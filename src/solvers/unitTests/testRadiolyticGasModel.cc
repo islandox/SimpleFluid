@@ -16,6 +16,7 @@
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/unitTests/region_mesh_helpers.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "utils/testing_environment.hh"
@@ -30,8 +31,11 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <stdexcept>
+#include <span>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -77,6 +81,58 @@ SimpleFluid::SP<ALEMeshType> make_ale_single_cell_column()
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
             {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
     return std::make_shared<ALEMeshType>(std::move(geometry));
+}
+
+/** @brief Four cells with an explicit inter-region join and shared wall names. */
+SimpleFluid::SP<SimpleFluid::Meshes::MultiRegionMesh> make_gas_composite_column()
+{
+    using Composite = SimpleFluid::Meshes::MultiRegionMesh;
+    return std::make_shared<Composite>(std::vector<Composite::Region>{
+        SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
+        SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
+        std::vector<Composite::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}},
+        SimpleFluid::Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
+}
+
+/** @brief Own swept-flux data so a property callback can invalidate only the
+ * assembly-time GCL input, after advance() has completed its entry validation.
+ */
+class MutableGasALEView final : public SimpleFluid::MeshMotionModel
+{
+public:
+    MutableGasALEView(SimpleFluid::SP<ALEMeshType> mesh, ALEMotionType& motion)
+        : mesh_(std::move(mesh)), motion_(motion),
+          flux_(motion.face_mesh_fluxes().begin(), motion.face_mesh_fluxes().end()) {}
+    void begin_trial(SimpleFluid::real_t top, SimpleFluid::real_t dt) override { motion_.begin_trial(top, dt); }
+    void accept_trial() override { motion_.accept_trial(); }
+    void rollback_trial() override { motion_.rollback_trial(); }
+    bool has_active_trial() const noexcept override { return motion_.has_active_trial(); }
+    std::string_view mesh_family() const noexcept override { return motion_.mesh_family(); }
+    std::span<const SimpleFluid::real_t> old_cell_volumes() const noexcept override { return motion_.old_cell_volumes(); }
+    std::span<const SimpleFluid::real_t> new_cell_volumes() const noexcept override { return motion_.new_cell_volumes(); }
+    std::span<const SimpleFluid::real_t> face_mesh_fluxes() const noexcept override { return flux_; }
+    const SimpleFluid::MeshMotionDiagnostics& diagnostics() const noexcept override { return motion_.diagnostics(); }
+    const SimpleFluid::SP<ALEMeshType>& mesh_ptr() const noexcept { return mesh_; }
+    void invalidate_flux() { flux_.front() += 1.0; }
+private:
+    SimpleFluid::SP<ALEMeshType> mesh_;
+    ALEMotionType& motion_;
+    std::vector<SimpleFluid::real_t> flux_;
+};
+
+thread_local MutableGasALEView* gas_gcl_fault_motion = nullptr;
+thread_local bool gas_gcl_fault_armed = false;
+thread_local bool gas_gcl_fault_injected = false;
+
+double gas_diffusivity_with_gcl_fault(double)
+{
+    if (gas_gcl_fault_armed)
+    {
+        gas_gcl_fault_armed = false;
+        gas_gcl_fault_injected = true;
+        gas_gcl_fault_motion->invalidate_flux();
+    }
+    return 1e-8;
 }
 
 /**
@@ -3081,6 +3137,156 @@ TEST(RadiolyticGasModelTest, SolverOwnsAndPublishesOptionalModel)
     EXPECT_TRUE(solver.remove_radiolytic_gas_model());
     EXPECT_EQ(solver.find_radiolytic_gas_model(), nullptr);
     std::filesystem::remove(output);
+}
+
+/** @brief Composite transport agrees with independently assembled explicit geometry. */
+TEST(RadiolyticGasModelTest, CompositeTransportLeaseMatchesExplicitReference)
+{
+    auto composite = make_gas_composite_column();
+    auto mesh = std::make_shared<ALEMeshType>(composite);
+    if (mesh->owned_cell_map()->getComm()->getSize() != 1)
+        GTEST_SKIP() << "The independent explicit geometry oracle uses one rank.";
+    auto explicit_mesh = std::make_shared<ALEMeshType>(SimpleFluid::test::explicit_reference(*composite));
+    const auto options = ale_escape_options();
+    const auto advance = [&](const SimpleFluid::SP<ALEMeshType>& selected)
+    {
+        ALERadiolyticModelType model(selected, options);
+        model.enable_donor_hydrogen_deficit_tracking();
+        ALEFieldType temperature(selected, 300., "temperature"), pressure(selected, 0., "pressure"),
+            power(selected, 0., "power");
+        ALEVelocityFieldType velocity(selected, ALEMeshType::Vec3{}, "velocity");
+        ALEFaceFieldType flux(selected, 0., "flux");
+        for (const auto face : flux.owned_face_ids())
+            if (!selected->is_boundary_face(face))
+                flux.set_owned_value(face, .05 * selected->face_area_vector(face).x);
+        flux.sync_ghosts();
+        auto material = make_ale_water_properties(selected);
+        model.initialize_state(0., temperature, pressure, velocity, material);
+        const double before = model.global_submerged_hydrogen_moles();
+        model.advance(.01, .01, temperature, pressure, velocity, flux, material, &power);
+        const auto& statistics = model.last_statistics();
+        EXPECT_GE(statistics.transport_linear.solves, 6);
+        EXPECT_GT(statistics.submerged_bubble_hydrogen_escaped, 0.);
+        EXPECT_NEAR(model.global_submerged_hydrogen_moles() + statistics.hydrogen_escaped, before, 1e-12);
+        EXPECT_NEAR(statistics.inventory_error, 0., 1e-12);
+        EXPECT_NEAR(statistics.donor_inventory_error, 0., 1e-12);
+        std::map<std::string, std::vector<double>> result;
+        for (const auto& [name, field] : model.output_fields())
+            for (size_t row = 0; row < selected->num_owned_cells(); ++row)
+                result[name].push_back(field->value(static_cast<Pack::local_ordinal_type>(row)));
+        return result;
+    };
+    const auto actual = advance(mesh);
+    EXPECT_NO_THROW(composite->require_geometry_writable());
+    const auto expected = advance(explicit_mesh);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (const auto& [name, values] : expected)
+    {
+        SCOPED_TRACE(name);
+        const auto& obtained = actual.at(name);
+        ASSERT_EQ(obtained.size(), values.size());
+        for (size_t cell = 0; cell < values.size(); ++cell)
+            EXPECT_NEAR(obtained[cell], values[cell], std::max(1e-17, std::abs(values[cell]) * 1e-9));
+    }
+}
+
+/** @brief Composite ALE transport releases its lease on success/failure and
+ * retains the assembly-time GCL check after the initial advance preflight.
+ */
+TEST(RadiolyticGasModelTest, CompositeTransportLeasePreservesALEReplayAndAssemblyGCL)
+{
+    for (const double target : {.8, 1.2})
+    {
+        SCOPED_TRACE(target);
+        auto composite = make_gas_composite_column();
+        auto mesh = std::make_shared<ALEMeshType>(composite);
+        if (mesh->owned_cell_map()->getComm()->getSize() != 1)
+            GTEST_SKIP() << "The assembly-time fault fixture uses one rank.";
+        gas_gcl_fault_motion = nullptr;
+        gas_gcl_fault_armed = false;
+        gas_gcl_fault_injected = false;
+        auto options = ale_escape_options();
+        options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+        options.hydrogen_diffusivity_correlation = &gas_diffusivity_with_gcl_fault;
+        ALERadiolyticModelType model(mesh, options);
+        model.enable_donor_hydrogen_deficit_tracking();
+        ALEFieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
+        ALEVelocityFieldType velocity(mesh, ALEMeshType::Vec3{}, "velocity");
+        ALEFaceFieldType relative_flux(mesh, 0., "relative_flux");
+        auto material = make_ale_water_properties(mesh);
+        model.initialize_state(0., temperature, pressure, velocity, material);
+        const auto checkpoint = model.snapshot();
+        const double before = model.global_submerged_hydrogen_moles();
+        ALEMotionType motion(mesh);
+        constexpr double dt = .01;
+        const auto fields = [&]
+        {
+            std::map<std::string, std::vector<double>> result;
+            for (const auto& [name, field] : model.output_fields())
+                for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+                    result[name].push_back(field->value(static_cast<Pack::local_ordinal_type>(row)));
+            return result;
+        };
+        const auto advance = [&]
+        {
+            motion.begin_trial(target, dt);
+            const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+            model.refresh_geometry();
+            model.advance(dt, dt, temperature, pressure, velocity, relative_flux, material, &power,
+                &ale, SimpleFluid::Dimension::Z);
+            EXPECT_NEAR(model.global_submerged_hydrogen_moles() + model.last_statistics().hydrogen_escaped,
+                before, 1e-12);
+            EXPECT_NEAR(model.last_statistics().donor_inventory_error, 0., 1e-12);
+            EXPECT_NO_THROW(composite->require_geometry_writable());
+            return fields();
+        };
+        const auto rollback = [&]
+        {
+            motion.rollback_trial();
+            model.restore(checkpoint);
+            model.refresh_geometry();
+        };
+        const auto expected = advance();
+        rollback();
+        const auto replay = advance();
+        for (const auto& [name, values] : expected)
+        {
+            SCOPED_TRACE(name);
+            for (size_t cell = 0; cell < values.size(); ++cell)
+                EXPECT_NEAR(replay.at(name)[cell], values[cell], std::max(1e-17, std::abs(values[cell]) * 1e-11));
+        }
+        rollback();
+
+        motion.begin_trial(target, dt);
+        {
+            MutableGasALEView altered(mesh, motion);
+            const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, altered);
+            gas_gcl_fault_motion = &altered;
+            model.refresh_geometry();
+            gas_gcl_fault_armed = true;
+            std::string message;
+            try
+            {
+                model.advance(dt, dt, temperature, pressure, velocity, relative_flux, material, &power,
+                    &ale, SimpleFluid::Dimension::Z);
+            }
+            catch (const std::invalid_argument& error) { message = error.what(); }
+            EXPECT_TRUE(gas_gcl_fault_injected);
+            EXPECT_NE(message.find("geometric conservation law"), std::string::npos);
+            EXPECT_NO_THROW(composite->require_geometry_writable());
+            gas_gcl_fault_motion = nullptr;
+            gas_gcl_fault_armed = false;
+        }
+        rollback();
+        const auto recovered = advance();
+        for (const auto& [name, values] : expected)
+        {
+            SCOPED_TRACE(name);
+            for (size_t cell = 0; cell < values.size(); ++cell)
+                EXPECT_NEAR(recovered.at(name)[cell], values[cell], std::max(1e-17, std::abs(values[cell]) * 1e-11));
+        }
+        rollback();
+    }
 }
 
 } // namespace

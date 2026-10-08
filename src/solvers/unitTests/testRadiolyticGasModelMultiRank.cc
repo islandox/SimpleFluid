@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "equations/RadiolyticGasModel.hh"
+#include "geometry/MeshHandle.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
@@ -21,8 +23,11 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
+#include <memory>
 #include <numbers>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 namespace
@@ -34,6 +39,14 @@ using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
 using FaceFieldType = SimpleFluid::FaceField<Pack>;
 using RadiolyticModelType = SimpleFluid::RadiolyticGasModel<Pack>;
+
+thread_local const SimpleFluid::Meshes::MultiRegionMesh* gas_transport_guard_probe = nullptr;
+
+double gas_diffusivity_with_transport_guard_probe(double)
+{
+    if (gas_transport_guard_probe) gas_transport_guard_probe->require_geometry_writable();
+    return 1e-8;
+}
 
 using utils_test::KokkosEnvironment;
 
@@ -153,6 +166,101 @@ void expect_same_on_all_ranks(const MeshType& mesh, double value)
 }
 
 } // namespace
+
+/** @brief A rank-local mutation probe fails inside leased gas transport, then
+ * all ranks release the lease and can roll back/replay real composite ALE.
+ */
+TEST(RadiolyticGasModelMultiRankTest, CompositeTransportLeaseFailureIsCollectiveAndReleasesForALE)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    using Composite = SimpleFluid::Meshes::MultiRegionMesh;
+    using Scalar = SimpleFluid::ScalarCellFieldStored<Pack, Handle>;
+    using Vector = SimpleFluid::VectorCellFieldStored<Pack, Handle>;
+    using Face = SimpleFluid::ScalarFaceFieldStored<Pack, Handle>;
+    using Model = SimpleFluid::RadiolyticGasModel<Pack, Handle>;
+    auto geometry = std::make_shared<Composite>(std::vector<Composite::Region>{
+        SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
+        SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
+        std::vector<Composite::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}},
+        SimpleFluid::Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
+    auto mesh = std::make_shared<Handle>(geometry);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    const int has_cells = mesh->num_owned_cells() > 0;
+    int all_have_cells = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &has_cells, &all_have_cells);
+    ASSERT_EQ(all_have_cells, 1);
+    auto options = sheng_options();
+    options.initial_dissolved_hydrogen = .2;
+    options.initial_micro_number_density = 1e8;
+    options.initial_micro_moles = 1e-6;
+    options.microbubble_lifetime = 1e100;
+    options.micro_to_large_conversion_coefficient = 0;
+    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+    options.hydrogen_diffusivity_correlation = &gas_diffusivity_with_transport_guard_probe;
+    Model model(mesh, options);
+    model.enable_donor_hydrogen_deficit_tracking();
+    Scalar temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
+    Vector velocity(mesh, Handle::Vec3{}, "velocity");
+    Face relative_flux(mesh, 0., "relative_flux");
+    SimpleFluid::BoussinesqModelOptions water;
+    water.reference_density = water.density = 1000.;
+    water.specific_heat_capacity = 4200.;
+    water.dynamic_viscosity = .001;
+    water.thermal_conductivity = .6;
+    SimpleFluid::MaterialPropertyFields<Pack, Handle> material(mesh, water, SimpleFluid::TimeStepperOptions{});
+    model.initialize_state(0., temperature, pressure, velocity, material);
+    const auto checkpoint = model.snapshot();
+    const double before = model.global_submerged_hydrogen_moles();
+    gas_transport_guard_probe = comm->getRank() == 0 ? geometry.get() : nullptr;
+    int category = 0;
+    std::string message;
+    try { model.advance(.01, .01, temperature, pressure, velocity, relative_flux, material, &power); }
+    catch (const std::logic_error& error) { category = 1; message = error.what(); }
+    catch (const std::runtime_error& error) { category = 2; message = error.what(); }
+    catch (const std::exception& error) { category = 3; message = error.what(); }
+    gas_transport_guard_probe = nullptr;
+    EXPECT_EQ(category, comm->getRank() == 0 ? 1 : 2);
+    EXPECT_EQ(message, comm->getRank() == 0
+        ? "Geometry is held by a region execution view."
+        : "Radiolytic diffusivity evaluation failed on another rank.");
+    EXPECT_NO_THROW(geometry->require_geometry_writable());
+    model.restore(checkpoint);
+
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(mesh);
+    const auto advance = [&]
+    {
+        motion.begin_trial(1.1, .01);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+        model.refresh_geometry();
+        model.advance(.01, .01, temperature, pressure, velocity, relative_flux, material, &power,
+            &ale, SimpleFluid::Dimension::Z);
+        EXPECT_GE(model.last_statistics().transport_linear.solves, 6);
+        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1e-12);
+        EXPECT_NEAR(model.last_statistics().inventory_error, 0., 1e-12);
+        EXPECT_NEAR(model.last_statistics().donor_inventory_error, 0., 1e-12);
+        EXPECT_NO_THROW(geometry->require_geometry_writable());
+        std::map<std::string, std::vector<double>> result;
+        for (const auto& [name, field] : model.output_fields())
+            for (size_t cell = 0; cell < mesh->num_local_cells(); ++cell)
+                result[name].push_back(field->local_value(static_cast<Pack::local_ordinal_type>(cell)));
+        return result;
+    };
+    const auto expected = advance();
+    motion.rollback_trial();
+    model.restore(checkpoint);
+    model.refresh_geometry();
+    const auto replay = advance();
+    for (const auto& [name, values] : expected)
+    {
+        SCOPED_TRACE(name);
+        for (size_t cell = 0; cell < values.size(); ++cell)
+            EXPECT_NEAR(replay.at(name)[cell], values[cell], std::max(1e-17, std::abs(values[cell]) * 1e-11));
+    }
+    motion.rollback_trial();
+    model.restore(checkpoint);
+    model.refresh_geometry();
+}
 
 /** Check analytic source/decay, changing cell inputs and ghost state for either policy. */
 void check_repeated_kinetics_with_heterogeneous_inputs(SimpleFluid::RadiolyticKineticsMode mode)
