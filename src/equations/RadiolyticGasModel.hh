@@ -151,8 +151,9 @@ public:
      */
     void configure(const RadiolyticGasOptions& options);
     /** Collectively opt in to skipping exactly zero auxiliary inventories on
-     * fixed meshes. Transport has zero source and homogeneous boundaries;
-     * kinetics still executes and populated fields resume normal transport.
+     * fixed or validated ALE meshes. Transport has zero source and homogeneous
+     * boundaries; kinetics still executes and populated fields resume transport.
+     * ALE skips retain timestep/GCL and dissolved-provider/coefficient validation.
      * Microbubble equations always execute, including their initial zero step.
      */
     void set_skip_zero_auxiliary_transport(bool enabled);

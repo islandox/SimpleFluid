@@ -149,6 +149,24 @@ and geometric-conservation check still executes. Acquisition failures are
 propagated collectively before transport communication. The lease ends on
 return or exception, before subsequent mesh-motion acceptance or rollback.
 
+`set_skip_zero_auxiliary_transport(true)` opts into skipping a dissolved,
+large-number, large-moles, or enabled donor transport equation only when every
+owned value is exactly zero across all MPI ranks. The default is false. This
+works on fixed and validated ALE meshes: the transport stage has zero source,
+homogeneous Neumann data and no incoming boundary flux, so different old/new
+volumes still map zero inventory to zero. Microbubble number and moles always
+run, and later kinetics can populate an empty field; its next transport then
+resumes normally. Each field is checked independently, ghosts are synchronized,
+and skipping a field leaves other populations' accumulated escape unchanged.
+
+ALE zero-field paths retain active-trial, timestep and GCL validation. Empty
+dissolved transport also evaluates the selected diffusivity provider and
+validates the same clamped liquid storage and liquid-weighted diffusion as
+assembly, including a GCL check after the provider callback. The existing
+fixed-mesh shortcut keeps its previous behavior. No nonzero population is
+discarded or treated as zero by a tolerance, and no old numeric operator is
+reused when a skipped number equation has a populated moles partner.
+
 Transport/local-kinetics splitting is first order. Local linear decays are
 analytic and the remaining rates use bounded subcycles. `maximum_subcycles`,
 clipping, pressure-floor events, and radius failures are exposed through
