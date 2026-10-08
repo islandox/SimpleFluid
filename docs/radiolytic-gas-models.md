@@ -156,8 +156,18 @@ works on fixed and validated ALE meshes: the transport stage has zero source,
 homogeneous Neumann data and no incoming boundary flux, so different old/new
 volumes still map zero inventory to zero. Microbubble number and moles always
 run, and later kinetics can populate an empty field; its next transport then
-resumes normally. Each field is checked independently, ghosts are synchronized,
-and skipping a field leaves other populations' accumulated escape unchanged.
+resumes normally. Independent flags for all four auxiliary fields are combined
+in one reduction per transport stage; a disabled donor is excluded. Proven-zero
+owned and overlap storage is filled locally without a halo import. Skipping a
+field leaves other populations' accumulated escape unchanged.
+
+The flags live only within that transport call and are consumed after each
+field, so kinetics, rollback and later replays always obtain fresh decisions.
+Property callbacks must not modify a still-untransported inventory proven
+zero by that batch. Pending zeros are checked after external-provider phases
+inside their existing collective error handling; a callback write raises an
+error before it can be erased by a local zero fill. These checks add no
+collectives. The final post-kinetics field synchronization is unchanged.
 
 ALE zero-field paths retain active-trial, timestep and GCL validation. Empty
 dissolved transport also evaluates the selected diffusivity provider and

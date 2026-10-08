@@ -1011,6 +1011,65 @@ using ZeroALEHandle = SimpleFluid::MeshHandle<Pack>;
 using ZeroALEModel = SimpleFluid::RadiolyticGasModel<Pack, ZeroALEHandle>;
 using ZeroALEScalar = SimpleFluid::ScalarCellFieldStored<Pack, ZeroALEHandle>;
 
+struct BatchedGhostProbe
+{
+    const ZeroALEModel* model = nullptr;
+    bool donor = false;
+    bool observed = false;
+    bool clean = true;
+};
+thread_local BatchedGhostProbe batched_ghost_probe;
+thread_local ZeroALEScalar* batched_mutation_target = nullptr;
+thread_local double batched_mutation_value = 0;
+thread_local bool batched_mutation_armed = false;
+
+double inspect_batched_zero_ghosts(double)
+{
+    const auto* model = batched_ghost_probe.model;
+    if (model)
+    {
+        const auto& work = model->last_statistics();
+        if (work.transport_work[0].skipped && work.transport_work[3].skipped &&
+            work.transport_work[4].skipped && (!batched_ghost_probe.donor || work.donor_transport_work.skipped))
+        {
+            // First reached from transported-volume reconstruction, before
+            // kinetics and its final packed state import can repair ghosts.
+            batched_ghost_probe.observed = true;
+            const std::array<const ZeroALEScalar*, 4> fields{&model->dissolved_hydrogen_inventory(),
+                batched_ghost_probe.donor ? &model->donor_hydrogen_deficit() : nullptr,
+                &model->large_number_density(), &model->large_moles()};
+            for (const auto* field : fields)
+                if (field)
+                {
+                    const auto values = field->local_read_view();
+                    for (size_t row = 0; row < values.extent(0); ++row)
+                        batched_ghost_probe.clean = batched_ghost_probe.clean && values(row, 0) == 0;
+                }
+        }
+    }
+    return 1e-8;
+}
+
+double mutate_batched_zero_inventory(double)
+{
+    if (batched_mutation_armed)
+    {
+        batched_mutation_armed = false;
+        batched_mutation_target->set_owned_value(0, batched_mutation_value);
+    }
+    return 1e-8;
+}
+
+struct ResetBatchedCallbackState
+{
+    ~ResetBatchedCallbackState()
+    {
+        batched_ghost_probe = {};
+        batched_mutation_target = nullptr;
+        batched_mutation_armed = false;
+    }
+};
+
 SimpleFluid::SP<ZeroALEHandle> make_zero_ale_composite()
 {
     using Composite = SimpleFluid::Meshes::MultiRegionMesh;
@@ -1031,7 +1090,7 @@ struct DistributedALEZeroPair
     SimpleFluid::MaterialPropertyFields<Pack, ZeroALEHandle> material;
     SimpleFluid::PlanarALEMeshMotion<Pack> motion{mesh};
 
-    explicit DistributedALEZeroPair(SimpleFluid::RadiolyticGasOptions options)
+    explicit DistributedALEZeroPair(SimpleFluid::RadiolyticGasOptions options, bool donor = true)
         : full(mesh, options), reduced(mesh, options), material(mesh, [] {
             SimpleFluid::BoussinesqModelOptions water;
             water.reference_density = water.density = 1000.;
@@ -1041,8 +1100,11 @@ struct DistributedALEZeroPair
             return water;
         }(), SimpleFluid::TimeStepperOptions{})
     {
-        full.enable_donor_hydrogen_deficit_tracking();
-        reduced.enable_donor_hydrogen_deficit_tracking();
+        if (donor)
+        {
+            full.enable_donor_hydrogen_deficit_tracking();
+            reduced.enable_donor_hydrogen_deficit_tracking();
+        }
         reduced.set_skip_zero_auxiliary_transport(true);
         full.initialize_state(0., temperature, pressure, velocity, material);
         reduced.initialize_state(0., temperature, pressure, velocity, material);
@@ -1077,6 +1139,154 @@ struct DistributedALEZeroPair
     }
 };
 } // namespace
+
+TEST(RadiolyticGasModelMultiRankTest, BatchedZeroAuxiliaryRepairsOverlapBeforePackedSync)
+{
+    for (const bool donor : {false, true})
+    {
+        SCOPED_TRACE(donor);
+        auto options = sheng_options();
+        options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+        options.hydrogen_diffusivity_correlation = &inspect_batched_zero_ghosts;
+        DistributedALEZeroPair state(options, donor);
+        ResetBatchedCallbackState reset_callbacks;
+        const auto comm = state.mesh->owned_cell_map()->getComm();
+        if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+        const int local_ghosts = state.mesh->num_local_cells() > state.mesh->num_owned_cells();
+        int any_ghosts = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_ghosts, &any_ghosts);
+        ASSERT_EQ(any_ghosts, 1);
+        const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+        for (const double top : {1.1, .9})
+        {
+            const std::array<const ZeroALEScalar*, 4> fields{&state.reduced.dissolved_hydrogen_inventory(),
+                donor ? &state.reduced.donor_hydrogen_deficit() : nullptr,
+                &state.reduced.large_number_density(), &state.reduced.large_moles()};
+            for (const auto* field : fields)
+                if (field)
+                {
+                    // Owned values remain exactly zero; poison every overlap
+                    // row, including genuine remote ghosts and owned copies.
+                    const_cast<ZeroALEScalar*>(field)->overlap_data().putScalar(37.);
+                    const auto values = field->owned_read_view();
+                    for (size_t row = 0; row < values.extent(0); ++row) EXPECT_DOUBLE_EQ(values(row, 0), 0.);
+                }
+            state.motion.begin_trial(top, .001);
+            const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
+            state.full.refresh_geometry();
+            state.reduced.refresh_geometry();
+            state.full.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
+                state.material, &state.power, &ale);
+            batched_ghost_probe = {&state.reduced, donor, false, true};
+            state.reduced.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
+                state.material, &state.power, &ale);
+            EXPECT_TRUE(batched_ghost_probe.observed);
+            EXPECT_TRUE(batched_ghost_probe.clean);
+            batched_ghost_probe = {};
+            state.compare();
+            EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
+            EXPECT_EQ(state.reduced.last_statistics().donor_transport_work.skipped, donor ? 1 : 0);
+            state.motion.rollback_trial();
+            state.full.restore(full_start);
+            state.reduced.restore(reduced_start);
+        }
+    }
+}
+
+TEST(RadiolyticGasModelMultiRankTest, BatchedZeroAuxiliaryKeepsRankLocalMolesIndependent)
+{
+    auto options = sheng_options();
+    options.microbubble_lifetime = options.large_bubble_dissolution_time = 1e100;
+    options.micro_to_large_conversion_coefficient = 0;
+    DistributedALEZeroPair state(options, false);
+    const auto comm = state.mesh->owned_cell_map()->getComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    for (auto* model : {&state.full, &state.reduced})
+    {
+        auto& moles = const_cast<ZeroALEScalar&>(model->large_moles());
+        if (comm->getRank() == 0) moles.set_owned_value(0, 1e-6);
+        moles.sync_ghosts();
+    }
+    state.advance(1.1, .001, .001);
+    state.compare();
+    EXPECT_EQ(state.reduced.last_statistics().transport_work[3].skipped, 1);
+    EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 0);
+    EXPECT_EQ(state.reduced.last_statistics().transport_work[4].assemblies, 1);
+    EXPECT_EQ(state.reduced.last_statistics().donor_transport_work.solves, 0);
+    EXPECT_GT(state.reduced.global_large_bubble_hydrogen_moles(), 0.);
+    state.motion.rollback_trial();
+    state.full.restore(full_start);
+    state.reduced.restore(reduced_start);
+    // Replaying the zero baseline must discard the previous nonzero mask.
+    state.advance(.9, .001, .001);
+    state.compare();
+    EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 1);
+    EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
+    EXPECT_DOUBLE_EQ(state.reduced.global_large_bubble_hydrogen_moles(), 0.);
+    state.motion.rollback_trial();
+}
+
+TEST(RadiolyticGasModelMultiRankTest, BatchedZeroCallbackMutationIsCollectiveWithoutErasure)
+{
+    constexpr auto guard_message = "Radiolytic material callback modified an untransported zero auxiliary inventory.";
+    for (int scenario = 0; scenario < 4; ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        auto options = sheng_options();
+        options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
+        options.hydrogen_diffusivity_correlation = &mutate_batched_zero_inventory;
+        DistributedALEZeroPair state(options);
+        ResetBatchedCallbackState reset_callbacks;
+        const auto comm = state.mesh->owned_cell_map()->getComm();
+        if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+        const bool enabled = scenario != 3;
+        if (!enabled) state.reduced.set_skip_zero_auxiliary_transport(false);
+        const auto checkpoint = state.reduced.snapshot();
+        auto& target = const_cast<ZeroALEScalar&>(scenario == 0
+            ? state.reduced.dissolved_hydrogen_inventory() : state.reduced.large_moles());
+        batched_mutation_target = &target;
+        batched_mutation_value = scenario == 2 ? std::numeric_limits<double>::quiet_NaN() : 1e-6;
+        batched_mutation_armed = comm->getRank() == 0;
+        state.motion.begin_trial(1.1, .001);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
+        state.reduced.refresh_geometry();
+        int category = 0;
+        std::string message;
+        try
+        {
+            state.reduced.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
+                state.material, &state.power, &ale);
+        }
+        catch (const std::logic_error& error) { category = 1; message = error.what(); }
+        catch (const std::runtime_error& error) { category = 2; message = error.what(); }
+        batched_mutation_armed = false;
+        batched_mutation_target = nullptr;
+        if (enabled)
+        {
+            EXPECT_EQ(category, comm->getRank() == 0 ? 1 : 2);
+            EXPECT_EQ(message, comm->getRank() == 0 ? guard_message
+                : "Radiolytic diffusivity evaluation failed on another rank.");
+            EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
+            EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 0);
+            if (comm->getRank() == 0)
+            {
+                if (scenario == 2) EXPECT_TRUE(std::isnan(target.value(0)));
+                else EXPECT_DOUBLE_EQ(target.value(0), batched_mutation_value);
+            }
+        }
+        else
+        {
+            // The disabled policy retains its existing transport/physical
+            // validation path, rather than adding the cached-zero guard.
+            EXPECT_NE(message, guard_message);
+            EXPECT_GT(state.reduced.last_statistics().transport_work[4].solves, 0);
+            if (comm->getRank() == 0) EXPECT_GT(target.value(0), 0.);
+        }
+        state.motion.rollback_trial();
+        state.reduced.restore(checkpoint);
+    }
+}
 
 TEST(RadiolyticGasModelMultiRankTest, ALEZeroAuxiliaryResumesAfterRankLocalProduction)
 {

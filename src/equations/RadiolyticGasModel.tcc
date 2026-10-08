@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -1331,6 +1332,68 @@ void RadiolyticGasModel<Pack, MeshType>::bubble_slip_volume_flux(
         output.sync_ghosts();
 }
 
+/** @brief Prove auxiliary zero fields with one transport-local collective. */
+template<TpetraTypePack Pack, class MeshType>
+auto RadiolyticGasModel<Pack, MeshType>::zero_auxiliary_transport_fields() const -> std::array<bool, 4>
+{
+    std::array<bool, 4> zero{};
+    if (!d_skip_zero_auxiliary_transport)
+        return zero;
+    const std::array<const field_type*, 4> fields{&d_dissolved_hydrogen_inventory,
+        d_donor_tracking_enabled ? &d_donor_hydrogen_deficit : nullptr, &d_large_number, &d_large_moles};
+    // The fifth entry propagates local view/acquisition failures in the same
+    // reduction, before any rank can branch into transport communication.
+    std::array<int, 5> local{}, global{};
+    std::exception_ptr error;
+    try
+    {
+        for (size_t field = 0; field < fields.size(); ++field)
+        {
+            if (!fields[field])
+            {
+                local[field] = 1;
+                continue;
+            }
+            const auto values = fields[field]->owned_read_view();
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                local[field] |= values(owned, 0) != scalar_type{};
+        }
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+        local[4] = 1;
+    }
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        static_cast<int>(local.size()), local.data(), global.data());
+    if (global[4])
+    {
+        if (error) std::rethrow_exception(error);
+        throw std::runtime_error("Radiolytic auxiliary zero detection failed on another rank.");
+    }
+    for (size_t field = 0; field < zero.size(); ++field)
+        zero[field] = global[field] == 0;
+    return zero;
+}
+
+/** @brief Reject callback writes that would invalidate a pending zero proof. */
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::validate_pending_zero_auxiliary_fields(
+    const std::array<bool, 4>& pending_zero) const
+{
+    const std::array<const field_type*, 4> fields{
+        &d_dissolved_hydrogen_inventory, &d_donor_hydrogen_deficit, &d_large_number, &d_large_moles};
+    for (size_t field = 0; field < fields.size(); ++field)
+    {
+        if (!pending_zero[field])
+            continue;
+        const auto values = fields[field]->owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            if (values(owned, 0) != scalar_type{})
+                throw std::logic_error("Radiolytic material callback modified an untransported zero auxiliary inventory.");
+    }
+}
+
 /**
  * @brief Transport one non-negative radiolytic inventory field.
  * @tparam Pack Tpetra type pack used by the model.
@@ -1360,7 +1423,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     Dimension slip_axis,
     size_t operator_slot,
     bool reuse_population_operator,
-    const field_type* diffusivity_temperature)
+    const field_type* diffusivity_temperature,
+    const std::array<bool, 4>* pending_zero)
 {
     const auto started = std::chrono::steady_clock::now();
     const auto elapsed = [](auto begin)
@@ -1386,18 +1450,12 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
     // This transport stage has no source, homogeneous Neumann data, and no
     // incoming physical-boundary flux. Exact global zero is an invariant of
     // this stage, irrespective of kinetics that may populate it afterward.
-    // Keep MPI decisions collective: local emptiness alone is insufficient.
-    if (d_skip_zero_auxiliary_transport && operator_slot != 1)
+    // The caller proved all auxiliary fields in one collective for this stage.
+    // No transport or property callback may invalidate a pending zero proof.
+    if (pending_zero != nullptr && operator_slot != 1)
     {
-        int local_nonzero = 0, global_nonzero = 0;
-        {
-            const auto values = field.owned_read_view();
-            for (size_t cell = 0; cell < d_mesh->num_owned_cells(); ++cell)
-                local_nonzero |= values(cell, 0) != scalar_type{};
-        }
-        Teuchos::reduceAll(
-            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_nonzero, &global_nonzero);
-        if (!global_nonzero)
+        const size_t auxiliary = operator_slot == 0 ? 0 : operator_slot == 3 ? 1 : 2 + reuse_population_operator;
+        if (pending_zero->at(auxiliary))
         {
             if (ale != nullptr && diffuse)
             {
@@ -1420,6 +1478,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                             invalid_coefficients |= !std::isfinite(liquid_fraction) || liquid_fraction <= 0.0
                                 || !std::isfinite(diffusion) || diffusion < 0.0;
                         }
+                        if (d_options.diffusivity_mode == HydrogenDiffusivityMode::External)
+                            validate_pending_zero_auxiliary_fields(*pending_zero);
                     });
                 // A provider can invalidate borrowed swept-flux data without
                 // mutating mesh coordinates. Preserve the assembly boundary's
@@ -1432,7 +1492,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                     throw std::invalid_argument("weighted_scalar_transport_system requires finite positive storage and finite "
                                                 "non-negative advection and diffusion coefficients.");
             }
-            field.sync_ghosts();
+            // Global zero supplies the overlap values without an import.
+            field.put_scalar(scalar_type{});
             ++work.skipped;
             work.total_seconds += elapsed(started);
             return;
@@ -1521,6 +1582,9 @@ void RadiolyticGasModel<Pack, MeshType>::transport_scalar(
                     ? RadiolyticGasPhysics::hydrogen_diffusivity(d_options, temperature_values(owned, 0)) : diffusivity;
                 diffusion(owned, 0) = diffuse ? liquid_fraction * cell_diffusivity : 0.0;
             }
+            if (pending_zero != nullptr && diffuse &&
+                d_options.diffusivity_mode == HydrogenDiffusivityMode::External)
+                validate_pending_zero_auxiliary_fields(*pending_zero);
         };
         if (diffuse)
             collective_detail::collective_local_validation(*d_mesh, "Radiolytic diffusivity evaluation", assemble_weights);
@@ -1806,6 +1870,8 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         });
     auto& workspace = *d_transport_workspace;
     workspace.operator_ready.fill(false);
+    auto pending_zero = zero_auxiliary_transport_fields();
+    const auto* zero_proofs = d_skip_zero_auxiliary_transport ? &pending_zero : nullptr;
     const auto old_cell_volumes = ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes();
     const auto new_cell_volumes = ale == nullptr ? std::span<const real_t>{} : ale->new_cell_volumes();
     const auto inventories_before = population_integrals(old_cell_volumes);
@@ -1828,13 +1894,15 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         true,
         d_escape_molar_rate,
         ale,
-        slip_axis, 0, false, &temperature);
+        slip_axis, 0, false, &temperature, zero_proofs);
+    pending_zero[0] = false;
 
     if (d_donor_tracking_enabled)
     {
         d_donor_escape_rate.put_scalar(0.0);
         transport_scalar(d_donor_hydrogen_deficit, time_step, liquid_face_flux, nullptr,
-            0.0, false, false, d_donor_escape_rate, ale, slip_axis, 3);
+            0.0, false, false, d_donor_escape_rate, ale, slip_axis, 3, false, nullptr, zero_proofs);
+        pending_zero[1] = false;
     }
 
     auto& axial_bubble_flux = workspace.axial_flux;
@@ -1907,6 +1975,11 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
                 micro_slip_values(owned, 0) = category_slip(micro_number_values(owned, 0), micro_moles_values(owned, 0));
                 large_slip_values(owned, 0) = category_slip(large_number_values(owned, 0), large_moles_values(owned, 0));
             }
+            if (zero_proofs != nullptr &&
+                (d_options.diffusivity_mode == HydrogenDiffusivityMode::External ||
+                 d_options.surface_tension_mode == SurfaceTensionMode::External ||
+                 d_options.nucleation_radius_mode == NucleationRadiusMode::External))
+                validate_pending_zero_auxiliary_fields(pending_zero);
         });
     micro_slip.sync_ghosts();
     large_slip.sync_ghosts();
@@ -1944,9 +2017,11 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
         false,
         d_escape_number_rate,
         ale,
-        slip_axis, 2);
+        slip_axis, 2, false, nullptr, zero_proofs);
+    pending_zero[2] = false;
     transport_scalar(d_large_moles, time_step, *bubble_liquid_flux, &large_slip, 0.0, false, false, d_escape_molar_rate,
-        ale, slip_axis, 2, true);
+        ale, slip_axis, 2, true, nullptr, zero_proofs);
+    pending_zero[3] = false;
 
     // Retain the exact operator-split state used to remove transport from the
     // later material-volume finite difference.  Kinetics below may create,
