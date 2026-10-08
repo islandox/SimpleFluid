@@ -144,8 +144,10 @@ For each configured two-population solver step:
 
 Population transport holds a mesh execution read lease across its inventory,
 flux, assembly, balance and escape calculations. Composite geometry queries
-share the guarded static-region validation; every existing per-assembly ALE
-and geometric-conservation check still executes. Acquisition failures are
+share the guarded static-region validation. Per-assembly ALE validation remains:
+borrowed views execute the full GCL check, while the planar solver's validated
+immutable snapshot reuses that result after collective live-state checks.
+Acquisition failures are
 propagated collectively before transport communication. The lease ends on
 return or exception, before subsequent mesh-motion acceptance or rollback.
 
@@ -172,7 +174,9 @@ collectives. The final post-kinetics field synchronization is unchanged.
 ALE zero-field paths retain active-trial, timestep and GCL validation. Empty
 dissolved transport also evaluates the selected diffusivity provider and
 validates the same clamped liquid storage and liquid-weighted diffusion as
-assembly, including a GCL check after the provider callback. The existing
+assembly, including ALE validation after the provider callback. Borrowed views
+repeat the full GCL check; immutable planar snapshots retain their validated
+data and still check the live trial and epochs. The existing
 fixed-mesh shortcut keeps its previous behavior. No nonzero population is
 discarded or treated as zero by a tolerance, and no old numeric operator is
 reused when a skipped number equation has a populated moles partner.

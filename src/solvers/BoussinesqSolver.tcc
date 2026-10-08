@@ -4040,7 +4040,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             {
                 const auto geometry_timing = this->d_solver_timings.scope(SolverPhase::ALEGeometry);
                 d_ale_motion->begin_trial(candidate_level, time_step);
-                d_active_ale.emplace(FVM::make_ale_control_volume_state(*d_mesh, *d_ale_motion));
+                d_active_ale.emplace(FVM::make_validated_planar_ale_control_volume_state(*d_mesh, *d_ale_motion));
                 refresh_geometry_dependent_state();
             }
             if (d_fission_power_source && d_fission_power_source->has_interval_energy())

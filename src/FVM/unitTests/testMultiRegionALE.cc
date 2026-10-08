@@ -16,6 +16,7 @@
 #include <Tpetra_Core.hpp>
 #include <array>
 #include <limits>
+#include <utility>
 namespace
 {
 using namespace SimpleFluid;
@@ -28,6 +29,7 @@ class ThrowingHandle : public Handle
 public:
     using Handle::Handle;
     bool fail_epoch = false, fail_faces = false, fail_owner = false;
+    mutable size_t face_traversals = 0;
 
     std::uint64_t geometry_epoch() const
     {
@@ -37,6 +39,7 @@ public:
 
     CellFaceRange faces(local_ordinal_type cell) const
     {
+        ++face_traversals;
         if (fail_faces) throw std::runtime_error("Injected rank-local face traversal failure.");
         return Handle::faces(cell);
     }
@@ -385,6 +388,112 @@ TEST(MultiRegionALETest, RankDivergentFaultsRetainCollectiveErrorPriority)
     const auto fresh_ale = FVM::make_ale_control_volume_state(*fresh_mesh, fresh_motion);
     EXPECT_NO_THROW(fresh_ale.validate(*fresh_mesh));
 }
+TEST(MultiRegionALETest, ValidatedPlanarProofWalksGclOnceAndPreservesMovedFromOwner)
+{
+    auto mesh = std::make_shared<ThrowingHandle>(test::two_regions());
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, .2);
+    mesh->face_traversals = 0;
+    auto owned = FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+    EXPECT_EQ(mesh->face_traversals, mesh->num_owned_cells());
+    mesh->face_traversals = 0;
+    for (int consumer = 0; consumer < 4; ++consumer) EXPECT_NO_THROW(owned.validate(*mesh, .2));
+    EXPECT_EQ(mesh->face_traversals, 0U);
+    {
+        auto moved = std::move(owned);
+        EXPECT_NO_THROW(moved.validate(*mesh));
+    }
+    // The destination has been destroyed: source spans must still own their
+    // immutable storage, and the reusable certificate must remain attached.
+    EXPECT_NO_THROW(owned.validate(*mesh));
+    EXPECT_EQ(mesh->face_traversals, 0U);
+    const auto borrowed = FVM::make_ale_control_volume_state(*mesh, motion);
+    EXPECT_EQ(mesh->face_traversals, mesh->num_owned_cells());
+    EXPECT_NO_THROW(borrowed.validate(*mesh));
+    EXPECT_EQ(mesh->face_traversals, 2 * mesh->num_owned_cells());
+    motion.rollback_trial();
+}
+
+TEST(MultiRegionALETest, ValidatedPlanarMixedEligibilityUsesCollectiveFullFallback)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    auto mesh = std::make_shared<ThrowingHandle>(test::two_regions());
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, .2);
+    const auto borrowed = FVM::make_ale_control_volume_state(*mesh, motion);
+    const auto owned = FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+    const auto& mixed = comm->getRank() == 0 ? owned : borrowed;
+    mesh->face_traversals = 0;
+    EXPECT_NO_THROW(mixed.validate(*mesh));
+    EXPECT_EQ(mesh->face_traversals, mesh->num_owned_cells());
+    const auto face = static_cast<size_t>(mesh->faces(Handle::local_ordinal_type{0}).front());
+    const double original = motion.face_mesh_fluxes()[face];
+    if (comm->getRank() == 1) const_cast<double*>(motion.face_mesh_fluxes().data())[face] += 1.;
+    const std::string message = "ALE control-volume state violates the cellwise geometric conservation law; maximum residual is "
+        + std::to_string(1.) + " m^3/s.";
+    expect_collective_error(*comm, [&] { mixed.validate(*mesh); }, RejectionCategory::InvalidArgument, message.c_str());
+    if (comm->getRank() == 1) const_cast<double*>(motion.face_mesh_fluxes().data())[face] = original;
+    EXPECT_NO_THROW(mixed.validate(*mesh));
+    motion.rollback_trial();
+}
+
+TEST(MultiRegionALETest, ValidatedPlanarProofRetainsRankLocalMetadataChecks)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    auto mesh = std::make_shared<ThrowingHandle>(test::two_regions());
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, .2);
+    const auto owned = FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+    mesh->fail_epoch = comm->getRank() == 0;
+    expect_collective_error(*comm, [&] { owned.validate(*mesh); }, RejectionCategory::LogicError,
+        "Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
+    mesh->fail_epoch = false;
+    expect_collective_error(*comm, [&] { owned.validate(*mesh, comm->getRank() == 0 ? .1 : .2); },
+        RejectionCategory::InvalidArgument, "ALE transport timestep must exactly match the active mesh-motion trial.");
+    EXPECT_NO_THROW(owned.validate(*mesh, .2));
+    motion.rollback_trial();
+    expect_collective_error(*comm, [&] { owned.validate(*mesh); }, RejectionCategory::LogicError,
+        "ALE control-volume state requires its originating motion trial to remain active.");
+}
+
+TEST(MultiRegionALETest, ValidatedPlanarSnapshotsIncludeEmptyRanksAndRejectBadConstruction)
+{
+    auto geometry = std::make_shared<Meshes::MultiRegionMesh>(
+        std::vector<Meshes::MultiRegionMesh::Region>{Meshes::cartesian_region("single", {{{0,1}, {0,1}, {0,1}}})},
+        std::vector<Meshes::MultiRegionMesh::Interface>{});
+    Handle::DistributionOptions distribution;
+    distribution.allow_empty_partitions = true;
+    auto mesh = std::make_shared<Handle>(geometry, distribution);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    const int local_empty = mesh->num_owned_cells() == 0;
+    int empty_ranks = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty_ranks);
+    EXPECT_EQ(empty_ranks, comm->getSize() - 1);
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, .2);
+    const auto owned = FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+    EXPECT_NO_THROW(owned.validate(*mesh));
+    size_t face = 0;
+    double original = 0;
+    if (!local_empty)
+    {
+        face = static_cast<size_t>(mesh->faces(Handle::local_ordinal_type{0}).front());
+        original = motion.face_mesh_fluxes()[face];
+        const_cast<double*>(motion.face_mesh_fluxes().data())[face] += 1.;
+    }
+    const std::string message = "ALE control-volume state violates the cellwise geometric conservation law; maximum residual is "
+        + std::to_string(1.) + " m^3/s.";
+    expect_collective_error(*comm, [&] { (void)FVM::make_validated_planar_ale_control_volume_state(*mesh, motion); },
+        RejectionCategory::InvalidArgument, message.c_str());
+    EXPECT_NO_THROW(owned.validate(*mesh));
+    if (!local_empty) const_cast<double*>(motion.face_mesh_fluxes().data())[face] = original;
+    motion.rollback_trial();
+    expect_collective_error(*comm, [&] { owned.validate(*mesh); }, RejectionCategory::LogicError,
+        "ALE control-volume state requires its originating motion trial to remain active.");
+}
+
 TEST(MultiRegionALETest, ChangingThePeriodicLengthIsRejected)
 {
     using namespace Meshes;
