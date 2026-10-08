@@ -154,6 +154,9 @@ public:
      * fixed or validated ALE meshes. Transport has zero source and homogeneous
      * boundaries; kinetics still executes and populated fields resume transport.
      * ALE skips retain timestep/GCL and dissolved-provider/coefficient validation.
+     * Zero decisions are batched per transport stage. Property callbacks must
+     * not modify untransported zero inventories; such writes fail collectively.
+     * Proven-zero owned and overlap storage is filled locally without an import.
      * Microbubble equations always execute, including their initial zero step.
      */
     void set_skip_zero_auxiliary_transport(bool enabled);
@@ -554,6 +557,12 @@ private:
         const material_type& material,
         const FVM::ALEControlVolumeState* ale,
         Dimension slip_axis);
+    /** Stage-local zero proofs for dissolved, donor, large number and large moles. */
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    std::array<bool, 4> zero_auxiliary_transport_fields() const;
+    /** Local callback guard; invoke inside an existing collective validation. */
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    void validate_pending_zero_auxiliary_fields(const std::array<bool, 4>& pending_zero) const;
     SIMPLEFLUID_EQUATIONS_LOCAL
     void transport_scalar(
         field_type& field,
@@ -568,7 +577,8 @@ private:
         Dimension slip_axis,
         size_t operator_slot = 0,
         bool reuse_population_operator = false,
-        const field_type* diffusivity_temperature = nullptr);
+        const field_type* diffusivity_temperature = nullptr,
+        const std::array<bool, 4>* pending_zero = nullptr);
     SIMPLEFLUID_EQUATIONS_LOCAL
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;
