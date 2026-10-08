@@ -17,7 +17,9 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace
@@ -71,17 +73,22 @@ std::unordered_map<local_ordinal_type, scalar_type> matrix_row(const Pack::matri
     return result;
 }
 
-void expect_systems_equal(const SimpleFluid::FVM::TransportSystem<Pack>& expected,
-    const SimpleFluid::FVM::TransportSystem<Pack>& actual, size_t rows)
+template<class System>
+void expect_systems_equal(const System& expected, const System& actual, size_t rows, bool exact_rhs = false)
 {
     ASSERT_TRUE(expected.matrix->getRowMap()->isSameAs(*actual.matrix->getRowMap()));
-    const auto expected_rhs = expected.rhs->getData();
-    const auto actual_rhs = actual.rhs->getData();
+    const auto expected_rhs = expected.rhs->getLocalViewHost(Tpetra::Access::ReadOnly);
+    const auto actual_rhs = actual.rhs->getLocalViewHost(Tpetra::Access::ReadOnly);
+    ASSERT_EQ(expected_rhs.extent(1), actual_rhs.extent(1));
     for (size_t row = 0; row < rows; ++row)
     {
         const auto lid = static_cast<local_ordinal_type>(row);
         EXPECT_EQ(matrix_row(*actual.matrix, lid), matrix_row(*expected.matrix, lid));
-        EXPECT_DOUBLE_EQ(actual_rhs[lid], expected_rhs[lid]);
+        for (size_t component = 0; component < expected_rhs.extent(1); ++component)
+        {
+            if (exact_rhs) { EXPECT_EQ(actual_rhs(row, component), expected_rhs(row, component)); }
+            else { EXPECT_DOUBLE_EQ(actual_rhs(row, component), expected_rhs(row, component)); }
+        }
     }
 }
 
@@ -242,6 +249,14 @@ private:
     SimpleFluid::MeshMotionDiagnostics d_diagnostics;
     bool d_active = true;
 };
+
+template<class MotionType>
+concept AcceptsValidatedPlanarSnapshot = requires(const Handle& mesh, const MotionType& motion)
+{
+    SimpleFluid::FVM::make_validated_planar_ale_control_volume_state(mesh, motion);
+};
+static_assert(AcceptsValidatedPlanarSnapshot<Motion>);
+static_assert(!AcceptsValidatedPlanarSnapshot<CorruptMotion>);
 
 } // namespace
 
@@ -489,4 +504,122 @@ TEST(ALETransportTest, RechecksRankLocalMutableFluxAfterSuccessfulValidation)
     if (mesh->owned_cell_map()->getComm()->getRank() == 0)
         motion.corrupt_flux(std::numeric_limits<SimpleFluid::real_t>::quiet_NaN());
     EXPECT_THROW(ale.validate(*mesh), std::invalid_argument);
+}
+
+TEST(ALETransportTest, ValidatedPlanarSnapshotExactlyMatchesBorrowedAssemblies)
+{
+    for (const double top : {2., 3., 1.5})
+    {
+        SCOPED_TRACE(top);
+        auto mesh = make_column();
+        Motion motion(mesh);
+        constexpr double dt = .5;
+        motion.begin_trial(top, dt);
+        const auto borrowed = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+        const auto owned = SimpleFluid::FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+        FaceField absolute(mesh, 0., "absolute_flux"), relative(mesh, 0., "relative_flux"),
+            owned_relative(mesh, 0., "owned_relative_flux");
+        SimpleFluid::FVM::mesh_relative_face_fluxes(absolute, borrowed, relative);
+        SimpleFluid::FVM::mesh_relative_face_fluxes(absolute, owned, owned_relative);
+        for (const auto face : relative.owned_face_ids())
+            EXPECT_EQ(relative.value(face), owned_relative.value(face));
+        ScalarField old(mesh, 3., "old"), storage(mesh, 2., "storage"), old_storage(mesh, 1.5, "old_storage"),
+            advection(mesh, .75, "advection"), diffusion(mesh, .03, "diffusion"),
+            density(mesh, 4., "density"), old_density(mesh, 2., "old_density"),
+            heat_capacity(mesh, 5., "heat_capacity"), old_heat_capacity(mesh, 3., "old_heat_capacity");
+        const Handle::Vec3 vector_value{1.25, -.75, .5};
+        VectorField old_vector(mesh, vector_value, "old_vector");
+        for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+        {
+            const auto lid = static_cast<local_ordinal_type>(row);
+            old.set_owned_value(lid, 3. + mesh->cell_global_id(lid));
+        }
+        old.sync_ghosts();
+        const auto scalar = [&](const auto& ale)
+        {
+            return SimpleFluid::FVM::weighted_scalar_transport_system<Pack>(
+                SimpleFluid::FVM::MeshWeightedScalarTransportRequest<Pack, Handle>{.old_values = old,
+                    .face_fluxes = relative, .time_step = dt, .storage_weight = storage,
+                    .advection_weight = advection, .diffusivity = diffusion,
+                    .boundary_condition = dirichlet_condition(), .boundary_value = [](int, size_t) { return 2.; },
+                    .source = zero_source(), .treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
+                    .correction_field = &old, .old_storage_weight = &old_storage, .ale = &ale});
+        };
+        expect_systems_equal(scalar(borrowed), scalar(owned), mesh->num_owned_cells(), true);
+        const auto vector = [&](const auto& ale)
+        {
+            return SimpleFluid::FVM::non_orthogonal_transport_system<Pack>(
+                old_vector, relative, dt, .03, [=](int, size_t) { return vector_value; }, zero_vector_source(),
+                SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, &old_vector, Teuchos::null,
+                SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}, nullptr, &ale);
+        };
+        expect_systems_equal(vector(borrowed), vector(owned), mesh->num_owned_cells(), true);
+        const auto momentum = [&](const auto& ale)
+        {
+            return SimpleFluid::FVM::physical_momentum_transport_system<Pack>(
+                old_vector, relative, dt, diffusion, 2., [=](int, size_t) { return vector_value; }, zero_vector_source(),
+                SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid, &old_vector, Teuchos::null,
+                SimpleFluid::FVM::detail::AlwaysDiffuseBoundary{}, nullptr, nullptr,
+                SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic, &ale);
+        };
+        expect_systems_equal(momentum(borrowed), momentum(owned), mesh->num_owned_cells(), true);
+        const auto temperature = [&](const auto& ale)
+        {
+            return SimpleFluid::FVM::physical_temperature_transport_system<Pack>(
+                old, relative, dt, density, heat_capacity, diffusion, dirichlet_condition(),
+                [](int, size_t) { return 2.; }, zero_source(), SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid,
+                &old, Teuchos::null, nullptr, nullptr, SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic,
+                &ale, &old_density, &old_heat_capacity);
+        };
+        expect_systems_equal(temperature(borrowed), temperature(owned), mesh->num_owned_cells(), true);
+        motion.rollback_trial();
+    }
+}
+
+TEST(ALETransportTest, ValidatedPlanarSnapshotOwnsCopiesAndRejectsBadNewSnapshots)
+{
+    auto mesh = make_column();
+    Motion motion(mesh);
+    motion.begin_trial(3., .5);
+    const auto borrowed = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+    std::optional<SimpleFluid::FVM::ALEControlVolumeState> retained;
+    {
+        auto original = SimpleFluid::FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+        auto copied = original;
+        auto moved = std::move(copied);
+        EXPECT_NO_THROW(copied.validate(*mesh));
+        retained.emplace(std::move(moved));
+        EXPECT_NO_THROW(moved.validate(*mesh));
+    }
+    const std::vector<double> old(retained->old_cell_volumes().begin(), retained->old_cell_volumes().end());
+    const std::vector<double> next(retained->new_cell_volumes().begin(), retained->new_cell_volumes().end());
+    const std::vector<double> flux(retained->face_mesh_fluxes().begin(), retained->face_mesh_fluxes().end());
+    if (!old.empty()) EXPECT_NE(retained->old_cell_volumes().data(), motion.old_cell_volumes().data());
+    if (!next.empty()) EXPECT_NE(retained->new_cell_volumes().data(), motion.new_cell_volumes().data());
+    if (!flux.empty()) EXPECT_NE(retained->face_mesh_fluxes().data(), motion.face_mesh_fluxes().data());
+    EXPECT_NO_THROW(retained->validate(*mesh));
+
+    // Deliberate fixture-only writes to the original Planar buffers must not
+    // change an owned snapshot. The generic public factory remains borrowed.
+    if (mesh->owned_cell_map()->getComm()->getRank() == 0)
+        const_cast<double*>(motion.face_mesh_fluxes().data())[0] += 1.;
+    EXPECT_THROW(borrowed.validate(*mesh), std::invalid_argument);
+    EXPECT_THROW(SimpleFluid::FVM::make_validated_planar_ale_control_volume_state(*mesh, motion), std::invalid_argument);
+    EXPECT_NO_THROW(retained->validate(*mesh));
+    if (mesh->owned_cell_map()->getComm()->getRank() == 0)
+    {
+        const_cast<double*>(motion.old_cell_volumes().data())[0] = -1.;
+        const_cast<double*>(motion.new_cell_volumes().data())[0] = std::numeric_limits<double>::quiet_NaN();
+    }
+    EXPECT_NO_THROW(retained->validate(*mesh));
+    EXPECT_EQ(std::vector<double>(retained->old_cell_volumes().begin(), retained->old_cell_volumes().end()), old);
+    EXPECT_EQ(std::vector<double>(retained->new_cell_volumes().begin(), retained->new_cell_volumes().end()), next);
+    EXPECT_EQ(std::vector<double>(retained->face_mesh_fluxes().begin(), retained->face_mesh_fluxes().end()), flux);
+    EXPECT_THROW(borrowed.validate(*mesh), std::invalid_argument);
+    EXPECT_THROW(SimpleFluid::FVM::make_validated_planar_ale_control_volume_state(*mesh, motion), std::invalid_argument);
+    std::copy(old.begin(), old.end(), const_cast<double*>(motion.old_cell_volumes().data()));
+    std::copy(next.begin(), next.end(), const_cast<double*>(motion.new_cell_volumes().data()));
+    std::copy(flux.begin(), flux.end(), const_cast<double*>(motion.face_mesh_fluxes().data()));
+    EXPECT_NO_THROW(borrowed.validate(*mesh));
+    motion.rollback_trial();
 }

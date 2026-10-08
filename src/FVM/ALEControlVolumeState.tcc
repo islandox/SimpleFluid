@@ -49,9 +49,12 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
             ? 1
             : 0;
 
-    std::array<int, 7> local_state{local_identity_error, local_trial_error, local_size_error,
-        local_static_error, local_epoch_error, local_time_error, local_tolerance_error};
-    std::array<int, 7> global_state{};
+    // Join reuse eligibility to the existing collective preflight. A single
+    // borrowed view makes every rank execute the unchanged full validation.
+    std::array<int, 8> local_state{local_identity_error, local_trial_error, local_size_error,
+        local_static_error, local_epoch_error, local_time_error, local_tolerance_error,
+        d_validated_geometry ? 0 : 1};
+    std::array<int, 8> global_state{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_state.size()), local_state.data(),
         global_state.data());
     if (global_state[0] != 0)
@@ -84,6 +87,9 @@ void ALEControlVolumeState::validate(const MeshType& mesh) const
     {
         throw std::invalid_argument("ALE control-volume state requires finite non-negative GCL tolerances.");
     }
+
+    if (global_state[7] == 0)
+        return;
 
     int local_non_finite = 0;
     for (size_t local = 0; local < d_old_cell_volumes.size(); ++local)

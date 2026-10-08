@@ -96,3 +96,60 @@ TEST(ALETrialReplayTest, SameTargetAndTimeStepRejectRetainedViewOnTwoRanks)
     EXPECT_FALSE(motion.diagnostics().trial_active);
     expect_rejection(fresh, false, *mesh);
 }
+
+TEST(ALETrialReplayTest, ValidatedPlanarSnapshotRejectsAcceptRollbackAndIdenticalReplay)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    auto mesh = std::make_shared<Handle>(test::two_regions());
+    PlanarALEMeshMotion<> motion(mesh);
+    constexpr double target = 1.25, dt = .2;
+    const auto expect_rejection = [&](const FVM::ALEControlVolumeState& state, bool epoch)
+    {
+        std::string message;
+        bool category_matches = false;
+        try { state.validate(*mesh); }
+        catch (const std::invalid_argument& error) { message = error.what(); category_matches = epoch; }
+        catch (const std::logic_error& error) { message = error.what(); category_matches = !epoch; }
+        catch (const std::exception& error) { message = error.what(); }
+        const char* expected = epoch
+            ? "ALE control-volume state does not represent the mesh's current trial geometry epoch."
+            : "ALE control-volume state requires its originating motion trial to remain active.";
+        EXPECT_TRUE(category_matches);
+        EXPECT_EQ(message, expected);
+        const int local_match = category_matches && message == expected;
+        int matches = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_match, &matches);
+        EXPECT_EQ(matches, comm->getSize());
+    };
+
+    motion.begin_trial(target, dt);
+    const auto first = FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+    EXPECT_NO_THROW(first.validate(*mesh, dt));
+    motion.accept_trial();
+    expect_rejection(first, false);
+
+    motion.begin_trial(target, dt);
+    const auto retained = FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+    const std::vector<double> old(retained.old_cell_volumes().begin(), retained.old_cell_volumes().end());
+    const std::vector<double> next(retained.new_cell_volumes().begin(), retained.new_cell_volumes().end());
+    const std::vector<double> flux(retained.face_mesh_fluxes().begin(), retained.face_mesh_fluxes().end());
+    const auto trial_epoch = mesh->geometry_epoch();
+    motion.rollback_trial();
+    EXPECT_GT(mesh->geometry_epoch(), trial_epoch);
+    expect_rejection(retained, false);
+    const auto rollback_epoch = mesh->geometry_epoch();
+
+    motion.begin_trial(target, dt);
+    EXPECT_GT(mesh->geometry_epoch(), rollback_epoch);
+    const auto fresh = FVM::make_validated_planar_ale_control_volume_state(*mesh, motion);
+    EXPECT_EQ(std::vector<double>(fresh.old_cell_volumes().begin(), fresh.old_cell_volumes().end()), old);
+    EXPECT_EQ(std::vector<double>(fresh.new_cell_volumes().begin(), fresh.new_cell_volumes().end()), next);
+    EXPECT_EQ(std::vector<double>(fresh.face_mesh_fluxes().begin(), fresh.face_mesh_fluxes().end()), flux);
+    expect_rejection(retained, true);
+    EXPECT_NO_THROW(fresh.validate(*mesh, dt));
+    EXPECT_THROW(fresh.validate(*mesh, dt / 2), std::invalid_argument);
+    auto foreign = std::make_shared<Handle>(test::two_regions());
+    EXPECT_THROW(fresh.validate(*foreign), std::invalid_argument);
+    motion.accept_trial();
+    expect_rejection(fresh, false);
+}

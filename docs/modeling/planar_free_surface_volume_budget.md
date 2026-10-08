@@ -420,13 +420,34 @@ Co_c=\frac{\Delta t}{2V_c}\sum_{f\in c}|\phi_{transport,f}|,
 \end{cases}
 $$
 
-The non-owning `ALEControlVolumeState` carries
+`ALEControlVolumeState` carries
 accepted-old and active-trial-new volumes in mesh-local cell order, mesh fluxes
 in mesh-local face order, timestep, concrete geometry identity, and old/new
 epochs. It is valid only while the originating motion trial is active and
 validates sizes, finiteness, positivity, identity, epoch, and the cellwise GCL.
 Repeating a trial with the same target and time step still changes its geometry
 epoch, so a state retained from the earlier trial must be rebuilt.
+
+The generic `make_ale_control_volume_state` factory returns a borrowed view and
+performs full validation on every call, including checks after external
+callbacks. `make_validated_planar_ale_control_volume_state` accepts only the
+concrete final `PlanarALEMeshMotion` controller. It copies the old/new volumes
+and swept fluxes into shared immutable storage and validates those copied
+values before enabling reuse. Boussinesq's planar solver uses this snapshot
+for each new geometry trial; copies retain ownership of the same data.
+
+Snapshot consumers still collectively check mesh identity, active trial,
+dimensions, static constituents, old/new geometry epochs, timestep and
+tolerances. Only the immutable-data scan and full cellwise GCL walk are reused.
+Every rank participates in selecting the path: a borrowed view on any rank
+forces full validation on all ranks. Acceptance, rollback, restoration and
+new trials invalidate retained snapshots through active-state/epoch checks.
+The motion controller must still outlive its views. This is not an epoch-only
+cache of mutable spans, and it does not change material/provider validation.
+
+The ownership member changes the C++ ALE state layout. FVM, Solvers, affected
+consumers and their tests must be rebuilt against matching headers and
+libraries; the material C ABI is unchanged.
 
 Validation combines rank-local state failures before any rank throws. The GCL
 pass similarly combines invalid volume or mesh-flux data, mesh traversal
