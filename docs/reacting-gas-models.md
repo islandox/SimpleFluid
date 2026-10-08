@@ -142,6 +142,13 @@ For each configured two-population solver step:
 7. Reconstruct radii, concentrations, and void fraction.
 8. Evaluate experimental inertial pressure for the following timestep.
 
+Population transport holds a mesh execution read lease across its inventory,
+flux, assembly, balance and escape calculations. Composite geometry queries
+share the guarded static-region validation; every existing per-assembly ALE
+and geometric-conservation check still executes. Acquisition failures are
+propagated collectively before transport communication. The lease ends on
+return or exception, before subsequent mesh-motion acceptance or rollback.
+
 Transport/local-kinetics splitting is first order. Local linear decays are
 analytic and the remaining rates use bounded subcycles. `maximum_subcycles`,
 clipping, pressure-floor events, and radius failures are exposed through
