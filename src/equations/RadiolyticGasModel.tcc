@@ -15,6 +15,7 @@
 
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -25,6 +26,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <sstream>
 #include <stdexcept>
@@ -1756,6 +1758,19 @@ void RadiolyticGasModel<Pack, MeshType>::transport_populations(
     }
     if (!d_transport_workspace)
         d_transport_workspace = std::make_unique<TransportWorkspace>(d_mesh);
+    // Hold the immutable geometry across all population transport queries.
+    // Nested assembly/ALE leases remain valid, and every existing GCL check
+    // still executes. Release on return or failure, before any later ALE
+    // mutation. Acquire collectively so a stale constituent on one rank
+    // cannot strand peers in a subsequent field import or transport solve.
+    using Execution = decltype(acquire_mesh_execution(*d_mesh));
+    std::unique_ptr<Execution> execution;
+    collective_detail::collective_local_validation(*d_mesh, "Radiolytic transport geometry execution", [&]
+        {
+            // Direct prvalue construction preserves copy elision for the
+            // nonmovable, thread-affine composite execution view.
+            execution.reset(new Execution(acquire_mesh_execution(*d_mesh)));
+        });
     auto& workspace = *d_transport_workspace;
     workspace.operator_ready.fill(false);
     const auto old_cell_volumes = ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes();
