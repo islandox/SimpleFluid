@@ -735,6 +735,7 @@ TEST(BoussinesqPlanarALETest, UniformHeatingMovesTopAndClosesConservativeBalance
     const auto old_mass = state.solver->liquid_mass_inventory().totalMass();
     const auto old_history = state.solver->free_surface_history().size();
 
+    state.solver->reset_solver_phase_timings();
     ASSERT_NO_THROW(state.solver->step());
 
     const auto expected_temperature = initial_temperature + power_density * time_step / (density * heat_capacity);
@@ -766,6 +767,12 @@ TEST(BoussinesqPlanarALETest, UniformHeatingMovesTopAndClosesConservativeBalance
     }
     EXPECT_GE(diagnostics.outer_correctors, 2);
     EXPECT_LE(diagnostics.outer_correctors, 4);
+    // Successful Picard replay refreshes only candidate geometry, never the
+    // transient accepted mesh between two candidate trials.
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::GeometryRefresh).calls,
+        state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALEGeometry).calls);
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALERestore).calls,
+        static_cast<std::uint64_t>(diagnostics.outer_correctors - 1));
     EXPECT_EQ(diagnostics.level_residual_history.size(), static_cast<size_t>(diagnostics.outer_correctors));
     EXPECT_EQ(diagnostics.target_change_history.size(), static_cast<size_t>(diagnostics.outer_correctors));
     EXPECT_EQ(diagnostics.continuity_maximum_history.size(), static_cast<size_t>(diagnostics.outer_correctors));
@@ -1112,6 +1119,39 @@ TEST(BoussinesqPlanarALETest, StrictGasStepClosureFailureRollsBackTheWholeTransa
     EXPECT_EQ(state.solver->planar_ale_diagnostics().rejected_transactions, 1U);
 }
 
+TEST(BoussinesqPlanarALETest, PublicScalarVoidRestoreRefreshesRollbackGeometry)
+{
+    auto mesh = make_column();
+    SimpleFluid::ScalarVoidFractionOptions options;
+    options.alpha_diffusivity = 0.1;
+    SimpleFluid::ScalarVoidFractionModel<Pack, Handle> model(mesh, options);
+    ScalarField initial(mesh, "initial_alpha");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        initial.set_owned_value(cell, mesh->cell_centroid(cell).z < 0.5 ? 0.8 : 0.1);
+    }
+    initial.sync_ghosts();
+    model.initialize_from(initial);
+    const auto accepted = model.snapshot();
+    model.update_explicit(0.1, nullptr, nullptr);
+    const auto expected = capture_owned_values(model.alpha_g());
+    model.restore(accepted);
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(mesh);
+    motion.begin_trial(1.2, 0.1);
+    model.refresh_geometry();
+    model.update_explicit(0.1, nullptr, nullptr);
+    motion.rollback_trial();
+    // The public restore alone must refresh rollback metrics and invalidate
+    // trial diffusion state; no additional caller refresh is supplied.
+    ASSERT_NO_THROW(model.restore(accepted));
+    ASSERT_NO_THROW(model.update_explicit(0.1, nullptr, nullptr));
+    expect_owned_values(model.alpha_g(), expected);
+    SimpleFluid::ScalarVoidFractionModel<Pack, Handle> foreign(mesh, options);
+    EXPECT_THROW(model.restore(foreign.snapshot()), std::invalid_argument);
+    expect_owned_values(model.alpha_g(), expected);
+}
+
 TEST(BoussinesqPlanarALETest, MeshMotionLimitFailureLeavesAcceptedStateUntouched)
 {
     auto mesh = make_column();
@@ -1129,7 +1169,14 @@ TEST(BoussinesqPlanarALETest, MeshMotionLimitFailureLeavesAcceptedStateUntouched
     const auto primary = capture_primary(*solver);
     const auto history = solver->free_surface_history().size();
 
+    solver->reset_solver_phase_timings();
     EXPECT_THROW(solver->step(), std::invalid_argument);
+    // The stationary first candidate completes and rolls back internally;
+    // the next candidate fails begin_trial's movement limit. The outward
+    // catch must still refresh the accepted mesh before returning.
+    EXPECT_EQ(solver->solver_phase_timing(SimpleFluid::SolverPhase::ALEGeometry).calls, 2u);
+    EXPECT_EQ(solver->solver_phase_timing(SimpleFluid::SolverPhase::ALERestore).calls, 2u);
+    EXPECT_EQ(solver->solver_phase_timing(SimpleFluid::SolverPhase::GeometryRefresh).calls, 2u);
     expect_geometry_restored(*mesh, geometry);
     expect_primary_restored(*solver, primary);
     EXPECT_EQ(solver->step_index(), 0);
@@ -1199,6 +1246,7 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     const auto initial_pressure_offset = gas->absolute_pressure_offset();
     const auto initial_committed_escape = state.solver->find_free_surface_model()->committedEscapedMoles();
 
+    state.solver->reset_solver_phase_timings();
     std::string failure;
     try
     {
@@ -1211,6 +1259,10 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     }
 
     EXPECT_NE(failure.find("outer level/continuity corrector did not converge"), std::string::npos) << failure;
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALEGeometry).calls, 2u);
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALERestore).calls, 3u);
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::GeometryRefresh).calls, 3u);
+    EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::GasRestore).calls, 3u);
     expect_geometry_restored(*state.mesh, geometry);
     expect_primary_restored(*state.solver, primary);
     EXPECT_DOUBLE_EQ(state.solver->time(), initial_time);
@@ -1990,6 +2042,7 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
         energy[owned] = state.mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(owned)).z < 0.5 ? 0.01 : 0.02;
     auto checkpoint = solver.create_coupling_checkpoint();
     EXPECT_THROW(static_cast<void>(solver.create_coupling_checkpoint()), std::logic_error);
+    solver.reset_solver_phase_timings();
     solver.set_coupling_interval_energy(energy, 0.02);
     solver.step();
     EXPECT_NEAR(solver.find_fission_power_source()->integrated_power(), 1.5, 1.e-13);
@@ -1997,6 +2050,11 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     EXPECT_THROW(solver.set_coupling_interval_energy(energy, 0.02), std::logic_error);
     solver.step();
     const auto accepted_time = solver.time();
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::GeometryRefresh).calls,
+        solver.solver_phase_timing(SimpleFluid::SolverPhase::ALEGeometry).calls);
+    EXPECT_GT(solver.solver_phase_timing(SimpleFluid::SolverPhase::ALERestore).calls, 0u);
+    EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::GasRestore).calls,
+        solver.solver_phase_timing(SimpleFluid::SolverPhase::ALERestore).calls);
     const auto accepted_level = top_elevation(*state.mesh);
     const auto accepted_energy = coupling_sensible_energy(state);
     const auto accepted_hydrogen = gas->global_submerged_hydrogen_moles();

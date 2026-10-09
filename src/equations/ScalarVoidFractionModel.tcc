@@ -52,6 +52,18 @@ auto ScalarVoidFractionModel<Pack, MeshType>::snapshot() const -> StateSnapshot
 template<TpetraTypePack Pack, class MeshType>
 void ScalarVoidFractionModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 {
+    restore_state(snapshot, true);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void ScalarVoidFractionModel<Pack, MeshType>::restore_for_ale_replay(const StateSnapshot& snapshot)
+{
+    restore_state(snapshot, false);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void ScalarVoidFractionModel<Pack, MeshType>::restore_state(const StateSnapshot& snapshot, bool refresh_metrics)
+{
     const int local_invalid = snapshot.d_owner != this ||
                               snapshot.d_alpha_g.size() != d_mesh->num_owned_cells() ||
                               snapshot.d_alpha_l.size() != d_mesh->num_owned_cells() ||
@@ -71,7 +83,8 @@ void ScalarVoidFractionModel<Pack, MeshType>::restore(const StateSnapshot& snaps
         d_source_alpha_total.set_owned_value(cell, snapshot.d_source[owned]);
     }
     sync_fields();
-    refresh_geometry();
+    if (refresh_metrics) refresh_geometry();
+    else d_diffusion_solver.reset();
 }
 
 template<TpetraTypePack Pack, class MeshType>
