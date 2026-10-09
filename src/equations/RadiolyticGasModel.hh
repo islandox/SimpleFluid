@@ -30,6 +30,7 @@
 
 namespace SimpleFluid
 {
+template<TpetraTypePack Pack> class BoussinesqSolver;
 /** Local elapsed times; reduce across ranks when exporting diagnostics. */
 struct RadiolyticTransportWork
 {
@@ -473,6 +474,13 @@ public:
     }
 
 private:
+    template<TpetraTypePack> friend class BoussinesqSolver;
+    // Only the solver's internal Picard replay can leave metrics stale. Public
+    // restore always refreshes, and outward failure paths restore eagerly.
+    void restore_for_ale_replay(const StateSnapshot& snapshot);
+    void restore_state(const StateSnapshot& snapshot, bool refresh_metrics);
+    void invalidate_transport_operator();
+
     /** @brief Per-cell conserved inventories advanced by local kinetics. */
     struct CellKineticsState
     {

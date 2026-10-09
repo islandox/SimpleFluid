@@ -3054,6 +3054,7 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::temperature_equation(
 template<TpetraTypePack Pack>
 void BoussinesqSolver<Pack>::refresh_geometry_dependent_state()
 {
+    const auto refresh_timing = this->d_solver_timings.scope(SolverPhase::GeometryRefresh);
     if (!d_shared_transport_geometry) d_shared_transport_geometry.emplace(*d_mesh);
     else d_shared_transport_geometry->refresh();
     const auto& geometry = d_shared_transport_geometry->shared_geometry();
@@ -3927,8 +3928,9 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     const auto accepted_surface = d_free_surface_model->diagnostics();
     const auto time_step = static_cast<scalar_type>(d_problem.time_options().time_step);
 
-    auto restore_accepted = [&]
+    auto restore_accepted = [&](bool refresh_metrics = true)
     {
+        const auto restore_timing = this->d_solver_timings.scope(SolverPhase::ALERestore);
         clear_volume_continuity_target();
         clear_ale_pressure_boundary();
         d_ale_temperature_density = nullptr;
@@ -3937,8 +3939,11 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
         {
             d_ale_motion->rollback_trial();
         }
-        refresh_geometry_dependent_state();
-        d_ale_boundary->refresh(d_free_surface_model->volumeMap());
+        if (refresh_metrics)
+        {
+            refresh_geometry_dependent_state();
+            d_ale_boundary->refresh(d_free_surface_model->volumeMap());
+        }
         pressure_snapshot.restore(pressure());
         pressure_correction_snapshot.restore(this->pressure_correction());
         velocity_snapshot.restore(velocity());
@@ -3966,11 +3971,14 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
         d_volume_continuity_model->restore(volume_model_snapshot);
         if (radiolytic_snapshot)
         {
-            d_radiolytic_gas_model->restore(*radiolytic_snapshot);
+            const auto gas_restore_timing = this->d_solver_timings.scope(SolverPhase::GasRestore);
+            if (refresh_metrics) d_radiolytic_gas_model->restore(*radiolytic_snapshot);
+            else d_radiolytic_gas_model->restore_for_ale_replay(*radiolytic_snapshot);
         }
         if (void_snapshot)
         {
-            d_scalar_void_fraction_model->restore(*void_snapshot);
+            if (refresh_metrics) d_scalar_void_fraction_model->restore(*void_snapshot);
+            else d_scalar_void_fraction_model->restore_for_ale_replay(*void_snapshot);
         }
         d_last_step_statistics = accepted_statistics;
         pressure_velocity_residuals() = accepted_residuals;
@@ -4515,7 +4523,12 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                     (volume_trial.target().integrated_rate(static_cast<local_ordinal_type>(owned)) -
                         target_guess[owned]);
             }
-            restore_accepted();
+            // No geometry-dependent consumer runs between this internal
+            // rollback and the next candidate's begin_trial/refresh. Preserve
+            // all accepted physical state now; reconstruct metrics only for
+            // the candidate. Any exception (including begin/refresh failure)
+            // reaches the eager restore below before leaving this function.
+            restore_accepted(false);
             target_guess = std::move(next_target);
             density_guess = std::move(next_density_guess);
             heat_capacity_guess = std::move(next_heat_capacity_guess);

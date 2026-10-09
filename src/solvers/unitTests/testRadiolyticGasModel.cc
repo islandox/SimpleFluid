@@ -3243,8 +3243,9 @@ TEST(RadiolyticGasModelTest, CompositeTransportLeasePreservesALEReplayAndAssembl
         const auto rollback = [&]
         {
             motion.rollback_trial();
+            // Public restore must refresh the new rollback epoch itself.
+            // Omitting an extra caller refresh exercises standalone restore.
             model.restore(checkpoint);
-            model.refresh_geometry();
         };
         const auto expected = advance();
         rollback();

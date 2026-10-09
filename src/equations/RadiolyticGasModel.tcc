@@ -3380,6 +3380,18 @@ auto RadiolyticGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
 template<TpetraTypePack Pack, class MeshType>
 void RadiolyticGasModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
 {
+    restore_state(snapshot, true);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::restore_for_ale_replay(const StateSnapshot& snapshot)
+{
+    restore_state(snapshot, false);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapshot, bool refresh_metrics)
+{
     const auto fields = mutable_state_fields();
     int local_invalid = snapshot.d_owner != this || snapshot.d_fields.size() != fields.size() ||
                         snapshot.d_transport_slip_face_ids !=
@@ -3455,7 +3467,8 @@ void RadiolyticGasModel<Pack, MeshType>::restore(const StateSnapshot& snapshot)
         d_transport_bubble_slip_volume_flux.sync_ghosts();
         d_transport_bubble_carrier_volume_flux.sync_ghosts();
     }
-    refresh_geometry();
+    if (refresh_metrics) refresh_geometry();
+    else invalidate_transport_operator();
 }
 
 /** Refresh reconstruction geometry without a caller-supplied snapshot. */
@@ -3471,6 +3484,12 @@ void RadiolyticGasModel<Pack, MeshType>::refresh_geometry(
     typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)
 {
     d_transport_geometry_cache.refresh(std::move(geometry));
+    invalidate_transport_operator();
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void RadiolyticGasModel<Pack, MeshType>::invalidate_transport_operator()
+{
     d_transport_solver.notify_operator_values_changed();
     if (d_transport_workspace)
     {

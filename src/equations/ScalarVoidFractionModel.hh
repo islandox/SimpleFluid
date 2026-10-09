@@ -30,6 +30,7 @@
 
 namespace SimpleFluid
 {
+template<TpetraTypePack Pack> class BoussinesqSolver;
 
 /**
  * @brief Runtime controls for the bounded scalar void-fraction model.
@@ -266,6 +267,11 @@ public:
         scalar_type time_step);
 
 private:
+    template<TpetraTypePack> friend class BoussinesqSolver;
+    // Solver-only internal replay; public restore keeps geometry current.
+    void restore_for_ale_replay(const StateSnapshot& snapshot);
+    void restore_state(const StateSnapshot& snapshot, bool refresh_metrics);
+
     /**
      * @brief Apply conservative bounded backward-Euler void diffusion.
      *
