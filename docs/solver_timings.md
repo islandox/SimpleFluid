@@ -19,7 +19,16 @@ attempted work and subsequent attempts accumulate it.
 Times are **inclusive**: `sf.step` includes all work in a physical step, `sf.ale`
 includes the complete planar ALE transaction, and `sf.ale_trial` includes an outer
 corrector attempt. `sf.ale_geometry` covers moving the trial geometry, creating
-control-volume state, and refreshing geometry-dependent caches. Pressure/velocity
+control-volume state, and refreshing geometry-dependent caches. `sf.ale_restore`
+counts internal Picard replay and outward failure restoration; `sf.geometry_refresh`
+measures Boussinesq geometry-dependent cache refresh, including candidate and
+outward rollback refreshes. Internal replay restores physical fields and ledgers
+immediately but defers metrics reconstruction to the next candidate; outward
+failure always refreshes accepted geometry. Gas and scalar void mirrors preserve
+their snapshot validation and solver invalidation during deferred replay; public
+model restore always refreshes geometry. `sf.gas_restore` measures gas snapshot
+restoration within the ALE transaction. These scopes remain inclusive and are
+outside checkpoint state. Pressure/velocity
 coupling includes each momentum predictor and pressure correction for segregated
 methods; coupled Krylov/NOX work belongs to `sf.pressure_velocity` and does not
 pretend to have separate segregated solve times. Physical model refresh,
@@ -31,7 +40,9 @@ without a temperature phase. The collector cannot be copied or moved while
 scopes retain references to it.
 
 `depth` describes the logical flow chart for display; it is not a runtime nesting
-trace. Gas can run under pre/post-temperature models or an ALE trial, and shared
+trace. Geometry refresh can also run during coupling-checkpoint restoration
+outside an ALE trial; its depth is a display convention, not its caller depth.
+Gas can run under pre/post-temperature models or an ALE trial, and shared
 pressure/temperature stages can run inside an ALE trial. Therefore, do not add
 parent and child values or subtract logical children to infer exclusive time.
 In particular, `sf.pressure_project` also includes ALE continuity-refinement
