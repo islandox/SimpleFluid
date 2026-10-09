@@ -931,3 +931,179 @@ TEST(MeshToMeshTransferMultiRankTest, PolygonRejectsCurvedCompositeProvidersColl
     EXPECT_THROW((Transfer(curved, polygon, polygon_partial_options())), std::invalid_argument);
     EXPECT_THROW((Transfer(polygon, curved, polygon_partial_options())), std::invalid_argument);
 }
+
+namespace
+{
+void expect_reverse_overlap_parity(const SimpleFluid::SP<Handle>& source_mesh,
+                                  const SimpleFluid::SP<Handle>& target_mesh,
+                                  const Options& options)
+{
+    // The forward plan dies before any coverage query or application, so
+    // every parity case also checks independent reverse-plan ownership.
+    auto reused = [&] {
+        Transfer forward(source_mesh, target_mesh, options);
+        return forward.reversed();
+    }();
+    Transfer independent(target_mesh, source_mesh, options);
+    const auto& actual = reused.coverage();
+    const auto& expected = independent.coverage();
+    const auto expect_values = [](const auto& a, const auto& b) {
+        ASSERT_EQ(a.size(), b.size());
+        for (size_t item = 0; item < a.size(); ++item) EXPECT_DOUBLE_EQ(a[item], b[item]);
+    };
+    expect_values(actual.source_cell_volumes, expected.source_cell_volumes);
+    expect_values(actual.source_covered_volumes, expected.source_covered_volumes);
+    expect_values(actual.source_uncovered_volumes, expected.source_uncovered_volumes);
+    expect_values(actual.target_cell_volumes, expected.target_cell_volumes);
+    expect_values(actual.target_covered_volumes, expected.target_covered_volumes);
+    expect_values(actual.target_uncovered_volumes, expected.target_uncovered_volumes);
+    EXPECT_DOUBLE_EQ(actual.source_volume, expected.source_volume);
+    EXPECT_DOUBLE_EQ(actual.target_volume, expected.target_volume);
+    EXPECT_DOUBLE_EQ(actual.overlap_volume, expected.overlap_volume);
+    EXPECT_DOUBLE_EQ(actual.uncovered_source_volume, expected.uncovered_source_volume);
+    EXPECT_DOUBLE_EQ(actual.uncovered_target_volume, expected.uncovered_target_volume);
+    Pack::multi_vector_type source(target_mesh->owned_cell_map(), 3);
+    Pack::multi_vector_type reused_target(source_mesh->owned_cell_map(), 3);
+    Pack::multi_vector_type independent_target(source_mesh->owned_cell_map(), 3);
+    for (const auto quantity : {Quantity::Intensive, Quantity::Extensive})
+        for (const bool uniform : {true, false})
+        {
+            SCOPED_TRACE(static_cast<int>(quantity));
+            SCOPED_TRACE(uniform);
+            for (size_t column = 0; column < 3; ++column)
+            {
+                auto values = source.getDataNonConst(column);
+                for (size_t row = 0; row < source.getLocalLength(); ++row)
+                {
+                    const auto cell = static_cast<LO>(row);
+                    const auto center = target_mesh->cell_centroid(cell);
+                    double value = uniform ? 2.3 : 1.7 + 0.13 * center.x
+                        + 0.27 * center.y + 0.41 * center.z;
+                    value *= column + 1;
+                    values[row] = quantity == Quantity::Extensive
+                        ? value * target_mesh->cell_volume(cell) : value;
+                }
+            }
+            const auto a = reused.project(source, reused_target, quantity);
+            const auto b = independent.project(source, independent_target, quantity);
+            expect_values(a.source_integral, b.source_integral);
+            expect_values(a.transferred_integral, b.transferred_integral);
+            expect_values(a.uncovered_source_integral, b.uncovered_source_integral);
+            expect_values(a.target_integral, b.target_integral);
+            expect_values(a.transfer_error, b.transfer_error);
+            expect_values(a.conservation_error, b.conservation_error);
+            for (size_t column = 0; column < 3; ++column)
+                expect_values(reused_target.getData(column), independent_target.getData(column));
+        }
+}
+} // namespace
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapMatchesIndependentCartesianBothDirections)
+{
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    auto fine = make_cartesian(true);
+    auto coarse = make_cartesian(false, true);
+    expect_reverse_overlap_parity(fine, coarse, options);
+    expect_reverse_overlap_parity(coarse, fine, options);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapMatchesPartialCylindricalEndpoints)
+{
+    const double pi = std::numbers::pi;
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    options.coverage_mode = CoverageMode::AllowPartial;
+    auto start = make_cylindrical({{{0.1, 0.73, 2.4},
+        {0.0, pi, 2 * pi}, {0.0, 0.37, 1.29, 2.7}}}, true);
+    auto end = make_cylindrical({{{0.1, 0.41, 1.38, 2.4},
+        {0.0, pi, 2 * pi}, {0.0, 0.23, 1.73, 3.1}}});
+    expect_reverse_overlap_parity(start, end, options);
+    expect_reverse_overlap_parity(end, start, options);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapMatchesPolygonAfterALEAndRetainsStaleGuards)
+{
+    auto polygon = make_polygon_composite();
+    auto annulus = make_polygon_enclosing_annulus(true);
+    const auto options = polygon_partial_options();
+    expect_reverse_overlap_parity(annulus, polygon, options);
+    expect_reverse_overlap_parity(polygon, annulus, options);
+    Transfer before(annulus, polygon, options);
+    auto reverse = before.reversed();
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(polygon);
+    motion.begin_trial(1.37, 1.0);
+    EXPECT_THROW((void)before.reversed(), std::runtime_error);
+    EXPECT_THROW(reverse.coverage(), std::runtime_error);
+    motion.accept_trial();
+    expect_reverse_overlap_parity(annulus, polygon, options);
+    expect_reverse_overlap_parity(polygon, annulus, options);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapRejectsRankLocalInvalidAndStalePlans)
+{
+    SKIP_SINGLE_RANK(MeshToMeshTransferMultiRankTest);
+    auto source = make_cartesian();
+    auto target = make_cartesian(false, true);
+    Options conservative;
+    conservative.method = Method::ConservativeCellAverage;
+    Transfer valid(source, target, conservative);
+    Options nearest;
+    nearest.method = Method::NearestCell;
+    Transfer invalid(source, target, nearest);
+    const auto comm = Tpetra::getDefaultComm();
+    const auto& chosen = comm->getRank() == 0 ? invalid : valid;
+    EXPECT_THROW((void)chosen.reversed(), std::invalid_argument);
+    auto reverse = valid.reversed();
+    Pack::multi_vector_type input(target->owned_cell_map(), 1), output(source->owned_cell_map(), 1);
+    input.putScalar(2.3);
+    output.putScalar(-19.0);
+    if (comm->getRank() == 0 && input.getLocalLength())
+        input.getDataNonConst(0)[0] = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW((void)reverse.project(input, output, Quantity::Intensive), std::invalid_argument);
+    for (const double value : output.getData(0)) EXPECT_DOUBLE_EQ(value, -19.0);
+    input.putScalar(2.3);
+    const auto quantity = comm->getRank() == 0 ? static_cast<Quantity>(-1) : Quantity::Intensive;
+    EXPECT_THROW((void)reverse.project(input, output, quantity), std::invalid_argument);
+    for (const double value : output.getData(0)) EXPECT_DOUBLE_EQ(value, -19.0);
+    auto replacement = make_cartesian();
+    if (comm->getRank() == 0) *source = *replacement;
+    EXPECT_THROW((void)valid.reversed(), std::runtime_error);
+    EXPECT_THROW(reverse.coverage(), std::runtime_error);
+    EXPECT_THROW((void)reverse.project(input, output, Quantity::Intensive), std::runtime_error);
+    for (const double value : output.getData(0)) EXPECT_DOUBLE_EQ(value, -19.0);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapHandlesEmptyOwnersInBothDirections)
+{
+    SKIP_SINGLE_RANK(MeshToMeshTransferMultiRankTest);
+    const double pi = std::numbers::pi;
+    const auto comm = Tpetra::getDefaultComm();
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    for (const bool refined : {false, true})
+    {
+        SCOPED_TRACE(refined);
+        auto source = make_cylindrical(
+            {{{1.0, 3.0}, {0.0, pi / 2.0}, {0.0, 2.0}}}, false, true);
+        const auto target_r = refined ? SimpleFluid::ArrReal{1.0, 1.73, 3.0}
+                                      : SimpleFluid::ArrReal{1.0, 3.0};
+        auto target = make_cylindrical(
+            {{target_r, {0.0, pi / 2.0}, {0.0, 2.0}}}, true, true);
+        EXPECT_EQ(source->num_owned_cells(), comm->getRank() == 0 ? 1U : 0U);
+        const bool target_active = comm->getRank() >= comm->getSize() - (refined ? 2 : 1);
+        EXPECT_EQ(target->num_owned_cells(), target_active ? 1U : 0U);
+        expect_reverse_overlap_parity(source, target, options);
+        expect_reverse_overlap_parity(target, source, options);
+    }
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapSurvivesForwardPlanDestruction)
+{
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    auto fine = make_cartesian(true);
+    auto coarse = make_cartesian(false, true);
+    expect_reverse_overlap_parity(fine, coarse, options);
+    expect_reverse_overlap_parity(coarse, fine, options);
+}

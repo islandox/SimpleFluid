@@ -9,12 +9,14 @@
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultMpiComm.hpp>
+#include <Tpetra_RowMatrixTransposer.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <numeric>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace SimpleFluid
@@ -334,6 +336,168 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
         d_weights->insertGlobalValues(target_map->getGlobalElement(static_cast<LO>(row)),
             Teuchos::arrayViewFromVector(columns[row]), Teuchos::arrayViewFromVector(weights[row]));
     d_weights->fillComplete(source_map, target_map);
+}
+
+template<TpetraTypePack Pack>
+MeshToMeshTransfer<Pack> MeshToMeshTransfer<Pack>::reversed() const
+{
+    using namespace mesh_transfer_detail;
+    const auto comm = d_source_map->getComm();
+    require_all(*comm, d_options.method == MeshToMeshTransferMethod::ConservativeCellAverage,
+                "Reverse overlap reuse requires conservative mesh transfer.");
+    require_all(*comm, std::numeric_limits<typename Pack::scalar_type>::is_specialized
+        && !std::numeric_limits<typename Pack::scalar_type>::is_integer
+        && std::numeric_limits<typename Pack::scalar_type>::radix == std::numeric_limits<double>::radix
+        && std::numeric_limits<typename Pack::scalar_type>::digits >= std::numeric_limits<double>::digits,
+        "Reverse overlap reuse requires a real scalar with at least double precision.");
+    validate_geometry();
+    // Agree allocation failures before entering the distributed transpose.
+    std::optional<MeshToMeshTransfer> reverse;
+    bool valid = true;
+    try
+    {
+        reverse.emplace(*this);
+        std::swap(reverse->d_source, reverse->d_target);
+        std::swap(reverse->d_source_geometry, reverse->d_target_geometry);
+        std::swap(reverse->d_source_epoch, reverse->d_target_epoch);
+        std::swap(reverse->d_source_map, reverse->d_target_map);
+        auto& coverage = reverse->d_coverage;
+        std::swap(coverage.source_cell_volumes, coverage.target_cell_volumes);
+        std::swap(coverage.source_covered_volumes, coverage.target_covered_volumes);
+        std::swap(coverage.source_uncovered_volumes, coverage.target_uncovered_volumes);
+        std::swap(coverage.source_volume, coverage.target_volume);
+        std::swap(coverage.uncovered_source_volume, coverage.uncovered_target_volume);
+    }
+    catch (const std::exception&) { valid = false; }
+    require_all(*comm, valid, "Could not allocate reverse mesh transfer snapshot.");
+    require_all(*comm, reverse->d_source_map->getGlobalNumElements()
+        <= static_cast<size_t>(std::numeric_limits<int>::max() / 12)
+        && reverse->d_source_map->getLocalNumElements() <= static_cast<size_t>(std::numeric_limits<int>::max()),
+        "Reverse mesh transfer exceeds the geometry gather limit.");
+    using Matrix = typename Pack::matrix_type;
+    Tpetra::RowMatrixTransposer<typename Matrix::scalar_type,
+        typename Matrix::local_ordinal_type, typename Matrix::global_ordinal_type,
+        typename Matrix::node_type> transposer(d_weights);
+    reverse->d_weights = transposer.createTranspose();
+
+    // Recompute coverage in independent reverse construction order. Merely
+    // swapping forward coverage changes local versus reduced summation order,
+    // which changes energy-normalization arithmetic even with identical weights.
+    using GO = typename Pack::global_ordinal_type;
+    using LO = typename Pack::local_ordinal_type;
+    const auto source_map = reverse->d_source_map;
+    const auto target_map = reverse->d_target_map;
+    std::vector<GO> donor_ids;
+    std::vector<double> donor_volumes;
+    size_t source_offset = 0;
+    valid = true;
+    try
+    {
+        donor_ids.reserve(source_map->getGlobalNumElements());
+        donor_volumes.reserve(source_map->getGlobalNumElements());
+    }
+    catch (const std::exception&) { valid = false; }
+    require_all(*comm, valid, "Could not allocate reverse donor records.");
+    for (int rank = 0; rank < comm->getSize(); ++rank)
+    {
+        int count = static_cast<int>(source_map->getLocalNumElements());
+        Teuchos::broadcast(*comm, rank, 1, &count);
+        std::vector<GO> ids;
+        std::vector<double> volumes;
+        valid = true;
+        try
+        {
+            ids.resize(count);
+            volumes.resize(count);
+            if (comm->getRank() == rank)
+            {
+                for (int row = 0; row < count; ++row)
+                {
+                    ids[row] = source_map->getGlobalElement(static_cast<LO>(row));
+                    volumes[row] = reverse->d_coverage.source_cell_volumes[row];
+                }
+                source_offset = donor_ids.size();
+            }
+        }
+        catch (const std::exception&) { valid = false; }
+        require_all(*comm, valid, "Could not allocate reverse donor broadcast.");
+        if (count)
+        {
+            Teuchos::broadcast(*comm, rank, count, ids.data());
+            Teuchos::broadcast(*comm, rank, count, volumes.data());
+        }
+        donor_ids.insert(donor_ids.end(), ids.begin(), ids.end());
+        donor_volumes.insert(donor_volumes.end(), volumes.begin(), volumes.end());
+    }
+    auto& coverage = reverse->d_coverage;
+    std::vector<double> source_coverage, global_coverage;
+    valid = true;
+    try
+    {
+        source_coverage.assign(donor_ids.size(), 0);
+        global_coverage.resize(donor_ids.size());
+        std::unordered_map<GO, size_t> donor_order;
+        for (size_t donor = 0; donor < donor_ids.size(); ++donor)
+            donor_order.emplace(donor_ids[donor], donor);
+        const auto column_map = reverse->d_weights->getColMap();
+        std::vector<std::pair<size_t, double>> entries;
+        for (size_t row = 0; row < target_map->getLocalNumElements(); ++row)
+        {
+            typename Matrix::local_inds_host_view_type columns;
+            typename Matrix::values_host_view_type values;
+            reverse->d_weights->getLocalRowView(static_cast<LO>(row), columns, values);
+            entries.clear();
+            for (size_t item = 0; item < columns.extent(0); ++item)
+                entries.emplace_back(donor_order.at(column_map->getGlobalElement(columns(item))), values(item));
+            std::sort(entries.begin(), entries.end());
+            double covered = 0;
+            for (const auto& [donor, overlap] : entries)
+            {
+                covered += overlap;
+                source_coverage[donor] += overlap;
+            }
+            coverage.target_covered_volumes[row] = covered;
+            coverage.target_uncovered_volumes[row] = coverage.target_cell_volumes[row] - covered;
+        }
+    }
+    catch (const std::exception&) { valid = false; }
+    require_all(*comm, valid, "Could not reconstruct reverse overlap rows.");
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, static_cast<int>(donor_ids.size()),
+                      source_coverage.data(), global_coverage.data());
+    const bool partial = d_options.coverage_mode == MeshToMeshCoverageMode::AllowPartial;
+    const auto covered_is_valid = [&](double covered, double volume) {
+        const double residual = covered / volume - 1.0;
+        return std::isfinite(covered) && covered >= 0
+            && residual <= d_options.coverage_tolerance
+            && (partial || std::abs(residual) <= d_options.coverage_tolerance);
+    };
+    valid = true;
+    for (size_t donor = 0; donor < donor_ids.size(); ++donor)
+        valid = valid && covered_is_valid(global_coverage[donor], donor_volumes[donor]);
+    for (size_t row = 0; row < source_map->getLocalNumElements(); ++row)
+    {
+        coverage.source_covered_volumes[row] = global_coverage[source_offset + row];
+        coverage.source_uncovered_volumes[row] = coverage.source_cell_volumes[row]
+            - coverage.source_covered_volumes[row];
+    }
+    for (size_t row = 0; row < target_map->getLocalNumElements(); ++row)
+        valid = valid && covered_is_valid(coverage.target_covered_volumes[row], coverage.target_cell_volumes[row]);
+    std::array<double, 5> local_volumes{
+        std::accumulate(coverage.source_cell_volumes.begin(), coverage.source_cell_volumes.end(), 0.0),
+        std::accumulate(coverage.target_cell_volumes.begin(), coverage.target_cell_volumes.end(), 0.0),
+        std::accumulate(coverage.target_covered_volumes.begin(), coverage.target_covered_volumes.end(), 0.0),
+        std::accumulate(coverage.source_uncovered_volumes.begin(), coverage.source_uncovered_volumes.end(), 0.0),
+        std::accumulate(coverage.target_uncovered_volumes.begin(), coverage.target_uncovered_volumes.end(), 0.0)};
+    std::array<double, 5> global_volumes{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 5, local_volumes.data(), global_volumes.data());
+    for (double volume : global_volumes) valid = valid && std::isfinite(volume);
+    coverage.source_volume = global_volumes[0];
+    coverage.target_volume = global_volumes[1];
+    coverage.overlap_volume = global_volumes[2];
+    coverage.uncovered_source_volume = global_volumes[3];
+    coverage.uncovered_target_volume = global_volumes[4];
+    require_all(*comm, valid, "Reverse mesh transfer encountered invalid overlap coverage.");
+    return std::move(*reverse);
 }
 
 template<TpetraTypePack Pack>

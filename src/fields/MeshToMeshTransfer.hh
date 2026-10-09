@@ -147,6 +147,18 @@ public:
                        SP<const mesh_type> target,
                        MeshToMeshTransferOptions options = {});
 
+    /** @brief Build the reverse conservative plan from these exact overlaps.
+     *
+     * Collective on the captured source context. Retains the same immutable
+     * endpoint snapshots and options, recomputes reverse coverage, and materializes
+     * the distributed overlap transpose without gathering or intersecting geometry.
+     * Requires conservative construction and a real scalar type with at least
+     * double precision (the default pack qualifies); rejects stale geometry/maps.
+     * The result owns its matrix and remains valid after this plan is destroyed.
+     * Floating-point accumulation can differ from independent reverse setup.
+     */
+    [[nodiscard]] MeshToMeshTransfer reversed() const;
+
     /**
      * @brief Transfer authoritative owned components on the original cell maps.
      * @note Does not update ghosts. Source and target may alias. Invalid input
