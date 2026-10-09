@@ -368,3 +368,19 @@ The current API transfers cell data. Face flux transfer, boundary mortar
 mapping, geometric phase occupancy, high-order reconstruction, other mixed-coordinate
 intersections, and arbitrary polyhedral conservative intersections remain
 separate work.
+
+## Reverse conservative overlap reuse
+
+`auto reverse = forward.reversed();` creates a reverse conservative transfer for
+the same retained endpoint geometry and options. It validates the captured
+geometry epochs, identities and maps collectively, materializes the distributed
+overlap transpose, and reconstructs coverage with reverse donor summation order.
+It requires a real scalar type with at least double precision, so stored overlap
+values retain the geometric double precision. The default pack qualifies.
+It does not repeat geometric intersection search. Independent construction keeps
+its existing behavior. Both plans reject subsequent geometry/map changes; reuse
+requires the exact endpoint snapshots, rather than merely matching cell counts
+or ownership. The reverse plan owns its matrix and survives destruction of the
+forward plan. As with independent plans, applications retain collective input,
+finite-value and conservation checks. Floating-point projection ordering can
+differ from independent construction and should be qualified for each application.
