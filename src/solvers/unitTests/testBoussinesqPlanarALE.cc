@@ -2783,8 +2783,18 @@ TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycl
     const auto restored_timings = solver.solver_phase_timings();
     for (std::size_t phase = 0; phase < attempt_timings.size(); ++phase)
     {
-        EXPECT_EQ(restored_timings[phase].calls, attempt_timings[phase].calls);
-        EXPECT_EQ(restored_timings[phase].seconds, attempt_timings[phase].seconds);
+        SCOPED_TRACE(attempt_timings[phase].name);
+        if (phase == static_cast<std::size_t>(SimpleFluid::SolverPhase::GeometryRefresh))
+        {
+            // Restoring geometry adds real work to cumulative diagnostics.
+            EXPECT_EQ(restored_timings[phase].calls, attempt_timings[phase].calls + 1u);
+            EXPECT_GE(restored_timings[phase].seconds, attempt_timings[phase].seconds);
+        }
+        else
+        {
+            EXPECT_EQ(restored_timings[phase].calls, attempt_timings[phase].calls);
+            EXPECT_EQ(restored_timings[phase].seconds, attempt_timings[phase].seconds);
+        }
     }
     EXPECT_GT(state.mesh->geometry_epoch(), epoch);
     EXPECT_EQ(state.mesh->owned_cell_map().getRawPtr(), original_map.getRawPtr());

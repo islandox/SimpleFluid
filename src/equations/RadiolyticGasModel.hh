@@ -477,8 +477,11 @@ private:
     template<TpetraTypePack> friend class BoussinesqSolver;
     // Only the solver's internal Picard replay can leave metrics stale. Public
     // restore always refreshes, and outward failure paths restore eagerly.
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void restore_for_ale_replay(const StateSnapshot& snapshot);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void restore_state(const StateSnapshot& snapshot, bool refresh_metrics);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void invalidate_transport_operator();
 
     /** @brief Per-cell conserved inventories advanced by local kinetics. */

@@ -220,7 +220,8 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::BoilingSourceModel<.*>[ ]*::(validate_void_inputs|limit_to_available_void|add_bulk_boiling|add_wall_boiling)[(]"
     "SimpleFluid::DelayedNeutronPrecursorModel<.*>[ ]*::(validate_collective_configuration|validate_collective_advance_selection|validate_liquid_fraction_field|reconstruct_concentrations|transport|update_inventory_diagnostics)[(]"
     "SimpleFluid::FissionPowerSource<.*>[ ]*::(require_uniform_value|require_uniform_configuration|copy_scaled_field|integrate|apply_base_profile|apply_time_multiplier)[(]"
-    "SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::(diffuse)[(]"
+    "SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::(diffuse|restore_for_ale_replay|restore_state)[(]"
+    "SimpleFluid::RadiolyticGasModel<.*>[ ]*::(restore_for_ale_replay|restore_state|invalidate_transport_operator)[(]"
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::(updateVolumeFromStoredDensity)[(]"
     "SimpleFluid::PlanarALEBoundary<.*>[ ]*::(validate|validate_collective_controls)[(]"
     "^SimpleFluid::detail::"
@@ -717,15 +718,20 @@ endif()
 # APIs extend the reviewed library shape without widening the export map to
 # vendor or implementation-detail namespaces.
 # Explicitly compiled physical models and inventories extend the reviewed API.
-# GCC Release exports 1279 SimpleFluid symbols with these instantiations; 1350
-# leaves bounded headroom for configuration differences. The count is not a
-# qualification of other toolchains or build configurations.
+# Recounted at 813c481 after hiding the solver-only ALE replay helpers:
+# local GCC Debug/Release export 1325/1333 SimpleFluid symbols, and local
+# LLVM Debug/Release export 1341/1344. Keep about 6% downward and 4% upward
+# headroom around this measured range for configuration differences.
+# These counts do not qualify other toolchains or build configurations.
 # Private-family exclusions and exact API anchors above remain authoritative.
-if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 1350)
+set(simplefluid_api_symbol_lower_bound 1250)
+set(simplefluid_api_symbol_upper_bound 1400)
+if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
+   OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 1350")
+        "SimpleFluid symbols; the reviewed public-API range is "
+        "${simplefluid_api_symbol_lower_bound} to ${simplefluid_api_symbol_upper_bound}")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)
@@ -755,3 +761,7 @@ if(simplefluid_unexpected_symbols)
         "unexpected dynamic definitions:\n  "
         "${simplefluid_unexpected_symbol_sample}")
 endif()
+message(STATUS
+    "ELF exports verified: ${simplefluid_api_symbol_count} SimpleFluid API "
+    "symbols (reviewed range ${simplefluid_api_symbol_lower_bound} to "
+    "${simplefluid_api_symbol_upper_bound})")
