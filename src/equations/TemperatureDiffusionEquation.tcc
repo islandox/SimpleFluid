@@ -31,8 +31,51 @@ TemperatureDiffusionEquation<Pack, MeshType>::TemperatureDiffusionEquation(
     : d_mesh(EquationValidation::require_non_null_mesh(std::move(mesh), "TemperatureDiffusionEquation")),
       d_transport_geometry_cache(*d_mesh), d_candidate_temperature(d_mesh, "temperature_candidate", false),
       d_face_boundary_temperature{{}, d_mesh},
-      d_boundary_condition(std::make_shared<BoundaryConditionMap>(boundary_conditions.temperature))
+      d_boundary_condition(std::make_shared<BoundaryConditionMap>(boundary_conditions.temperature)),
+      d_convection_boundaries(boundary_conditions.convection)
 {
+    collective_detail::collective_local_validation(*d_mesh, "Exterior convection configuration",
+        [&]
+        {
+            for (const auto& [name, boundary] : d_convection_boundaries)
+            {
+                if (d_boundary_condition->contains(name))
+                    throw std::invalid_argument("A patch cannot specify both temperature and convection: " + name);
+                evaluate_convection(boundary, boundary.ambient_temperature);
+            }
+            for (const auto& [name, boundary] : *d_boundary_condition)
+                if (boundary.type == BoundaryConditionType::Robin &&
+                    (!std::isfinite(boundary.value) || !std::isfinite(boundary.robin_coefficient) ||
+                        boundary.robin_coefficient < 0))
+                    throw std::invalid_argument("Invalid normalized Robin temperature boundary: " + name);
+        });
+    const auto signature = convection_detail::configuration_signature(d_convection_boundaries);
+    int root_size = static_cast<int>(signature.size());
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    Teuchos::broadcast(*comm, 0, 1, &root_size);
+    std::string root_signature = comm->getRank() == 0 ? signature : std::string(root_size, '\0');
+    if (root_size > 0)
+        Teuchos::broadcast(*comm, 0, root_size, root_signature.data());
+    collective_detail::collective_local_validation(*d_mesh, "Exterior convection rank agreement",
+        [&]
+        {
+            if (signature != root_signature)
+                throw std::invalid_argument("Exterior convection configuration must agree on every rank.");
+        });
+    std::vector<std::string> convection_names;
+    for (const auto& [name, boundary] : d_convection_boundaries)
+        convection_names.push_back(name);
+    std::sort(convection_names.begin(), convection_names.end());
+    for (const auto& name : convection_names)
+    {
+        int local_faces = 0, global_faces = 0;
+        for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
+            if (d_mesh->boundary_batch_name(batch_id) == name && !batch.face_lids.empty())
+                local_faces = 1;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_faces, &global_faces);
+        if (global_faces == 0)
+            throw std::invalid_argument("Unknown exterior convection patch: " + name);
+    }
     refresh_boundary_cache();
 }
 
@@ -131,6 +174,8 @@ void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::v
     scalar_type time_step, scalar_type thermal_diffusivity, field_type& temperature,
     const source_type& right_hand_source) const
 {
+    if (!d_convection_boundaries.empty())
+        throw std::invalid_argument("Exterior convection requires advance_physical with conductivity and rho cp.");
     EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(time_step, "time step", "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity", "TemperatureDiffusionEquation");
@@ -311,6 +356,8 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(co
     field_type& temperature, const source_type& right_hand_source, std::optional<FVM::NonOrthogonalTreatment> treatment,
     const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
 {
+    if (!d_convection_boundaries.empty())
+        throw std::invalid_argument("Exterior convection requires advance_physical with conductivity and rho cp.");
     EquationValidation::require_mesh_match(*d_mesh, old_temperature, "TemperatureDiffusionEquation");
     EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(time_step, "time step", "TemperatureDiffusionEquation");
@@ -517,14 +564,64 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     const auto conductivity_values = thermal_conductivity.local_read_view();
 
     const auto old_temperature_values = old_temperature.local_read_view();
-    auto boundary_condition = [&](int batch_id, size_t)
+    std::unordered_map<int, std::vector<BoundaryCondition>> convection_conditions;
+    if (!d_convection_boundaries.empty())
+        collective_detail::collective_local_validation(*d_mesh, "Exterior convection face evaluation",
+            [&]
+            {
+                const auto flux_values = face_fluxes.owned_read_view();
+                for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
+                {
+                    const auto iter = d_convection_boundaries.find(d_mesh->boundary_batch_name(batch_id));
+                    if (iter == d_convection_boundaries.end())
+                        continue;
+                    auto& conditions = convection_conditions[batch_id];
+                    conditions.resize(batch.face_lids.size());
+                    for (size_t index = 0; index < batch.face_lids.size(); ++index)
+                    {
+                        const auto face = batch.face_lids[index];
+                        const auto owner = d_mesh->owner_cell(face);
+                        if (!d_mesh->is_owned_cell(owner))
+                            continue;
+                        if (!d_mesh->is_boundary_face(face))
+                            throw std::invalid_argument("Exterior convection requires a physical boundary face.");
+                        if (!std::isfinite(flux_values(face, 0)) || flux_values(face, 0) != 0.0)
+                            throw std::invalid_argument(
+                                "Exterior convection requires zero carrier flux through the wall.");
+                        const auto conductivity = FVM::boundary_coefficient<Pack>(
+                            boundary_thermal_conductivity, batch_id, index, conductivity_values(owner, 0));
+                        const auto conductance =
+                            FVM::detail::boundary_diffusion_coefficient(*d_mesh, face, owner, conductivity) /
+                            d_mesh->face_area(face);
+                        if (!std::isfinite(conductivity) || conductivity < 0.0 || !std::isfinite(conductance) ||
+                            conductance < 0.0)
+                            throw std::invalid_argument(
+                                "Exterior convection requires finite non-negative wall conductivity.");
+                        const auto evaluated =
+                            evaluate_convection_at_cell(iter->second, old_temperature_values(owner, 0), conductance);
+                        const auto coefficient =
+                            conductivity > 0.0 ? evaluated.heat_transfer_coefficient / conductivity : 0.0;
+                        if (!std::isfinite(coefficient))
+                            throw std::overflow_error("Exterior convection normalized coefficient overflow.");
+                        conditions[index] = {
+                            BoundaryConditionType::Robin, iter->second.ambient_temperature, coefficient};
+                    }
+                }
+            });
+    auto boundary_condition = [&](int batch_id, size_t in_batch_id)
     {
+        const auto convection = convection_conditions.find(batch_id);
+        if (convection != convection_conditions.end())
+            return convection->second.at(in_batch_id);
         const auto name = d_mesh->boundary_batch_name(batch_id);
         const auto iter = d_boundary_condition->find(name);
         return iter == d_boundary_condition->end() ? BoundaryCondition{} : iter->second;
     };
     auto boundary_value = [&](int batch_id, size_t in_batch_id) -> scalar_type
     {
+        const auto condition = boundary_condition(batch_id, in_batch_id);
+        if (condition.type == BoundaryConditionType::Robin)
+            return condition.value;
         const auto iter = d_face_boundary_temperature.value.find(batch_id);
         if (iter != d_face_boundary_temperature.value.end())
         {

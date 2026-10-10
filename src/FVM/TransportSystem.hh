@@ -898,8 +898,9 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> weighted_scalar_transport_system(co
  * @param coefficient_interpolation Rule for interpolating conductivity to faces.
  * @throws std::invalid_argument If field/cache meshes are incompatible,
  *         ranks disagree on correction-field or treatment selection, or the
- *         time step, boundary condition, or boundary value is invalid. Robin
- *         conditions are not implemented by this assembly path.
+ *         time step, boundary condition, or boundary value is invalid.
+ *         Physical temperature supports normalized Robin conditions
+ *         dT/dn = robin_coefficient * (condition.value - T_face).
  * @throws std::runtime_error If a boundary callback fails on another rank.
  */
 template<TpetraTypePack Pack>

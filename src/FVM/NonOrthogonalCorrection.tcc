@@ -366,8 +366,9 @@ void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& corr
         for (size_t in_batch_id = 0; in_batch_id < batch.face_lids.size(); ++in_batch_id)
         {
             const auto face_lid = batch.face_lids[in_batch_id];
+            const auto condition = boundary_condition(batch_id, in_batch_id);
             if (!mesh.is_owned_face(face_lid) || !mesh.is_boundary_face(face_lid) ||
-                boundary_condition(batch_id, in_batch_id).type != BoundaryConditionType::Dirichlet)
+                (condition.type != BoundaryConditionType::Dirichlet && condition.type != BoundaryConditionType::Robin))
             {
                 continue;
             }
@@ -376,9 +377,12 @@ void add_variable_explicit_non_orthogonal_correction(const CellField<Pack>& corr
             const auto tangential_area =
                 detail::non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, owner),
                     mesh.face_centroid(face_lid) - mesh.cell_centroid(owner));
-            rhs.sumIntoLocalValue(
-                owner, correction_weight * boundary_coefficient(batch_id, in_batch_id, coefficient_values(owner, 0)) *
-                           detail::vector_view_value<Pack>(gradient_values, owner).dot(tangential_area));
+            const auto weight = condition.type == BoundaryConditionType::Robin
+                                    ? detail::robin_boundary_weight(mesh, face_lid, owner, condition.robin_coefficient)
+                                    : scalar_type{1};
+            rhs.sumIntoLocalValue(owner,
+                weight * correction_weight * boundary_coefficient(batch_id, in_batch_id, coefficient_values(owner, 0)) *
+                    detail::vector_view_value<Pack>(gradient_values, owner).dot(tangential_area));
         }
     }
 }

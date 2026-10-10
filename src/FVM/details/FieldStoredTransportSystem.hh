@@ -948,12 +948,15 @@ void add_stored_variable_scalar_explicit_non_orthogonal_correction(
                     return;
                 }
                 const auto location = boundary_locations[index];
-                if (boundary_condition(location.batch_id, location.in_batch_id).type !=
-                    BoundaryConditionType::Dirichlet)
+                const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
+                if (condition.type != BoundaryConditionType::Dirichlet &&
+                    condition.type != BoundaryConditionType::Robin)
                 {
                     return;
                 }
                 face_diffusivity = boundary_diffusivity(location.batch_id, location.in_batch_id, face_diffusivity);
+                if (condition.type == BoundaryConditionType::Robin)
+                    face_diffusivity *= robin_boundary_weight(metrics, face_lid, cell_lid, condition.robin_coefficient);
                 direction = metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid);
             }
             else
@@ -976,18 +979,16 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     const ScalarCellFieldStored<Pack, MeshType>& old_values, const ScalarFaceFieldStored<Pack, MeshType>& face_fluxes,
     typename Pack::scalar_type time_step, StorageValue storage_value, OldStorageValue old_storage_value,
     bool has_distinct_old_storage, AdvectionValue advection_value, DiffusivityValue diffusivity_value,
-    BoundaryCondition boundary_condition, BoundaryValue boundary_value, Source source,
-    NonOrthogonalTreatment treatment, const ScalarCellFieldStored<Pack, MeshType>* correction_field,
+    BoundaryCondition boundary_condition, BoundaryValue boundary_value, Source source, NonOrthogonalTreatment treatment,
+    const ScalarCellFieldStored<Pack, MeshType>* correction_field,
     Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
     std::function<typename Pack::scalar_type(typename Pack::local_ordinal_type)> implicit_sink,
     std::function<std::optional<typename Pack::scalar_type>(typename Pack::local_ordinal_type)> fixed_cell_value,
     const BoundaryCache* boundary_diffusivity, const GeometryCache* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context,
-    ScalarTransportDiscretization discretization,
-    const ScalarCellFieldStored<Pack, MeshType>* older_values,
-    const ALEControlVolumeState* ale,
-    StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr,
-    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null)
+    ScalarTransportDiscretization discretization, const ScalarCellFieldStored<Pack, MeshType>* older_values,
+    const ALEControlVolumeState* ale, StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr,
+    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null, bool allow_robin = false)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1279,14 +1280,16 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                 boundary_condition(location.batch_id, location.in_batch_id);
             const auto value =
                 boundary_value(location.batch_id, location.in_batch_id);
-            has_dirichlet_boundary = has_dirichlet_boundary
-                || condition.type == BoundaryConditionType::Dirichlet;
-            unsupported_boundary_condition = unsupported_boundary_condition
-                || (condition.type != BoundaryConditionType::Dirichlet
-                    && condition.type != BoundaryConditionType::Neumann);
+            has_dirichlet_boundary = has_dirichlet_boundary || condition.type == BoundaryConditionType::Dirichlet ||
+                                     (allow_robin && condition.type == BoundaryConditionType::Robin);
+            unsupported_boundary_condition =
+                unsupported_boundary_condition || (condition.type != BoundaryConditionType::Dirichlet &&
+                                                      condition.type != BoundaryConditionType::Neumann &&
+                                                      !(allow_robin && condition.type == BoundaryConditionType::Robin));
             invalid_boundary_condition_value =
-                invalid_boundary_condition_value
-                || !std::isfinite(condition.value);
+                invalid_boundary_condition_value || !std::isfinite(condition.value) ||
+                (condition.type == BoundaryConditionType::Robin &&
+                    (!std::isfinite(condition.robin_coefficient) || condition.robin_coefficient < 0));
             invalid_boundary_value = invalid_boundary_value
                 || !std::isfinite(value);
             boundary_conditions[face] = condition;
@@ -1583,20 +1586,27 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
                 location.batch_id, location.in_batch_id);
             const auto face_diffusivity =
                 boundary_face_diffusivity(location.batch_id, location.in_batch_id, diffusivity_value(cell_lid));
-            if (condition.type == BoundaryConditionType::Dirichlet)
+            if (condition.type == BoundaryConditionType::Dirichlet || condition.type == BoundaryConditionType::Robin)
             {
-                const auto coefficient = boundary_diffusion_coefficient(metrics, face_lid, cell_lid, face_diffusivity);
+                const auto weight =
+                    condition.type == BoundaryConditionType::Robin
+                        ? robin_boundary_weight(metrics, face_lid, cell_lid, condition.robin_coefficient)
+                        : scalar_type{1};
+                const auto effective_diffusivity = face_diffusivity * weight;
+                const auto coefficient =
+                    boundary_diffusion_coefficient(metrics, face_lid, cell_lid, effective_diffusivity);
                 if (coefficient > scalar_type{})
                 {
                     add_matrix_entry(row_values, cell_lid, coefficient);
-                    rhs_value += coefficient
-                        * cached_boundary_value(
-                            location.batch_id, location.in_batch_id);
+                    rhs_value +=
+                        coefficient * (condition.type == BoundaryConditionType::Robin
+                                              ? condition.value
+                                              : cached_boundary_value(location.batch_id, location.in_batch_id));
                 }
                 const auto tangential_area =
                     non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
                         metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
-                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, face_diffusivity, tangential_area);
+                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, effective_diffusivity, tangential_area);
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
@@ -1750,10 +1760,10 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
     };
     return stored_weighted_scalar_transport_system_impl<Pack>(old_temperature, face_fluxes, time_step, capacity,
         old_capacity, old_density != nullptr || old_specific_heat_capacity != nullptr, capacity, conductivity,
-        std::move(boundary_condition), std::move(boundary_value), std::move(power_density),
-        treatment, correction_field, std::move(cached_matrix), {}, {}, boundary_thermal_conductivity, geometry_cache,
-        coefficient_interpolation, incompatible_fields, "physical_temperature_transport_system", discretization,
-        older_temperature, ale);
+        std::move(boundary_condition), std::move(boundary_value), std::move(power_density), treatment, correction_field,
+        std::move(cached_matrix), {}, {}, boundary_thermal_conductivity, geometry_cache, coefficient_interpolation,
+        incompatible_fields, "physical_temperature_transport_system", discretization, older_temperature, ale, nullptr,
+        Teuchos::null, true);
 }
 
 template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion>

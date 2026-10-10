@@ -63,6 +63,31 @@ double global_energy(const Field& temperature)
 
 } // namespace
 
+TEST(SolidHeatConductionMultiRankTest, ConvectionConservesEnergyAndFailsCollectively)
+{
+    SKIP_SINGLE_RANK(ConvectionConservesEnergyAndFailsCollectively);
+    const auto mesh = make_partitioned_solid();
+    const auto comm = mesh->owned_cell_map()->getComm();
+    Field temperature(mesh, 400.0, "solid_temperature");
+    auto material = make_material(mesh);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    // Both cut faces see the same exterior; each unit cell has one such face.
+    boundaries.convection["solid_interface"].heat_transfer_coefficient = 2.0;
+    SimpleFluid::SolidHeatConductionEquation<Pack> equation(mesh, boundaries);
+    equation.advance(temperature, 1.0, material, temperature);
+    EXPECT_NEAR(temperature.value(0), 350.0, 1e-10);
+    EXPECT_NEAR(global_energy(temperature), 700.0, 1e-10);
+    Field old_temperature(mesh, 400.0, "old_temperature");
+    if (comm->getRank() == 0)
+        old_temperature.set_owned_value(0, -1.0);
+    old_temperature.sync_ghosts();
+    EXPECT_ANY_THROW(equation.advance(old_temperature, 1.0, material, temperature));
+    EXPECT_NEAR(temperature.value(0), 350.0, 1e-10);
+    if (comm->getRank() == 0)
+        boundaries.convection["solid_interface"].ambient_temperature = 310.0;
+    EXPECT_ANY_THROW((SimpleFluid::SolidHeatConductionEquation<Pack>(mesh, boundaries)));
+}
+
 /** @brief Heat crosses the selected-cell partition face without losing energy. */
 TEST(SolidHeatConductionMultiRankTest, ConservesEnergyAcrossPartitionedSolidCells)
 {

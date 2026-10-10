@@ -3913,6 +3913,83 @@ TEST(FvmOperatorsTest,
     }
 }
 
+/** @brief Robin wall resistance preserves an affine equilibrium on skew faces. */
+TEST(FvmOperatorsTest, PhysicalRobinPreservesAffineEquilibriumOnSkewMesh)
+{
+    auto legacy = SimpleFluid::test::make_skewed_prism_mesh<Pack>();
+    const auto check = []<class Mesh>(SimpleFluid::SP<const Mesh> mesh)
+    {
+        using Traits = SimpleFluid::MeshFieldTraits<Pack, Mesh>;
+        using Field = typename Traits::scalar_cell_type;
+        using Flux = typename Traits::scalar_face_type;
+        Field temperature(mesh, "temperature");
+        Field density(mesh, 1.0, "density");
+        Field capacity(mesh, 1.0, "capacity");
+        Field conductivity(mesh, 2.0, "conductivity");
+        const typename Mesh::Vec3 gradient{2.0, 3.0, 4.0};
+        const auto exact = [&](const auto& position) { return 300.0 + gradient.dot(position); };
+        for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
+            temperature.set_owned_value(static_cast<Pack::local_ordinal_type>(i),
+                exact(mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(i))));
+        temperature.sync_ghosts();
+        Flux flux(mesh, 0.0, "zero_flux");
+        const auto condition = [&](int batch_id, size_t index)
+        {
+            const auto face = mesh->boundary_face_batch(batch_id).face_lids[index];
+            const auto normal = mesh->face_normal_outward(face, mesh->owner_cell(face));
+            return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Robin,
+                exact(mesh->face_centroid(face)) + gradient.dot(normal) / 0.4, 0.4};
+        };
+        const auto value = [&](int batch_id, size_t index) { return condition(batch_id, index).value; };
+        const auto zero = [](Pack::local_ordinal_type) { return 0.0; };
+        SimpleFluid::FVM::TransportGeometryCache<Mesh> cache(*mesh);
+        for (const auto treatment : {SimpleFluid::FVM::NonOrthogonalTreatment::Explicit,
+                 SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid})
+        {
+            for (const bool cached : {false, true})
+            {
+                const auto system = SimpleFluid::FVM::physical_temperature_transport_system<Pack>(temperature, flux,
+                    1.0, density, capacity, conductivity, condition, value, zero, treatment,
+                    treatment == SimpleFluid::FVM::NonOrthogonalTreatment::Implicit ? nullptr : &temperature,
+                    Teuchos::null, nullptr, cached ? &cache : nullptr);
+                typename Pack::vector_type action(mesh->owned_cell_map(), true);
+                system.matrix->apply(temperature.owned_data(), action);
+                for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
+                    EXPECT_NEAR(action.getData()[i], system.rhs->getData()[i], 2e-10);
+            }
+        }
+    };
+    check(SimpleFluid::SP<const MeshType>(legacy));
+    check(
+        SimpleFluid::SP<const SimpleFluid::MeshHandle<Pack>>(std::make_shared<SimpleFluid::MeshHandle<Pack>>(legacy)));
+}
+
+TEST(FvmOperatorsTest, PhysicalTemperatureCacheSkipsPeriodicBoundaryData)
+{
+    auto mesh = make_periodic_box_mesh();
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType density(mesh, 1.0, "density");
+    FieldType capacity(mesh, 1.0, "capacity");
+    FieldType conductivity(mesh, 1.0, "conductivity");
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "zero_flux");
+    SimpleFluid::FVM::TransportGeometryCache<MeshType> cache(*mesh);
+    const auto condition = [&](int batch_id, size_t)
+    {
+        const auto name = mesh->boundary_batch_name(batch_id);
+        if (name == "xmin" || name == "xmax")
+            throw std::runtime_error("Periodic faces must not request thermal boundary data.");
+        return SimpleFluid::BoundaryCondition{};
+    };
+    const auto value = [](int, size_t) { return 300.0; };
+    const auto source = [](Pack::local_ordinal_type) { return 0.0; };
+    const auto system = SimpleFluid::FVM::physical_temperature_transport_system<Pack>(temperature, flux, 1.0,
+        density, capacity, conductivity, condition, value, source,
+        SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, nullptr, Teuchos::null, nullptr, &cache);
+    const auto action = local_matrix_action(*system.matrix, temperature);
+    for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
+        EXPECT_NEAR(action[i], system.rhs->getData()[i], 1e-10);
+}
+
 /** @brief Verifies physical transport harmonically interpolates material coefficients. */
 TEST(FvmOperatorsTest, PhysicalTransportUsesHarmonicMaterialCoefficients)
 {

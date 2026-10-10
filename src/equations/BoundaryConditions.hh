@@ -10,8 +10,9 @@
  */
 #pragma once
 
-#include "dataclass/vec3.hh"
 #include "dataclass/typedefs.hh"
+#include "dataclass/vec3.hh"
+#include "equations/ConvectionBoundary.hh"
 
 #include <cstdint>
 #include <string>
@@ -40,7 +41,7 @@ struct BoundaryCondition
 {
     BoundaryConditionType type = BoundaryConditionType::Neumann;
     real_t value = 0.0;
-    real_t robin_coefficient = 0.0; // Used only for Robin conditions
+    real_t robin_coefficient = 0.0; ///< Scalar Robin: dT/dn = r (value - T_face), r in 1/m.
 };
 
 /**
@@ -78,6 +79,7 @@ struct BoundaryConditionSet
     VectorBoundaryConditionMap velocity;
     BoundaryConditionMap pressure; ///< Dirichlet Pa; Neumann Pa/m.
     TurbulenceBoundaryConditionSet turbulence;
+    ConvectionBoundaryMap convection; ///< Physical temperature only; exclusive with temperature on a patch.
 };
 
 } // namespace SimpleFluid

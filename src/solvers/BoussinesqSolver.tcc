@@ -322,6 +322,7 @@ namespace
     }
 
     scalar_boundaries(boundaries.temperature);
+    string(convection_detail::configuration_signature(boundaries.convection));
     vector_boundaries(boundaries.velocity);
     scalar_boundaries(boundaries.pressure);
     scalar_boundaries(boundaries.turbulence.turbulent_kinetic_energy);

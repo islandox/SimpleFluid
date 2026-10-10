@@ -66,6 +66,122 @@ std::vector<double> local_values(const Field& field)
 
 } // namespace
 
+TEST(SolidHeatConductionEquationTest, ConvectionIncludesWallResistanceAndReusesMatrix)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 1.0, 1.0, 1.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.convection["xmax"].heat_transfer_coefficient = 2.0;
+    for (const auto treatment : {SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+             SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid})
+    {
+        Field temperature(mesh, 400.0, "solid_temperature");
+        Equation equation(mesh, boundaries);
+        EXPECT_TRUE(equation.advance(temperature, 1.0, material, temperature, treatment).converged);
+        // Unit cell: k/d=2, h=2 -> H=1, rho cp V/dt=1.
+        EXPECT_NEAR(temperature.value(0), 350.0, 1e-10);
+        EXPECT_TRUE(equation.advance(temperature, 1.0, material, temperature, treatment).converged);
+        EXPECT_NEAR(temperature.value(0), 325.0, 1e-10);
+    }
+}
+
+TEST(SolidHeatConductionEquationTest, ConvectionHeatingInsulationAndConductivityOverride)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 1.0, 1.0, 1.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.convection["xmax"].heat_transfer_coefficient = 2.0;
+    Field temperature(mesh, 200.0, "solid_temperature");
+    Equation equation(mesh, boundaries);
+    equation.advance(temperature, 1.0, material, temperature);
+    EXPECT_NEAR(temperature.value(0), 250.0, 1e-10);
+    boundaries.convection["xmax"].heat_transfer_coefficient = 0.0;
+    equation.set_boundary_conditions(boundaries);
+    equation.advance(temperature, 1.0, material, temperature);
+    EXPECT_NEAR(temperature.value(0), 250.0, 1e-10);
+
+    boundaries.convection["xmax"].heat_transfer_coefficient = 2.0;
+    equation.set_boundary_conditions(boundaries);
+    Field conductivity(mesh, 4.0, "override_conductivity");
+    equation.advance(
+        temperature, 1.0, material, temperature, SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, {}, &conductivity);
+    EXPECT_NEAR(temperature.value(0), (250.0 + 1.6 * 300.0) / 2.6, 1e-10);
+}
+
+TEST(SolidHeatConductionEquationTest, ConvectionHonorsBoundaryConductivityAndLimitingCases)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 1.0, 1.0, 1.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.convection["xmax"].heat_transfer_coefficient = 2.0;
+    Equation equation(mesh, boundaries);
+    Equation::boundary_cache_type conductivity{{}, mesh};
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        if (mesh->boundary_batch_name(batch_id) == "xmax")
+            conductivity.value[batch_id] = SimpleFluid::ArrReal(batch.face_lids.size(), 4.0);
+    Field temperature(mesh, 400.0, "solid_temperature");
+    equation.advance(temperature, 1.0, material, temperature, SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, {},
+        nullptr, &conductivity);
+    EXPECT_NEAR(temperature.value(0), (400.0 + 1.6 * 300.0) / 2.6, 1e-10);
+    for (auto& [batch_id, values] : conductivity.value)
+        std::fill(values.begin(), values.end(), 0.0);
+    const auto saved = temperature.value(0);
+    equation.advance(temperature, 1.0, material, temperature, SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, {},
+        nullptr, &conductivity);
+    EXPECT_NEAR(temperature.value(0), saved, 1e-10);
+    boundaries.convection["xmax"].heat_transfer_coefficient = 1e14;
+    equation.set_boundary_conditions(boundaries);
+    temperature.set_owned_value(0, 400.0);
+    temperature.sync_ghosts();
+    equation.advance(temperature, 1.0, material, temperature);
+    EXPECT_NEAR(temperature.value(0), 1000.0 / 3.0, 1e-10);
+}
+
+TEST(SolidHeatConductionEquationTest, CorrelationBoundaryUpdatesWithTemperature)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 1.0, 1.0, 1.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    auto& boundary = boundaries.convection["xmax"];
+    boundary.correlation = SimpleFluid::ConvectionCorrelation::ChurchillChuVerticalPlate;
+    boundary.characteristic_length = 1.0;
+    boundary.fluid_thermal_conductivity = 0.026;
+    boundary.kinematic_viscosity = 1.6e-5;
+    boundary.thermal_diffusivity = 2.3e-5;
+    boundary.thermal_expansion = 1.0 / 300.0;
+    Field temperature(mesh, 400.0, "solid_temperature");
+    Equation equation(mesh, boundaries);
+    double previous_h = 1e10;
+    for (int step = 0; step < 3; ++step)
+    {
+        const auto old = temperature.value(0);
+        const auto h = SimpleFluid::evaluate_convection_at_cell(boundary, old, 2.0).heat_transfer_coefficient;
+        EXPECT_LT(h, previous_h);
+        previous_h = h;
+        equation.advance(temperature, 1.0, material, temperature);
+        const auto next = temperature.value(0);
+        const auto surface = (2.0 * next + h * 300.0) / (2.0 + h);
+        EXPECT_NEAR(old - next, h * (surface - 300.0), 1e-10);
+    }
+}
+
+TEST(SolidHeatConductionEquationTest, RejectsConflictingAndUnknownConvectionPatches)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.convection["missing"] = {};
+    EXPECT_THROW(Equation(mesh, boundaries), std::invalid_argument);
+    boundaries.convection.clear();
+    boundaries.convection["xmax"] = {};
+    boundaries.temperature["xmax"] = {};
+    EXPECT_THROW(Equation(mesh, boundaries), std::invalid_argument);
+}
+
 /** @brief Volumetric heating uses rho-cp storage without an advective contribution. */
 TEST(SolidHeatConductionEquationTest, InsulatedCellAddsVolumetricPower)
 {

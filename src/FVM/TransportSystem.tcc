@@ -1802,30 +1802,32 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
             const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
             const auto face_conductivity =
                 boundary_conductivity(location.batch_id, location.in_batch_id, conductivity_data(cell_lid, 0));
-            if (condition.type == BoundaryConditionType::Dirichlet)
+            if (condition.type == BoundaryConditionType::Dirichlet || condition.type == BoundaryConditionType::Robin)
             {
+                const auto weight =
+                    condition.type == BoundaryConditionType::Robin
+                        ? detail::robin_boundary_weight(mesh, face_lid, cell_lid, condition.robin_coefficient)
+                        : scalar_type{1};
+                const auto effective_conductivity = face_conductivity * weight;
                 const auto coefficient =
-                    detail::boundary_diffusion_coefficient(mesh, face_lid, cell_lid, face_conductivity);
+                    detail::boundary_diffusion_coefficient(mesh, face_lid, cell_lid, effective_conductivity);
                 if (coefficient > scalar_type{})
                 {
                     detail::add_matrix_entry(row_values, cell_lid, coefficient);
                     rhs->sumIntoLocalValue(
-                        cell_lid, coefficient * boundary_value(location.batch_id, location.in_batch_id));
+                        cell_lid, coefficient * (condition.type == BoundaryConditionType::Robin
+                                                        ? condition.value
+                                                        : boundary_value(location.batch_id, location.in_batch_id)));
                 }
 
                 const auto tangential_area =
                     detail::non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
                         mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid));
-                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, face_conductivity, tangential_area);
+                add_non_orthogonal_stencil(cell_lid, scalar_type{1}, effective_conductivity, tangential_area);
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
                 rhs->sumIntoLocalValue(cell_lid, face_conductivity * condition.value * mesh.face_area(face_lid));
-            }
-            else if (condition.type == BoundaryConditionType::Robin)
-            {
-                throw std::runtime_error(
-                    "Robin boundary conditions are not yet implemented in physical_temperature_transport_system.");
             }
         }
 
