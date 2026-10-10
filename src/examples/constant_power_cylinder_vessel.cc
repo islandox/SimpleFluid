@@ -15,6 +15,8 @@
 #include <Tpetra_Core.hpp>
 
 #include <memory>
+#include <stdexcept>
+#include <string_view>
 
 /**
  * @brief Run the constant-power cylindrical vessel multiphysics smoke case.
@@ -62,6 +64,35 @@ int main(int argc, char** argv)
         {SimpleFluid::BoundaryConditionType::NoSlip, {}};
     bcs.velocity["radial"] =
         {SimpleFluid::BoundaryConditionType::NoSlip, {}};
+
+    // Optional exterior cooling on the fluid-domain boundary (no solid wall).
+    // Usage: --exterior-convection=constant|natural|forced
+    for (int index = 1; index < argc; ++index)
+    {
+        const std::string_view argument(argv[index]);
+        constexpr std::string_view prefix = "--exterior-convection=";
+        if (!argument.starts_with(prefix))
+            continue;
+        const auto mode = argument.substr(prefix.size());
+        auto& exterior = bcs.convection["radial"];
+        exterior.ambient_temperature = 293.15;
+        exterior.heat_transfer_coefficient = 5.0;
+        exterior.characteristic_length = 1.0; // height (natural) or diameter (forced)
+        exterior.fluid_thermal_conductivity = 0.026;
+        exterior.kinematic_viscosity = 1.6e-5;
+        exterior.thermal_diffusivity = 2.3e-5;
+        exterior.thermal_expansion = 1.0 / 300.0;
+        exterior.free_stream_speed = 1.0;
+        if (mode == "natural")
+            exterior.correlation = SimpleFluid::ConvectionCorrelation::ChurchillChuVerticalPlate;
+        else if (mode == "forced")
+            exterior.correlation = SimpleFluid::ConvectionCorrelation::ChurchillBernsteinCylinder;
+        else if (mode == "constant")
+            exterior.correlation = SimpleFluid::ConvectionCorrelation::Constant;
+        else
+            throw std::invalid_argument("--exterior-convection requires constant, natural, or forced.");
+        bcs.temperature.erase("radial");
+    }
 
     SimpleFluid::TimeStepperOptions time_options;
     time_options.time_step = 1.0e-3;

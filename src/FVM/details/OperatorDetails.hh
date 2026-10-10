@@ -620,6 +620,22 @@ inline auto boundary_diffusion_coefficient(
          : scalar_type{};
 }
 
+/** @brief Fraction of the Dirichlet conductance retained by a normalized Robin condition. */
+template<class MeshType>
+inline auto robin_boundary_weight(const MeshType& mesh, typename MeshType::local_ordinal_type face_lid,
+    typename MeshType::local_ordinal_type cell_lid, typename MeshType::scalar_type coefficient) ->
+    typename MeshType::scalar_type
+{
+    if (!std::isfinite(coefficient) || coefficient < 0)
+        throw std::invalid_argument("Robin coefficient must be finite and non-negative.");
+    if (coefficient == 0)
+        return 0;
+    const auto inverse_distance =
+        boundary_diffusion_coefficient(mesh, face_lid, cell_lid, typename MeshType::scalar_type{1}) /
+        mesh.face_area(query_face_id(mesh, face_lid));
+    return coefficient / (coefficient + inverse_distance);
+}
+
 /**
  * @brief Signed distance from a cell centroid to a boundary-face plane.
  *
@@ -1303,6 +1319,20 @@ scalar_affine_gradient_stencils(
             normal[2][2] += direction.z * direction.z;
         };
 
+        // Robin supplies (n + r*d).grad(T) = r*(T_ambient - T_cell).
+        // Scale by r + 1/|d| to retain length units and a regular r=0 limit.
+        const auto robin_sample = [&](auto face_id, const auto& condition)
+        {
+            const auto d = mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+            const auto length = d.norm();
+            const auto r = condition.robin_coefficient;
+            if (!std::isfinite(r) || r < 0 || length <= 0)
+                throw std::invalid_argument("Invalid Robin gradient coefficient or boundary distance.");
+            const auto inverse_scale = 1.0 / (r + 1.0 / length);
+            const auto weight = r * inverse_scale;
+            return std::pair{d * weight + mesh.face_normal_outward(face_id, cell_id) * inverse_scale, weight};
+        };
+
         for (const auto face_id : mesh.faces(cell_id))
         {
             if (mesh.is_interior_face(face_id))
@@ -1322,15 +1352,15 @@ scalar_affine_gradient_stencils(
             }
             const auto condition = boundary_condition(
                 location.batch_id, location.in_batch_id);
-            if (condition.type != BoundaryConditionType::Dirichlet
-                && condition.type != BoundaryConditionType::Neumann)
+            if (condition.type != BoundaryConditionType::Dirichlet &&
+                condition.type != BoundaryConditionType::Neumann && condition.type != BoundaryConditionType::Robin)
             {
-                throw std::invalid_argument(
-                    "Affine scalar gradients support only Dirichlet and "
-                    "Neumann boundary conditions.");
+                throw std::invalid_argument("Affine scalar gradients support only Dirichlet and "
+                                            "Neumann or Robin boundary conditions.");
             }
-            add_direction(
-                mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id));
+            add_direction(condition.type == BoundaryConditionType::Robin
+                              ? robin_sample(face_id, condition).first
+                              : mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id));
         }
 
         normal[1][0] = normal[0][1];
@@ -1369,10 +1399,16 @@ scalar_affine_gradient_stencils(
             }
             direction =
                 mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+            const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
+            real_t robin_weight = 0;
+            if (condition.type == BoundaryConditionType::Robin)
+            {
+                const auto sample = robin_sample(face_id, condition);
+                direction = sample.first;
+                robin_weight = sample.second;
+            }
             auto local_normal = normal;
             const auto basis = solve_3x3(local_normal, direction);
-            const auto condition = boundary_condition(
-                location.batch_id, location.in_batch_id);
             real_t boundary_increment{};
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
@@ -1381,6 +1417,13 @@ scalar_affine_gradient_stencils(
                     {-basis.x, -basis.y, -basis.z});
                 boundary_increment = static_cast<real_t>(boundary_value(
                     location.batch_id, location.in_batch_id));
+            }
+            else if (condition.type == BoundaryConditionType::Robin)
+            {
+                const auto weight = robin_weight;
+                add_gradient_coefficient<MeshType>(
+                    coefficients, cell_lid, {-weight * basis.x, -weight * basis.y, -weight * basis.z});
+                boundary_increment = weight * condition.value;
             }
             else
             {

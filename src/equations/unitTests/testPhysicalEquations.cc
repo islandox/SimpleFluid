@@ -533,6 +533,46 @@ TEST(PhysicalEquationsTest,
     EXPECT_DOUBLE_EQ(temperature.value(0), 275.0);
 }
 
+TEST(PhysicalEquationsTest, ExteriorForcedConvectionUsesPhysicalTemperaturePath)
+{
+    auto mesh = make_single_hex_mesh();
+    FieldType old_temperature(mesh, 400.0, "old_temperature");
+    FieldType temperature(mesh, 0.0, "temperature");
+    SimpleFluid::FaceField<Pack> fluxes(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet bcs;
+    auto& boundary = bcs.convection["xmax"];
+    boundary.correlation = SimpleFluid::ConvectionCorrelation::ChurchillBernsteinCylinder;
+    boundary.characteristic_length = 1.0;
+    boundary.fluid_thermal_conductivity = 0.03;
+    boundary.kinematic_viscosity = 0.7e-5;
+    boundary.thermal_diffusivity = 1e-5;
+    boundary.free_stream_speed = 0.07;
+    SimpleFluid::TemperatureDiffusionEquation<Pack> equation(mesh, bcs);
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions options;
+    options.reference_density = 1.0;
+    options.density = 1.0;
+    options.specific_heat_capacity = 1.0;
+    options.thermal_conductivity = 1.0;
+    SimpleFluid::MaterialPropertyFields<Pack> material(mesh, options, time_options);
+    const auto zero = [](MeshType::local_ordinal_type) { return 0.0; };
+    equation.advance_physical(
+        old_temperature, fluxes, 1.0, material, temperature, zero, SimpleFluid::FVM::NonOrthogonalTreatment::Implicit);
+    const double h = 53.32778867020997 * 0.03;
+    const double conductance = 1.0 / (0.5 + 1.0 / h);
+    EXPECT_NEAR(temperature.value(0), (400.0 + conductance * 300.0) / (1.0 + conductance), 1e-10);
+    EXPECT_THROW(equation.advance_semi_implicit(old_temperature, fluxes, 1.0, 1.0, temperature), std::invalid_argument);
+    EXPECT_THROW(equation.advance_explicit(std::vector<double>{400.0}, 1.0, 1.0, temperature), std::invalid_argument);
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        if (mesh->boundary_batch_name(batch_id) == "xmax")
+            fluxes.set_value(batch.face_lids.front(), 1.0);
+    const auto saved = temperature.value(0);
+    EXPECT_THROW(equation.advance_physical(old_temperature, fluxes, 1.0, material, temperature, zero,
+                     SimpleFluid::FVM::NonOrthogonalTreatment::Implicit),
+        std::invalid_argument);
+    EXPECT_DOUBLE_EQ(temperature.value(0), saved);
+}
+
 /** @brief Verifies that a rejected semi-implicit solve preserves aliased accepted state. */
 TEST(PhysicalEquationsTest,
      TemperatureSemiImplicitRejectionPreservesAliasedAcceptedField)

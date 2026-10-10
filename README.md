@@ -662,9 +662,18 @@ the outward temperature gradient in K/m, so a prescribed inward wall heat
 flux is converted consistently with its sign and the local conductivity. Use
 `set_boundary_conditions()` to replace prescribed interface or exterior data
 between time steps.
-Robin boundaries and automatic two-way temperature/flux continuity with a
-fluid solve are not yet implemented; the current interface is a standalone or
-prescribed-boundary solid solve, not a full conjugate-heat-transfer driver.
+Exterior convection is configured through `boundaries.convection[patch]`,
+with a constant coefficient, Churchill–Chu vertical-plate natural convection,
+or Churchill–Bernstein cylinder crossflow. The physical temperature operator
+assembles the Robin wall resistance implicitly; correlation coefficients are
+updated from the old thermal state at each advance. See
+[exterior convection](docs/modeling/exterior_convection.md) for configuration,
+equations, applicability, and time-lagging details. Do not also assign a
+`temperature` boundary to the same patch.
+
+Automatic two-way temperature/flux continuity with a fluid solve is not yet
+implemented; the current solid interface remains a standalone or
+prescribed-boundary solve, not a full conjugate-heat-transfer driver.
 
 ## Fission Power Source
 
