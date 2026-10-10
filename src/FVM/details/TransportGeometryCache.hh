@@ -103,6 +103,12 @@ TransportGeometryCache<MeshType>::scalar_affine_stencils(
     std::function<typename MeshType::scalar_type(int, size_t)> boundary_value) const
 {
     require_mesh(*d_mesh);
+    // Robin changes the least-squares directions, not just boundary constants.
+    for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
+        for (size_t index = 0; index < batch.face_lids.size(); ++index)
+            if (d_mesh->is_boundary_face(batch.face_lids[index]) &&
+                boundary_condition(batch_id, index).type == BoundaryConditionType::Robin)
+                return detail::scalar_affine_gradient_stencils(*d_mesh, boundary_condition, boundary_value);
     return detail::materialize_scalar_affine_gradient_stencils<MeshType>(
         d_geometry->boundary, std::move(boundary_condition), std::move(boundary_value));
 }

@@ -130,6 +130,7 @@ private:
     mutable field_type d_candidate_temperature;
     boundary_cache_type d_face_boundary_temperature;
     SP<BoundaryConditionMap> d_boundary_condition;
+    ConvectionBoundaryMap d_convection_boundaries;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
     mutable bool d_cached_transport_graph_supports_non_orthogonal_correction = false;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_physical_transport_matrix;
