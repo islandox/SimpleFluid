@@ -155,7 +155,10 @@ public:
      * Requires conservative construction and a real scalar type with at least
      * double precision (the default pack qualifies); rejects stale geometry/maps.
      * The result owns its matrix and remains valid after this plan is destroyed.
-     * Floating-point accumulation can differ from independent reverse setup.
+     * Donor ordering metadata follows the local transpose column map; coverage
+     * reductions use bounded work buffers. Floating-point accumulation can
+     * differ from independent reverse setup, including MPI reduction rounding
+     * when coverage requires more than one block.
      */
     [[nodiscard]] MeshToMeshTransfer reversed() const;
 

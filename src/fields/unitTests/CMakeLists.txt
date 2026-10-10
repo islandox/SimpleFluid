@@ -27,6 +27,13 @@ simplefluid_add_mpi_test(
   PROCS 2
   TIMEOUT 60
   LABELS mpi)
+simplefluid_add_mpi_test(
+  NAME MeshToMeshReverseCoverage_4procs
+  TARGET testMeshToMeshTransferMultiRank
+  PROCS 4
+  ARGS "--gtest_filter=*ReverseOverlapPreservesRankAndLocalDonorOrder:*ReverseCoverageBoundedReductionMatchesDenseOwnerResults"
+  TIMEOUT 60
+  LABELS "mpi;field_transfer")
 
 add_executable(testGhostSyncMultiRank testGhostSyncMultiRank.cc)
 target_link_libraries(testGhostSyncMultiRank SimpleFluid::Fields GTest::gtest_main)
