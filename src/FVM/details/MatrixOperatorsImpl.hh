@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <exception>
 #include <vector>
 #include <optional>
 #include <stdexcept>
@@ -117,6 +118,9 @@ void visit_pressure_poisson_rows(const MeshType& mesh,
     std::optional<typename Pack::global_ordinal_type> gauge_cell_gid,
     BoundaryConditionProvider boundary_condition, RowVisitor visit_row)
 {
+    // Validate composite constituents once while retaining the original face
+    // order and coefficient arithmetic. The lease never survives this pass.
+    const auto execution = acquire_mesh_execution(mesh);
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -186,12 +190,43 @@ template<TpetraTypePack Pack, class MeshType, class BoundaryConditionProvider>
 Teuchos::RCP<typename Pack::matrix_type> pressure_poisson_matrix_impl(const MeshType& mesh,
     std::optional<typename Pack::global_ordinal_type> gauge_cell_gid, BoundaryConditionProvider boundary_condition)
 {
-    auto matrix = make_face_stencil_matrix<Pack>(mesh);
-    visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
-        [&](auto row, const auto& columns, const auto& values)
-        {
-            matrix->insertLocalValues(row, columns(), values());
-        });
+    Teuchos::Array<size_t> capacities;
+    std::exception_ptr local_error;
+    try
+    {
+        const auto execution = acquire_mesh_execution(mesh);
+        capacities = face_stencil_capacities<Pack>(mesh);
+    }
+    catch (...)
+    {
+        local_error = std::current_exception();
+    }
+    if (reduce_transport_validation_state(mesh, std::array<int, 1>{local_error ? 1 : 0})[0])
+    {
+        if (local_error) std::rethrow_exception(local_error);
+        throw std::runtime_error("Pressure matrix geometry validation failed on another rank.");
+    }
+    auto matrix = Teuchos::rcp(new typename Pack::matrix_type(
+        mesh.owned_cell_map(), mesh.overlap_cell_map(), capacities()));
+    try
+    {
+        visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
+            [&](auto row, const auto& columns, const auto& values)
+            {
+                matrix->insertLocalValues(row, columns(), values());
+            });
+    }
+    catch (...)
+    {
+        local_error = std::current_exception();
+    }
+    // No peer may enter fillComplete after a local traversal, callback, or
+    // insertion failure. The originating rank retains its original exception.
+    if (reduce_transport_validation_state(mesh, std::array<int, 1>{local_error ? 1 : 0})[0])
+    {
+        if (local_error) std::rethrow_exception(local_error);
+        throw std::runtime_error("Pressure matrix assembly failed on another rank.");
+    }
     matrix->fillComplete();
     return matrix;
 }
@@ -216,44 +251,56 @@ bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
     values_changed = false;
     if (!compatible_present_transport_matrix_maps<Pack>(mesh, matrix, mesh.num_owned_cells())) return false;
     int local_invalid = 0;
-    int global_invalid = 0;
-
-    std::vector<Teuchos::Array<scalar_type>> staged(mesh.num_owned_cells());
+    std::vector<Teuchos::Array<scalar_type>> staged;
     int local_changed = 0;
-    visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
-        [&](auto row, const auto& columns, const auto& values)
-        {
-            typename Pack::matrix_type::local_inds_host_view_type previous_columns;
-            typename Pack::matrix_type::values_host_view_type previous_values;
-            matrix.getLocalRowView(row, previous_columns, previous_values);
-            auto& refreshed = staged[static_cast<size_t>(row)];
-            refreshed.resize(previous_values.extent(0), scalar_type{});
-            std::vector<bool> visited(previous_values.extent(0), false);
-            for (int entry = 0; entry < columns.size(); ++entry)
+    std::exception_ptr local_error;
+    try
+    {
+        staged.resize(mesh.num_owned_cells());
+        visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
+            [&](auto row, const auto& columns, const auto& values)
             {
-                size_t slot = 0;
-                while (slot < previous_columns.extent(0) && previous_columns(slot) != columns[entry]) ++slot;
-                if (slot == previous_columns.extent(0))
+                typename Pack::matrix_type::local_inds_host_view_type previous_columns;
+                typename Pack::matrix_type::values_host_view_type previous_values;
+                matrix.getLocalRowView(row, previous_columns, previous_values);
+                auto& refreshed = staged[static_cast<size_t>(row)];
+                refreshed.resize(previous_values.extent(0), scalar_type{});
+                std::vector<bool> visited(previous_values.extent(0), false);
+                for (int entry = 0; entry < columns.size(); ++entry)
                 {
-                    local_invalid = 1;
-                    continue;
+                    size_t slot = 0;
+                    while (slot < previous_columns.extent(0) && previous_columns(slot) != columns[entry]) ++slot;
+                    if (slot == previous_columns.extent(0))
+                    {
+                        local_invalid = 1;
+                        continue;
+                    }
+                    visited[slot] = true;
+                    refreshed[slot] += values[entry];
                 }
-                visited[slot] = true;
-                refreshed[slot] += values[entry];
-            }
-            for (size_t slot = 0; slot < previous_columns.extent(0); ++slot)
-            {
-                if (!visited[slot]) local_invalid = 1;
-                if (symmetric_gauge && gauge_cell_gid &&
-                    mesh.owned_cell_map()->getGlobalElement(row) != *gauge_cell_gid &&
-                    matrix.getColMap()->getGlobalElement(previous_columns(slot)) == *gauge_cell_gid)
-                    refreshed[slot] = scalar_type{};
-                if (refreshed[slot] != previous_values(slot)) local_changed = 1;
-            }
-        });
-    const int local_status[2]{local_invalid, local_changed};
-    int global_status[2]{};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 2, local_status, global_status);
+                for (size_t slot = 0; slot < previous_columns.extent(0); ++slot)
+                {
+                    if (!visited[slot]) local_invalid = 1;
+                    if (symmetric_gauge && gauge_cell_gid &&
+                        mesh.owned_cell_map()->getGlobalElement(row) != *gauge_cell_gid &&
+                        matrix.getColMap()->getGlobalElement(previous_columns(slot)) == *gauge_cell_gid)
+                        refreshed[slot] = scalar_type{};
+                    if (refreshed[slot] != previous_values(slot)) local_changed = 1;
+                }
+            });
+    }
+    catch (...)
+    {
+        local_error = std::current_exception();
+    }
+    const int local_status[3]{local_invalid, local_changed, local_error ? 1 : 0};
+    int global_status[3]{};
+    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, 3, local_status, global_status);
+    if (global_status[2] != 0)
+    {
+        if (local_error) std::rethrow_exception(local_error);
+        throw std::runtime_error("Pressure matrix refresh failed on another rank.");
+    }
     if (global_status[0] != 0) return false;
     values_changed = global_status[1] != 0;
     if (!values_changed) return true;

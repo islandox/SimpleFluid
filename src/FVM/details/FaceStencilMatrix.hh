@@ -15,18 +15,19 @@
 namespace SimpleFluid::FVM::detail
 {
 /**
- * @brief Allocate one diagonal plus at most one entry per incident logical face.
+ * @brief Count one diagonal plus at most one entry per incident logical face.
  *
  * Expanded coarse/fine subfaces may exceed the usual hexahedral stencil.
  * Counting faces also bounds duplicate neighbor insertions before fillComplete.
  * This bound is for face-neighbor operators, not extended gradient stencils.
  * @param mesh Mesh with owned rows and a complete face-neighbor overlap map.
- * @return Empty fill-active matrix with a per-row capacity bound.
+ * The caller holds any mesh execution lease. This operation is local, allowing
+ * collective callers to propagate failures before constructing a matrix.
+ * @return Per-row capacity bound in owned-cell order.
  */
 template<TpetraTypePack Pack, class MeshType>
-Teuchos::RCP<typename Pack::matrix_type> make_face_stencil_matrix(const MeshType& mesh)
+Teuchos::Array<size_t> face_stencil_capacities(const MeshType& mesh)
 {
-    const auto execution = acquire_mesh_execution(mesh);
     Teuchos::Array<size_t> capacities(mesh.num_owned_cells());
     if constexpr (requires { mesh.supports_region_execution(); mesh.visit([](const auto&) {}); })
     {
@@ -41,8 +42,7 @@ Teuchos::RCP<typename Pack::matrix_type> make_face_stencil_matrix(const MeshType
                     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
                         capacities[owned] = native.cell_faces(mesh.cell_geometry_global_id(owned)).size() + 1;
             });
-            return Teuchos::rcp(new typename Pack::matrix_type(
-                mesh.owned_cell_map(), mesh.overlap_cell_map(), capacities()));
+            return capacities;
         }
     }
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
@@ -50,6 +50,15 @@ Teuchos::RCP<typename Pack::matrix_type> make_face_stencil_matrix(const MeshType
         const auto cell = query_cell_id(mesh, static_cast<typename Pack::local_ordinal_type>(owned));
         capacities[owned] = mesh.faces(cell).size() + 1;
     }
+    return capacities;
+}
+
+/** @brief Allocate a fill-active matrix with topology-sized row capacity. */
+template<TpetraTypePack Pack, class MeshType>
+Teuchos::RCP<typename Pack::matrix_type> make_face_stencil_matrix(const MeshType& mesh)
+{
+    const auto execution = acquire_mesh_execution(mesh);
+    const auto capacities = face_stencil_capacities<Pack>(mesh);
     return Teuchos::rcp(new typename Pack::matrix_type(
         mesh.owned_cell_map(), mesh.overlap_cell_map(), capacities()));
 }
