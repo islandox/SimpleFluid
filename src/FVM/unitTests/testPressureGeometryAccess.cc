@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <optional>
 #include <string>
@@ -76,6 +77,18 @@ std::vector<Row> snapshot(const Matrix& matrix)
         }
     }
     return result;
+}
+
+Teuchos::RCP<Matrix> matrix_from_rows(const Handle& mesh, const std::vector<Row>& rows)
+{
+    Teuchos::Array<size_t> capacities(rows.size());
+    for (size_t row = 0; row < rows.size(); ++row) capacities[row] = rows[row].columns.size();
+    auto matrix = Teuchos::rcp(new Matrix(mesh.owned_cell_map(), mesh.overlap_cell_map(), capacities()));
+    for (size_t row = 0; row < rows.size(); ++row)
+        matrix->insertLocalValues(static_cast<Pack::local_ordinal_type>(row),
+            Teuchos::arrayViewFromVector(rows[row].columns), Teuchos::arrayViewFromVector(rows[row].values));
+    matrix->fillComplete();
+    return matrix;
 }
 
 BoundaryCondition mixed_boundary(int batch, size_t index)
@@ -221,6 +234,113 @@ TEST(PressureGeometryAccessTest, MotionRollbackAndIdenticalReplayReacquireCurren
             motion.begin_trial(1.0, 0.2);
             motion.accept_trial();
         }
+}
+
+TEST(PressureGeometryAccessTest, RefreshAccumulatesRepeatedPeriodicNeighborInFaceOrder)
+{
+    using namespace Meshes;
+    StructuredPatchInterface periodic{{0, 0}, {1, 1}};
+    periodic.periodic_translation = MeshUtils::Vec3{2, 0, 0};
+    auto geometry = std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{
+        cartesian_region("left", {{{0, 0.7}, {0, 1}, {0, 1}}}),
+        cartesian_region("right", {{{0.7, 2}, {0, 1}, {0, 1}}})},
+        std::vector<MultiRegionMesh::Interface>{StructuredPatchInterface{{0, 1}, {1, 0}}, periodic});
+    auto mesh = std::make_shared<Handle>(geometry);
+    int repeated_rows = 0;
+    FVM::detail::visit_pressure_poisson_rows<Pack>(*mesh, Gauge{}, mixed_boundary,
+        [&](auto, const auto& columns, const auto&)
+        {
+            // Each cell sees its only neighbor through both the internal and
+            // periodic interfaces. The graph merges those two contributions.
+            EXPECT_EQ(columns.size(), 3);
+            if (columns.size() == 3 && columns[0] == columns[1]) ++repeated_rows;
+        });
+    int total_repeated_rows = 0;
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+        1, &repeated_rows, &total_repeated_rows);
+    EXPECT_EQ(total_repeated_rows, 2);
+    auto matrix = FVM::pressure_poisson_matrix<Pack>(*mesh, Gauge{}, mixed_boundary);
+    check_refresh(*mesh, *matrix, Gauge{}, false, false);
+    matrix->setAllToScalar(0.0);
+    check_refresh(*mesh, *matrix, Gauge{}, false, true);
+    const auto original = snapshot(*matrix);
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.3, 0.2);
+    check_refresh(*mesh, *matrix, Gauge{}, false, true);
+    motion.rollback_trial();
+    check_refresh(*mesh, *matrix, Gauge{}, false, true);
+    EXPECT_EQ(snapshot(*matrix), original);
+}
+
+TEST(PressureGeometryAccessTest, RefreshRejectsExtraZeroGraphEntryWithoutPublishing)
+{
+    const Handle mesh(test::two_regions());
+    const auto comm = mesh.owned_cell_map()->getComm();
+    const auto expected = FVM::pressure_poisson_matrix<Pack>(mesh, Gauge{}, mixed_boundary);
+    auto rows = snapshot(*expected);
+    int added = 0;
+    if (comm->getRank() == 0)
+        for (auto& row : rows)
+        {
+            for (size_t column = 0; column < mesh.overlap_cell_map()->getLocalNumElements(); ++column)
+            {
+                const auto local = static_cast<Pack::local_ordinal_type>(column);
+                if (std::find(row.columns.begin(), row.columns.end(), local) != row.columns.end()) continue;
+                row.columns.push_back(local);
+                row.values.push_back(0.0);
+                added = 1;
+                break;
+            }
+            if (added) break;
+        }
+    int total_added = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &added, &total_added);
+    EXPECT_EQ(total_added, 1);
+    auto matrix = matrix_from_rows(mesh, rows);
+    const auto before = snapshot(*matrix);
+    bool changed = true;
+    EXPECT_FALSE(FVM::detail::refresh_pressure_poisson_matrix_values<Pack>(
+        mesh, Gauge{}, mixed_boundary, false, *matrix, changed));
+    EXPECT_FALSE(changed);
+    EXPECT_EQ(snapshot(*matrix), before);
+    EXPECT_TRUE(matrix->isFillComplete());
+}
+
+TEST(PressureGeometryAccessTest, RefreshRejectsMissingColumnWithPriorRowLookupWithoutPublishing)
+{
+    const Handle mesh(test::two_regions());
+    const auto comm = mesh.owned_cell_map()->getComm();
+    const auto expected = FVM::pressure_poisson_matrix<Pack>(mesh, Gauge{}, mixed_boundary);
+    auto rows = snapshot(*expected);
+    std::vector<unsigned char> seen(mesh.overlap_cell_map()->getLocalNumElements(), 0);
+    int removed = 0;
+    if (comm->getRank() == 0)
+        for (auto& row : rows)
+        {
+            for (size_t slot = 0; slot < row.columns.size(); ++slot)
+                if (seen[static_cast<size_t>(row.columns[slot])])
+                {
+                    // The missing column retains a lookup from an earlier
+                    // row; a refresh must reject that stale absolute slot.
+                    row.columns.erase(row.columns.begin() + slot);
+                    row.values.erase(row.values.begin() + slot);
+                    removed = 1;
+                    break;
+                }
+            if (removed) break;
+            for (const auto column : row.columns) seen[static_cast<size_t>(column)] = 1;
+        }
+    int total_removed = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &removed, &total_removed);
+    EXPECT_EQ(total_removed, 1);
+    auto matrix = matrix_from_rows(mesh, rows);
+    const auto before = snapshot(*matrix);
+    bool changed = true;
+    EXPECT_FALSE(FVM::detail::refresh_pressure_poisson_matrix_values<Pack>(
+        mesh, Gauge{}, mixed_boundary, false, *matrix, changed));
+    EXPECT_FALSE(changed);
+    EXPECT_EQ(snapshot(*matrix), before);
+    EXPECT_TRUE(matrix->isFillComplete());
 }
 
 TEST(PressureGeometryAccessTest, AcquisitionCapacityAndRowFailuresAreCollectiveAndReleaseLeases)
