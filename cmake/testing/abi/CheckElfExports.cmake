@@ -220,7 +220,8 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::BoilingSourceModel<.*>[ ]*::(validate_void_inputs|limit_to_available_void|add_bulk_boiling|add_wall_boiling)[(]"
     "SimpleFluid::DelayedNeutronPrecursorModel<.*>[ ]*::(validate_collective_configuration|validate_collective_advance_selection|validate_liquid_fraction_field|reconstruct_concentrations|transport|update_inventory_diagnostics)[(]"
     "SimpleFluid::FissionPowerSource<.*>[ ]*::(require_uniform_value|require_uniform_configuration|copy_scaled_field|integrate|apply_base_profile|apply_time_multiplier)[(]"
-    "SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::(diffuse)[(]"
+    "SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::(diffuse|restore_for_ale_replay|restore_state)[(]"
+    "SimpleFluid::RadiolyticGasModel<.*>[ ]*::(restore_for_ale_replay|restore_state|invalidate_transport_operator)[(]"
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::(updateVolumeFromStoredDensity)[(]"
     "SimpleFluid::PlanarALEBoundary<.*>[ ]*::(validate|validate_collective_controls)[(]"
     "^SimpleFluid::detail::"
@@ -717,9 +718,10 @@ endif()
 # APIs extend the reviewed library shape without widening the export map to
 # vendor or implementation-detail namespaces.
 # Explicitly compiled physical models and inventories extend the reviewed API.
-# GCC Release exports 1279 SimpleFluid symbols with these instantiations; 1350
-# leaves bounded headroom for configuration differences. The count is not a
-# qualification of other toolchains or build configurations.
+# At the ALE replay update, GCC Debug exports 1325 SimpleFluid symbols and
+# LLVM Debug exports 1341 after hiding the ten solver-only replay helpers.
+# The 1350 ceiling retains bounded headroom for configuration differences;
+# these counts do not qualify other toolchains or build configurations.
 # Private-family exclusions and exact API anchors above remain authoritative.
 if(simplefluid_api_symbol_count LESS 300
    OR simplefluid_api_symbol_count GREATER 1350)
@@ -755,3 +757,6 @@ if(simplefluid_unexpected_symbols)
         "unexpected dynamic definitions:\n  "
         "${simplefluid_unexpected_symbol_sample}")
 endif()
+message(STATUS
+    "ELF exports verified: ${simplefluid_api_symbol_count} SimpleFluid API "
+    "symbols (reviewed range 300 to 1350)")
