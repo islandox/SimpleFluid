@@ -58,6 +58,13 @@ public:
     /** @brief Replace temperature boundary data for subsequent advances. */
     void set_boundary_conditions(const BoundaryConditionSet& boundary_conditions);
 
+    /** Refresh physical outward heat-flux overrides [W/m^2] on coupled batches.
+     * set_boundary_conditions() clears these overrides when replacing the equation.
+     */
+    void set_boundary_heat_flux(const boundary_cache_type& heat_flux);
+    void set_boundary_heat_flux_snapshot(SP<const boundary_cache_type> heat_flux);
+    SP<const boundary_cache_type> boundary_heat_flux() const noexcept;
+
     /** @brief Advance conduction without volumetric heat generation. */
     LinearSolveStatistics advance(const field_type& old_temperature, scalar_type time_step,
         const material_type& material, field_type& temperature,

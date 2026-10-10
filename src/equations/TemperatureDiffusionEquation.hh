@@ -60,6 +60,17 @@ public:
 
     void refresh_boundary_cache();
 
+    /** Replace per-face outward heat fluxes [W/m^2] for physical advances.
+     * Cached batches override their temperature/convection patch conditions;
+     * other patches are unchanged. An empty mesh-bound cache clears overrides.
+     * Collective validation precedes publication. Nonzero flux requires positive
+     * boundary conductivity and zero carrier flux. Diffusivity-only APIs reject it.
+     */
+    void set_boundary_heat_flux(const boundary_cache_type& heat_flux);
+    /** Adopt a validated immutable snapshot without copying boundary arrays. */
+    void set_boundary_heat_flux_snapshot(SP<const boundary_cache_type> heat_flux);
+    SP<const boundary_cache_type> boundary_heat_flux() const noexcept { return d_boundary_heat_flux; }
+
     /**
      * @brief Refresh numeric geometry and discard operator-dependent solve state.
      */
@@ -131,6 +142,8 @@ private:
     boundary_cache_type d_face_boundary_temperature;
     SP<BoundaryConditionMap> d_boundary_condition;
     ConvectionBoundaryMap d_convection_boundaries;
+    SP<const boundary_cache_type> d_boundary_heat_flux;
+    bool d_has_boundary_heat_flux = false;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
     mutable bool d_cached_transport_graph_supports_non_orthogonal_correction = false;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_physical_transport_matrix;
