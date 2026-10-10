@@ -718,16 +718,20 @@ endif()
 # APIs extend the reviewed library shape without widening the export map to
 # vendor or implementation-detail namespaces.
 # Explicitly compiled physical models and inventories extend the reviewed API.
-# At the ALE replay update, GCC Debug exports 1325 SimpleFluid symbols and
-# LLVM Debug exports 1341 after hiding the ten solver-only replay helpers.
-# The 1350 ceiling retains bounded headroom for configuration differences;
-# these counts do not qualify other toolchains or build configurations.
+# Recounted at 813c481 after hiding the solver-only ALE replay helpers:
+# local GCC Debug/Release export 1325/1333 SimpleFluid symbols, and local
+# LLVM Debug/Release export 1341/1344. Keep about 6% downward and 4% upward
+# headroom around this measured range for configuration differences.
+# These counts do not qualify other toolchains or build configurations.
 # Private-family exclusions and exact API anchors above remain authoritative.
-if(simplefluid_api_symbol_count LESS 300
-   OR simplefluid_api_symbol_count GREATER 1350)
+set(simplefluid_api_symbol_lower_bound 1250)
+set(simplefluid_api_symbol_upper_bound 1400)
+if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
+   OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR
         "${SIMPLEFLUID_LIBRARY} exports ${simplefluid_api_symbol_count} "
-        "SimpleFluid symbols; the reviewed public-API range is 300 to 1350")
+        "SimpleFluid symbols; the reviewed public-API range is "
+        "${simplefluid_api_symbol_lower_bound} to ${simplefluid_api_symbol_upper_bound}")
 endif()
 if(simplefluid_kokkos_bridge_symbol_count GREATER
    SIMPLEFLUID_KOKKOS_BRIDGE_SYMBOL_CEILING)
@@ -759,4 +763,5 @@ if(simplefluid_unexpected_symbols)
 endif()
 message(STATUS
     "ELF exports verified: ${simplefluid_api_symbol_count} SimpleFluid API "
-    "symbols (reviewed range 300 to 1350)")
+    "symbols (reviewed range ${simplefluid_api_symbol_lower_bound} to "
+    "${simplefluid_api_symbol_upper_bound})")
