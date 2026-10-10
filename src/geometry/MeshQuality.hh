@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "geometry/GeometryExecutionGuard.hh"
 #include "geometry/MeshHandle.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -186,6 +187,8 @@ MeshQualityMetrics evaluate_mesh_quality(
 
     try
     {
+        // Validate composite constituents once for both unchanged read passes.
+        const auto execution = acquire_mesh_execution(mesh);
         for (size_t local = 0; local < mesh.num_owned_cells(); ++local)
         {
             const auto cell = static_cast<local_ordinal_type>(local);
