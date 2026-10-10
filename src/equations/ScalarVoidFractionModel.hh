@@ -269,7 +269,9 @@ public:
 private:
     template<TpetraTypePack> friend class BoussinesqSolver;
     // Solver-only internal replay; public restore keeps geometry current.
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void restore_for_ale_replay(const StateSnapshot& snapshot);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void restore_state(const StateSnapshot& snapshot, bool refresh_metrics);
 
     /**
