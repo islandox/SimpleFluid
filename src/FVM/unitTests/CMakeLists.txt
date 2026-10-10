@@ -67,6 +67,13 @@ simplefluid_add_mpi_test(
     LABELS "mpi;transport;field_stored"
     TIMEOUT 120)
 
+simplefluid_add_mpi_test(
+    NAME PressureGeometryAccess_2procs
+    TARGET testPressureGeometryAccess
+    PROCS 2
+    LABELS "mpi;fvm;pressure;geometry;collective"
+    TIMEOUT 30)
+
 foreach(_cached_kernel IN ITEMS CellFluxBalanceCache StoredPressureFaceFluxCache)
   simplefluid_add_mpi_test(
       NAME ${_cached_kernel}_2procs
