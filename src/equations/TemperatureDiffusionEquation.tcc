@@ -32,7 +32,8 @@ TemperatureDiffusionEquation<Pack, MeshType>::TemperatureDiffusionEquation(
       d_transport_geometry_cache(*d_mesh), d_candidate_temperature(d_mesh, "temperature_candidate", false),
       d_face_boundary_temperature{{}, d_mesh},
       d_boundary_condition(std::make_shared<BoundaryConditionMap>(boundary_conditions.temperature)),
-      d_convection_boundaries(boundary_conditions.convection)
+      d_convection_boundaries(boundary_conditions.convection),
+      d_boundary_heat_flux(std::make_shared<const boundary_cache_type>(boundary_cache_type{{}, d_mesh}))
 {
     collective_detail::collective_local_validation(*d_mesh, "Exterior convection configuration",
         [&]
@@ -113,9 +114,55 @@ void TemperatureDiffusionEquation<Pack, MeshType>::refresh_boundary_cache()
     }
 }
 
-/** Refresh geometry-dependent transport data after fixed-topology motion. */
 template<TpetraTypePack Pack, class MeshType>
-void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry()
+void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux(const boundary_cache_type& heat_flux)
+{
+    SP<const boundary_cache_type> candidate;
+    collective_detail::collective_local_validation(*d_mesh, "Temperature heat-flux snapshot",
+        [&] { candidate = std::make_shared<const boundary_cache_type>(heat_flux); });
+    set_boundary_heat_flux_snapshot(std::move(candidate));
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux_snapshot(
+    SP<const boundary_cache_type> heat_flux)
+{
+    int local_flags[2]{}, global_flags[2]{};
+    collective_detail::collective_local_validation(*d_mesh, "Temperature boundary heat-flux update",
+        [&]
+        {
+            if (!heat_flux || heat_flux->mesh.get() != d_mesh.get())
+                throw std::invalid_argument("Boundary heat-flux snapshot is null or belongs to another mesh.");
+            const auto& old_values = d_boundary_heat_flux->value;
+            local_flags[0] = !heat_flux->value.empty();
+            local_flags[1] = heat_flux->value.size() != old_values.size();
+            for (const auto& [id, values] : heat_flux->value)
+            {
+                const auto found = d_mesh->boundary_batches().find(id);
+                if (found == d_mesh->boundary_batches().end() || values.size() != found->second.face_lids.size())
+                    throw std::invalid_argument("Boundary heat-flux cache has an unknown batch or incorrect size.");
+                for (std::size_t i = 0; i < values.size(); ++i)
+                    if (!std::isfinite(values[i]) || !d_mesh->is_boundary_face(found->second.face_lids[i]))
+                        throw std::invalid_argument("Boundary heat flux requires finite values on physical faces.");
+                const auto old = old_values.find(id);
+                local_flags[1] |= old == old_values.end() || old->second.size() != values.size();
+            }
+        });
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 2, local_flags, global_flags);
+    d_boundary_heat_flux = std::move(heat_flux);
+    d_has_boundary_heat_flux = global_flags[0] != 0;
+    // Numeric flux changes affect only the RHS. Changing boundary support can
+    // replace Dirichlet/Robin stencils, so all ranks invalidate together.
+    if (global_flags[1])
+    {
+        d_cached_physical_transport_matrix = Teuchos::null;
+        d_cached_physical_graph_supports_non_orthogonal_correction = false;
+        d_linear_solver.reset();
+    }
+}
+
+/** Refresh geometry-dependent transport data after fixed-topology motion. */
+template<TpetraTypePack Pack, class MeshType> void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry()
 {
     refresh_geometry({});
 }
@@ -174,8 +221,9 @@ void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::v
     scalar_type time_step, scalar_type thermal_diffusivity, field_type& temperature,
     const source_type& right_hand_source) const
 {
-    if (!d_convection_boundaries.empty())
-        throw std::invalid_argument("Exterior convection requires advance_physical with conductivity and rho cp.");
+    if (!d_convection_boundaries.empty() || d_has_boundary_heat_flux)
+        throw std::invalid_argument(
+            "Thermal exchange boundaries require advance_physical with conductivity and rho cp.");
     EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(time_step, "time step", "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(thermal_diffusivity, "diffusivity", "TemperatureDiffusionEquation");
@@ -356,8 +404,9 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(co
     field_type& temperature, const source_type& right_hand_source, std::optional<FVM::NonOrthogonalTreatment> treatment,
     const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
 {
-    if (!d_convection_boundaries.empty())
-        throw std::invalid_argument("Exterior convection requires advance_physical with conductivity and rho cp.");
+    if (!d_convection_boundaries.empty() || d_has_boundary_heat_flux)
+        throw std::invalid_argument(
+            "Thermal exchange boundaries require advance_physical with conductivity and rho cp.");
     EquationValidation::require_mesh_match(*d_mesh, old_temperature, "TemperatureDiffusionEquation");
     EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
     EquationValidation::require_non_negative(time_step, "time step", "TemperatureDiffusionEquation");
@@ -565,7 +614,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
 
     const auto old_temperature_values = old_temperature.local_read_view();
     std::unordered_map<int, std::vector<BoundaryCondition>> convection_conditions;
-    if (!d_convection_boundaries.empty())
+    if (!d_convection_boundaries.empty() || d_has_boundary_heat_flux)
         collective_detail::collective_local_validation(*d_mesh, "Exterior convection face evaluation",
             [&]
             {
@@ -573,8 +622,12 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                 for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
                 {
                     const auto iter = d_convection_boundaries.find(d_mesh->boundary_batch_name(batch_id));
-                    if (iter == d_convection_boundaries.end())
+                    const auto prescribed = d_boundary_heat_flux->value.find(batch_id);
+                    if (iter == d_convection_boundaries.end() && prescribed == d_boundary_heat_flux->value.end())
                         continue;
+                    if (prescribed != d_boundary_heat_flux->value.end() &&
+                        prescribed->second.size() != batch.face_lids.size())
+                        throw std::invalid_argument("Boundary heat-flux cache is stale after a topology change.");
                     auto& conditions = convection_conditions[batch_id];
                     conditions.resize(batch.face_lids.size());
                     for (size_t index = 0; index < batch.face_lids.size(); ++index)
@@ -590,6 +643,19 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                                 "Exterior convection requires zero carrier flux through the wall.");
                         const auto conductivity = FVM::boundary_coefficient<Pack>(
                             boundary_thermal_conductivity, batch_id, index, conductivity_values(owner, 0));
+                        if (prescribed != d_boundary_heat_flux->value.end())
+                        {
+                            const auto heat_flux = prescribed->second[index];
+                            if (!std::isfinite(conductivity) || conductivity < 0.0 ||
+                                (conductivity == 0.0 && heat_flux != 0.0))
+                                throw std::invalid_argument(
+                                    "Nonzero boundary heat flux requires positive conductivity.");
+                            const auto gradient = conductivity > 0.0 ? -heat_flux / conductivity : 0.0;
+                            if (!std::isfinite(gradient))
+                                throw std::overflow_error("Boundary heat-flux normalization overflow.");
+                            conditions[index] = {BoundaryConditionType::Neumann, gradient};
+                            continue;
+                        }
                         const auto conductance =
                             FVM::detail::boundary_diffusion_coefficient(*d_mesh, face, owner, conductivity) /
                             d_mesh->face_area(face);
@@ -685,6 +751,10 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     auto& candidate_temperature = d_candidate_temperature;
     candidate_temperature.owned_data().update(scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
+    // Reassembly can change material/time-step coefficients independently of a
+    // boundary refresh. Retain graph/Krylov storage, invalidate numeric factors.
+    if (d_has_boundary_heat_flux)
+        d_linear_solver.notify_operator_values_changed();
     const auto statistics =
         d_linear_solver.solve_with_statistics(matrix, *system.rhs, candidate_temperature.owned_data(), linear_options);
     if (!statistics.converged)

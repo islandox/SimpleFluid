@@ -238,6 +238,8 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
 - `TemperatureDiffusionEquation` — energy equation assembly
 - `SolidHeatConductionEquation` — conservative, zero-advection solid energy
   equation on a `SolidSubdomain`
+- `LumpedInnerCavityModel` — lumped headspace temperature and humidity with
+  liquid evaporation, wall condensation, natural convection, and enclosure radiation
 - `CoupledPressureVelocitySolver` — monolithic block-Krylov solver
 - `BelosLinearSolver` — unified interface to Trilinos iterative solvers
 - Direct `MeshHandle` execution through `MeshFieldTraits` for mapped pressure,
@@ -674,6 +676,15 @@ equations, applicability, and time-lagging details. Do not also assign a
 Automatic two-way temperature/flux continuity with a fluid solve is not yet
 implemented; the current solid interface remains a standalone or
 prescribed-boundary solve, not a full conjugate-heat-transfer driver.
+
+`LumpedInnerCavityModel` supplies a separate, extensible headspace model above
+a liquid free surface and inside vessel walls. It advances uniform moist-air
+temperature and humidity and returns per-surface mass, heat, and energy rates
+for external coupling. Field batches support facewise or area-averaged sampling
+and refresh per-face heat-flux boundaries on coupled thermal subdomains.
+See [lumped inner cavity](docs/modeling/lumped_inner_cavity.md)
+for the conservation contract, natural-convection options, radiation view
+factors, and a pool/wall example.
 
 ## Fission Power Source
 
