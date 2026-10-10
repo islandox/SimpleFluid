@@ -251,32 +251,49 @@ bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
     values_changed = false;
     if (!compatible_present_transport_matrix_maps<Pack>(mesh, matrix, mesh.num_owned_cells())) return false;
     int local_invalid = 0;
-    std::vector<Teuchos::Array<scalar_type>> staged;
+    std::vector<scalar_type> staged;
+    std::vector<size_t> row_offsets;
     int local_changed = 0;
     std::exception_ptr local_error;
     try
     {
-        staged.resize(mesh.num_owned_cells());
+        staged.resize(matrix.getLocalNumEntries(), scalar_type{});
+        row_offsets.resize(mesh.num_owned_cells() + 1, 0);
+        // Build a fresh column-to-slot lookup for each row in one shared
+        // workspace. Absolute slots let the row interval reject mappings left
+        // by earlier rows without clearing all local columns between rows.
+        std::vector<size_t> column_slots(matrix.getColMap()->getLocalNumElements(), staged.size());
+        std::vector<unsigned char> visited;
+        visited.reserve(matrix.getLocalMaxNumRowEntries());
         visit_pressure_poisson_rows<Pack>(mesh, gauge_cell_gid, boundary_condition,
             [&](auto row, const auto& columns, const auto& values)
             {
                 typename Pack::matrix_type::local_inds_host_view_type previous_columns;
                 typename Pack::matrix_type::values_host_view_type previous_values;
                 matrix.getLocalRowView(row, previous_columns, previous_values);
-                auto& refreshed = staged[static_cast<size_t>(row)];
-                refreshed.resize(previous_values.extent(0), scalar_type{});
-                std::vector<bool> visited(previous_values.extent(0), false);
+                const auto begin = row_offsets[static_cast<size_t>(row)];
+                const auto end = begin + previous_values.extent(0);
+                row_offsets[static_cast<size_t>(row) + 1] = end;
+                visited.assign(previous_values.extent(0), 0);
+                for (size_t slot = 0; slot < previous_columns.extent(0); ++slot)
+                {
+                    const auto column = static_cast<size_t>(previous_columns(slot));
+                    if (column >= column_slots.size()) local_invalid = 1;
+                    else column_slots[column] = begin + slot;
+                }
                 for (int entry = 0; entry < columns.size(); ++entry)
                 {
-                    size_t slot = 0;
-                    while (slot < previous_columns.extent(0) && previous_columns(slot) != columns[entry]) ++slot;
-                    if (slot == previous_columns.extent(0))
+                    const auto column = static_cast<size_t>(columns[entry]);
+                    const auto slot = column < column_slots.size() ? column_slots[column] : staged.size();
+                    if (slot < begin || slot >= end)
                     {
                         local_invalid = 1;
                         continue;
                     }
-                    visited[slot] = true;
-                    refreshed[slot] += values[entry];
+                    visited[slot - begin] = 1;
+                    // Keep face-order accumulation, including repeated
+                    // neighbors, exactly as in the original row staging.
+                    staged[slot] += values[entry];
                 }
                 for (size_t slot = 0; slot < previous_columns.extent(0); ++slot)
                 {
@@ -284,8 +301,8 @@ bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
                     if (symmetric_gauge && gauge_cell_gid &&
                         mesh.owned_cell_map()->getGlobalElement(row) != *gauge_cell_gid &&
                         matrix.getColMap()->getGlobalElement(previous_columns(slot)) == *gauge_cell_gid)
-                        refreshed[slot] = scalar_type{};
-                    if (refreshed[slot] != previous_values(slot)) local_changed = 1;
+                        staged[begin + slot] = scalar_type{};
+                    if (staged[begin + slot] != previous_values(slot)) local_changed = 1;
                 }
             });
     }
@@ -310,7 +327,7 @@ bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
     // every entry already exists. It otherwise returns invalid without writing.
     matrix.resumeFill();
     int local_replacement_failed = 0;
-    for (size_t owned = 0; owned < staged.size(); ++owned)
+    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
         const auto row = static_cast<local_ordinal_type>(owned);
         typename Pack::matrix_type::local_inds_host_view_type columns;
@@ -318,7 +335,7 @@ bool refresh_pressure_poisson_matrix_values(const MeshType& mesh,
         matrix.getLocalRowView(row, columns, previous_values);
         const auto entries = static_cast<local_ordinal_type>(columns.extent(0));
         const auto replaced = matrix.replaceLocalValues(row, entries,
-            staged[owned].getRawPtr(), columns.data());
+            staged.data() + row_offsets[owned], columns.data());
         if (replaced != entries) local_replacement_failed = 1;
     }
     matrix.fillComplete(domain_map, range_map);
