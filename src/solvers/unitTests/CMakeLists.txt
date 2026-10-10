@@ -365,3 +365,10 @@ simplefluid_add_mpi_test(NAME SASBoiling_2procs TARGET testSASSupportedPaths PRO
 simplefluid_add_mpi_test(NAME SASFreeSurface_2procs TARGET testSASSupportedPaths PROCS 2
     ARGS "--gtest_filter=SASSupportedPathsTest.FixedFreeSurface*:SASSupportedPathsTest.LazyFreeSurface*"
     LABELS "mpi;turbulence;sas;free_surface;small_fixture" TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME VolumeContinuityAccess_2procs
+    TARGET testVolumeContinuityGeometryAccess
+    PROCS 2
+    LABELS "mpi;ale;continuity;validation"
+    TIMEOUT 60)
