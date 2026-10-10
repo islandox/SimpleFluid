@@ -5,6 +5,7 @@
 #pragma once
 
 #include "solvers/VolumeContinuityModel.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 
 namespace SimpleFluid
 {
@@ -82,74 +83,81 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
     scalar_type local_carrier_transport{};
     scalar_type local_slip_divergence{};
     scalar_type local_maximum_target_change{};
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto old_material = inputs.old_material_volume[owned];
-        const auto new_material = inputs.new_material_volume[owned];
-        local_invalid = local_invalid || !std::isfinite(old_material) || old_material < scalar_type{} ||
-                        !std::isfinite(new_material) || new_material < scalar_type{};
-        scalar_type carrier_divergence{};
-        scalar_type slip_divergence{};
-        for (const auto face_lid : d_mesh->faces(cell_lid))
+    // The preview traversal has no callbacks, communication or geometry mutation.
+    // Validate composite constituents once while pinning them for these reads;
+    // release before reductions, including on every local failure path.
+    collective_detail::collective_local_validation(*d_mesh, "VolumeContinuityModel geometry traversal", [&]
         {
-            const auto owner_flux = inputs.carrier_relative_flux.local_value(face_lid);
-            const auto outward_flux = d_mesh->owner_cell(face_lid) == cell_lid ? owner_flux : -owner_flux;
-            if (inputs.carrier_material_volume_flux != nullptr)
+            const auto execution = acquire_mesh_execution(*d_mesh);
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto owner_material_flux = inputs.carrier_material_volume_flux->local_value(face_lid);
-                carrier_divergence +=
-                    d_mesh->owner_cell(face_lid) == cell_lid ? owner_material_flux : -owner_material_flux;
-            }
-            else
-            {
-                auto upwind = cell_lid;
-                if (outward_flux < scalar_type{} && d_mesh->is_interior_face(face_lid))
+                const auto cell_lid = static_cast<local_ordinal_type>(owned);
+                const auto old_material = inputs.old_material_volume[owned];
+                const auto new_material = inputs.new_material_volume[owned];
+                local_invalid = local_invalid || !std::isfinite(old_material) || old_material < scalar_type{} ||
+                                !std::isfinite(new_material) || new_material < scalar_type{};
+                scalar_type carrier_divergence{};
+                scalar_type slip_divergence{};
+                for (const auto face_lid : d_mesh->faces(cell_lid))
                 {
-                    upwind = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                    const auto owner_flux = inputs.carrier_relative_flux.local_value(face_lid);
+                    const auto outward_flux = d_mesh->owner_cell(face_lid) == cell_lid ? owner_flux : -owner_flux;
+                    if (inputs.carrier_material_volume_flux != nullptr)
+                    {
+                        const auto owner_material_flux = inputs.carrier_material_volume_flux->local_value(face_lid);
+                        carrier_divergence +=
+                            d_mesh->owner_cell(face_lid) == cell_lid ? owner_material_flux : -owner_material_flux;
+                    }
+                    else
+                    {
+                        auto upwind = cell_lid;
+                        if (outward_flux < scalar_type{} && d_mesh->is_interior_face(face_lid))
+                        {
+                            upwind = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                        }
+                        // The supported transports are backward-Euler implicit
+                        // in their advected state. Remove that same trial-new
+                        // carrier transport here; accepted-old W/V fabricates a
+                        // source whenever a nonuniform inventory advects.
+                        const auto concentration =
+                            inputs.carrier_material_fraction.empty()
+                                ? inputs.new_material_volume[static_cast<size_t>(upwind)] /
+                                      static_cast<scalar_type>(new_volumes[static_cast<size_t>(upwind)])
+                                : inputs.carrier_material_fraction[static_cast<size_t>(upwind)];
+                        carrier_divergence += outward_flux * concentration;
+                    }
+                    if (inputs.bubble_slip_volume_flux != nullptr)
+                    {
+                        const auto owner_slip = inputs.bubble_slip_volume_flux->local_value(face_lid);
+                        slip_divergence += d_mesh->owner_cell(face_lid) == cell_lid ? owner_slip : -owner_slip;
+                    }
                 }
-                // The supported transports are backward-Euler implicit
-                // in their advected state. Remove that same trial-new
-                // carrier transport here; accepted-old W/V fabricates a
-                // source whenever a nonuniform inventory advects.
-                const auto concentration =
-                    inputs.carrier_material_fraction.empty()
-                        ? inputs.new_material_volume[static_cast<size_t>(upwind)] /
-                              static_cast<scalar_type>(new_volumes[static_cast<size_t>(upwind)])
-                        : inputs.carrier_material_fraction[static_cast<size_t>(upwind)];
-                carrier_divergence += outward_flux * concentration;
+                const auto volume_rate = (new_material - old_material) / time_step;
+                material_source[owned] = volume_rate + carrier_divergence + slip_divergence;
+                slip_contribution[owned] = -slip_divergence;
+                target_values[owned] = material_source[owned] + slip_contribution[owned];
+                local_invalid =
+                    local_invalid || !std::isfinite(material_source[owned]) || !std::isfinite(target_values[owned]);
+                local_old_material += old_material;
+                local_new_material += new_material;
+                local_material_source += material_source[owned];
+                local_carrier_transport += carrier_divergence;
+                local_slip_divergence += slip_divergence;
+                if (!inputs.previous_target.empty())
+                {
+                    local_maximum_target_change = std::max(
+                        local_maximum_target_change, std::abs(target_values[owned] - inputs.previous_target[owned]));
+                }
             }
-            if (inputs.bubble_slip_volume_flux != nullptr)
+            for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
             {
-                const auto owner_slip = inputs.bubble_slip_volume_flux->local_value(face_lid);
-                slip_divergence += d_mesh->owner_cell(face_lid) == cell_lid ? owner_slip : -owner_slip;
+                const auto carrier_fraction =
+                    inputs.carrier_material_fraction.empty()
+                        ? inputs.new_material_volume[local] / static_cast<scalar_type>(new_volumes[local])
+                        : inputs.carrier_material_fraction[local];
+                local_invalid = local_invalid || !std::isfinite(carrier_fraction) || carrier_fraction < scalar_type{};
             }
-        }
-        const auto volume_rate = (new_material - old_material) / time_step;
-        material_source[owned] = volume_rate + carrier_divergence + slip_divergence;
-        slip_contribution[owned] = -slip_divergence;
-        target_values[owned] = material_source[owned] + slip_contribution[owned];
-        local_invalid =
-            local_invalid || !std::isfinite(material_source[owned]) || !std::isfinite(target_values[owned]);
-        local_old_material += old_material;
-        local_new_material += new_material;
-        local_material_source += material_source[owned];
-        local_carrier_transport += carrier_divergence;
-        local_slip_divergence += slip_divergence;
-        if (!inputs.previous_target.empty())
-        {
-            local_maximum_target_change = std::max(
-                local_maximum_target_change, std::abs(target_values[owned] - inputs.previous_target[owned]));
-        }
-    }
-    for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
-    {
-        const auto carrier_fraction =
-            inputs.carrier_material_fraction.empty()
-                ? inputs.new_material_volume[local] / static_cast<scalar_type>(new_volumes[local])
-                : inputs.carrier_material_fraction[local];
-        local_invalid = local_invalid || !std::isfinite(carrier_fraction) || carrier_fraction < scalar_type{};
-    }
+        });
 
     int any_invalid = 0;
     Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
