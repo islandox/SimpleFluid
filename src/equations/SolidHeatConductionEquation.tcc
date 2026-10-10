@@ -27,6 +27,25 @@ void SolidHeatConductionEquation<Pack, MeshType>::set_boundary_conditions(
 }
 
 template<TpetraTypePack Pack, class MeshType>
+void SolidHeatConductionEquation<Pack, MeshType>::set_boundary_heat_flux(const boundary_cache_type& heat_flux)
+{
+    d_temperature_equation->set_boundary_heat_flux(heat_flux);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void SolidHeatConductionEquation<Pack, MeshType>::set_boundary_heat_flux_snapshot(
+    SP<const boundary_cache_type> heat_flux)
+{
+    d_temperature_equation->set_boundary_heat_flux_snapshot(std::move(heat_flux));
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto SolidHeatConductionEquation<Pack, MeshType>::boundary_heat_flux() const noexcept -> SP<const boundary_cache_type>
+{
+    return d_temperature_equation->boundary_heat_flux();
+}
+
+template<TpetraTypePack Pack, class MeshType>
 auto SolidHeatConductionEquation<Pack, MeshType>::advance(const field_type& old_temperature, scalar_type time_step,
     const material_type& material, field_type& temperature, FVM::NonOrthogonalTreatment treatment,
     const LinearSolverOptions& linear_options, const field_type* thermal_conductivity_override,

@@ -6,6 +6,7 @@
 #include "fields/MeshToMeshTransfer.hh"
 #include "fields/details/MeshTransferGeometry.hh"
 #include "fields/details/MeshTransferSearch.hh"
+#include "parallel/CommunicatorCompatibility.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultMpiComm.hpp>
@@ -85,18 +86,7 @@ inline std::vector<double> reduce_reverse_coverage(
 inline bool same_communicator(const Teuchos::Comm<int>& a,
                               const Teuchos::Comm<int>& b)
 {
-    if (&a == &b) return true;
-#ifdef HAVE_TEUCHOS_MPI
-    const auto* ma = dynamic_cast<const Teuchos::MpiComm<int>*>(&a);
-    const auto* mb = dynamic_cast<const Teuchos::MpiComm<int>*>(&b);
-    if (ma && mb)
-    {
-        int comparison = MPI_UNEQUAL;
-        MPI_Comm_compare(*ma->getRawMpiComm(), *mb->getRawMpiComm(), &comparison);
-        return comparison == MPI_IDENT || comparison == MPI_CONGRUENT;
-    }
-#endif
-    return a.getSize() == 1 && b.getSize() == 1;
+    return communicators_congruent(a, b);
 }
 
 template<class Map>

@@ -6,6 +6,8 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     explicit_instantiation/ReactingGasModel.cc
     explicit_instantiation/BoussinesqMomentumEquation.cc
     explicit_instantiation/IncompressibleMomentumEquation.cc
+    LumpedInnerCavityModel.cc
+    LumpedInnerCavityCoupling.cc
     explicit_instantiation/PressureProjectionEquation.cc
     BubbleGasPhysics.cc
     ReactingGasProperties.cc

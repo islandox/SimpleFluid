@@ -106,6 +106,13 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
+    NAME LumpedInnerCavityCoupling_2procs
+    TARGET testLumpedInnerCavityCoupling
+    PROCS 2
+    LABELS "mpi;cavity;conservation"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME TurbulenceModel_2procs
     TARGET testTurbulenceModelMultiRank
     PROCS 2
