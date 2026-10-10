@@ -14,9 +14,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <optional>
-#include <unordered_map>
 #include <vector>
 
 namespace SimpleFluid
@@ -31,6 +31,55 @@ inline void require_all(const Teuchos::Comm<int>& comm, bool valid,
     int global = 0;
     Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &local, &global);
     if (!global) throw std::invalid_argument(message);
+}
+
+// Keep rank-local donor partial sums and the same SUM reduction as independent
+// construction. Only the owning rank retains each result. A bounded dense
+// workspace avoids growing all-donor replicas on large transfer maps. Keeping
+// up to 1M donors in one block also retains the original MPI message count for
+// these transfers; larger maps may see different MPI reduction rounding.
+// Internal collective precondition: donor_count and block_limit agree on every
+// rank (the captured global map and fixed default provide this in reversed()).
+inline std::vector<double> reduce_reverse_coverage(
+    const Teuchos::Comm<int>& comm, size_t donor_count, size_t owned_begin,
+    size_t owned_count, const std::vector<std::pair<size_t, double>>& partials,
+    size_t block_limit = 1024 * 1024)
+{
+    bool valid = block_limit > 0
+        && block_limit <= static_cast<size_t>(std::numeric_limits<int>::max())
+        && owned_begin <= donor_count && owned_count <= donor_count - owned_begin;
+    for (size_t i = 0; i < partials.size(); ++i)
+        valid = valid && partials[i].first < donor_count
+            && (i == 0 || partials[i - 1].first < partials[i].first);
+    require_all(comm, valid, "Invalid reverse coverage ownership or donor order.");
+    const size_t block_size = std::min(donor_count, block_limit);
+    std::vector<double> local, global, owned;
+    try
+    {
+        local.resize(block_size);
+        global.resize(block_size);
+        owned.resize(owned_count);
+    }
+    catch (const std::exception&) { valid = false; }
+    require_all(comm, valid, "Could not allocate reverse coverage reduction.");
+    size_t next = 0;
+    for (size_t begin = 0; begin < donor_count; begin += block_size)
+    {
+        const size_t count = std::min(block_size, donor_count - begin);
+        std::fill_n(local.begin(), count, 0.0);
+        while (next < partials.size() && partials[next].first < begin + count)
+        {
+            local[partials[next].first - begin] = partials[next].second;
+            ++next;
+        }
+        Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, static_cast<int>(count),
+                          local.data(), global.data());
+        const size_t first_owned = std::max(begin, owned_begin);
+        const size_t end_owned = std::min(begin + count, owned_begin + owned_count);
+        for (size_t donor = first_owned; donor < end_owned; ++donor)
+            owned[donor - owned_begin] = global[donor - begin];
+    }
+    return owned;
 }
 
 inline bool same_communicator(const Teuchos::Comm<int>& a,
@@ -373,7 +422,7 @@ MeshToMeshTransfer<Pack> MeshToMeshTransfer<Pack>::reversed() const
     require_all(*comm, reverse->d_source_map->getGlobalNumElements()
         <= static_cast<size_t>(std::numeric_limits<int>::max() / 12)
         && reverse->d_source_map->getLocalNumElements() <= static_cast<size_t>(std::numeric_limits<int>::max()),
-        "Reverse mesh transfer exceeds the geometry gather limit.");
+        "Reverse mesh transfer exceeds the donor ordering limit.");
     using Matrix = typename Pack::matrix_type;
     Tpetra::RowMatrixTransposer<typename Matrix::scalar_type,
         typename Matrix::local_ordinal_type, typename Matrix::global_ordinal_type,
@@ -383,64 +432,63 @@ MeshToMeshTransfer<Pack> MeshToMeshTransfer<Pack>::reversed() const
     // Recompute coverage in independent reverse construction order. Merely
     // swapping forward coverage changes local versus reduced summation order,
     // which changes energy-normalization arithmetic even with identical weights.
-    using GO = typename Pack::global_ordinal_type;
     using LO = typename Pack::local_ordinal_type;
+    using Scalar = typename Pack::scalar_type;
     const auto source_map = reverse->d_source_map;
     const auto target_map = reverse->d_target_map;
-    std::vector<GO> donor_ids;
-    std::vector<double> donor_volumes;
-    size_t source_offset = 0;
+    const auto column_map = reverse->d_weights->getColMap();
+    const auto importer = reverse->d_weights->getCrsGraph()->getImporter();
+    const int owned_count = static_cast<int>(source_map->getLocalNumElements());
+    std::vector<int> counts;
+    std::optional<multi_vector_type> owned_order, column_order;
     valid = true;
     try
     {
-        donor_ids.reserve(source_map->getGlobalNumElements());
-        donor_volumes.reserve(source_map->getGlobalNumElements());
+        counts.resize(comm->getSize());
+        owned_order.emplace(source_map, 1);
+        column_order.emplace(column_map, 1);
     }
     catch (const std::exception&) { valid = false; }
-    require_all(*comm, valid, "Could not allocate reverse donor records.");
-    for (int rank = 0; rank < comm->getSize(); ++rank)
+    require_all(*comm, valid, "Could not allocate reverse donor order metadata.");
+    Teuchos::gatherAll(*comm, 1, &owned_count, comm->getSize(), counts.data());
+    const size_t source_offset = std::accumulate(
+        counts.begin(), counts.begin() + comm->getRank(), size_t{0});
+    // The construction limit is below INT_MAX, so these ordinals are exactly
+    // representable by every scalar type accepted above. Global IDs need not
+    // be contiguous or ordered within a rank.
+    valid = std::accumulate(counts.begin(), counts.end(), size_t{0})
+        == source_map->getGlobalNumElements();
+    try
     {
-        int count = static_cast<int>(source_map->getLocalNumElements());
-        Teuchos::broadcast(*comm, rank, 1, &count);
-        std::vector<GO> ids;
-        std::vector<double> volumes;
-        valid = true;
-        try
-        {
-            ids.resize(count);
-            volumes.resize(count);
-            if (comm->getRank() == rank)
-            {
-                for (int row = 0; row < count; ++row)
-                {
-                    ids[row] = source_map->getGlobalElement(static_cast<LO>(row));
-                    volumes[row] = reverse->d_coverage.source_cell_volumes[row];
-                }
-                source_offset = donor_ids.size();
-            }
-        }
-        catch (const std::exception&) { valid = false; }
-        require_all(*comm, valid, "Could not allocate reverse donor broadcast.");
-        if (count)
-        {
-            Teuchos::broadcast(*comm, rank, count, ids.data());
-            Teuchos::broadcast(*comm, rank, count, volumes.data());
-        }
-        donor_ids.insert(donor_ids.end(), ids.begin(), ids.end());
-        donor_volumes.insert(donor_volumes.end(), volumes.begin(), volumes.end());
+        auto order = owned_order->getDataNonConst(0);
+        for (size_t row = 0; row < source_map->getLocalNumElements(); ++row)
+            order[row] = static_cast<Scalar>(source_offset + row);
     }
+    catch (const std::exception&) { valid = false; }
+    require_all(*comm, valid, "Could not initialize reverse donor order metadata.");
+    try
+    {
+        if (!importer.is_null())
+            column_order->doImport(*owned_order, *importer, Tpetra::INSERT);
+        else
+            // Tpetra omits this importer only when domain and column maps
+            // agree collectively, including their local ordering.
+            column_order->assign(*owned_order);
+    }
+    catch (const std::exception&) { valid = false; }
+    require_all(*comm, valid, "Could not import reverse donor order metadata.");
+
     auto& coverage = reverse->d_coverage;
-    std::vector<double> source_coverage, global_coverage;
+    std::vector<std::pair<size_t, double>> source_coverage;
     valid = true;
     try
     {
-        source_coverage.assign(donor_ids.size(), 0);
-        global_coverage.resize(donor_ids.size());
-        std::unordered_map<GO, size_t> donor_order;
-        for (size_t donor = 0; donor < donor_ids.size(); ++donor)
-            donor_order.emplace(donor_ids[donor], donor);
-        const auto column_map = reverse->d_weights->getColMap();
-        std::vector<std::pair<size_t, double>> entries;
+        const auto order = column_order->getData(0);
+        source_coverage.resize(column_map->getLocalNumElements());
+        for (size_t column = 0; column < source_coverage.size(); ++column)
+            source_coverage[column] = {static_cast<size_t>(order[column]), 0.0};
+        std::vector<std::pair<LO, double>> entries;
+        entries.reserve(reverse->d_weights->getLocalMaxNumRowEntries());
         for (size_t row = 0; row < target_map->getLocalNumElements(); ++row)
         {
             typename Matrix::local_inds_host_view_type columns;
@@ -448,22 +496,27 @@ MeshToMeshTransfer<Pack> MeshToMeshTransfer<Pack>::reversed() const
             reverse->d_weights->getLocalRowView(static_cast<LO>(row), columns, values);
             entries.clear();
             for (size_t item = 0; item < columns.extent(0); ++item)
-                entries.emplace_back(donor_order.at(column_map->getGlobalElement(columns(item))), values(item));
-            std::sort(entries.begin(), entries.end());
+                entries.emplace_back(columns(item), values(item));
+            std::sort(entries.begin(), entries.end(), [&](const auto& a, const auto& b) {
+                return source_coverage[a.first].first < source_coverage[b.first].first;
+            });
             double covered = 0;
-            for (const auto& [donor, overlap] : entries)
+            for (const auto& [column, overlap] : entries)
             {
                 covered += overlap;
-                source_coverage[donor] += overlap;
+                source_coverage[column].second += overlap;
             }
             coverage.target_covered_volumes[row] = covered;
             coverage.target_uncovered_volumes[row] = coverage.target_cell_volumes[row] - covered;
         }
+        std::sort(source_coverage.begin(), source_coverage.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
     }
     catch (const std::exception&) { valid = false; }
     require_all(*comm, valid, "Could not reconstruct reverse overlap rows.");
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, static_cast<int>(donor_ids.size()),
-                      source_coverage.data(), global_coverage.data());
+    const auto owned_coverage = reduce_reverse_coverage(*comm,
+        source_map->getGlobalNumElements(), source_offset,
+        source_map->getLocalNumElements(), source_coverage);
     const bool partial = d_options.coverage_mode == MeshToMeshCoverageMode::AllowPartial;
     const auto covered_is_valid = [&](double covered, double volume) {
         const double residual = covered / volume - 1.0;
@@ -472,13 +525,12 @@ MeshToMeshTransfer<Pack> MeshToMeshTransfer<Pack>::reversed() const
             && (partial || std::abs(residual) <= d_options.coverage_tolerance);
     };
     valid = true;
-    for (size_t donor = 0; donor < donor_ids.size(); ++donor)
-        valid = valid && covered_is_valid(global_coverage[donor], donor_volumes[donor]);
     for (size_t row = 0; row < source_map->getLocalNumElements(); ++row)
     {
-        coverage.source_covered_volumes[row] = global_coverage[source_offset + row];
+        coverage.source_covered_volumes[row] = owned_coverage[row];
         coverage.source_uncovered_volumes[row] = coverage.source_cell_volumes[row]
             - coverage.source_covered_volumes[row];
+        valid = valid && covered_is_valid(owned_coverage[row], coverage.source_cell_volumes[row]);
     }
     for (size_t row = 0; row < target_map->getLocalNumElements(); ++row)
         valid = valid && covered_is_valid(coverage.target_covered_volumes[row], coverage.target_cell_volumes[row]);

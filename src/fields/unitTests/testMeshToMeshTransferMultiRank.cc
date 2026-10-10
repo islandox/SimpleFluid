@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include "fields/MeshToMeshTransfer.hh"
+#include "fields/MeshToMeshTransfer.tcc"
+#include "geometry/MeshReorderingFactory.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
@@ -934,9 +936,10 @@ TEST(MeshToMeshTransferMultiRankTest, PolygonRejectsCurvedCompositeProvidersColl
 
 namespace
 {
-void expect_reverse_overlap_parity(const SimpleFluid::SP<Handle>& source_mesh,
-                                  const SimpleFluid::SP<Handle>& target_mesh,
-                                  const Options& options)
+void expect_reverse_overlap_parity(const SimpleFluid::SP<const Handle>& source_mesh,
+                                  const SimpleFluid::SP<const Handle>& target_mesh,
+                                  const Options& options,
+                                  bool exact_coverage = false)
 {
     // The forward plan dies before any coverage query or application, so
     // every parity case also checks independent reverse-plan ownership.
@@ -962,6 +965,16 @@ void expect_reverse_overlap_parity(const SimpleFluid::SP<Handle>& source_mesh,
     EXPECT_DOUBLE_EQ(actual.overlap_volume, expected.overlap_volume);
     EXPECT_DOUBLE_EQ(actual.uncovered_source_volume, expected.uncovered_source_volume);
     EXPECT_DOUBLE_EQ(actual.uncovered_target_volume, expected.uncovered_target_volume);
+    if (exact_coverage)
+    {
+        EXPECT_EQ(actual.source_covered_volumes, expected.source_covered_volumes);
+        EXPECT_EQ(actual.source_uncovered_volumes, expected.source_uncovered_volumes);
+        EXPECT_EQ(actual.target_covered_volumes, expected.target_covered_volumes);
+        EXPECT_EQ(actual.target_uncovered_volumes, expected.target_uncovered_volumes);
+        EXPECT_EQ(actual.overlap_volume, expected.overlap_volume);
+        EXPECT_EQ(actual.uncovered_source_volume, expected.uncovered_source_volume);
+        EXPECT_EQ(actual.uncovered_target_volume, expected.uncovered_target_volume);
+    }
     Pack::multi_vector_type source(target_mesh->owned_cell_map(), 3);
     Pack::multi_vector_type reused_target(source_mesh->owned_cell_map(), 3);
     Pack::multi_vector_type independent_target(source_mesh->owned_cell_map(), 3);
@@ -1106,4 +1119,106 @@ TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapSurvivesForwardPlanDestructi
     auto coarse = make_cartesian(false, true);
     expect_reverse_overlap_parity(fine, coarse, options);
     expect_reverse_overlap_parity(coarse, fine, options);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapPreservesRankAndLocalDonorOrder)
+{
+    using Factory = SimpleFluid::MeshReorderingFactory<Pack>;
+    const double pi = std::numbers::pi;
+    auto fine = make_cylindrical({{{1.0, 1.00000001, 1.00013, 1.17, 1.23,
+        1.24, 2.0, 2.7, 4.0}, {0.0, pi, 2 * pi}, {0.0, 0.000001, 0.37, 1.29, 2.7}}}, true);
+    auto coarse = make_cylindrical({{{1.0, 1.07, 1.49, 2.2, 4.0},
+        {0.0, pi, 2 * pi}, {0.0, 0.23, 1.73, 2.7}}});
+    // Rank order is reversed on the fine mesh; local IDs are then permuted
+    // into nonmonotone, noncontiguous runs on both endpoint maps. Sorting by
+    // global ID instead of rank/local donor ordinal changes coverage sums.
+    ASSERT_GT(coarse->num_owned_cells(), 1U);
+    const auto coarse_first_gid = coarse->cell_global_id(0);
+    const auto coarse_last_gid = coarse->cell_global_id(
+        static_cast<LO>(coarse->num_owned_cells() - 1));
+    const auto fine_layout = Factory::selected_cells_first(std::move(fine),
+        [](Pack::global_ordinal_type gid, const Handle::Vec3&) { return gid % 3 == 1; });
+    // With four ranks, each coarse radial slab owns GIDs rank + 4*k;
+    // a parity predicate would select all or none and leave the map unchanged.
+    // Move the actual last owned cell first, independently of that stride.
+    const auto coarse_layout = Factory::selected_cells_first(std::move(coarse),
+        [coarse_last_gid](Pack::global_ordinal_type gid, const Handle::Vec3&)
+        { return gid == coarse_last_gid; });
+    EXPECT_TRUE(fine_layout.mesh->has_reordered_cells());
+    EXPECT_TRUE(coarse_layout.mesh->has_reordered_cells());
+    EXPECT_EQ(coarse_layout.mesh->cell_global_id(0), coarse_last_gid);
+    EXPECT_EQ(coarse_layout.mesh->cell_global_id(1), coarse_first_gid);
+    EXPECT_GT(coarse_last_gid, coarse_first_gid + 1);
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    expect_reverse_overlap_parity(fine_layout.mesh, coarse_layout.mesh, options, true);
+    expect_reverse_overlap_parity(coarse_layout.mesh, fine_layout.mesh, options, true);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapHandlesIdentityAndAbsentColumns)
+{
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    auto identity = make_cartesian();
+    // An identity matrix needs no domain-to-column importer.
+    expect_reverse_overlap_parity(identity, identity, options, true);
+    options.coverage_mode = CoverageMode::AllowPartial;
+    auto source = make_cylindrical(
+        {{{1.0, 3.0}, {0.0, std::numbers::pi / 2.0}, {0.0, 2.0}}}, false, true);
+    auto target = make_cylindrical(
+        {{{1.0, 3.0}, {0.0, std::numbers::pi / 2.0}, {3.0, 5.0}}}, true, true);
+    // These plans have nonempty global source maps but no overlap columns on
+    // any rank, including ranks with and without owned cells.
+    expect_reverse_overlap_parity(source, target, options, true);
+    expect_reverse_overlap_parity(target, source, options, true);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ReverseCoverageBoundedReductionMatchesDenseOwnerResults)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    constexpr size_t donor_count = 17;
+    const int rank = comm->getRank();
+    // Intermediate ranks contribute without owning any donors. Both owned
+    // ranges cross reduction blocks and the final block is incomplete.
+    const size_t owned_begin = rank == 0 ? 0 : 5;
+    const size_t owned_count = comm->getSize() == 1 ? donor_count
+        : rank == 0 ? 5 : rank == comm->getSize() - 1 ? donor_count - 5 : 0;
+    std::vector<std::pair<size_t, double>> partials;
+    std::vector<double> local(donor_count), dense(donor_count);
+    for (size_t donor = 0; donor < donor_count; ++donor)
+    {
+        // Donor zero has at least three nonzero contributors at four ranks;
+        // their disparate positive magnitudes exercise reduction rounding.
+        // Other donors include absent local columns and wholly uncovered cells.
+        if (donor % 5 == 4 || (donor != 0 && (donor + rank) % 3 == 0)) continue;
+        const double value = rank % 4 == 0 ? 1.0 + 0.13 * donor
+            : std::ldexp(1.0 + rank % 3, -54 + static_cast<int>(donor % 3));
+        local[donor] = value;
+        partials.emplace_back(donor, value);
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, static_cast<int>(donor_count),
+                      local.data(), dense.data());
+    for (const size_t block_limit : {size_t{3}, size_t{7}, donor_count})
+    {
+        SCOPED_TRACE(block_limit);
+        const auto actual = SimpleFluid::mesh_transfer_detail::reduce_reverse_coverage(
+            *comm, donor_count, owned_begin, owned_count, partials, block_limit);
+        ASSERT_EQ(actual.size(), owned_count);
+        for (size_t row = 0; row < owned_count; ++row)
+        {
+            const double expected = dense[owned_begin + row];
+            if (block_limit == donor_count)
+                EXPECT_EQ(actual[row], expected);
+            else
+                // Blocking can select a different MPI reduction algorithm;
+                // do not require its rounding to match a single dense call.
+                EXPECT_NEAR(actual[row], expected,
+                    4 * std::numeric_limits<double>::epsilon() * std::max(1.0, std::abs(expected)));
+        }
+    }
+    EXPECT_TRUE(SimpleFluid::mesh_transfer_detail::reduce_reverse_coverage(
+        *comm, 0, 0, 0, {}, 3).empty());
+    if (rank == 0) partials.emplace_back(donor_count, 1.0);
+    EXPECT_THROW((void)SimpleFluid::mesh_transfer_detail::reduce_reverse_coverage(
+        *comm, donor_count, owned_begin, owned_count, partials, 3), std::invalid_argument);
 }
