@@ -9,8 +9,22 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   target_link_libraries(${TEST_NAME} SimpleFluid::Mesh GTest::gtest_main)
   simplefluid_configure_test_executable(${TEST_NAME})
-  simplefluid_discover_tests(${TEST_NAME})
+  if(TEST_NAME STREQUAL "testMeshQualityAccess")
+    simplefluid_discover_tests(${TEST_NAME}
+        TEST_FILTER "QualityAccessTest.*"
+        PROPERTIES TIMEOUT 30)
+  else()
+    simplefluid_discover_tests(${TEST_NAME})
+  endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME MeshQualityAccess_2procs
+    TARGET testMeshQualityAccess
+    PROCS 2
+    ARGS "--gtest_filter=QualityAccessTest.*:QualityAccessMultiRankTest.*"
+    LABELS "mpi;geometry;quality;collective"
+    TIMEOUT 30)
 
 simplefluid_add_mpi_test(
     NAME SweptRZRegionProviders_2procs
