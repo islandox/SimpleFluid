@@ -34,6 +34,15 @@ namespace SimpleFluid
 namespace
 {
 
+void validate_topology(const VTUWriter::Topology& topology_data);
+
+/** Factory-only proof tied to both the immutable allocation and its owner. */
+struct ValidatedTopologyDeleter
+{
+    const VTUWriter::Topology* validated;
+    void operator()(const VTUWriter::Topology* topology) const { delete topology; }
+};
+
 static_assert(sizeof(real_t) == 8);
 static_assert(sizeof(int) == 4);
 static_assert(sizeof(global_index_t) == 8);
@@ -252,13 +261,16 @@ auto VTUWriter::make_topology(
     Int64Data faces,
     Int64Data face_offsets) -> TopologyHandle
 {
-    return std::make_shared<const Topology>(Topology{
+    auto candidate = std::make_unique<const Topology>(Topology{
         std::move(points),
         std::move(connectivity),
         std::move(offsets),
         std::move(cell_types),
         std::move(faces),
         std::move(face_offsets)});
+    validate_topology(*candidate);
+    const auto* validated = candidate.get();
+    return TopologyHandle(candidate.release(), ValidatedTopologyDeleter{validated});
 }
 
 /** @brief Return the collision-free filename for one MPI rank's piece. */
@@ -510,18 +522,11 @@ void VTUWriter::add_cell_data_array(DataArray data_array)
     d_cell_data.push_back(std::move(data_array));
 }
 
-/**
- * @brief Validate the VTU data for internal consistency before writing.
- *
- * Checks that cell offsets and types match, offsets are monotonically
- * increasing, the final offset matches connectivity size, and cell data
- * arrays have the correct number of entries.
- *
- * @throws std::runtime_error If any consistency check fails.
- */
-void VTUWriter::validate() const
+namespace
 {
-    const auto& topology_data = topology();
+/** Validate immutable connectivity before publishing a factory handle. */
+void validate_topology(const VTUWriter::Topology& topology_data)
+{
     if (topology_data.cell_offsets.size()
         != topology_data.cell_types.size())
     {
@@ -567,11 +572,11 @@ void VTUWriter::validate() const
         topology_data.cell_types.end(), polyhedron_type) != topology_data.cell_types.end();
     if (has_polyhedra || !topology_data.faces.empty() || !topology_data.face_offsets.empty())
     {
-        if (topology_data.face_offsets.size() != num_cells())
+        if (topology_data.face_offsets.size() != topology_data.cell_offsets.size())
             throw std::runtime_error("VTUWriter requires one face offset per cell when faces are supplied.");
 
         size_t cursor = 0;
-        for (size_t cell = 0; cell < num_cells(); ++cell)
+        for (size_t cell = 0; cell < topology_data.cell_offsets.size(); ++cell)
         {
             const auto offset = topology_data.face_offsets[cell];
             if (topology_data.cell_types[cell] != polyhedron_type)
@@ -617,6 +622,15 @@ void VTUWriter::validate() const
         if (cursor != topology_data.faces.size())
             throw std::runtime_error("VTUWriter polyhedron face stream contains trailing entries.");
     }
+}
+} // namespace
+
+/** Recheck mutable topology and every writer's field sizes before output. */
+void VTUWriter::validate() const
+{
+    const auto* proof = std::get_deleter<ValidatedTopologyDeleter>(d_shared_topology);
+    if (!proof || proof->validated != d_shared_topology.get())
+        validate_topology(topology());
 
     for (const auto& data_array : d_cell_data)
     {

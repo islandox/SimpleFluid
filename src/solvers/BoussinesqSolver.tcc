@@ -3636,7 +3636,7 @@ struct BoussinesqSolver<Pack>::CouplingState
     continuity_residual_type volume_residuals;
     NonlinearSolveResult nonlinear_result;
     PlanarALEStepDiagnostics ale_diagnostics;
-    std::vector<FreeSurfaceHistoryRecord> history;
+    size_t history_size = 0;
 };
 
 template<TpetraTypePack Pack>
@@ -3716,7 +3716,7 @@ auto BoussinesqSolver<Pack>::create_coupling_checkpoint() -> CouplingCheckpoint
     saved->nonlinear_result = this->d_last_nonlinear_result;
     saved->ale_diagnostics = d_planar_ale_diagnostics;
     saved->occupancy_error = d_pool_occupancy_volume_error;
-    saved->history = d_free_surface_history;
+    saved->history_size = d_free_surface_history.size();
     d_active_coupling_checkpoint = saved;
     return CouplingCheckpoint(std::move(saved));
 }
@@ -3732,7 +3732,8 @@ void BoussinesqSolver<Pack>::validate_coupling_checkpoint(const CouplingCheckpoi
             d_radiolytic_gas_model.get(), d_scalar_void_fraction_model.get(), d_fission_power_source.get()};
         if (!saved || saved->owner != this || saved.get() != d_active_coupling_checkpoint.lock().get() ||
             saved->model_owners != owners || saved->configuration != coupling_configuration_signature() ||
-            d_active_ale || !d_ale_motion || d_ale_motion->has_active_trial())
+            d_active_ale || !d_ale_motion || d_ale_motion->has_active_trial() ||
+            d_free_surface_history.size() < saved->history_size)
             throw std::invalid_argument("Coupling checkpoint is stale, foreign, active, or reconfigured.");
         size_t index = 0;
         if (saved->sources.size() != stored_temperature_sources().entries().size())
@@ -3778,7 +3779,8 @@ void BoussinesqSolver<Pack>::restore_coupling_checkpoint(const CouplingCheckpoin
     this->d_last_nonlinear_result = saved.nonlinear_result;
     d_planar_ale_diagnostics = saved.ale_diagnostics;
     d_pool_occupancy_volume_error = saved.occupancy_error;
-    d_free_surface_history = saved.history;
+    // A valid checkpoint preserves the accepted prefix; trials only append.
+    d_free_surface_history.resize(saved.history_size);
 }
 
 template<TpetraTypePack Pack>

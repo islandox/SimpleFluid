@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <vector>
@@ -647,20 +648,23 @@ MeshToMeshConservationReport MeshToMeshTransfer<Pack>::project(
     require_all(*comm, minimum == maximum, "Mesh transfer quantity must agree on every rank.");
     validate_data(source, target);
     const auto count = source.getNumVectors();
-    multi_vector_type density(d_source_map, count);
+    std::unique_ptr<multi_vector_type> converted_density;
+    if (quantity == MeshToMeshQuantity::Extensive)
+        converted_density = std::make_unique<multi_vector_type>(d_source_map, count);
+    const auto& density = converted_density ? *converted_density : source;
     for (size_t col = 0; col < count; ++col)
     {
         const auto input = source.getData(col);
-        auto output = density.getDataNonConst(col);
+        if (!converted_density) continue;
+        auto output = converted_density->getDataNonConst(col);
         for (size_t row = 0; row < source.getLocalLength(); ++row)
             output[row] = quantity == MeshToMeshQuantity::Extensive
                 ? input[row] / d_coverage.source_cell_volumes[row] : input[row];
     }
     require_all(*comm, finite(density), "Mesh transfer source density is non-finite.");
-    multi_vector_type inventory(d_target_map, count);
-    d_weights->apply(density, inventory);
-    require_all(*comm, finite(inventory), "Mesh transfer produced non-finite target inventories.");
     multi_vector_type result(d_target_map, count);
+    d_weights->apply(density, result);
+    require_all(*comm, finite(result), "Mesh transfer produced non-finite target inventories.");
     MeshToMeshConservationReport report;
     report.source_integral.resize(count);
     report.transferred_integral.resize(count);
@@ -681,12 +685,11 @@ MeshToMeshConservationReport MeshToMeshTransfer<Pack>::project(
             local_transferred[col] += rho[row] * d_coverage.source_covered_volumes[row];
             local_uncovered[col] += rho[row] * d_coverage.source_uncovered_volumes[row];
         }
-        const auto amounts = inventory.getData(col);
         auto output = result.getDataNonConst(col);
         for (size_t row = 0; row < target.getLocalLength(); ++row)
         {
             output[row] = quantity == MeshToMeshQuantity::Intensive
-                ? amounts[row] / d_coverage.target_cell_volumes[row] : amounts[row];
+                ? output[row] / d_coverage.target_cell_volumes[row] : output[row];
             // Report the integral of the actual returned representation.
             local_target[col] += quantity == MeshToMeshQuantity::Intensive
                 ? output[row] * d_coverage.target_cell_volumes[row] : output[row];

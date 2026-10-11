@@ -6,12 +6,13 @@
 #pragma once
 
 #include <stdexcept>
+#include <Tpetra_Access.hpp>
 #include <Teuchos_CommHelpers.hpp>
 #include "fields/Field.hh"
-#include <type_traits>
 #include <functional>
 #include <memory>
 #include <utility>
+#include <type_traits>
 #include <vector>
 
 namespace SimpleFluid
@@ -33,25 +34,26 @@ public:
     explicit FieldStateSnapshot(const Field& field)
         : d_field(&field), d_mesh(&field.mesh()),
           d_owned_map(field.owned_data().getMap()),
-          d_overlap_map(field.overlap_data().getMap()),
-          d_columns(field.owned_data().getNumVectors())
+          d_overlap_map(field.overlap_data().getMap())
     {
-        if constexpr (requires { field.owned_face_ids(); })
+        d_rows = field.owned_data().getLocalLength();
+        d_columns = field.owned_data().getNumVectors();
+        d_values.resize(d_rows * d_columns);
+        if (field.owned_data().isConstantStride())
         {
-            d_local_ids = field.owned_face_ids();
+            const auto values = field.owned_data().getLocalViewHost(Tpetra::Access::ReadOnly);
+            for (size_t column = 0; column < d_columns; ++column)
+                for (size_t row = 0; row < d_rows; ++row)
+                    d_values[column * d_rows + row] = values(row, column);
         }
         else
         {
-            d_local_ids.reserve(field.num_owned_entries());
-            for (size_t owned = 0; owned < field.num_owned_entries(); ++owned)
+            for (size_t column = 0; column < d_columns; ++column)
             {
-                d_local_ids.push_back(static_cast<local_ordinal_type>(owned));
+                const auto values = field.owned_data().getData(column);
+                for (size_t row = 0; row < d_rows; ++row)
+                    d_values[column * d_rows + row] = values[row];
             }
-        }
-        d_values.reserve(d_local_ids.size());
-        for (const auto local_id : d_local_ids)
-        {
-            d_values.push_back(field.value(local_id));
         }
     }
 
@@ -61,17 +63,29 @@ public:
             || field.owned_data().getMap().getRawPtr() != d_owned_map.getRawPtr()
             || field.overlap_data().getMap().getRawPtr() != d_overlap_map.getRawPtr()
             || !mesh_maps_match(field)
-            || d_local_ids.size() != d_values.size()
-            || field.num_owned_entries() != d_values.size()
+            || field.num_owned_entries() != d_rows
             || field.owned_data().getNumVectors() != d_columns);
         int all_valid = 0;
         Teuchos::reduceAll(*d_owned_map->getComm(), Teuchos::REDUCE_MIN, 1,
                           &local_valid, &all_valid);
         if (!all_valid)
             throw std::invalid_argument("FieldStateSnapshot belongs to another field or topology.");
-        for (size_t entry = 0; entry < d_values.size(); ++entry)
+        if (field.owned_data().isConstantStride())
         {
-            field.set_owned_value(d_local_ids[entry], d_values[entry]);
+            auto values = field.owned_data().getLocalViewHost(Tpetra::Access::OverwriteAll);
+            for (size_t column = 0; column < d_columns; ++column)
+                for (size_t row = 0; row < d_rows; ++row)
+                    values(row, column) = d_values[column * d_rows + row];
+        }
+        else
+        {
+            // Logical column access preserves unselected backing columns.
+            for (size_t column = 0; column < d_columns; ++column)
+            {
+                auto values = field.owned_data().getDataNonConst(column);
+                for (size_t row = 0; row < d_rows; ++row)
+                    values[row] = d_values[column * d_rows + row];
+            }
         }
         field.sync_ghosts();
     }
@@ -93,9 +107,8 @@ private:
     const Field* d_field = nullptr;
     const typename Field::mesh_type* d_mesh = nullptr;
     Teuchos::RCP<const typename Field::map_type> d_owned_map, d_overlap_map;
-    size_t d_columns = 0;
-    std::vector<local_ordinal_type> d_local_ids;
-    std::vector<value_type> d_values;
+    size_t d_rows = 0, d_columns = 0;
+    std::vector<typename Field::scalar_type> d_values;
 };
 
 /** Snapshot actions are captured only for an explicitly enabled transaction. */

@@ -2137,6 +2137,44 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     EXPECT_THROW(solver.restore_coupling_checkpoint(checkpoint), std::invalid_argument);
 }
 
+TEST(BoussinesqCouplingIntervalTest, RepeatedReplayPreservesAcceptedHistoryPrefix)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 4);
+    auto& solver = *state.solver;
+    solver.step();
+    solver.step();
+    const auto prefix = solver.free_surface_history();
+    ASSERT_GE(prefix.size(), 2U);
+    const auto accepted_time = solver.time();
+    auto checkpoint = solver.create_coupling_checkpoint();
+    for (int replay = 0; replay < 2; ++replay)
+    {
+        solver.step();
+        ASSERT_EQ(solver.free_surface_history().size(), prefix.size() + 1);
+        solver.restore_coupling_checkpoint(checkpoint);
+        EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
+        ASSERT_EQ(solver.free_surface_history().size(), prefix.size());
+        for (size_t record = 0; record < prefix.size(); ++record)
+        {
+            const auto& actual = solver.free_surface_history()[record];
+            EXPECT_DOUBLE_EQ(actual.free_surface.pool_level, prefix[record].free_surface.pool_level);
+            EXPECT_DOUBLE_EQ(actual.liquid_mass.total_mass, prefix[record].liquid_mass.total_mass);
+            ASSERT_EQ(actual.planar_ale.has_value(), prefix[record].planar_ale.has_value());
+            if (actual.planar_ale)
+            {
+                EXPECT_EQ(actual.planar_ale->level_residual_history, prefix[record].planar_ale->level_residual_history);
+                EXPECT_EQ(actual.planar_ale->target_change_history, prefix[record].planar_ale->target_change_history);
+                EXPECT_EQ(actual.planar_ale->continuity_maximum_history, prefix[record].planar_ale->continuity_maximum_history);
+                EXPECT_EQ(actual.planar_ale->material_state_residual_history, prefix[record].planar_ale->material_state_residual_history);
+                EXPECT_EQ(actual.planar_ale->gas_state_residual_history, prefix[record].planar_ale->gas_state_residual_history);
+            }
+        }
+    }
+    solver.step();
+    solver.accept_coupling_checkpoint(checkpoint);
+    EXPECT_EQ(solver.free_surface_history().size(), prefix.size() + 1);
+}
+
 TEST(BoussinesqCouplingIntervalTest, RejectsInvalidBudgetAndRestoresSourceAfterFailedTrial)
 {
     auto state = make_case(Coupling::PISO, 0.0, 1);
