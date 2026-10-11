@@ -61,6 +61,29 @@ TEST(LumpedInnerCavityModelTest, EmptyCavityPreservesState)
     EXPECT_DOUBLE_EQ(step.energy_balance_residual, 0.0);
 }
 
+TEST(LumpedInnerCavityModelTest, EmptyCavityPreservesNonUnitInventoryInPreviewAndAdvance)
+{
+    auto o = options();
+    o.dry_air_mass = 0.37;
+    for (const auto dt : {1.0e-6, 1.0e6})
+    {
+        SCOPED_TRACE(dt);
+        LumpedInnerCavityModel model(o, {300.0, 0.03});
+        for (const auto& step : std::array{model.preview(dt, {}), model.advance(dt, {})})
+        {
+            EXPECT_EQ(step.state.temperature, 300.0);
+            EXPECT_EQ(step.state.humidity_ratio, 0.03);
+            EXPECT_EQ(step.mass_balance_residual, 0.0);
+            EXPECT_EQ(step.energy_balance_residual, 0.0);
+            EXPECT_EQ(step.exchange.vapor_mass_rate, 0.0);
+            EXPECT_EQ(step.exchange.air_energy_rate, 0.0);
+            EXPECT_TRUE(step.exchange.surfaces.empty());
+        }
+        EXPECT_EQ(model.state().temperature, 300.0);
+        EXPECT_EQ(model.state().humidity_ratio, 0.03);
+    }
+}
+
 TEST(LumpedInnerCavityModelTest, DryHeatingMatchesBackwardEulerAndConvergesToExponential)
 {
     const auto o = options();
@@ -383,6 +406,7 @@ TEST(LumpedInnerCavityModelTest, InvalidSurfacesAndRadiationAreRejectedTransacti
     reject({});
     EXPECT_THROW(model.advance(0.0, {}), std::invalid_argument);
     EXPECT_THROW(model.advance(std::numeric_limits<real_t>::quiet_NaN(), {}), std::invalid_argument);
+    EXPECT_THROW(model.advance(1.0, {}, std::array{1.0}), std::invalid_argument);
 }
 
 TEST(LumpedInnerCavityModelTest, MaterialCallbackFailureDoesNotCommitState)

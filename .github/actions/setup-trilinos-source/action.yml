@@ -123,12 +123,13 @@ runs:
 
     - name: Restore partitioners install cache
       id: cache-partitioners
-      if: steps.cache-trilinos.outputs.cache-hit != 'true'
       uses: actions/cache@v5
       with:
         path: |
           ${{ github.workspace }}/_deps/partitioners_install
-        key: partitioners-${{ runner.os }}-${{ inputs.compiler-id }}-${{ inputs.cache-suffix-install }}
+        # Restore after the combined Trilinos cache so its old host-tuned
+        # partitioner binaries cannot replace the portable libraries.
+        key: partitioners-portable-v1-${{ runner.os }}-${{ inputs.compiler-id }}-gk3b7d61b9-metis272d4a91-par7436de67-${{ inputs.cache-suffix-install }}
 
     - name: Restore Trilinos build cache
       id: cache-trilinos-build
@@ -189,7 +190,7 @@ runs:
         "$NETCDF_PREFIX/bin/nc-config" --cflags
 
     - name: Build METIS and ParMETIS from source
-      if: steps.cache-trilinos.outputs.cache-hit != 'true' && steps.cache-partitioners.outputs.cache-hit != 'true'
+      if: steps.cache-partitioners.outputs.cache-hit != 'true'
       shell: bash
       run: |
         PARTITIONER_PREFIX="${{ github.workspace }}/_deps/partitioners_install"
@@ -218,6 +219,16 @@ runs:
           https://github.com/KarypisLab/ParMETIS.git \
           "${{ github.workspace }}/_deps/ParMETIS" \
           7436de671433c248e4203e1640a65b778845e6fc
+
+        # GCC defaults to -march=native in both pinned gkbuild modules. The
+        # cached libraries move between Intel and AMD runners; use baseline
+        # x86-64 instructions instead of the cache producer's CPU extensions.
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          test "$(uname -m)" = x86_64
+          python3 "${{ github.workspace }}/.github/scripts/portable-partitioner-flags.py" \
+            "${{ github.workspace }}/_deps/METIS/conf/gkbuild.cmake" \
+            "${{ github.workspace }}/_deps/ParMETIS/conf/gkbuild.cmake"
+        fi
 
         if [ "${{ inputs.compiler-id }}" = "LLVM" ]; then
           export OMPI_CC="$(command -v clang)"
@@ -265,6 +276,19 @@ runs:
         test -e "$PARTITIONER_PREFIX/lib/libGKlib.$PARTITIONER_LIBRARY_SUFFIX"
         test -e "$PARTITIONER_PREFIX/lib/libmetis.$PARTITIONER_LIBRARY_SUFFIX"
         test -e "$PARTITIONER_PREFIX/lib/libparmetis.$PARTITIONER_LIBRARY_SUFFIX"
+
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          for flags in \
+            "${{ github.workspace }}/_deps/METIS/build/libmetis/CMakeFiles/metis.dir/flags.make" \
+            "${{ github.workspace }}/_deps/ParMETIS/build/Linux-x86_64/libparmetis/CMakeFiles/parmetis.dir/flags.make"; do
+            test -f "$flags"
+            if grep -Eq -- '-m(arch|tune)=native' "$flags"; then
+              echo "Host-specific instructions found in $flags" >&2
+              exit 1
+            fi
+            cat "$flags"
+          done
+        fi
 
     - name: Build Trilinos from source
       if: steps.cache-trilinos.outputs.cache-hit != 'true'
