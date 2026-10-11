@@ -14,6 +14,7 @@
 #include "FVM/TransportSystem.hh"
 #include "equations/BoussinesqMomentumEquation.hh"
 #include "equations/IncompressibleMomentumEquation.hh"
+#include "parallel/CommunicatorCompatibility.hh"
 
 #include <BelosTpetraAdapter.hpp>
 #include <Ifpack2_Factory.hpp>
@@ -33,6 +34,20 @@ namespace SimpleFluid
 {
 namespace detail
 {
+
+/** Compare caller maps without rank-dependent Map::isSameAs collectives. */
+template<class Map>
+bool locally_same_coupled_map(const Map& first, const Map& second)
+{
+    if (!communicators_congruent(*first.getComm(), *second.getComm()) ||
+        first.getGlobalNumElements() != second.getGlobalNumElements() ||
+        first.getLocalNumElements() != second.getLocalNumElements() ||
+        first.getIndexBase() != second.getIndexBase() || first.isDistributed() != second.isDistributed())
+        return false;
+    const auto a = first.getLocalElementList();
+    const auto b = second.getLocalElementList();
+    return std::equal(a.begin(), a.end(), b.begin());
+}
 
 /** Counts application-owned streamed product matrices, not Trilinos internal scratch. */
 class ScopedCoupledProduct
@@ -2348,13 +2363,25 @@ auto CoupledPressureVelocitySolver<Pack, MeshType>::right_preconditioner(
     const system_type& system, bool preserve_retained_generations) const
     -> Teuchos::RCP<const operator_type>
 {
-    if (system.geometry_epoch != mesh_geometry_epoch(*d_mesh) ||
-        system.fixed_boundary_flux_revision != d_fixed_boundary_flux_revision ||
-        system.map.is_null() || !system.map->isSameAs(*d_coupled_map) ||
-        system.momentum.is_null() || system.schur.is_null())
+    collective_detail::collective_local_validation(*d_mesh, "Coupled preconditioner validation", [&]
     {
-        throw std::invalid_argument("Cannot precondition an incompatible or stale coupled system.");
-    }
+        if (system.geometry_epoch != mesh_geometry_epoch(*d_mesh) ||
+            system.fixed_boundary_flux_revision != d_fixed_boundary_flux_revision ||
+            system.map.is_null() || !detail::locally_same_coupled_map(*system.map, *d_coupled_map))
+            throw std::invalid_argument("Cannot precondition an incompatible or stale coupled system.");
+        const auto valid_block = [&](const auto& block)
+        {
+            return !block.is_null() && block->isFillComplete() &&
+                !block->getRowMap().is_null() && !block->getDomainMap().is_null() &&
+                !block->getRangeMap().is_null() &&
+                detail::locally_same_coupled_map(*block->getRowMap(), *d_mesh->owned_cell_map()) &&
+                detail::locally_same_coupled_map(*block->getDomainMap(), *d_mesh->owned_cell_map()) &&
+                detail::locally_same_coupled_map(*block->getRangeMap(), *d_mesh->owned_cell_map());
+        };
+        if (!valid_block(system.momentum) || !valid_block(system.schur) ||
+            !std::all_of(system.gradient.begin(), system.gradient.end(), valid_block))
+            throw std::invalid_argument("Cannot precondition an incompatible or stale coupled system.");
+    });
     const int local_reuse_preconditioner = d_rebuild_policy == CoupledRebuildPolicy::OnOperatorGraphChange &&
                                       !d_preconditioner.is_null() &&
                                       (!preserve_retained_generations || d_preconditioner.strong_count() == 1) &&
@@ -2381,23 +2408,39 @@ typename CoupledPressureVelocitySolver<Pack, MeshType>::result_type
 CoupledPressureVelocitySolver<Pack, MeshType>::solve(const system_type& system, velocity_field_type& velocity,
     field_type& pressure, const LinearSolverOptions& options) const
 {
-    if (!std::isfinite(system.reference_density) || system.reference_density <= scalar_type{})
+    collective_detail::collective_local_validation(*d_mesh, "Coupled solve validation", [&]
     {
-        throw std::invalid_argument("Coupled pressure-velocity system requires a finite positive "
-                                    "reference density.");
-    }
-    if (system.geometry_epoch != mesh_geometry_epoch(*d_mesh))
-    {
-        throw std::invalid_argument("Coupled pressure-velocity system is stale for the current "
-                                    "mesh geometry epoch.");
-    }
-    if (system.fixed_boundary_flux_revision != d_fixed_boundary_flux_revision)
-    {
-        throw std::invalid_argument("Coupled pressure-velocity system is stale for the current "
-                                    "fixed-boundary-flux configuration.");
-    }
+        if (!std::isfinite(system.reference_density) || system.reference_density <= scalar_type{})
+        {
+            throw std::invalid_argument("Coupled pressure-velocity system requires a finite positive "
+                                        "reference density.");
+        }
+        if (system.geometry_epoch != mesh_geometry_epoch(*d_mesh))
+        {
+            throw std::invalid_argument("Coupled pressure-velocity system is stale for the current "
+                                        "mesh geometry epoch.");
+        }
+        if (system.fixed_boundary_flux_revision != d_fixed_boundary_flux_revision)
+        {
+            throw std::invalid_argument("Coupled pressure-velocity system is stale for the current "
+                                        "fixed-boundary-flux configuration.");
+        }
 
-    if (d_solution.is_null() || !d_solution->getMap()->isSameAs(*system.map) ||
+        if (system.map.is_null() || !detail::locally_same_coupled_map(*system.map, *d_coupled_map) ||
+            system.rhs.is_null() || system.rhs->getMap().is_null() ||
+            !detail::locally_same_coupled_map(*system.rhs->getMap(), *d_coupled_map) ||
+            (system.linear_operator.is_null() && system.matrix.is_null()) ||
+            velocity.mesh_ptr().get() != d_mesh.get() || pressure.mesh_ptr().get() != d_mesh.get())
+            throw std::invalid_argument("Cannot solve an incompatible coupled system.");
+        Teuchos::RCP<const operator_type> selected_operator = system.linear_operator;
+        if (selected_operator.is_null()) selected_operator = system.matrix;
+        if (selected_operator->getDomainMap().is_null() || selected_operator->getRangeMap().is_null() ||
+            !detail::locally_same_coupled_map(*selected_operator->getDomainMap(), *d_coupled_map) ||
+            !detail::locally_same_coupled_map(*selected_operator->getRangeMap(), *d_coupled_map))
+            throw std::invalid_argument("Coupled solve operator maps are incompatible.");
+    });
+
+    if (d_solution.is_null() || !detail::locally_same_coupled_map(*d_solution->getMap(), *system.map) ||
         d_rebuild_policy == CoupledRebuildPolicy::Always)
     {
         d_solution = Teuchos::rcp(new vector_type(system.map, true));

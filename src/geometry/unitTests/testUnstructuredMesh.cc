@@ -352,3 +352,18 @@ TEST(UnstructuredMeshTest, RejectsOpenMisOrientedAndDegeneratePolyhedra)
     EXPECT_NO_THROW(Mesh(SimpleFluid::Arr<Mesh::Vec3>{}, Mesh::PolyhedralTopology{}));
     EXPECT_THROW(Mesh(nodes, prism_topology(6), 2, 0), std::invalid_argument);
 }
+
+/** Only the explicit partition seam permits a rank with no geometry. */
+TEST(UnstructuredMeshTest, EmptyPartitionDoesNotRelaxOrdinaryInputValidation)
+{
+    const auto empty = Mesh::empty_partition();
+    EXPECT_EQ(empty.num_cells(), 0U);
+    EXPECT_EQ(empty.num_owned_cells(), 0U);
+    EXPECT_EQ(empty.num_faces(), 0U);
+    EXPECT_EQ(empty.num_nodes(), 0U);
+    EXPECT_EQ(empty.indexer().cells, 0U);
+    const SimpleFluid::Arr<Mesh::Vec3> nodes;
+    const SimpleFluid::Arr<Mesh::CellDefinition> cells;
+    EXPECT_THROW((Mesh(nodes, cells)), std::invalid_argument);
+    EXPECT_THROW((Mesh(nodes, cells, {}, 0, 0)), std::invalid_argument);
+}

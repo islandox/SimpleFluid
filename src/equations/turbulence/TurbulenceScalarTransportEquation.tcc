@@ -309,15 +309,18 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
             }
         });
 
-    bool all_diffusivities_positive = true;
+    int local_all_diffusivities_positive = 1;
     for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(local);
-        all_diffusivities_positive = all_diffusivities_positive &&
+        local_all_diffusivities_positive = local_all_diffusivities_positive &&
                                      diffusivity_values(cell_lid, 0) >
                                          scalar_type{};
     }
 
+    int all_diffusivities_positive = 0;
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN,
+        1, &local_all_diffusivities_positive, &all_diffusivities_positive);
     auto boundary_condition = [&](int batch_id, size_t in_batch_id)
     {
         const auto face_lid =
@@ -398,6 +401,7 @@ auto TurbulenceScalarTransportEquation<Pack, MeshType>::advance(
     auto& candidate = d_candidate;
     candidate.owned_data().update(
         scalar_type{1}, old_state.owned_data(), scalar_type{0});
+    d_linear_solver.notify_operator_values_changed();
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     const auto statistics = d_linear_solver.solve_with_statistics(
         matrix, *system.rhs, candidate.owned_data(), linear_options);

@@ -145,6 +145,10 @@ provide an explicit refresh/invalidation path. Raw mutation through
 `MeshHandle::visit_mutable()` does not publish an epoch and is unsupported
 after field/cache construction.
 
+`SolidSubdomain` forwards its parent's periodic-image displacement, geometry
+epoch, and execution protection. A moving parent invalidates existing solid
+geometry caches; this does not make fixed-grid solid conduction ALE-capable.
+
 `TransportGeometryCache::refresh()` retains a geometry snapshot when its mesh
 identity and epoch still match. The overload taking `shared_geometry_type`
 allows equations on that exact mesh and epoch to share immutable geometry;
@@ -231,6 +235,10 @@ parameter/factory configuration for an identical map, but each required numeric
 setup constructs a fresh hierarchy and factors. Configuration reuse does not
 authorize stale numeric state. `solve_from_zero_with_statistics()` explicitly
 zeros the supplied solution and retains the ordinary final-residual contract.
+
+Temperature, momentum, and turbulence scalar reassembly invalidate numerical
+preconditioners even when their matrix allocation is reused. Coefficient-based
+graph eligibility is a collective decision, including on empty ranks.
 
 `testBelosLinearSolver` and the registered `BelosAccurateResidual_2procs` case
 cover residual precision, bounded refinement, failure paths, and vector
@@ -400,6 +408,8 @@ behavioral changes separable during review.
   the stable public forwarding surface under `src/FVM`.
 - Validate rank-local inputs collectively before a rank can throw while peers
   enter assembly or a Trilinos collective.
+- Material update callbacks may be absent on individual ranks. If any rank has
+  one, every rank participates in validation and ghost synchronization.
 - State physical units in option, source, and output-field documentation.
 - Parse `Database` options with defaults and validate them before allocating
   distributed state.

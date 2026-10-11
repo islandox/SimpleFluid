@@ -32,6 +32,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME CoupledPreconditionerValidation_2procs
+    TARGET testCoupledPressureVelocitySolver
+    PROCS 2
+    ARGS "--gtest_filter=*RejectsRankLocalInvalidPreconditionerStateCollectively*"
+    LABELS "mpi;coupled;collective"
+    TIMEOUT 60)
+
+simplefluid_add_mpi_test(
     NAME BelosAccurateResidual_2procs
     TARGET testBelosLinearSolver
     PROCS 2

@@ -766,11 +766,15 @@ template<TpetraTypePack Pack, class MeshType> struct MaterialPropertyFields
      * @brief Run a dynamic updater, validate bounds, and synchronize ghosts.
      *
      * Static fields are already validated and synchronized by construction or
-     * explicit initialization, so this is a no-op without an updater.
+     * explicit initialization, so this is a no-op when no rank has an updater.
      */
     void update(const context_type& context)
     {
-        if (!updater)
+        const int local_active = static_cast<bool>(updater);
+        int any_active = 0;
+        Teuchos::reduceAll(*density.mesh().owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+            1, &local_active, &any_active);
+        if (any_active == 0)
         {
             return;
         }

@@ -37,6 +37,11 @@
 namespace SimpleFluid
 {
 
+namespace detail
+{
+template<TpetraTypePack Pack> struct TransportEquationTestAccess;
+}
+
 /**
  * @brief Momentum update for incompressible three-component velocity fields.
  *
@@ -209,6 +214,7 @@ public:
         const FVM::ALEControlVolumeState* ale) const;
 
 private:
+    friend struct detail::TransportEquationTestAccess<Pack>;
     SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_transport_inputs(
         const velocity_field_type& old_velocity,

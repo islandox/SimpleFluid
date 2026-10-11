@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 
 #include "geometry/SolidSubdomain.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/unitTests/region_mesh_helpers.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -208,4 +210,69 @@ TEST(SolidSubdomainTest, CollectivelyValidatesSelectionInputs)
                      std::move(colliding_name_parent),
                      [](Pack::global_ordinal_type, const Subdomain::Vec3&) { return true; }, "xmin")),
         std::invalid_argument);
+}
+
+/** Periodic image distances survive compact and reordered solid selections. */
+TEST(SolidSubdomainTest, PreservesPeriodicImageVectorsInBothOrientations)
+{
+    for (const bool select_all : {true, false})
+    {
+        auto geometry = std::make_shared<Cartesian>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0, 1, 2, 3}, {0, 1}, {0, 1}}},
+            SimpleFluid::Vec3D<bool>{{true, false, false}});
+        auto parent = std::make_shared<Handle>(geometry);
+        std::unique_ptr<Subdomain> solid;
+        if (select_all)
+            solid = std::make_unique<Subdomain>(SimpleFluid::SP<const Handle>(parent));
+        else
+            solid = std::make_unique<Subdomain>(std::move(parent),
+                [](Pack::global_ordinal_type gid, const Subdomain::Vec3&) { return gid != 1; });
+        size_t periodic_faces = 0;
+        for (size_t f = 0; f < solid->num_faces(); ++f)
+        {
+            const auto face = static_cast<Pack::local_ordinal_type>(f);
+            if (!solid->is_interior_face(face)) continue;
+            const auto owner = solid->owner_cell(face), neighbor = solid->neighbor_cell(face);
+            const auto wrapped = solid->cell_centroid(neighbor) - solid->cell_centroid(owner);
+            if (wrapped.norm() < 1.5) continue;
+            ++periodic_faces;
+            const auto forward = solid->cell_center_vector(face, owner);
+            const auto reverse = solid->cell_center_vector(face, neighbor);
+            EXPECT_NEAR(forward.norm(), 1.0, 1e-14);
+            EXPECT_NEAR((forward + reverse).norm(), 0.0, 1e-14);
+            EXPECT_NEAR(solid->face_cell_center_distance(face), 1.0, 1e-14);
+            EXPECT_NEAR((forward - solid->parent_mesh().cell_center_vector(
+                solid->parent_face_lid(face), solid->parent_cell_lid(owner))).norm(), 0.0, 1e-14);
+        }
+        EXPECT_GT(periodic_faces, 0U);
+    }
+}
+
+/** An aliased parent publishes trial and rollback revisions and retains its read lease. */
+TEST(SolidSubdomainTest, ForwardsParentMotionEpochAndExecutionProtection)
+{
+    auto native = std::make_shared<Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0, 1}, {0, 1}, {0, 1, 2}}});
+    auto composite = std::make_shared<SimpleFluid::Meshes::MultiRegionMesh>(
+        std::vector<SimpleFluid::Meshes::MultiRegionMesh::Region>{
+            SimpleFluid::Meshes::native_region("solid", native)},
+        std::vector<SimpleFluid::Meshes::MultiRegionMesh::Interface>{});
+    auto parent = std::make_shared<Handle>(composite);
+    const Subdomain solid{SimpleFluid::SP<const Handle>(parent)};
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(parent);
+    const auto epoch = solid.geometry_epoch();
+    {
+        const auto execution = solid.acquire_execution_view();
+        EXPECT_THROW(motion.begin_trial(3.0, 1.0), std::logic_error);
+        EXPECT_THROW(*native = Cartesian(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0, 1}, {0, 1}, {0, 2}}}),
+            std::logic_error);
+        EXPECT_EQ(solid.geometry_epoch(), epoch);
+    }
+    motion.begin_trial(3.0, 1.0);
+    EXPECT_GT(solid.geometry_epoch(), epoch);
+    EXPECT_DOUBLE_EQ(solid.cell_volume(0), 1.5);
+    const auto trial_epoch = solid.geometry_epoch();
+    motion.rollback_trial();
+    EXPECT_GT(solid.geometry_epoch(), trial_epoch);
+    EXPECT_DOUBLE_EQ(solid.cell_volume(0), 1.0);
 }
