@@ -89,7 +89,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
-          gcc g++ gfortran
+          gcc g++ gfortran gdb
 
         gcc --version
         g++ --version
@@ -105,6 +105,10 @@ jobs:
         fortran-compiler: ${{ matrix.fortran_compiler }}
         cache-suffix-install: ${{ matrix.cache_suffix }}
         cache-suffix-build: ${{ matrix.cache_suffix }}
+
+    - name: Restore Open MPI signal diagnostics
+      if: runner.os == 'Linux'
+      run: bash .github/scripts/restore-openmpi-help.sh
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.
@@ -127,13 +131,35 @@ jobs:
         -G"Ninja Multi-Config"
         -S ${{ github.workspace }}
 
+    - name: Check distributed mesh startup
+      id: mpi_smoke
+      if: runner.os == 'Linux' && matrix.compiler_id == 'GCC'
+      run: |
+        cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 2 --target testMeshPartitioner testGhostSyncMultiRank
+        for attempt in 1 2 3; do
+          timeout 30s mpiexec -n 2 ${{ steps.strings.outputs.build-output-dir }}/bin/${{ matrix.build_type }}/testMeshPartitioner --gtest_filter=MeshPartitionerTest.PartitionsRootOnlySourceGeometry --gtest_color=no
+          timeout 30s mpiexec -n 2 ${{ steps.strings.outputs.build-output-dir }}/bin/${{ matrix.build_type }}/testGhostSyncMultiRank --gtest_filter=GhostSyncMultiRankTest.SyncsOwnedGlobalIdValuesToAllLocalCells --gtest_color=no
+        done
+
     - name: Build
       # Build your program with the given configuration. Note that --config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
       run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }} --parallel 2
 
     - name: Test
+      id: test
       working-directory: ${{ steps.strings.outputs.build-output-dir }}
       # Execute tests defined by the CMake configuration. Note that --build-config is needed because the default Windows generator is a multi-config generator (Visual Studio generator).
       # See https://cmake.org/cmake/help/latest/manual/ctest.1.html for more detail
       # thermal_lib_extract is an optional local dependency, unavailable in this matrix.
       run: ctest --build-config ${{ matrix.build_type }} -j1 --output-on-failure --label-exclude '^external_material$'
+
+    - name: Capture MPI crash diagnostics
+      if: failure() && runner.os == 'Linux' && matrix.compiler_id == 'GCC' && (steps.mpi_smoke.conclusion == 'failure' || steps.test.conclusion == 'failure')
+      run: bash .github/scripts/diagnose-mpi.sh '${{ steps.strings.outputs.build-output-dir }}' '${{ matrix.build_type }}'
+
+    - name: Upload MPI crash diagnostics
+      if: failure() && runner.os == 'Linux' && matrix.compiler_id == 'GCC' && (steps.mpi_smoke.conclusion == 'failure' || steps.test.conclusion == 'failure')
+      uses: actions/upload-artifact@v7
+      with:
+        name: mpi-diagnostics-${{ matrix.compiler_id }}-${{ matrix.build_type }}
+        path: ${{ steps.strings.outputs.build-output-dir }}/mpi-diagnostics
