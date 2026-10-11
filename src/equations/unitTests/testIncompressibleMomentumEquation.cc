@@ -21,6 +21,29 @@
 #include <stdexcept>
 #include <vector>
 
+namespace SimpleFluid::detail
+{
+/** @brief Test-only access to the linear solver's numeric setup counter. */
+template<TpetraTypePack Pack>
+struct BelosLinearSolverTestAccess
+{
+    static std::size_t preconditioner_setup_count(const BelosLinearSolver<Pack>& solver) noexcept
+    {
+        return solver.d_preconditioner_setup_count;
+    }
+};
+/** @brief Test-only access to transport numeric preconditioner setup counts. */
+template<TpetraTypePack Pack>
+struct TransportEquationTestAccess
+{
+    template<class Equation>
+    static std::size_t preconditioner_setup_count(const Equation& equation) noexcept
+    {
+        return BelosLinearSolverTestAccess<Pack>::preconditioner_setup_count(equation.d_linear_solver);
+    }
+};
+}
+
 namespace
 {
 
@@ -513,4 +536,92 @@ TEST(IncompressibleMomentumEquationTest,
         velocity, zero_fluxes, boundary_cache, options, zero_source);
     EXPECT_TRUE(third.matrix->isFillComplete());
     EXPECT_NE(third.matrix.get(), first_storage);
+}
+
+/** @brief Mixed rank coefficients can expand a cached implicit graph collectively. */
+TEST(IncompressibleMomentumEquationTest, MixedRankViscosityAndChangedTimeStepMatchFreshEquation)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    VectorFieldType old_velocity(mesh, "old_velocity"), velocity(mesh, "velocity"), fresh_velocity(mesh, "fresh_velocity");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+        const auto x = mesh->cell_centroid(cell).x;
+        old_velocity.set_value(cell, {1.0 + x, 0.5 * x, -0.2 * x});
+    }
+    old_velocity.sync_ghosts();
+    FieldType viscosity(mesh, 0.2, "viscosity");
+    if (mesh->owned_cell_map()->getComm()->getRank() == 0 && mesh->num_owned_cells() > 0)
+        viscosity.set_owned_value(0, 0.0);
+    viscosity.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    const auto boundary_cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    SimpleFluid::TimeStepperOptions options;
+    options.non_orthogonal_treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.preconditioner = SimpleFluid::LinearPreconditioner::Jacobi;
+    linear_options.reuse_preconditioner = true;
+    auto acceleration = [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type { return {0.1, 0.2, 0.3}; };
+    SimpleFluid::IncompressibleMomentumEquation<Pack> reused(mesh);
+    for (int step = 0; step < 3; ++step)
+    {
+        if (step == 2)
+        {
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                viscosity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.7);
+            viscosity.sync_ghosts();
+        }
+        options.time_step = 0.1 + 0.03 * step;
+        const auto previous_setups = SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused);
+        SimpleFluid::IncompressibleMomentumEquation<Pack> fresh(mesh);
+        reused.advance_velocity_physical(old_velocity, zero_flux, boundary_cache, options, viscosity,
+            1.0, velocity, acceleration, linear_options);
+        fresh.advance_velocity_physical(old_velocity, zero_flux, boundary_cache, options, viscosity,
+            1.0, fresh_velocity, acceleration, linear_options);
+        EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused), previous_setups);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            EXPECT_NEAR(velocity.value(cell).x, fresh_velocity.value(cell).x, 1.0e-9);
+            EXPECT_NEAR(velocity.value(cell).y, fresh_velocity.value(cell).y, 1.0e-9);
+            EXPECT_NEAR(velocity.value(cell).z, fresh_velocity.value(cell).z, 1.0e-9);
+        }
+    }
+}
+
+/** @brief Empty ranks participate in repeated implicit physical momentum assembly. */
+TEST(IncompressibleMomentumEquationTest, EmptyOwnedRanksParticipateInImplicitCoefficientTransition)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(1, 1, 1, 1.0));
+    VectorFieldType old_velocity(mesh, "old_velocity"), velocity(mesh, "velocity");
+    FieldType viscosity(mesh, 0.0, "viscosity");
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    const auto boundary_cache = SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(mesh, boundaries);
+    SimpleFluid::TimeStepperOptions options;
+    options.time_step = 0.1;
+    options.non_orthogonal_treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
+    auto acceleration = [](MeshType::local_ordinal_type) -> VectorFieldType::vec_type { return {1.0, 2.0, 3.0}; };
+    SimpleFluid::IncompressibleMomentumEquation<Pack> equation(mesh);
+    for (int step = 0; step < 3; ++step)
+    {
+        if (step == 2)
+        {
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                viscosity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.2);
+            viscosity.sync_ghosts();
+        }
+        equation.advance_velocity_physical(old_velocity, flux, boundary_cache, options, viscosity,
+            1.0, velocity, acceleration);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto value = velocity.value(static_cast<MeshType::local_ordinal_type>(owned));
+            EXPECT_NEAR(value.x, 0.1, 1.0e-12);
+            EXPECT_NEAR(value.y, 0.2, 1.0e-12);
+            EXPECT_NEAR(value.z, 0.3, 1.0e-12);
+        }
+    }
 }

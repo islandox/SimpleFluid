@@ -14,6 +14,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -217,7 +218,31 @@ void stored_mesh_relative_face_fluxes(
     using scalar_type = typename Pack::scalar_type;
 
     const auto& mesh = absolute_fluxes.mesh();
-    const auto execution = acquire_mesh_execution(mesh);
+    using execution_type = decltype(acquire_mesh_execution(mesh));
+    // Conversion constructs the nonmovable execution lease directly in its
+    // retained stack storage through guaranteed copy elision.
+    struct ExecutionFactory
+    {
+        const MeshType& mesh;
+        operator execution_type() const { return acquire_mesh_execution(mesh); }
+    };
+    std::optional<execution_type> execution;
+    int local_execution_error = 0;
+    try
+    {
+        execution.emplace(ExecutionFactory{mesh});
+    }
+    catch (...)
+    {
+        local_execution_error = 1;
+    }
+    int any_execution_error = 0;
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+        1, &local_execution_error, &any_execution_error);
+    if (any_execution_error != 0)
+    {
+        throw std::logic_error("mesh_relative_face_fluxes could not acquire a mesh execution view.");
+    }
     const std::array<int, 2> local_output_error{
         absolute_fluxes.mesh_ptr().get() != relative_fluxes.mesh_ptr().get() ? 1 : 0,
         &absolute_fluxes == &relative_fluxes ? 1 : 0};

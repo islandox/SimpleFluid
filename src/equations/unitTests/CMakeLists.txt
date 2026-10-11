@@ -91,6 +91,16 @@ simplefluid_add_mpi_test(
     LABELS "mpi;ale;equations;conservation"
     TIMEOUT 120)
 
+foreach(_coefficient_equation IN ITEMS IncompressibleMomentumEquation TurbulenceScalarTransportEquation)
+  simplefluid_add_mpi_test(
+      NAME ${_coefficient_equation}Cache_2procs
+      TARGET test${_coefficient_equation}
+      PROCS 2
+      ARGS "--gtest_filter=*MixedRank*:*EmptyOwnedRanksParticipateInImplicitCoefficientTransition"
+      LABELS "mpi;equations;cache"
+      TIMEOUT 60)
+endforeach()
+
 simplefluid_add_mpi_test(
     NAME PressureProjection_2procs
     TARGET testPressureProjectionMultiRank

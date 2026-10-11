@@ -150,6 +150,14 @@ public:
         }
     };
 
+    /** @brief Empty rank-local geometry for a partition with no incident cells.
+     *
+     * Ordinary input constructors still require valid nonempty geometry.
+     * Attach this value through PartitionedMesh with the collective indexer
+     * and communicator; it is not a standalone global mesh.
+     */
+    static UnstructuredMesh empty_partition() { return UnstructuredMesh(EmptyPartitionTag{}); }
+
     UnstructuredMesh(
         const Arr<Vec3>& nodes,
         const Arr<CellDefinition>& cells,
@@ -199,6 +207,9 @@ public:
     int cell_face_orientation(CellID cell_id, FaceID face_id) const;
 
 private:
+    struct EmptyPartitionTag {};
+    explicit UnstructuredMesh(EmptyPartitionTag) {}
+
     friend Base;
 
     /** @brief Derived connectivity and geometry for one cell. */

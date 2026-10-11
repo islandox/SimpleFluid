@@ -306,10 +306,14 @@ TEST(MultiRegionALETest, RankLocalStaleChildFailsValidationCollectively)
         PlanarALEMeshMotion<> motion(mesh);
         motion.begin_trial(1.1, 0.2);
         const auto ale = FVM::make_ale_control_volume_state(*mesh, motion);
+        ScalarFaceFieldStored<Pack> absolute(mesh, 0.0, "absolute"), relative(mesh, "relative");
         if (comm->getRank() == 0) *left = Meshes::OrthogonalCartesian3D(left_edges);
         expect_collective_error(*comm, [&] { ale.validate(*mesh); },
             RejectionCategory::LogicError,
             "Static region constituent changed; rebuild MultiRegionMesh and its fields/operators.");
+        expect_collective_error(*comm, [&] { FVM::mesh_relative_face_fluxes(absolute, ale, relative); },
+            RejectionCategory::LogicError,
+            "mesh_relative_face_fluxes could not acquire a mesh execution view.");
     }
     auto fresh_mesh = std::make_shared<Handle>(test::two_regions());
     PlanarALEMeshMotion<> fresh_motion(fresh_mesh);

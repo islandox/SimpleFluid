@@ -47,6 +47,17 @@ struct BelosLinearSolverTestAccess
     }
 };
 
+/** @brief Test-only access to transport numeric preconditioner setup counts. */
+template<TpetraTypePack Pack>
+struct TransportEquationTestAccess
+{
+    template<class Equation>
+    static std::size_t preconditioner_setup_count(const Equation& equation) noexcept
+    {
+        return BelosLinearSolverTestAccess<Pack>::preconditioner_setup_count(equation.d_linear_solver);
+    }
+};
+
 /**
  * @brief Test-only access to cached pressure-projection state.
  * @tparam Pack Tpetra type pack used by the equation.
@@ -2347,4 +2358,65 @@ TEST(PhysicalEquationsTest, MomentumDiffusionHonorsNonOrthogonalTreatmentOnSkewe
     }
 
     EXPECT_GT(max_difference, 1.0e-10);
+}
+
+/** @brief Cached temperature operators refresh numeric factors after coefficient and dt changes. */
+TEST(PhysicalEquationsTest, TemperatureReassembledOperatorsMatchFreshEquationsWithReuseEnabled)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    FieldType old_temperature(mesh, "old_temperature"), temperature(mesh, "temperature"), fresh_temperature(mesh, "fresh_temperature");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+        old_temperature.set_owned_value(cell, 275.0 + 10.0 * mesh->cell_centroid(cell).x);
+    }
+    old_temperature.sync_ghosts();
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.temperature["xmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 290.0};
+    SimpleFluid::TemperatureDiffusionEquation<Pack> reused_ordinary(mesh, boundaries), reused_physical(mesh, boundaries);
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.preconditioner = SimpleFluid::LinearPreconditioner::Jacobi;
+    linear_options.reuse_preconditioner = true;
+    SimpleFluid::TimeStepperOptions time_options;
+    SimpleFluid::BoussinesqModelOptions model_options;
+    SimpleFluid::MaterialPropertyFields<Pack> material(mesh, model_options, time_options);
+    auto zero_power = [](MeshType::local_ordinal_type) -> Pack::scalar_type { return 0.0; };
+    for (int step = 0; step < 3; ++step)
+    {
+        const auto dt = 0.1 + 0.03 * step;
+        const auto coefficient = 0.2 + 0.4 * step;
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            material.density.set_owned_value(cell, 1.0);
+            material.specific_heat_capacity.set_owned_value(cell, 1.0);
+            material.thermal_conductivity.set_owned_value(cell, coefficient);
+        }
+        material.validate_and_sync();
+        const auto previous_ordinary_setups = SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused_ordinary);
+        const auto previous_physical_setups = SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused_physical);
+        SimpleFluid::TemperatureDiffusionEquation<Pack> fresh_ordinary(mesh, boundaries), fresh_physical(mesh, boundaries);
+        ASSERT_TRUE(reused_ordinary.advance_semi_implicit(old_temperature, zero_flux, dt, coefficient,
+            temperature, linear_options).converged);
+        ASSERT_TRUE(fresh_ordinary.advance_semi_implicit(old_temperature, zero_flux, dt, coefficient,
+            fresh_temperature, linear_options).converged);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            EXPECT_NEAR(temperature.value(cell), fresh_temperature.value(cell), 1.0e-8);
+        }
+        EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused_ordinary), previous_ordinary_setups);
+        ASSERT_TRUE(reused_physical.advance_physical(old_temperature, zero_flux, dt, material,
+            temperature, zero_power, SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, linear_options).converged);
+        ASSERT_TRUE(fresh_physical.advance_physical(old_temperature, zero_flux, dt, material,
+            fresh_temperature, zero_power, SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, linear_options).converged);
+        EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused_physical), previous_physical_setups);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell = static_cast<MeshType::local_ordinal_type>(owned);
+            EXPECT_NEAR(temperature.value(cell), fresh_temperature.value(cell), 1.0e-8);
+        }
+    }
 }

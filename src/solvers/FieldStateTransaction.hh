@@ -6,6 +6,9 @@
 #pragma once
 
 #include <stdexcept>
+#include <Teuchos_CommHelpers.hpp>
+#include "fields/Field.hh"
+#include <type_traits>
 #include <functional>
 #include <memory>
 #include <utility>
@@ -27,7 +30,11 @@ public:
     using value_type = typename Field::value_type;
     using local_ordinal_type = typename Field::local_ordinal_type;
 
-    explicit FieldStateSnapshot(const Field& field) : d_field(&field)
+    explicit FieldStateSnapshot(const Field& field)
+        : d_field(&field), d_mesh(&field.mesh()),
+          d_owned_map(field.owned_data().getMap()),
+          d_overlap_map(field.overlap_data().getMap()),
+          d_columns(field.owned_data().getNumVectors())
     {
         if constexpr (requires { field.owned_face_ids(); })
         {
@@ -50,10 +57,18 @@ public:
 
     void restore(Field& field) const
     {
-        if (&field != d_field || d_local_ids.size() != d_values.size() || field.num_owned_entries() != d_values.size())
-        {
+        const int local_valid = !(&field != d_field || &field.mesh() != d_mesh
+            || field.owned_data().getMap().getRawPtr() != d_owned_map.getRawPtr()
+            || field.overlap_data().getMap().getRawPtr() != d_overlap_map.getRawPtr()
+            || !mesh_maps_match(field)
+            || d_local_ids.size() != d_values.size()
+            || field.num_owned_entries() != d_values.size()
+            || field.owned_data().getNumVectors() != d_columns);
+        int all_valid = 0;
+        Teuchos::reduceAll(*d_owned_map->getComm(), Teuchos::REDUCE_MIN, 1,
+                          &local_valid, &all_valid);
+        if (!all_valid)
             throw std::invalid_argument("FieldStateSnapshot belongs to another field or topology.");
-        }
         for (size_t entry = 0; entry < d_values.size(); ++entry)
         {
             field.set_owned_value(d_local_ids[entry], d_values[entry]);
@@ -62,7 +77,23 @@ public:
     }
 
 private:
+    bool mesh_maps_match(const Field& field) const
+    {
+        if constexpr (std::is_same_v<typename Field::location_type, CellLocation>)
+            return field.mesh().owned_cell_map().getRawPtr() == d_owned_map.getRawPtr()
+                && field.mesh().overlap_cell_map().getRawPtr() == d_overlap_map.getRawPtr();
+        else if constexpr (std::is_same_v<typename Field::location_type, FaceLocation>)
+            return field.mesh().owned_face_map().getRawPtr() == d_owned_map.getRawPtr()
+                && field.mesh().overlap_face_map().getRawPtr() == d_overlap_map.getRawPtr();
+        else
+            return field.mesh().boundary_face_map().getRawPtr() == d_owned_map.getRawPtr()
+                && field.mesh().boundary_face_map().getRawPtr() == d_overlap_map.getRawPtr();
+    }
+
     const Field* d_field = nullptr;
+    const typename Field::mesh_type* d_mesh = nullptr;
+    Teuchos::RCP<const typename Field::map_type> d_owned_map, d_overlap_map;
+    size_t d_columns = 0;
     std::vector<local_ordinal_type> d_local_ids;
     std::vector<value_type> d_values;
 };

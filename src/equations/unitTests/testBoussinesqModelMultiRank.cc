@@ -304,4 +304,42 @@ TEST(BoussinesqModelMultiRankTest, RankLocalInvalidMaterialOutputThrowsCoherentl
     EXPECT_ANY_THROW(material.update(context));
 }
 
+/** @brief Rank-local updater presence still participates in validation and imports. */
+TEST(BoussinesqModelMultiRankTest, AsymmetricMaterialUpdaterSynchronizesAndRejectsFailures)
+{
+    SKIP_SINGLE_RANK(AsymmetricMaterialUpdaterSynchronizesAndRejectsFailures);
+    auto mesh = make_distributed_mesh();
+    const auto rank = mesh->owned_cell_map()->getComm()->getRank();
+    auto material = make_material(mesh);
+    FieldType temperature(mesh, 300.0, "temperature");
+    FieldType pressure(mesh, 0.0, "pressure");
+    VelocityFieldType velocity(mesh, "velocity");
+    const SimpleFluid::BoussinesqUpdateContext<Pack> context{
+        1.0, 2, *mesh, temperature, pressure, velocity};
+    ASSERT_GT(mesh->num_owned_cells(), 0U);
+    FieldType expected(mesh, material.density.value(0), "expected_density");
+    if (rank == 0)
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            expected.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 2.0);
+    expected.sync_ghosts();
+    if (rank == 0)
+        material.set_updater([](const auto&, auto& fields)
+        {
+            for (size_t owned = 0; owned < fields.density.mesh().num_owned_cells(); ++owned)
+                fields.density.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 2.0);
+        });
+    EXPECT_NO_THROW(material.update(context));
+    for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+    {
+        const auto cell = static_cast<MeshType::local_ordinal_type>(local);
+        EXPECT_DOUBLE_EQ(material.density.local_value(cell), expected.local_value(cell));
+    }
+    if (rank == 0)
+        material.set_updater([](const auto&, auto&) { throw std::runtime_error("local callback failure"); });
+    EXPECT_ANY_THROW(material.update(context));
+    if (rank == 0)
+        material.set_updater([](const auto&, auto& fields) { fields.density.set_owned_value(0, -1.0); });
+    EXPECT_ANY_THROW(material.update(context));
+}
+
 } // namespace

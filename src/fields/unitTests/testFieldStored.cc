@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include "fields/FieldStored.hh"
+#include "solvers/FieldStateTransaction.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "problems/Problem.hh"
@@ -225,4 +226,31 @@ TEST(FieldStoredTest, ProblemRejectsDuplicateNamesAndWrongTypes)
         problem.object<SimpleFluid::VectorCellFieldStored<Pack>>(
             "temperature"),
         std::invalid_argument);
+}
+
+TEST(FieldStoredTest, SnapshotRestoresOwnedStorageAndRejectsForeignField)
+{
+    auto mesh = make_handle();
+    SimpleFluid::ScalarCellFieldStored<Pack> scalar(mesh, "scalar");
+    SimpleFluid::VectorCellFieldStored<Pack> vector(mesh, "vector");
+    SimpleFluid::ScalarFaceFieldStored<Pack> faces(mesh, "faces");
+    SimpleFluid::ScalarFaceFieldStored<Pack> other_faces(mesh, "other_faces");
+    scalar.set_owned_value(0, 2.5);
+    vector.set_owned_value(1, {1.0, 2.0, 3.0});
+    const auto face = faces.owned_face_ids().back();
+    faces.set_owned_value(face, 7.5);
+    SimpleFluid::FieldStateSnapshot scalar_snapshot(scalar);
+    SimpleFluid::FieldStateSnapshot vector_snapshot(vector);
+    SimpleFluid::FieldStateSnapshot face_snapshot(faces);
+    scalar.put_scalar(-1.0);
+    vector.put_value({-2.0, -2.0, -2.0});
+    faces.put_scalar(-3.0);
+    scalar_snapshot.restore(scalar);
+    vector_snapshot.restore(vector);
+    face_snapshot.restore(faces);
+    EXPECT_DOUBLE_EQ(scalar.local_value(0), 2.5);
+    EXPECT_EQ(vector.local_value(1), (SimpleFluid::vec3<double>{1.0, 2.0, 3.0}));
+    EXPECT_DOUBLE_EQ(faces.local_value(face), 7.5);
+    EXPECT_DOUBLE_EQ(other_faces.value(face), 0.0);
+    EXPECT_THROW(face_snapshot.restore(other_faces), std::invalid_argument);
 }

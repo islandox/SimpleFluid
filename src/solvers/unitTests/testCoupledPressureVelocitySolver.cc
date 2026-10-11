@@ -382,6 +382,32 @@ TEST_P(CoupledResidualAssemblyTest, MatchesFullAffineOperatorWithGaugeAndPressur
     }
 }
 
+TEST_P(CoupledResidualAssemblyTest, RejectsRankLocalInvalidPreconditionerStateCollectively)
+{
+    NativeSolver solver(mesh);
+    const Equation equation(mesh);
+    const auto valid = assemble(solver, equation, AssemblyPurpose::LinearSolve);
+    const auto rank = mesh->owned_cell_map()->getComm()->getRank();
+    for (int failure = 0; failure < 4; ++failure)
+    {
+        auto invalid = valid;
+        if (rank == 0)
+        {
+            if (failure == 0) invalid.schur = Teuchos::null;
+            if (failure == 1) ++invalid.geometry_epoch;
+            if (failure == 2) invalid.map = mesh->owned_cell_map();
+            if (failure == 3) invalid.gradient[1] = Teuchos::null;
+        }
+        EXPECT_THROW(solver.right_preconditioner(invalid), std::exception);
+        EXPECT_THROW(solver.solve(invalid, velocity, pressure, {}), std::exception);
+    }
+    EXPECT_NO_THROW(solver.right_preconditioner(valid));
+    auto congruent = valid;
+    congruent.map = Teuchos::rcp(new Pack::map_type(valid.map->getGlobalNumElements(),
+        valid.map->getLocalElementList(), valid.map->getIndexBase(), valid.map->getComm()->duplicate()));
+    EXPECT_NO_THROW(solver.right_preconditioner(congruent));
+}
+
 TEST_P(CoupledResidualAssemblyTest, RefreshesSchurAfterSwitchingAssemblyPurpose)
 {
     NativeSolver solver(mesh);

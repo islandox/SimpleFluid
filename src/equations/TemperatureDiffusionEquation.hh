@@ -34,6 +34,11 @@
 namespace SimpleFluid
 {
 
+namespace detail
+{
+template<TpetraTypePack Pack> struct TransportEquationTestAccess;
+}
+
 /**
  * @brief Finite-volume heat equation for cell-centered temperature.
  *
@@ -130,6 +135,7 @@ public:
         const field_type* transport_density_override) const;
 
 private:
+    friend struct detail::TransportEquationTestAccess<Pack>;
     SIMPLEFLUID_EQUATIONS_LOCAL
     LinearSolveStatistics advance_semi_implicit_impl(const field_type& old_temperature,
         const face_flux_field_type& face_fluxes, scalar_type time_step, scalar_type thermal_diffusivity,

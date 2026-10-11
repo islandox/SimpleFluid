@@ -21,6 +21,29 @@
 #include <string>
 #include <vector>
 
+namespace SimpleFluid::detail
+{
+/** @brief Test-only access to the linear solver's numeric setup counter. */
+template<TpetraTypePack Pack>
+struct BelosLinearSolverTestAccess
+{
+    static std::size_t preconditioner_setup_count(const BelosLinearSolver<Pack>& solver) noexcept
+    {
+        return solver.d_preconditioner_setup_count;
+    }
+};
+/** @brief Test-only access to transport numeric preconditioner setup counts. */
+template<TpetraTypePack Pack>
+struct TransportEquationTestAccess
+{
+    template<class Equation>
+    static std::size_t preconditioner_setup_count(const Equation& equation) noexcept
+    {
+        return BelosLinearSolverTestAccess<Pack>::preconditioner_setup_count(equation.d_linear_solver);
+    }
+};
+}
+
 namespace
 {
 
@@ -420,6 +443,74 @@ TEST(TurbulenceScalarTransportEquationTest,
     // Transient 1, overridden xmin coefficient 1, and fallback xmax
     // coefficient 2: (1 + 1*2 + 2*4) / (1 + 1 + 2) = 11/4.
     EXPECT_NEAR(state.value(0), 11.0 / 4.0, 1.0e-10);
+}
+
+/** @brief Repeated implicit assembly uses one collective graph policy and fresh factors. */
+TEST(TurbulenceScalarTransportEquationTest, MixedRankDiffusivityAndChangedCoefficientsMatchFreshEquation)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    FieldType old_state(mesh, "old_state");
+    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+        old_state.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned),
+            1.0 + 0.01 * static_cast<double>(mesh->owned_cell_map()->getGlobalElement(owned)));
+    old_state.sync_ghosts();
+    FieldType diffusivity(mesh, 0.2, "diffusivity");
+    if (mesh->owned_cell_map()->getComm()->getRank() == 0 && mesh->num_owned_cells() > 0)
+        diffusivity.set_owned_value(0, 0.0);
+    diffusivity.sync_ghosts();
+    FieldType state(mesh, 1.0, "state"), fresh_state(mesh, 1.0, "fresh_state");
+    SimpleFluid::FaceField<Pack> zero_flux(mesh, 0.0, "face_flux");
+    SimpleFluid::LinearSolverOptions linear_options;
+    linear_options.preconditioner = SimpleFluid::LinearPreconditioner::Jacobi;
+    linear_options.reuse_preconditioner = true;
+    Equation reused(mesh);
+    for (int step = 0; step < 3; ++step)
+    {
+        if (step == 2)
+        {
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                diffusivity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.7);
+            diffusivity.sync_ghosts();
+        }
+        const auto previous_setups = SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused);
+        Equation fresh(mesh);
+        const auto dt = 0.1 + 0.03 * step;
+        ASSERT_TRUE(reused.advance(old_state, zero_flux, dt, diffusivity, state,
+            zero_provider(), zero_provider(), 1.0e-12,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, linear_options).converged);
+        ASSERT_TRUE(fresh.advance(old_state, zero_flux, dt, diffusivity, fresh_state,
+            zero_provider(), zero_provider(), 1.0e-12,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit, linear_options).converged);
+        EXPECT_GT(SimpleFluid::detail::TransportEquationTestAccess<Pack>::preconditioner_setup_count(reused), previous_setups);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            EXPECT_NEAR(state.value(static_cast<MeshType::local_ordinal_type>(owned)),
+                fresh_state.value(static_cast<MeshType::local_ordinal_type>(owned)), 1.0e-9);
+    }
+}
+
+/** @brief Empty ranks retain the neutral local positivity flag across graph expansion. */
+TEST(TurbulenceScalarTransportEquationTest, EmptyOwnedRanksParticipateInImplicitCoefficientTransition)
+{
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(
+        SimpleFluid::test::make_box_database(1, 1, 1, 1.0));
+    FieldType old_state(mesh, 1.0, "old_state"), state(mesh, 1.0, "state"), diffusivity(mesh, 0.0, "diffusivity");
+    SimpleFluid::FaceField<Pack> flux(mesh, 0.0, "flux");
+    Equation equation(mesh);
+    for (int step = 0; step < 3; ++step)
+    {
+        if (step == 2)
+        {
+            for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                diffusivity.set_owned_value(static_cast<MeshType::local_ordinal_type>(owned), 0.2);
+            diffusivity.sync_ghosts();
+        }
+        EXPECT_TRUE(equation.advance(old_state, flux, 0.1, diffusivity, state,
+            zero_provider(), zero_provider(), 1.0e-12,
+            SimpleFluid::FVM::NonOrthogonalTreatment::Implicit).converged);
+        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+            EXPECT_NEAR(state.value(static_cast<MeshType::local_ordinal_type>(owned)), 1.0, 1.0e-12);
+    }
 }
 
 } // namespace
