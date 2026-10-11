@@ -145,6 +145,28 @@ TEST(VTUWriter, SharesImmutableTopologyAcrossWriters)
     EXPECT_EQ(second.topology_handle().get(), topology.get());
 }
 
+/** Cached validation applies only to the factory's exact immutable allocation. */
+TEST(VTUWriter, ValidatedTopologyPreservesExternalAliasAndFieldChecks)
+{
+    const auto topology = VTUWriter::make_topology(
+        {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}, {0, 1, 2}, {3}, {5});
+    VTUWriter bad_data(topology);
+    bad_data.add_scalar_cell_data("temperature", {});
+    EXPECT_THROW(bad_data.write("test_invalid_shared_data.vtu"), std::runtime_error);
+
+    auto external = std::make_shared<VTUWriter::Topology>(*topology);
+    VTUWriter external_writer(external);
+    external->connectivity[0] = 99;
+    EXPECT_THROW(external_writer.write("test_invalid_external_topology.vtu"), std::runtime_error);
+    VTUWriter aliased_writer(VTUWriter::TopologyHandle(topology, external.get()));
+    EXPECT_THROW(aliased_writer.write("test_invalid_aliased_topology.vtu"), std::runtime_error);
+
+    VTUWriter detached(topology);
+    detached.set_points({});
+    EXPECT_THROW(detached.write("test_invalid_detached_topology.vtu"), std::runtime_error);
+    EXPECT_THROW(VTUWriter::make_topology({}, {0}, {1}, {1}), std::runtime_error);
+}
+
 // ===========================================================================
 // Cell data addition
 // ===========================================================================
