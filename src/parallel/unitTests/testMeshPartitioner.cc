@@ -1454,3 +1454,37 @@ TEST(MeshPartitionerTest, MeshHandlePartitionsUnstructuredMesh)
         }
     }
 }
+
+/** Empty graph ranks must use the same collective map constructors as their peer. */
+TEST(MeshPartitionerTest, OneCellPartitionWithEmptyRanksCompletesCollectively)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2) GTEST_SKIP() << "Requires at least two ranks.";
+    auto source = make_unstructured_hex_line(1);
+    const auto partition = SimpleFluid::MeshPartitioner<Pack>::partition(*source, comm);
+    const auto local_owned = static_cast<int>(partition.indexer.num_owned_cells());
+    int global_owned = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_owned, &global_owned);
+    EXPECT_EQ(global_owned, 1);
+    int local_empty = local_owned == 0, global_empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &global_empty);
+    EXPECT_EQ(global_empty, comm->getSize() - 1);
+    if (local_owned)
+    {
+        EXPECT_EQ(partition.indexer.cell_global_id(0), 0);
+        EXPECT_DOUBLE_EQ(source->cell_volume(source->cell_id(0)), 1.0);
+    }
+    else
+    {
+        EXPECT_EQ(source->num_cells(), 0U);
+        EXPECT_EQ(source->num_faces(), 0U);
+        EXPECT_EQ(source->num_nodes(), 0U);
+    }
+    const auto distributed = std::make_shared<PartitionedUnstructured>(source, partition.indexer, comm);
+    PartitionedCellField value(SimpleFluid::ScalarCellFieldDescriptor<Pack>("single_cell"), distributed);
+    for (size_t cell = 0; cell < distributed->num_owned_cells(); ++cell)
+        value.set_owned_value(static_cast<Pack::local_ordinal_type>(cell), 7.0);
+    value.sync_ghosts();
+    for (size_t cell = 0; cell < distributed->num_local_cells(); ++cell)
+        EXPECT_DOUBLE_EQ(value.value(static_cast<Pack::local_ordinal_type>(cell)), 7.0);
+}

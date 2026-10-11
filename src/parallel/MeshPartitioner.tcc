@@ -813,43 +813,20 @@ auto MeshPartitioner<Pack>::solve_partition_graph(
     const auto invalid_size =
         Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
 
-    Teuchos::RCP<const map_type> row_map;
-    if (!partition_graph.row_gids.empty())
-    {
-        row_map = Teuchos::rcp(new map_type(
-            invalid_size,
-            partition_graph.row_gids.data(),
-            partition_graph.row_gids.size(),
-            GO{},
-            comm));
-    }
-    else
-    {
-        row_map = Teuchos::rcp(new map_type(
-            invalid_size,
-            size_t{},
-            GO{},
-            comm));
-    }
-
-    Teuchos::RCP<const map_type> column_map;
-    if (!partition_graph.column_gids.empty())
-    {
-        column_map = Teuchos::rcp(new map_type(
-            invalid_size,
-            partition_graph.column_gids.data(),
-            partition_graph.column_gids.size(),
-            GO{},
-            comm));
-    }
-    else
-    {
-        column_map = Teuchos::rcp(new map_type(
-            invalid_size,
-            size_t{},
-            GO{},
-            comm));
-    }
+    // All ranks must enter the same map constructor: the contiguous overload
+    // performs different collectives, even when its local count is zero.
+    const auto row_map = Teuchos::rcp(new map_type(
+        invalid_size,
+        partition_graph.row_gids.data(),
+        partition_graph.row_gids.size(),
+        GO{},
+        comm));
+    const auto column_map = Teuchos::rcp(new map_type(
+        invalid_size,
+        partition_graph.column_gids.data(),
+        partition_graph.column_gids.size(),
+        GO{},
+        comm));
 
     size_t max_adjacency = 0;
     for (const auto& adjacency : partition_graph.row_adjacency)
@@ -1390,12 +1367,12 @@ auto MeshPartitioner<Pack>::rebuild(
         local_boundaries.push_back(std::move(boundary));
     }
 
-    UnstructuredMesh local_mesh(
-        local_nodes,
-        local_cells,
-        local_boundaries,
-        order.owned_cells.size(),
-        order.owned_faces.size());
+    // An empty destination owns no local topology. Keep ordinary mesh input
+    // validation intact and use the dedicated rank-local empty value.
+    auto local_mesh = source_cell_lids.empty()
+        ? UnstructuredMesh::empty_partition()
+        : UnstructuredMesh(local_nodes, local_cells, local_boundaries,
+            order.owned_cells.size(), order.owned_faces.size());
 
     auto source_face_key = [&](FaceID source_id)
     {

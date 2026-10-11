@@ -474,6 +474,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(co
         return {true, 0, 0.0};
     }
 
+    d_linear_solver.notify_operator_values_changed();
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     auto& candidate_temperature = d_candidate_temperature;
     candidate_temperature.owned_data().update(scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
@@ -753,8 +754,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     // Reassembly can change material/time-step coefficients independently of a
     // boundary refresh. Retain graph/Krylov storage, invalidate numeric factors.
-    if (d_has_boundary_heat_flux)
-        d_linear_solver.notify_operator_values_changed();
+    d_linear_solver.notify_operator_values_changed();
     const auto statistics =
         d_linear_solver.solve_with_statistics(matrix, *system.rhs, candidate_temperature.owned_data(), linear_options);
     if (!statistics.converged)

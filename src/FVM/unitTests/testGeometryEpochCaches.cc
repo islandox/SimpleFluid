@@ -9,6 +9,7 @@
 #include "FVM/FaceFlux.hh"
 #include "FVM/TransportSystem.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/SolidSubdomain.hh"
 #include "utils/testing_environment.hh"
 
 #include <memory>
@@ -165,4 +166,33 @@ TEST(GeometryEpochCacheTest, MotionAndRollbackRejectStaleCachesUntilExplicitRefr
         EXPECT_NEAR(value.y, 0.0, 1.0e-12);
         EXPECT_NEAR(value.z, 1.0, 1.0e-12);
     }
+}
+
+/** Solid views must reject cached geometry after motion through a mutable parent alias. */
+TEST(GeometryEpochCacheTest, SolidParentMotionAndRollbackRejectStaleTransportSnapshots)
+{
+    using Solid = SimpleFluid::SolidSubdomain<Pack>;
+    auto native = std::make_shared<Mesh::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0, 1}, {0, 1}, {0, 1, 2, 3}}});
+    auto parent = std::make_shared<Mesh>(native);
+    const Solid solid{SimpleFluid::SP<const Mesh>(parent)};
+    SimpleFluid::FVM::TransportGeometryCache<Solid> cache(solid);
+    const auto accepted_snapshot = cache.shared_geometry();
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(parent);
+    motion.begin_trial(4.5, 1.0);
+    EXPECT_THROW(cache.require_mesh(solid), std::invalid_argument);
+    EXPECT_THROW(cache.assembly_geometry(), std::invalid_argument);
+    EXPECT_THROW(cache.refresh(accepted_snapshot), std::invalid_argument);
+    cache.refresh();
+    EXPECT_EQ(cache.geometry_epoch(), solid.geometry_epoch());
+    const auto trial_snapshot = cache.shared_geometry();
+    EXPECT_NE(trial_snapshot, accepted_snapshot);
+    motion.rollback_trial();
+    EXPECT_THROW(cache.interior_stencils(), std::invalid_argument);
+    EXPECT_THROW(cache.refresh(trial_snapshot), std::invalid_argument);
+    EXPECT_THROW(cache.refresh(accepted_snapshot), std::invalid_argument);
+    cache.refresh();
+    EXPECT_NO_THROW(cache.require_mesh(solid));
+    EXPECT_EQ(cache.geometry_epoch(), parent->geometry_epoch());
+    EXPECT_DOUBLE_EQ(solid.cell_volume(0), 1.0);
 }

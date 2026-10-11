@@ -12,6 +12,7 @@
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "utils/testing_environment.hh"
+#include "solvers/FieldStateTransaction.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_CommHelpers.hpp>
@@ -1221,4 +1222,24 @@ TEST(MeshToMeshTransferMultiRankTest, ReverseCoverageBoundedReductionMatchesDens
     if (rank == 0) partials.emplace_back(donor_count, 1.0);
     EXPECT_THROW((void)SimpleFluid::mesh_transfer_detail::reduce_reverse_coverage(
         *comm, donor_count, owned_begin, owned_count, partials, 3), std::invalid_argument);
+}
+
+TEST(MeshToMeshTransferMultiRankTest, SnapshotRejectsRankLocalForeignFieldBeforeRestore)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    ASSERT_GE(comm->getSize(), 2);
+    auto mesh = make_cartesian();
+    ScalarField original(mesh, "original");
+    ScalarField foreign(mesh, "foreign");
+    original.put_scalar(2.0);
+    foreign.put_scalar(9.0);
+    SimpleFluid::FieldStateSnapshot snapshot(original);
+    original.put_scalar(3.0);
+    auto& selected = comm->getRank() == 0 ? foreign : original;
+    EXPECT_THROW(snapshot.restore(selected), std::invalid_argument);
+    for (size_t row = 0; row < original.num_owned_entries(); ++row)
+    {
+        EXPECT_DOUBLE_EQ(original.value(static_cast<LO>(row)), 3.0);
+        EXPECT_DOUBLE_EQ(foreign.value(static_cast<LO>(row)), 9.0);
+    }
 }

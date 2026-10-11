@@ -25,6 +25,11 @@
 namespace SimpleFluid
 {
 
+namespace detail
+{
+template<TpetraTypePack Pack> struct TransportEquationTestAccess;
+}
+
 /**
  * @brief Dynamic boundary and adjacent-cell data for a turbulence scalar.
  *
@@ -122,6 +127,7 @@ public:
     }
 
 private:
+    friend struct detail::TransportEquationTestAccess<Pack>;
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     BoundaryConditionMap d_boundary_conditions;

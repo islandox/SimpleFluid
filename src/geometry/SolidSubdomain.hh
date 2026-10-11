@@ -118,6 +118,12 @@ public:
     const mesh_type& parent_mesh() const noexcept { return *d_parent; }
     SP<const mesh_type> parent_mesh_ptr() const noexcept { return d_parent; }
 
+    /** @brief Parent revision for numeric-cache invalidation; solid ALE remains unsupported. */
+    std::uint64_t geometry_epoch() const { return d_parent->geometry_epoch(); }
+
+    /** @brief Retain the parent's bulk geometry protection while reading this view. */
+    [[nodiscard]] auto acquire_execution_view() const { return d_parent->acquire_execution_view(); }
+
     size_t spatial_dimension() const noexcept { return d_parent->spatial_dimension(); }
 
     size_t num_owned_cells() const noexcept { return d_num_owned_cells; }
@@ -338,7 +344,7 @@ public:
         {
             return 0.0;
         }
-        return (cell_centroid(neighbor) - cell_centroid(owner_cell(face_lid))).norm();
+        return cell_center_vector(face_lid, owner_cell(face_lid)).norm();
     }
 
     Vec3 cell_center_vector(local_ordinal_type face_lid, local_ordinal_type cell_lid) const
@@ -348,7 +354,7 @@ public:
         {
             throw std::invalid_argument("Exterior solid-subdomain face has no opposite cell.");
         }
-        return cell_centroid(other) - cell_centroid(cell_lid);
+        return d_parent->cell_center_vector(parent_face_lid(face_lid), parent_cell_lid(cell_lid));
     }
 
     real_t cell_to_face_distance(local_ordinal_type face_lid, local_ordinal_type cell_lid) const

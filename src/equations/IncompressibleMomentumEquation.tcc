@@ -407,6 +407,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity(
             return;
         }
 
+        d_linear_solver.notify_operator_values_changed();
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto statistics =
             d_linear_solver.solve_with_statistics(
@@ -579,15 +580,18 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::assemble_physical_system(
     const auto requires_non_orthogonal_graph =
         options.non_orthogonal_treatment
             != FVM::NonOrthogonalTreatment::Explicit;
-    bool all_viscosities_positive = true;
+    int local_all_viscosities_positive = 1;
     const auto viscosity_values =
         dynamic_viscosity.local_read_view();
     for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
     {
         const auto cell_lid = static_cast<local_ordinal_type>(local);
-        all_viscosities_positive = all_viscosities_positive
+        local_all_viscosities_positive = local_all_viscosities_positive
             && viscosity_values(cell_lid, 0) > scalar_type{};
     }
+    int all_viscosities_positive = 0;
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN,
+        1, &local_all_viscosities_positive, &all_viscosities_positive);
     if (requires_non_orthogonal_graph
         && !d_cached_physical_graph_supports_non_orthogonal_correction)
     {
@@ -718,6 +722,7 @@ auto IncompressibleMomentumEquation<Pack, MeshType>::advance_velocity_physical(
             old_velocity, face_fluxes, velocity_boundary_cache, options,
             dynamic_viscosity, reference_density, acceleration_source,
             correction_field, boundary_dynamic_viscosity, ale);
+        d_linear_solver.notify_operator_values_changed();
         Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
         const auto statistics =
             d_linear_solver.solve_with_statistics(
