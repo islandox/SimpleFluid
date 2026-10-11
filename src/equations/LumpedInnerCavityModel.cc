@@ -345,6 +345,15 @@ LumpedInnerCavityStep LumpedInnerCavityModel::preview_samples(real_t time_step,
 {
     positive(time_step, "time step");
     const auto prepared = prepare(d_options, d_state.temperature, surfaces, view_factors);
+    if (surfaces.empty())
+    {
+        // No exchanges means exact conservation; avoid energy subtraction and
+        // the humidity-to-mass round trip in the implicit solve.
+        validate_state(d_options, d_state);
+        LumpedInnerCavityStep step;
+        step.state = d_state;
+        return step;
+    }
     const auto old_mass = vapor_mass();
     const auto old_energy = internal_energy();
     const auto trial = [&](real_t temperature)
