@@ -394,6 +394,9 @@ behavioral changes separable during review.
   overlap storage may require `sync_ghosts()` before a stencil read.
 - Keep fields, caches, equations, and solvers bound to the same mesh object;
   reject mismatches instead of relying on equivalent-looking topology.
+- `FieldStored` shares immutable importer and face-ID layout metadata for exact
+  mesh/map identities. Numerical storage remains field-owned; cache hits must
+  agree collectively because importer construction communicates.
 - Apply `MeshReorderingFactory` before constructing fields or caches. Preserve
   its separate owned-selected and ghost-selected prefixes: combining them into
   one local interval would violate the owned-first distributed-map contract.

@@ -235,6 +235,10 @@ TEST(FieldStoredTest, SnapshotRestoresOwnedStorageAndRejectsForeignField)
     SimpleFluid::VectorCellFieldStored<Pack> vector(mesh, "vector");
     SimpleFluid::ScalarFaceFieldStored<Pack> faces(mesh, "faces");
     SimpleFluid::ScalarFaceFieldStored<Pack> other_faces(mesh, "other_faces");
+    // Scalar and vector descriptors share immutable face IDs, not values.
+    SimpleFluid::VectorFaceFieldStored<Pack> vector_faces(mesh, "vector_faces");
+    EXPECT_EQ(&faces.owned_face_ids(), &vector_faces.owned_face_ids());
+    EXPECT_EQ(&faces.owned_face_ids(), &other_faces.owned_face_ids());
     scalar.set_owned_value(0, 2.5);
     vector.set_owned_value(1, {1.0, 2.0, 3.0});
     const auto face = faces.owned_face_ids().back();
@@ -253,4 +257,30 @@ TEST(FieldStoredTest, SnapshotRestoresOwnedStorageAndRejectsForeignField)
     EXPECT_DOUBLE_EQ(faces.local_value(face), 7.5);
     EXPECT_DOUBLE_EQ(other_faces.value(face), 0.0);
     EXPECT_THROW(face_snapshot.restore(other_faces), std::invalid_argument);
+}
+
+TEST(FieldStoredTest, SnapshotRestoresLogicalNonconstantStrideColumns)
+{
+    auto mesh = make_handle();
+    SimpleFluid::VectorCellFieldStored<Pack> field(mesh, "rebound");
+    Pack::multi_vector_type backing(mesh->owned_cell_map(), 5);
+    backing.putScalar(19.0);
+    Teuchos::Array<size_t> columns{0, 2, 4};
+    field.owned_data() = *backing.subViewNonConst(columns());
+    ASSERT_FALSE(field.owned_data().isConstantStride());
+    for (size_t row = 0; row < field.num_owned_entries(); ++row)
+        field.set_owned_value(static_cast<Pack::local_ordinal_type>(row),
+                              {1.0 + row, 2.0 + row, 3.0 + row});
+    SimpleFluid::FieldStateSnapshot snapshot(field);
+    field.put_value({-1.0, -2.0, -3.0});
+    snapshot.restore(field);
+    for (size_t row = 0; row < field.num_owned_entries(); ++row)
+    {
+        EXPECT_EQ(field.value(static_cast<Pack::local_ordinal_type>(row)),
+                  (SimpleFluid::vec3<double>{1.0 + row, 2.0 + row, 3.0 + row}));
+        EXPECT_EQ(field.local_value(static_cast<Pack::local_ordinal_type>(row)),
+                  (SimpleFluid::vec3<double>{1.0 + row, 2.0 + row, 3.0 + row}));
+        EXPECT_DOUBLE_EQ(backing.getData(1)[row], 19.0);
+        EXPECT_DOUBLE_EQ(backing.getData(3)[row], 19.0);
+    }
 }

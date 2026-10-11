@@ -14,6 +14,8 @@
 
 #include <Teuchos_CommHelpers.hpp>
 
+#include <algorithm>
+
 namespace SimpleFluid
 {
 
@@ -101,13 +103,9 @@ void TemperatureDiffusionEquation<Pack, MeshType>::refresh_boundary_cache()
             continue;
         }
 
-        for (auto face_lid : boundary_batch.face_lids)
+        if (std::any_of(boundary_batch.face_lids.begin(), boundary_batch.face_lids.end(),
+                [&](auto face_lid) { return d_mesh->is_owned_face(face_lid); }))
         {
-            if (!d_mesh->is_owned_face(face_lid))
-            {
-                continue;
-            }
-
             d_face_boundary_temperature.value[batch_id] =
                 Arr<typename Pack::scalar_type>(boundary_batch.face_lids.size(), iter->second.value);
         }

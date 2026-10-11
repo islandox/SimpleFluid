@@ -66,6 +66,7 @@ public:
     VTUWriter() = default;
     explicit VTUWriter(TopologyHandle topology);
 
+    /** Validate once and own immutable topology; malformed connectivity is rejected here. */
     static TopologyHandle make_topology(
         VectorData points,
         Int64Data connectivity,

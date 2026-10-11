@@ -479,3 +479,29 @@ TEST(CylindricalMeshToMeshTransferTest, ReorderingEitherMapWithSameGeometryInval
             EXPECT_DOUBLE_EQ(target.value(static_cast<LO>(row)), 91.0);
     }
 }
+
+TEST(CylindricalMeshToMeshTransferTest, ProjectionSupportsAliasedNonconstantStrideColumns)
+{
+    auto mesh = annulus();
+    Transfer transfer(mesh, mesh, conservative());
+    for (const auto quantity : {Quantity::Intensive, Quantity::Extensive})
+    {
+        Pack::multi_vector_type storage(mesh->owned_cell_map(), 3);
+        storage.putScalar(std::numeric_limits<double>::quiet_NaN());
+        for (size_t row = 0; row < storage.getLocalLength(); ++row)
+        {
+            storage.replaceLocalValue(static_cast<LO>(row), 0, 2.0 + row);
+            storage.replaceLocalValue(static_cast<LO>(row), 2, -4.0 - row);
+        }
+        Teuchos::Array<size_t> columns{0, 2};
+        auto selected = storage.subViewNonConst(columns());
+        ASSERT_FALSE(selected->isConstantStride());
+        expect_balanced(transfer.project(*selected, *selected, quantity), 2);
+        for (size_t row = 0; row < storage.getLocalLength(); ++row)
+        {
+            EXPECT_NEAR(storage.getData(0)[row], 2.0 + row, 1.e-12);
+            EXPECT_TRUE(std::isnan(storage.getData(1)[row]));
+            EXPECT_NEAR(storage.getData(2)[row], -4.0 - row, 1.e-12);
+        }
+    }
+}

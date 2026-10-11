@@ -1224,6 +1224,26 @@ TEST(MeshToMeshTransferMultiRankTest, ReverseCoverageBoundedReductionMatchesDens
         *comm, donor_count, owned_begin, owned_count, partials, 3), std::invalid_argument);
 }
 
+TEST(MeshToMeshTransferMultiRankTest, FieldLayoutCacheHandlesAsymmetricLifetimes)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    ASSERT_GE(comm->getSize(), 2);
+    auto mesh = make_cartesian();
+    using FaceField = SimpleFluid::ScalarFaceFieldStored<Pack>;
+    auto retained = std::make_unique<FaceField>(mesh, "retained");
+    if (comm->getRank() != 0) retained.reset();
+    // One rank has a live layout while peers must reconstruct their importer.
+    FaceField fresh(mesh, "fresh");
+    FaceField sharing(mesh, "sharing");
+    EXPECT_EQ(&fresh.owned_face_ids(), &sharing.owned_face_ids());
+    for (const auto lid : fresh.owned_face_ids())
+        fresh.set_owned_value(lid, static_cast<double>(mesh->face_global_id(lid)) + 0.5);
+    fresh.sync_ghosts();
+    for (size_t lid = 0; lid < mesh->num_faces(); ++lid)
+        EXPECT_DOUBLE_EQ(fresh.local_value(static_cast<LO>(lid)),
+                         static_cast<double>(mesh->face_global_id(static_cast<LO>(lid))) + 0.5);
+}
+
 TEST(MeshToMeshTransferMultiRankTest, SnapshotRejectsRankLocalForeignFieldBeforeRestore)
 {
     const auto comm = Tpetra::getDefaultComm();

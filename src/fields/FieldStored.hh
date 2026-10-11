@@ -15,12 +15,15 @@
 #include "geometry/MeshHandle.hh"
 
 #include <Teuchos_OrdinalTraits.hpp>
+#include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Access.hpp>
 #include <Tpetra_CombineMode.hpp>
 
 #include <array>
 #include <concepts>
 #include <cstddef>
+#include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -90,6 +93,70 @@ inline constexpr bool supported_field_location =
  || std::is_same_v<Location, FaceLocation>
  || std::is_same_v<Location, BoundaryFaceLocation>;
 
+// Weak entries retain no mesh or importer after the last bound field dies.
+// Separate location caches prevent identical cell/face maps from sharing IDs.
+template<class Pack, class MeshType, class Location>
+struct StoredFieldLayout
+{
+    using map_type = typename Pack::map_type;
+    using import_type = typename Pack::import_type;
+    Teuchos::RCP<const map_type> owned, overlap;
+    Teuchos::RCP<const import_type> importer;
+    const MeshType* mesh = nullptr;
+    std::vector<typename Pack::local_ordinal_type> owned_face_ids;
+
+    inline static std::mutex mutex;
+    inline static std::vector<std::weak_ptr<const StoredFieldLayout>> entries;
+
+    template<class MakeIds>
+    static std::shared_ptr<const StoredFieldLayout> acquire(
+        const MeshType& mesh, const Teuchos::RCP<const map_type>& owned,
+        const Teuchos::RCP<const map_type>& overlap, MakeIds make_ids)
+    {
+        const std::lock_guard lock(mutex);
+        std::shared_ptr<const StoredFieldLayout> cached;
+        for (auto it = entries.begin(); it != entries.end();)
+        {
+            if (auto entry = it->lock())
+            {
+                if (entry->mesh == &mesh && entry->owned.getRawPtr() == owned.getRawPtr()
+                    && entry->overlap.getRawPtr() == overlap.getRawPtr())
+                    cached = entry;
+                ++it;
+            }
+            else it = entries.erase(it);
+        }
+        // Import construction is collective. Rank-local field lifetimes may
+        // differ, so only reuse when every rank has a live matching layout.
+        const int local_hit = cached ? 1 : 0;
+        int all_hit = 0;
+        Teuchos::reduceAll(*owned->getComm(), Teuchos::REDUCE_MIN, 1, &local_hit, &all_hit);
+        if (all_hit) return cached;
+        std::shared_ptr<StoredFieldLayout> entry;
+        int local_valid = 1, all_valid = 0;
+        try
+        {
+            entry = std::make_shared<StoredFieldLayout>();
+            entry->mesh = &mesh;
+            entry->owned = owned;
+            entry->overlap = overlap;
+            entry->owned_face_ids = make_ids();
+            entries.reserve(entries.size() + 1);
+        }
+        catch (...)
+        {
+            local_valid = 0;
+        }
+        Teuchos::reduceAll(*owned->getComm(), Teuchos::REDUCE_MIN, 1,
+                          &local_valid, &all_valid);
+        if (!all_valid)
+            throw std::runtime_error("FieldStored layout allocation or owned-face validation failed on a rank.");
+        entry->importer = Teuchos::rcp(new import_type(owned, overlap));
+        entries.emplace_back(entry);
+        return entry;
+    }
+};
+
 } // namespace detail
 
 /**
@@ -149,9 +216,9 @@ public:
           d_mesh(require_mesh(std::move(mesh))),
           d_owned(make_storage(map_for<false>(*d_mesh), zero_out)),
           d_overlap(make_storage(map_for<true>(*d_mesh), false)),
-          d_import(Teuchos::rcp(new import_type(
-              d_owned.getMap(), d_overlap.getMap()))),
-          d_owned_face_ids(make_owned_face_ids(*d_mesh))
+          d_layout(layout_type::acquire(*d_mesh, d_owned.getMap(), d_overlap.getMap(),
+              [this] { return make_owned_face_ids(*d_mesh); })),
+          d_import(d_layout->importer)
     {
         if (zero_out)
         {
@@ -310,7 +377,7 @@ public:
     const std::vector<local_ordinal_type>& owned_face_ids() const noexcept
         requires std::same_as<location_type, FaceLocation>
     {
-        return d_owned_face_ids;
+        return d_layout->owned_face_ids;
     }
 
     /** @brief Return the owned storage row for an owned mesh-local face ID. */
@@ -970,12 +1037,14 @@ private:
         }
     }
 
+    using layout_type = detail::StoredFieldLayout<Pack, mesh_type, location_type>;
+
     descriptor_type d_descriptor;
     SP<const mesh_type> d_mesh;
     storage_type d_owned;
     storage_type d_overlap;
+    std::shared_ptr<const layout_type> d_layout;
     Teuchos::RCP<const import_type> d_import;
-    std::vector<local_ordinal_type> d_owned_face_ids;
 };
 
 template<TpetraTypePack Pack = DefaultTpetraTypes,

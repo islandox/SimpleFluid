@@ -260,12 +260,15 @@ void stored_mesh_relative_face_fluxes(
     }
     ale.validate(mesh);
     const auto mesh_fluxes = ale.face_mesh_fluxes();
-    for (const auto face_lid : relative_fluxes.owned_face_ids())
     {
-        relative_fluxes.set_owned_value(face_lid,
-            absolute_fluxes.value(face_lid)
-                - static_cast<scalar_type>(
-                    mesh_fluxes[static_cast<size_t>(face_lid)]));
+        const auto absolute_values = absolute_fluxes.owned_read_view();
+        auto relative_values = relative_fluxes.owned_write_view();
+        for (const auto face_lid : relative_fluxes.owned_face_ids())
+        {
+            relative_values(relative_fluxes.owned_row(face_lid), 0) =
+                absolute_values(absolute_fluxes.owned_row(face_lid), 0)
+                - static_cast<scalar_type>(mesh_fluxes[static_cast<size_t>(face_lid)]);
+        }
     }
     relative_fluxes.sync_ghosts();
 }
