@@ -18,6 +18,7 @@
 #include <array>
 #include <cmath>
 #include <chrono>
+#include <exception>
 #include <stdexcept>
 #include <typeinfo>
 #include <vector>
@@ -567,6 +568,33 @@ auto FluidSolver<Pack>::pressure_linear_solver_options() const noexcept
         "pressure_projection").linear_solver_options();
 }
 
+/** Validate the entire policy collectively before publishing an override. */
+template<TpetraTypePack Pack>
+void FluidSolver<Pack>::set_momentum_linear_solver_options(LinearSolverOptions options)
+{
+    std::exception_ptr failure;
+    try { BelosLinearSolver<Pack>::validate_options(options); }
+    catch (...) { failure = std::current_exception(); }
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    const int local_invalid = failure ? 1 : 0;
+    int invalid = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_invalid, &invalid);
+    if (invalid)
+    {
+        if (failure) std::rethrow_exception(failure);
+        throw std::invalid_argument("Invalid momentum linear policy on another rank.");
+    }
+    const std::array<double, 6> local{static_cast<double>(options.max_iterations), options.tolerance,
+        static_cast<double>(options.verbosity), static_cast<double>(options.backend),
+        static_cast<double>(options.preconditioner), options.reuse_preconditioner ? 1.0 : 0.0};
+    std::array<double, 6> minimum{}, maximum{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 6, local.data(), minimum.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 6, local.data(), maximum.data());
+    if (minimum != maximum)
+        throw std::invalid_argument("Momentum linear policy must agree on every mesh rank.");
+    d_momentum_linear_options = std::move(options);
+}
+
 /**
  * @brief Replace the pressure solver policy without changing transport
  *        equation choices.
@@ -1001,7 +1029,7 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
             d_problem.time_options(),
             legacy_velocity(),
             pressure_source,
-            d_problem.linear_options());
+            momentum_linear_solver_options());
         sync_primary_fields_from_legacy();
         return result;
     }
@@ -1033,7 +1061,7 @@ auto FluidSolver<Pack>::advance_momentum() -> LinearSolveSummary
         d_problem.time_options(),
         velocity(),
         pressure_source,
-        d_problem.linear_options());
+        momentum_linear_solver_options());
 }
 
 /**

@@ -372,6 +372,27 @@ Keep this phase independent of the new physics so solver performance changes can
       index.
 - [ ] Migrate the remaining host-side finite-volume row assembly loops to
       backend-portable Kokkos kernels after defining a device assembly API.
+- [ ] Revisit scoped geometry execution in
+      `PlanarALEMeshMotion::compute_trial_state` only with stronger
+      application-level performance evidence. The October 11, 2026 review of
+      Hydra-TF candidate C2 reverted the trial-read lease and its two added
+      tests because the measured benefit did not clear the predeclared
+      performance gate, not because of a correctness failure. On the
+      267,652-cell, six-rank, 0–0.1 s startup fixture, warmed ABBAAB runs passed
+      exact parity for all ten selected output files and matched native phase
+      call counts; focused serial/MPI and rejection/replay checks also passed.
+      Rank-zero inclusive ALE-geometry median time fell from 33.47 to 28.80 s
+      (about 14%), while whole-run median time fell from 292.05 to 284.55 s
+      (2.57%). Observed ranges overlapped: control 269.73–292.99 s, candidate
+      277.49–287.13 s. The acceptance rule required at least 1% lower median
+      wall time **and nonoverlapping observed ranges**; the application benefit
+      therefore remained uncertain. Warmups and an earlier block contaminated
+      by a competing build were excluded. Preserve arithmetic, traversal order,
+      collective failure handling, and physical gates in any requalification;
+      do not treat the inclusive phase reduction as an established wall-time
+      speedup. The patch and evidence remain in the local, untracked Hydra-TF
+      directory `build/next-optimization-20261010/`: `C2.patch`,
+      `C2-comparison.json`, `C2-decision.json`, and `report.json`.
 
 The timing ceiling is a smoke-regression guard, not a claim of comparable
 performance across different machines. Release scaling and profiling remain

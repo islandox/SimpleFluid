@@ -1987,6 +1987,24 @@ TEST(BoussinesqPlanarALESupportMatrixTest, CollectivelyRejectsRankDivergentRunti
     EXPECT_EQ(solver->find_free_surface_model(), nullptr);
 }
 
+TEST(BoussinesqPlanarALESupportMatrixTest, RejectsDivergentMomentumPolicyBeforeMotion)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
+    auto mesh = make_column();
+    Solver solver(mesh, planar_boundaries(), time_options(Coupling::PISO),
+        SimpleFluid::LinearSolverOptions{}, physical_options());
+    solver.configure_material_feedback(material_feedback_options());
+    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto momentum = solver.linear_solver_options();
+    momentum.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    momentum.preconditioner = SimpleFluid::LinearPreconditioner::ILU0;
+    solver.set_momentum_linear_solver_options(momentum);
+    if (comm->getRank() == 1) solver.clear_momentum_linear_solver_options();
+    EXPECT_THROW(static_cast<void>(solver.configure_free_surface(free_surface_options(4))), std::invalid_argument);
+    EXPECT_FALSE(solver.planar_ale_enabled());
+}
+
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsMultiRankSemiStructuredBeforeSolverConfiguration)
 {
     if (Tpetra::getDefaultComm()->getSize() == 1)

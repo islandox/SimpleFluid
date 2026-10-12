@@ -1886,3 +1886,96 @@ TEST(BelosLinearSolverTest, ReusesAndInvalidatesDICAndGaussSeidelFactors)
         EXPECT_EQ(preconditioner_setup_count(solver), 5U);
     }
 }
+
+/** Exercise multiple AMG levels and cross-rank edges, not only a coarse solve. */
+TEST(BelosLinearSolverTest, SymmetricSmoothedAmgIsPositiveSymmetricAndSupportsCg)
+{
+    using Access = SimpleFluid::detail::BelosLinearSolverTestAccess<Pack>;
+    auto map = Teuchos::rcp(new Pack::map_type(512, 0, Tpetra::getDefaultComm()));
+    auto matrix = Teuchos::rcp(new Pack::matrix_type(map, 3));
+    for (size_t i = 0; i < map->getLocalNumElements(); ++i)
+    {
+        const auto gid = map->getGlobalElement(i);
+        Teuchos::Array<Pack::global_ordinal_type> columns;
+        Teuchos::Array<Pack::scalar_type> values;
+        if (gid > 0) { columns.push_back(gid - 1); values.push_back(-1.0); }
+        columns.push_back(gid); values.push_back(2.01 + .001 * (gid % 13));
+        if (gid < 511) { columns.push_back(gid + 1); values.push_back(-1.0); }
+        matrix->insertGlobalValues(gid, columns(), values());
+    }
+    matrix->fillComplete();
+    Pack::vector_type x(map, true), y(map, true), bx(map, true), by(map, true);
+    {
+        auto xv = x.getDataNonConst(0), yv = y.getDataNonConst(0);
+        for (size_t i = 0; i < map->getLocalNumElements(); ++i)
+        {
+            const double gid = map->getGlobalElement(i);
+            xv[i] = std::sin(.13 * gid) + .3;
+            yv[i] = std::cos(.07 * gid) - .2;
+        }
+    }
+    Pack::vector_type rhs(map, true), solution(map, true);
+    matrix->apply(x, rhs);
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLuSymmetric;
+    options.tolerance = 1e-12;
+    options.reuse_preconditioner = true;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto stats = solver.solve_from_zero_with_statistics(matrix, rhs, solution, options);
+    ASSERT_TRUE(stats.converged);
+    EXPECT_LE(stats.achieved_tolerance, options.tolerance);
+    const auto inverse = Access::preconditioner(solver);
+    using AMG = MueLu::TpetraOperator<Pack::scalar_type, Pack::local_ordinal_type,
+        Pack::global_ordinal_type, Pack::node_type>;
+    const auto amg = Teuchos::rcp_dynamic_cast<const AMG>(inverse, true);
+    EXPECT_GT(amg->GetHierarchy()->GetNumLevels(), 1);
+    inverse->apply(x, bx); inverse->apply(y, by);
+    EXPECT_GT(x.dot(bx), 0.0);
+    EXPECT_GT(y.dot(by), 0.0);
+    EXPECT_NEAR(x.dot(by), y.dot(bx), 1e-11 * x.norm2() * by.norm2());
+    Pack::vector_type sum(map, true), bsum(map, true);
+    sum.update(1.0, x, 1.0, y, 0.0);
+    inverse->apply(sum, bsum);
+    bsum.update(-1.0, bx, -1.0, by, 1.0);
+    EXPECT_LE(bsum.norm2(), 1e-12 * (bx.norm2() + by.norm2()));
+    ASSERT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options).converged);
+    EXPECT_EQ(Access::preconditioner_setup_count(solver), 1U);
+    EXPECT_EQ(Access::configuration_count(solver), 1U);
+    // The same matrix/map must not retain the other MueLu policy's factory.
+    options.backend = SimpleFluid::LinearSolverBackend::Gmres;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLu;
+    ASSERT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options).converged);
+    EXPECT_EQ(Access::configuration_count(solver), 2U);
+    options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLuSymmetric;
+    ASSERT_TRUE(solver.solve_from_zero_with_statistics(matrix, rhs, solution, options).converged);
+    EXPECT_EQ(Access::configuration_count(solver), 3U);
+    EXPECT_EQ(SimpleFluid::parse_linear_preconditioner("MueLuSymmetric"), options.preconditioner);
+}
+
+TEST(BelosLinearSolverTest, SymmetricSmoothedAmgSupportsEmptyRanks)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() < 2) GTEST_SKIP() << "Requires an empty MPI rank.";
+    auto map = Teuchos::rcp(new Pack::map_type(1, 0, comm));
+    auto matrix = Teuchos::rcp(new Pack::matrix_type(map, 1));
+    if (map->getLocalNumElements())
+    {
+        const Pack::global_ordinal_type column = 0;
+        const Pack::scalar_type value = 2.0;
+        matrix->insertGlobalValues(0, 1, &value, &column);
+    }
+    matrix->fillComplete();
+    Pack::vector_type rhs(map, true), solution(map, true);
+    rhs.putScalar(1.0);
+    SimpleFluid::LinearSolverOptions options;
+    options.backend = SimpleFluid::LinearSolverBackend::Cg;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::MueLuSymmetric;
+    options.tolerance = 1e-12;
+    SimpleFluid::BelosLinearSolver<Pack> solver;
+    const auto stats = solver.solve_from_zero_with_statistics(matrix, rhs, solution, options);
+    ASSERT_TRUE(stats.converged);
+    EXPECT_LE(stats.achieved_tolerance, options.tolerance);
+    EXPECT_NEAR(solution.norm2(), .5, 1e-12);
+}
