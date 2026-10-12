@@ -11,6 +11,7 @@
 #pragma once
 
 #include "geometry/GeometryExecutionGuard.hh"
+#include "geometry/MeshTraverse.hh"
 
 #include "equations/BoundaryConditions.hh"
 #include "FVM/FaceCoefficientInterpolation.hh"
@@ -821,6 +822,55 @@ void visit_gradient_geometry_samples(const MeshType& mesh,
     }
 }
 
+/** Typed samples keep category selection outside a retained incidence loop. */
+template<class MeshType, bool Interior>
+struct TraverseGradientGeometrySample : GradientGeometrySample<MeshType>
+{
+    static constexpr bool is_interior = Interior;
+};
+
+/**
+ * @brief Build current gradient metrics through already classified incidence.
+ * The access object borrows the enclosing cell batch's provider/geometry lease.
+ * Raw boundary displacement and provider periodic interior displacement retain
+ * the point-query reference's arithmetic and orientation.
+ */
+template<class MeshType, bool IncludeBoundary, class Faces, class Access, class Visitor>
+[[gnu::always_inline]] inline void visit_traverse_gradient_samples(
+    const Faces& faces, const Access& access, Visitor&& visitor)
+{
+    // Keep topology sampling fused with the numerical callback. Outlining this
+    // small adapter prevents the compiler from folding native geometry queries
+    // across the structured batch and spills the accumulation state per face.
+    const auto sample_face = [&] [[gnu::always_inline]] (const auto& face)
+    {
+        constexpr bool interior = std::remove_cvref_t<decltype(face)>::is_interior;
+        TraverseGradientGeometrySample<MeshType, interior> sample;
+        sample.face_lid = face.id();
+        sample.interior = interior;
+        const auto cell = face.cell_id();
+        if constexpr (interior)
+        {
+            const auto owner = face.owner(), neighbor = face.neighbor();
+            if (owner == Access::invalid_local_id() || neighbor == Access::invalid_local_id())
+                throw std::invalid_argument("Gradient traversal requires adjacent cells in the local cell map.");
+            sample.other_lid = face.orientation() > 0 ? neighbor : owner;
+            sample.direction = access.cell_center_vector(face.id(), cell);
+        }
+        else
+        {
+            if (face.boundary_id() == MeshType::invalid_boundary_id) return;
+            sample.boundary = true;
+            sample.direction = access.face_centroid(face.id()) - access.cell_centroid(cell);
+            sample.normal_distance = static_cast<typename MeshType::scalar_type>(
+                sample.direction.dot(access.face_normal_outward(face.id(), cell)));
+        }
+        visitor(sample);
+    };
+    if constexpr (IncludeBoundary) faces.all().apply(access, sample_face);
+    else faces.interior().apply(access, sample_face);
+}
+
 /**
  * @brief Compute least-squares gradient reconstruction stencils for all
  *        owned cells.
@@ -831,9 +881,11 @@ void visit_gradient_geometry_samples(const MeshType& mesh,
  */
 template<class MeshType>
 std::vector<LeastSquaresGradientStencil<MeshType>>
-least_squares_gradient_stencils(const MeshType& mesh)
+least_squares_gradient_stencils(const MeshType& mesh, const MeshTraversePlan<MeshType>& plan)
 {
-    const auto execution = acquire_mesh_execution(mesh);
+    if (&plan.mesh() != &mesh || plan.entities() != MeshTraverseEntities::AllWithCellFaces)
+        throw std::invalid_argument("Gradient traversal requires cell-face incidence for the same mesh.");
+    const auto traversal = plan.acquire();
     using local_ordinal_type = typename MeshType::local_ordinal_type;
 
     std::vector<LeastSquaresGradientStencil<MeshType>> stencils(
@@ -841,12 +893,14 @@ least_squares_gradient_stencils(const MeshType& mesh)
     std::vector<GradientGeometrySample<MeshType>> samples;
     samples.reserve(6);
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    traversal.cells().all().apply([&](const auto& cell)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto cell_lid = cell.id();
+        const auto owned = static_cast<size_t>(cell_lid);
         std::array<std::array<real_t, 3>, 3> normal{};
         samples.clear();
-        visit_gradient_geometry_samples(mesh, cell_lid, [&](const auto& sample)
+        visit_traverse_gradient_samples<MeshType, false>(
+            traversal.cell_faces(cell_lid), cell.geometry(), [&](const auto& sample)
         {
             const auto& d = sample.direction;
             samples.push_back(sample);
@@ -857,7 +911,7 @@ least_squares_gradient_stencils(const MeshType& mesh)
             normal[1][1] += d.y * d.y;
             normal[1][2] += d.y * d.z;
             normal[2][2] += d.z * d.z;
-        }, false);
+        });
 
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
@@ -885,9 +939,17 @@ least_squares_gradient_stencils(const MeshType& mesh)
         {
             stencils[owned].push_back({entry_lid, coefficient});
         }
-    }
+    });
 
     return stencils;
+}
+
+template<class MeshType>
+std::vector<LeastSquaresGradientStencil<MeshType>>
+least_squares_gradient_stencils(const MeshType& mesh)
+{
+    const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
+    return least_squares_gradient_stencils(mesh, plan);
 }
 
 /**
@@ -1071,75 +1133,78 @@ template<class MeshType>
 std::vector<BoundaryAwareGradientCellGeometry<MeshType>>
 boundary_aware_gradient_geometry(
     const MeshType& mesh,
-    const std::vector<BoundaryFaceLocation<MeshType>>& boundary_locations)
+    const std::vector<BoundaryFaceLocation<MeshType>>& boundary_locations,
+    const MeshTraversePlan<MeshType>& plan)
 {
-    const auto execution = acquire_mesh_execution(mesh);
+    if (&plan.mesh() != &mesh || plan.entities() != MeshTraverseEntities::AllWithCellFaces)
+        throw std::invalid_argument("Gradient traversal requires cell-face incidence for the same mesh.");
+    const auto traversal = plan.acquire();
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     using vec_type = typename MeshType::Vec3;
 
-    std::vector<BoundaryAwareGradientCellGeometry<MeshType>> geometry(
-        mesh.num_owned_cells());
-    std::vector<GradientGeometrySample<MeshType>> samples;
-    samples.reserve(6);
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    std::vector<BoundaryAwareGradientCellGeometry<MeshType>> geometry(mesh.num_owned_cells());
+    std::vector<GradientGeometrySample<MeshType>> interior_samples, boundary_samples;
+    interior_samples.reserve(6);
+    boundary_samples.reserve(6);
+    traversal.cells().all().apply([&](const auto& cell)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
+        const auto cell_lid = cell.id();
         std::array<std::array<real_t, 3>, 3> normal{};
-        auto add_direction = [&](const vec_type& direction)
+        interior_samples.clear();
+        boundary_samples.clear();
+        visit_traverse_gradient_samples<MeshType, true>(
+            traversal.cell_faces(cell_lid), cell.geometry(), [&](const auto& sample)
         {
+            if constexpr (std::remove_cvref_t<decltype(sample)>::is_interior)
+                interior_samples.push_back(sample);
+            else
+            {
+                if (!boundary_locations.at(sample.face_lid).active) return;
+                boundary_samples.push_back(sample);
+            }
+            const auto& direction = sample.direction;
             normal[0][0] += direction.x * direction.x;
             normal[0][1] += direction.x * direction.y;
             normal[0][2] += direction.x * direction.z;
             normal[1][1] += direction.y * direction.y;
             normal[1][2] += direction.y * direction.z;
             normal[2][2] += direction.z * direction.z;
-        };
-
-        samples.clear();
-        visit_gradient_geometry_samples(mesh, cell_lid, [&](const auto& sample)
-        {
-            if (!sample.interior && !boundary_locations.at(sample.face_lid).active) return;
-            add_direction(sample.direction);
-            samples.push_back(sample);
         });
 
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
         normal[2][1] = normal[1][2];
         std::unordered_map<local_ordinal_type, vec_type> coefficients;
-        auto& cell_geometry = geometry[owned];
-
-        for (const auto& sample : samples)
+        auto& cell_geometry = geometry[static_cast<size_t>(cell_lid)];
+        for (const auto& sample : interior_samples)
         {
-            if (sample.interior)
-            {
-                auto direction = sample.direction;
-                auto local_normal = normal;
-                const auto basis = solve_3x3(local_normal, direction);
-                add_gradient_coefficient<MeshType>(
-                    coefficients, sample.other_lid, basis);
-                add_gradient_coefficient<MeshType>(
-                    coefficients, cell_lid,
-                    {-basis.x, -basis.y, -basis.z});
-                continue;
-            }
             auto direction = sample.direction;
             auto local_normal = normal;
-            cell_geometry.boundary_samples.push_back({
-                sample.face_lid,
-                boundary_locations.at(sample.face_lid),
-                solve_3x3(local_normal, direction),
-                sample.normal_distance});
+            const auto basis = solve_3x3(local_normal, direction);
+            add_gradient_coefficient<MeshType>(coefficients, sample.other_lid, basis);
+            add_gradient_coefficient<MeshType>(coefficients, cell_lid, {-basis.x, -basis.y, -basis.z});
         }
-
+        for (const auto& sample : boundary_samples)
+        {
+            auto direction = sample.direction;
+            auto local_normal = normal;
+            cell_geometry.boundary_samples.push_back({sample.face_lid, boundary_locations.at(sample.face_lid),
+                solve_3x3(local_normal, direction), sample.normal_distance});
+        }
         cell_geometry.interior_entries.reserve(coefficients.size());
         for (const auto& [entry_lid, coefficient] : coefficients)
-        {
-            cell_geometry.interior_entries.push_back(
-                {entry_lid, coefficient});
-        }
-    }
+            cell_geometry.interior_entries.push_back({entry_lid, coefficient});
+    });
     return geometry;
+}
+
+template<class MeshType>
+std::vector<BoundaryAwareGradientCellGeometry<MeshType>>
+boundary_aware_gradient_geometry(
+    const MeshType& mesh, const std::vector<BoundaryFaceLocation<MeshType>>& boundary_locations)
+{
+    const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
+    return boundary_aware_gradient_geometry(mesh, boundary_locations, plan);
 }
 
 /** @brief Add or accumulate an entry in a materialized gradient stencil. */
@@ -1294,8 +1359,12 @@ std::vector<AffineLeastSquaresGradientStencil<MeshType>>
 scalar_affine_gradient_stencils(
     const MeshType& mesh,
     BoundaryConditionProvider boundary_condition,
-    BoundaryValueProvider boundary_value)
+    BoundaryValueProvider boundary_value,
+    const MeshTraversePlan<MeshType>& plan)
 {
+    if (&plan.mesh() != &mesh || plan.entities() != MeshTraverseEntities::AllWithCellFaces)
+        throw std::invalid_argument("Gradient traversal requires cell-face incidence for the same mesh.");
+    const auto traversal = plan.acquire();
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     using vec_type = typename MeshType::Vec3;
 
@@ -1303,10 +1372,13 @@ scalar_affine_gradient_stencils(
     std::vector<AffineLeastSquaresGradientStencil<MeshType>> stencils(
         mesh.num_owned_cells());
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    traversal.cells().all().apply([&](const auto& cell)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto cell_id = query_cell_id(mesh, cell_lid);
+        using access_type = std::remove_cvref_t<decltype(cell.geometry())>;
+        const auto cell_lid = cell.id();
+        const auto owned = static_cast<size_t>(cell_lid);
+        const auto& access = cell.geometry();
+        const auto faces = traversal.cell_faces(cell_lid).all();
         std::array<std::array<real_t, 3>, 3> normal{};
 
         auto add_direction = [&](const vec_type& direction)
@@ -1321,47 +1393,45 @@ scalar_affine_gradient_stencils(
 
         // Robin supplies (n + r*d).grad(T) = r*(T_ambient - T_cell).
         // Scale by r + 1/|d| to retain length units and a regular r=0 limit.
-        const auto robin_sample = [&](auto face_id, const auto& condition)
+        const auto robin_sample = [&](auto face_lid, const auto& condition)
         {
-            const auto d = mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
+            const auto d = access.face_centroid(face_lid) - access.cell_centroid(cell_lid);
             const auto length = d.norm();
             const auto r = condition.robin_coefficient;
             if (!std::isfinite(r) || r < 0 || length <= 0)
                 throw std::invalid_argument("Invalid Robin gradient coefficient or boundary distance.");
             const auto inverse_scale = 1.0 / (r + 1.0 / length);
             const auto weight = r * inverse_scale;
-            return std::pair{d * weight + mesh.face_normal_outward(face_id, cell_id) * inverse_scale, weight};
+            return std::pair{d * weight + access.face_normal_outward(face_lid, cell_lid) * inverse_scale, weight};
         };
 
-        for (const auto face_id : mesh.faces(cell_id))
+        faces.apply(access, [&](const auto& face)
         {
-            if (mesh.is_interior_face(face_id))
+            if constexpr (std::remove_cvref_t<decltype(face)>::is_interior)
             {
-                add_direction(mesh.cell_center_vector(face_id, cell_id));
-                continue;
+                if (face.owner() == access_type::invalid_local_id() ||
+                    face.neighbor() == access_type::invalid_local_id())
+                    throw std::invalid_argument("Gradient traversal requires adjacent cells in the local cell map.");
+                add_direction(access.cell_center_vector(face.id(), cell_lid));
             }
-            if (!mesh.is_boundary_face(face_id))
+            else
             {
-                continue;
+                if (face.boundary_id() == MeshType::invalid_boundary_id) return;
+                const auto location = boundary_locations.at(static_cast<size_t>(face.id()));
+                if (!location.active) return;
+                const auto condition = boundary_condition(
+                    location.batch_id, location.in_batch_id);
+                if (condition.type != BoundaryConditionType::Dirichlet &&
+                    condition.type != BoundaryConditionType::Neumann && condition.type != BoundaryConditionType::Robin)
+                {
+                    throw std::invalid_argument("Affine scalar gradients support only Dirichlet and "
+                                                "Neumann or Robin boundary conditions.");
+                }
+                add_direction(condition.type == BoundaryConditionType::Robin
+                                  ? robin_sample(face.id(), condition).first
+                                  : access.face_centroid(face.id()) - access.cell_centroid(cell_lid));
             }
-            const auto location = boundary_locations.at(
-                packed_face_local_id(mesh, face_id));
-            if (!location.active)
-            {
-                continue;
-            }
-            const auto condition = boundary_condition(
-                location.batch_id, location.in_batch_id);
-            if (condition.type != BoundaryConditionType::Dirichlet &&
-                condition.type != BoundaryConditionType::Neumann && condition.type != BoundaryConditionType::Robin)
-            {
-                throw std::invalid_argument("Affine scalar gradients support only Dirichlet and "
-                                            "Neumann or Robin boundary conditions.");
-            }
-            add_direction(condition.type == BoundaryConditionType::Robin
-                              ? robin_sample(face_id, condition).first
-                              : mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id));
-        }
+        });
 
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
@@ -1369,80 +1439,82 @@ scalar_affine_gradient_stencils(
         std::unordered_map<local_ordinal_type, vec_type> coefficients;
         auto& stencil = stencils[owned];
 
-        for (const auto face_id : mesh.faces(cell_id))
+        faces.apply(access, [&](const auto& face)
         {
             vec_type direction{};
-            if (mesh.is_interior_face(face_id))
+            if constexpr (std::remove_cvref_t<decltype(face)>::is_interior)
             {
-                direction = mesh.cell_center_vector(face_id, cell_id);
+                direction = access.cell_center_vector(face.id(), cell_lid);
                 auto local_normal = normal;
                 const auto basis = solve_3x3(local_normal, direction);
-                const auto other_id =
-                    mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id);
-                const auto other_lid = packed_cell_local_id(mesh, other_id);
+                const auto other_lid = face.orientation() > 0 ? face.neighbor() : face.owner();
                 add_gradient_coefficient<MeshType>(
                     coefficients, other_lid, basis);
                 add_gradient_coefficient<MeshType>(
                     coefficients, cell_lid,
                     {-basis.x, -basis.y, -basis.z});
-                continue;
-            }
-            if (!mesh.is_boundary_face(face_id))
-            {
-                continue;
-            }
-            const auto location = boundary_locations.at(
-                packed_face_local_id(mesh, face_id));
-            if (!location.active)
-            {
-                continue;
-            }
-            direction =
-                mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
-            const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
-            real_t robin_weight = 0;
-            if (condition.type == BoundaryConditionType::Robin)
-            {
-                const auto sample = robin_sample(face_id, condition);
-                direction = sample.first;
-                robin_weight = sample.second;
-            }
-            auto local_normal = normal;
-            const auto basis = solve_3x3(local_normal, direction);
-            real_t boundary_increment{};
-            if (condition.type == BoundaryConditionType::Dirichlet)
-            {
-                add_gradient_coefficient<MeshType>(
-                    coefficients, cell_lid,
-                    {-basis.x, -basis.y, -basis.z});
-                boundary_increment = static_cast<real_t>(boundary_value(
-                    location.batch_id, location.in_batch_id));
-            }
-            else if (condition.type == BoundaryConditionType::Robin)
-            {
-                const auto weight = robin_weight;
-                add_gradient_coefficient<MeshType>(
-                    coefficients, cell_lid, {-weight * basis.x, -weight * basis.y, -weight * basis.z});
-                boundary_increment = weight * condition.value;
             }
             else
             {
-                boundary_increment = condition.value
-                    * static_cast<real_t>(boundary_normal_distance(
-                        mesh, face_id, cell_id));
+                if (face.boundary_id() == MeshType::invalid_boundary_id) return;
+                const auto location = boundary_locations.at(static_cast<size_t>(face.id()));
+                if (!location.active) return;
+                direction = access.face_centroid(face.id()) - access.cell_centroid(cell_lid);
+                const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
+                real_t robin_weight = 0;
+                if (condition.type == BoundaryConditionType::Robin)
+                {
+                    const auto sample = robin_sample(face.id(), condition);
+                    direction = sample.first;
+                    robin_weight = sample.second;
+                }
+                auto local_normal = normal;
+                const auto basis = solve_3x3(local_normal, direction);
+                real_t boundary_increment{};
+                if (condition.type == BoundaryConditionType::Dirichlet)
+                {
+                    add_gradient_coefficient<MeshType>(
+                        coefficients, cell_lid,
+                        {-basis.x, -basis.y, -basis.z});
+                    boundary_increment = static_cast<real_t>(boundary_value(
+                        location.batch_id, location.in_batch_id));
+                }
+                else if (condition.type == BoundaryConditionType::Robin)
+                {
+                    const auto weight = robin_weight;
+                    add_gradient_coefficient<MeshType>(
+                        coefficients, cell_lid, {-weight * basis.x, -weight * basis.y, -weight * basis.z});
+                    boundary_increment = weight * condition.value;
+                }
+                else
+                {
+                    const auto normal_direction = access.face_centroid(face.id()) - access.cell_centroid(cell_lid);
+                    const auto normal_distance = static_cast<typename MeshType::scalar_type>(
+                        normal_direction.dot(access.face_normal_outward(face.id(), cell_lid)));
+                    boundary_increment = condition.value * static_cast<real_t>(normal_distance);
+                }
+                stencil.constant.x += basis.x * boundary_increment;
+                stencil.constant.y += basis.y * boundary_increment;
+                stencil.constant.z += basis.z * boundary_increment;
             }
-            stencil.constant.x += basis.x * boundary_increment;
-            stencil.constant.y += basis.y * boundary_increment;
-            stencil.constant.z += basis.z * boundary_increment;
-        }
+        });
 
         stencil.entries.reserve(coefficients.size());
         for (const auto& [entry_lid, coefficient] : coefficients)
         {
             stencil.entries.push_back({entry_lid, coefficient});
         }
-    }
+    });
     return stencils;
+}
+
+template<class MeshType, class BoundaryConditionProvider, class BoundaryValueProvider>
+std::vector<AffineLeastSquaresGradientStencil<MeshType>>
+scalar_affine_gradient_stencils(
+    const MeshType& mesh, BoundaryConditionProvider boundary_condition, BoundaryValueProvider boundary_value)
+{
+    const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
+    return scalar_affine_gradient_stencils(mesh, std::move(boundary_condition), std::move(boundary_value), plan);
 }
 
 /** @brief Build component-wise affine vector gradient stencils. */
@@ -1450,8 +1522,12 @@ template<class MeshType, class BoundaryValueProvider>
 std::vector<VectorAffineLeastSquaresGradientStencil<MeshType>>
 vector_affine_gradient_stencils(
     const MeshType& mesh,
-    BoundaryValueProvider boundary_value)
+    BoundaryValueProvider boundary_value,
+    const MeshTraversePlan<MeshType>& plan)
 {
+    if (&plan.mesh() != &mesh || plan.entities() != MeshTraverseEntities::AllWithCellFaces)
+        throw std::invalid_argument("Gradient traversal requires cell-face incidence for the same mesh.");
+    const auto traversal = plan.acquire();
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     using vec_type = typename MeshType::Vec3;
 
@@ -1459,10 +1535,13 @@ vector_affine_gradient_stencils(
     std::vector<VectorAffineLeastSquaresGradientStencil<MeshType>> stencils(
         mesh.num_owned_cells());
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    traversal.cells().all().apply([&](const auto& cell)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto cell_id = query_cell_id(mesh, cell_lid);
+        using access_type = std::remove_cvref_t<decltype(cell.geometry())>;
+        const auto cell_lid = cell.id();
+        const auto owned = static_cast<size_t>(cell_lid);
+        const auto& access = cell.geometry();
+        const auto faces = traversal.cell_faces(cell_lid).all();
         std::array<std::array<real_t, 3>, 3> normal{};
         auto add_direction = [&](const vec_type& direction)
         {
@@ -1474,23 +1553,24 @@ vector_affine_gradient_stencils(
             normal[2][2] += direction.z * direction.z;
         };
 
-        for (const auto face_id : mesh.faces(cell_id))
+        faces.apply(access, [&](const auto& face)
         {
-            if (mesh.is_interior_face(face_id))
+            if constexpr (std::remove_cvref_t<decltype(face)>::is_interior)
             {
-                add_direction(mesh.cell_center_vector(face_id, cell_id));
+                if (face.owner() == access_type::invalid_local_id() ||
+                    face.neighbor() == access_type::invalid_local_id())
+                    throw std::invalid_argument("Gradient traversal requires adjacent cells in the local cell map.");
+                add_direction(access.cell_center_vector(face.id(), cell_lid));
             }
-            else if (mesh.is_boundary_face(face_id))
+            else if (face.boundary_id() != MeshType::invalid_boundary_id)
             {
-                const auto location = boundary_locations.at(
-                    packed_face_local_id(mesh, face_id));
+                const auto location = boundary_locations.at(static_cast<size_t>(face.id()));
                 if (location.active)
                 {
-                    add_direction(mesh.face_centroid(face_id)
-                                  - mesh.cell_centroid(cell_id));
+                    add_direction(access.face_centroid(face.id()) - access.cell_centroid(cell_lid));
                 }
             }
-        }
+        });
 
         normal[1][0] = normal[0][1];
         normal[2][0] = normal[0][2];
@@ -1498,62 +1578,62 @@ vector_affine_gradient_stencils(
         std::unordered_map<local_ordinal_type, vec_type> coefficients;
         auto& stencil = stencils[owned];
 
-        for (const auto face_id : mesh.faces(cell_id))
+        faces.apply(access, [&](const auto& face)
         {
             vec_type direction{};
-            if (mesh.is_interior_face(face_id))
+            if constexpr (std::remove_cvref_t<decltype(face)>::is_interior)
             {
-                direction = mesh.cell_center_vector(face_id, cell_id);
+                direction = access.cell_center_vector(face.id(), cell_lid);
                 auto local_normal = normal;
                 const auto basis = solve_3x3(local_normal, direction);
-                const auto other_id =
-                    mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id);
-                const auto other_lid = packed_cell_local_id(mesh, other_id);
+                const auto other_lid = face.orientation() > 0 ? face.neighbor() : face.owner();
                 add_gradient_coefficient<MeshType>(
                     coefficients, other_lid, basis);
                 add_gradient_coefficient<MeshType>(
                     coefficients, cell_lid,
                     {-basis.x, -basis.y, -basis.z});
-                continue;
             }
-            if (!mesh.is_boundary_face(face_id))
+            else
             {
-                continue;
+                if (face.boundary_id() == MeshType::invalid_boundary_id) return;
+                const auto location = boundary_locations.at(static_cast<size_t>(face.id()));
+                if (!location.active) return;
+                direction = access.face_centroid(face.id()) - access.cell_centroid(cell_lid);
+                auto local_normal = normal;
+                const auto basis = solve_3x3(local_normal, direction);
+                add_gradient_coefficient<MeshType>(
+                    coefficients, cell_lid,
+                    {-basis.x, -basis.y, -basis.z});
+                const auto value = static_cast<vec_type>(boundary_value(
+                    location.batch_id, location.in_batch_id));
+                for (size_t component_id = 0; component_id < 3; ++component_id)
+                {
+                    const auto component_value = value.component(component_id);
+                    stencil.constants[component_id].x +=
+                        basis.x * component_value;
+                    stencil.constants[component_id].y +=
+                        basis.y * component_value;
+                    stencil.constants[component_id].z +=
+                        basis.z * component_value;
+                }
             }
-            const auto location = boundary_locations.at(
-                packed_face_local_id(mesh, face_id));
-            if (!location.active)
-            {
-                continue;
-            }
-            direction =
-                mesh.face_centroid(face_id) - mesh.cell_centroid(cell_id);
-            auto local_normal = normal;
-            const auto basis = solve_3x3(local_normal, direction);
-            add_gradient_coefficient<MeshType>(
-                coefficients, cell_lid,
-                {-basis.x, -basis.y, -basis.z});
-            const auto value = static_cast<vec_type>(boundary_value(
-                location.batch_id, location.in_batch_id));
-            for (size_t component_id = 0; component_id < 3; ++component_id)
-            {
-                const auto component_value = value.component(component_id);
-                stencil.constants[component_id].x +=
-                    basis.x * component_value;
-                stencil.constants[component_id].y +=
-                    basis.y * component_value;
-                stencil.constants[component_id].z +=
-                    basis.z * component_value;
-            }
-        }
+        });
 
         stencil.entries.reserve(coefficients.size());
         for (const auto& [entry_lid, coefficient] : coefficients)
         {
             stencil.entries.push_back({entry_lid, coefficient});
         }
-    }
+    });
     return stencils;
+}
+
+template<class MeshType, class BoundaryValueProvider>
+std::vector<VectorAffineLeastSquaresGradientStencil<MeshType>>
+vector_affine_gradient_stencils(const MeshType& mesh, BoundaryValueProvider boundary_value)
+{
+    const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
+    return vector_affine_gradient_stencils(mesh, std::move(boundary_value), plan);
 }
 
 /**
