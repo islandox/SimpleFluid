@@ -242,6 +242,18 @@ public:
         d_problem.linear_options() = std::move(options);
     }
 
+    /** Momentum follows the shared transport policy until explicitly overridden. */
+    const LinearSolverOptions& momentum_linear_solver_options() const noexcept
+    {
+        return d_momentum_linear_options ? *d_momentum_linear_options : d_problem.linear_options();
+    }
+
+    /** Collectively select a momentum-only policy, leaving scalar transport unchanged. */
+    void set_momentum_linear_solver_options(LinearSolverOptions options);
+
+    /** Resume following the shared transport policy; call on every mesh rank. */
+    void clear_momentum_linear_solver_options() noexcept { d_momentum_linear_options.reset(); }
+
     /** @brief Return the pressure-projection linear-solver policy. */
     const LinearSolverOptions&
     pressure_linear_solver_options() const noexcept;
@@ -476,6 +488,7 @@ protected:
     SP<mesh_type> d_mutable_mesh;
     SP<const legacy_mesh_type> d_legacy_mesh;
     Problem<Pack> d_problem;
+    std::optional<LinearSolverOptions> d_momentum_linear_options;
     SolverTimings d_solver_timings;
     scalar_type d_time = 0.0;
     int d_step_index = 0;

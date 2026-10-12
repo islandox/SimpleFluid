@@ -105,7 +105,9 @@ enum class LinearPreconditioner
     ILUT,
     DIC,
     GaussSeidel,
-    SymmetricGaussSeidel
+    SymmetricGaussSeidel,
+    /** Symmetric smoothed aggregation with SGS smoothing and an exact coarse solve. */
+    MueLuSymmetric
 };
 
 /**
@@ -121,6 +123,7 @@ inline std::string_view to_string(LinearPreconditioner preconditioner)
     {
         case LinearPreconditioner::None:    return "none";
         case LinearPreconditioner::MueLu:   return "MueLu";
+        case LinearPreconditioner::MueLuSymmetric: return "MueLuSymmetric";
         case LinearPreconditioner::Jacobi:  return "jacobi";
         case LinearPreconditioner::ILU0:    return "ilu0";
         case LinearPreconditioner::ILUT:    return "ilut";
@@ -144,6 +147,8 @@ inline LinearPreconditioner parse_linear_preconditioner(
         return LinearPreconditioner::None;
     if (value == "MueLu" || value == "muelu")
         return LinearPreconditioner::MueLu;
+    if (value == "MueLuSymmetric")
+        return LinearPreconditioner::MueLuSymmetric;
     if (value == "jacobi" || value == "Jacobi")
         return LinearPreconditioner::Jacobi;
     if (value == "ilu0" || value == "ILU0"
@@ -317,6 +322,7 @@ public:
         d_preconditioner_kind.reset();
         d_muelu_factory = Teuchos::null;
         d_muelu_map = Teuchos::null;
+        d_muelu_kind.reset();
     }
 
     bool solve(
@@ -955,12 +961,14 @@ private:
                         });
                 break;
             case LinearPreconditioner::MueLu:
+            case LinearPreconditioner::MueLuSymmetric:
             {
                 // The policy is fixed, but parsing it builds a sizeable factory
                 // tree. Retain that configuration for the exact same map/comm;
                 // every numeric setup still gets a fresh hierarchy and factors.
                 if (d_muelu_factory.is_null() ||
-                    d_muelu_map.get() != crs_matrix->getDomainMap().get())
+                    d_muelu_map.get() != crs_matrix->getDomainMap().get() ||
+                    d_muelu_kind != options.preconditioner)
                 {
                     Teuchos::ParameterList parameters;
                     parameters.set("verbosity", "none");
@@ -973,9 +981,23 @@ private:
                         "relaxation: type", "Jacobi");
                     parameters.sublist("coarse: params").set(
                         "relaxation: sweeps", 4);
+                    if (options.preconditioner == LinearPreconditioner::MueLuSymmetric)
+                    {
+                        parameters.set("multigrid algorithm", "sa");
+                        parameters.set("problem: symmetric", true);
+                        parameters.set("transpose: use implicit", true);
+                        parameters.set("smoother: pre or post", "both");
+                        parameters.sublist("smoother: params").set(
+                            "relaxation: type", "Symmetric Gauss-Seidel");
+                        parameters.sublist("smoother: params").set("relaxation: sweeps", 1);
+                        parameters.sublist("smoother: params").set("relaxation: damping factor", scalar_type{1});
+                        parameters.set("coarse: type", "KLU2");
+                        parameters.remove("coarse: params");
+                    }
                     d_muelu_factory = Teuchos::rcp(new muelu_factory_type(
                         parameters, crs_matrix->getDomainMap()->getComm()));
                     d_muelu_map = crs_matrix->getDomainMap();
+                    d_muelu_kind = options.preconditioner;
                     ++d_muelu_configuration_count;
                 }
 
@@ -1249,6 +1271,7 @@ private:
         typename Pack::node_type>;
     Teuchos::RCP<muelu_factory_type> d_muelu_factory;
     Teuchos::RCP<const typename Pack::map_type> d_muelu_map;
+    std::optional<LinearPreconditioner> d_muelu_kind;
     std::size_t d_muelu_configuration_count = 0;
 };
 
