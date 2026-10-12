@@ -25,10 +25,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -62,6 +66,7 @@ public:
     using vec_type = typename mesh_type::Vec3;
     using boundary_location_type =
         detail::BoundaryFaceLocation<mesh_type>;
+    using traverse_plan_type = MeshTraversePlan<mesh_type>;
 
     /** @brief One cached interior-neighbor contribution. */
     struct InteriorSample
@@ -85,6 +90,98 @@ public:
         std::vector<BoundarySample> boundary_samples;
     };
 
+    /** Six regular contributions; boundary metadata lives in separate arrays. */
+    struct StructuredInteriorRow
+    {
+        std::array<vec_type, 6> weights;
+        std::array<local_ordinal_type, 6> neighbors;
+    };
+
+    struct StructuredBoundaryRow
+    {
+        size_t interior_begin{}, boundary_interior_begin{}, boundary_begin{};
+        unsigned char interior_count{}, boundary_count{};
+    };
+
+    struct StructuredGeometry
+    {
+        explicit StructuredGeometry(::SimpleFluid::detail::StructuredTraverseLayout source) : layout(std::move(source)) {}
+        ::SimpleFluid::detail::StructuredTraverseLayout layout;
+        // Low bit marks a boundary row; remaining bits index the matching array.
+        std::vector<size_t> rows;
+        std::vector<StructuredInteriorRow> interior_rows;
+        std::vector<StructuredBoundaryRow> boundary_rows;
+        std::vector<InteriorSample> boundary_interior_only, boundary_interior;
+        std::vector<BoundarySample> boundary_samples;
+
+        struct InteriorRange
+        {
+            const StructuredInteriorRow* row;
+            struct Iterator
+            {
+                const StructuredInteriorRow* row;
+                size_t slot;
+                InteriorSample operator*() const { return {row->neighbors[slot], row->weights[slot]}; }
+                Iterator& operator++() { ++slot; return *this; }
+                bool operator==(const Iterator&) const = default;
+            };
+            Iterator begin() const { return {row, 0}; }
+            Iterator end() const { return {row, 6}; }
+            size_t size() const noexcept { return 6; }
+        };
+        struct InteriorView
+        {
+            InteriorRange interior_samples;
+            std::span<const BoundarySample> boundary_samples;
+        };
+        struct BoundaryView
+        {
+            std::span<const InteriorSample> interior_samples;
+            std::span<const BoundarySample> boundary_samples;
+        };
+
+        template<bool IncludeBoundary, class Visitor>
+        void visit_rows(Visitor&& visitor) const
+        {
+            for (size_t cell = 0; cell < rows.size(); ++cell)
+            {
+                const auto encoded = rows[cell];
+                if (!(encoded & size_t{1}))
+                    visitor(cell, InteriorView{{&interior_rows[encoded >> 1]}, {}});
+                else
+                {
+                    const auto& row = boundary_rows[encoded >> 1];
+                    if constexpr (IncludeBoundary)
+                    {
+                        if (row.boundary_count)
+                            visitor(cell, BoundaryView{
+                                std::span<const InteriorSample>(boundary_interior).subspan(
+                                    row.boundary_interior_begin, row.interior_count),
+                                std::span<const BoundarySample>(boundary_samples).subspan(
+                                    row.boundary_begin, row.boundary_count)});
+                        else
+                            visitor(cell, BoundaryView{
+                                std::span<const InteriorSample>(boundary_interior_only).subspan(
+                                    row.interior_begin, row.interior_count), {}});
+                    }
+                    else
+                        visitor(cell, BoundaryView{
+                            std::span<const InteriorSample>(boundary_interior_only).subspan(
+                                row.interior_begin, row.interior_count), {}});
+                }
+            }
+        }
+
+        size_t storage_bytes() const noexcept
+        {
+            return sizeof(*this) + rows.capacity() * sizeof(size_t)
+                + interior_rows.capacity() * sizeof(StructuredInteriorRow)
+                + boundary_rows.capacity() * sizeof(StructuredBoundaryRow)
+                + (boundary_interior_only.capacity() + boundary_interior.capacity()) * sizeof(InteriorSample)
+                + boundary_samples.capacity() * sizeof(BoundarySample);
+        }
+    };
+
     /**
      * @brief Precompute least-squares weights for an assembled mesh.
      * @param mesh Shared mesh whose lifetime and geometry the cache retains.
@@ -96,6 +193,10 @@ public:
 
     /** Optional displacement override for mixed vector boundary constraints. */
     CellGradientCache(SP<const mesh_type> mesh, boundary_direction_provider_type boundary_direction);
+
+    /** Rebuild numeric weights while sharing the same fixed-topology traversal. */
+    CellGradientCache(SP<const mesh_type> mesh, boundary_direction_provider_type boundary_direction,
+        std::shared_ptr<const traverse_plan_type> traverse_plan);
 
     CellGradientCache(const CellGradientCache&) = delete;
     CellGradientCache& operator=(const CellGradientCache&) = delete;
@@ -118,6 +219,7 @@ public:
             throw std::invalid_argument(
                 "Cell-gradient cache belongs to another mesh.");
         }
+        d_traverse_plan->require_valid();
         if (mesh_geometry_epoch(mesh) != d_geometry_epoch)
         {
             throw std::invalid_argument("Cell-gradient cache is stale for the mesh geometry epoch.");
@@ -130,28 +232,66 @@ public:
     /** @brief Geometry epoch represented by this cache. */
     std::uint64_t geometry_epoch() const noexcept { return d_geometry_epoch; }
 
+    const traverse_plan_type& traverse_plan() const noexcept { return *d_traverse_plan; }
+    const std::shared_ptr<const traverse_plan_type>& shared_traverse_plan() const noexcept
+    { return d_traverse_plan; }
+
     /** @brief Return interior-neighbor-only reconstruction weights. */
     const std::vector<CellGeometry>& interior_geometry() const
     {
         require_mesh(*d_mesh);
-        return d_interior_geometry;
+        materialize_geometry();
+        return d_geometry->interior;
     }
 
     /** @brief Return boundary-aware reconstruction weights. */
     const std::vector<CellGeometry>& boundary_geometry() const
     {
         require_mesh(*d_mesh);
-        return d_boundary_geometry;
+        materialize_geometry();
+        return d_geometry->boundary;
     }
 
     /** @brief Return the cached per-face boundary lookup. */
     const std::vector<boundary_location_type>& boundary_locations() const
     {
         require_mesh(*d_mesh);
-        return d_boundary_locations;
+        materialize_locations();
+        return *d_geometry->locations;
     }
 
+    bool uses_structured_storage() const noexcept { return d_geometry && bool(d_geometry->structured); }
+    bool legacy_geometry_materialized() const noexcept
+    { return !uses_structured_storage() || d_geometry->legacy_ready.load(std::memory_order_acquire); }
+    const StructuredGeometry* structured_geometry() const
+    { require_mesh(*d_mesh); return d_geometry->structured.get(); }
+    /** Numerical capacities; lazily requested compatibility arrays are excluded. */
+    size_t numerical_storage_bytes() const noexcept;
+
 private:
+    struct GeometrySnapshot
+    {
+        std::unique_ptr<StructuredGeometry> structured;
+        mutable std::vector<CellGeometry> interior, boundary;
+        mutable std::shared_ptr<const std::vector<boundary_location_type>> locations;
+        mutable std::once_flag legacy_once, locations_once;
+        mutable std::atomic<bool> legacy_ready{false};
+    };
+    void materialize_geometry() const;
+    void materialize_locations() const;
+    std::shared_ptr<GeometrySnapshot> build_snapshot() const;
+    void build_structured_geometry(GeometrySnapshot& next,
+        const std::vector<boundary_location_type>* locations) const;
+    static std::shared_ptr<const traverse_plan_type> require_traverse_plan(const mesh_type& mesh,
+        std::shared_ptr<const traverse_plan_type> plan)
+    {
+        if (!plan) return std::make_shared<const traverse_plan_type>(mesh, MeshTraverseEntities::AllWithCellFaces);
+        if (&plan->mesh() != &mesh || plan->entities() != MeshTraverseEntities::AllWithCellFaces)
+            throw std::invalid_argument("Cell-gradient cache requires cell-face traversal for the same mesh.");
+        plan->require_valid();
+        return plan;
+    }
+
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)
     {
         if (!mesh)
@@ -179,13 +319,13 @@ private:
     static std::vector<CellGeometry> build_geometry(
         const mesh_type& mesh,
         const std::vector<boundary_location_type>& boundary_locations,
-        bool include_boundary_samples, const boundary_direction_provider_type& boundary_direction);
+        const traverse_plan_type& plan, bool include_boundary_samples,
+        const boundary_direction_provider_type& boundary_direction);
 
     SP<const mesh_type> d_mesh;
+    std::shared_ptr<const traverse_plan_type> d_traverse_plan;
     boundary_direction_provider_type d_boundary_direction;
-    std::vector<boundary_location_type> d_boundary_locations;
-    std::vector<CellGeometry> d_interior_geometry;
-    std::vector<CellGeometry> d_boundary_geometry;
+    std::shared_ptr<GeometrySnapshot> d_geometry;
     std::uint64_t d_geometry_epoch = 0;
 };
 extern template class CellGradientCache<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
@@ -225,14 +365,11 @@ void cached_scalar_cell_gradient(
     const auto owned_values = field.owned_read_view();
     const auto local_values = field.local_read_view();
     auto gradient_values = gradients.owned_write_view();
-    const auto& geometry = cache.interior_geometry();
-    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    visit_cached_gradient_rows<false>(cache, [&](local_ordinal_type cell_lid, const auto& cell_geometry)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
         const auto value_p = owned_values(cell_lid, 0);
         typename Mesh<Pack>::Vec3 gradient{};
-        for (const auto& sample : geometry[owned].interior_samples)
+        for (const auto& sample : cell_geometry.interior_samples)
         {
             const auto delta =
                 local_values(sample.other_lid, 0) - value_p;
@@ -246,7 +383,7 @@ void cached_scalar_cell_gradient(
             static_cast<scalar_type>(gradient.y);
         gradient_values(cell_lid, 2) =
             static_cast<scalar_type>(gradient.z);
-    }
+    });
 }
 
 /** @brief Evaluate cached boundary-aware scalar reconstruction weights. */
@@ -267,18 +404,8 @@ void cached_scalar_cell_gradient(
     const auto owned_values = field.owned_read_view();
     const auto local_values = field.local_read_view();
     auto gradient_values = gradients.owned_write_view();
-    const auto& interior_geometry = cache.interior_geometry();
-    const auto& boundary_geometry = cache.boundary_geometry();
-    for (size_t owned = 0;
-         owned < boundary_geometry.size();
-         ++owned)
+    visit_cached_gradient_rows<true>(cache, [&](local_ordinal_type cell_lid, const auto& cell_geometry)
     {
-        const auto& cell_geometry =
-            boundary_geometry[owned].boundary_samples.empty()
-          ? interior_geometry[owned]
-          : boundary_geometry[owned];
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
         const auto value_p = owned_values(cell_lid, 0);
         typename Mesh<Pack>::Vec3 gradient{};
         for (const auto& sample : cell_geometry.interior_samples)
@@ -324,7 +451,7 @@ void cached_scalar_cell_gradient(
             static_cast<scalar_type>(gradient.y);
         gradient_values(cell_lid, 2) =
             static_cast<scalar_type>(gradient.z);
-    }
+    });
 }
 
 /** @brief Evaluate cached interior-only vector reconstruction weights. */
@@ -348,13 +475,10 @@ void cached_vector_cell_gradient(
     const auto owned_values = field.owned_read_view();
     const auto local_values = field.local_read_view();
     auto gradient_values = gradients.owned_write_view();
-    const auto& geometry = cache.interior_geometry();
-    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    visit_cached_gradient_rows<false>(cache, [&](local_ordinal_type cell_lid, const auto& cell_geometry)
     {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
         std::array<typename Mesh<Pack>::Vec3, 3> gradient{};
-        for (const auto& sample : geometry[owned].interior_samples)
+        for (const auto& sample : cell_geometry.interior_samples)
         {
             for (size_t component = 0;
                  component < VectorCellField<Pack>::num_components;
@@ -379,7 +503,7 @@ void cached_vector_cell_gradient(
             gradient_values(cell_lid, component * 3 + 2) =
                 static_cast<scalar_type>(gradient[component].z);
         }
-    }
+    });
 }
 
 /** @brief Evaluate cached boundary-aware vector reconstruction weights. */
@@ -404,18 +528,8 @@ void cached_vector_cell_gradient(
     const auto owned_values = field.owned_read_view();
     const auto local_values = field.local_read_view();
     auto gradient_values = gradients.owned_write_view();
-    const auto& interior_geometry = cache.interior_geometry();
-    const auto& boundary_geometry = cache.boundary_geometry();
-    for (size_t owned = 0;
-         owned < boundary_geometry.size();
-         ++owned)
+    visit_cached_gradient_rows<true>(cache, [&](local_ordinal_type cell_lid, const auto& cell_geometry)
     {
-        const auto& cell_geometry =
-            boundary_geometry[owned].boundary_samples.empty()
-          ? interior_geometry[owned]
-          : boundary_geometry[owned];
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
         std::array<typename Mesh<Pack>::Vec3, 3> gradient{};
         for (const auto& sample : cell_geometry.interior_samples)
         {
@@ -462,7 +576,7 @@ void cached_vector_cell_gradient(
             gradient_values(cell_lid, component * 3 + 2) =
                 static_cast<scalar_type>(gradient[component].z);
         }
-    }
+    });
 }
 
 /**

@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "FVM/details/CachedGradientRows.hh"
 #include "FVM/details/OperatorDetails.hh"
 #include "FVM/details/ResolvedDiffusionGeometry.hh"
 #include "FVM/details/StoredMeshIdentity.hh"
@@ -77,23 +78,21 @@ void stored_cached_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshTy
 
     require_same_stored_mesh(field, gradients, "cell_gradient");
     cache.require_mesh(field.mesh());
-    const auto& geometry = cache.interior_geometry();
     const auto local_values = field.local_read_view();
     const auto owned_values = field.owned_read_view();
     auto gradient_values = gradients.owned_write_view();
-    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    visit_cached_gradient_rows<false>(cache, [&](local_ordinal_type cell_lid, const auto& geometry)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto value_p = owned_values(cell_lid, 0);
         vec_type gradient{};
-        for (const auto& sample : geometry[owned].interior_samples)
+        for (const auto& sample : geometry.interior_samples)
         {
             gradient = gradient + sample.weight * (local_values(sample.other_lid, 0) - value_p);
         }
         gradient_values(cell_lid, 0) = gradient.x;
         gradient_values(cell_lid, 1) = gradient.y;
         gradient_values(cell_lid, 2) = gradient.z;
-    }
+    });
 }
 
 /** @brief Evaluate cached boundary-aware scalar-gradient geometry. */
@@ -108,16 +107,11 @@ void stored_cached_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshTy
 
     require_same_stored_mesh(field, gradients, "cell_gradient");
     cache.require_mesh(field.mesh());
-    const auto& interior_geometry = cache.interior_geometry();
-    const auto& boundary_geometry = cache.boundary_geometry();
     const auto local_values = field.local_read_view();
     const auto owned_values = field.owned_read_view();
     auto gradient_values = gradients.owned_write_view();
-    for (size_t owned = 0; owned < boundary_geometry.size(); ++owned)
+    visit_cached_gradient_rows<true>(cache, [&](local_ordinal_type cell_lid, const auto& geometry)
     {
-        const auto& geometry =
-            boundary_geometry[owned].boundary_samples.empty() ? interior_geometry[owned] : boundary_geometry[owned];
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto value_p = owned_values(cell_lid, 0);
         vec_type gradient{};
         for (const auto& sample : geometry.interior_samples)
@@ -149,7 +143,7 @@ void stored_cached_scalar_cell_gradient(const ScalarCellFieldStored<Pack, MeshTy
         gradient_values(cell_lid, 0) = gradient.x;
         gradient_values(cell_lid, 1) = gradient.y;
         gradient_values(cell_lid, 2) = gradient.z;
-    }
+    });
 }
 
 /** @brief Evaluate interior vector-gradient stencils into tensor storage. */
@@ -231,16 +225,14 @@ void stored_cached_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshTy
 
     require_same_stored_mesh(field, gradients, "cell_gradient");
     cache.require_mesh(field.mesh());
-    const auto& geometry = cache.interior_geometry();
     const auto local_values = field.local_read_view();
     const auto owned_values = field.owned_read_view();
     auto gradient_values = gradients.owned_write_view();
-    for (size_t owned = 0; owned < geometry.size(); ++owned)
+    visit_cached_gradient_rows<false>(cache, [&](local_ordinal_type cell_lid, const auto& geometry)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto value_p = vec_type{owned_values(cell_lid, 0), owned_values(cell_lid, 1), owned_values(cell_lid, 2)};
         tensor_type gradient{};
-        for (const auto& sample : geometry[owned].interior_samples)
+        for (const auto& sample : geometry.interior_samples)
         {
             const auto delta = vec_type{local_values(sample.other_lid, 0), local_values(sample.other_lid, 1),
                                    local_values(sample.other_lid, 2)} -
@@ -256,7 +248,7 @@ void stored_cached_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshTy
             gradient_values(cell_lid, component * 3 + 1) = gradient[component].y;
             gradient_values(cell_lid, component * 3 + 2) = gradient[component].z;
         }
-    }
+    });
 }
 
 /** @brief Evaluate cached boundary-aware vector-gradient geometry. */
@@ -270,16 +262,11 @@ void stored_cached_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshTy
 
     require_same_stored_mesh(field, gradients, "cell_gradient");
     cache.require_mesh(field.mesh());
-    const auto& interior_geometry = cache.interior_geometry();
-    const auto& boundary_geometry = cache.boundary_geometry();
     const auto local_values = field.local_read_view();
     const auto owned_values = field.owned_read_view();
     auto gradient_values = gradients.owned_write_view();
-    for (size_t owned = 0; owned < boundary_geometry.size(); ++owned)
+    visit_cached_gradient_rows<true>(cache, [&](local_ordinal_type cell_lid, const auto& geometry)
     {
-        const auto& geometry =
-            boundary_geometry[owned].boundary_samples.empty() ? interior_geometry[owned] : boundary_geometry[owned];
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
         const auto value_p = vec_type{owned_values(cell_lid, 0), owned_values(cell_lid, 1), owned_values(cell_lid, 2)};
         tensor_type gradient{};
         for (const auto& sample : geometry.interior_samples)
@@ -306,7 +293,7 @@ void stored_cached_vector_cell_gradient(const VectorCellFieldStored<Pack, MeshTy
             gradient_values(cell_lid, component * 3 + 1) = gradient[component].y;
             gradient_values(cell_lid, component * 3 + 2) = gradient[component].z;
         }
-    }
+    });
 }
 
 /** @brief Gauss-linear scalar gradient for stored fields. */

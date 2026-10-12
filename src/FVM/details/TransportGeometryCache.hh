@@ -10,11 +10,35 @@ namespace SimpleFluid::FVM
 
 template<class MeshType>
 TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(const MeshType& source)
+    : SharedGeometry(source, std::make_shared<const traverse_plan_type>(
+          source, MeshTraverseEntities::AllWithCellFaces))
+{
+}
+
+template<class MeshType>
+TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(
+    const MeshType& source, std::shared_ptr<const traverse_plan_type> traverse)
+    : SharedGeometry(source, std::move(traverse), nullptr)
+{
+}
+
+template<class MeshType>
+TransportGeometryCache<MeshType>::SharedGeometry::SharedGeometry(
+    const MeshType& source, std::shared_ptr<const traverse_plan_type> traverse,
+    const assembly_geometry_type* previous_assembly)
     : mesh(&source), identity(detail::ale_geometry_identity(source)), epoch(mesh_geometry_epoch(source)),
-      interior(detail::least_squares_gradient_stencils(source)),
+      gradient_traverse([&]
+      {
+          if (!traverse || &traverse->mesh() != &source
+              || traverse->entities() != MeshTraverseEntities::AllWithCellFaces)
+              throw std::invalid_argument("Cannot share a foreign transport gradient traverse plan.");
+          traverse->require_valid();
+          return std::move(traverse);
+      }()),
+      interior(detail::least_squares_gradient_stencils(source, *gradient_traverse)),
       locations(detail::boundary_face_locations(source)),
-      boundary(detail::boundary_aware_gradient_geometry(source, locations)),
-      assembly(detail::transport_assembly_geometry(source)),
+      boundary(detail::boundary_aware_gradient_geometry(source, locations, *gradient_traverse)),
+      assembly(detail::transport_assembly_geometry(source, gradient_traverse, previous_assembly)),
       has_non_orthogonal_faces(detail::stored_transport_has_non_orthogonal_faces(source))
 {
 }
@@ -29,6 +53,7 @@ template<class MeshType> void TransportGeometryCache<MeshType>::require_mesh(con
 {
     if (&mesh != d_mesh)
         throw std::invalid_argument("transport geometry cache belongs to another mesh.");
+    d_geometry->gradient_traverse->require_valid();
     if (mesh_geometry_epoch(mesh) != d_geometry->epoch ||
         detail::ale_geometry_identity(mesh) != d_geometry->identity)
         throw std::invalid_argument("transport geometry cache is stale for the mesh geometry epoch.");
@@ -48,13 +73,21 @@ void TransportGeometryCache<MeshType>::refresh(shared_geometry_type geometry)
     if (geometry)
     {
         if (geometry->mesh != d_mesh || geometry->epoch != mesh_geometry_epoch(*d_mesh) ||
-            geometry->identity != detail::ale_geometry_identity(*d_mesh))
+            geometry->identity != detail::ale_geometry_identity(*d_mesh) ||
+            !geometry->gradient_traverse || &geometry->gradient_traverse->mesh() != d_mesh)
             throw std::invalid_argument("Cannot share foreign or stale transport geometry.");
+        geometry->gradient_traverse->require_valid();
         d_geometry = std::move(geometry);
     }
-    else if (!d_geometry || d_geometry->epoch != mesh_geometry_epoch(*d_mesh) ||
-             d_geometry->identity != detail::ale_geometry_identity(*d_mesh))
+    else if (!d_geometry)
         d_geometry = std::make_shared<SharedGeometry>(*d_mesh);
+    else
+    {
+        d_geometry->gradient_traverse->require_valid();
+        if (d_geometry->epoch != mesh_geometry_epoch(*d_mesh) ||
+            d_geometry->identity != detail::ale_geometry_identity(*d_mesh))
+            d_geometry = std::make_shared<SharedGeometry>(*d_mesh, d_geometry->gradient_traverse, &d_geometry->assembly);
+    }
 }
 
 template<class MeshType>
@@ -108,7 +141,8 @@ TransportGeometryCache<MeshType>::scalar_affine_stencils(
         for (size_t index = 0; index < batch.face_lids.size(); ++index)
             if (d_mesh->is_boundary_face(batch.face_lids[index]) &&
                 boundary_condition(batch_id, index).type == BoundaryConditionType::Robin)
-                return detail::scalar_affine_gradient_stencils(*d_mesh, boundary_condition, boundary_value);
+                return detail::scalar_affine_gradient_stencils(
+                    *d_mesh, boundary_condition, boundary_value, *d_geometry->gradient_traverse);
     return detail::materialize_scalar_affine_gradient_stencils<MeshType>(
         d_geometry->boundary, std::move(boundary_condition), std::move(boundary_value));
 }

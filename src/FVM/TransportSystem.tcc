@@ -23,6 +23,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -116,19 +117,22 @@ PreparedTransportMatrix<Pack> prepare_transport_matrix(
 }
 
 template<TpetraTypePack Pack>
-std::vector<TransportMatrixRow<Pack>> basic_transport_rows(const Mesh<Pack>& mesh)
+std::vector<TransportMatrixRow<Pack>> basic_transport_rows(
+    const Mesh<Pack>& mesh, const TransportAssemblyGeometry<Mesh<Pack>>& geometry)
 {
     using local_ordinal_type = typename Pack::local_ordinal_type;
     std::vector<TransportMatrixRow<Pack>> rows(mesh.num_owned_cells());
-    for (size_t owned = 0; owned < rows.size(); ++owned)
+    visit_transport_assembly_rows(mesh, geometry,
+        [&](local_ordinal_type cell, auto, auto&& visit_faces)
     {
-        const auto cell = static_cast<local_ordinal_type>(owned);
-        auto& columns = rows[owned].columns;
+        auto& columns = rows[static_cast<size_t>(cell)].columns;
         columns.push_back(cell);
-        for (const auto face : mesh.faces(cell))
-            if (mesh.is_interior_face(face))
-                columns.push_back(mesh.opposite_or_periodic_neighbor_cell(face, cell));
-    }
+        visit_faces([&](const auto& face, const auto&)
+        {
+            if constexpr (std::remove_cvref_t<decltype(face)>::interior)
+                columns.push_back(face.other);
+        });
+    });
     return rows;
 }
 
@@ -193,9 +197,11 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
 
     // Row map = owned cells; domain map = owned + ghost cells
     // so that neighbour columns on other ranks are valid.
+    detail::TransportAssemblyGeometry<Mesh<Pack>> local_assembly_geometry;
+    const auto& assembly_geometry = detail::select_transport_assembly_geometry(mesh, local_assembly_geometry);
     const auto required_rows = cached_matrix.is_null()
         ? std::vector<detail::TransportMatrixRow<Pack>>{}
-        : detail::basic_transport_rows<Pack>(mesh);
+        : detail::basic_transport_rows<Pack>(mesh, assembly_geometry);
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 12, &required_rows);
     const auto& matrix = prepared.matrix;
@@ -205,78 +211,71 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
 
     detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(mesh.num_local_cells(), 32);
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    detail::visit_transport_assembly_rows(mesh, assembly_geometry,
+        [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-
-        const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
         const auto old_value = old_value_data(cell_lid, 0);
         scalar_type rhs_value = transient * old_value + volume * right_hand_source(cell_lid);
         row_values.clear();
         detail::add_matrix_entry(row_values, cell_lid, transient);
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_faces([&](const auto& face, const auto& metrics)
         {
-            const auto is_interior = mesh.is_interior_face(face_lid);
+            using face_type = std::remove_cvref_t<decltype(face)>;
+            const auto face_lid = face.face_lid;
+            constexpr bool is_interior = face_type::interior;
             local_ordinal_type other{};
-            if (is_interior)
+            if constexpr (is_interior)
             {
-                other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                other = face.other;
             }
 
             // === advection (upwind) ===
             const auto owner_oriented_flux = face_fluxes.is_owned_face(face_lid)
                                                  ? face_flux_data(face_fluxes.owned_row(face_lid), 0)
                                                  : scalar_type{};
-            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_oriented_flux : -owner_oriented_flux;
+            const auto out_flux = face_type::owned_orientation ? owner_oriented_flux : -owner_oriented_flux;
 
             if (out_flux >= scalar_type{0})
             {
                 detail::add_matrix_entry(row_values, cell_lid, out_flux);
             }
-            else if (is_interior)
+            else if constexpr (is_interior)
             {
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
 
             // === diffusion ===
-            if (!is_interior)
+            if constexpr (!is_interior)
             {
-                continue;
+                return;
             }
 
             row_values.ensure(other);
             if (diffusivity <= scalar_type{0})
             {
-                continue;
+                return;
             }
 
-            const auto coeff = detail::interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, diffusivity);
+            const auto coeff = detail::interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, diffusivity);
             detail::add_matrix_entry(row_values, cell_lid, coeff);
             detail::add_matrix_entry(row_values, other, -coeff);
-        }
+        });
 
         detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
         rhs->replaceLocalValue(cell_lid, rhs_value);
-    }
+    });
 
     // Apply boundary conditions using sumIntoLocalValues (works reliably).
-    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
+    detail::visit_transport_boundary_batches(mesh, assembly_geometry,
+        [&](int batch_id, const auto boundary_faces, const auto& metrics)
     {
-        for (size_t in_batch_id = 0; in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
+        for (const auto& entry : boundary_faces)
         {
-            const auto face_lid = boundary_batch.face_lids[in_batch_id];
-            if (!mesh.is_owned_face(face_lid))
-            {
-                continue;
-            }
-            if (!mesh.is_boundary_face(face_lid))
-            {
-                continue;
-            }
-
-            const auto owner = mesh.owner_cell(face_lid);
+            const auto face_lid = entry.face_lid;
+            const auto owner = entry.owner;
+            const auto in_batch_id = entry.in_batch_id;
 
             // Advective boundary flux
             const auto out_flux = face_fluxes.is_owned_face(face_lid)
@@ -302,7 +301,7 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
                 continue;
             }
 
-            const auto coeff = detail::boundary_diffusion_coefficient(mesh, face_lid, owner, diffusivity);
+            const auto coeff = detail::boundary_diffusion_coefficient(metrics, face_lid, owner, diffusivity);
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
                 if (coeff > scalar_type{0})
@@ -315,14 +314,14 @@ TransportSystem<Pack> transport_system(const CellField<Pack>& old_values, const 
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
-                rhs->sumIntoLocalValue(owner, diffusivity * condition.value * mesh.face_area(face_lid));
+                rhs->sumIntoLocalValue(owner, diffusivity * condition.value * metrics.face_area(face_lid));
             }
             else if (condition.type == BoundaryConditionType::Robin)
             {
                 throw std::runtime_error("Robin boundary conditions are not yet implemented in transport_system.");
             }
         }
-    }
+    });
 
     detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
@@ -388,7 +387,7 @@ TransportSystem<Pack> non_orthogonal_transport_system(const CellField<Pack>& old
         {
             geometry_cache->require_mesh(mesh);
         }
-        catch (const std::invalid_argument&)
+        catch (const std::exception&)
         {
             invalid_geometry_cache = 1;
         }
@@ -440,9 +439,11 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
     const auto& mesh = old_values.mesh();
     detail::validate_transport_scalar_inputs(mesh, &face_fluxes.mesh() == &mesh, time_step, diffusivity);
 
+    detail::TransportAssemblyGeometry<Mesh<Pack>> local_assembly_geometry;
+    const auto& assembly_geometry = detail::select_transport_assembly_geometry(mesh, local_assembly_geometry);
     const auto required_rows = cached_matrix.is_null()
         ? std::vector<detail::TransportMatrixRow<Pack>>{}
-        : detail::basic_transport_rows<Pack>(mesh);
+        : detail::basic_transport_rows<Pack>(mesh, assembly_geometry);
     const auto prepared = detail::prepare_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 12, &required_rows);
     const auto& matrix = prepared.matrix;
@@ -452,54 +453,54 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
 
     detail::FlatMatrixRow<local_ordinal_type, scalar_type> row_values(mesh.num_local_cells(), 32);
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    detail::visit_transport_assembly_rows(mesh, assembly_geometry,
+        [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-
-        const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
         const auto source_value = right_hand_source(cell_lid);
         row_values.clear();
         detail::add_matrix_entry(row_values, cell_lid, transient);
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_faces([&](const auto& face, const auto& metrics)
         {
-            const auto is_interior = mesh.is_interior_face(face_lid);
+            using face_type = std::remove_cvref_t<decltype(face)>;
+            const auto face_lid = face.face_lid;
+            constexpr bool is_interior = face_type::interior;
             local_ordinal_type other{};
-            if (is_interior)
+            if constexpr (is_interior)
             {
-                other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                other = face.other;
             }
 
             const auto owner_oriented_flux = face_fluxes.is_owned_face(face_lid)
                                                  ? face_flux_data(face_fluxes.owned_row(face_lid), 0)
                                                  : scalar_type{};
-            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_oriented_flux : -owner_oriented_flux;
+            const auto out_flux = face_type::owned_orientation ? owner_oriented_flux : -owner_oriented_flux;
 
             if (out_flux >= scalar_type{0})
             {
                 detail::add_matrix_entry(row_values, cell_lid, out_flux);
             }
-            else if (is_interior)
+            else if constexpr (is_interior)
             {
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
 
-            if (!is_interior)
+            if constexpr (!is_interior)
             {
-                continue;
+                return;
             }
 
             row_values.ensure(other);
             if (diffusivity <= scalar_type{0})
             {
-                continue;
+                return;
             }
 
-            const auto coeff = detail::interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, diffusivity);
+            const auto coeff = detail::interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, diffusivity);
             detail::add_matrix_entry(row_values, cell_lid, coeff);
             detail::add_matrix_entry(row_values, other, -coeff);
-        }
+        });
 
         detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
         for (size_t comp = 0; comp < num_components; ++comp)
@@ -507,23 +508,16 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
             rhs->replaceLocalValue(
                 cell_lid, comp, transient * old_value_data(cell_lid, comp) + volume * source_value.component(comp));
         }
-    }
+    });
 
-    for (const auto& [batch_id, boundary_batch] : mesh.boundary_batches())
+    detail::visit_transport_boundary_batches(mesh, assembly_geometry,
+        [&](int batch_id, const auto boundary_faces, const auto& metrics)
     {
-        for (size_t in_batch_id = 0; in_batch_id < boundary_batch.face_lids.size(); ++in_batch_id)
+        for (const auto& entry : boundary_faces)
         {
-            const auto face_lid = boundary_batch.face_lids[in_batch_id];
-            if (!mesh.is_owned_face(face_lid))
-            {
-                continue;
-            }
-            if (!mesh.is_boundary_face(face_lid))
-            {
-                continue;
-            }
-
-            const auto owner = mesh.owner_cell(face_lid);
+            const auto face_lid = entry.face_lid;
+            const auto owner = entry.owner;
+            const auto in_batch_id = entry.in_batch_id;
             const auto out_flux = face_fluxes.is_owned_face(face_lid)
                                       ? face_flux_data(face_fluxes.owned_row(face_lid), 0)
                                       : scalar_type{};
@@ -549,7 +543,7 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
                 continue;
             }
 
-            const auto coeff = detail::boundary_diffusion_coefficient(mesh, face_lid, owner, diffusivity);
+            const auto coeff = detail::boundary_diffusion_coefficient(metrics, face_lid, owner, diffusivity);
             if (condition.type == BoundaryConditionType::Dirichlet || condition.type == BoundaryConditionType::NoSlip)
             {
                 if (coeff > scalar_type{0})
@@ -568,7 +562,7 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
                 for (size_t comp = 0; comp < num_components; ++comp)
                 {
                     rhs->sumIntoLocalValue(
-                        owner, comp, diffusivity * condition.value.component(comp) * mesh.face_area(face_lid));
+                        owner, comp, diffusivity * condition.value.component(comp) * metrics.face_area(face_lid));
                 }
             }
             else if (condition.type == BoundaryConditionType::Robin)
@@ -577,7 +571,7 @@ VectorTransportSystem<Pack> transport_system(const VectorCellField<Pack>& old_va
                     "Robin boundary conditions are not yet implemented in vector transport_system.");
             }
         }
-    }
+    });
 
     detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
@@ -631,7 +625,7 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
     if (geometry_cache != nullptr)
     {
         try { geometry_cache->require_mesh(mesh); }
-        catch (const std::invalid_argument&) { invalid_geometry_cache = 1; }
+        catch (const std::exception&) { invalid_geometry_cache = 1; }
     }
     const auto state = detail::reduce_transport_validation_state(mesh, std::array<int, 4>{
         &face_fluxes.mesh() != &mesh ? 1 : 0,
@@ -647,6 +641,9 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
     const auto explicit_weight = non_orthogonal_weights.explicit_;
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::assembly_geometry_type local_assembly_geometry;
+    const auto& assembly_geometry =
+        detail::select_transport_assembly_geometry(mesh, local_assembly_geometry, geometry_cache);
     typename geometry_cache_type::interior_stencils_type local_gradient_stencils;
     typename geometry_cache_type::boundary_locations_type local_boundary_locations;
     if (geometry_cache == nullptr)
@@ -683,10 +680,9 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
         partition_gradient_data.emplace(partition_gradients->local_read_view());
     }
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    detail::visit_transport_assembly_rows(mesh, assembly_geometry,
+        [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
         const auto source_value = right_hand_source(cell_lid);
 
@@ -715,13 +711,15 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
             }
         };
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_faces([&](const auto& face, const auto& metrics)
         {
-            const auto is_interior = mesh.is_interior_face(face_lid);
+            using face_type = std::remove_cvref_t<decltype(face)>;
+            const auto face_lid = face.face_lid;
+            constexpr bool is_interior = face_type::interior;
             local_ordinal_type other{};
-            if (is_interior)
+            if constexpr (is_interior)
             {
-                other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                other = face.other;
                 // Keep the cached graph independent of the current flux
                 // direction, including the zero-diffusivity case.
                 row_values.ensure(other);
@@ -730,17 +728,17 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
             const auto owner_oriented_flux = face_fluxes.is_owned_face(face_lid)
                                                  ? face_flux_data(face_fluxes.owned_row(face_lid), 0)
                                                  : scalar_type{};
-            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_oriented_flux : -owner_oriented_flux;
+            const auto out_flux = face_type::owned_orientation ? owner_oriented_flux : -owner_oriented_flux;
 
             if (out_flux >= scalar_type{0})
             {
                 detail::add_matrix_entry(row_values, cell_lid, out_flux);
             }
-            else if (is_interior)
+            else if constexpr (is_interior)
             {
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
-            else if (mesh.is_boundary_face(face_lid) && static_cast<size_t>(face_lid) < boundary_locations.size() &&
+            else if (face_type::boundary && static_cast<size_t>(face_lid) < boundary_locations.size() &&
                      boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 const auto location = boundary_locations[static_cast<size_t>(face_lid)];
@@ -753,17 +751,17 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
 
             if (diffusivity <= scalar_type{0})
             {
-                continue;
+                return;
             }
 
-            if (is_interior)
+            if constexpr (is_interior)
             {
-                const auto coeff = detail::interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, diffusivity);
+                const auto coeff = detail::interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, diffusivity);
                 detail::add_matrix_entry(row_values, cell_lid, coeff);
                 detail::add_matrix_entry(row_values, other, -coeff);
 
-                const auto area_vector = mesh.face_area_vector_outward(face_lid, cell_lid);
-                const auto d = mesh.cell_center_vector(face_lid, cell_lid);
+                const auto area_vector = metrics.face_area_vector_outward(face_lid, cell_lid);
+                const auto d = metrics.cell_center_vector(face_lid, cell_lid);
                 const auto tangential_area = detail::non_orthogonal_area_vector(area_vector, d);
 
                 if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
@@ -787,22 +785,22 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
                                 remote_gradient[component].dot(tangential_area));
                     }
                 }
-                continue;
+                return;
             }
 
-            if (!mesh.is_boundary_face(face_lid) || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
+            if (!face_type::boundary || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
                 !boundary_locations[static_cast<size_t>(face_lid)].active)
             {
-                continue;
+                return;
             }
 
             const auto location = boundary_locations[static_cast<size_t>(face_lid)];
             if (!boundary_diffusion(location.batch_id, location.in_batch_id))
             {
-                continue;
+                return;
             }
             const auto boundary_face_value = boundary_value(location.batch_id, location.in_batch_id);
-            const auto coeff = detail::boundary_diffusion_coefficient(mesh, face_lid, cell_lid, diffusivity);
+            const auto coeff = detail::boundary_diffusion_coefficient(metrics, face_lid, cell_lid, diffusivity);
             if (coeff > scalar_type{0})
             {
                 detail::add_matrix_entry(row_values, cell_lid, coeff);
@@ -812,14 +810,14 @@ VectorTransportSystem<Pack> non_orthogonal_transport_system(const VectorCellFiel
                 }
             }
 
-            const auto area_vector = mesh.face_area_vector_outward(face_lid, cell_lid);
-            const auto d = mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid);
+            const auto area_vector = metrics.face_area_vector_outward(face_lid, cell_lid);
+            const auto d = metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid);
             const auto tangential_area = detail::non_orthogonal_area_vector(area_vector, d);
             add_non_orthogonal_stencil(cell_lid, scalar_type{1}, tangential_area);
-        }
+        });
 
         detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
-    }
+    });
 
     if (correction_field != nullptr && explicit_weight > scalar_type{0})
     {
@@ -1220,6 +1218,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
     }
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::assembly_geometry_type local_assembly_geometry;
+    const auto& assembly_geometry =
+        detail::select_transport_assembly_geometry(mesh, local_assembly_geometry, geometry_cache);
     typename geometry_cache_type::boundary_locations_type local_boundary_locations;
     if (geometry_cache == nullptr)
     {
@@ -1398,10 +1399,10 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
         partition_gradient_data.emplace(partition_gradients->local_read_view());
     }
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    detail::visit_transport_assembly_rows(mesh, assembly_geometry,
+        [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto volume = mesh.cell_volume(cell_lid);
+        const auto owned = static_cast<size_t>(cell_lid);
         const auto cell_storage = storage_data(cell_lid, 0);
         const auto cell_advection = advection_data(cell_lid, 0);
         const auto transient = cell_storage * volume / time_step;
@@ -1443,23 +1444,25 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
             }
         };
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_faces([&](const auto& face, const auto& metrics)
         {
+            using face_type = std::remove_cvref_t<decltype(face)>;
+            const auto face_lid = face.face_lid;
             const auto owner_oriented_flux = face_fluxes.is_owned_face(face_lid)
                                                  ? face_flux_data(face_fluxes.owned_row(face_lid), 0)
                                                  : scalar_type{};
-            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_oriented_flux : -owner_oriented_flux;
+            const auto out_flux = face_type::owned_orientation ? owner_oriented_flux : -owner_oriented_flux;
             if (out_flux >= scalar_type{})
             {
                 detail::add_matrix_entry(row_values, cell_lid, out_flux * cell_advection);
             }
-            else if (mesh.is_interior_face(face_lid))
+            else if constexpr (face_type::interior)
             {
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto other = face.other;
                 const auto other_advection = advection_data(other, 0);
                 detail::add_matrix_entry(row_values, other, out_flux * other_advection);
             }
-            else if (mesh.is_boundary_face(face_lid) && static_cast<size_t>(face_lid) < boundary_locations.size() &&
+            else if (face_type::boundary && static_cast<size_t>(face_lid) < boundary_locations.size() &&
                      boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 const auto location = boundary_locations[static_cast<size_t>(face_lid)];
@@ -1470,12 +1473,11 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
                             location.batch_id, location.in_batch_id));
             }
 
-            if (mesh.is_interior_face(face_lid)
+            if (face_type::interior
                 && convection_gradients != nullptr)
             {
                 const auto other =
-                    mesh.opposite_or_periodic_neighbor_cell(
-                        face_lid, cell_lid);
+                    face.other;
                 const auto upwind = out_flux >= scalar_type{}
                     ? cell_lid
                     : other;
@@ -1489,7 +1491,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
                         old_values.local_value(downwind),
                         convection_gradients->local_value(upwind),
                         detail::cell_to_face_displacement(
-                            mesh, face_lid, upwind));
+                            metrics, face_lid, upwind));
                 rhs->sumIntoLocalValue(
                     cell_lid,
                     detail::deferred_convection_rhs_correction(
@@ -1499,21 +1501,21 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
                         face_value));
             }
 
-            if (mesh.is_interior_face(face_lid))
+            if constexpr (face_type::interior)
             {
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto other = face.other;
                 row_values.ensure(other);
-                const auto face_diffusivity = detail::face_coefficient_value(mesh, face_lid, cell_lid, other,
+                const auto face_diffusivity = detail::face_coefficient_value(metrics, face_lid, cell_lid, other,
                     diffusivity_data(cell_lid, 0), diffusivity_data(other, 0), coefficient_interpolation);
                 if (face_diffusivity <= scalar_type{})
-                    continue;
+                    return;
                 const auto coefficient =
-                    detail::interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, face_diffusivity);
+                    detail::interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, face_diffusivity);
                 detail::add_matrix_entry(row_values, cell_lid, coefficient);
                 detail::add_matrix_entry(row_values, other, -coefficient);
 
                 const auto tangential_area = detail::non_orthogonal_area_vector(
-                    mesh.face_area_vector_outward(face_lid, cell_lid), mesh.cell_center_vector(face_lid, cell_lid));
+                    metrics.face_area_vector_outward(face_lid, cell_lid), metrics.cell_center_vector(face_lid, cell_lid));
                 if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
                 {
                     add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_diffusivity, tangential_area);
@@ -1531,13 +1533,13 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
                         implicit_weight * face_diffusivity * scalar_type{0.5} *
                             detail::vector_view_value<Pack>(*partition_gradient_data, other).dot(tangential_area));
                 }
-                continue;
+                return;
             }
 
-            if (!mesh.is_boundary_face(face_lid) || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
+            if (!face_type::boundary || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
                 !boundary_locations[static_cast<size_t>(face_lid)].active)
             {
-                continue;
+                return;
             }
             const auto location = boundary_locations[static_cast<size_t>(face_lid)];
             const auto condition = cached_boundary_condition(
@@ -1547,7 +1549,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
             if (condition.type == BoundaryConditionType::Dirichlet)
             {
                 const auto coefficient =
-                    detail::boundary_diffusion_coefficient(mesh, face_lid, cell_lid, face_diffusivity);
+                    detail::boundary_diffusion_coefficient(metrics, face_lid, cell_lid, face_diffusivity);
                 if (coefficient > scalar_type{})
                 {
                     detail::add_matrix_entry(row_values, cell_lid, coefficient);
@@ -1558,15 +1560,15 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
                                 location.batch_id, location.in_batch_id));
                 }
                 const auto tangential_area =
-                    detail::non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
-                        mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid));
+                    detail::non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
+                        metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
                 add_non_orthogonal_stencil(cell_lid, scalar_type{1}, face_diffusivity, tangential_area);
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
-                rhs->sumIntoLocalValue(cell_lid, face_diffusivity * condition.value * mesh.face_area(face_lid));
+                rhs->sumIntoLocalValue(cell_lid, face_diffusivity * condition.value * metrics.face_area(face_lid));
             }
-        }
+        });
 
         if (fixed_cell_values[owned].has_value())
         {
@@ -1580,7 +1582,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
         }
 
         rows.push_back(detail::capture_transport_row<Pack>(row_values));
-    }
+    });
 
     if (correction_field != nullptr && explicit_weight > scalar_type{})
     {
@@ -1658,6 +1660,9 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
     const auto explicit_weight = non_orthogonal_weights.explicit_;
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::assembly_geometry_type local_assembly_geometry;
+    const auto& assembly_geometry =
+        detail::select_transport_assembly_geometry(mesh, local_assembly_geometry, geometry_cache);
     typename geometry_cache_type::boundary_locations_type local_boundary_locations;
     std::vector<detail::AffineLeastSquaresGradientStencil<Mesh<Pack>>> gradient_stencils;
     if (geometry_cache == nullptr)
@@ -1700,10 +1705,9 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
         partition_gradient_data.emplace(partition_gradients->local_read_view());
     }
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    detail::visit_transport_assembly_rows(mesh, assembly_geometry,
+        [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto volume = mesh.cell_volume(cell_lid);
         const auto cell_capacity = density_data(cell_lid, 0) * heat_capacity_data(cell_lid, 0);
         const auto transient = cell_capacity * volume / time_step;
         row_values.clear();
@@ -1730,24 +1734,26 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
             }
         };
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_faces([&](const auto& face, const auto& metrics)
         {
+            using face_type = std::remove_cvref_t<decltype(face)>;
+            const auto face_lid = face.face_lid;
             const auto owner_oriented_flux = face_fluxes.is_owned_face(face_lid)
                                                  ? face_flux_data(face_fluxes.owned_row(face_lid), 0)
                                                  : scalar_type{};
-            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_oriented_flux : -owner_oriented_flux;
+            const auto out_flux = face_type::owned_orientation ? owner_oriented_flux : -owner_oriented_flux;
 
             if (out_flux >= scalar_type{})
             {
                 detail::add_matrix_entry(row_values, cell_lid, out_flux * cell_capacity);
             }
-            else if (mesh.is_interior_face(face_lid))
+            else if constexpr (face_type::interior)
             {
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto other = face.other;
                 const auto other_capacity = density_data(other, 0) * heat_capacity_data(other, 0);
                 detail::add_matrix_entry(row_values, other, out_flux * other_capacity);
             }
-            else if (mesh.is_boundary_face(face_lid) && static_cast<size_t>(face_lid) < boundary_locations.size() &&
+            else if (face_type::boundary && static_cast<size_t>(face_lid) < boundary_locations.size() &&
                      boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 const auto location = boundary_locations[static_cast<size_t>(face_lid)];
@@ -1755,23 +1761,23 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
                     cell_lid, -out_flux * cell_capacity * boundary_value(location.batch_id, location.in_batch_id));
             }
 
-            if (mesh.is_interior_face(face_lid))
+            if constexpr (face_type::interior)
             {
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto other = face.other;
                 row_values.ensure(other);
-                const auto face_conductivity = detail::face_coefficient_value(mesh, face_lid, cell_lid, other,
+                const auto face_conductivity = detail::face_coefficient_value(metrics, face_lid, cell_lid, other,
                     conductivity_data(cell_lid, 0), conductivity_data(other, 0), coefficient_interpolation);
                 if (face_conductivity <= scalar_type{})
                 {
-                    continue;
+                    return;
                 }
                 const auto coefficient =
-                    detail::interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, face_conductivity);
+                    detail::interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, face_conductivity);
                 detail::add_matrix_entry(row_values, cell_lid, coefficient);
                 detail::add_matrix_entry(row_values, other, -coefficient);
 
                 const auto tangential_area = detail::non_orthogonal_area_vector(
-                    mesh.face_area_vector_outward(face_lid, cell_lid), mesh.cell_center_vector(face_lid, cell_lid));
+                    metrics.face_area_vector_outward(face_lid, cell_lid), metrics.cell_center_vector(face_lid, cell_lid));
                 if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
                 {
                     add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_conductivity, tangential_area);
@@ -1790,13 +1796,13 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
                         implicit_weight * face_conductivity * scalar_type{0.5} *
                             detail::vector_view_value<Pack>(*partition_gradient_data, other).dot(tangential_area));
                 }
-                continue;
+                return;
             }
 
-            if (!mesh.is_boundary_face(face_lid) || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
+            if (!face_type::boundary || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
                 !boundary_locations[static_cast<size_t>(face_lid)].active)
             {
-                continue;
+                return;
             }
             const auto location = boundary_locations[static_cast<size_t>(face_lid)];
             const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
@@ -1806,11 +1812,11 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
             {
                 const auto weight =
                     condition.type == BoundaryConditionType::Robin
-                        ? detail::robin_boundary_weight(mesh, face_lid, cell_lid, condition.robin_coefficient)
+                        ? detail::robin_boundary_weight(metrics, face_lid, cell_lid, condition.robin_coefficient)
                         : scalar_type{1};
                 const auto effective_conductivity = face_conductivity * weight;
                 const auto coefficient =
-                    detail::boundary_diffusion_coefficient(mesh, face_lid, cell_lid, effective_conductivity);
+                    detail::boundary_diffusion_coefficient(metrics, face_lid, cell_lid, effective_conductivity);
                 if (coefficient > scalar_type{})
                 {
                     detail::add_matrix_entry(row_values, cell_lid, coefficient);
@@ -1821,18 +1827,18 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
                 }
 
                 const auto tangential_area =
-                    detail::non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
-                        mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid));
+                    detail::non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
+                        metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
                 add_non_orthogonal_stencil(cell_lid, scalar_type{1}, effective_conductivity, tangential_area);
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
-                rhs->sumIntoLocalValue(cell_lid, face_conductivity * condition.value * mesh.face_area(face_lid));
+                rhs->sumIntoLocalValue(cell_lid, face_conductivity * condition.value * metrics.face_area(face_lid));
             }
-        }
+        });
 
         detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
-    }
+    });
 
     if (correction_field != nullptr && explicit_weight > scalar_type{})
     {
@@ -1880,6 +1886,9 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
     const auto explicit_weight = non_orthogonal_weights.explicit_;
 
     using geometry_cache_type = TransportGeometryCache<Mesh<Pack>>;
+    typename geometry_cache_type::assembly_geometry_type local_assembly_geometry;
+    const auto& assembly_geometry =
+        detail::select_transport_assembly_geometry(mesh, local_assembly_geometry, geometry_cache);
     typename geometry_cache_type::boundary_locations_type local_boundary_locations;
     std::vector<detail::VectorAffineLeastSquaresGradientStencil<Mesh<Pack>>> gradient_stencils;
     if (geometry_cache == nullptr)
@@ -1920,10 +1929,9 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
         partition_gradient_data.emplace(partition_gradients->local_read_view());
     }
 
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+    detail::visit_transport_assembly_rows(mesh, assembly_geometry,
+        [&](local_ordinal_type cell_lid, scalar_type volume, auto&& visit_faces)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto volume = mesh.cell_volume(cell_lid);
         const auto transient = volume / time_step;
         const auto source_value = acceleration_source(cell_lid);
 
@@ -1957,22 +1965,24 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
             }
         };
 
-        for (const auto face_lid : mesh.faces(cell_lid))
+        visit_faces([&](const auto& face, const auto& metrics)
         {
+            using face_type = std::remove_cvref_t<decltype(face)>;
+            const auto face_lid = face.face_lid;
             const auto owner_oriented_flux = face_fluxes.is_owned_face(face_lid)
                                                  ? face_flux_data(face_fluxes.owned_row(face_lid), 0)
                                                  : scalar_type{};
-            const auto out_flux = mesh.owner_cell(face_lid) == cell_lid ? owner_oriented_flux : -owner_oriented_flux;
+            const auto out_flux = face_type::owned_orientation ? owner_oriented_flux : -owner_oriented_flux;
             if (out_flux >= scalar_type{})
             {
                 detail::add_matrix_entry(row_values, cell_lid, out_flux);
             }
-            else if (mesh.is_interior_face(face_lid))
+            else if constexpr (face_type::interior)
             {
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto other = face.other;
                 detail::add_matrix_entry(row_values, other, out_flux);
             }
-            else if (mesh.is_boundary_face(face_lid) && static_cast<size_t>(face_lid) < boundary_locations.size() &&
+            else if (face_type::boundary && static_cast<size_t>(face_lid) < boundary_locations.size() &&
                      boundary_locations[static_cast<size_t>(face_lid)].active)
             {
                 const auto location = boundary_locations[static_cast<size_t>(face_lid)];
@@ -1983,25 +1993,25 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
                 }
             }
 
-            if (mesh.is_interior_face(face_lid))
+            if constexpr (face_type::interior)
             {
-                const auto other = mesh.opposite_or_periodic_neighbor_cell(face_lid, cell_lid);
+                const auto other = face.other;
                 row_values.ensure(other);
                 const auto face_kinematic_viscosity =
-                    detail::face_coefficient_value(mesh, face_lid, cell_lid, other, viscosity_data(cell_lid, 0),
+                    detail::face_coefficient_value(metrics, face_lid, cell_lid, other, viscosity_data(cell_lid, 0),
                         viscosity_data(other, 0), coefficient_interpolation) /
                     reference_density;
                 if (face_kinematic_viscosity <= scalar_type{})
                 {
-                    continue;
+                    return;
                 }
                 const auto coefficient =
-                    detail::interior_diffusion_coefficient(mesh, face_lid, cell_lid, other, face_kinematic_viscosity);
+                    detail::interior_diffusion_coefficient(metrics, face_lid, cell_lid, other, face_kinematic_viscosity);
                 detail::add_matrix_entry(row_values, cell_lid, coefficient);
                 detail::add_matrix_entry(row_values, other, -coefficient);
 
                 const auto tangential_area = detail::non_orthogonal_area_vector(
-                    mesh.face_area_vector_outward(face_lid, cell_lid), mesh.cell_center_vector(face_lid, cell_lid));
+                    metrics.face_area_vector_outward(face_lid, cell_lid), metrics.cell_center_vector(face_lid, cell_lid));
                 if (mesh.is_owned_cell(other) && static_cast<size_t>(other) < gradient_stencils.size())
                 {
                     add_non_orthogonal_stencil(cell_lid, scalar_type{0.5}, face_kinematic_viscosity, tangential_area);
@@ -2023,24 +2033,24 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
                                 remote_gradient[component].dot(tangential_area));
                     }
                 }
-                continue;
+                return;
             }
 
-            if (!mesh.is_boundary_face(face_lid) || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
+            if (!face_type::boundary || static_cast<size_t>(face_lid) >= boundary_locations.size() ||
                 !boundary_locations[static_cast<size_t>(face_lid)].active)
             {
-                continue;
+                return;
             }
             const auto location = boundary_locations[static_cast<size_t>(face_lid)];
             if (!boundary_diffusion(location.batch_id, location.in_batch_id))
             {
-                continue;
+                return;
             }
             const auto face_kinematic_viscosity =
                 boundary_viscosity(location.batch_id, location.in_batch_id, viscosity_data(cell_lid, 0)) /
                 reference_density;
             const auto coefficient =
-                detail::boundary_diffusion_coefficient(mesh, face_lid, cell_lid, face_kinematic_viscosity);
+                detail::boundary_diffusion_coefficient(metrics, face_lid, cell_lid, face_kinematic_viscosity);
             if (coefficient > scalar_type{})
             {
                 detail::add_matrix_entry(row_values, cell_lid, coefficient);
@@ -2052,13 +2062,13 @@ VectorTransportSystem<Pack> physical_momentum_transport_system(const VectorCellF
             }
 
             const auto tangential_area =
-                detail::non_orthogonal_area_vector(mesh.face_area_vector_outward(face_lid, cell_lid),
-                    mesh.face_centroid(face_lid) - mesh.cell_centroid(cell_lid));
+                detail::non_orthogonal_area_vector(metrics.face_area_vector_outward(face_lid, cell_lid),
+                    metrics.face_centroid(face_lid) - metrics.cell_centroid(cell_lid));
             add_non_orthogonal_stencil(cell_lid, scalar_type{1}, face_kinematic_viscosity, tangential_area);
-        }
+        });
 
         detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
-    }
+    });
 
     if (correction_field != nullptr && explicit_weight > scalar_type{})
     {
