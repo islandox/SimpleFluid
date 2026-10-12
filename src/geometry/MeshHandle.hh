@@ -55,6 +55,9 @@ class MeshReorderingFactory;
 namespace detail
 {
 
+template<class PublicMesh, class GeometryMesh>
+class TraverseAccess;
+
 /**
  * @brief Concept satisfied when a mesh type accepts a given structured cell ID.
  */
@@ -92,6 +95,8 @@ template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
     friend class MeshReorderingFactory<Pack>;
+    template<class PublicMesh, class GeometryMesh>
+    friend class detail::TraverseAccess;
 
 public:
     using scalar_type = typename Pack::scalar_type;

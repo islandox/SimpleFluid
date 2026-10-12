@@ -19,6 +19,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME MeshTraverse_2procs
+    TARGET testMeshTraverse
+    PROCS 2
+    ARGS "--gtest_filter=MeshTraverseMultiRankTest.*"
+    LABELS "mpi;geometry;mesh_traverse"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME MeshQualityAccess_2procs
     TARGET testMeshQualityAccess
     PROCS 2

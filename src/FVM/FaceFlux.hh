@@ -16,9 +16,12 @@
 #include "fields/FaceField.hh"
 #include "fields/VectorCellField.hh"
 #include "fields/VectorFaceField.hh"
+#include "geometry/MeshTraverse.hh"
 #include "FVM/CellOperators.hh"
 #include "FVM/details/FieldStoredFaceFlux.hh"
 #include "FVM/details/FieldStoredPressureWeightedFaceFlux.hh"
+#include "FVM/details/PressureFaceBatches.hh"
+#include "geometry/DirectBatchRange.hh"
 #include "FVM/details/FieldStoredVelocityBoundaryCache.hh"
 
 #include <algorithm>
@@ -27,8 +30,12 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -174,16 +181,13 @@ private:
 };
 
 /**
- * @brief Reusable Rhie-Chow scratch storage for mesh-aware stored fields.
+ * @brief Private Rhie-Chow scratch with shared topology and geometry snapshots.
  *
- * Each workspace owns its pressure-gradient field. Boundary-face locations,
- * mesh-only gradient geometry, and ordered pressure-face metrics may be shared
- * as an immutable snapshot with other workspaces for the exact same mesh.
- * Geometry metrics reject stale epochs until refresh_geometry() is called.
- * It is tied to one exact mesh instance and is not safe for concurrent evaluations.
- *
- * @tparam Pack Tpetra type pack used by the stored fields.
- * @tparam MeshType Runtime or statically dispatched mapped mesh.
+ * Face/cell IDs and boundary slots are retained independently of geometry.
+ * Each epoch owns category-specific metric arrays in exactly the same order.
+ * Acquiring an execution pins and validates the snapshot once, then exposes
+ * direct paired ranges. Fixed-topology ALE refresh preserves topology identity.
+ * A workspace is tied to one exact mesh and is not safe for concurrent use.
  */
 template<TpetraTypePack Pack, class MeshType = MeshHandle<Pack>>
 class FieldStoredPressureWeightedFaceFluxWorkspace
@@ -191,145 +195,272 @@ class FieldStoredPressureWeightedFaceFluxWorkspace
 public:
     using mesh_type = MeshType;
     using face_geometry_type = detail::StoredPressureFaceGeometry<Pack>;
-    using boundary_location_type =
-        detail::BoundaryFaceLocation<mesh_type>;
+    using traverse_plan_type = MeshTraversePlan<mesh_type>;
+    using topology_type = detail::PressureFaceTopology<Pack, mesh_type>;
+    using boundary_group_type = typename topology_type::boundary_group_type;
+    using boundary_location_type = detail::BoundaryFaceLocation<mesh_type>;
+    using interior_range_type = DirectBatchRange<typename topology_type::interior_type,
+        detail::InteriorPressureFaceMetrics<Pack>>;
+    using boundary_range_type = DirectBatchRange<typename topology_type::boundary_type,
+        detail::BoundaryPressureFaceMetrics<Pack>>;
+    using zero_range_type = DirectBatchRange<typename topology_type::zero_type,
+        detail::ZeroPressureFaceMetrics<Pack>>;
 
-    /** @brief Immutable mesh metrics shared independently of field scratch.
-     * Boundary condition types and values are evaluated at each flux call;
-     * they are not part of this geometry snapshot.
-     */
+    // Compatibility descriptors are materialized only on explicit request.
+    struct BoundaryFaceIndex { size_t geometry_index, in_batch_id; bool active; };
+    struct BoundaryBatch
+    {
+        int id;
+        std::string name;
+        std::vector<BoundaryFaceIndex> faces;
+        size_t required_values = 0;
+        bool all_active = true;
+    };
+    struct FaceBatches
+    {
+        std::vector<size_t> interior;
+        std::map<int, BoundaryBatch> boundary;
+    };
+
+    /** Immutable topology/metric snapshot; lazy legacy views are not on the numerical path. */
     class SharedGeometry
     {
         friend class FieldStoredPressureWeightedFaceFluxWorkspace;
-
     public:
         explicit SharedGeometry(SP<const mesh_type> mesh)
-            : d_mesh(require_mesh(std::move(mesh))),
-              d_gradient_cache(d_mesh),
-              d_face_geometry(detail::stored_pressure_face_geometry<Pack>(*d_mesh)),
-              d_geometry_identity(detail::ale_geometry_identity(*d_mesh)),
-              d_geometry_epoch(mesh_geometry_epoch(*d_mesh))
-        {
-        }
+            : SharedGeometry(std::move(mesh), {}) {}
 
     private:
+        SharedGeometry(SP<const mesh_type> mesh, std::shared_ptr<const topology_type> topology)
+            : d_mesh(require_mesh(std::move(mesh))), d_topology(std::move(topology)),
+              d_geometry_identity(detail::ale_geometry_identity(*d_mesh))
+        {
+            // A local failure must reach the numerical collective preflight,
+            // before another rank enters imports or writes any output values.
+            try
+            {
+                const auto backend = ::SimpleFluid::detail::retain_traverse_backend(*d_mesh);
+                const auto native_lease = detail::acquire_pressure_native_geometry(*d_mesh);
+                const auto lease = acquire_mesh_execution(*d_mesh);
+                d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+                if (d_topology) d_topology->require_valid(*d_mesh);
+                d_gradient_cache = std::make_unique<CellGradientCache<Pack, mesh_type>>(d_mesh);
+                if (!d_topology)
+                    d_topology = detail::make_pressure_face_topology<Pack>(
+                        *d_mesh, d_gradient_cache->boundary_locations());
+                d_metrics = detail::pressure_face_metrics<Pack>(*d_mesh, *d_topology);
+            }
+            catch (...) { d_error = std::current_exception(); }
+        }
+
         const SP<const mesh_type> d_mesh;
-        const CellGradientCache<Pack, mesh_type> d_gradient_cache;
-        const std::vector<face_geometry_type> d_face_geometry;
+        std::shared_ptr<const topology_type> d_topology;
+        std::unique_ptr<CellGradientCache<Pack, mesh_type>> d_gradient_cache;
+        detail::PressureFaceMetrics<Pack> d_metrics;
         const void* const d_geometry_identity;
-        const std::uint64_t d_geometry_epoch;
+        std::uint64_t d_geometry_epoch = 0;
+        std::exception_ptr d_error;
+        mutable std::once_flag d_legacy_geometry_once, d_legacy_batches_once;
+        mutable std::vector<face_geometry_type> d_legacy_geometry;
+        mutable FaceBatches d_legacy_batches;
+        mutable std::atomic<bool> d_materialized_geometry{false};
     };
     using shared_geometry_type = std::shared_ptr<const SharedGeometry>;
 
-    explicit FieldStoredPressureWeightedFaceFluxWorkspace(
-        SP<const mesh_type> mesh)
-        : FieldStoredPressureWeightedFaceFluxWorkspace(
-              mesh, std::make_shared<SharedGeometry>(mesh))
+    /** Snapshot ownership and read leases outlive every borrowed direct range. */
+    class Execution
     {
-    }
+        friend class FieldStoredPressureWeightedFaceFluxWorkspace;
+    public:
+        Execution(const Execution&) = delete;
+        Execution& operator=(const Execution&) = delete;
+        Execution(Execution&&) = delete;
+        Execution& operator=(Execution&&) = delete;
 
-    /** @brief Allocate private scratch while reusing current mesh geometry.
-     * @throws std::invalid_argument for a null, foreign, or stale snapshot.
-     */
-    FieldStoredPressureWeightedFaceFluxWorkspace(
-        SP<const mesh_type> mesh, shared_geometry_type geometry)
+        interior_range_type interior() const & noexcept { return d_interior; }
+        zero_range_type zero_flux_faces() const & noexcept { return d_zero; }
+        const std::vector<boundary_group_type>& boundary_groups() const & noexcept
+        { return d_geometry->d_topology->boundary_groups; }
+        boundary_range_type boundary(const boundary_group_type& group) const & noexcept
+        { return d_boundary.subrange(group.begin, group.count); }
+        interior_range_type interior() const && = delete;
+        zero_range_type zero_flux_faces() const && = delete;
+        const std::vector<boundary_group_type>& boundary_groups() const && = delete;
+        boundary_range_type boundary(const boundary_group_type&) const && = delete;
+
+    private:
+        explicit Execution(shared_geometry_type geometry)
+            : d_geometry(checked_geometry(std::move(geometry))),
+              d_backend(::SimpleFluid::detail::retain_traverse_backend(*d_geometry->d_mesh)),
+              d_native_lease(detail::acquire_pressure_native_geometry(*d_geometry->d_mesh)),
+              d_lease(acquire_mesh_execution(*d_geometry->d_mesh)),
+              d_interior(interior_range_type::checked(d_geometry->d_topology->interior, d_geometry->d_metrics.interior)),
+              d_boundary(boundary_range_type::checked(d_geometry->d_topology->boundary, d_geometry->d_metrics.boundary)),
+              d_zero(zero_range_type::checked(d_geometry->d_topology->zero_flux_faces, d_geometry->d_metrics.zero_flux_faces))
+        {}
+
+        static shared_geometry_type checked_geometry(shared_geometry_type geometry)
+        {
+            require_ready_geometry(*geometry);
+            require_current_geometry(*geometry->d_mesh, *geometry);
+            geometry->d_topology->require_valid(*geometry->d_mesh);
+            return geometry;
+        }
+        shared_geometry_type d_geometry;
+        [[maybe_unused]] decltype(::SimpleFluid::detail::retain_traverse_backend(std::declval<const mesh_type&>())) d_backend;
+        [[maybe_unused]] std::optional<GeometryExecutionGuard::ReadLease> d_native_lease;
+        decltype(acquire_mesh_execution(std::declval<const mesh_type&>())) d_lease;
+        interior_range_type d_interior;
+        boundary_range_type d_boundary;
+        zero_range_type d_zero;
+    };
+
+    explicit FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh)
+        : FieldStoredPressureWeightedFaceFluxWorkspace(mesh, std::make_shared<SharedGeometry>(mesh)) {}
+
+    /** Allocate private scratch while reusing the exact mesh's current snapshot. */
+    FieldStoredPressureWeightedFaceFluxWorkspace(SP<const mesh_type> mesh, shared_geometry_type geometry)
         : d_mesh(require_mesh(std::move(mesh))),
           d_geometry(require_geometry(d_mesh, std::move(geometry))),
-          d_pressure_gradient(
-              VectorCellFieldDescriptor<Pack>(
-                  "rhie_chow_pressure_gradient_workspace"),
-              d_mesh,
-              false)
-    {
-    }
+          d_pressure_gradient(VectorCellFieldDescriptor<Pack>("rhie_chow_pressure_gradient_workspace"), d_mesh, false) {}
 
-    FieldStoredPressureWeightedFaceFluxWorkspace(
-        const FieldStoredPressureWeightedFaceFluxWorkspace&) = delete;
-    FieldStoredPressureWeightedFaceFluxWorkspace& operator=(
-        const FieldStoredPressureWeightedFaceFluxWorkspace&) = delete;
-    FieldStoredPressureWeightedFaceFluxWorkspace(
-        FieldStoredPressureWeightedFaceFluxWorkspace&&) = default;
-    FieldStoredPressureWeightedFaceFluxWorkspace& operator=(
-        FieldStoredPressureWeightedFaceFluxWorkspace&&) = default;
+    FieldStoredPressureWeightedFaceFluxWorkspace(const FieldStoredPressureWeightedFaceFluxWorkspace&) = delete;
+    FieldStoredPressureWeightedFaceFluxWorkspace& operator=(const FieldStoredPressureWeightedFaceFluxWorkspace&) = delete;
+    FieldStoredPressureWeightedFaceFluxWorkspace(FieldStoredPressureWeightedFaceFluxWorkspace&&) = default;
+    FieldStoredPressureWeightedFaceFluxWorkspace& operator=(FieldStoredPressureWeightedFaceFluxWorkspace&&) = default;
 
     const SP<const mesh_type>& mesh_ptr() const noexcept { return d_mesh; }
-
-    VectorCellFieldStored<Pack, mesh_type>& pressure_gradient() noexcept
-    {
-        return d_pressure_gradient;
-    }
-
-    const VectorCellFieldStored<Pack, mesh_type>&
-    pressure_gradient() const noexcept
-    {
-        return d_pressure_gradient;
-    }
-
+    VectorCellFieldStored<Pack, mesh_type>& pressure_gradient() noexcept { return d_pressure_gradient; }
+    const VectorCellFieldStored<Pack, mesh_type>& pressure_gradient() const noexcept { return d_pressure_gradient; }
     const std::vector<boundary_location_type>& boundary_locations() const
+    { return gradient_cache().boundary_locations(); }
+    const CellGradientCache<Pack, mesh_type>& gradient_cache() const
     {
-        return d_geometry->d_gradient_cache.boundary_locations();
+        require_ready_geometry(*d_geometry);
+        return *d_geometry->d_gradient_cache;
     }
-
-    const CellGradientCache<Pack, mesh_type>& gradient_cache() const noexcept
-    {
-        return d_geometry->d_gradient_cache;
-    }
-
-    /** @brief Retain the immutable snapshot; new workspaces validate its epoch. */
     const shared_geometry_type& shared_geometry() const noexcept { return d_geometry; }
+    const topology_type& topology_groups() const
+    {
+        require_ready_geometry(*d_geometry);
+        d_geometry->d_topology->require_valid(*d_mesh);
+        return *d_geometry->d_topology;
+    }
+    [[nodiscard]] Execution acquire_execution() const & { return Execution(d_geometry); }
+    Execution acquire_execution() const && = delete;
 
-    /** @brief Return ordered owned faces with current-epoch numeric metrics. */
+    /** Explicit invalidation propagates to all snapshots sharing this topology. */
+    void invalidate_topology() noexcept
+    { if (d_geometry->d_topology) d_geometry->d_topology->invalidate(); }
+
+    /** Compatibility only: do not use in numerical traversal. */
+    const traverse_plan_type& traverse_plan() const
+    {
+        return topology_groups().legacy_traverse(*d_mesh);
+    }
+    bool face_traverse_matches_geometry() const noexcept
+    {
+        try
+        {
+            require_current_geometry(*d_mesh, *d_geometry);
+            topology_groups();
+            return true;
+        }
+        catch (...) { return false; }
+    }
+    bool has_materialized_face_geometry() const noexcept
+    { return d_geometry->d_materialized_geometry.load(std::memory_order_acquire); }
+
+    /** Lazily rebuild the legacy face-ordered vector only when explicitly requested. */
     const std::vector<face_geometry_type>& face_geometry() const
     {
-        require_current_geometry(*d_mesh, *d_geometry);
-        return d_geometry->d_face_geometry;
+        const auto execution = acquire_execution();
+        std::call_once(d_geometry->d_legacy_geometry_once, [&]
+        {
+            d_geometry->d_legacy_geometry = detail::stored_pressure_face_geometry<Pack>(*d_mesh);
+            d_geometry->d_materialized_geometry.store(true, std::memory_order_release);
+        });
+        return d_geometry->d_legacy_geometry;
     }
 
-    /** @brief Refresh Rhie--Chow reconstruction geometry after mesh motion. */
+    /** Legacy index grouping, materialized independently of production storage. */
+    const FaceBatches& face_batches() const
+    {
+        const auto& geometry = face_geometry();
+        std::call_once(d_geometry->d_legacy_batches_once, [&]
+        {
+            const auto& locations = boundary_locations();
+            FaceBatches result;
+            for (size_t i = 0; i < geometry.size(); ++i)
+            {
+                const auto& face = geometry[i];
+                if (face.interior) { result.interior.push_back(i); continue; }
+                const auto& location = locations[static_cast<size_t>(face.face)];
+                const auto id = d_mesh->boundary_id(detail::query_face_id(*d_mesh, face.face));
+                auto& batch = result.boundary.try_emplace(id, BoundaryBatch{id, {}, {}}).first->second;
+                const bool active = face.boundary && location.active;
+                batch.faces.push_back({i, location.in_batch_id, active});
+                batch.all_active = batch.all_active && active;
+                if (active) batch.required_values = std::max(batch.required_values, location.in_batch_id + 1);
+            }
+            for (auto& [id, batch] : result.boundary)
+                if (batch.required_values) batch.name = d_mesh->boundary_batch_name(id);
+            d_geometry->d_legacy_batches = std::move(result);
+        });
+        return d_geometry->d_legacy_batches;
+    }
+
+    /** Publish replacement metrics only after successful fixed-topology refresh. */
     void refresh_geometry()
     {
-        if (detail::ale_geometry_identity(*d_mesh) == d_geometry->d_geometry_identity &&
-            mesh_geometry_epoch(*d_mesh) == d_geometry->d_geometry_epoch) return;
-        // Replacing a snapshot never mutates metrics retained by another
-        // workspace or an older analytic Jacobian generation.
-        d_geometry = std::make_shared<SharedGeometry>(d_mesh);
+        require_ready_geometry(*d_geometry);
+        d_geometry->d_topology->require_valid(*d_mesh);
+        if (detail::ale_geometry_identity(*d_mesh) == d_geometry->d_geometry_identity
+            && mesh_geometry_epoch(*d_mesh) == d_geometry->d_geometry_epoch) return;
+        auto next = shared_geometry_type(new SharedGeometry(d_mesh, d_geometry->d_topology));
+        require_ready_geometry(*next);
+        d_geometry = std::move(next);
     }
-
-    /** @brief Share validated current metrics while retaining private field scratch. */
     void refresh_geometry(shared_geometry_type geometry)
     {
-        d_geometry = require_geometry(d_mesh, std::move(geometry));
+        auto next = require_geometry(d_mesh, std::move(geometry));
+        require_ready_geometry(*next);
+        next->d_topology->require_valid(*d_mesh);
+        d_geometry = std::move(next);
     }
 
 private:
+    static void require_ready_geometry(const SharedGeometry& geometry)
+    {
+        if (geometry.d_error) std::rethrow_exception(geometry.d_error);
+        if (!geometry.d_topology || !geometry.d_gradient_cache)
+            throw std::invalid_argument("Pressure face-flux snapshot construction is incomplete.");
+    }
     static void require_current_geometry(const mesh_type& mesh, const SharedGeometry& geometry)
     {
         if (&mesh != geometry.d_mesh.get())
-            throw std::invalid_argument("pressure face-flux geometry belongs to another mesh.");
-        if (detail::ale_geometry_identity(mesh) != geometry.d_geometry_identity ||
-            mesh_geometry_epoch(mesh) != geometry.d_geometry_epoch)
-            throw std::invalid_argument("pressure face-flux geometry is stale for the mesh geometry epoch.");
+            throw std::invalid_argument("Pressure face-flux geometry belongs to another mesh.");
+        if (detail::ale_geometry_identity(mesh) != geometry.d_geometry_identity
+            || mesh_geometry_epoch(mesh) != geometry.d_geometry_epoch)
+            throw std::invalid_argument("Pressure face-flux geometry is stale for the mesh geometry epoch.");
     }
-
     static shared_geometry_type require_geometry(const SP<const mesh_type>& mesh, shared_geometry_type geometry)
     {
-        if (!geometry)
-            throw std::invalid_argument("pressure face-flux geometry snapshot must not be null.");
-        require_current_geometry(*mesh, *geometry);
+        if (!geometry) throw std::invalid_argument("Pressure face-flux geometry snapshot must not be null.");
+        if (mesh.get() != geometry->d_mesh.get())
+            throw std::invalid_argument("Pressure face-flux geometry belongs to another mesh.");
+        if (!geometry->d_error)
+        {
+            require_current_geometry(*mesh, *geometry);
+            if (geometry->d_topology) geometry->d_topology->require_valid(*mesh);
+        }
         return geometry;
     }
-
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh)
     {
-        if (!mesh)
-        {
-            throw std::invalid_argument(
-                "FieldStoredPressureWeightedFaceFluxWorkspace requires a "
-                "non-null mesh.");
-        }
+        if (!mesh) throw std::invalid_argument("FieldStoredPressureWeightedFaceFluxWorkspace requires a non-null mesh.");
         return mesh;
     }
-
     SP<const mesh_type> d_mesh;
     shared_geometry_type d_geometry;
     VectorCellFieldStored<Pack, mesh_type> d_pressure_gradient;
