@@ -6,6 +6,9 @@ compact local interface indexing, provider-aware construction validation, and
 accuracy/scaling qualification. The contiguous canonical-cell MPI partitioner
 and current supported geometry/interface combinations remain authoritative.
 
+For reusable all/interior/boundary cell and face selections, see
+[batched mesh traversal](mesh_traverse.md).
+
 ## Execution contract
 
 ```cpp
