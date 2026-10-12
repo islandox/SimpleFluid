@@ -122,7 +122,7 @@ namespace
 /** Deterministically encode every rank-global choice used by planar ALE. */
 [[nodiscard]] std::string encode_planar_ale_runtime_options(
     const TimeStepperOptions& time, const LinearSolverOptions& linear,
-    const LinearSolverOptions& pressure_linear,
+    const LinearSolverOptions& pressure_linear, const LinearSolverOptions& momentum_linear,
     const BoussinesqModelOptions& model,
     const MaterialFeedbackOptions* feedback,
     const ReactingGasOptions* gas,
@@ -237,6 +237,7 @@ namespace
     scalar(time.n_outer_correctors);
     linear_options(linear);
     linear_options(pressure_linear);
+    linear_options(momentum_linear);
 
     scalar(model.reference_density);
     scalar(model.density);
@@ -2097,7 +2098,7 @@ void BoussinesqSolver<Pack>::validate_planar_ale_runtime_parity() const
     }
     const auto local_encoding = encode_planar_ale_runtime_options(
         d_problem.time_options(), d_problem.linear_options(),
-        this->pressure_linear_solver_options(), d_model_options,
+        this->pressure_linear_solver_options(), this->momentum_linear_solver_options(), d_model_options,
         feedback_options, gas_options, d_problem.boundary_conditions(),
         temperature_sources,
         this->has_mutable_mesh_handle(), uses_legacy_backend(),
@@ -3177,13 +3178,13 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::advance_momentum() ->
         return boussinesq_momentum_equation().advance_velocity_physical(velocity(), *momentum_flux, temperature(),
             boussinesq_velocity_boundary_cache(), d_problem.time_options(), stored_material_properties(),
             d_model_options.reference_density, d_model_options.density_feedback_enabled, velocity(), pressure_source,
-            d_problem.linear_options(), turbulence != nullptr ? &turbulence->effective_dynamic_viscosity() : nullptr,
+            this->momentum_linear_solver_options(), turbulence != nullptr ? &turbulence->effective_dynamic_viscosity() : nullptr,
             turbulence != nullptr ? turbulence->effective_dynamic_viscosity_boundary_cache() : nullptr,
             d_active_ale ? &*d_active_ale : nullptr);
     }
     return boussinesq_momentum_equation().advance_velocity(velocity(), *momentum_flux, temperature(),
         boussinesq_velocity_boundary_cache(), d_problem.time_options(), velocity(), pressure_source,
-        d_problem.linear_options(), d_active_ale ? &*d_active_ale : nullptr);
+        this->momentum_linear_solver_options(), d_active_ale ? &*d_active_ale : nullptr);
 }
 
 /**
@@ -3651,7 +3652,7 @@ std::string BoussinesqSolver<Pack>::coupling_configuration_signature() const
                d_reacting_gas_model->donor_hydrogen_deficit_tracking_enabled()) +
         encode_free_surface_options(d_free_surface_options) +
         encode_planar_ale_runtime_options(time_options, d_problem.linear_options(),
-            this->pressure_linear_solver_options(), d_model_options,
+            this->pressure_linear_solver_options(), this->momentum_linear_solver_options(), d_model_options,
             d_material_feedback_model ? &d_material_feedback_model->options() : nullptr,
             d_reacting_gas_model ? &d_reacting_gas_model->options() : nullptr,
             d_problem.boundary_conditions(), sources,

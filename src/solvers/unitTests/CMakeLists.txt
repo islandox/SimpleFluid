@@ -47,6 +47,14 @@ simplefluid_add_mpi_test(
     LABELS "mpi;linear_solver;accuracy"
     TIMEOUT 120)
 
+simplefluid_add_mpi_test(
+    NAME BelosSymmetricAMG_2procs
+    TARGET testBelosLinearSolver
+    PROCS 2
+    ARGS "--gtest_filter=BelosLinearSolverTest.SymmetricSmoothedAmg*"
+    LABELS "mpi;linear_solver;preconditioner"
+    TIMEOUT 120)
+
 target_sources(testBoussinesqSolver PRIVATE
   PressureGradientStencilTestSupport.cc)
 

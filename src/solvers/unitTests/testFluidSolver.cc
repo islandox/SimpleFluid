@@ -520,6 +520,18 @@ TEST(FluidSolverTest, ExposesIndependentLinearSolverPolicies)
         solver.pressure_linear_solver_options().preconditioner,
         SimpleFluid::LinearPreconditioner::MueLu);
 
+    auto momentum = solver.linear_solver_options();
+    momentum.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    momentum.preconditioner = SimpleFluid::LinearPreconditioner::ILU0;
+    solver.set_momentum_linear_solver_options(momentum);
+    EXPECT_EQ(solver.momentum_linear_solver_options().preconditioner, SimpleFluid::LinearPreconditioner::ILU0);
+    EXPECT_EQ(solver.linear_solver_options().preconditioner, SimpleFluid::LinearPreconditioner::Jacobi);
+    replacement_transport.tolerance = 1e-9;
+    solver.set_linear_solver_options(replacement_transport);
+    EXPECT_DOUBLE_EQ(solver.momentum_linear_solver_options().tolerance, momentum.tolerance);
+    solver.clear_momentum_linear_solver_options();
+    EXPECT_DOUBLE_EQ(solver.momentum_linear_solver_options().tolerance, 1e-9);
+
     auto replacement_pressure =
         solver.pressure_linear_solver_options();
     replacement_pressure.preconditioner =

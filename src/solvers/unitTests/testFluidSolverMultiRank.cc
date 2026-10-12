@@ -1009,3 +1009,23 @@ TEST(FluidSolverMultiRankTest,
         solver.last_pressure_velocity_residuals().continuity,
         1.0e-8);
 }
+
+TEST(FluidSolverMultiRankTest, MomentumPolicyValidationIsCollectiveAndTransactional)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
+    ExposedFluidSolver solver(native_distributed_line_mesh(), {});
+    auto options = solver.linear_solver_options();
+    options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    options.preconditioner = SimpleFluid::LinearPreconditioner::ILU0;
+    solver.set_momentum_linear_solver_options(options);
+    EXPECT_EQ(solver.linear_solver_options().backend, SimpleFluid::LinearSolverBackend::Gmres);
+    auto invalid = options;
+    if (comm->getRank() == 1) invalid.tolerance = -1;
+    EXPECT_THROW(solver.set_momentum_linear_solver_options(invalid), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(solver.momentum_linear_solver_options().tolerance, options.tolerance);
+    auto different = options;
+    if (comm->getRank() == 1) different.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    EXPECT_THROW(solver.set_momentum_linear_solver_options(different), std::invalid_argument);
+    EXPECT_EQ(solver.momentum_linear_solver_options().preconditioner, SimpleFluid::LinearPreconditioner::ILU0);
+}
