@@ -4,9 +4,11 @@
 #pragma once
 
 #include "geometry/MeshHandle.hh"
+#include "geometry/details/StructuredTraverseLayout.hh"
 
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -34,7 +36,9 @@ template<class PublicMesh, class GeometryMesh>
 class TraverseAccess
 {
 public:
+    using mesh_type = PublicMesh;
     using local_ordinal_type = typename PublicMesh::local_ordinal_type;
+    using scalar_type = typename PublicMesh::scalar_type;
     using geometry_type = GeometryMesh;
     using Vec3 = typename GeometryMesh::Vec3;
 
@@ -54,6 +58,31 @@ public:
 
     size_t num_cells() const noexcept { return d_num_cells; }
     size_t num_faces() const noexcept { return d_num_faces; }
+    const mesh_type& mesh() const noexcept { return d_mesh; }
+
+    /** Canonical orthogonal ordinals admit an allocation-free range plan. */
+    std::optional<StructuredTraverseLayout> structured_layout() const
+    {
+        if constexpr (has_structured_traverse_layout<GeometryMesh>)
+        {
+            if constexpr (traverse_is_handle<PublicMesh>)
+            {
+                // Reordering and partition maps need the generic field-local
+                // schedules even when their geometry provider is structured.
+                if (!d_mesh.d_serial_identity || !d_mesh.d_cell_geometry_lids.empty())
+                    return std::nullopt;
+            }
+            else if constexpr (!std::is_same_v<PublicMesh, GeometryMesh>)
+                return std::nullopt;
+            const auto& indexer = d_geometry.indexer();
+            if (indexer.num_cells_per_dim[0] && indexer.num_cells_per_dim[1] && indexer.num_cells_per_dim[2]
+                && d_num_cells == indexer.total_cells() && d_num_faces == indexer.total_faces()
+                && d_mesh.num_owned_cells() == d_num_cells
+                && d_mesh.num_owned_faces() == d_num_faces)
+                return StructuredTraverseLayout(indexer);
+        }
+        return std::nullopt;
+    }
 
     bool is_owned_cell(size_t cell) const
     {
@@ -130,14 +159,28 @@ public:
     }
 
     Vec3 cell_center_vector(size_t face, size_t cell) const
-    { return d_geometry.cell_center_vector(face_id(face), cell_id(cell)); }
+    {
+        if constexpr (requires { typename PublicMesh::partitioned_mesh_base_tag; })
+            return d_mesh.cell_center_vector(local(face), local(cell));
+        else
+            return d_geometry.cell_center_vector(face_id(face), cell_id(cell));
+    }
 
     real_t cell_to_face_distance(size_t face, size_t cell) const
     {
-        if constexpr (traverse_is_stk_adapter<GeometryMesh>)
-            return d_geometry.mesh().cell_to_face_distance(face_id(face), cell_id(cell));
-        else if constexpr (std::is_same_v<GeometryMesh, Meshes::MultiRegionMesh>)
-            return face_center_vector(face, cell).norm();
+        if constexpr (traverse_is_handle<PublicMesh>)
+        {
+            // Match MeshHandle's public distance arithmetic, including the
+            // wrapped legacy and Cartesian periodic-face distances.
+            if constexpr (traverse_is_stk_adapter<GeometryMesh>)
+                return d_geometry.mesh().cell_to_face_distance(face_id(face), cell_id(cell));
+            else if constexpr (std::is_same_v<GeometryMesh, Meshes::OrthogonalCartesian3D>)
+                return d_geometry.cell_to_face_distance(face_id(face), cell_id(cell));
+            else
+                return face_center_vector(face, cell).norm();
+        }
+        else if constexpr (requires { typename PublicMesh::partitioned_mesh_base_tag; })
+            return (face_centroid(face) - cell_centroid(cell)).norm();
         else
             return d_geometry.cell_to_face_distance(face_id(face), cell_id(cell));
     }
@@ -172,6 +215,9 @@ public:
         else
             return face_normal_outward(face, cell) * face_area(face);
     }
+
+protected:
+    const GeometryMesh& geometry_provider() const noexcept { return d_geometry; }
 
 private:
     static local_ordinal_type local(size_t value)
@@ -308,6 +354,77 @@ private:
     const GeometryMesh& d_geometry;
     size_t d_num_cells, d_num_faces;
 };
+
+/**
+ * Preserve the selected plan layout in nested numerical callback types.
+ * This keeps the generic schedule path out of structured incidence kernels.
+ * Construction requires the plan's full, canonical structured-layout proof.
+ * The enclosing execution pins the provider and its fixed topology; checked
+ * public ordinals therefore map directly through its orthogonal indexer.
+ */
+template<class Access>
+class StructuredTraverseAccess : public Access
+{
+public:
+    using mesh_type = typename Access::mesh_type;
+    using geometry_type = typename Access::geometry_type;
+    using local_ordinal_type = typename Access::local_ordinal_type;
+    using Vec3 = typename Access::Vec3;
+
+    static_assert(has_structured_traverse_layout<geometry_type>);
+    static_assert(traverse_is_handle<mesh_type> || std::is_same_v<mesh_type, geometry_type>);
+
+    explicit StructuredTraverseAccess(const Access& access) : Access(access) {}
+
+    local_ordinal_type owner_cell(size_t face) const
+    {
+        const auto& geometry = this->geometry_provider();
+        return canonical_field_cell(geometry.topology().owner_cell(canonical_face_id(face)));
+    }
+
+    local_ordinal_type neighbor_cell(size_t face) const
+    {
+        const auto& geometry = this->geometry_provider();
+        return canonical_field_cell(geometry.topology().neighbor_cell(canonical_face_id(face)));
+    }
+
+    Vec3 cell_center_vector(size_t face, size_t cell) const
+    {
+        // Keep provider arithmetic, adjacency checks, and Cartesian periodic
+        // image displacements exactly as in the ordinary geometry query.
+        return this->geometry_provider().cell_center_vector(
+            canonical_face_id(face), canonical_cell_id(cell));
+    }
+
+private:
+    typename geometry_type::cell_id_t canonical_cell_id(size_t cell) const
+    {
+        if (cell >= this->num_cells())
+            throw std::out_of_range("Mesh traverse cell ordinal is out of range.");
+        return this->geometry_provider().indexer().cell_id(cell);
+    }
+
+    typename geometry_type::face_id_t canonical_face_id(size_t face) const
+    {
+        if (face >= this->num_faces())
+            throw std::out_of_range("Mesh traverse face ordinal is out of range.");
+        return this->geometry_provider().indexer().face_id(face);
+    }
+
+    local_ordinal_type canonical_field_cell(typename geometry_type::cell_id_t cell) const
+    {
+        if (cell == geometry_type::invalid_cell_id()) return Access::invalid_local_id();
+        // A valid face's topology query returns a valid canonical cell or the
+        // sentinel above. Plan construction already checked ordinal capacity,
+        // so neither field-map lookup nor another geometry bounds check is
+        // needed to convert this topology-produced identifier.
+        return static_cast<local_ordinal_type>(this->geometry_provider().indexer().cell_ordinal(cell));
+    }
+};
+
+template<class Access> inline constexpr bool is_structured_traverse_access = false;
+template<class Access>
+inline constexpr bool is_structured_traverse_access<StructuredTraverseAccess<Access>> = true;
 
 /** @brief Dispatch a runtime mesh once, outside all batch numerical loops. */
 template<class Mesh, class Visitor>

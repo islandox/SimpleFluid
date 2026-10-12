@@ -11,6 +11,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -226,10 +227,18 @@ public:
                 if constexpr (Incidence)
                 {
                     const auto& face = d_incidence[ordinal];
-                    std::invoke(operation, reference(*d_access, face.face, run.batch, d_cell, face.orientation));
+                    if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Operation>>)
+                        std::invoke(operation, reference(*d_access, face.face, run.batch, d_cell, face.orientation));
+                    else
+                        operation(reference(*d_access, face.face, run.batch, d_cell, face.orientation));
                 }
                 else
-                    std::invoke(operation, reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch));
+                {
+                    if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Operation>>)
+                        std::invoke(operation, reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch));
+                    else
+                        operation(reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch));
+                }
             }
     }
 
@@ -270,6 +279,8 @@ public:
 
         detail::with_traverse_access(mesh, [&](const auto& access)
         {
+            d_structured = access.structured_layout();
+            if (d_structured) return;
             if (entities != MeshTraverseEntities::Faces)
                 for (size_t cell = 0; cell < d_counts[0]; ++cell)
                 {
@@ -313,6 +324,7 @@ public:
     MeshTraverseExecution<Mesh> acquire() const && = delete;
     const Mesh& mesh() const noexcept { return *d_mesh; }
     MeshTraverseEntities entities() const noexcept { return d_entities; }
+    bool uses_structured_ranges() const noexcept { return d_structured.has_value(); }
 
     /** Explicitly reject further use before editing topology in place. */
     void invalidate() noexcept { d_valid = false; }
@@ -343,6 +355,7 @@ private:
     bool d_valid = true;
     std::array<size_t, 4> d_counts{};
     std::array<const void*, 5> d_binding{};
+    std::optional<detail::StructuredTraverseLayout> d_structured;
     std::array<detail::MeshTraverseSchedule, 2> d_cells, d_faces;
     std::vector<detail::MeshTraverseSchedule> d_cell_faces;
     std::vector<detail::MeshTraverseIncidence<local_ordinal_type>> d_incidence;
@@ -429,7 +442,23 @@ public:
 
     size_t size() const
     {
-        d_execution->d_plan->require_valid();
+        const auto& plan = *d_execution->d_plan;
+        plan.require_valid();
+        if (plan.d_structured)
+        {
+            const auto& layout = *plan.d_structured;
+            if constexpr (Incidence)
+            {
+                size_t count = 0;
+                for (const auto& face : layout.cell_faces(static_cast<size_t>(d_cell)))
+                    if (structured_selected(face.interior, face.batch)) ++count;
+                return count;
+            }
+            else if constexpr (Entity == MeshTraverseEntity::Cell)
+                return layout.cell_count(structured_selection());
+            else
+                return layout.face_count(structured_selection(), structured_batch());
+        }
         size_t count = 0;
         for (const auto& run : selected_runs()) count += run.end - run.begin;
         return count;
@@ -441,13 +470,56 @@ public:
         visit_batches([&](const auto& batch) { batch.apply(operation); });
     }
 
+    /**
+     * Reuse access borrowed from an enclosing typed traversal of this mesh.
+     * The enclosing callback keeps the geometry lease alive; neither this
+     * operation nor its entity references may outlive that callback.
+     */
+    template<class Access, class Operation>
+        requires std::is_same_v<typename Access::mesh_type, Mesh>
+    void apply(const Access& access, Operation&& operation) const
+    {
+        visit_batches(access, [&](const auto& batch) { batch.apply(operation); });
+    }
+
     template<class Visitor> void visit_batches(Visitor&& visitor) const
     {
         const auto& plan = *d_execution->d_plan;
         plan.require_valid();
         detail::with_traverse_access(plan.mesh(), [&](const auto& access)
         {
-            using Access = std::remove_cvref_t<decltype(access)>;
+            visit_batches(access, visitor);
+        });
+    }
+
+    /** Borrow an enclosing traversal's same-mesh access without redispatch. */
+    template<class Access, class Visitor>
+        requires std::is_same_v<typename Access::mesh_type, Mesh>
+    void visit_batches(const Access& access, Visitor&& visitor) const
+    {
+        const auto& plan = *d_execution->d_plan;
+        plan.require_valid();
+        if (&access.mesh() != &plan.mesh())
+            throw std::invalid_argument("Mesh traverse access belongs to another mesh.");
+        if constexpr (detail::is_structured_traverse_access<Access>)
+        {
+            if (!plan.d_structured)
+                throw std::invalid_argument("Structured traverse access requires a structured plan.");
+            visit_structured_batches(access, visitor, *plan.d_structured);
+        }
+        else
+        {
+            if constexpr (detail::has_structured_traverse_layout<typename Access::geometry_type>
+                && (detail::traverse_is_handle<typename Access::mesh_type>
+                    || std::is_same_v<typename Access::mesh_type, typename Access::geometry_type>))
+            {
+                if (plan.d_structured)
+                {
+                    const detail::StructuredTraverseAccess<Access> structured(access);
+                    visit_structured_batches(structured, visitor, *plan.d_structured);
+                    return;
+                }
+            }
             const auto emit = [&]<bool Interior>(std::span<const detail::MeshTraverseRun> runs)
             {
                 if (!runs.empty())
@@ -481,7 +553,7 @@ public:
                         else emit.template operator()<false>({&run, 1});
                     }
             }
-        });
+        }
     }
 
     /** Local preflight only; the enclosing numerical operation coordinates MPI failure. */
@@ -506,6 +578,123 @@ private:
     template<class, MeshTraverseEntity, MeshTraverseSelection, MeshTraverseOwnership, bool> friend class MeshBatchProxy;
     explicit MeshBatchProxy(const MeshTraverseExecution<Mesh>& execution, local_ordinal_type cell = {})
         : d_execution(&execution), d_cell(cell) {}
+
+    static constexpr detail::StructuredTraverseSelection structured_selection()
+    {
+        if constexpr (Selection == MeshTraverseSelection::Interior)
+            return detail::StructuredTraverseSelection::Interior;
+        else if constexpr (Selection == MeshTraverseSelection::Boundary)
+            return detail::StructuredTraverseSelection::Boundary;
+        else
+            return detail::StructuredTraverseSelection::All;
+    }
+    std::optional<int> structured_batch() const
+    {
+        return d_has_batch ? std::optional<int>(d_batch) : std::nullopt;
+    }
+    bool structured_selected(bool interior, int batch) const
+    {
+        if constexpr (Selection == MeshTraverseSelection::Interior) return interior;
+        else if constexpr (Selection == MeshTraverseSelection::Boundary)
+            return !interior && (!d_has_batch || batch == d_batch);
+        else return true;
+    }
+
+    template<class Access, class Visitor>
+    void visit_structured_batches(const Access& access, Visitor&& visitor,
+        const detail::StructuredTraverseLayout& layout) const
+    {
+        if constexpr (Incidence)
+        {
+            // A cell has exactly six canonical incidences, including distinct
+            // periodic faces sharing a neighbour. Scratch expires with this
+            // callback and never becomes per-cell retained heap storage.
+            const auto faces = layout.cell_faces(static_cast<size_t>(d_cell));
+            std::array<detail::MeshTraverseIncidence<local_ordinal_type>, 6> incidence;
+            bool all_interior = true;
+            for (size_t i = 0; i < faces.size(); ++i)
+            {
+                incidence[i] = {static_cast<local_ordinal_type>(faces[i].face), faces[i].orientation};
+                all_interior = all_interior && faces[i].interior;
+            }
+            // Most structured cells need one six-face range. Avoid rebuilding
+            // and filtering six general run descriptors on this hot path.
+            if (all_interior)
+            {
+                if constexpr (Selection != MeshTraverseSelection::Boundary)
+                {
+                    const detail::MeshTraverseRun run{0, faces.size(), true, -1};
+                    std::invoke(visitor, MeshTraverseBatch<Access, Entity, true, Incidence>(
+                        access, {&run, 1}, incidence, d_cell));
+                }
+                return;
+            }
+            const auto emit_selected = [&](auto&& selected)
+            {
+                std::array<detail::MeshTraverseRun, 6> runs;
+                size_t count = 0;
+                for (size_t i = 0; i < faces.size(); ++i)
+                {
+                    const auto& face = faces[i];
+                    if (!selected(face)) continue;
+                    if (count && runs[count - 1].end == i
+                        && runs[count - 1].interior == face.interior
+                        && runs[count - 1].batch == face.batch)
+                        runs[count - 1].end = i + 1;
+                    else
+                        runs[count++] = {i, i + 1, face.interior, face.batch};
+                }
+                for (size_t i = 0; i < count; ++i)
+                {
+                    const auto emit = [&]<bool Interior>()
+                    {
+                        std::invoke(visitor, MeshTraverseBatch<Access, Entity, Interior, Incidence>(
+                            access, {&runs[i], 1}, incidence, d_cell));
+                    };
+                    if constexpr (Selection == MeshTraverseSelection::Interior)
+                        emit.template operator()<true>();
+                    else if constexpr (Selection == MeshTraverseSelection::Boundary)
+                        emit.template operator()<false>();
+                    else if (runs[i].interior) emit.template operator()<true>();
+                    else emit.template operator()<false>();
+                }
+            };
+            if constexpr (Selection == MeshTraverseSelection::All)
+            {
+                if (d_independent)
+                {
+                    emit_selected([](const auto& face) { return face.interior; });
+                    // Orthogonal incidence order is lower/upper per axis, so
+                    // its boundary subsequence is already sorted by batch ID.
+                    emit_selected([](const auto& face) { return !face.interior; });
+                }
+                else emit_selected([](const auto&) { return true; });
+            }
+            else emit_selected([&](const auto& face) { return structured_selected(face.interior, face.batch); });
+        }
+        else
+        {
+            const auto emit_run = [&](const detail::StructuredTraverseRun& structured)
+            {
+                const detail::MeshTraverseRun run{
+                    structured.begin, structured.end, structured.interior, structured.batch};
+                const auto emit = [&]<bool Interior>()
+                {
+                    std::invoke(visitor, MeshTraverseBatch<Access, Entity, Interior, Incidence>(access, {&run, 1}));
+                };
+                if constexpr (Selection == MeshTraverseSelection::Interior)
+                    emit.template operator()<true>();
+                else if constexpr (Selection == MeshTraverseSelection::Boundary)
+                    emit.template operator()<false>();
+                else if (run.interior) emit.template operator()<true>();
+                else emit.template operator()<false>();
+            };
+            if constexpr (Entity == MeshTraverseEntity::Cell)
+                layout.visit_cells(structured_selection(), d_independent, emit_run);
+            else
+                layout.visit_faces(structured_selection(), d_independent, structured_batch(), emit_run);
+        }
+    }
     template<MeshTraverseSelection Next> auto select() const
     {
         MeshBatchProxy<Mesh, Entity, Next, Ownership, Incidence> result(*d_execution, d_cell);

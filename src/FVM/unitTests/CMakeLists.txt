@@ -152,3 +152,17 @@ foreach(_gradient_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME RegionTransportAssembly_${_gradient_procs}procs TARGET testRegionTransportAssembly
         PROCS ${_gradient_procs} LABELS "mpi;fvm;transport;multi_region" TIMEOUT 120)
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME GradientTraverse_2procs
+    TARGET testGradientTraverse
+    PROCS 2
+    LABELS "mpi;fvm;gradient;traverse"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME TransportTraverse_2procs
+    TARGET testTransportTraverse
+    PROCS 2
+    LABELS "mpi;fvm;transport;traverse"
+    TIMEOUT 120)

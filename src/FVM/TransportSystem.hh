@@ -25,6 +25,7 @@
 #include "fields/VectorCellField.hh"
 #include "geometry/GeometryEpoch.hh"
 #include "geometry/Mesh.hh"
+#include "geometry/MeshTraverse.hh"
 
 #include <Teuchos_Array.hpp>
 #include <Teuchos_RCP.hpp>
@@ -158,7 +159,8 @@ template<TpetraTypePack Pack> struct VectorTransportSystem
  * condition types and values remain callback-driven and are materialized for
  * each assembly, so changing boundary data does not require rebuilding this
  * cache. Fixed-topology geometry motion invalidates the cache until refresh()
- * rebuilds its numeric data; topology changes require a new cache.
+ * rebuilds its numeric data while retaining the gradient traversal plan;
+ * topology changes require a new cache.
  *
  * @tparam MeshType Mesh interface used by the transport fields.
  */
@@ -169,13 +171,19 @@ public:
     using boundary_locations_type = std::vector<detail::BoundaryFaceLocation<MeshType>>;
     using boundary_geometry_type = std::vector<detail::BoundaryAwareGradientCellGeometry<MeshType>>;
     using assembly_geometry_type = detail::TransportAssemblyGeometry<MeshType>;
+    using traverse_plan_type = MeshTraversePlan<MeshType>;
     /** Immutable mesh metrics; field and boundary values are never retained. */
     struct SharedGeometry
     {
         explicit SharedGeometry(const MeshType& mesh);
+        SharedGeometry(const MeshType& mesh, std::shared_ptr<const traverse_plan_type> traverse);
+        SharedGeometry(const MeshType& mesh, std::shared_ptr<const traverse_plan_type> traverse,
+            const assembly_geometry_type* previous_assembly);
         const MeshType* const mesh;
         const void* const identity;
         const std::uint64_t epoch;
+        /** Ordered gradient topology retained across geometry-only refreshes. */
+        const std::shared_ptr<const traverse_plan_type> gradient_traverse;
         const interior_stencils_type interior;
         const boundary_locations_type locations;
         const boundary_geometry_type boundary;
@@ -194,6 +202,7 @@ public:
     /** Refresh once per epoch, or adopt a validated snapshot of the same mesh. */
     void refresh(shared_geometry_type geometry);
     const shared_geometry_type& shared_geometry() const noexcept { return d_geometry; }
+    const traverse_plan_type& traverse_plan() const noexcept { return *d_geometry->gradient_traverse; }
 
     /** @brief Geometry epoch represented by this cache. */
     std::uint64_t geometry_epoch() const noexcept { return d_geometry->epoch; }

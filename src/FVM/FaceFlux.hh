@@ -231,7 +231,8 @@ public:
             : SharedGeometry(std::move(mesh), {}) {}
 
     private:
-        SharedGeometry(SP<const mesh_type> mesh, std::shared_ptr<const topology_type> topology)
+        SharedGeometry(SP<const mesh_type> mesh, std::shared_ptr<const topology_type> topology,
+            std::shared_ptr<const traverse_plan_type> gradient_traverse = {})
             : d_mesh(require_mesh(std::move(mesh))), d_topology(std::move(topology)),
               d_geometry_identity(detail::ale_geometry_identity(*d_mesh))
         {
@@ -244,7 +245,9 @@ public:
                 const auto lease = acquire_mesh_execution(*d_mesh);
                 d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
                 if (d_topology) d_topology->require_valid(*d_mesh);
-                d_gradient_cache = std::make_unique<CellGradientCache<Pack, mesh_type>>(d_mesh);
+                d_gradient_cache = std::make_unique<CellGradientCache<Pack, mesh_type>>(d_mesh,
+                    typename CellGradientCache<Pack, mesh_type>::boundary_direction_provider_type{},
+                    std::move(gradient_traverse));
                 if (!d_topology)
                     d_topology = detail::make_pressure_face_topology<Pack>(
                         *d_mesh, d_gradient_cache->boundary_locations());
@@ -417,7 +420,8 @@ public:
         d_geometry->d_topology->require_valid(*d_mesh);
         if (detail::ale_geometry_identity(*d_mesh) == d_geometry->d_geometry_identity
             && mesh_geometry_epoch(*d_mesh) == d_geometry->d_geometry_epoch) return;
-        auto next = shared_geometry_type(new SharedGeometry(d_mesh, d_geometry->d_topology));
+        auto next = shared_geometry_type(new SharedGeometry(d_mesh, d_geometry->d_topology,
+            d_geometry->d_gradient_cache ? d_geometry->d_gradient_cache->shared_traverse_plan() : nullptr));
         require_ready_geometry(*next);
         d_geometry = std::move(next);
     }

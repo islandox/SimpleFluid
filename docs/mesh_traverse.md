@@ -1,8 +1,9 @@
 # Batched mesh traversal
 
 `geometry/MeshTraverse.hh` provides reusable selections for numerical operations
-on cells and faces. Selection and ownership tests run when the plan is built;
-execution dispatches a typed operation outside each homogeneous numerical loop.
+on cells and faces. Generic plans retain selection and ownership metadata;
+structured plans derive ranges from grid dimensions. Execution dispatches a
+typed operation outside each homogeneous numerical loop.
 
 ```cpp
 #include "geometry/MeshTraverse.hh"
@@ -79,6 +80,20 @@ provide `size()`, `empty()`, `is_interior`, and `apply(operation)`. Batch and
 entity references expire with their callback. Move-only operations and visitors
 are supported without per-entity type erasure.
 
+Nested incidence operations can reuse the outer typed geometry access:
+
+```cpp
+traverse.cells().all().apply([&](const auto& cell) {
+    traverse.cell_faces(cell.id()).all().apply(cell.geometry(), incidence_operation);
+});
+```
+
+The two-argument `apply(access, operation)` and
+`visit_batches(access, visitor)` overloads validate the same mesh and reuse the
+enclosing callback's geometry lease without repeating provider dispatch for
+each cell. The borrowed access and any nested views must remain inside that
+callback.
+
 By default, all-category traversal follows existing local ordinal order.
 Subsets retain their order within that sequence. Homogeneous half-open ranges
 avoid storing one ID per entity on structured meshes. Irregular category,
@@ -93,6 +108,36 @@ and accumulation order permit reordering. Existing numerical kernels can rely
 on earlier writes being visible to later rows; grouping those rows would change
 their behavior. Face-to-cell scatter also requires an explicit race/accumulation
 policy before parallel execution.
+
+## Structured range specialization
+
+Native `OrthogonalCartesian3D` and `OrthogonalCylindrial3D` providers specialize
+the plan layout when public ordinals cover the complete provider in canonical
+order. This includes their serial identity `MeshHandle` views. The descriptor
+retains only three dimensions and three periodicity flags. Plan construction
+does not scan entities or allocate cell, face, or incidence schedules, and
+retained plan storage is independent of mesh size.
+
+Cell selections produce arithmetic row/slab ranges. Face selections produce
+ranges within orientation blocks, with the normal coordinate varying fastest.
+Periodic axes contribute no physical boundary ranges. Ordered traversal,
+ascending patch grouping for `.independent()`, thin axes, and the established
+owner orientation remain unchanged.
+
+Cell-face traversal derives the six lower/upper I, J, K incidences into bounded
+callback-local storage. Classification selects homogeneous runs before the
+numerical operation executes; no per-cell heap storage is retained. Geometry
+is still read through the leased provider, so the same plan survives supported
+geometry-only ALE updates and rollback.
+
+The selected layout remains part of the borrowed access type in nested
+callbacks. Canonical owner and neighbour queries use the structured indexer and
+topology directly; metric formulas still come from the native provider.
+
+`uses_structured_ranges()` reports whether this specialization is active.
+Reordered handles, distributed maps, composite providers, and other mesh
+families retain the generic field-local schedules. A structured provider alone
+does not imply that public field ordinals have the canonical structured layout.
 
 ## Cell-face incidence
 
@@ -113,8 +158,9 @@ These references also provide `cell_id()`, `orientation()` and
 `outward_normal()`. The default preserves native incidence order and canonical
 fine-subface expansion. An incidence traversal includes unowned incident faces
 needed by the selected row; it does not filter by face ownership. Optional
-incidence storage is proportional to locally visible incidences. Ordinary
-`All`, `Cells`, and `Faces` plans do not allocate it.
+incidence storage for generic plans is proportional to locally visible
+incidences. Structured plans derive it on demand. Ordinary `All`, `Cells`, and
+`Faces` plans do not allocate incidence storage.
 
 ## Geometry lifetime and invalidation
 
@@ -176,8 +222,8 @@ zero-output array. Geometry refresh fills category-specific metric arrays from
 those retained IDs, then publishes a replacement immutable snapshot only on
 success. Shared older snapshots retain their own metrics. Rollback creates a
 new geometry epoch and needs refresh even when coordinates return to an earlier
-state. The gradient cache retains its established refresh behavior; this change
-does not eliminate its own topology-related work.
+state. Replacement snapshots also retain their gradient cache's traversal plan;
+the new snapshot owns independently rebuilt gradient weights.
 
 Topology/partition/order edits require workspace reconstruction. Call
 `invalidate_topology()` before an in-place edit; all snapshots sharing the same
@@ -197,3 +243,131 @@ was requested; shared workspaces observe the same optional materialization.
 The original batched comparison and profiling evidence remain in
 `build/verification/face-flux-unbatched-20261013/`. Direct-range measurements use
 an independent campaign directory and the same original unbatched control.
+
+## Gradient construction and refresh
+
+`CellGradientCache` and `GaussLinearGradientCache` retain an ordered
+`AllWithCellFaces` plan from construction through geometry refresh and rollback.
+Each rebuild uses owned cell batches and typed incident-face batches; interior
+and physical-boundary sample selection is compiled separately. The nested face
+operation reuses the current cell's typed access. Boundary slot lookup is
+retained by these caches rather than rediscovered during their `refresh()`.
+
+Least-squares normal matrices still accumulate directions in original mixed
+face order. Independent inverse applications then fill separate interior and
+boundary sample arrays, preserving each array's order. The boundary-aware
+cache builds only boundary-cell rows; interior rows retain their established
+empty boundary-cache representation. Boundary direction callbacks run in their
+original order and remain live during refresh.
+
+The shared least-squares, scalar affine (including Robin), and vector affine
+stencil builders also accept a retained traversal plan. Their existing entry
+points create an operation-local plan. `TransportGeometryCache` shares its
+gradient plan between both stencil builders and across replacement geometry
+snapshots. The pressure-flux workspace likewise shares the gradient plan when
+it constructs replacement snapshots. Previous snapshots keep their own weights.
+
+`traverse_plan()` exposes the retained plan for cache diagnostics. The
+least-squares cache additionally supports a shared plan constructor and
+`shared_traverse_plan()` for snapshot owners. Plans must belong to the exact
+same mesh and contain cell-face incidence. Topology, partition, and local-order
+changes require new caches; geometry-only refresh preserves the plan identity.
+
+All rebuilds construct numeric replacements privately and capture the mesh
+epoch before publishing them. A failed callback or geometry query leaves the
+old cache data and epoch unchanged. These builders remain local and add no MPI
+collectives or implicit field synchronization. Gradient application kernels
+retain their existing owned/overlap reads, write order, and aliasing behavior.
+
+Public construction and refresh entry points remain available. Cache object
+layouts now include traversal state, so downstream users must rebuild against
+the updated headers and libraries. Export-symbol checks do not establish
+binary layout compatibility. Matched measurements of the generic migration
+and the structured specialization are retained in
+`build/verification/traverse-extension-20261013/REPORT.txt` and
+`build/verification/structured-traverse-canonical-20261013/REPORT.txt`.
+These separate initial cache construction, retained-plan refresh, and cached or
+uncached gradient evaluation.
+
+### Structured numerical gradient storage
+
+When the traversal plan has a canonical structured layout, gradient caches also
+use compact numerical rows. Least-squares interior rows store six weights and
+six neighbour IDs in contiguous arrays. Boundary cells use separate flat arrays
+for interior-only and boundary-aware reconstruction. Gauss interior rows retain
+only areas, interpolation distances, and neighbour IDs; full boundary records
+are stored only for boundary cells. Evaluation still visits owned cells in their
+original order and accumulates every contribution in the established order.
+Boundary callbacks remain live, and no interpolation reciprocal is precomputed.
+
+The existing `interior_geometry()`, `boundary_geometry()`, `boundary_locations()`
+and Gauss `geometry()` interfaces remain available. Structured compatibility
+views are materialized on explicit request with `std::call_once`; normal cached
+evaluation reads the compact rows directly. Multiple const readers may request
+compatibility views concurrently. Cache refresh must remain separate from
+concurrent readers, as before. Gauss copies share immutable numerical snapshots;
+refresh replaces only the refreshed cache's snapshot. Least-squares caches retain
+their move-only interface.
+
+Refresh builds a replacement privately and holds the geometry lease through
+epoch capture and publication. Failed callbacks leave the previous data and
+epoch unchanged. Structured refresh reuses compact boundary locations rather
+than retaining a dense per-face lookup; a requested least-squares compatibility
+lookup can be shared across later snapshots. Reordered, distributed, composite,
+and other unsupported layouts keep the generic numerical representation.
+
+`uses_structured_storage()` identifies this representation, while
+`legacy_geometry_materialized()` reports whether compatibility geometry has
+been requested. `numerical_storage_bytes()` estimates native numerical storage,
+excluding allocator overhead and explicitly requested compatibility arrays.
+The matched cache-layout qualification is retained in
+`build/verification/structured-gradient-cache-final-20261013/REPORT.txt`.
+It separates fresh evaluation, evaluation after a fixed geometry refresh, and
+cache construction/refresh with fixed iteration counts in both variants.
+
+## Transport system construction
+
+Scalar and vector transport, weighted scalar transport, physical temperature,
+and physical momentum builders use the same ordered row/face traversal for
+legacy and stored fields. Each row's retained incidence is split into contiguous
+runs by interior/physical-boundary/untagged-exterior category and owner
+orientation. Category and orientation dispatch occurs once per run; numerical
+face callbacks see compile-time flags. Upwind, coefficient, boundary-condition,
+and nonorthogonal-treatment choices remain numerical decisions.
+
+`TransportGeometryCache::assembly_geometry()` retains the traversal plan and
+shares immutable category schedules through `batches` across geometry-only
+refreshes. Refresh copies the existing compatibility topology arrays into the
+new snapshot and recomputes volumes; it does not rediscover incidence or rebuild
+category schedules. Previous snapshots remain unchanged and stale epochs are
+rejected before execution. Uncached builders create operation-local geometry.
+
+Native/mapped geometry access dispatches outside the row traversal. Composite
+meshes keep their typed region resolution: a reusable buffer, bounded by the
+largest row, holds that row's resolved face metrics while its runs execute.
+There is no persistent global resolved-metric table. Canonical coarse/fine
+faces, periodic images, field-local IDs, repeated neighbours and numerical
+accumulation order retain their existing meaning.
+
+The legacy uniform scalar/vector builders still apply boundary conditions
+after the row pass. Their preclassified boundary descriptors preserve the
+original mesh boundary-batch iteration order and original in-batch slots,
+including gaps removed by ownership or periodic filtering. This preserves
+boundary callback order and face-field ownership behavior.
+
+Stored-field explicit nonorthogonal and deviatoric transpose-gradient stress
+contributions reuse the same row batches. Existing standalone legacy correction
+operators and nonorthogonality detection retain their own execution paths.
+Matrix maps, symbolic graph reuse, fixed rows, coefficient formulas and field
+synchronization contracts are unchanged.
+
+Assembly geometry selection catches local setup/cache errors and reduces one
+status on every participating rank before subsequent assembly collectives or
+cached-matrix mutation. This adds one setup reduction per builder on MPI
+communicators; serial execution needs no reduction. A supplied geometry cache
+does not let one rank skip that collective. This validation does not change
+the enclosing operator's existing boundary/source failure policy.
+
+No transport speedup is claimed without matched timing measurements. Exact
+metric/coefficient, matrix/RHS, boundary order, retained topology, cache-reuse,
+ALE/rollback and two-rank collective tests cover the migration.
