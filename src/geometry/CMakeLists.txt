@@ -3,6 +3,8 @@ set(SIMPLEFLUID_MESH_SOURCES
     BoundaryLayerMeshFactory.cc
     explicit_instantiation/Mesh.cc
     explicit_instantiation/MeshHandle.cc
+    explicit_instantiation/MeshTraverse.cc
+    details/LayeredTraverseLayout.cc
     explicit_instantiation/PlanarALEMeshMotion.cc
     explicit_instantiation/MeshReorderingFactory.cc
     explicit_instantiation/SolidSubdomain.cc

@@ -5,9 +5,7 @@
 
 #include <cassert>
 #include <cstddef>
-#include <functional>
 #include <span>
-#include <stdexcept>
 
 namespace SimpleFluid
 {
@@ -19,19 +17,13 @@ namespace SimpleFluid
  * acquisition, field synchronization, or per-entity selection. Grouped positions
  * index only these arrays, never the mesh's field or boundary-value storage.
  */
-template<class Topology, class Metrics>
-class DirectBatchRange
+template<class Topology, class Metrics> class DirectBatchRange
 {
 public:
     DirectBatchRange() = default;
 
     /** Validate the pairing once, before entering the numerical operation. */
-    static DirectBatchRange checked(std::span<const Topology> topology, std::span<const Metrics> metrics)
-    {
-        if (topology.size() != metrics.size())
-            throw std::invalid_argument("Direct batch topology and metrics have different lengths.");
-        return {topology.data(), metrics.data(), topology.size()};
-    }
+    static DirectBatchRange checked(std::span<const Topology> topology, std::span<const Metrics> metrics);
 
     size_t size() const noexcept { return d_size; }
     bool empty() const noexcept { return d_size == 0; }
@@ -42,25 +34,18 @@ public:
     DirectBatchRange subrange(size_t begin, size_t count) const noexcept
     {
         assert(begin <= d_size && count <= d_size - begin);
-        return {begin == 0 ? d_topology : d_topology + begin,
-                begin == 0 ? d_metrics : d_metrics + begin, count};
+        return {begin == 0 ? d_topology : d_topology + begin, begin == 0 ? d_metrics : d_metrics + begin, count};
     }
 
-    template<class Operation> void apply(Operation&& operation) const
-    {
-        const auto* topology = d_topology;
-        const auto* metrics = d_metrics;
-        const auto count = d_size;
-        for (size_t i = 0; i < count; ++i)
-            std::invoke(operation, topology[i], metrics[i]);
-    }
+    template<class Operation> void apply(Operation&& operation) const;
 
 private:
-    DirectBatchRange(const Topology* topology, const Metrics* metrics, size_t count) noexcept
-        : d_topology(topology), d_metrics(metrics), d_size(count) {}
+    DirectBatchRange(const Topology* topology, const Metrics* metrics, size_t count) noexcept;
 
     const Topology* d_topology = nullptr;
     const Metrics* d_metrics = nullptr;
     size_t d_size = 0;
 };
 } // namespace SimpleFluid
+
+#include "geometry/DirectBatchRange.ipp"
