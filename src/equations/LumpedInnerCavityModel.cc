@@ -1,6 +1,6 @@
 #include "equations/LumpedInnerCavityModel.hh"
 
-#include <Teuchos_LAPACK.hpp>
+#include "equations/GrayDiffuseEnclosure.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -72,33 +72,6 @@ void validate_state(const LumpedInnerCavityOptions& o, const LumpedInnerCavitySt
     energy(o, state.temperature, mass);
 }
 
-// Column-major enclosure solve through Trilinos' LAPACK backend.
-std::vector<real_t> solve_radiosity(std::vector<real_t> a, std::vector<real_t> rhs)
-{
-    if (rhs.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
-        throw std::length_error("Lumped inner cavity radiosity matrix exceeds the LAPACK ordinal range.");
-    const auto n = static_cast<int>(rhs.size());
-    const Teuchos::LAPACK<int, real_t> lapack;
-    std::vector<int> pivots(rhs.size());
-    int info = 0;
-    lapack.GETRF(n, n, a.data(), n, pivots.data(), &info);
-    if (info < 0)
-        throw std::runtime_error("Lumped inner cavity LAPACK GETRF rejected argument " + std::to_string(-info) + '.');
-    if (info > 0)
-        throw std::domain_error("Lumped inner cavity radiosity matrix is singular.");
-    // Retain the existing near-singularity guard in addition to LAPACK's exact
-    // zero-pivot check. GETRF stores the U diagonal in the factored matrix.
-    for (std::size_t i = 0; i < rhs.size(); ++i)
-        if (std::abs(finite(a[i * rhs.size() + i])) <= 64.0 * std::numeric_limits<real_t>::epsilon())
-            throw std::domain_error("Lumped inner cavity radiosity matrix is numerically singular.");
-    lapack.GETRS('N', n, 1, a.data(), n, pivots.data(), rhs.data(), n, &info);
-    if (info != 0)
-        throw std::runtime_error("Lumped inner cavity LAPACK GETRS failed with INFO=" + std::to_string(info) + '.');
-    for (const auto value : rhs)
-        finite(value);
-    return rhs;
-}
-
 struct PreparedSurface
 {
     real_t h, heat_conductance, mass_conductance, equilibrium_pressure, hv, hl;
@@ -144,42 +117,26 @@ std::vector<PreparedSurface> prepare(const LumpedInnerCavityOptions& o, real_t a
     if (factors.empty())
         return result;
 
-    constexpr real_t tolerance = 1.0e-10;
-    std::vector<real_t> matrix(factors.size()), rhs(n);
+    std::vector<real_t> areas(n), emissivities(n), exchange_areas(factors.size()), emission(n);
+    const auto reference_temperature = surfaces.front().temperature;
+    const auto reference_blackbody = finite(stefan_boltzmann * std::pow(reference_temperature, 4));
     for (std::size_t i = 0; i < n; ++i)
     {
-        positive(surfaces[i].properties->emissivity, "surface emissivity");
-        if (surfaces[i].properties->emissivity > 1.0)
-            throw std::invalid_argument("Lumped inner cavity emissivity must be at most one.");
-        real_t sum = 0.0;
+        areas[i] = surfaces[i].area;
+        emissivities[i] = surfaces[i].properties->emissivity;
+        emission[i] = GrayDiffuseEnclosure::blackbody_delta(surfaces[i].temperature, reference_temperature);
         for (std::size_t j = 0; j < n; ++j)
         {
-            const auto f = factors[i * n + j];
-            nonnegative(f, "view factor");
-            if (f > 1.0)
+            nonnegative(factors[i * n + j], "view factor");
+            if (factors[i * n + j] > 1.0)
                 throw std::invalid_argument("Lumped inner cavity view factors must be at most one.");
-            sum += f;
-            const auto aij = finite(surfaces[i].area * f);
-            const auto aji = finite(surfaces[j].area * factors[j * n + i]);
-            if (std::abs(aij - aji) > tolerance * std::max(aij, aji))
-                throw std::invalid_argument("Lumped inner cavity view factors violate area reciprocity.");
-            // View factors remain row-major at the API; LAPACK stores columns.
-            matrix[j * n + i] = (i == j ? 1.0 : 0.0) - (1.0 - surfaces[i].properties->emissivity) * f;
+            exchange_areas[i * n + j] = finite(areas[i] * factors[i * n + j]);
         }
-        if (std::abs(sum - 1.0) > tolerance)
-            throw std::invalid_argument("Lumped inner cavity view factors must close each enclosure row.");
-        rhs[i] = finite(surfaces[i].properties->emissivity * stefan_boltzmann * std::pow(surfaces[i].temperature, 4));
     }
-    const auto radiosity = solve_radiosity(std::move(matrix), std::move(rhs));
+    const GrayDiffuseEnclosure enclosure(std::move(areas), std::move(exchange_areas), std::move(emissivities));
+    const auto radiation = enclosure.evaluate(emission, reference_blackbody);
     for (std::size_t i = 0; i < n; ++i)
-        for (auto j = i + 1; j < n; ++j)
-        {
-            // Symmetric exchange area preserves energy despite roundoff in reciprocity.
-            const auto area = 0.5 * surfaces[i].area * factors[i * n + j] + 0.5 * surfaces[j].area * factors[j * n + i];
-            const auto heat = finite(area * (radiosity[i] - radiosity[j]));
-            result[i].radiation = finite(result[i].radiation + heat);
-            result[j].radiation = finite(result[j].radiation - heat);
-        }
+        result[i].radiation = radiation.outward_heat_rate[i];
     return result;
 }
 
