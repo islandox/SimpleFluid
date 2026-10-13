@@ -139,6 +139,66 @@ Reordered handles, distributed maps, composite providers, and other mesh
 families retain the generic field-local schedules. A structured provider alone
 does not imply that public field ordinals have the canonical structured layout.
 
+## Layered XY/Z range specialization
+
+Native `SemiStructuredXY_Z` providers and their serial identity `MeshHandle`
+views retain a distinct layered layout. `uses_layered_ranges()` identifies it;
+`uses_structured_ranges()` continues to mean the orthogonal six-face layout.
+The shared immutable `layered_layout()` contains flat XY cell-edge incidence,
+side ownership and patch metadata, and compressed XY runs. Its retained storage
+is independent of the number of Z layers. Cells, axial faces and side faces use
+their respective native ordinal layouts and repeat arithmetically over Z.
+
+Cell incidence retains flat XY side descriptors (edge IDs, orientation, physical
+category and patch) and homogeneous side runs once. Row-local run indices retain
+interior order and stable ascending patch order. Borrowed views decode base/layer
+coordinates once, then combine the arithmetic lower/upper axial prefix with these
+runs, preserving maximal adjacent category/patch coalescing. Independent traversal
+uses each row's sorted run indices; patch lookup uses binary search, without
+scanning global patch IDs or rediscovering per-face groups during execution. There is no fixed polygon degree,
+per-cell allocation, or shared mutable scratch in traversal. Patch grouping
+uses boundary IDs rather than incidence slots, including repeated noncontiguous
+patches. Exterior classification follows neighbour absence even when a boundary
+value slot is inactive. Nested traversal retains the geometry execution lease.
+Reordered handles and composite providers retain the generic fallback. This
+specialization adds neither semi-structured MPI distribution nor public periodic
+geometry support. Geometry-only axial motion may reuse the plan; XY topology
+changes require a replacement plan and cache.
+
+### Typed interior cell-face ranges
+
+`execution.cell_faces(cell_ref)` preserves the physical-interior proof carried
+by an enclosing typed cell callback. Canonical layered interior cells select a
+small direct incidence range: `all()`, `interior()` and `independent()` retain
+native face order, while boundary selections are empty. Ordinary operations run
+directly in that range; member pointers retain their invocation semantics.
+Boundary cells, other providers and the ordinal-only API retain their existing
+selection paths. `cells().all()` continues visiting owned ordinals in native
+order. Layered LS interior-only geometry construction explicitly builds interior
+cells first and boundary cells second, since those rows have no live boundary
+callbacks and are independent. Each row retains native incidence arithmetic;
+owned-ID row mapping preserves evaluation and legacy ordering. The boundary-aware
+pass retains native boundary-cell callback order.
+
+The layout retains compressed interior XY cell runs once and repeats eligible
+Z layers arithmetically. Cell references carry their originating plan identity;
+ordinary global face references and batches retain their previous storage layout.
+Layered incidence references carry resolved adjacency separately. Typed range
+creation rejects foreign plans/meshes, invalid IDs and plans without
+`AllWithCellFaces`. Plan/access validation remains active on range use, including
+empty selections and adjacency preflight. These references and ranges borrow the
+enclosing execution/access scope and must remain inside its callback lifetime.
+Generic fallback and supported geometry-motion/invalidation policies are unchanged.
+
+The initial typed-range qualification is recorded in
+`build/verification/layered-xy-interior-range-20261013/REPORT.txt`.
+That qualification found no statistically clear traversal improvement over the
+preceding retained-XY implementation on the large cases. LS refresh took about
+5–7% longer; Gauss refresh differences were not statistically clear. The report
+also retains the original-control comparison and exact correctness gates.
+The split-only intermediate is preserved in
+`build/verification/layered-xy-split-cells-20261013/STATUS.txt`.
+
 ## Cell-face incidence
 
 Classifying a boundary cell does not classify each face of its stencil. An
@@ -324,6 +384,54 @@ The matched cache-layout qualification is retained in
 `build/verification/structured-gradient-cache-final-20261013/REPORT.txt`.
 It separates fresh evaluation, evaluation after a fixed geometry refresh, and
 cache construction/refresh with fixed iteration counts in both variants.
+
+### Layered numerical gradient storage
+
+Canonical XY/Z plans also select variable-degree flat numerical cache rows.
+`uses_layered_storage()` and `layered_geometry()` expose this representation.
+Least-squares rows retain interior-only weights once and add boundary-aware
+weights only for cells with active samples. Gauss rows store compact interior
+areas, neighbour IDs and interpolation distances. Gauss topology arrays (row
+maps, offsets, neighbour IDs and ordered boundary metadata) are immutable and
+shared across geometry refreshes and cache copies; snapshots replace metrics
+only. Interior face ordinals are derived from retained XY connectivity without
+a duplicate 3D ID array. Refresh visits retained owned rows directly, without
+rebuilding incidence groups, payload counts or boundary-slot mappings. Both
+kernels preserve owned ordinal order and original
+floating-point accumulation and interpolation expressions. Boundary callbacks
+remain live. Scratch used while building least-squares rows is reused across
+cells and can grow to any supported polygon degree.
+
+Legacy numerical geometry is materialized lazily with `std::call_once`.
+Layered caches reuse provider boundary-slot metadata during refresh, including
+inactive entries. Least-squares retains the shared dense lookup and includes
+its capacity in `numerical_storage_bytes()`. Gauss accounting includes the shared
+cache topology once, as well as metric payload. The provider rejects side patch names
+`zmin` and `zmax`. Refresh publishes immutable snapshots
+only after successful rebuilding under the geometry lease. The orthogonal
+compact representation and mapped/composite fallback remain separate.
+The matched XY/Z qualification and focused validation are retained in
+`build/verification/semistructured-xy-z-20261013/REPORT.txt`.
+The follow-up Gauss payload reservation comparison is retained in
+`build/verification/layered-gauss-reserve-20261013/REPORT.txt`.
+The retained Gauss topology qualification is recorded in
+`build/verification/layered-gauss-retained-topology-20261013/REPORT.txt`.
+The retained XY incidence/run comparison is recorded in
+`build/verification/layered-xy-incidence-runs-20261013/REPORT.txt`.
+
+Layered incidence references resolve owner/neighbour IDs directly from the
+provider's existing `SemiStructMeshTopo::side_face()` entries using the decoded
+XY edge ID; axial adjacency is arithmetic. The traversal plan stores no duplicate
+owner/neighbour table or borrowed topology pointer. Both mixed batches and the
+dedicated interior range obtain topology through the active geometry access.
+LS directions
+use the decoded current/opposite cell pair and the provider's live centroid
+subtraction, so geometry values are never retained. Ordinary global face
+references, orthogonal paths and mapped fallbacks keep their existing queries.
+The split-cell and XY adjacency qualification is recorded in
+`build/verification/layered-xy-adjacency-20261013/REPORT.txt`.
+The follow-up removal of duplicate adjacency storage is recorded in
+`build/verification/layered-xy-direct-topology-20261013/REPORT.txt`.
 
 ## Transport system construction
 

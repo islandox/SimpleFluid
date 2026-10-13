@@ -182,6 +182,48 @@ public:
         }
     };
 
+    /** Variable-degree flat numerical rows for polygonal XY/Z prisms. */
+    struct LayeredGeometry
+    {
+        std::shared_ptr<const ::SimpleFluid::detail::LayeredTraverseLayout> layout;
+        struct Row
+        {
+            size_t interior_begin{}, interior_count{};
+            size_t boundary_interior_begin{}, boundary_begin{}, boundary_count{};
+        };
+        std::vector<Row> rows;
+        std::vector<InteriorSample> interior, boundary_interior;
+        std::vector<BoundarySample> boundary;
+        struct View
+        {
+            std::span<const InteriorSample> interior_samples;
+            std::span<const BoundarySample> boundary_samples;
+        };
+        template<bool IncludeBoundary, class Visitor>
+        void visit_rows(Visitor&& visitor) const
+        {
+            for (size_t cell = 0; cell < rows.size(); ++cell)
+            {
+                const auto& row = rows[cell];
+                if constexpr (IncludeBoundary)
+                    if (row.boundary_count)
+                    {
+                        visitor(cell, View{
+                            std::span<const InteriorSample>(boundary_interior).subspan(row.boundary_interior_begin, row.interior_count),
+                            std::span<const BoundarySample>(boundary).subspan(row.boundary_begin, row.boundary_count)});
+                        continue;
+                    }
+                visitor(cell, View{std::span<const InteriorSample>(interior).subspan(row.interior_begin, row.interior_count), {}});
+            }
+        }
+        size_t storage_bytes() const noexcept
+        {
+            return sizeof(*this) + rows.capacity() * sizeof(Row)
+                + (interior.capacity() + boundary_interior.capacity()) * sizeof(InteriorSample)
+                + boundary.capacity() * sizeof(BoundarySample);
+        }
+    };
+
     /**
      * @brief Precompute least-squares weights for an assembled mesh.
      * @param mesh Shared mesh whose lifetime and geometry the cache retains.
@@ -261,8 +303,11 @@ public:
     }
 
     bool uses_structured_storage() const noexcept { return d_geometry && bool(d_geometry->structured); }
+    bool uses_layered_storage() const noexcept { return d_geometry && bool(d_geometry->layered); }
+    const LayeredGeometry* layered_geometry() const
+    { require_mesh(*d_mesh); return d_geometry->layered.get(); }
     bool legacy_geometry_materialized() const noexcept
-    { return !uses_structured_storage() || d_geometry->legacy_ready.load(std::memory_order_acquire); }
+    { return !(uses_structured_storage() || uses_layered_storage()) || d_geometry->legacy_ready.load(std::memory_order_acquire); }
     const StructuredGeometry* structured_geometry() const
     { require_mesh(*d_mesh); return d_geometry->structured.get(); }
     /** Numerical capacities; lazily requested compatibility arrays are excluded. */
@@ -272,6 +317,7 @@ private:
     struct GeometrySnapshot
     {
         std::unique_ptr<StructuredGeometry> structured;
+        std::unique_ptr<LayeredGeometry> layered;
         mutable std::vector<CellGeometry> interior, boundary;
         mutable std::shared_ptr<const std::vector<boundary_location_type>> locations;
         mutable std::once_flag legacy_once, locations_once;
@@ -280,6 +326,7 @@ private:
     void materialize_geometry() const;
     void materialize_locations() const;
     std::shared_ptr<GeometrySnapshot> build_snapshot() const;
+    void build_layered_geometry(GeometrySnapshot& next) const;
     void build_structured_geometry(GeometrySnapshot& next,
         const std::vector<boundary_location_type>* locations) const;
     static std::shared_ptr<const traverse_plan_type> require_traverse_plan(const mesh_type& mesh,

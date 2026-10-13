@@ -81,6 +81,43 @@ public:
         std::vector<std::array<FaceGeometry, 6>> boundary;
     };
 
+    /** Cache-owned immutable topology shared by geometry snapshots and copies. */
+    struct LayeredTopology
+    {
+        struct BoundaryFace
+        {
+            local_ordinal_type face_lid{}, other_lid{};
+            boundary_location_type boundary{};
+            bool interior = false;
+        };
+        std::shared_ptr<const traverse_plan_type> plan;
+        std::vector<size_t> rows, interior_offsets, boundary_offsets;
+        std::vector<local_ordinal_type> other_lids;
+        std::vector<BoundaryFace> boundary;
+        size_t storage_bytes() const noexcept
+        {
+            return sizeof(*this) + (rows.capacity() + interior_offsets.capacity()
+                + boundary_offsets.capacity()) * sizeof(size_t)
+                + other_lids.capacity() * sizeof(local_ordinal_type)
+                + boundary.capacity() * sizeof(BoundaryFace);
+        }
+    };
+
+    /** Variable-degree metric payload; topology is retained across refresh. */
+    struct LayeredGeometry
+    {
+        struct BoundaryMetric
+        {
+            typename mesh_type::Vec3 area{};
+            real_t cell_distance{}, other_distance{}, normal_distance{};
+        };
+        std::shared_ptr<const LayeredTopology> topology;
+        std::vector<real_t> volumes;
+        std::vector<typename mesh_type::Vec3> areas;
+        std::vector<real_t> cell_distances, other_distances;
+        std::vector<BoundaryMetric> boundary;
+    };
+
     explicit GaussLinearGradientCache(SP<const mesh_type> mesh);
 
     const SP<const mesh_type>& mesh_ptr() const noexcept { return d_mesh; }
@@ -92,6 +129,9 @@ public:
 
     /** Ordered compatibility view, materialized only when explicitly requested. */
     const Geometry& geometry() const;
+
+    bool uses_layered_storage() const noexcept { return bool(d_snapshot->layered); }
+    const LayeredGeometry* layered_geometry() const noexcept { return d_snapshot->layered.get(); }
 
     bool uses_structured_storage() const noexcept { return bool(d_snapshot->structured); }
     bool legacy_geometry_materialized() const noexcept
@@ -106,9 +146,14 @@ public:
     void refresh();
 
 private:
+    std::shared_ptr<const LayeredTopology> build_layered_topology(
+        const MeshTraverseExecution<mesh_type>& traversal) const;
+    void fill_layered_geometry(LayeredGeometry& geometry) const;
+
     struct Snapshot
     {
         std::unique_ptr<StructuredGeometry> structured;
+        std::unique_ptr<LayeredGeometry> layered;
         mutable Geometry geometry;
         mutable std::once_flag legacy_once;
         mutable std::atomic<bool> legacy_materialized{false};
@@ -191,6 +236,68 @@ void cached_gauss_linear_scalar_gradient(const ScalarField& field,
                     gradient = gradient + face.area * face_value;
                 }
             gradient = gradient / static_cast<scalar_type>(structured->volumes[owned]);
+            gradient_values(cell_lid, 0) = gradient.x;
+            gradient_values(cell_lid, 1) = gradient.y;
+            gradient_values(cell_lid, 2) = gradient.z;
+        }
+        return;
+    }
+    if (const auto* layered = cache.layered_geometry())
+    {
+        const auto& topology = *layered->topology;
+        const auto local_values = field.local_read_view();
+        auto gradient_values = gradients.owned_write_view();
+        for (size_t owned = 0; owned < layered->volumes.size(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const auto cell_value = local_values(cell_lid, 0);
+            vec3<scalar_type> gradient{};
+            const auto row = topology.rows[owned];
+            if ((row & 1) == 0)
+            {
+                const auto& faces = *layered;
+                for (size_t face = topology.interior_offsets[row >> 1];
+                     face < topology.interior_offsets[(row >> 1) + 1]; ++face)
+                {
+                    const auto total_distance = faces.cell_distances[face] + faces.other_distances[face];
+                    const auto face_value = total_distance > scalar_type{}
+                        ? (faces.other_distances[face] * cell_value
+                            + faces.cell_distances[face] * local_values(topology.other_lids[face], 0)) / total_distance
+                        : scalar_type{0.5} * (cell_value + local_values(topology.other_lids[face], 0));
+                    gradient = gradient + faces.areas[face] * face_value;
+                }
+            }
+            else
+                for (size_t entry = topology.boundary_offsets[row >> 1];
+                     entry < topology.boundary_offsets[(row >> 1) + 1]; ++entry)
+                {
+                    const auto& face = layered->boundary[entry];
+                    const auto& metadata = topology.boundary[entry];
+                    scalar_type face_value = cell_value;
+                    if (metadata.interior)
+                    {
+                        const auto total_distance = face.cell_distance + face.other_distance;
+                        face_value = total_distance > scalar_type{}
+                            ? (face.other_distance * cell_value
+                                + face.cell_distance * local_values(metadata.other_lid, 0)) / total_distance
+                            : scalar_type{0.5} * (cell_value + local_values(metadata.other_lid, 0));
+                    }
+                    else if (metadata.boundary.active)
+                    {
+                        const auto& location = metadata.boundary;
+                        const auto condition = boundary_condition(location.batch_id, location.in_batch_id);
+                        if (condition.type == BoundaryConditionType::Dirichlet)
+                            face_value = boundary_value(location.batch_id, location.in_batch_id);
+                        else if (condition.type == BoundaryConditionType::Neumann)
+                            face_value = cell_value + static_cast<scalar_type>(condition.value)
+                                * static_cast<scalar_type>(face.normal_distance);
+                        else
+                            throw std::invalid_argument("Gauss-linear scalar gradients support only "
+                                                        "Dirichlet and Neumann boundaries.");
+                    }
+                    gradient = gradient + face.area * face_value;
+                }
+            gradient = gradient / static_cast<scalar_type>(layered->volumes[owned]);
             gradient_values(cell_lid, 0) = gradient.x;
             gradient_values(cell_lid, 1) = gradient.y;
             gradient_values(cell_lid, 2) = gradient.z;
@@ -296,6 +403,65 @@ void cached_gauss_linear_vector_gradient(const VectorField& field,
                         gradient[component] = gradient[component] + face.area * face_value.component(component);
                 }
             const auto inverse_volume = scalar_type{1} / static_cast<scalar_type>(structured->volumes[owned]);
+            for (size_t component = 0; component < 3; ++component)
+            {
+                gradient[component] = gradient[component] * inverse_volume;
+                gradient_values(cell_lid, component * 3) = gradient[component].x;
+                gradient_values(cell_lid, component * 3 + 1) = gradient[component].y;
+                gradient_values(cell_lid, component * 3 + 2) = gradient[component].z;
+            }
+        }
+        return;
+    }
+    if (const auto* layered = cache.layered_geometry())
+    {
+        const auto& topology = *layered->topology;
+        const auto local_values = field.local_read_view();
+        auto gradient_values = gradients.owned_write_view();
+        for (size_t owned = 0; owned < layered->volumes.size(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            const vec_type cell_value{local_values(cell_lid, 0), local_values(cell_lid, 1), local_values(cell_lid, 2)};
+            std::array<vec_type, 3> gradient{};
+            const auto row = topology.rows[owned];
+            if ((row & 1) == 0)
+            {
+                const auto& faces = *layered;
+                for (size_t face = topology.interior_offsets[row >> 1];
+                     face < topology.interior_offsets[(row >> 1) + 1]; ++face)
+                {
+                    const auto other = topology.other_lids[face];
+                    const vec_type other_value{local_values(other, 0), local_values(other, 1), local_values(other, 2)};
+                    const auto total_distance = faces.cell_distances[face] + faces.other_distances[face];
+                    const auto face_value = total_distance > scalar_type{}
+                        ? (cell_value * faces.other_distances[face] + other_value * faces.cell_distances[face]) / total_distance
+                        : (cell_value + other_value) / scalar_type{2};
+                    for (size_t component = 0; component < 3; ++component)
+                        gradient[component] = gradient[component] + faces.areas[face] * face_value.component(component);
+                }
+            }
+            else
+                for (size_t entry = topology.boundary_offsets[row >> 1];
+                     entry < topology.boundary_offsets[(row >> 1) + 1]; ++entry)
+                {
+                    const auto& face = layered->boundary[entry];
+                    const auto& metadata = topology.boundary[entry];
+                    auto face_value = cell_value;
+                    if (metadata.interior)
+                    {
+                        const vec_type other_value{local_values(metadata.other_lid, 0),
+                            local_values(metadata.other_lid, 1), local_values(metadata.other_lid, 2)};
+                        const auto total_distance = face.cell_distance + face.other_distance;
+                        face_value = total_distance > scalar_type{}
+                            ? (cell_value * face.other_distance + other_value * face.cell_distance) / total_distance
+                            : (cell_value + other_value) / scalar_type{2};
+                    }
+                    else if (metadata.boundary.active)
+                        face_value = boundary_value(metadata.boundary.batch_id, metadata.boundary.in_batch_id);
+                    for (size_t component = 0; component < 3; ++component)
+                        gradient[component] = gradient[component] + face.area * face_value.component(component);
+                }
+            const auto inverse_volume = scalar_type{1} / static_cast<scalar_type>(layered->volumes[owned]);
             for (size_t component = 0; component < 3; ++component)
             {
                 gradient[component] = gradient[component] * inverse_volume;
