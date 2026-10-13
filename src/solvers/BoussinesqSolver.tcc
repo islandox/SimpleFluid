@@ -2036,6 +2036,9 @@ void BoussinesqSolver<Pack>::validate_free_surface_configuration(const FreeSurfa
     {
         return;
     }
+    if (options.headspace.temperature_mode == HeadspaceTemperatureMode::External &&
+        (options.mode != FreeSurfaceMode::PlanarALE || !d_thermal_participant))
+        throw std::invalid_argument("External headspace temperature requires a typed planar ALE thermal participant.");
     if (options.mode == FreeSurfaceMode::PlanarALE)
     {
         validate_planar_ale_support(options);
@@ -2158,10 +2161,11 @@ void BoussinesqSolver<Pack>::validate_planar_ale_support(const FreeSurfaceOption
         options.range_policy != FreeSurfaceRangePolicy::Error ||
         options.liquid_mass.depletion_policy != FreeSurfaceRangePolicy::Error ||
         options.headspace.mode != HeadspaceMode::Vented ||
-        options.headspace.temperature_mode != HeadspaceTemperatureMode::Fixed)
+        (options.headspace.temperature_mode != HeadspaceTemperatureMode::Fixed &&
+            !(options.headspace.temperature_mode == HeadspaceTemperatureMode::External && d_thermal_participant)))
     {
         throw std::invalid_argument(
-            "planarALE initially requires constantArea, cellMassInventory, fixed-temperature vented headspace, "
+            "planarALE initially requires constantArea, cellMassInventory, fixed or typed external-temperature vented headspace, "
             "and error range/depletion policies.");
     }
     if (stored_turbulence_model().enabled())
@@ -2590,6 +2594,24 @@ template<TpetraTypePack Pack> auto BoussinesqSolver<Pack>::headspace_temperature
     if (options.temperature_mode == HeadspaceTemperatureMode::Prescribed)
     {
         return prescribed_headspace_temperature(options, time);
+    }
+    if (options.temperature_mode == HeadspaceTemperatureMode::External)
+    {
+        std::optional<scalar_type> supplied;
+        collective_detail::collective_local_validation(*d_mesh, "External headspace temperature", [&]
+        {
+            if (!d_thermal_participant)
+                throw std::invalid_argument("External headspace temperature has no thermal owner.");
+            supplied = d_thermal_participant->trial_cavity_temperature();
+            if (!supplied || !std::isfinite(*supplied) || *supplied <= scalar_type{})
+                throw std::invalid_argument("Thermal participant must supply a finite positive cavity temperature.");
+        });
+        scalar_type low{}, high{};
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &*supplied, &low);
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &*supplied, &high);
+        if (low != high)
+            throw std::invalid_argument("External cavity temperature must agree on every mesh rank.");
+        return *supplied;
     }
 
     scalar_type local_temperature_volume{};
@@ -3378,6 +3400,11 @@ void BoussinesqSolver<Pack>::initialize_bottom_hot_top_cold(
 template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::validate_step_coupling() const
 {
     validate_collective_model_state();
+    if (d_thermal_participant) collective_detail::collective_local_validation(*d_mesh, "Thermal participant step support", [&]
+    {
+        if (d_thermal_participant && !planar_ale_enabled())
+            throw std::invalid_argument("Thermal participant is supported only by planar ALE advances.");
+    });
     if (d_free_surface_step_failed)
     {
         throw std::logic_error(
@@ -3620,6 +3647,8 @@ struct BoussinesqSolver<Pack>::CouplingState
     std::vector<std::pair<velocity_field_type*, FieldStateSnapshot<velocity_field_type>>> vector_fields;
     std::vector<std::pair<face_flux_field_type*, FieldStateSnapshot<face_flux_field_type>>> face_fields;
     std::vector<std::pair<volumetric_source_type*, bool>> sources;
+    SP<const typename thermal_participant_type::State> thermal;
+    SP<const typename temperature_equation_type::boundary_cache_type> thermal_flux;
     typename ale_motion_type::StateSnapshot geometry;
     typename material_type::StateSnapshot material;
     typename material_feedback_model_type::StateSnapshot feedback;
@@ -3641,6 +3670,46 @@ struct BoussinesqSolver<Pack>::CouplingState
 };
 
 template<TpetraTypePack Pack>
+void BoussinesqSolver<Pack>::set_thermal_step_participant(SP<thermal_participant_type> participant)
+{
+    collective_detail::collective_local_validation(*d_mesh, "ALE thermal participant installation", [&]
+    {
+        if (!d_active_coupling_checkpoint.expired() || d_active_ale ||
+            (d_ale_motion && d_ale_motion->has_active_trial()))
+            throw std::logic_error("Cannot replace thermal participant during a live coupling transaction.");
+        if (participant && (uses_legacy_backend() || !physical_transport_enabled()))
+            throw std::invalid_argument("Thermal participant requires mapped physical temperature transport.");
+    });
+    int local = participant ? 1 : 0, low = 0, high = 0;
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local, &low);
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local, &high);
+    if (low != high) throw std::invalid_argument("Thermal participant installation differs across ranks.");
+    std::string signature;
+    collective_detail::collective_local_validation(*d_mesh, "ALE thermal configuration", [&]
+    {
+        if (participant) signature = participant->configuration_signature();
+        if (signature.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+            throw std::invalid_argument("Thermal configuration signature is too large.");
+    });
+    auto comm = d_mesh->owned_cell_map()->getComm();
+    int root_size = static_cast<int>(signature.size());
+    Teuchos::broadcast(*comm, 0, 1, &root_size);
+    std::string root_signature = comm->getRank() == 0 ? signature : std::string(root_size, '\0');
+    if (root_size) Teuchos::broadcast(*comm, 0, root_size, root_signature.data());
+    collective_detail::collective_local_validation(*d_mesh, "ALE thermal rank agreement", [&]
+    {
+        if (signature != root_signature)
+            throw std::invalid_argument("Thermal participant configuration must agree on every rank.");
+    });
+    // Removing a participant removes its prescribed thermal boundary snapshot.
+    if (d_thermal_participant && !participant)
+        temperature_equation().set_boundary_heat_flux_snapshot(
+            std::make_shared<const typename temperature_equation_type::boundary_cache_type>(
+                typename temperature_equation_type::boundary_cache_type{{}, d_mesh}));
+    d_thermal_participant = std::move(participant);
+}
+
+template<TpetraTypePack Pack>
 std::string BoussinesqSolver<Pack>::coupling_configuration_signature() const
 {
     auto time_options = d_problem.time_options();
@@ -3648,7 +3717,8 @@ std::string BoussinesqSolver<Pack>::coupling_configuration_signature() const
     std::vector<std::pair<std::string, bool>> sources;
     for (const auto& [name, source] : stored_temperature_sources().entries())
         sources.emplace_back(name, true); // Enabled flags are checkpointed physical source state.
-    return std::to_string(d_reacting_gas_model &&
+    return (d_thermal_participant ? d_thermal_participant->configuration_signature() : std::string{}) +
+        std::to_string(d_reacting_gas_model &&
                d_reacting_gas_model->donor_hydrogen_deficit_tracking_enabled()) +
         encode_free_surface_options(d_free_surface_options) +
         encode_planar_ale_runtime_options(time_options, d_problem.linear_options(),
@@ -3682,7 +3752,14 @@ auto BoussinesqSolver<Pack>::create_coupling_checkpoint() -> CouplingCheckpoint
     saved->configuration = coupling_configuration_signature();
     saved->model_owners = {d_ale_motion.get(), d_free_surface_model.get(), d_liquid_mass_inventory.get(),
         d_volume_continuity_model.get(), d_material_feedback_model.get(), d_reacting_gas_model.get(),
-        d_scalar_void_fraction_model.get(), d_prescribed_heat_source.get()};
+        d_scalar_void_fraction_model.get(), d_prescribed_heat_source.get(), d_thermal_participant.get()};
+    if (d_thermal_participant) saved->thermal = d_thermal_participant->capture_state();
+    if (d_thermal_participant) collective_detail::collective_local_validation(*d_mesh, "ALE thermal checkpoint state", [&]
+    {
+        if (d_thermal_participant && !saved->thermal)
+            throw std::invalid_argument("Thermal participant returned a null checkpoint state.");
+    });
+    saved->thermal_flux = temperature_equation().boundary_heat_flux();
     saved->geometry = d_ale_motion->snapshot();
     for (auto* field : {&pressure(), &this->pressure_correction(), &temperature(), d_clear_level.get(),
              d_pool_level.get(), d_headspace_pressure.get(), d_pool_occupancy.get(), d_mesh_volume_rate.get(),
@@ -3730,7 +3807,7 @@ void BoussinesqSolver<Pack>::validate_coupling_checkpoint(const CouplingCheckpoi
     {
         const std::vector<const void*> owners{d_ale_motion.get(), d_free_surface_model.get(),
             d_liquid_mass_inventory.get(), d_volume_continuity_model.get(), d_material_feedback_model.get(),
-            d_reacting_gas_model.get(), d_scalar_void_fraction_model.get(), d_prescribed_heat_source.get()};
+            d_reacting_gas_model.get(), d_scalar_void_fraction_model.get(), d_prescribed_heat_source.get(), d_thermal_participant.get()};
         if (!saved || saved->owner != this || saved.get() != d_active_coupling_checkpoint.lock().get() ||
             saved->model_owners != owners || saved->configuration != coupling_configuration_signature() ||
             d_active_ale || !d_ale_motion || d_ale_motion->has_active_trial() ||
@@ -3769,6 +3846,8 @@ void BoussinesqSolver<Pack>::restore_coupling_checkpoint(const CouplingCheckpoin
     if (saved.gas) d_reacting_gas_model->restore(*saved.gas);
     if (saved.void_state) d_scalar_void_fraction_model->restore(*saved.void_state);
     if (saved.prescribed_heat) d_prescribed_heat_source->restore(*saved.prescribed_heat);
+    if (saved.thermal) d_thermal_participant->restore_state(*saved.thermal);
+    if (d_thermal_participant) temperature_equation().set_boundary_heat_flux_snapshot(saved.thermal_flux);
     d_time = saved.time;
     this->set_time_step(saved.time_step);
     d_step_index = saved.step_index;
@@ -3931,6 +4010,26 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
         *d_ale_old_heat_capacity, accepted_cell_volumes);
     const auto accepted_surface = d_free_surface_model->diagnostics();
     const auto time_step = static_cast<scalar_type>(d_problem.time_options().time_step);
+    const auto accepted_thermal = d_thermal_participant ? d_thermal_participant->capture_state() : nullptr;
+    if (d_thermal_participant) collective_detail::collective_local_validation(*d_mesh, "ALE thermal accepted state", [&]
+    {
+        if (d_thermal_participant && !accepted_thermal)
+            throw std::invalid_argument("Thermal participant returned a null accepted state.");
+    });
+    const auto accepted_thermal_flux = temperature_equation().boundary_heat_flux();
+    SP<const typename thermal_participant_type::State> substep_thermal;
+    std::unique_ptr<field_type> thermal_guess;
+    if (d_thermal_participant)
+    {
+        thermal_guess = std::make_unique<field_type>(d_mesh, "ale_thermal_guess");
+        {
+            const auto source = temperature().owned_read_view();
+            auto destination = thermal_guess->owned_write_view();
+            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                destination(owned, 0) = source(owned, 0);
+        }
+        thermal_guess->sync_ghosts();
+    }
 
     auto restore_accepted = [&](bool refresh_metrics = true)
     {
@@ -3959,6 +4058,10 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
         bubble_slip_flux_snapshot.restore(*d_bubble_slip_volume_flux);
         mesh_volume_rate_snapshot.restore(*d_mesh_volume_rate);
         temperature_snapshot.restore(temperature());
+        if (d_thermal_participant && accepted_thermal)
+            d_thermal_participant->restore_state(refresh_metrics || !substep_thermal ?
+                *accepted_thermal : *substep_thermal);
+        if (d_thermal_participant) temperature_equation().set_boundary_heat_flux_snapshot(accepted_thermal_flux);
         clear_level_snapshot.restore(*d_clear_level);
         pool_level_snapshot.restore(*d_pool_level);
         headspace_pressure_snapshot.restore(*d_headspace_pressure);
@@ -4031,6 +4134,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     scalar_type last_pool_volume_tolerance{};
     scalar_type last_material_state_residual{};
     scalar_type last_gas_state_residual{};
+    scalar_type last_thermal_state_residual{};
     constexpr scalar_type state_relative_tolerance{1.0e-10};
     std::vector<scalar_type> previous_gas_state;
     std::vector<scalar_type> level_residual_history;
@@ -4040,6 +4144,16 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     std::vector<scalar_type> gas_state_residual_history;
     try
     {
+        if (d_thermal_participant)
+        {
+            d_thermal_participant->begin_substep(d_time, time_step);
+            substep_thermal = d_thermal_participant->capture_state();
+            collective_detail::collective_local_validation(*d_mesh, "ALE thermal substep state", [&]
+            {
+                if (!substep_thermal)
+                    throw std::invalid_argument("Thermal participant returned a null substep state.");
+            });
+        }
         for (int corrector = 1; corrector <= d_free_surface_options.ale.maximum_correctors; ++corrector)
         {
             const auto trial_timing = this->d_solver_timings.scope(SolverPhase::ALETrial);
@@ -4113,6 +4227,9 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             }
             try
             {
+                if (d_thermal_participant)
+                    temperature_equation().set_boundary_heat_flux_snapshot(
+                        d_thermal_participant->preview_trial(d_mesh, *thermal_guess));
                 advance_temperature_transport(time_step);
             }
             catch (...)
@@ -4350,9 +4467,10 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             scalar_type added_energy{};
             Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
                 1, &local_added_energy, &added_energy);
-            const auto energy_residual = new_energy - old_energy - added_energy;
+            const auto boundary_energy = time_step * temperature_equation().last_prescribed_boundary_power();
+            const auto energy_residual = new_energy - old_energy - added_energy + boundary_energy;
             const auto energy_scale = std::max({scalar_type{1}, std::abs(new_energy), std::abs(old_energy),
-                std::abs(added_energy)});
+                std::abs(added_energy), std::abs(boundary_energy)});
             const auto energy_tolerance = scalar_type{4096} * std::numeric_limits<scalar_type>::epsilon() *
                                               energy_scale +
                                           scalar_type{1.0e-9} * energy_scale;
@@ -4441,7 +4559,22 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             continuity_maximum_history.push_back(last_continuity_maximum);
             material_state_residual_history.push_back(material_state_residual);
             gas_state_residual_history.push_back(gas_state_residual);
-            const bool converged = std::abs(level_residual) <= level_tolerance &&
+            scalar_type thermal_residual{};
+            if (d_thermal_participant)
+            {
+                thermal_residual = d_thermal_participant->residual(temperature());
+                collective_detail::collective_local_validation(*d_mesh, "ALE thermal residual", [&]
+                {
+                    if (!std::isfinite(thermal_residual) || thermal_residual < scalar_type{})
+                        throw std::runtime_error("Thermal participant returned invalid residual.");
+                });
+                scalar_type global_thermal_residual{};
+                Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+                    1, &thermal_residual, &global_thermal_residual);
+                thermal_residual = global_thermal_residual;
+            }
+            last_thermal_state_residual = thermal_residual;
+            const bool converged = thermal_residual <= scalar_type{1} && std::abs(level_residual) <= level_tolerance &&
                                    volume_trial.diagnostics().maximum_target_change <= target_tolerance &&
                                    final_continuity.maximum <= continuity_tolerance &&
                                    std::abs(pool_volume_mismatch) <= pool_volume_tolerance &&
@@ -4450,6 +4583,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
 
             if (converged)
             {
+                if (d_thermal_participant) d_thermal_participant->validate_commit();
                 const auto motion_diagnostics = d_ale_motion->diagnostics();
                 for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
                 {
@@ -4487,6 +4621,8 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                     surface_preview.headspacePressure() - d_free_surface_model->headspacePressure());
                 accepted_diagnostics.material_state_residual = material_state_residual;
                 accepted_diagnostics.gas_state_residual = gas_state_residual;
+                accepted_diagnostics.thermal_state_residual = thermal_residual;
+                accepted_diagnostics.outward_boundary_energy = boundary_energy;
                 accepted_diagnostics.energy_residual = energy_residual;
                 accepted_diagnostics.normalized_energy_residual = energy_residual / energy_scale;
                 accepted_diagnostics.liquid_mass_residual = liquid_preview.diagnostics().step_mass_balance_residual;
@@ -4511,6 +4647,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                 // still roll geometry, fields, ledgers, time, and history
                 // back together.
                 finish_step();
+                if (d_thermal_participant) d_thermal_participant->commit();
                 d_ale_motion->accept_trial();
                 d_ale_temperature_density = nullptr;
                 d_active_ale.reset();
@@ -4532,6 +4669,16 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             // all accepted physical state now; reconstruct metrics only for
             // the candidate. Any exception (including begin/refresh failure)
             // reaches the eager restore below before leaving this function.
+            if (thermal_guess)
+            {
+                {
+                    const auto source = temperature().owned_read_view();
+                    auto destination = thermal_guess->owned_write_view();
+                    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                        destination(owned, 0) = source(owned, 0);
+                }
+                thermal_guess->sync_ghosts();
+            }
             restore_accepted(false);
             target_guess = std::move(next_target);
             density_guess = std::move(next_density_guess);
@@ -4552,7 +4699,8 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                 << last_material_state_residual << " (tolerance="
                 << state_relative_tolerance << "), gas-state residual="
                 << last_gas_state_residual << " (tolerance="
-                << state_relative_tolerance << ").";
+                << state_relative_tolerance << "), thermal-state residual="
+                << last_thermal_state_residual << " (tolerance=1).";
         throw std::runtime_error(message.str());
     }
     catch (...)

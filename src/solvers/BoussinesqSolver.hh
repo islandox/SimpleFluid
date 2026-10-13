@@ -21,6 +21,7 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "equations/turbulence/TurbulenceModel.hh"
 #include "solvers/FluidSolver.hh"
+#include "solvers/ThermalStepParticipant.hh"
 #include "solvers/FieldStateTransaction.hh"
 #include "solvers/PlanarALEBoundary.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
@@ -74,6 +75,13 @@ public:
     using temperature_source_registry_type = TemperatureSourceRegistry<Pack, mesh_type>;
     using volumetric_source_type = VolumetricScalarSource<Pack, mesh_type>;
     using update_context_type = BoussinesqUpdateContext<Pack, mesh_type>;
+    using thermal_participant_type = ThermalStepParticipant<Pack>;
+    /** Install a typed external thermal transaction for mapped physical planar ALE.
+     * Base thermal patches remain adiabatic; participant fluxes override selected
+     * faces on each candidate. Installation and removal are collective and idle.
+     */
+    void set_thermal_step_participant(SP<thermal_participant_type> participant);
+    SP<thermal_participant_type> thermal_step_participant() const noexcept { return d_thermal_participant; }
     using temperature_equation_type = TemperatureDiffusionEquation<Pack, mesh_type>;
     using boussinesq_momentum_equation_type = BoussinesqMomentumEquation<Pack, mesh_type>;
     using turbulence_model_type = TurbulenceModel<Pack, mesh_type>;
@@ -113,6 +121,8 @@ public:
         scalar_type pressure_residual = {};     ///< [Pa]
         scalar_type material_state_residual = {}; ///< normalized Picard change
         scalar_type gas_state_residual = {};      ///< normalized Picard change
+        scalar_type thermal_state_residual = {}; ///< normalized thermal participant change
+        scalar_type outward_boundary_energy = {}; ///< prescribed heat leaving liquid [J]
         scalar_type energy_residual = {};       ///< [J]
         scalar_type normalized_energy_residual = {};
         scalar_type liquid_mass_residual = {};  ///< [kg]
@@ -762,6 +772,7 @@ private:
 
     SIMPLEFLUID_SOLVERS_LOCAL std::string coupling_configuration_signature() const;
     SIMPLEFLUID_SOLVERS_LOCAL void validate_coupling_checkpoint(const CouplingCheckpoint& checkpoint) const;
+    SP<thermal_participant_type> d_thermal_participant;
     std::weak_ptr<const CouplingState> d_active_coupling_checkpoint;
     BoussinesqModelOptions d_model_options;
     bool d_physical_model_enabled = false;

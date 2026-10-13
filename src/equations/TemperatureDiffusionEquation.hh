@@ -76,6 +76,9 @@ public:
     void set_boundary_heat_flux_snapshot(SP<const boundary_cache_type> heat_flux);
     SP<const boundary_cache_type> boundary_heat_flux() const noexcept { return d_boundary_heat_flux; }
 
+    /** Global outward prescribed boundary power used by the last physical assembly [W]. */
+    scalar_type last_prescribed_boundary_power() const noexcept { return d_last_prescribed_boundary_power; }
+
     /**
      * @brief Refresh numeric geometry and discard operator-dependent solve state.
      */
@@ -150,6 +153,7 @@ private:
     ConvectionBoundaryMap d_convection_boundaries;
     SP<const boundary_cache_type> d_boundary_heat_flux;
     bool d_has_boundary_heat_flux = false;
+    mutable scalar_type d_last_prescribed_boundary_power{};
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_transport_matrix;
     mutable bool d_cached_transport_graph_supports_non_orthogonal_correction = false;
     mutable Teuchos::RCP<typename Pack::matrix_type> d_cached_physical_transport_matrix;
