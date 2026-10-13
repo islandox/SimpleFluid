@@ -5,6 +5,21 @@ on cells and faces. Generic plans retain selection and ownership metadata;
 structured plans derive ranges from grid dimensions. Execution dispatches a
 typed operation outside each homogeneous numerical loop.
 
+Traversal declarations, one-line getters, and short read-only queries live in
+`.hh` files. Longer inline queries and caller-dependent numerical loops live
+in `.ipp` files, which the headers include. Plan construction and layout detection live in
+`.tcc` files, included by `geometry/explicit_instantiation/MeshTraverse.cc`.
+The headers do not include `.tcc` files. Layered XY metadata construction is
+compiled separately in `geometry/details/LayeredTraverseLayout.cc`.
+
+`SimpleFluid::Mesh` supplies compiled plans for native Cartesian, cylindrical,
+layered, unstructured, and composite meshes, plus `Mesh`, `MeshHandle`,
+`SolidSubdomain`, `STKMeshAdapter`, and Cartesian/unstructured `PartitionedMesh` wrappers using
+`DefaultTpetraTypes`. Caller-defined operations remain supported through the
+inline traversal templates. Other mesh types or Tpetra packs require an owning
+instantiation unit that includes `geometry/MeshTraverse.tcc` and instantiates
+the plan and any directly used layout-detection methods.
+
 ```cpp
 #include "geometry/MeshTraverse.hh"
 
