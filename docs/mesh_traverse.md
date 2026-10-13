@@ -183,17 +183,18 @@ changes require a replacement plan and cache.
 ### Typed interior cell-face ranges
 
 `execution.cell_faces(cell_ref)` preserves the physical-interior proof carried
-by an enclosing typed cell callback. Canonical layered interior cells select a
-small direct incidence range: `all()`, `interior()` and `independent()` retain
+by an enclosing typed cell callback. Canonical structured and layered interior
+cells select a small direct incidence range: `all()`, `interior()` and `independent()` retain
 native face order, while boundary selections are empty. Ordinary operations run
 directly in that range; member pointers retain their invocation semantics.
 Boundary cells, other providers and the ordinal-only API retain their existing
 selection paths. `cells().all()` continues visiting owned ordinals in native
-order. Layered LS interior-only geometry construction explicitly builds interior
-cells first and boundary cells second, since those rows have no live boundary
-callbacks and are independent. Each row retains native incidence arithmetic;
-owned-ID row mapping preserves evaluation and legacy ordering. The boundary-aware
-pass retains native boundary-cell callback order.
+order. Structured and layered numerical cache construction explicitly builds
+interior cells first and boundary cells second. Each row retains native incidence
+arithmetic; owned-ID row mapping preserves evaluation and legacy ordering.
+LS builds both stencil variants from one face visit, sharing the identical
+interior prefix up to the first active boundary contribution. Boundary callbacks
+retain native boundary-cell/face order and do not affect the interior-only matrix.
 
 The layout retains compressed interior XY cell runs once and repeats eligible
 Z layers arithmetically. Cell references carry their originating plan identity;
@@ -204,6 +205,12 @@ creation rejects foreign plans/meshes, invalid IDs and plans without
 empty selections and adjacency preflight. These references and ranges borrow the
 enclosing execution/access scope and must remain inside its callback lifetime.
 Generic fallback and supported geometry-motion/invalidation policies are unchanged.
+Structured interior ranges borrow the layout and cell ID; applying the range
+creates six arithmetic incidences as local scratch. Selecting a range does not
+copy that scratch. This bypasses mixed incidence classification and dispatch.
+The structured query adapters retain checked native ownership and displacement
+arithmetic, including provider periodic-image geometry. Their narrow inlining
+controls avoid the measured regression from outlined query chains.
 
 The initial typed-range qualification is recorded in
 `build/verification/layered-xy-interior-range-20261013/REPORT.txt`.
@@ -213,6 +220,13 @@ preceding retained-XY implementation on the large cases. LS refresh took about
 also retains the original-control comparison and exact correctness gates.
 The split-only intermediate is preserved in
 `build/verification/layered-xy-split-cells-20261013/STATUS.txt`.
+The initial structured and XY/Z one-pass qualification, including its structured
+LS regression and code-generation diagnosis, is recorded in
+`build/verification/structured-onepass-20261014/REPORT.txt`. The compact-range
+intermediate is preserved in
+`build/verification/structured-onepass-fixed-20261014/STATUS.txt`. The final
+structured query inlining and XY/Z one-pass qualification are recorded in
+`build/verification/structured-onepass-fused-20261014/REPORT.txt`.
 
 ## Cell-face incidence
 
@@ -323,10 +337,26 @@ an independent campaign directory and the same original unbatched control.
 
 `CellGradientCache` and `GaussLinearGradientCache` retain an ordered
 `AllWithCellFaces` plan from construction through geometry refresh and rollback.
-Each rebuild uses owned cell batches and typed incident-face batches; interior
-and physical-boundary sample selection is compiled separately. The nested face
-operation reuses the current cell's typed access. Boundary slot lookup is
-retained by these caches rather than rediscovered during their `refresh()`.
+Native structured, layered, and generic rebuilds use owned cell batches and
+typed incident-face batches; interior and physical-boundary sample selection is
+compiled separately. The nested face operation reuses the current cell's typed
+access. Boundary slot lookup is retained by these caches rather than
+rediscovered during their `refresh()`.
+
+Canonical multiregion handles instead borrow the existing typed region geometry
+view and resolve each logical incidence once while building numerical metrics.
+The resolved face supplies current transformed centroids, areas, and periodic
+displacements; stitched and coarse/fine faces retain their canonical identity.
+Least-squares construction builds both existing cache rows from this one visit.
+No resolved geometry or duplicate topology table is retained between refreshes.
+Other reordered and mapped providers keep the generic path; compact composite
+cell reordering remains unsupported. Both paths retain existing field-local
+maps, reject missing halo neighbours, and leave implicit connectivity and
+indexer materialization untouched. Multiregion numerical cache storage and
+gradient application are unchanged.
+The matched construction/refresh qualification, including Cartesian composite,
+stitched XY/Z, coarse/fine, periodic and native-control gates, is recorded in
+`build/verification/multiregion-traverse-20261013/REPORT.txt`.
 
 Least-squares normal matrices still accumulate directions in original mixed
 face order. Independent inverse applications then fill separate interior and
@@ -409,11 +439,13 @@ weights only for cells with active samples. Gauss rows store compact interior
 areas, neighbour IDs and interpolation distances. Gauss topology arrays (row
 maps, offsets, neighbour IDs and ordered boundary metadata) are immutable and
 shared across geometry refreshes and cache copies; snapshots replace metrics
-only. Interior face ordinals are derived from retained XY connectivity without
+only. Initial Gauss construction fills topology and metrics in one incidence
+visit. Interior face ordinals are derived from retained XY connectivity without
 a duplicate 3D ID array. Refresh visits retained owned rows directly, without
-rebuilding incidence groups, payload counts or boundary-slot mappings. Both
-kernels preserve owned ordinal order and original
-floating-point accumulation and interpolation expressions. Boundary callbacks
+rebuilding incidence groups, payload counts or boundary-slot mappings. Construction
+and refill use separate interior/boundary cell passes, with row maps and volumes
+indexed by owned cell ID. Evaluation preserves owned ordinal order; both kernels
+preserve original floating-point accumulation and interpolation expressions. Boundary callbacks
 remain live. Scratch used while building least-squares rows is reused across
 cells and can grow to any supported polygon degree.
 

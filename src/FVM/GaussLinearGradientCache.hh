@@ -146,8 +146,8 @@ public:
     void refresh();
 
 private:
-    std::shared_ptr<const LayeredTopology> build_layered_topology(
-        const MeshTraverseExecution<mesh_type>& traversal) const;
+    void build_layered_geometry(
+        LayeredGeometry& geometry, const MeshTraverseExecution<mesh_type>& traversal) const;
     void fill_layered_geometry(LayeredGeometry& geometry) const;
 
     struct Snapshot
