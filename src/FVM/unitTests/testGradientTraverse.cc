@@ -73,7 +73,8 @@ auto normal_matrix(const auto& samples)
 // of traverse selection and incidence descriptors. Preserve the numerical
 // backend and arithmetic order so even one changed sample is observable.
 template<class MeshType>
-void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>& cache)
+void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>& cache,
+    const typename FVM::CellGradientCache<Pack, MeshType>::boundary_direction_provider_type& boundary_direction = {})
 {
     const auto& mesh = *cache.mesh_ptr();
     const auto locations = FVM::detail::boundary_face_locations(mesh);
@@ -90,6 +91,8 @@ void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>&
             {
                 if (!sample.interior && !locations.at(sample.face_lid).active) return;
                 has_boundary = has_boundary || !sample.interior;
+                if (!sample.interior && boundary_direction)
+                    sample.direction = boundary_direction(sample.face_lid, static_cast<Local>(cell));
                 samples.push_back(sample);
             }, boundaries);
             if (boundaries && !has_boundary)
@@ -607,6 +610,99 @@ TEST(GradientTraverseTest, NativeMappedReorderedAndLegacyCachesMatchPointGeometr
         std::move(mesh), [](auto, const Vec& point) { return point.y > 0.5; });
     compare_caches(reordered.mesh);
     expect_linear_reconstruction(reordered.mesh);
+}
+
+TEST(GradientTraverseTest, RegionNativeCachesKeepMappedFieldsAndUntaggedExteriors)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Explicit native regions require serial handles.";
+    using Native = Meshes::UnstructuredMesh;
+    auto native = std::make_shared<Native>(
+        Arr<Vec>{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
+                 {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1},
+                 {2, 0, 0}, {2, 1, 0}, {2, 0, 1}, {2, 1, 1}},
+        Arr<Native::CellDefinition>{
+            {Native::CellType::HEXAHEDRON, {0, 1, 2, 3, 4, 5, 6, 7}},
+            {Native::CellType::HEXAHEDRON, {1, 8, 9, 2, 5, 10, 11, 6}}},
+        Arr<Native::BoundaryFaceDefinition>{
+            {{3, 7, 4, 0}, 7, "inlet"}, {{8, 10, 11, 9}, 8, "outlet"}});
+    auto geometry = std::make_shared<Meshes::MultiRegionMesh>(
+        std::vector<Meshes::MultiRegionMesh::Region>{Meshes::native_region("pair", native)},
+        std::vector<Meshes::MultiRegionMesh::Interface>{});
+    const auto check = [&](SP<const Handle> mesh, bool native_execution)
+    {
+        ASSERT_EQ(mesh->supports_region_execution(), native_execution);
+        const auto indexer = mesh->has_materialized_indexer();
+        const auto owned = mesh->owned_cell_map(), overlap = mesh->overlap_cell_map();
+        const auto faces = mesh->overlap_face_map();
+        Cache least_squares(mesh);
+        GaussCache gauss(mesh);
+        const auto locations = FVM::detail::boundary_face_locations(*mesh);
+        size_t tagged = 0, untagged = 0;
+        for (const auto& face : gauss.geometry().faces)
+            if (!face.interior)
+            {
+                EXPECT_TRUE(mesh->is_geometry_exterior_face(face.face_lid));
+                EXPECT_EQ(face.boundary.active, locations.at(face.face_lid).active);
+                (face.boundary.active ? tagged : untagged)++;
+            }
+        if (mesh->num_owned_cells())
+        {
+            EXPECT_GT(tagged, 0U);
+            EXPECT_GT(untagged, 0U);
+        }
+        for (bool refresh : {false, true})
+        {
+            if (refresh)
+            {
+                least_squares.refresh();
+                gauss.refresh();
+            }
+            expect_least_squares_geometry(least_squares);
+            expect_gauss_geometry(gauss);
+            expect_cached_reconstruction(mesh, least_squares, gauss);
+        }
+        EXPECT_EQ(mesh->owned_cell_map(), owned);
+        EXPECT_EQ(mesh->overlap_cell_map(), overlap);
+        EXPECT_EQ(mesh->overlap_face_map(), faces);
+        EXPECT_FALSE(mesh->has_materialized_connectivity());
+        EXPECT_EQ(mesh->connectivity_storage_bytes(), 0U);
+        EXPECT_EQ(mesh->has_materialized_indexer(), indexer);
+    };
+    check(std::make_shared<Handle>(geometry), true);
+    if (Tpetra::getDefaultComm()->getSize() == 1)
+    {
+        // Composite reordering is unsupported; the same native constituent
+        // exercises the mapped fallback against its independent point oracle.
+        auto mesh = std::make_shared<Handle>(native);
+        auto reordered = MeshReorderingFactory<>::selected_cells_first(
+            std::move(mesh), [](auto, const Vec& center) { return center.x > 1; });
+        check(reordered.mesh, false);
+    }
+}
+
+TEST(GradientTraverseTest, RegionNativeCachesKeepPartitionSeamsInterior)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
+    auto mesh = std::make_shared<Handle>(test::two_regions(2));
+    ASSERT_TRUE(mesh->supports_region_execution());
+    ASSERT_GT(mesh->num_local_cells(), mesh->num_owned_cells());
+    Cache least_squares(mesh);
+    GaussCache gauss(mesh);
+    expect_least_squares_geometry(least_squares);
+    expect_gauss_geometry(gauss);
+    const auto locations = FVM::detail::boundary_face_locations(*mesh);
+    size_t partition_faces = 0;
+    for (const auto& face : gauss.geometry().faces)
+        if (face.interior && static_cast<size_t>(face.other_lid) >= mesh->num_owned_cells())
+        {
+            ++partition_faces;
+            EXPECT_FALSE(mesh->is_geometry_exterior_face(face.face_lid));
+            EXPECT_FALSE(locations.at(face.face_lid).active);
+            EXPECT_FALSE(face.boundary.active);
+        }
+    EXPECT_GT(partition_faces, 0U);
+    expect_cached_reconstruction(mesh, least_squares, gauss);
+    EXPECT_FALSE(mesh->has_materialized_connectivity());
 }
 
 TEST(GradientTraverseTest, BoundaryDirectionOrderAndRefreshFailurePreservePreviousGeometry)
@@ -1358,5 +1454,78 @@ TEST(GradientTraverseTest, LayeredSplitConstructionMapsInterleavedOwnedRowsExact
         expect_cached_reconstruction(mesh, cache, gauss);
         expect_least_squares_geometry(cache);
         EXPECT_EQ(snapshot(cache.interior_geometry()), original);
+    }
+}
+
+TEST(GradientTraverseTest, OnePassCompactCachesPreserveBothNormalsAndBoundaryCallbackOrder)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Requires serial canonical maps.";
+    std::vector<SP<Handle>> meshes;
+    meshes.push_back(std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+        Vec3D<ArrReal>{{{0, 0.5, 2, 4}, {0, 0.25, 1, 3}, {0, 0.4, 2, 4}}})));
+    meshes.push_back(std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCylindrical3D>(
+        Vec3D<ArrReal>{{{1, 2, 3, 5}, {0, 0.2, 0.7, 1.5}, {0, 0.5, 2, 3}}})));
+    meshes.push_back(layered_gradient_mesh(5, false));
+    meshes.push_back(layered_gradient_mesh(5, true));
+    for (const auto& mesh : meshes)
+    {
+        using Call = std::pair<Local, Local>;
+        std::vector<Call> calls;
+        const auto direction = [&](Local face, Local cell)
+        {
+            const auto delta = mesh->face_centroid(face) - mesh->cell_centroid(cell);
+            return Vec{delta.x + 0.17 * delta.y, delta.y - 0.11 * delta.z, delta.z + 0.09 * delta.x};
+        };
+        const auto expected_calls = [&]
+        {
+            std::vector<Call> expected;
+            const auto locations = FVM::detail::boundary_face_locations(*mesh);
+            for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+                FVM::detail::visit_gradient_geometry_samples(*mesh, static_cast<Local>(cell), [&](const auto& sample)
+                {
+                    if (!sample.interior && locations.at(sample.face_lid).active)
+                        expected.emplace_back(sample.face_lid, static_cast<Local>(cell));
+                });
+            return expected;
+        };
+        Cache cache(mesh, [&](Local face, Local cell)
+        {
+            calls.emplace_back(face, cell);
+            return direction(face, cell);
+        });
+        GaussCache gauss(mesh);
+        EXPECT_EQ(calls, expected_calls());
+        const auto check = [&]
+        {
+            // Independently form each normal matrix through point geometry.
+            // In particular the overridden direction must not change the
+            // interior-only matrix or the raw boundary normal distance.
+            expect_least_squares_geometry(cache, direction);
+            expect_gauss_geometry(gauss);
+            const auto execution = cache.traverse_plan().acquire();
+            EXPECT_FALSE(execution.cells().interior().empty());
+            EXPECT_FALSE(execution.cells().boundary().empty());
+        };
+        check();
+        const auto interior_before = snapshot(cache.interior_geometry());
+        const auto boundary_before = snapshot(cache.boundary_geometry());
+        const auto topology = gauss.layered_geometry() ? gauss.layered_geometry()->topology : nullptr;
+        PlanarALEMeshMotion<> motion(mesh);
+        motion.begin_trial(1.2, 0.2);
+        calls.clear();
+        cache.refresh();
+        gauss.refresh();
+        EXPECT_EQ(calls, expected_calls());
+        if (topology) EXPECT_EQ(gauss.layered_geometry()->topology, topology);
+        check();
+        motion.rollback_trial();
+        calls.clear();
+        cache.refresh();
+        gauss.refresh();
+        EXPECT_EQ(calls, expected_calls());
+        if (topology) EXPECT_EQ(gauss.layered_geometry()->topology, topology);
+        check();
+        EXPECT_EQ(snapshot(cache.interior_geometry()), interior_before);
+        EXPECT_EQ(snapshot(cache.boundary_geometry()), boundary_before);
     }
 }

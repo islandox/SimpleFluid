@@ -228,19 +228,21 @@ public:
 
     explicit StructuredTraverseAccess(const Access& access);
 
-    local_ordinal_type owner_cell(size_t face) const
+    // Inline the native query chains with these adapters so numerical face
+    // loops can optimize ordinal decoding and accumulation in one scope.
+    [[gnu::always_inline, gnu::flatten]] local_ordinal_type owner_cell(size_t face) const
     {
         const auto& geometry = this->geometry_provider();
         return canonical_field_cell(geometry.topology().owner_cell(canonical_face_id(face)));
     }
 
-    local_ordinal_type neighbor_cell(size_t face) const
+    [[gnu::always_inline, gnu::flatten]] local_ordinal_type neighbor_cell(size_t face) const
     {
         const auto& geometry = this->geometry_provider();
         return canonical_field_cell(geometry.topology().neighbor_cell(canonical_face_id(face)));
     }
 
-    Vec3 cell_center_vector(size_t face, size_t cell) const
+    [[gnu::always_inline, gnu::flatten]] Vec3 cell_center_vector(size_t face, size_t cell) const
     {
         // Keep provider arithmetic, adjacency checks, and Cartesian periodic
         // image displacements exactly as in the ordinary geometry query.
@@ -255,7 +257,7 @@ private:
         return this->geometry_provider().indexer().cell_id(cell);
     }
 
-    typename geometry_type::face_id_t canonical_face_id(size_t face) const
+    [[gnu::always_inline]] typename geometry_type::face_id_t canonical_face_id(size_t face) const
     {
         if (face >= this->num_faces())
             throw std::out_of_range("Mesh traverse face ordinal is out of range.");
