@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <Teuchos_CommHelpers.hpp>
 
+#include <array>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -365,6 +366,39 @@ template<class MeshType> void compare_repeated_assemblies(SP<const MeshType> mes
         }
     }
 }
+// Canonical serial XY/Z topology with mixed cell degrees and repeated side
+// patch IDs. The middle quad supplies interior cells once there are three layers.
+auto layered_transport_mesh(size_t layers, bool triangles)
+{
+    using Native = Meshes::SemiStructuredXY_Z;
+    Arr<Vec> nodes;
+    const std::array<real_t, 4> xy{0, 0.4, 1.3, 2.1};
+    for (unsigned y = 0; y < 4; ++y)
+        for (unsigned x = 0; x < 4; ++x) nodes.push_back({xy[x], xy[y], 0});
+    Arr<Arr<unsigned>> cells;
+    for (unsigned y = 0; y < 3; ++y)
+        for (unsigned x = 0; x < 3; ++x)
+        {
+            const unsigned a = x + 4 * y, b = a + 1, c = b + 4, d = a + 4;
+            if (triangles || (x == 0 && y == 0))
+            {
+                cells.push_back({a, b, d});
+                cells.push_back({b, c, d});
+            }
+            else cells.push_back({a, b, c, d});
+        }
+    Arr<Native::BoundaryEdge> edges;
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        edges.push_back({i, i + 1, "south"});
+        edges.push_back({12 + i, 13 + i, "north"});
+        edges.push_back({4 * i, 4 * (i + 1), i % 2 ? "odd" : "even"});
+        edges.push_back({3 + 4 * i, 3 + 4 * (i + 1), i % 2 ? "odd" : "even"});
+    }
+    Arr<real_t> z{0};
+    for (size_t layer = 0; layer < layers; ++layer) z.push_back(z.back() + 0.3 + 0.17 * layer);
+    return std::make_shared<Handle>(std::make_shared<Native>(nodes, cells, z, edges));
+}
 } // namespace
 
 TEST(TransportTraverseTest, CompositeIncidenceMatchesCanonicalOrderAndClassification)
@@ -536,4 +570,72 @@ TEST(TransportTraverseTest, EmptyRanksPreserveRowsAndCollectiveRejection)
     SP<const Handle> mesh = std::make_shared<Handle>(geometry);
     compare_repeated_assemblies(mesh);
     if (Tpetra::getDefaultComm()->getRank() > 0) EXPECT_EQ(mesh->num_owned_cells(), 0U);
+}
+
+TEST(TransportTraverseTest, LayeredRowsPreserveCanonicalIncidenceAndLiveAssemblyInputs)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "XY/Z remains serial only.";
+    for (size_t layers : {1U, 2U, 5U})
+        for (bool triangles : {false, true})
+        {
+            SCOPED_TRACE(::testing::Message() << "layers=" << layers << " triangles=" << triangles);
+            auto mesh = layered_transport_mesh(layers, triangles);
+            const auto materialized = mesh->has_materialized_indexer();
+            TransportGeometryCache<Handle> cache(*mesh);
+            EXPECT_TRUE(cache.traverse_plan().uses_layered_ranges());
+            EXPECT_FALSE(cache.traverse_plan().uses_structured_ranges());
+            expect_canonical_geometry(*mesh, cache);
+            EXPECT_EQ(mesh->connectivity_storage_bytes(), 0U);
+            EXPECT_EQ(mesh->has_materialized_indexer(), materialized);
+            compare_repeated_assemblies<Handle>(mesh);
+        }
+}
+
+TEST(TransportTraverseTest, LayeredMotionAndRollbackRefreshMetricsAndRetainTraversePlan)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "XY/Z remains serial only.";
+    for (size_t layers : {1U, 2U, 5U})
+        for (bool triangles : {false, true})
+        {
+            SCOPED_TRACE(::testing::Message() << "layers=" << layers << " triangles=" << triangles);
+            auto mesh = layered_transport_mesh(layers, triangles);
+            Assembly<Handle> state(mesh);
+            state.update(0);
+            TransportGeometryCache<Handle> cache(*mesh);
+            const auto* traverse = &cache.traverse_plan();
+            const auto topology = traverse->layered_layout();
+            const auto plan_bytes = traverse->storage_bytes();
+            const auto old_geometry = cache.shared_geometry();
+            const auto batches = cache.assembly_geometry().batches;
+            const auto original = state.weighted(cache, NonOrthogonalTreatment::Hybrid);
+            const auto original_values = snapshot(original);
+            PlanarALEMeshMotion<> motion(mesh);
+            EXPECT_THROW(FVM::detail::visit_transport_assembly_rows(*mesh, cache.assembly_geometry(),
+                [](Local, auto, const auto& visit_faces)
+                { visit_faces([](const auto&, const auto&) { throw std::runtime_error("injected layered assembly failure"); }); }),
+                std::runtime_error);
+            // Callback failure releases the execution lease before geometry mutation.
+            motion.begin_trial(1.35, 0.2);
+            EXPECT_THROW(state.weighted(cache, NonOrthogonalTreatment::Hybrid, original.matrix), std::invalid_argument);
+            EXPECT_EQ(snapshot(original), original_values);
+            cache.refresh();
+            EXPECT_EQ(&cache.traverse_plan(), traverse);
+            EXPECT_EQ(traverse->layered_layout(), topology);
+            EXPECT_EQ(traverse->storage_bytes(), plan_bytes);
+            EXPECT_EQ(cache.assembly_geometry().batches, batches);
+            EXPECT_NE(cache.shared_geometry(), old_geometry);
+            expect_canonical_geometry(*mesh, cache);
+            TransportGeometryCache<Handle> fresh(*mesh);
+            expect_same_system(state.weighted(cache, NonOrthogonalTreatment::Hybrid),
+                state.weighted(fresh, NonOrthogonalTreatment::Hybrid));
+            motion.rollback_trial();
+            EXPECT_THROW(cache.assembly_geometry(), std::invalid_argument);
+            cache.refresh();
+            EXPECT_EQ(&cache.traverse_plan(), traverse);
+            EXPECT_EQ(traverse->layered_layout(), topology);
+            EXPECT_EQ(traverse->storage_bytes(), plan_bytes);
+            EXPECT_EQ(cache.assembly_geometry().batches, batches);
+            expect_canonical_geometry(*mesh, cache);
+            EXPECT_EQ(snapshot(state.weighted(cache, NonOrthogonalTreatment::Hybrid)), original_values);
+        }
 }

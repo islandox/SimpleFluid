@@ -102,6 +102,11 @@ public:
     {
         return d_xy_cell_nodes;
     }
+    /** Original face validation followed by the shared centroid expression. */
+    Vec3 cell_center_vector(FaceID face, CellID cell) const;
+    /** Centroid displacement for an already resolved adjacent cell pair. */
+    Vec3 resolved_cell_center_vector(CellID cell, CellID other) const;
+
     const Arr<real_t>& z_edges() const noexcept { return d_z_edges; }
     const Indexer& indexer() const noexcept { return d_topology.indexer(); }
     const Topology& topology() const noexcept { return d_topology; }

@@ -17,6 +17,12 @@ void visit_cached_gradient_rows(const Cache& cache, Visitor&& visitor)
             structured->template visit_rows<IncludeBoundary>(visitor);
             return;
         }
+    if constexpr (requires { cache.layered_geometry(); })
+        if (const auto* layered = cache.layered_geometry())
+        {
+            layered->template visit_rows<IncludeBoundary>(visitor);
+            return;
+        }
     const auto& interior = cache.interior_geometry();
     if constexpr (IncludeBoundary)
     {
