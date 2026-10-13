@@ -2922,3 +2922,145 @@ TEST(BoussinesqCouplingIntervalTest, CheckpointInitializesLazyMaterialAndGasDepe
 }
 
 } // namespace
+
+namespace
+{
+class ConstantThermalParticipant final : public SimpleFluid::ThermalStepParticipant<Pack>
+{
+public:
+    struct Saved final : State { double energy{}, trial{}, dt{}, cavity = 300.; int commits{}; std::vector<double> guess; };
+    explicit ConstantThermalParticipant(double flux) : d_flux(flux) {}
+    std::string configuration_signature() const override { return "constant:" + std::to_string(d_flux); }
+    SimpleFluid::SP<const State> capture_state() const override { return std::make_shared<const Saved>(d_state); }
+    void restore_state(const State& state) override { d_state = dynamic_cast<const Saved&>(state); }
+    void begin_substep(double, double dt) override { d_state.dt = dt; d_state.trial = 0; }
+    SimpleFluid::SP<const boundary_cache_type> preview_trial(
+        SimpleFluid::SP<const mesh_type> mesh, const field_type& guess) override
+    {
+        d_state.guess.resize(mesh->num_owned_cells());
+        const auto values = guess.owned_read_view();
+        for (size_t owned = 0; owned < d_state.guess.size(); ++owned)
+            d_state.guess[owned] = values(owned, 0);
+        auto flux = std::make_shared<boundary_cache_type>();
+        flux->mesh = mesh;
+        double local_power = 0;
+        for (const auto& [id, batch] : mesh->boundary_batches())
+            if (mesh->boundary_batch_name(id) == "xmax")
+            {
+                flux->value[id] = SimpleFluid::Arr<double>(batch.face_lids.size(), d_flux);
+                for (const auto face : batch.face_lids)
+                    if (mesh->is_owned_cell(mesh->owner_cell(face)))
+                        local_power += mesh->face_area(face) * d_flux;
+            }
+        double power = 0;
+        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_power, &power);
+        d_state.trial = power * d_state.dt;
+        d_state.cavity = 310.;
+        return flux;
+    }
+    double residual(const field_type& solved) const override
+    {
+        double local = 0, global = 0;
+        const auto values = solved.owned_read_view();
+        for (size_t owned = 0; owned < d_state.guess.size(); ++owned)
+            local = std::max(local, std::abs(values(owned, 0) - d_state.guess[owned]) / 1.e-8);
+        Teuchos::reduceAll(*solved.mesh().owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local, &global);
+        return global;
+    }
+    std::optional<double> trial_cavity_temperature() const override { return d_state.cavity; }
+    void validate_commit() const override {}
+    void commit() noexcept override { d_state.energy += d_state.trial; ++d_state.commits; }
+    double energy() const { return d_state.energy; }
+    int commits() const { return d_state.commits; }
+private:
+    double d_flux;
+    Saved d_state;
+};
+
+ConfiguredCase make_thermal_case(double flux, int correctors, bool external_temperature = false)
+{
+    auto mesh = make_column();
+    auto physical = physical_options();
+    physical.thermal_conductivity = 1.0;
+    SimpleFluid::LinearSolverOptions linear;
+    linear.tolerance = 1.e-13;
+    linear.max_iterations = 500;
+    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO), linear, physical);
+    solver->configure_material_feedback(material_feedback_options());
+    solver->initialize_linear_temperature({0., 0., 1.}, 300., 300.);
+    solver->set_thermal_step_participant(std::make_shared<ConstantThermalParticipant>(flux));
+    auto surface = free_surface_options(correctors);
+    if (external_temperature) surface.headspace.temperature_mode = SimpleFluid::HeadspaceTemperatureMode::External;
+    solver->configure_free_surface(surface);
+    return {mesh, std::move(solver), nullptr};
+}
+}
+
+TEST(BoussinesqPlanarALETest, ThermalParticipantUsesMovingAreaAndCheckpointReplay)
+{
+    auto state = make_thermal_case(1.e-3, 8);
+    auto participant = std::dynamic_pointer_cast<ConstantThermalParticipant>(state.solver->thermal_step_participant());
+    const auto old_energy = coupling_sensible_energy(state);
+    auto checkpoint = state.solver->create_coupling_checkpoint();
+    EXPECT_THROW(state.solver->set_thermal_step_participant(nullptr), std::logic_error);
+    ASSERT_NO_THROW(state.solver->step());
+    const auto accepted_energy = coupling_sensible_energy(state);
+    const auto escaped = participant->energy();
+    const auto accepted_top = top_elevation(*state.mesh);
+    EXPECT_EQ(participant->commits(), 1);
+    EXPECT_LT(accepted_top, 1.0);
+    EXPECT_NEAR(escaped, 1.e-5 * accepted_top, 1.e-14);
+    EXPECT_NEAR(accepted_energy - old_energy + escaped, 0., 2.e-8);
+    EXPECT_NEAR(state.solver->planar_ale_diagnostics().energy_residual, 0., 2.e-8);
+    ASSERT_NO_THROW(state.solver->restore_coupling_checkpoint(checkpoint));
+    EXPECT_EQ(participant->commits(), 0);
+    EXPECT_DOUBLE_EQ(participant->energy(), 0.);
+    ASSERT_NO_THROW(state.solver->step());
+    EXPECT_EQ(participant->commits(), 1);
+    EXPECT_DOUBLE_EQ(participant->energy(), escaped);
+    EXPECT_NEAR(coupling_sensible_energy(state), accepted_energy, 2.e-8);
+    EXPECT_NO_THROW(state.solver->accept_coupling_checkpoint(checkpoint));
+}
+
+TEST(BoussinesqPlanarALETest, ThermalParticipantFailedCorrectorRestoresExternalInventory)
+{
+    auto state = make_thermal_case(1.e-3, 1);
+    auto participant = std::dynamic_pointer_cast<ConstantThermalParticipant>(state.solver->thermal_step_participant());
+    const auto old_energy = coupling_sensible_energy(state);
+    EXPECT_THROW(state.solver->step(), std::runtime_error);
+    EXPECT_EQ(participant->commits(), 0);
+    EXPECT_DOUBLE_EQ(participant->energy(), 0.);
+    EXPECT_NEAR(coupling_sensible_energy(state), old_energy, 1.e-12);
+    EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.);
+}
+
+TEST(BoussinesqPlanarALETest, ZeroThermalParticipantPreservesDefaultFields)
+{
+    auto coupled = make_thermal_case(0., 4);
+    auto reference = make_thermal_case(0., 4);
+    reference.solver->set_thermal_step_participant(nullptr);
+    ASSERT_NO_THROW(coupled.solver->step());
+    ASSERT_NO_THROW(reference.solver->step());
+    for (size_t owned = 0; owned < coupled.mesh->num_owned_cells(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        EXPECT_DOUBLE_EQ(coupled.solver->temperature().value(cell), reference.solver->temperature().value(cell));
+        EXPECT_DOUBLE_EQ(coupled.solver->pressure().value(cell), reference.solver->pressure().value(cell));
+    }
+    EXPECT_DOUBLE_EQ(top_elevation(*coupled.mesh), top_elevation(*reference.mesh));
+}
+
+TEST(BoussinesqPlanarALETest, ExternalThermalTemperatureUsesParticipantAndRollsBack)
+{
+    auto state = make_thermal_case(1.e-3, 8, true);
+    auto checkpoint = state.solver->create_coupling_checkpoint();
+    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 300.);
+    ASSERT_NO_THROW(state.solver->step());
+    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 310.);
+    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.pressure, 101325.);
+    ASSERT_NO_THROW(state.solver->restore_coupling_checkpoint(checkpoint));
+    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 300.);
+    ASSERT_NO_THROW(state.solver->step());
+    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 310.);
+    EXPECT_NO_THROW(state.solver->accept_coupling_checkpoint(checkpoint));
+}

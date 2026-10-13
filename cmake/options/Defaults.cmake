@@ -27,6 +27,8 @@ option(SIMPLEFLUID_WRAP_STATIC_TRILINOS
        "Export static Trilinos through one SimpleFluid shared backend (Linux)"
        ${_simplefluid_wrap_static_trilinos_default})
 unset(_simplefluid_wrap_static_trilinos_default)
+set(SIMPLEFLUID_REUSE_TRILINOS_BACKEND "" CACHE FILEPATH
+    "Existing compatible shared Trilinos backend; empty builds the backend locally")
 
 # Testing. CTest consumes BUILD_TESTING after these defaults are established.
 option(BUILD_TESTING "Build the testing tree." ON)

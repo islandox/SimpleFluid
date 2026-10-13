@@ -673,6 +673,18 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                     }
                 }
             });
+    scalar_type local_prescribed_power{};
+    for (const auto& [batch_id, values] : d_boundary_heat_flux->value)
+    {
+        const auto& faces = d_mesh->boundary_face_batch(batch_id).face_lids;
+        for (size_t index = 0; index < faces.size(); ++index)
+            if (d_mesh->is_owned_cell(d_mesh->owner_cell(faces[index])))
+                local_prescribed_power += values[index] * d_mesh->face_area(faces[index]);
+    }
+    d_last_prescribed_boundary_power = scalar_type{};
+    if (d_has_boundary_heat_flux)
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+            1, &local_prescribed_power, &d_last_prescribed_boundary_power);
     auto boundary_condition = [&](int batch_id, size_t in_batch_id)
     {
         const auto convection = convection_conditions.find(batch_id);

@@ -172,8 +172,9 @@ void add_moles(GasMolesBySpecies& destination, const GasMolesBySpecies& source)
     {
         return HeadspaceTemperatureMode::BulkLiquid;
     }
+    if (value == "external") return HeadspaceTemperatureMode::External;
     throw std::invalid_argument(
-        "free_surface_headspace_temperature_model must be 'fixed', 'prescribed', or 'bulkLiquid'.");
+        "free_surface_headspace_temperature_model must be 'fixed', 'prescribed', 'bulkLiquid', or 'external'.");
 }
 
 [[nodiscard]] Dimension parse_gravity_axis(const std::string& value)
@@ -1009,7 +1010,8 @@ real_t HeadspaceModel::temperature(real_t supplied_temperature) const
     if (!finite_positive(supplied_temperature))
     {
         const auto source =
-            d_options.temperature_mode == HeadspaceTemperatureMode::Prescribed ? "prescribed" : "bulk-liquid";
+            d_options.temperature_mode == HeadspaceTemperatureMode::Prescribed ? "prescribed" :
+            d_options.temperature_mode == HeadspaceTemperatureMode::External ? "external" : "bulk-liquid";
         throw std::invalid_argument(
             std::string("A finite positive ") + source + " headspace temperature [K] is required for this update.");
     }

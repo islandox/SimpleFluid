@@ -286,6 +286,8 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::CoupledPressureVelocitySolver<.*SimpleFluid::MeshHandle<.*>[ ]*::solve[(]"
     "^SimpleFluid::TemperatureDiffusionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_physical[(]"
     "^SimpleFluid::SolidHeatConductionEquation<.*SimpleFluid::SolidSubdomain<.*>[ ]*::advance[(]"
+    "^SimpleFluid::VentedLumpedCavityModel::preview[(]"
+    "^SimpleFluid::BoussinesqSolver<.*::set_thermal_step_participant[(]"
     "^SimpleFluid::BoussinesqMomentumEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_velocity_physical[(]"
     "^SimpleFluid::TurbulenceModel<.*SimpleFluid::MeshHandle<.*>[ ]*::advance[(]"
     "^SimpleFluid::AdaptiveSteadyStateController::observe[(]"
@@ -725,7 +727,10 @@ endif()
 # These counts do not qualify other toolchains or build configurations.
 # Private-family exclusions and exact API anchors above remain authoritative.
 set(simplefluid_api_symbol_lower_bound 1250)
-set(simplefluid_api_symbol_upper_bound 1400)
+# Vented cavity and typed ALE thermal transactions add twelve reviewed exports
+# in the GNU no-LTO Release build (1401 total on 2026-10-13). Keep the existing
+# exact API/internal-family checks and allow that additive public surface.
+set(simplefluid_api_symbol_upper_bound 1412)
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

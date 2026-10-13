@@ -57,6 +57,10 @@ function(simplefluid_add_abi_tests)
             LABELS abi)
         if(TARGET SimpleFluidTrilinosBackend)
             set(backend_link_rules "")
+            set(backend_archive_owners 1)
+            if(SIMPLEFLUID_REUSE_TRILINOS_BACKEND)
+                set(backend_archive_owners 0)
+            endif()
             if(CMAKE_GENERATOR STREQUAL "Ninja Multi-Config")
                 set(backend_link_rules "${CMAKE_BINARY_DIR}/CMakeFiles/impl-$<CONFIG>.ninja")
             elseif(CMAKE_GENERATOR STREQUAL "Ninja")
@@ -70,6 +74,7 @@ function(simplefluid_add_abi_tests)
                     "-DSIMPLEFLUID_READELF=${CMAKE_READELF}"
                     "-DSIMPLEFLUID_LINK_RULES=${backend_link_rules}"
                     "-DSIMPLEFLUID_TRILINOS_PREFIX=${backend_trilinos_prefix}"
+                    "-DSIMPLEFLUID_EXPECTED_ARCHIVE_OWNERS=${backend_archive_owners}"
                     -P "${PROJECT_SOURCE_DIR}/cmake/testing/abi/CheckTrilinosBackend.cmake")
             set_tests_properties(simplefluid_trilinos_backend_boundary PROPERTIES LABELS abi)
         endif()
