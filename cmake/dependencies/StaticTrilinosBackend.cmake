@@ -84,6 +84,28 @@ function(simplefluid_add_static_trilinos_backend)
     if(NOT archives)
         message(FATAL_ERROR "No static Trilinos archives found for the backend")
     endif()
+    if(SIMPLEFLUID_REUSE_TRILINOS_BACKEND)
+        if(NOT IS_ABSOLUTE "${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}" OR
+           NOT EXISTS "${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}")
+            message(FATAL_ERROR "SIMPLEFLUID_REUSE_TRILINOS_BACKEND must name an existing absolute library path")
+        endif()
+        add_library(SimpleFluidTrilinosBackend SHARED IMPORTED GLOBAL)
+        add_library(SimpleFluid::TrilinosBackend ALIAS SimpleFluidTrilinosBackend)
+        execute_process(COMMAND "${CMAKE_READELF}" --dynamic "${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}"
+            RESULT_VARIABLE reused_inspection_status OUTPUT_VARIABLE reused_dynamic)
+        if(NOT reused_inspection_status EQUAL 0 OR
+           NOT reused_dynamic MATCHES "\\(SONAME\\)[^\n]*\\[([^]]+)\\]")
+            message(FATAL_ERROR "Cannot inspect the reused Trilinos backend SONAME")
+        endif()
+        set(reused_soname "${CMAKE_MATCH_1}")
+        set_target_properties(SimpleFluidTrilinosBackend PROPERTIES
+            IMPORTED_LOCATION "${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}"
+            IMPORTED_SONAME "${reused_soname}")
+        target_link_libraries(SimpleFluidTrilinosBackend INTERFACE
+            SimpleFluidTrilinosUsage ${external_libraries})
+        message(STATUS "Reusing shared Trilinos backend ${SIMPLEFLUID_REUSE_TRILINOS_BACKEND}")
+        return()
+    endif()
     add_library(SimpleFluidTrilinosBackend SHARED
         "${PROJECT_SOURCE_DIR}/src/TrilinosBackend.cc")
     add_library(SimpleFluid::TrilinosBackend ALIAS SimpleFluidTrilinosBackend)

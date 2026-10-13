@@ -16,3 +16,11 @@ entry files and helper commands instead of including these details directly.
 
 Helper commands retain the `simplefluid_` namespace, and target names, cache
 options, and ELF symbol-version names retain their established names.
+
+`SIMPLEFLUID_REUSE_TRILINOS_BACKEND=/absolute/path/libSimpleFluidTrilinosBackend.so`
+imports an existing shared runtime when building against static Trilinos. It
+requires `SIMPLEFLUID_WRAP_STATIC_TRILINOS=ON` and a backend compatible with the
+selected Trilinos installation, compiler and MPI. This lets a multiphysics host
+rebuild SimpleFluid components while retaining the same runtime used by another
+solver. The backend ownership/export tests still run; no consumer may acquire
+static Trilinos archives. Leaving the option empty builds the backend normally.

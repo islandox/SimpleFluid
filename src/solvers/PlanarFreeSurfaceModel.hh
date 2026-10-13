@@ -81,7 +81,8 @@ enum class HeadspaceTemperatureMode
 {
     Fixed,
     Prescribed,
-    BulkLiquid
+    BulkLiquid,
+    External ///< Supplied by the typed thermal participant in solver-integrated ALE.
 };
 
 /**

@@ -1,5 +1,23 @@
 # Lumped inner cavity above a liquid pool
 
+For a vented cavity whose volume changes with a moving pool, use the additive
+`VentedLumpedCavityModel` in `equations/VentedLumpedCavityModel.hh`. It advances
+perfectly mixed dry air at supplied ambient pressure. Its pure
+`preview(dt, new_volume, surfaces)` returns sensible surface transfers, signed
+vent mass/enthalpy and `p * (V_new - V_old)` work. Inflow carries ambient
+enthalpy; outflow carries candidate cavity enthalpy. It uses `h = cp T`,
+`H = m cp T` and `U = H - pV`, with an implicit enthalpy balance. Water exchange
+is rejected and radiation is not part of this sensible-only model.
+
+`solvers/ThermalStepParticipant.hh` supplies the typed transaction interface for
+coupling external solid/cavity inventories to `BoussinesqSolver` planar ALE.
+Register the participant before configuring `HeadspaceTemperatureMode::External`
+when it owns cavity temperature. Every preview starts from the same substep
+baseline; normalized thermal residuals must be at most one before collective
+preflight and a nonthrowing commit. Step and interval rollback include immutable
+boundary-flux and participant snapshots. The existing closed moist-air model
+below retains its fixed-volume contract.
+
 `LumpedInnerCavityModel` (`equations/LumpedInnerCavityModel.hh`, linked through
 `SimpleFluid::Equations`) represents a closed, fixed gas volume above a liquid
 free surface and inside vessel walls. Air has one temperature and one humidity
