@@ -4,9 +4,9 @@ For a vented cavity whose volume changes with a moving pool, use the additive
 `VentedLumpedCavityModel` in `equations/VentedLumpedCavityModel.hh`. It advances
 perfectly mixed dry air at supplied ambient pressure. Its pure
 `preview(dt, new_volume, surfaces)` returns sensible surface transfers, signed
-vent mass/enthalpy and `p * (V_new - V_old)` work. Inflow carries ambient
-enthalpy; outflow carries candidate cavity enthalpy. It uses `h = cp T`,
-`H = m cp T` and `U = H - pV`, with an implicit enthalpy balance. Water exchange
+vent mass/enthalpy and $p(V_\mathrm{new} - V_\mathrm{old})$ work. Inflow carries ambient
+enthalpy; outflow carries candidate cavity enthalpy. It uses $h = c_p T$,
+$H = m c_p T$ and $U = H - pV$, with an implicit enthalpy balance. Water exchange
 is rejected and radiation is not part of this sensible-only model.
 
 `solvers/ThermalStepParticipant.hh` supplies the typed transaction interface for
@@ -31,13 +31,13 @@ inventories, and acceptance; there is no automatic `BoussinesqSolver` driver.
 
 ## State, properties, and conservation
 
-All inputs and outputs use SI units. Humidity ratio is `w = m_v / m_d`, kg of
+All inputs and outputs use SI units. Humidity ratio is $w = m_v/m_d$, kg of
 vapor per kg of dry air, and differs from relative humidity. The dry-air mass
-`m_d` and gas volume `V` remain fixed. With ideal gases,
+$m_d$ and gas volume $V$ remain fixed. With ideal gases,
 
-\[
+$$
 p_v=m_vR_vT/V,\quad p=(m_dR_d+m_vR_v)T/V,\quad RH=p_v/p_{sat}(T).
-\]
+$$
 
 Pressure evolves with temperature and evaporation; this is not an isobaric,
 vented headspace. The caller supplies a pure saturation-pressure function, so
@@ -47,23 +47,23 @@ optional IF97 component. It is not a mandatory dependency. The default heat
 capacities and gas constants are approximate constant air/water properties;
 they are configurable and are not inferred from the liquid material provider.
 
-The constant caloric model uses a common reference temperature `T_r`:
+The constant caloric model uses a common reference temperature $T_r$:
 
-\[
+$$
 h_l(T)=c_{pl}(T-T_r),\qquad
 h_v(T)=L_r+c_{pv}(T-T_r),\qquad
 L(T)=h_v(T)-h_l(T),
-\]
-\[
+$$
+$$
 U=m_d(c_{pd}-R_d)(T-T_r)+m_v[h_v(T)-R_vT].
-\]
+$$
 
 The gas balances are
 
-\[
+$$
 \frac{dm_v}{dt}=\sum_i\dot m_i,\qquad
 \frac{dU}{dt}=\sum_i\left[h_iA_i(T_i-T)+\dot m_i h_v(T_i)\right].
-\]
+$$
 
 Transported vapor carries enthalpy across the gas control surface. Its latent
 energy is stored in the vapor inventory, rather than being added again as a
@@ -77,12 +77,12 @@ neglected in this model.
 Positive rates leave a surface. `LiquidSurface` supports evaporation and
 condensation; `CondensationOnly` supports cold-wall condensation without
 allowing an untracked wall-film inventory to evaporate. `Impermeable` disables
-moisture transfer. For supplied gas-film coefficient `k_m` in m/s,
+moisture transfer. For supplied gas-film coefficient $k_m$ in m/s,
 
-\[
+$$
 \dot m_i=\frac{A_i k_{m,i}}{R_vT_{film,i}}
               [p_{sat}(T_i)-p_v],\qquad T_{film,i}=(T_i+T_{old})/2.
-\]
+$$
 
 For condensation-only walls this expression is restricted to nonpositive
 values. A zero coefficient disables the exchange. This is a dilute gas-film
@@ -98,22 +98,28 @@ ambient temperature is always replaced by the cavity temperature. See
 [exterior convection](exterior_convection.md) for that correlation's formula,
 property inputs, and supported Rayleigh range. This is a mean plate approximation
 to a vessel wall, not a general enclosed-gap correlation. Do not apply it to a
-horizontal liquid surface or lid. Such surfaces can supply an effective `h`, or
+horizontal liquid surface or lid. Such surfaces can supply an effective $h$, or
 provide `convection_coefficient(T_surface, T_air)` for a validated horizontal or
 enclosure-specific closure. This callback overrides `convection`, must return
 a finite nonnegative coefficient, and is evaluated once per surface per call.
 
 Radiation is diffuse-gray surface-to-surface exchange with transparent gas.
-Pass a row-major `N*N` view-factor matrix in the same order as the surface list:
+The pure numerical kernel is also available as `GrayDiffuseEnclosure` in
+`equations/GrayDiffuseEnclosure.hh`. It takes areas, symmetric exchange areas
+$C_{ij} = A_i F_{ij}$, and patch emissivities, and retains its LAPACK factorization
+for repeated temperature evaluations. Its shifted-emission interface accepts
+$\sigma * (\bar{T^4} - T_\mathrm{ref}^4)$ and returns shifted irradiation as well as
+pairwise-conservative outward heat rates. It owns no gas or liquid state.
+Pass a row-major $N \times N$ view-factor matrix in the same order as the surface list:
 
-\[
+$$
 J_i=\epsilon_i\sigma T_i^4+(1-\epsilon_i)\sum_jF_{ij}J_j,
 \qquad Q_{rad,i}=\sum_j A_iF_{ij}(J_i-J_j).
-\]
+$$
 
-View factors must be finite, in `[0,1]`, sum to one in each row, and obey
-`A_i F_ij = A_j F_ji` (relative geometric tolerance `1e-10`). Concave walls may
-have nonzero self-view factors. Emissivities must be in `(0,1]`; a numerically
+View factors must be finite, in $[0,1]$, sum to one in each row, and obey
+$A_i F_{ij} = A_j F_{ji}$ (relative geometric tolerance $1\times 10^{-10}$). Concave walls may
+have nonzero self-view factors. Emissivities must be in $(0,1]$; a numerically
 singular radiosity system is rejected. The dense system uses Trilinos'
 `Teuchos::LAPACK` LU factorization and solve (`GETRF`/`GETRS`), with column-major
 internal storage; the public view-factor input remains row-major. An empty
@@ -127,11 +133,11 @@ Each surface reports the following rates:
 | Member | Meaning and coupling use |
 |---|---|
 | `vapor_mass_rate` | Signed water transfer, kg/s; subtract from liquid or accumulate condensate |
-| `sensible_heat_rate` | `h A (T_surface - T_air)`, W |
-| `latent_heat_rate` | `m_dot L(T_surface)`, W |
+| `sensible_heat_rate` | $ h A (T_\mathrm{surface} - T_\mathrm{air}) $, W |
+| `latent_heat_rate` | $ \dot m L(T_\mathrm{surface}) $, W |
 | `radiation_heat_rate` | Net radiation to the other surfaces, W |
 | `heat_rate` | Sensible + latent + radiation, W; use when liquid enthalpy transport is already accounted for |
-| `energy_rate` | `heat_rate + m_dot h_l(T_surface)`, W; total surface energy loss using this enthalpy reference |
+| `energy_rate` | `heat_rate` + $\dot m h_\mathrm{l}(T_\mathrm{surface})$, W; total surface energy loss using this enthalpy reference |
 
 The sum of `energy_rate` over all surfaces equals `air_energy_rate` to floating
 point accuracy. For wall condensate, the difference between `energy_rate` and
@@ -142,7 +148,7 @@ rates to the same energy balance or remove liquid enthalpy twice.
 
 `evaluate()` returns instantaneous rates without changing state. `preview(dt)`
 solves backward-Euler water-mass and gas-internal-energy balances without
-mutation; `advance(dt)` commits that result. Coefficients `h` and the film
+mutation; `advance(dt)` commits that result. Coefficients $h$ and the film
 mass-transfer conductance are frozen at the old air temperature. Vapor pressure,
 air temperature and mass are coupled implicitly. Rates in a returned step are
 the discrete rates used in its balances, not a fresh evaluation with updated
@@ -199,7 +205,7 @@ and mesh types and the following sampling modes:
 | Mode | Cavity surfaces and distribution |
 |---|---|
 | `Facewise` (default) | One surface per globally owned boundary face, retaining nonlinear evaporation and radiation |
-| `AreaAverage` | One surface per batch with `A = sum(A_f)` and `T = sum(A_f T_f)/A`; resulting extensive rates are returned to faces in proportion to area |
+| `AreaAverage` | One surface per batch with $A = \sum{A_f}$ and $T = \frac{\sum{A_f T_f}}{A}$; resulting extensive rates are returned to faces in proportion to area |
 
 Patch averaging is a modeling approximation: evaluating saturation pressure,
 natural convection, and fourth-power radiation at the mean temperature differs
@@ -210,7 +216,7 @@ Call `cavity.evaluate(input)`, `cavity.preview(dt, input)`, or
 `cavity.advance(dt, input)`. Every call reads current field values and geometry;
 constructing a batch does not freeze its field. All batch operations are
 collective, including on ranks with no local patch faces. Owned faces are
-counted exactly once. Averaged batches reduce only `sum(A)` and `sum(A*T)`;
+counted exactly once. Averaged batches reduce only $\sum A$ and $\sum A T$;
 their face IDs, areas and temperatures are never gathered globally. Facewise
 batches cache global ID ordering and local-to-global mappings, rebuilding them
 collectively when any rank's sampled face IDs/order changes. Only current areas
@@ -238,7 +244,7 @@ It includes batches even on empty ranks. Do not sum the replicated
 distributed coupling.
 
 `refresh_inner_cavity_boundary_conditions(cache, exchange, transfer)` converts
-face rates into outward heat fluxes, `q_out = rate / A`, in a mesh-bound
+face rates into outward heat fluxes, $q_\mathrm{out} = \mathrm{rate}/A$, in a mesh-bound
 `FVM::MeshBoundaryCache`. `Heat` selects `heat_rate`; `TotalEnergy` selects
 `energy_rate`. It validates face coverage, current areas and mesh identity and
 updates only the matched patches, preserving unrelated cached patches.
@@ -264,7 +270,7 @@ Overrides replace the complete
 temperature or convection condition on the selected batches; other patches
 retain their existing conditions. The physical operator uses the same effective
 conductivity, including cell or boundary overrides, to convert
-`dT/dn = -q_out/k`. Nonzero heat flux requires positive conductivity and zero
+$dT/dn = -q_\mathrm{out}/k$. Nonzero heat flux requires positive conductivity and zero
 carrier flux through the coupled face. Diffusivity-only APIs reject these
 physical flux boundaries. Passing an empty mesh-bound cache clears all flux
 overrides; replacing a solid equation's `BoundaryConditionSet` also clears them.
