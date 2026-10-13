@@ -30,7 +30,7 @@ auto CellGradientCache<Pack, MeshType>::build_geometry(
             interior_samples.clear();
             boundary_samples.clear();
             detail::visit_traverse_gradient_samples<mesh_type, IncludeBoundary>(
-                traversal.cell_faces(cell_lid), cell.geometry(), [&](auto sample)
+                traversal.cell_faces(cell), cell.geometry(), [&](auto sample)
             {
                 if constexpr (!decltype(sample)::is_interior)
                 {
@@ -91,7 +91,13 @@ template<TpetraTypePack Pack, class MeshType>
 auto CellGradientCache<Pack, MeshType>::build_snapshot() const -> std::shared_ptr<GeometrySnapshot>
 {
     auto next = std::make_shared<GeometrySnapshot>();
-    if (d_traverse_plan->uses_structured_ranges())
+    if (d_traverse_plan->uses_layered_ranges())
+    {
+        next->locations = d_geometry ? d_geometry->locations
+            : std::make_shared<const std::vector<boundary_location_type>>(detail::boundary_face_locations(*d_mesh));
+        build_layered_geometry(*next);
+    }
+    else if (d_traverse_plan->uses_structured_ranges())
     {
         if (d_geometry)
         {
@@ -113,6 +119,90 @@ auto CellGradientCache<Pack, MeshType>::build_snapshot() const -> std::shared_pt
         next->legacy_ready.store(true, std::memory_order_relaxed);
     }
     return next;
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void CellGradientCache<Pack, MeshType>::build_layered_geometry(GeometrySnapshot& next) const
+{
+    next.layered = std::make_unique<LayeredGeometry>();
+    auto& compact = *next.layered;
+    compact.layout = d_traverse_plan->layered_layout();
+    compact.rows.resize(d_mesh->num_owned_cells());
+    compact.interior.reserve(2 * compact.layout->face_count(
+        ::SimpleFluid::detail::StructuredTraverseSelection::Interior));
+    compact.boundary.reserve(compact.layout->face_count(
+        ::SimpleFluid::detail::StructuredTraverseSelection::Boundary));
+    size_t boundary_interior_capacity = 0;
+    const auto traversal = d_traverse_plan->acquire();
+    const auto build = [&]<bool IncludeBoundary>()
+    {
+        // Reused scratch grows to the largest polygon, never one allocation per cell.
+        std::vector<detail::GradientGeometrySample<mesh_type>> inner_samples, boundary_samples;
+        const auto build_cell = [&](const auto& cell)
+        {
+            const auto cell_lid = cell.id();
+            auto& row = compact.rows.at(static_cast<size_t>(cell_lid));
+            inner_samples.clear();
+            boundary_samples.clear();
+            std::array<std::array<real_t, 3>, 3> normal{};
+            detail::visit_traverse_gradient_samples<mesh_type, IncludeBoundary>(
+                traversal.cell_faces(cell), cell.geometry(), [&](auto sample)
+            {
+                if constexpr (!decltype(sample)::is_interior)
+                {
+                    if (!next.locations->at(sample.face_lid).active) return;
+                    if (d_boundary_direction)
+                        sample.direction = d_boundary_direction(sample.face_lid, cell_lid);
+                    boundary_samples.push_back(sample);
+                }
+                else inner_samples.push_back(sample);
+                const auto& direction = sample.direction;
+                normal[0][0] += direction.x * direction.x;
+                normal[0][1] += direction.x * direction.y;
+                normal[0][2] += direction.x * direction.z;
+                normal[1][1] += direction.y * direction.y;
+                normal[1][2] += direction.y * direction.z;
+                normal[2][2] += direction.z * direction.z;
+            });
+            if constexpr (IncludeBoundary)
+                if (boundary_samples.empty()) return;
+            normal[1][0] = normal[0][1];
+            normal[2][0] = normal[0][2];
+            normal[2][1] = normal[1][2];
+            const auto inverse = inverse_columns(normal);
+            auto& entries = IncludeBoundary ? compact.boundary_interior : compact.interior;
+            if constexpr (IncludeBoundary) row.boundary_interior_begin = entries.size();
+            else
+            {
+                row.interior_begin = entries.size();
+                row.interior_count = inner_samples.size();
+                if constexpr (!std::remove_cvref_t<decltype(cell)>::is_interior)
+                    boundary_interior_capacity += inner_samples.size();
+            }
+            for (const auto& sample : inner_samples)
+                entries.push_back({sample.other_lid, apply_inverse(inverse, sample.direction)});
+            if constexpr (IncludeBoundary)
+            {
+                row.boundary_begin = compact.boundary.size();
+                row.boundary_count = boundary_samples.size();
+                for (const auto& sample : boundary_samples)
+                    compact.boundary.push_back({next.locations->at(sample.face_lid),
+                        apply_inverse(inverse, sample.direction), sample.normal_distance});
+            }
+        };
+        if constexpr (IncludeBoundary) traversal.cells().boundary().apply(build_cell);
+        else
+        {
+            // Geometry rows are independent during construction. Preserve each
+            // incidence sequence and index rows by owned ID, while selecting
+            // the dedicated typed interior path without mixed cell dispatch.
+            traversal.cells().interior().apply(build_cell);
+            traversal.cells().boundary().apply(build_cell);
+        }
+    };
+    build.template operator()<false>();
+    compact.boundary_interior.reserve(boundary_interior_capacity);
+    build.template operator()<true>();
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -148,7 +238,7 @@ void CellGradientCache<Pack, MeshType>::build_structured_geometry(
             std::array<boundary_location_type, 6> selected_locations;
             std::array<std::array<real_t, 3>, 3> normal{};
             detail::visit_traverse_gradient_samples<mesh_type, IncludeBoundary>(
-                traversal.cell_faces(cell_lid), cell.geometry(), [&](auto sample)
+                traversal.cell_faces(cell), cell.geometry(), [&](auto sample)
             {
                 if constexpr (!decltype(sample)::is_interior)
                 {
@@ -231,25 +321,29 @@ void CellGradientCache<Pack, MeshType>::build_structured_geometry(
 template<TpetraTypePack Pack, class MeshType>
 void CellGradientCache<Pack, MeshType>::materialize_geometry() const
 {
-    if (!d_geometry->structured) return;
+    if (!d_geometry->structured && !d_geometry->layered) return;
     std::call_once(d_geometry->legacy_once, [&]
     {
-        const auto& compact = *d_geometry->structured;
-        std::vector<CellGeometry> interior(compact.rows.size()), boundary(compact.rows.size());
-        compact.template visit_rows<false>([&](size_t cell, const auto& row)
+        const auto materialize = [&](const auto& compact)
         {
-            interior[cell].interior_samples.reserve(row.interior_samples.size());
-            for (const auto& sample : row.interior_samples) interior[cell].interior_samples.push_back(sample);
-        });
-        compact.template visit_rows<true>([&](size_t cell, const auto& row)
-        {
-            if (row.boundary_samples.empty()) return;
-            boundary[cell].interior_samples.reserve(row.interior_samples.size());
-            for (const auto& sample : row.interior_samples) boundary[cell].interior_samples.push_back(sample);
-            boundary[cell].boundary_samples.assign(row.boundary_samples.begin(), row.boundary_samples.end());
-        });
-        d_geometry->interior = std::move(interior);
-        d_geometry->boundary = std::move(boundary);
+            std::vector<CellGeometry> interior(compact.rows.size()), boundary(compact.rows.size());
+            compact.template visit_rows<false>([&](size_t cell, const auto& row)
+            {
+                interior[cell].interior_samples.reserve(row.interior_samples.size());
+                for (const auto& sample : row.interior_samples) interior[cell].interior_samples.push_back(sample);
+            });
+            compact.template visit_rows<true>([&](size_t cell, const auto& row)
+            {
+                if (row.boundary_samples.empty()) return;
+                boundary[cell].interior_samples.reserve(row.interior_samples.size());
+                for (const auto& sample : row.interior_samples) boundary[cell].interior_samples.push_back(sample);
+                boundary[cell].boundary_samples.assign(row.boundary_samples.begin(), row.boundary_samples.end());
+            });
+            d_geometry->interior = std::move(interior);
+            d_geometry->boundary = std::move(boundary);
+        };
+        if (d_geometry->layered) materialize(*d_geometry->layered);
+        else materialize(*d_geometry->structured);
         d_geometry->legacy_ready.store(true, std::memory_order_release);
     });
 }
@@ -282,6 +376,8 @@ size_t CellGradientCache<Pack, MeshType>::numerical_storage_bytes() const noexce
     if (!d_geometry) return 0;
     size_t bytes = sizeof(*this) + sizeof(GeometrySnapshot);
     if (d_geometry->structured) return bytes + d_geometry->structured->storage_bytes();
+    if (d_geometry->layered) return bytes + d_geometry->layered->storage_bytes()
+        + d_geometry->locations->capacity() * sizeof(boundary_location_type);
     bytes += d_geometry->locations->capacity() * sizeof(boundary_location_type);
     for (const auto* rows : {&d_geometry->interior, &d_geometry->boundary})
     {

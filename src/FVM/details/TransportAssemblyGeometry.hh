@@ -199,7 +199,7 @@ TransportAssemblyGeometry<MeshType> transport_assembly_geometry(const MeshType& 
     execution.cells().all().apply([&](const auto& cell)
     {
         result.volumes.push_back(cell.volume());
-        execution.cell_faces(cell.id()).all().apply(cell.geometry(), [&](const auto& incidence)
+        execution.cell_faces(cell).all().apply(cell.geometry(), [&](const auto& incidence)
         {
             using incidence_type = std::remove_cvref_t<decltype(incidence)>;
             using access_type = std::remove_cvref_t<decltype(incidence.geometry())>;

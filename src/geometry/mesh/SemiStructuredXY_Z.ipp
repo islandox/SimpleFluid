@@ -15,6 +15,19 @@
 
 namespace SimpleFluid::Meshes
 {
+inline auto SemiStructuredXY_Z::cell_center_vector(FaceID face, CellID cell) const -> Vec3
+{
+    const auto other = opposite_cell(face, cell);
+    if (other == invalid_cell_id())
+        throw std::invalid_argument("Exterior face does not have an opposite cell.");
+    return resolved_cell_center_vector(cell, other);
+}
+
+inline auto SemiStructuredXY_Z::resolved_cell_center_vector(CellID cell, CellID other) const -> Vec3
+{
+    return cell_centroid(other) - cell_centroid(cell);
+}
+
 
 /**
  * @brief Check a base-cell ordinal and axial cell layer.

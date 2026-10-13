@@ -855,7 +855,9 @@ template<class MeshType, bool IncludeBoundary, class Faces, class Access, class 
             if (owner == Access::invalid_local_id() || neighbor == Access::invalid_local_id())
                 throw std::invalid_argument("Gradient traversal requires adjacent cells in the local cell map.");
             sample.other_lid = face.orientation() > 0 ? neighbor : owner;
-            sample.direction = access.cell_center_vector(face.id(), cell);
+            if constexpr (requires { face.cell_center_vector(); })
+                sample.direction = face.cell_center_vector();
+            else sample.direction = access.cell_center_vector(face.id(), cell);
         }
         else
         {

@@ -5,6 +5,8 @@
 
 #include "geometry/MeshHandle.hh"
 #include "geometry/details/StructuredTraverseLayout.hh"
+#include "geometry/details/LayeredTraverseLayout.hh"
+#include <memory>
 
 #include <cstddef>
 #include <limits>
@@ -82,6 +84,24 @@ public:
                 return StructuredTraverseLayout(indexer);
         }
         return std::nullopt;
+    }
+
+    std::shared_ptr<const LayeredTraverseLayout> layered_layout() const
+    {
+        if constexpr (has_layered_traverse_layout<GeometryMesh>)
+        {
+            if constexpr (traverse_is_handle<PublicMesh>)
+            {
+                if (!d_mesh.d_serial_identity || !d_mesh.d_cell_geometry_lids.empty()) return {};
+            }
+            else if constexpr (!std::is_same_v<PublicMesh, GeometryMesh>) return {};
+            const auto& indexer = d_geometry.indexer();
+            if (indexer.num_cells_per_layer && indexer.num_layers
+                && d_num_cells == indexer.total_cells() && d_num_faces == indexer.total_faces()
+                && d_mesh.num_owned_cells() == d_num_cells && d_mesh.num_owned_faces() == d_num_faces)
+                return std::make_shared<const LayeredTraverseLayout>(d_geometry.topology());
+        }
+        return {};
     }
 
     bool is_owned_cell(size_t cell) const
@@ -425,6 +445,82 @@ private:
 template<class Access> inline constexpr bool is_structured_traverse_access = false;
 template<class Access>
 inline constexpr bool is_structured_traverse_access<StructuredTraverseAccess<Access>> = true;
+
+/** Distinct tag: polygonal prisms never enter the orthogonal six-face kernel. */
+template<class Access>
+class LayeredTraverseAccess : public Access
+{
+public:
+    using mesh_type = typename Access::mesh_type;
+    using geometry_type = typename Access::geometry_type;
+    using local_ordinal_type = typename Access::local_ordinal_type;
+    using Vec3 = typename Access::Vec3;
+
+    static_assert(has_layered_traverse_layout<geometry_type>);
+    static_assert(traverse_is_handle<mesh_type> || std::is_same_v<mesh_type, geometry_type>);
+
+    explicit LayeredTraverseAccess(const Access& access) : Access(access) {}
+
+    local_ordinal_type owner_cell(size_t face) const
+    {
+        const auto& geometry = this->geometry_provider();
+        return canonical_field_cell(geometry.topology().owner_cell(canonical_face_id(face)));
+    }
+
+    local_ordinal_type neighbor_cell(size_t face) const
+    {
+        const auto& geometry = this->geometry_provider();
+        return canonical_field_cell(geometry.topology().neighbor_cell(canonical_face_id(face)));
+    }
+
+    Vec3 cell_center_vector(size_t face, size_t cell) const
+    {
+        // Keep provider arithmetic, adjacency checks, and layered periodic
+        // image displacements exactly as in the ordinary geometry query.
+        return this->geometry_provider().cell_center_vector(
+            canonical_face_id(face), canonical_cell_id(cell));
+    }
+
+    Vec3 resolved_cell_center_vector(typename geometry_type::cell_id_t cell,
+        typename geometry_type::cell_id_t other) const
+    {
+        return this->geometry_provider().resolved_cell_center_vector(cell, other);
+    }
+
+    auto resolve_incidence(const LayeredTraverseLayout::Incidences& faces, size_t slot) const
+    {
+        // Borrow topology through the active geometry access, never the retained layout.
+        return faces.resolved(slot, this->geometry_provider().topology());
+    }
+
+private:
+    typename geometry_type::cell_id_t canonical_cell_id(size_t cell) const
+    {
+        if (cell >= this->num_cells())
+            throw std::out_of_range("Mesh traverse cell ordinal is out of range.");
+        return this->geometry_provider().indexer().cell_id(cell);
+    }
+
+    typename geometry_type::face_id_t canonical_face_id(size_t face) const
+    {
+        if (face >= this->num_faces())
+            throw std::out_of_range("Mesh traverse face ordinal is out of range.");
+        return this->geometry_provider().indexer().face_id(face);
+    }
+
+    local_ordinal_type canonical_field_cell(typename geometry_type::cell_id_t cell) const
+    {
+        if (cell == geometry_type::invalid_cell_id()) return Access::invalid_local_id();
+        // A valid face's topology query returns a valid canonical cell or the
+        // sentinel above. Plan construction already checked ordinal capacity,
+        // so neither field-map lookup nor another geometry bounds check is
+        // needed to convert this topology-produced identifier.
+        return static_cast<local_ordinal_type>(this->geometry_provider().indexer().cell_ordinal(cell));
+    }
+};
+
+template<class Access> inline constexpr bool is_layered_traverse_access = false;
+template<class Access> inline constexpr bool is_layered_traverse_access<LayeredTraverseAccess<Access>> = true;
 
 /** @brief Dispatch a runtime mesh once, outside all batch numerical loops. */
 template<class Mesh, class Visitor>

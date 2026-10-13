@@ -143,6 +143,15 @@ template<class Mesh> auto mesh_traverse_counts(const Mesh& mesh)
     return std::array<size_t, 4>{mesh.num_local_cells(), mesh.num_faces(),
                                 mesh.num_owned_cells(), owned_faces};
 }
+template<bool Cell> struct TraverseCellOrigin
+{
+    explicit TraverseCellOrigin(const void* = nullptr) {}
+};
+template<> struct TraverseCellOrigin<true>
+{
+    const void* plan;
+    explicit TraverseCellOrigin(const void* source = nullptr) : plan(source) {}
+};
 } // namespace detail
 
 /**
@@ -162,8 +171,8 @@ public:
     static constexpr MeshTraverseEntity entity = Entity;
 
     MeshTraverseRef(const Access& access, local_ordinal_type id, int batch = -1,
-                 local_ordinal_type cell = {}, int orientation = 1)
-        : d_access(&access), d_id(id), d_batch(batch), d_cell(cell), d_orientation(orientation) {}
+                 local_ordinal_type cell = {}, int orientation = 1, const void* origin_plan = nullptr)
+        : d_access(&access), d_id(id), d_batch(batch), d_cell(cell), d_orientation(orientation), d_origin(origin_plan) {}
 
     local_ordinal_type id() const noexcept { return d_id; }
     auto centroid() const
@@ -182,6 +191,7 @@ public:
     int orientation() const requires Incidence { return d_orientation; }
     auto outward_normal() const requires Incidence { return normal() * d_orientation; }
     const Access& geometry() const noexcept { return *d_access; }
+    const void* origin_plan() const noexcept requires (Entity == MeshTraverseEntity::Cell) { return d_origin.plan; }
 
 private:
     const Access* d_access;
@@ -189,6 +199,34 @@ private:
     int d_batch;
     local_ordinal_type d_cell;
     int d_orientation;
+    [[no_unique_address]] detail::TraverseCellOrigin<Entity == MeshTraverseEntity::Cell> d_origin;
+};
+
+/** Layered incidence with resolved topology IDs and live provider geometry. */
+template<class Access, bool Interior>
+class LayeredIncidenceRef : public MeshTraverseRef<Access, MeshTraverseEntity::Face, Interior, true>
+{
+    using Base = MeshTraverseRef<Access, MeshTraverseEntity::Face, Interior, true>;
+public:
+    using local_ordinal_type = typename Access::local_ordinal_type;
+    using CellID = detail::LayeredTraverseLayout::Indexer::CellID;
+    LayeredIncidenceRef(const Access& access, const detail::LayeredTraverseLayout::ResolvedIncidence& face,
+        local_ordinal_type cell)
+        : Base(access, static_cast<local_ordinal_type>(face.incidence.face), face.incidence.batch, cell, face.incidence.orientation),
+          d_owner(local(face.owner)), d_neighbor(local(face.neighbor)), d_cell(face.cell), d_other(face.other) {}
+    local_ordinal_type owner() const noexcept { return d_owner; }
+    local_ordinal_type neighbor() const noexcept requires Interior { return d_neighbor; }
+    auto cell_center_vector() const requires Interior
+    {
+        if (d_owner == Access::invalid_local_id() || d_neighbor == Access::invalid_local_id())
+            throw std::invalid_argument("Exterior face does not have an opposite cell.");
+        return this->geometry().resolved_cell_center_vector(d_cell, d_other);
+    }
+private:
+    static local_ordinal_type local(size_t ordinal)
+    { return ordinal == detail::LayeredTraverseLayout::invalid_ordinal ? Access::invalid_local_id() : static_cast<local_ordinal_type>(ordinal); }
+    local_ordinal_type d_owner, d_neighbor;
+    CellID d_cell, d_other;
 };
 
 /**
@@ -208,8 +246,8 @@ public:
 
     MeshTraverseBatch(const Access& access, std::span<const detail::MeshTraverseRun> runs,
         std::span<const detail::MeshTraverseIncidence<local_ordinal_type>> incidence = {},
-        local_ordinal_type cell = {})
-        : d_access(&access), d_runs(runs), d_incidence(incidence), d_cell(cell) {}
+        local_ordinal_type cell = {}, const void* origin_plan = nullptr)
+        : d_access(&access), d_runs(runs), d_incidence(incidence), d_cell(cell), d_origin(origin_plan) {}
 
     size_t size() const noexcept
     {
@@ -232,12 +270,17 @@ public:
                     else
                         operation(reference(*d_access, face.face, run.batch, d_cell, face.orientation));
                 }
+                else if constexpr (Entity == MeshTraverseEntity::Cell)
+                {
+                    if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Operation>>)
+                        std::invoke(operation, reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch, {}, 1, d_origin.plan));
+                    else operation(reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch, {}, 1, d_origin.plan));
+                }
                 else
                 {
                     if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Operation>>)
                         std::invoke(operation, reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch));
-                    else
-                        operation(reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch));
+                    else operation(reference(*d_access, static_cast<local_ordinal_type>(ordinal), run.batch));
                 }
             }
     }
@@ -247,6 +290,7 @@ private:
     std::span<const detail::MeshTraverseRun> d_runs;
     std::span<const detail::MeshTraverseIncidence<local_ordinal_type>> d_incidence;
     local_ordinal_type d_cell;
+    [[no_unique_address]] detail::TraverseCellOrigin<Entity == MeshTraverseEntity::Cell> d_origin;
 };
 
 /**
@@ -281,6 +325,8 @@ public:
         {
             d_structured = access.structured_layout();
             if (d_structured) return;
+            d_layered = access.layered_layout();
+            if (d_layered) return;
             if (entities != MeshTraverseEntities::Faces)
                 for (size_t cell = 0; cell < d_counts[0]; ++cell)
                 {
@@ -326,6 +372,9 @@ public:
     MeshTraverseEntities entities() const noexcept { return d_entities; }
     bool uses_structured_ranges() const noexcept { return d_structured.has_value(); }
 
+    bool uses_layered_ranges() const noexcept { return bool(d_layered); }
+    const std::shared_ptr<const detail::LayeredTraverseLayout>& layered_layout() const noexcept { return d_layered; }
+
     /** Explicitly reject further use before editing topology in place. */
     void invalidate() noexcept { d_valid = false; }
     void require_valid() const
@@ -343,6 +392,7 @@ public:
         for (const auto& schedule : d_cells) bytes += schedule.storage_bytes();
         for (const auto& schedule : d_faces) bytes += schedule.storage_bytes();
         for (const auto& schedule : d_cell_faces) bytes += schedule.storage_bytes();
+        if (d_layered) bytes += d_layered->storage_bytes();
         return bytes;
     }
 
@@ -356,9 +406,82 @@ private:
     std::array<size_t, 4> d_counts{};
     std::array<const void*, 5> d_binding{};
     std::optional<detail::StructuredTraverseLayout> d_structured;
+    std::shared_ptr<const detail::LayeredTraverseLayout> d_layered;
     std::array<detail::MeshTraverseSchedule, 2> d_cells, d_faces;
     std::vector<detail::MeshTraverseSchedule> d_cell_faces;
     std::vector<detail::MeshTraverseIncidence<local_ordinal_type>> d_incidence;
+};
+
+/** Direct interior incidences from a same-plan typed cell proof. */
+template<class Mesh, class Access, MeshTraverseSelection Selection = MeshTraverseSelection::All>
+class LayeredInteriorCellFaces
+{
+public:
+    using local_ordinal_type = typename Mesh::local_ordinal_type;
+    using reference = LayeredIncidenceRef<Access, true>;
+    static constexpr bool is_layered_interior_range = true;
+    static constexpr bool is_interior = true;
+    static constexpr MeshTraverseEntity entity = MeshTraverseEntity::Face;
+    auto all() const { return select<MeshTraverseSelection::All>(); }
+    auto interior() const { return select<MeshTraverseSelection::Interior>(); }
+    auto boundary() const { return select<MeshTraverseSelection::Boundary>(); }
+    auto boundary(int) const { return boundary(); }
+    auto independent() const { return *this; }
+    size_t size() const { d_plan->require_valid(); if constexpr (Selection == MeshTraverseSelection::Boundary) return 0; else return d_faces.size(); }
+    bool empty() const { return size() == 0; }
+    void require_local_adjacency() const
+    {
+        // This proof is available only for a canonical, fully local layout.
+        // Physical interior classification therefore proves both adjacent IDs.
+        validate(*d_access);
+    }
+    template<class Operation> void apply(Operation&& operation) const
+    { apply(*d_access, std::forward<Operation>(operation)); }
+    template<class Operation>
+    [[gnu::always_inline]] void apply(const Access& access, Operation&& operation) const
+    {
+        validate(access);
+        if constexpr (Selection != MeshTraverseSelection::Boundary)
+            for (size_t slot = 0; slot < d_faces.size(); ++slot)
+            {
+                const auto face = access.resolve_incidence(d_faces, slot);
+                if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Operation>>)
+                    std::invoke(operation, reference(access, face, d_cell));
+                else operation(reference(access, face, d_cell));
+            }
+    }
+    template<class Visitor> void visit_batches(Visitor&& visitor) const
+    { visit_batches(*d_access, std::forward<Visitor>(visitor)); }
+    template<class Visitor> void visit_batches(const Access& access, Visitor&& visitor) const
+    {
+        validate(access);
+        if constexpr (Selection != MeshTraverseSelection::Boundary)
+        {
+            if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Visitor>>)
+                std::invoke(visitor, LayeredInteriorCellFaces(d_plan, &access, d_cell, d_faces));
+            else visitor(LayeredInteriorCellFaces(d_plan, &access, d_cell, d_faces));
+        }
+    }
+private:
+    friend class MeshTraverseExecution<Mesh>;
+    template<class, class, MeshTraverseSelection> friend class LayeredInteriorCellFaces;
+    LayeredInteriorCellFaces(const MeshTraversePlan<Mesh>& plan, const Access& access, local_ordinal_type cell)
+        : d_plan(&plan), d_access(&access), d_cell(cell), d_faces(plan.layered_layout()->cell_faces(cell)) {}
+    LayeredInteriorCellFaces(const MeshTraversePlan<Mesh>* plan, const Access* access,
+        local_ordinal_type cell, detail::LayeredTraverseLayout::Incidences faces)
+        : d_plan(plan), d_access(access), d_cell(cell), d_faces(faces) {}
+    template<MeshTraverseSelection Next> auto select() const
+    { return LayeredInteriorCellFaces<Mesh, Access, Next>(d_plan, d_access, d_cell, d_faces); }
+    void validate(const Access& access) const
+    {
+        d_plan->require_valid();
+        if (&access.mesh() != &d_plan->mesh())
+            throw std::invalid_argument("Mesh traverse access belongs to another mesh.");
+    }
+    const MeshTraversePlan<Mesh>* d_plan;
+    const Access* d_access;
+    local_ordinal_type d_cell;
+    detail::LayeredTraverseLayout::Incidences d_faces;
 };
 
 /** A synchronous, nonmovable geometry lease; no field synchronization is implicit. */
@@ -387,17 +510,38 @@ public:
     CellFaceBatchProxy<Mesh> cell_faces(typename Mesh::local_ordinal_type cell) const &
     {
         d_plan->require_valid();
-        if (d_plan->d_entities != MeshTraverseEntities::AllWithCellFaces)
-            throw std::logic_error("Cell-face traverses require an AllWithCellFaces plan.");
-        if (static_cast<size_t>(cell) >= d_plan->d_counts[0])
-            throw std::out_of_range("Mesh traverse cell ID is out of range.");
+        require_cell_faces_id(cell);
         return CellFaceBatchProxy<Mesh>(*this, cell);
     }
+    template<class Access, bool Interior>
+        requires std::is_same_v<typename Access::mesh_type, Mesh>
+    auto cell_faces(const MeshTraverseRef<Access, MeshTraverseEntity::Cell, Interior>& cell) const &
+    {
+        d_plan->require_valid();
+        if (&cell.geometry().mesh() != &d_plan->mesh() || cell.origin_plan() != d_plan)
+            throw std::invalid_argument("Mesh traverse cell proof belongs to another plan or mesh.");
+        require_cell_faces_id(cell.id());
+        if constexpr (Interior && detail::is_layered_traverse_access<Access>)
+        {
+            if (!d_plan->d_layered) throw std::invalid_argument("Layered cell proof requires a layered plan.");
+            return LayeredInteriorCellFaces<Mesh, Access>(*d_plan, cell.geometry(), cell.id());
+        }
+        else return CellFaceBatchProxy<Mesh>(*this, cell.id());
+    }
+    template<class Access, bool Interior>
+    auto cell_faces(const MeshTraverseRef<Access, MeshTraverseEntity::Cell, Interior>&) const && = delete;
     CellBatchProxy<Mesh> cells() const && = delete;
     FaceBatchProxy<Mesh> faces() const && = delete;
     CellFaceBatchProxy<Mesh> cell_faces(typename Mesh::local_ordinal_type) const && = delete;
 
 private:
+    void require_cell_faces_id(typename Mesh::local_ordinal_type cell) const
+    {
+        if (d_plan->d_entities != MeshTraverseEntities::AllWithCellFaces)
+            throw std::logic_error("Cell-face traverses require an AllWithCellFaces plan.");
+        if (static_cast<size_t>(cell) >= d_plan->d_counts[0])
+            throw std::out_of_range("Mesh traverse cell ID is out of range.");
+    }
     friend class MeshTraversePlan<Mesh>;
     template<class, MeshTraverseEntity, MeshTraverseSelection, MeshTraverseOwnership, bool> friend class MeshBatchProxy;
     explicit MeshTraverseExecution(const MeshTraversePlan<Mesh>& plan)
@@ -459,6 +603,19 @@ public:
             else
                 return layout.face_count(structured_selection(), structured_batch());
         }
+        if (plan.d_layered)
+        {
+            const auto& layout = *plan.d_layered;
+            if constexpr (Incidence)
+            {
+                size_t count = 0;
+                for (const auto face : layout.cell_faces(static_cast<size_t>(d_cell)))
+                    if (structured_selected(face.interior, face.batch)) ++count;
+                return count;
+            }
+            else if constexpr (Entity == MeshTraverseEntity::Cell) return layout.cell_count(structured_selection());
+            else return layout.face_count(structured_selection(), structured_batch());
+        }
         size_t count = 0;
         for (const auto& run : selected_runs()) count += run.end - run.begin;
         return count;
@@ -501,7 +658,12 @@ public:
         plan.require_valid();
         if (&access.mesh() != &plan.mesh())
             throw std::invalid_argument("Mesh traverse access belongs to another mesh.");
-        if constexpr (detail::is_structured_traverse_access<Access>)
+        if constexpr (detail::is_layered_traverse_access<Access>)
+        {
+            if (!plan.d_layered) throw std::invalid_argument("Layered access requires a layered plan.");
+            visit_layered_batches(access, visitor, *plan.d_layered);
+        }
+        else if constexpr (detail::is_structured_traverse_access<Access>)
         {
             if (!plan.d_structured)
                 throw std::invalid_argument("Structured traverse access requires a structured plan.");
@@ -520,11 +682,22 @@ public:
                     return;
                 }
             }
+            if constexpr (detail::has_layered_traverse_layout<typename Access::geometry_type>
+                && (detail::traverse_is_handle<typename Access::mesh_type>
+                    || std::is_same_v<typename Access::mesh_type, typename Access::geometry_type>))
+            {
+                if (plan.d_layered)
+                {
+                    const detail::LayeredTraverseAccess<Access> layered(access);
+                    visit_layered_batches(layered, visitor, *plan.d_layered);
+                    return;
+                }
+            }
             const auto emit = [&]<bool Interior>(std::span<const detail::MeshTraverseRun> runs)
             {
                 if (!runs.empty())
                     std::invoke(visitor, MeshTraverseBatch<Access, Entity, Interior, Incidence>(
-                        access, runs, plan.d_incidence, d_cell));
+                        access, runs, plan.d_incidence, d_cell, &plan));
             };
             const auto& schedule = selected_schedule();
             if constexpr (Selection == MeshTraverseSelection::Interior)
@@ -625,7 +798,7 @@ private:
                 {
                     const detail::MeshTraverseRun run{0, faces.size(), true, -1};
                     std::invoke(visitor, MeshTraverseBatch<Access, Entity, true, Incidence>(
-                        access, {&run, 1}, incidence, d_cell));
+                        access, {&run, 1}, incidence, d_cell, d_execution->d_plan));
                 }
                 return;
             }
@@ -649,7 +822,7 @@ private:
                     const auto emit = [&]<bool Interior>()
                     {
                         std::invoke(visitor, MeshTraverseBatch<Access, Entity, Interior, Incidence>(
-                            access, {&runs[i], 1}, incidence, d_cell));
+                            access, {&runs[i], 1}, incidence, d_cell, d_execution->d_plan));
                     };
                     if constexpr (Selection == MeshTraverseSelection::Interior)
                         emit.template operator()<true>();
@@ -680,7 +853,7 @@ private:
                     structured.begin, structured.end, structured.interior, structured.batch};
                 const auto emit = [&]<bool Interior>()
                 {
-                    std::invoke(visitor, MeshTraverseBatch<Access, Entity, Interior, Incidence>(access, {&run, 1}));
+                    std::invoke(visitor, MeshTraverseBatch<Access, Entity, Interior, Incidence>(access, {&run, 1}, {}, {}, d_execution->d_plan));
                 };
                 if constexpr (Selection == MeshTraverseSelection::Interior)
                     emit.template operator()<true>();
@@ -693,6 +866,69 @@ private:
                 layout.visit_cells(structured_selection(), d_independent, emit_run);
             else
                 layout.visit_faces(structured_selection(), d_independent, structured_batch(), emit_run);
+        }
+    }
+    template<class Access, bool Interior> class LayeredIncidenceBatch
+    {
+    public:
+        using reference = LayeredIncidenceRef<Access, Interior>;
+        static constexpr bool is_interior = Interior;
+        static constexpr MeshTraverseEntity entity = Entity;
+        LayeredIncidenceBatch(const Access& access, detail::LayeredTraverseLayout::Incidences faces,
+            size_t begin, size_t end, local_ordinal_type cell)
+            : d_access(&access), d_faces(faces), d_begin(begin), d_end(end), d_cell(cell) {}
+        size_t size() const noexcept { return d_end-d_begin; }
+        bool empty() const noexcept { return size()==0; }
+        template<class Operation> void apply(Operation&& operation) const
+        {
+            for (size_t i=d_begin; i<d_end; ++i)
+            {
+                const auto face=d_access->resolve_incidence(d_faces, i);
+                if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Operation>>)
+                    std::invoke(operation, reference(*d_access, face, d_cell));
+                else operation(reference(*d_access, face, d_cell));
+            }
+        }
+    private:
+        const Access* d_access;
+        detail::LayeredTraverseLayout::Incidences d_faces;
+        size_t d_begin,d_end;
+        local_ordinal_type d_cell;
+    };
+    template<class Access, class Visitor>
+    void visit_layered_batches(const Access& access, Visitor&& visitor,
+        const detail::LayeredTraverseLayout& layout) const
+    {
+        if constexpr (Incidence)
+        {
+            const auto faces=layout.cell_faces(static_cast<size_t>(d_cell));
+            faces.visit_runs(structured_selection(), d_independent, structured_batch(),
+                [&](const detail::StructuredTraverseRun& run)
+                {
+                    if constexpr (Selection == MeshTraverseSelection::Interior)
+                        std::invoke(visitor, LayeredIncidenceBatch<Access, true>(access, faces, run.begin, run.end, d_cell));
+                    else if constexpr (Selection == MeshTraverseSelection::Boundary)
+                        std::invoke(visitor, LayeredIncidenceBatch<Access, false>(access, faces, run.begin, run.end, d_cell));
+                    else if (run.interior)
+                        std::invoke(visitor, LayeredIncidenceBatch<Access, true>(access, faces, run.begin, run.end, d_cell));
+                    else
+                        std::invoke(visitor, LayeredIncidenceBatch<Access, false>(access, faces, run.begin, run.end, d_cell));
+                });
+        }
+        else
+        {
+            const auto emit_run=[&](const detail::StructuredTraverseRun& source)
+            {
+                const detail::MeshTraverseRun run{source.begin,source.end,source.interior,source.batch};
+                if constexpr (Selection == MeshTraverseSelection::Interior)
+                    std::invoke(visitor,MeshTraverseBatch<Access,Entity,true>(access,{&run,1},{},{},d_execution->d_plan));
+                else if constexpr (Selection == MeshTraverseSelection::Boundary)
+                    std::invoke(visitor,MeshTraverseBatch<Access,Entity,false>(access,{&run,1},{},{},d_execution->d_plan));
+                else if (source.interior) std::invoke(visitor,MeshTraverseBatch<Access,Entity,true>(access,{&run,1},{},{},d_execution->d_plan));
+                else std::invoke(visitor,MeshTraverseBatch<Access,Entity,false>(access,{&run,1},{},{},d_execution->d_plan));
+            };
+            if constexpr (Entity == MeshTraverseEntity::Cell) layout.visit_cells(structured_selection(),d_independent,emit_run);
+            else layout.visit_faces(structured_selection(),d_independent,structured_batch(),emit_run);
         }
     }
     template<MeshTraverseSelection Next> auto select() const
