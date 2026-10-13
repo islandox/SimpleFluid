@@ -94,6 +94,74 @@ template<class Mesh> inline void MeshTraversePlan<Mesh>::invalidate() noexcept
 
 template<class Mesh, class Access, MeshTraverseSelection Selection>
 template<class Operation>
+inline void StructuredInteriorCellFaces<Mesh, Access, Selection>::apply(Operation&& operation) const
+{
+    apply(*d_access, std::forward<Operation>(operation));
+}
+
+template<class Mesh, class Access, MeshTraverseSelection Selection>
+template<class Operation>
+inline void StructuredInteriorCellFaces<Mesh, Access, Selection>::apply(
+    const Access& access, Operation&& operation) const
+{
+    validate(access);
+    if constexpr (Selection != MeshTraverseSelection::Boundary)
+    {
+        // Keep selectors cheap: the six-face scratch belongs to this apply,
+        // rather than being copied along with each borrowed range value.
+        const auto faces = d_layout->cell_faces(static_cast<size_t>(d_cell));
+        for (const auto& face : faces)
+        {
+            if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Operation>>)
+                std::invoke(operation, reference(access, static_cast<local_ordinal_type>(face.face), -1,
+                                           d_cell, face.orientation));
+            else
+                operation(reference(access, static_cast<local_ordinal_type>(face.face), -1,
+                    d_cell, face.orientation));
+        }
+    }
+}
+
+template<class Mesh, class Access, MeshTraverseSelection Selection>
+template<class Visitor>
+inline void StructuredInteriorCellFaces<Mesh, Access, Selection>::visit_batches(Visitor&& visitor) const
+{
+    visit_batches(*d_access, std::forward<Visitor>(visitor));
+}
+
+template<class Mesh, class Access, MeshTraverseSelection Selection>
+template<class Visitor>
+inline void StructuredInteriorCellFaces<Mesh, Access, Selection>::visit_batches(
+    const Access& access, Visitor&& visitor) const
+{
+    validate(access);
+    if constexpr (Selection != MeshTraverseSelection::Boundary)
+    {
+        if constexpr (std::is_member_pointer_v<std::remove_cvref_t<Visitor>>)
+            std::invoke(visitor, StructuredInteriorCellFaces(d_plan, &access, d_cell, d_layout));
+        else
+            visitor(StructuredInteriorCellFaces(d_plan, &access, d_cell, d_layout));
+    }
+}
+
+template<class Mesh, class Access, MeshTraverseSelection Selection>
+inline StructuredInteriorCellFaces<Mesh, Access, Selection>::StructuredInteriorCellFaces(
+    const MeshTraversePlan<Mesh>& plan, const Access& access, local_ordinal_type cell,
+    const detail::StructuredTraverseLayout& layout)
+    : d_plan(&plan), d_access(&access), d_layout(&layout), d_cell(cell)
+{
+}
+
+template<class Mesh, class Access, MeshTraverseSelection Selection>
+inline StructuredInteriorCellFaces<Mesh, Access, Selection>::StructuredInteriorCellFaces(
+    const MeshTraversePlan<Mesh>* plan, const Access* access, local_ordinal_type cell,
+    const detail::StructuredTraverseLayout* layout)
+    : d_plan(plan), d_access(access), d_layout(layout), d_cell(cell)
+{
+}
+
+template<class Mesh, class Access, MeshTraverseSelection Selection>
+template<class Operation>
 inline void LayeredInteriorCellFaces<Mesh, Access, Selection>::apply(Operation&& operation) const
 {
     apply(*d_access, std::forward<Operation>(operation));
@@ -162,7 +230,14 @@ inline auto MeshTraverseExecution<Mesh>::cell_faces(
     if (&cell.geometry().mesh() != &d_plan->mesh() || cell.origin_plan() != d_plan)
         throw std::invalid_argument("Mesh traverse cell proof belongs to another plan or mesh.");
     require_cell_faces_id(cell.id());
-    if constexpr (Interior && detail::is_layered_traverse_access<Access>)
+    if constexpr (Interior && detail::is_structured_traverse_access<Access>)
+    {
+        if (!d_plan->d_structured)
+            throw std::invalid_argument("Structured cell proof requires a structured plan.");
+        return StructuredInteriorCellFaces<Mesh, Access>(
+            *d_plan, cell.geometry(), cell.id(), *d_plan->d_structured);
+    }
+    else if constexpr (Interior && detail::is_layered_traverse_access<Access>)
     {
         if (!d_plan->d_layered)
             throw std::invalid_argument("Layered cell proof requires a layered plan.");

@@ -326,6 +326,7 @@ private:
     void materialize_geometry() const;
     void materialize_locations() const;
     std::shared_ptr<GeometrySnapshot> build_snapshot() const;
+    void build_region_geometry(GeometrySnapshot& next) const;
     void build_layered_geometry(GeometrySnapshot& next) const;
     void build_structured_geometry(GeometrySnapshot& next,
         const std::vector<boundary_location_type>* locations) const;

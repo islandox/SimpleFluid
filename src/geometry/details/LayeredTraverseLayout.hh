@@ -106,6 +106,8 @@ public:
     void visit_faces(
         StructuredTraverseSelection selection, bool independent, std::optional<int> batch, Visitor&& visit) const;
     size_t cell_count(StructuredTraverseSelection selection) const noexcept;
+    /** Number of all face incidences belonging to the selected cells. */
+    size_t cell_incidence_count(StructuredTraverseSelection selection) const noexcept;
     size_t face_count(StructuredTraverseSelection selection, std::optional<int> batch = {}) const noexcept;
     std::span<const StructuredTraverseRun> xy_interior_cell_runs() const noexcept { return d_interior_cells; }
     const std::vector<int>& boundary_ids() const noexcept { return d_batches; }

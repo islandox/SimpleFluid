@@ -361,6 +361,64 @@ private:
     std::vector<detail::MeshTraverseIncidence<local_ordinal_type>> d_incidence;
 };
 
+/** Direct six-face incidences from a same-plan structured interior cell proof. */
+template<class Mesh, class Access, MeshTraverseSelection Selection = MeshTraverseSelection::All>
+class StructuredInteriorCellFaces
+{
+public:
+    using local_ordinal_type = typename Mesh::local_ordinal_type;
+    using reference = MeshTraverseRef<Access, MeshTraverseEntity::Face, true, true>;
+    static constexpr bool is_structured_interior_range = true;
+    static constexpr bool is_interior = true;
+    static constexpr MeshTraverseEntity entity = MeshTraverseEntity::Face;
+    auto all() const { return select<MeshTraverseSelection::All>(); }
+    auto interior() const { return select<MeshTraverseSelection::Interior>(); }
+    auto boundary() const { return select<MeshTraverseSelection::Boundary>(); }
+    auto boundary(int) const { return boundary(); }
+    auto independent() const { return *this; }
+    size_t size() const
+    {
+        d_plan->require_valid();
+        if constexpr (Selection == MeshTraverseSelection::Boundary)
+            return 0;
+        else
+            return 6;
+    }
+    bool empty() const { return size() == 0; }
+    void require_local_adjacency() const
+    {
+        // Canonical structured plans cover the full provider, so the typed
+        // interior-cell proof also guarantees both adjacent local ordinals.
+        validate(*d_access);
+    }
+    template<class Operation> void apply(Operation&& operation) const;
+    template<class Operation> void apply(const Access& access, Operation&& operation) const;
+    template<class Visitor> void visit_batches(Visitor&& visitor) const;
+    template<class Visitor> void visit_batches(const Access& access, Visitor&& visitor) const;
+
+private:
+    friend class MeshTraverseExecution<Mesh>;
+    template<class, class, MeshTraverseSelection> friend class StructuredInteriorCellFaces;
+    StructuredInteriorCellFaces(const MeshTraversePlan<Mesh>& plan, const Access& access,
+        local_ordinal_type cell, const detail::StructuredTraverseLayout& layout);
+    StructuredInteriorCellFaces(const MeshTraversePlan<Mesh>* plan, const Access* access, local_ordinal_type cell,
+        const detail::StructuredTraverseLayout* layout);
+    template<MeshTraverseSelection Next> auto select() const
+    {
+        return StructuredInteriorCellFaces<Mesh, Access, Next>(d_plan, d_access, d_cell, d_layout);
+    }
+    void validate(const Access& access) const
+    {
+        d_plan->require_valid();
+        if (&access.mesh() != &d_plan->mesh())
+            throw std::invalid_argument("Mesh traverse access belongs to another mesh.");
+    }
+    const MeshTraversePlan<Mesh>* d_plan;
+    const Access* d_access;
+    const detail::StructuredTraverseLayout* d_layout;
+    local_ordinal_type d_cell;
+};
+
 /** Direct interior incidences from a same-plan typed cell proof. */
 template<class Mesh, class Access, MeshTraverseSelection Selection = MeshTraverseSelection::All>
 class LayeredInteriorCellFaces
