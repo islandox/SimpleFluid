@@ -1,4 +1,9 @@
 #include "test_helpers.hh"
+#include "geometry/SolidSubdomain.hh"
+
+#include <array>
+#include <future>
+#include <latch>
 
 TEST(MeshTraverseTest, SelectionsCoverCellsAndFacesAndDeduplicateBoundaryCorners)
 {
@@ -293,6 +298,69 @@ TEST(MeshTraverseTest, LegacyAndPartitionedWrappersExposeFieldOrdinalsAndGeometr
     for (size_t n = 0; n < native->num_nodes(); ++n) nodes.push_back(native->node_id(n));
     Partitioned partition(native, Indexer(std::move(cells), {}, std::move(faces), {}, std::move(nodes)));
     check(partition);
+}
+
+TEST(MeshTraverseTest, ConcurrentValidationPreservesMapOwnership)
+{
+    if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Requires serial fixtures.";
+    const auto check = [](const auto& mesh)
+    {
+        // Keep owning references on the calling thread. Concurrent validation
+        // must neither copy these non-atomic owners nor change their counts.
+        const auto& map_mesh = [&]() -> const auto&
+        {
+            if constexpr (requires { mesh.owned_cell_map(); }) return mesh;
+            else return mesh.mesh(); // STK adapter delegates to a legacy mesh.
+        }();
+        const std::array<Teuchos::RCP<const Pack::map_type>, 3> maps{
+            map_mesh.owned_cell_map(), map_mesh.overlap_cell_map(), map_mesh.owned_face_map()};
+        const auto counts = [&]
+        { return std::array{maps[0].strong_count(), maps[1].strong_count(), maps[2].strong_count()}; };
+        const auto before = counts();
+        const auto plan = make_mesh_traverse_plan(mesh);
+        const auto binding = detail::mesh_traverse_binding(mesh);
+        std::latch start(1);
+        std::vector<std::future<bool>> readers;
+        for (size_t reader = 0; reader < 6; ++reader)
+            readers.push_back(std::async(std::launch::async, [&]
+            {
+                start.wait();
+                for (size_t iteration = 0; iteration < 1000; ++iteration)
+                {
+                    plan.require_valid();
+                    if (detail::mesh_traverse_binding(mesh) != binding) return false;
+                }
+                return true;
+            }));
+        start.count_down();
+        for (auto& reader : readers) EXPECT_TRUE(reader.get());
+        EXPECT_EQ(counts(), before);
+    };
+    Handle native(cartesian(3, 3, 3));
+    check(native);
+    const auto legacy = test::build_mesh<Pack>(test::make_two_hex_database());
+    check(*legacy);
+    Handle legacy_handle(legacy);
+    check(legacy_handle);
+    // The adapter has no map getters; its owned-face count still needs to
+    // borrow the legacy map during validation.
+    const Meshes::STKMeshAdapter<Pack> adapter(legacy);
+    check(adapter);
+
+    using Partitioned = Meshes::PartitionedMesh<Meshes::UnstructuredMesh, Pack>;
+    using Indexer = Partitioned::indexer_type;
+    const auto geometry = test::make_unstructured_hex_line(2);
+    std::vector<Indexer::cell_id_t> cells;
+    std::vector<Indexer::face_id_t> faces;
+    std::vector<Indexer::node_id_t> nodes;
+    for (size_t c = 0; c < geometry->num_cells(); ++c) cells.push_back(geometry->cell_id(c));
+    for (size_t f = 0; f < geometry->num_faces(); ++f) faces.push_back(geometry->face_id(f));
+    for (size_t n = 0; n < geometry->num_nodes(); ++n) nodes.push_back(geometry->node_id(n));
+    const Partitioned partition(geometry, Indexer(std::move(cells), {}, std::move(faces), {}, std::move(nodes)));
+    check(partition);
+    const SolidSubdomain<Pack> solid(std::make_shared<Handle>(cartesian(3, 3, 3)),
+        [](auto, const Handle::Vec3&) { return true; });
+    check(solid);
 }
 
 TEST(MeshTraverseTest, UntaggedPhysicalExteriorStillBelongsToBoundarySelection)

@@ -94,6 +94,7 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_PUBLIC_TYPE MeshHandle
 {
+    friend struct detail::MeshTraverseBinding;
     friend class MeshReorderingFactory<Pack>;
     template<class PublicMesh, class GeometryMesh>
     friend class detail::TraverseAccess;

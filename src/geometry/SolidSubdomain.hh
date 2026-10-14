@@ -47,6 +47,8 @@ namespace SimpleFluid
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes> class SIMPLEFLUID_PUBLIC_TYPE SolidSubdomain
 {
+    friend struct detail::MeshTraverseBinding;
+
 public:
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
