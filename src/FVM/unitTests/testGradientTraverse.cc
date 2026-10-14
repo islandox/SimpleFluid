@@ -15,6 +15,7 @@
 #include <cmath>
 #include <future>
 #include <latch>
+#include <limits>
 #include <numbers>
 #include <stdexcept>
 #include <tuple>
@@ -35,11 +36,20 @@ using PressureWorkspace = FVM::FieldStoredPressureWeightedFaceFluxWorkspace<Pack
 testing::Environment* const environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-void expect_exact(Vec actual, Vec expected)
+// The compiled cache and the inline reference can contract arithmetic
+// differently. Allow only roundoff in computed values; IDs, sample ordering,
+// callback ordering and retained snapshots are still checked exactly.
+void expect_roundoff_equal(real_t actual, real_t expected)
 {
-    EXPECT_EQ(actual.x, expected.x);
-    EXPECT_EQ(actual.y, expected.y);
-    EXPECT_EQ(actual.z, expected.z);
+    const auto scale = std::max({real_t{1}, std::abs(actual), std::abs(expected)});
+    EXPECT_NEAR(actual, expected, 16 * std::numeric_limits<real_t>::epsilon() * scale);
+}
+
+void expect_roundoff_equal(Vec actual, Vec expected)
+{
+    expect_roundoff_equal(actual.x, expected.x);
+    expect_roundoff_equal(actual.y, expected.y);
+    expect_roundoff_equal(actual.z, expected.z);
 }
 
 struct CompositeFixture
@@ -120,7 +130,7 @@ void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>&
                     ASSERT_LT(interior_index, geometry[cell].interior_samples.size());
                     const auto& actual = geometry[cell].interior_samples[interior_index++];
                     EXPECT_EQ(actual.other_lid, sample.other_lid);
-                    expect_exact(actual.weight, weight);
+                    expect_roundoff_equal(actual.weight, weight);
                 }
                 else
                 {
@@ -131,7 +141,7 @@ void expect_least_squares_geometry(const FVM::CellGradientCache<Pack, MeshType>&
                     EXPECT_EQ(actual.location.batch_id, location.batch_id);
                     EXPECT_EQ(actual.location.in_batch_id, location.in_batch_id);
                     EXPECT_EQ(actual.normal_distance, sample.normal_distance);
-                    expect_exact(actual.weight, weight);
+                    expect_roundoff_equal(actual.weight, weight);
                 }
             }
             EXPECT_EQ(interior_index, geometry[cell].interior_samples.size());
@@ -182,7 +192,7 @@ void expect_stencil_geometry(const MeshType& mesh)
                     EXPECT_EQ(actual.location.batch_id, locations.at(sample.face_lid).batch_id);
                     EXPECT_EQ(actual.location.in_batch_id, locations.at(sample.face_lid).in_batch_id);
                     EXPECT_EQ(actual.normal_distance, sample.normal_distance);
-                    expect_exact(actual.basis, basis);
+                    expect_roundoff_equal(actual.basis, basis);
                 }
             }
             const auto& actual = boundaries ? boundary[cell].interior_entries : interior[cell];
@@ -191,7 +201,7 @@ void expect_stencil_geometry(const MeshType& mesh)
             for (const auto& [id, coefficient] : coefficients)
             {
                 EXPECT_EQ(actual[entry].cell_lid, id);
-                expect_exact(actual[entry++].coefficient, coefficient);
+                expect_roundoff_equal(actual[entry++].coefficient, coefficient);
             }
             if (boundaries) EXPECT_EQ(boundary_index, boundary[cell].boundary_samples.size());
         }
@@ -216,14 +226,14 @@ void expect_gauss_geometry(const FVM::GaussLinearGradientCache<Pack, MeshType>& 
             ASSERT_LT(entry, actual.faces.size());
             const auto& face = actual.faces[entry++];
             EXPECT_EQ(face.face_lid, FVM::detail::packed_face_local_id(mesh, face_id));
-            expect_exact(face.area, mesh.face_area_vector_outward(face_id, cell_id));
+            expect_roundoff_equal(face.area, mesh.face_area_vector_outward(face_id, cell_id));
             EXPECT_EQ(face.interior, mesh.is_interior_face(face_id));
             if (face.interior)
             {
                 const auto other = mesh.opposite_or_periodic_neighbor_cell(face_id, cell_id);
                 EXPECT_EQ(face.other_lid, FVM::detail::packed_cell_local_id(mesh, other));
-                EXPECT_EQ(face.cell_distance, mesh.cell_to_face_distance(face_id, cell_id));
-                EXPECT_EQ(face.other_distance, mesh.cell_to_face_distance(face_id, other));
+                expect_roundoff_equal(face.cell_distance, mesh.cell_to_face_distance(face_id, cell_id));
+                expect_roundoff_equal(face.other_distance, mesh.cell_to_face_distance(face_id, other));
             }
             else
             {
@@ -341,7 +351,7 @@ void expect_linear_reconstruction(SP<const Handle> mesh, bool planar_faces = tru
         {
             SCOPED_TRACE(::testing::Message() << "mode=" << mode << " cell=" << cell);
             const auto value = gradient.value(cell);
-            if (mode >= 2) expect_exact(value, gauss_reference.value(cell));
+            if (mode >= 2) expect_roundoff_equal(value, gauss_reference.value(cell));
             // Cylindrical radial faces use midpoint normals rather than exact
             // integrated area vectors. Gauss is checked against its pointwise
             // operator there; affine exactness of transverse components holds
@@ -378,8 +388,10 @@ void expect_same_owned(const auto& actual, const auto& expected)
     ASSERT_EQ(a.extent(1), b.extent(1));
     for (size_t cell = 0; cell < a.extent(0); ++cell)
         for (size_t component = 0; component < a.extent(1); ++component)
-            EXPECT_EQ(a(cell, component), b(cell, component))
-                << "cell=" << cell << " component=" << component;
+        {
+            SCOPED_TRACE(::testing::Message() << "cell=" << cell << " component=" << component);
+            expect_roundoff_equal(a(cell, component), b(cell, component));
+        }
 }
 
 // Preserve the previous pointwise cached kernels as independent arithmetic
@@ -1025,8 +1037,10 @@ TEST(GradientTraverseTest, StructuredCompatibilityViewsPublishOnceAndSupportCach
 TEST(GradientTraverseTest, StructuredRefreshFailurePreservesUnmaterializedSnapshot)
 {
     if (Tpetra::getDefaultComm()->getSize() != 1) GTEST_SKIP() << "Requires serial canonical maps.";
+    // Stay below the growth-ratio limit so the ALE trial reaches the injected
+    // cache-refresh failure independently of geometry-query rounding.
     auto mesh = std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(
-        Vec3D<ArrReal>{{{0, 0.5, 2, 4}, {0, 0.25, 1, 2, 5}, {0, 2, 7, 8}}}));
+        Vec3D<ArrReal>{{{0, 0.5, 2, 4}, {0, 0.25, 1, 2, 5}, {0, 2, 6, 8}}}));
     bool fail = false;
     using Call = std::pair<Local, Local>;
     std::vector<Call> calls, expected;
