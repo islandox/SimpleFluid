@@ -3,8 +3,8 @@
 // Helpers retain translation-unit-local linkage. Register the test
 // environment only in the executable's top-level source.
 
-/** @file testGradientTraverse.cc
- * @brief Ordered geometry and retained traversal contracts for gradient builds.
+/** @file geometry_reference.hh
+ * @brief Translation-unit-local reference gradients and traversal geometry fixtures.
  */
 #include "FVM/CellOperators.hh"
 #include "FVM/FaceFlux.hh"

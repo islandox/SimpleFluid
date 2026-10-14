@@ -1,3 +1,6 @@
+/** @file RefreshCases.cc
+ * @brief Gradient cache refresh and geometry lifetime checks.
+ */
 #include "reconstruction_helpers.hh"
 
 TEST(GradientTraverseTest, BoundaryDirectionOrderAndRefreshFailurePreservePreviousGeometry)

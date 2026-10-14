@@ -3,8 +3,8 @@
 // Helpers retain translation-unit-local linkage. Register the test
 // environment only in the executable's top-level source.
 
-/** @file testMeshTraverse.cc
- * @brief Selection, ordering, geometry lifetime, and partition contracts for mesh traverses.
+/** @file test_helpers.hh
+ * @brief Translation-unit-local mesh traversal fixtures and reference checks.
  */
 #include <gtest/gtest.h>
 
@@ -31,7 +31,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <type_traits>
 
 namespace
 {

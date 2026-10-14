@@ -1,3 +1,6 @@
+/** @file LayeredCases.cc
+ * @brief Layered and multi-region traversal selection and geometry checks.
+ */
 #include "test_helpers.hh"
 
 namespace
