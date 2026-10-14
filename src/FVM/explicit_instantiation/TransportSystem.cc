@@ -80,6 +80,11 @@ template TransportSystem<Pack> physical_temperature_transport_system<Pack>(const
     ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*,
     Teuchos::RCP<Matrix>, const BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation);
 
+template TransportSystem<Pack> physical_temperature_transport_system<Pack>(const ScalarField&, const FluxField&, Scalar,
+    const ScalarField&, const ScalarField&, const ScalarField&, ScalarBoundaryConditionProvider<Pack>,
+    ScalarBoundaryValueProvider<Pack>, ScalarCellValueProvider<Pack>, NonOrthogonalTreatment, const ScalarField*,
+    Teuchos::RCP<Matrix>, const BoundaryCache<Pack>*, const GeometryCache*, FaceCoefficientInterpolation, bool);
+
 template VectorTransportSystem<Pack> physical_momentum_transport_system<Pack>(const VectorField&, const FluxField&,
     Scalar, const ScalarField&, Scalar, VectorBoundaryValueProvider<Pack>, VectorCellValueProvider<Pack>,
     NonOrthogonalTreatment, const VectorField*, Teuchos::RCP<Matrix>, BoundaryFaceSelector, const BoundaryCache<Pack>*,

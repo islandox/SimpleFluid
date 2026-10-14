@@ -153,6 +153,8 @@ void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux_snapsh
     // replace Dirichlet/Robin stencils, so all ranks invalidate together.
     if (global_flags[1])
     {
+        d_prepared_operator_ready = false;
+        d_prepared_advance = {};
         d_cached_physical_transport_matrix = Teuchos::null;
         d_cached_physical_graph_supports_non_orthogonal_correction = false;
         d_linear_solver.reset();
@@ -175,6 +177,8 @@ void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry(
     d_cached_physical_transport_matrix = Teuchos::null;
     d_cached_physical_graph_supports_non_orthogonal_correction = false;
     d_linear_solver.reset();
+    d_prepared_advance = {};
+    d_prepared_operator_ready = false;
     d_transport_geometry_cache.refresh(std::move(geometry));
 }
 
@@ -219,7 +223,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::advance_explicit(const std::v
     scalar_type time_step, scalar_type thermal_diffusivity, field_type& temperature,
     const source_type& right_hand_source) const
 {
-    if (!d_convection_boundaries.empty() || d_has_boundary_heat_flux)
+    if (d_boundary_response == nullptr && (!d_convection_boundaries.empty() || d_has_boundary_heat_flux))
         throw std::invalid_argument(
             "Thermal exchange boundaries require advance_physical with conductivity and rho cp.");
     EquationValidation::require_mesh_match(*d_mesh, temperature, "TemperatureDiffusionEquation");
@@ -402,7 +406,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_semi_implicit_impl(co
     field_type& temperature, const source_type& right_hand_source, std::optional<FVM::NonOrthogonalTreatment> treatment,
     const LinearSolverOptions& linear_options) const -> LinearSolveStatistics
 {
-    if (!d_convection_boundaries.empty() || d_has_boundary_heat_flux)
+    if (d_boundary_response == nullptr && (!d_convection_boundaries.empty() || d_has_boundary_heat_flux))
         throw std::invalid_argument(
             "Thermal exchange boundaries require advance_physical with conductivity and rho cp.");
     EquationValidation::require_mesh_match(*d_mesh, old_temperature, "TemperatureDiffusionEquation");
@@ -528,6 +532,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     const field_type* old_specific_heat_capacity,
     const field_type* transport_density_override) const -> LinearSolveStatistics
 {
+    if (!d_using_prepared) d_prepared_operator_ready = false;
     collective_detail::collective_local_validation(*d_mesh, "TemperatureDiffusionEquation physical input validation",
         [&]
         {
@@ -613,7 +618,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
 
     const auto old_temperature_values = old_temperature.local_read_view();
     std::unordered_map<int, std::vector<BoundaryCondition>> convection_conditions;
-    if (!d_convection_boundaries.empty() || d_has_boundary_heat_flux)
+    if (d_boundary_response == nullptr && (!d_convection_boundaries.empty() || d_has_boundary_heat_flux))
         collective_detail::collective_local_validation(*d_mesh, "Exterior convection face evaluation",
             [&]
             {
@@ -687,6 +692,23 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
             1, &local_prescribed_power, &d_last_prescribed_boundary_power);
     auto boundary_condition = [&](int batch_id, size_t in_batch_id)
     {
+        if (d_boundary_response != nullptr)
+        {
+            auto condition = d_prepared_boundary_conditions.at({batch_id, in_batch_id});
+            condition.value = scalar_type{};
+            const auto increment = d_boundary_response->value.find(batch_id);
+            if (increment != d_boundary_response->value.end())
+            {
+                const auto face = d_mesh->boundary_face_batch(batch_id).face_lids[in_batch_id];
+                const auto owner = d_mesh->owner_cell(face);
+                const auto conductivity = FVM::boundary_coefficient<Pack>(boundary_thermal_conductivity,
+                    batch_id, in_batch_id, conductivity_values(owner, 0));
+                if (conductivity <= scalar_type{} && increment->second[in_batch_id] != scalar_type{})
+                    throw std::invalid_argument("Nonzero boundary response requires positive conductivity.");
+                condition.value = conductivity > scalar_type{} ? -increment->second[in_batch_id] / conductivity : scalar_type{};
+            }
+            return condition;
+        }
         const auto convection = convection_conditions.find(batch_id);
         if (convection != convection_conditions.end())
             return convection->second.at(in_batch_id);
@@ -696,6 +718,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     };
     auto boundary_value = [&](int batch_id, size_t in_batch_id) -> scalar_type
     {
+        if (d_boundary_response != nullptr) return scalar_type{};
         const auto condition = boundary_condition(batch_id, in_batch_id);
         if (condition.type == BoundaryConditionType::Robin)
             return condition.value;
@@ -710,6 +733,24 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
         return old_temperature_values(owner, 0);
     };
 
+    if (d_using_prepared)
+    {
+        std::vector<std::pair<BoundaryConditionType, scalar_type>> signature;
+        for (const auto& [batch_id, batch] : d_mesh->boundary_batches())
+            for (size_t index = 0; index < batch.face_lids.size(); ++index)
+            {
+                const auto condition = boundary_condition(batch_id, index);
+                signature.emplace_back(condition.type, condition.robin_coefficient);
+                if (!d_prepared_operator_ready) d_prepared_boundary_conditions[{batch_id,index}] = condition;
+            }
+        collective_detail::collective_local_validation(*d_mesh, "Prepared physical boundary contract", [&]
+        {
+            if (d_prepared_operator_ready && signature != d_prepared_boundary_signature)
+                throw std::invalid_argument("Prepared physical boundary types/support/Robin coefficients changed; prepare again.");
+        });
+        if (!d_prepared_operator_ready) d_prepared_boundary_signature = std::move(signature);
+    }
+    const bool retain_operator = d_using_prepared && d_prepared_operator_ready;
     int local_all_conductivities_positive = 1;
     for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
     {
@@ -722,7 +763,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
         &all_conductivities_positive);
     const auto* correction_field = treatment == FVM::NonOrthogonalTreatment::Implicit ? nullptr : &old_temperature;
     const auto requires_non_orthogonal_graph = treatment != FVM::NonOrthogonalTreatment::Explicit;
-    if (requires_non_orthogonal_graph && !d_cached_physical_graph_supports_non_orthogonal_correction)
+    if (!retain_operator && requires_non_orthogonal_graph && !d_cached_physical_graph_supports_non_orthogonal_correction)
     {
         d_cached_physical_transport_matrix = Teuchos::null;
     }
@@ -735,7 +776,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                 return FVM::physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
                     transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
                     boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
-                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation);
+                    boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation, retain_operator);
             }
             else
             {
@@ -743,7 +784,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
                     transport_density, material.specific_heat_capacity, thermal_conductivity, boundary_condition,
                     boundary_value, power_density, treatment, correction_field, d_cached_physical_transport_matrix,
                     boundary_thermal_conductivity, &d_transport_geometry_cache, coefficient_interpolation,
-                    ale, old_density, old_specific_heat_capacity);
+                    ale, old_density, old_specific_heat_capacity, retain_operator);
             }
         }
         catch (...)
@@ -759,14 +800,23 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
         d_cached_physical_graph_supports_non_orthogonal_correction = true;
     }
 
+    d_prepared_rhs = system.rhs;
+    if (d_using_prepared) d_prepared_operator_ready = true;
+    if (d_prepared_rhs_only)
+    {
+        if (!retain_operator) d_linear_solver.notify_operator_values_changed();
+        return {};
+    }
     auto& candidate_temperature = d_candidate_temperature;
-    candidate_temperature.owned_data().update(scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
+    candidate_temperature.owned_data().update(scalar_type{1}, (d_prepared_initial_guess == nullptr ? old_temperature : *d_prepared_initial_guess).owned_data(), scalar_type{0});
     Teuchos::RCP<const typename Pack::matrix_type> matrix = system.matrix;
     // Reassembly can change material/time-step coefficients independently of a
     // boundary refresh. Retain graph/Krylov storage, invalidate numeric factors.
-    d_linear_solver.notify_operator_values_changed();
+    if (!retain_operator) d_linear_solver.notify_operator_values_changed();
+    auto prepared_options = linear_options;
+    if (retain_operator) prepared_options.reuse_preconditioner = true;
     const auto statistics =
-        d_linear_solver.solve_with_statistics(matrix, *system.rhs, candidate_temperature.owned_data(), linear_options);
+        d_linear_solver.solve_with_statistics(matrix, *system.rhs, candidate_temperature.owned_data(), prepared_options);
     if (!statistics.converged)
     {
         throw std::runtime_error("TemperatureDiffusionEquation physical transport solve did not converge.");
@@ -774,6 +824,133 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     temperature.owned_data().update(scalar_type{1}, candidate_temperature.owned_data(), scalar_type{0});
     d_mesh->sync_periodic_boundaries(temperature);
     return statistics;
+}
+
+
+template<TpetraTypePack Pack, class MeshType>
+void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
+    const field_type& old_temperature, const face_flux_field_type& face_fluxes, scalar_type time_step,
+    const material_type& material, FVM::NonOrthogonalTreatment treatment,
+    const field_type* conductivity_override, const boundary_cache_type* boundary_conductivity,
+    FVM::FaceCoefficientInterpolation interpolation)
+{
+    collective_detail::collective_local_validation(*d_mesh, "Prepare physical conduction inputs", [&]
+    {
+        EquationValidation::require_mesh_match(*d_mesh, old_temperature, "Prepared conduction");
+        EquationValidation::require_mesh_match(*d_mesh, face_fluxes, "Prepared conduction");
+        EquationValidation::require_mesh_match(*d_mesh, material.density, "Prepared conduction");
+        EquationValidation::require_mesh_match(*d_mesh, material.specific_heat_capacity, "Prepared conduction");
+        EquationValidation::require_mesh_match(*d_mesh, material.thermal_conductivity, "Prepared conduction");
+        if (conductivity_override != nullptr)
+            EquationValidation::require_mesh_match(*d_mesh, *conductivity_override, "Prepared conduction");
+        if (!std::isfinite(time_step) || time_step <= scalar_type{})
+            throw std::invalid_argument("Prepared conduction requires a finite positive time step.");
+        FVM::validate_boundary_coefficient_cache<Pack>(*d_mesh, boundary_conductivity, "Prepared conduction");
+    });
+    auto baseline = std::make_shared<field_type>(d_mesh, "prepared_old_temperature", false);
+    baseline->owned_data().update(scalar_type{1}, old_temperature.owned_data(), scalar_type{0});
+    baseline->sync_ghosts();
+    auto zero_baseline = std::make_shared<field_type>(d_mesh, scalar_type{}, "prepared_zero_temperature");
+    zero_baseline->sync_ghosts();
+    auto coefficients = std::make_shared<material_type>(d_mesh, BoussinesqModelOptions{}, TimeStepperOptions{});
+    coefficients->density.owned_data().update(scalar_type{1}, material.density.owned_data(), scalar_type{0});
+    coefficients->specific_heat_capacity.owned_data().update(scalar_type{1}, material.specific_heat_capacity.owned_data(), scalar_type{0});
+    coefficients->thermal_conductivity.owned_data().update(scalar_type{1},
+        (conductivity_override == nullptr ? material.thermal_conductivity : *conductivity_override).owned_data(), scalar_type{0});
+    coefficients->density.sync_ghosts();
+    coefficients->specific_heat_capacity.sync_ghosts();
+    coefficients->thermal_conductivity.sync_ghosts();
+    auto fluxes = std::make_shared<face_flux_field_type>(d_mesh, scalar_type{}, "prepared_face_flux");
+    fluxes->data().update(scalar_type{1}, face_fluxes.data(), scalar_type{0});
+    auto boundary_k = boundary_conductivity == nullptr ? std::shared_ptr<boundary_cache_type>{}
+        : std::make_shared<boundary_cache_type>(*boundary_conductivity);
+    d_prepared_operator_ready = false;
+    d_prepared_rhs = Teuchos::null;
+    d_prepared_advance = [this, baseline, zero_baseline, coefficients, fluxes, boundary_k, time_step, treatment, interpolation]
+        (field_type& output, const source_type& source, const LinearSolverOptions& options)
+    {
+        d_using_prepared = true;
+        try
+        {
+            const auto result = advance_physical(d_boundary_response == nullptr ? *baseline : *zero_baseline, *fluxes, time_step, *coefficients, output,
+                source ? source : source_type{[](local_ordinal_type) { return scalar_type{}; }},
+                treatment, options, nullptr, boundary_k.get(), interpolation);
+            d_using_prepared = false;
+            return result;
+        }
+        catch (...) { d_using_prepared = false; d_prepared_operator_ready = false; throw; }
+    };
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::advance_prepared(field_type& temperature,
+    const source_type& source, const field_type* initial_guess, const LinearSolverOptions& options) const
+    -> LinearSolveStatistics
+{
+    if (!d_prepared_advance) throw std::logic_error("Physical advance has not been prepared.");
+    collective_detail::collective_local_validation(*d_mesh, "Prepared initial guess", [&]
+    {
+        if (initial_guess != nullptr) EquationValidation::require_mesh_match(*d_mesh, *initial_guess, "Prepared initial guess");
+    });
+    d_prepared_initial_guess = initial_guess;
+    try
+    {
+        const auto result = d_prepared_advance(temperature, source, options);
+        d_prepared_initial_guess = nullptr;
+        return result;
+    }
+    catch (...) { d_prepared_initial_guess = nullptr; throw; }
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_rhs(const source_type& source) const
+    -> Teuchos::RCP<const typename Pack::vector_type>
+{
+    if (!d_prepared_advance) throw std::logic_error("Physical advance has not been prepared.");
+    d_prepared_rhs_only = true;
+    try { d_prepared_advance(d_candidate_temperature, source, {}); }
+    catch (...) { d_prepared_rhs_only = false; throw; }
+    d_prepared_rhs_only = false;
+    return d_prepared_rhs;
+}
+
+
+template<TpetraTypePack Pack, class MeshType>
+auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(const boundary_cache_type& increment) const
+    -> Teuchos::RCP<const typename Pack::vector_type>
+{
+    if (!d_prepared_operator_ready) throw std::logic_error("Assemble the prepared operator before its boundary response.");
+    collective_detail::collective_local_validation(*d_mesh, "Prepared boundary response", [&]
+    {
+        if (increment.mesh.get() != d_mesh.get())
+            throw std::invalid_argument("Boundary response requires the prepared mesh.");
+        for (const auto& [batch_id, values] : increment.value)
+        {
+            const auto selected = d_boundary_heat_flux->value.find(batch_id);
+            if (selected == d_boundary_heat_flux->value.end() || selected->second.size() != values.size())
+                throw std::invalid_argument("Boundary response requires existing prescribed-flux support.");
+            for (const auto value : values)
+                if (!std::isfinite(value)) throw std::invalid_argument("Boundary response requires finite flux increments.");
+        }
+    });
+    d_boundary_response = &increment;
+    const auto saved_rhs = d_prepared_rhs;
+    const auto saved_power = d_last_prescribed_boundary_power;
+    try
+    {
+        const auto result = prepared_rhs();
+        d_boundary_response = nullptr;
+        d_prepared_rhs = saved_rhs;
+        d_last_prescribed_boundary_power = saved_power;
+        return result;
+    }
+    catch (...)
+    {
+        d_boundary_response = nullptr;
+        d_prepared_rhs = saved_rhs;
+        d_last_prescribed_boundary_power = saved_power;
+        throw;
+    }
 }
 
 } // namespace SimpleFluid

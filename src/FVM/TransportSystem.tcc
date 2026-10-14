@@ -1634,6 +1634,22 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
     const BoundaryCache<Pack>* boundary_thermal_conductivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
     FaceCoefficientInterpolation coefficient_interpolation)
 {
+    return physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step,
+        density, specific_heat_capacity, thermal_conductivity, std::move(boundary_condition),
+        std::move(boundary_value), std::move(power_density), treatment, correction_field,
+        std::move(cached_matrix), boundary_thermal_conductivity, geometry_cache, coefficient_interpolation, false);
+}
+
+template<TpetraTypePack Pack>
+TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack>& old_temperature,
+    const FaceField<Pack>& face_fluxes, typename Pack::scalar_type time_step, const CellField<Pack>& density,
+    const CellField<Pack>& specific_heat_capacity, const CellField<Pack>& thermal_conductivity,
+    ScalarBoundaryConditionProvider<Pack> boundary_condition, ScalarBoundaryValueProvider<Pack> boundary_value,
+    ScalarCellValueProvider<Pack> power_density, NonOrthogonalTreatment treatment,
+    const CellField<Pack>* correction_field, Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
+    const BoundaryCache<Pack>* boundary_thermal_conductivity, const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
+    FaceCoefficientInterpolation coefficient_interpolation, bool rhs_only)
+{
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
 
@@ -1688,7 +1704,10 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
         partition_gradients->sync_ghosts();
     }
 
-    const auto prepared = detail::prepare_transport_matrix<Pack>(mesh, std::move(cached_matrix), 32);
+    if (rhs_only && cached_matrix.is_null())
+        throw std::invalid_argument("Prepared physical RHS requires an assembled operator.");
+    const auto prepared = rhs_only ? detail::PreparedTransportMatrix<Pack>{cached_matrix, true}
+                                  : detail::prepare_transport_matrix<Pack>(mesh, std::move(cached_matrix), 32);
     const auto& matrix = prepared.matrix;
     auto rhs = Teuchos::rcp(new typename Pack::vector_type(mesh.owned_cell_map(), true));
 
@@ -1837,7 +1856,7 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
             }
         });
 
-        detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
+        if (!rhs_only) detail::add_transport_values<Pack>(prepared, cell_lid, row_values);
     });
 
     if (correction_field != nullptr && explicit_weight > scalar_type{})
@@ -1847,7 +1866,7 @@ TransportSystem<Pack> physical_temperature_transport_system(const CellField<Pack
             coefficient_interpolation);
     }
 
-    detail::finish_transport_matrix<Pack>(prepared);
+    if (!rhs_only) detail::finish_transport_matrix<Pack>(prepared);
     return {matrix, rhs};
 }
 

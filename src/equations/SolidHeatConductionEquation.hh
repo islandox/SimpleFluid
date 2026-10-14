@@ -83,6 +83,20 @@ public:
         FVM::FaceCoefficientInterpolation coefficient_interpolation =
             FVM::FaceCoefficientInterpolation::Harmonic) const;
 
+    /** Freeze baseline and physical coefficients for repeated boundary-affine solves.
+     * Mesh, boundary support/types and Robin coefficients stay fixed during a session.
+     */
+    void prepare_advance(const field_type& old_temperature, scalar_type time_step, const material_type& material,
+        FVM::NonOrthogonalTreatment treatment = FVM::NonOrthogonalTreatment::Implicit,
+        const field_type* thermal_conductivity_override = nullptr,
+        const boundary_cache_type* boundary_thermal_conductivity = nullptr,
+        FVM::FaceCoefficientInterpolation coefficient_interpolation = FVM::FaceCoefficientInterpolation::Harmonic);
+    LinearSolveStatistics advance_prepared(field_type& temperature, const source_type& power_density = {},
+        const field_type* initial_guess = nullptr, const LinearSolverOptions& linear_options = {}) const;
+    Teuchos::RCP<const typename Pack::vector_type> prepared_rhs(const source_type& power_density = {}) const;
+    Teuchos::RCP<const typename Pack::vector_type> prepared_boundary_response(const boundary_cache_type& flux_increment) const;
+    Teuchos::RCP<const typename Pack::matrix_type> prepared_operator() const;
+
 private:
     SP<const mesh_type> d_mesh;
     face_flux_field_type d_zero_face_flux;
