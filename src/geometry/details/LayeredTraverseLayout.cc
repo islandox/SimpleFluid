@@ -67,18 +67,4 @@ LayeredTraverseLayout::LayeredTraverseLayout(const Meshes::SemiStructMeshTopo& t
     d_batches.erase(std::unique(d_batches.begin(), d_batches.end()), d_batches.end());
 }
 
-size_t LayeredTraverseLayout::cell_incidence_count(StructuredTraverseSelection selection) const noexcept
-{
-    const auto total = 2 * num_cells() + d_incidences.size() * d_indexer.num_layers;
-    if (selection == StructuredTraverseSelection::All) return total;
-    size_t base_interior = 0;
-    for (const auto& run : d_interior_cells)
-        for (size_t base = run.begin; base < run.end; ++base)
-            base_interior += 2 + d_offsets[base + 1] - d_offsets[base];
-    const size_t interior_layers = d_indexer.axial_periodic ? d_indexer.num_layers
-        : (d_indexer.num_layers > 2 ? d_indexer.num_layers - 2 : 0);
-    const auto interior = base_interior * interior_layers;
-    return selection == StructuredTraverseSelection::Interior ? interior : total - interior;
-}
-
 } // namespace SimpleFluid::detail

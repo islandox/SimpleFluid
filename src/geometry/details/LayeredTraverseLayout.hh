@@ -20,7 +20,7 @@ namespace SimpleFluid::detail
 template<class Geometry> inline constexpr bool has_layered_traverse_layout = false;
 template<> inline constexpr bool has_layered_traverse_layout<Meshes::SemiStructuredXY_Z> = true;
 
-class SIMPLEFLUID_PUBLIC_TYPE LayeredTraverseLayout
+class SIMPLEFLUID_LOCAL LayeredTraverseLayout
 {
 public:
     using Indexer = Meshes::SemiStructuredIndexer;

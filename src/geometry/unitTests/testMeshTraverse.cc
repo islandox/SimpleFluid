@@ -119,9 +119,13 @@ std::vector<Local> selected_ids(const Selection& selection)
 
 void expect_vector_equal(const auto& actual, const auto& expected)
 {
-    EXPECT_DOUBLE_EQ(actual.x, expected.x);
-    EXPECT_DOUBLE_EQ(actual.y, expected.y);
-    EXPECT_DOUBLE_EQ(actual.z, expected.z);
+    // Independently compiled cylindrical query paths can cancel to zero on
+    // one path and leave a few rounding bits on the other.
+    const auto scale = std::max({real_t{1}, actual.norm(), expected.norm()});
+    const auto tolerance = 8 * std::numeric_limits<real_t>::epsilon() * scale;
+    EXPECT_NEAR(actual.x, expected.x, tolerance);
+    EXPECT_NEAR(actual.y, expected.y, tolerance);
+    EXPECT_NEAR(actual.z, expected.z, tolerance);
 }
 
 /** Compare against canonical topology while keeping field ordinals explicit. */
