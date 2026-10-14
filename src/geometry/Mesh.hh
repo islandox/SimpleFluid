@@ -31,6 +31,11 @@
 namespace SimpleFluid
 {
 
+namespace detail
+{
+struct MeshTraverseBinding;
+}
+
 /**
  * @brief Forward declaration of a scalar field stored on mesh cells.
  * @tparam Pack Tpetra type pack shared with the mesh.
@@ -90,6 +95,7 @@ constexpr ID invalid_id() noexcept
 template<TpetraTypePack Pack = DefaultTpetraTypes>
 class SIMPLEFLUID_PUBLIC_TYPE Mesh
 {
+    friend struct detail::MeshTraverseBinding;
     /** @brief Grants MeshPartitioner access to internal mesh arrays for parallel redistribution. */
     template<TpetraTypePack>
     friend class MeshPartitioner;

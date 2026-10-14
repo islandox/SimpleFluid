@@ -384,6 +384,52 @@ template<class Mesh>
 
 namespace detail
 {
+/** Borrow identities without changing non-atomic Teuchos RCP ownership. */
+struct SIMPLEFLUID_LOCAL MeshTraverseBinding
+{
+    template<class Mesh> static auto maps(const Mesh& mesh)
+    {
+        std::array<const void*, 4> maps{};
+        if constexpr (requires { mesh.d_owned_cell_map.getRawPtr(); })
+            maps[0] = mesh.d_owned_cell_map.getRawPtr();
+        else if constexpr (requires { mesh.owned_cell_map().getRawPtr(); })
+            maps[0] = mesh.owned_cell_map().getRawPtr();
+        if constexpr (requires { mesh.d_overlap_cell_map.getRawPtr(); })
+            maps[1] = mesh.d_overlap_cell_map.getRawPtr();
+        else if constexpr (requires { mesh.overlap_cell_map().getRawPtr(); })
+            maps[1] = mesh.overlap_cell_map().getRawPtr();
+        if constexpr (requires { mesh.d_owned_face_map.getRawPtr(); })
+            maps[2] = mesh.d_owned_face_map.getRawPtr();
+        else if constexpr (requires { mesh.owned_face_map().getRawPtr(); })
+            maps[2] = mesh.owned_face_map().getRawPtr();
+        if constexpr (requires { mesh.d_overlap_face_map.getRawPtr(); })
+            maps[3] = mesh.d_overlap_face_map.getRawPtr();
+        else if constexpr (requires { mesh.overlap_face_map().getRawPtr(); })
+            maps[3] = mesh.overlap_face_map().getRawPtr();
+        return maps;
+    }
+
+    template<class Mesh> static size_t owned_faces(const Mesh& mesh)
+    {
+        if constexpr (traverse_is_stk_adapter<Mesh>)
+            return owned_faces(mesh.mesh());
+        else if constexpr (requires { mesh.legacy_mesh(); })
+        {
+            if (const auto legacy = mesh.legacy_mesh()) return owned_faces(*legacy);
+            return mesh.num_owned_faces();
+        }
+        else if constexpr (requires { mesh.num_owned_faces(); })
+            return mesh.num_owned_faces();
+        else if constexpr (requires { mesh.d_owned_face_map.getRawPtr(); })
+        {
+            const auto* map = mesh.d_owned_face_map.getRawPtr();
+            return map ? map->getLocalNumElements() : 0;
+        }
+        else
+            return mesh.owned_face_map()->getLocalNumElements();
+    }
+};
+
 template<class Mesh> auto mesh_traverse_binding(const Mesh& mesh)
 {
     std::array<const void*, 5> binding{};
@@ -391,26 +437,14 @@ template<class Mesh> auto mesh_traverse_binding(const Mesh& mesh)
         mesh.visit([&](const auto& native) { binding[0] = &native; });
     else
         binding[0] = &mesh;
-    if constexpr (requires { mesh.owned_cell_map().getRawPtr(); })
-        binding[1] = mesh.owned_cell_map().getRawPtr();
-    if constexpr (requires { mesh.overlap_cell_map().getRawPtr(); })
-        binding[2] = mesh.overlap_cell_map().getRawPtr();
-    if constexpr (requires { mesh.owned_face_map().getRawPtr(); })
-        binding[3] = mesh.owned_face_map().getRawPtr();
-    if constexpr (requires { mesh.overlap_face_map().getRawPtr(); })
-        binding[4] = mesh.overlap_face_map().getRawPtr();
+    const auto maps = MeshTraverseBinding::maps(mesh);
+    std::copy(maps.begin(), maps.end(), binding.begin() + 1);
     return binding;
 }
 
 template<class Mesh> auto mesh_traverse_counts(const Mesh& mesh)
 {
-    const auto owned_faces = [&]() -> size_t
-    {
-        if constexpr (requires { mesh.num_owned_faces(); })
-            return mesh.num_owned_faces();
-        else
-            return mesh.owned_face_map()->getLocalNumElements();
-    }();
+    const auto owned_faces = MeshTraverseBinding::owned_faces(mesh);
     return std::array<size_t, 4>{mesh.num_local_cells(), mesh.num_faces(), mesh.num_owned_cells(), owned_faces};
 }
 

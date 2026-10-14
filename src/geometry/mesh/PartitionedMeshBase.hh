@@ -29,6 +29,11 @@
 #include <utility>
 #include <vector>
 
+namespace SimpleFluid::detail
+{
+struct MeshTraverseBinding;
+}
+
 namespace SimpleFluid::Meshes
 {
 
@@ -53,6 +58,8 @@ template<MeshClass GeometryMesh,
          TpetraTypePack Pack = DefaultTpetraTypes>
 class PartitionedMesh
 {
+    friend struct SimpleFluid::detail::MeshTraverseBinding;
+
 public:
     using partitioned_mesh_base_tag = void;
     using mesh_type = GeometryMesh;
