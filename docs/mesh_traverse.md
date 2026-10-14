@@ -414,10 +414,12 @@ The existing `interior_geometry()`, `boundary_geometry()`, `boundary_locations()
 and Gauss `geometry()` interfaces remain available. Structured compatibility
 views are materialized on explicit request with `std::call_once`; normal cached
 evaluation reads the compact rows directly. Multiple const readers may request
-compatibility views concurrently. Cache refresh must remain separate from
-concurrent readers, as before. Gauss copies share immutable numerical snapshots;
-refresh replaces only the refreshed cache's snapshot. Least-squares caches retain
-their move-only interface.
+compatibility views concurrently. Validation borrows the supported meshes' map
+identities without copying their Teuchos reference-counted owners, including
+when Trilinos is built without thread-safe reference counts. Cache refresh must
+remain separate from concurrent readers, as before. Gauss copies share immutable
+numerical snapshots; refresh replaces only the refreshed cache's snapshot.
+Least-squares caches retain their move-only interface.
 
 Refresh builds a replacement privately and holds the geometry lease through
 epoch capture and publication. Failed callbacks leave the previous data and
