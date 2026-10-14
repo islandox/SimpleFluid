@@ -35,6 +35,9 @@ public:
         real_t reference_blackbody = 0.0) const;
 
     static real_t blackbody_delta(real_t temperature, real_t reference_temperature);
+    /** Cached-LU 1-norm condition estimate for conservatively screened matrices;
+     * the original inverse-column metric is used when screening is inconclusive.
+     */
     real_t reciprocal_condition_number() const noexcept { return reciprocal_condition_; }
     std::size_t size() const noexcept { return areas_.size(); }
 
