@@ -4,6 +4,14 @@ file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
+  if(TEST_NAME STREQUAL "testGradientTraverse")
+    target_sources(${TEST_NAME} PRIVATE
+        gradient_traverse/ReferenceCases.cc
+        gradient_traverse/RefreshCases.cc
+        gradient_traverse/StructuredCases.cc
+        gradient_traverse/LayeredCases.cc
+        gradient_traverse/OnePassCases.cc)
+  endif()
   if(TEST_NAME STREQUAL "testFvmLibrary")
     # Catch dependencies from FVM back into the higher-level solver DSO.
     target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
