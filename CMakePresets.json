@@ -143,6 +143,7 @@
         },
         {
             "name": "LLVM-RelWithDebInfo-Static",
+            "description": "Compatibility alias for LLVM-RelWithDebInfo; does not select static linkage.",
             "configurePreset": "LLVM-ninja-multi",
             "configuration": "RelWithDebInfo",
             "jobs": 8

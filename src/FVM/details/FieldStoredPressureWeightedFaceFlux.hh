@@ -318,11 +318,15 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                         face_velocity = boundary_velocity();
                     else if (values != nullptr && face.in_batch_id < values->size())
                         face_velocity = boundary_velocity();
-                    flux_values(face_lid, 0) = face_velocity.dot(metrics.normal) * metrics.area;
+                    const scalar_type velocity_flux = face_velocity.dot(metrics.normal) * metrics.area;
 
                     if constexpr (CorrectPressure)
                     {
-                        if (!face.owned_owner) return;
+                        if (!face.owned_owner)
+                        {
+                            flux_values(face_lid, 0) = velocity_flux;
+                            return;
+                        }
                         // A pressure correction does not require a velocity
                         // value slot, including for missing/truncated arrays.
                         const vec_type owner_gradient{
@@ -334,6 +338,8 @@ void pressure_weighted_stored_face_fluxes_impl(const VectorCellFieldStored<Pack,
                         flux_values(face_lid, 0) = owner_velocity.dot(metrics.area_vector) -
                             pressure_coefficient * (direct_gradient_flux - interpolated_gradient_flux);
                     }
+                    else
+                        flux_values(face_lid, 0) = velocity_flux;
                 });
             };
             const auto select_values = [&]<bool Slip, bool CorrectPressure>()

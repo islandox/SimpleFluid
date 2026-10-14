@@ -7,6 +7,15 @@ list(FILTER TEST_SOURCES EXCLUDE REGEX
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
+  if(TEST_NAME STREQUAL "testMeshTraverse")
+    target_sources(${TEST_NAME} PRIVATE
+        mesh_traverse/SelectionAndLifetimeCases.cc
+        mesh_traverse/StructuredCases.cc
+        mesh_traverse/MpiCases.cc
+        mesh_traverse/LayeredCases.cc
+        mesh_traverse/LayeredIncidenceCases.cc
+        mesh_traverse/StructuredIncidenceCases.cc)
+  endif()
   target_link_libraries(${TEST_NAME} SimpleFluid::Mesh GTest::gtest_main)
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testMeshQualityAccess")

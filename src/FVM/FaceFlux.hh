@@ -421,7 +421,7 @@ public:
         if (detail::ale_geometry_identity(*d_mesh) == d_geometry->d_geometry_identity
             && mesh_geometry_epoch(*d_mesh) == d_geometry->d_geometry_epoch) return;
         auto next = shared_geometry_type(new SharedGeometry(d_mesh, d_geometry->d_topology,
-            d_geometry->d_gradient_cache ? d_geometry->d_gradient_cache->shared_traverse_plan() : nullptr));
+            d_geometry->d_gradient_cache->shared_traverse_plan()));
         require_ready_geometry(*next);
         d_geometry = std::move(next);
     }

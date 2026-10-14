@@ -386,9 +386,11 @@ and can create dependency cycles.
 
 ## Change discipline and code conventions
 
-There is no repository-wide formatting configuration. Follow the surrounding
-file, avoid drive-by reformatting, and keep comment-only, mechanical, and
-behavioral changes separable during review.
+Use the checked-in `.clang-format` for touched SimpleFluid C++ code, following
+the surrounding file where the configuration leaves a choice. Avoid drive-by
+reformatting, and keep comment-only, mechanical, and behavioral changes separable
+during review. **Purpose:** maintain consistent formatting while keeping each
+change focused and reviewable.
 
 - Use the configured `Pack` aliases for scalar, local ordinal, global ordinal,
   map, matrix, and vector types in templated numerical code.
