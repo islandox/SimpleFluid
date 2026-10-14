@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include "SimpleFluidExport.hh"
 #include "geometry/mesh/OrthogonalIndexer.hh"
 
 #include <array>
@@ -79,11 +80,11 @@ public:
 
     /** Emit nonempty homogeneous ordinal ranges, preserving selected order. */
     template<class Visitor>
-    void visit_cells(StructuredTraverseSelection selection, bool independent, Visitor&& visitor) const;
+    SIMPLEFLUID_LOCAL void visit_cells(StructuredTraverseSelection selection, bool independent, Visitor&& visitor) const;
 
     /** Independent faces group interiors first, then ascending boundary IDs. */
     template<class Visitor>
-    void visit_faces(
+    SIMPLEFLUID_LOCAL void visit_faces(
         StructuredTraverseSelection selection, bool independent, std::optional<int> batch, Visitor&& visitor) const;
 
     /** Native lower/upper I, J, K incidence, including periodic wraparound. */

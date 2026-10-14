@@ -355,7 +355,8 @@ template<class Access> inline constexpr bool is_layered_traverse_access = false;
 template<class Access> inline constexpr bool is_layered_traverse_access<LayeredTraverseAccess<Access>> = true;
 
 /** @brief Dispatch a runtime mesh once, outside all batch numerical loops. */
-template<class Mesh, class Visitor> decltype(auto) with_traverse_access(const Mesh& mesh, Visitor&& visitor);
+template<class Mesh, class Visitor>
+SIMPLEFLUID_LOCAL decltype(auto) with_traverse_access(const Mesh& mesh, Visitor&& visitor);
 
 } // namespace SimpleFluid::detail
 

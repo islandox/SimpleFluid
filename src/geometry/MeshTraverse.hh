@@ -421,7 +421,7 @@ private:
 
 /** Direct interior incidences from a same-plan typed cell proof. */
 template<class Mesh, class Access, MeshTraverseSelection Selection = MeshTraverseSelection::All>
-class LayeredInteriorCellFaces
+class SIMPLEFLUID_LOCAL LayeredInteriorCellFaces
 {
 public:
     using local_ordinal_type = typename Mesh::local_ordinal_type;
@@ -571,7 +571,8 @@ public:
     size_t size() const;
     bool empty() const { return size() == 0; }
 
-    template<class Operation> void apply(Operation&& operation) const;
+    // Caller-instantiated callback adapters are not compiled binary entry points.
+    template<class Operation> SIMPLEFLUID_LOCAL void apply(Operation&& operation) const;
 
     /**
      * Reuse access borrowed from an enclosing typed traversal of this mesh.
@@ -580,14 +581,14 @@ public:
      */
     template<class Access, class Operation>
         requires std::is_same_v<typename Access::mesh_type, Mesh>
-    void apply(const Access& access, Operation&& operation) const;
+    SIMPLEFLUID_LOCAL void apply(const Access& access, Operation&& operation) const;
 
-    template<class Visitor> void visit_batches(Visitor&& visitor) const;
+    template<class Visitor> SIMPLEFLUID_LOCAL void visit_batches(Visitor&& visitor) const;
 
     /** Borrow an enclosing traversal's same-mesh access without redispatch. */
     template<class Access, class Visitor>
         requires std::is_same_v<typename Access::mesh_type, Mesh>
-    void visit_batches(const Access& access, Visitor&& visitor) const;
+    SIMPLEFLUID_LOCAL void visit_batches(const Access& access, Visitor&& visitor) const;
 
     /** Local preflight only; the enclosing numerical operation coordinates MPI failure. */
     void require_local_adjacency() const
@@ -619,9 +620,9 @@ private:
     }
 
     template<class Access, class Visitor>
-    void visit_structured_batches(
+    SIMPLEFLUID_LOCAL void visit_structured_batches(
         const Access& access, Visitor&& visitor, const detail::StructuredTraverseLayout& layout) const;
-    template<class Access, bool Interior> class LayeredIncidenceBatch
+    template<class Access, bool Interior> class SIMPLEFLUID_LOCAL LayeredIncidenceBatch
     {
     public:
         using reference = LayeredIncidenceRef<Access, Interior>;
@@ -640,7 +641,7 @@ private:
         local_ordinal_type d_cell;
     };
     template<class Access, class Visitor>
-    void visit_layered_batches(
+    SIMPLEFLUID_LOCAL void visit_layered_batches(
         const Access& access, Visitor&& visitor, const detail::LayeredTraverseLayout& layout) const;
     template<MeshTraverseSelection Next> auto select() const;
     template<MeshTraverseOwnership Next> auto ownership() const;
