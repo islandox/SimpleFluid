@@ -1006,7 +1006,7 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
     FaceCoefficientInterpolation coefficient_interpolation, int incompatible_fields, std::string_view context,
     ScalarTransportDiscretization discretization, const ScalarCellFieldStored<Pack, MeshType>* older_values,
     const ALEControlVolumeState* ale, StoredTransportSymbolicPlan<Pack>* symbolic_plan = nullptr,
-    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null, bool allow_robin = false)
+    Teuchos::RCP<typename Pack::vector_type> cached_rhs = Teuchos::null, bool allow_robin = false, bool rhs_only = false)
 {
     using scalar_type = typename Pack::scalar_type;
     using local_ordinal_type = typename Pack::local_ordinal_type;
@@ -1653,7 +1653,9 @@ TransportSystem<Pack> stored_weighted_scalar_transport_system_impl(
         }
     }
 
-    const auto matrix = finish_stored_transport_matrix<Pack>(
+    if (rhs_only && cached_matrix.is_null())
+        throw std::invalid_argument("Prepared physical RHS requires an assembled operator.");
+    const auto matrix = rhs_only ? cached_matrix : finish_stored_transport_matrix<Pack>(
         mesh, std::move(cached_matrix), 32, rows, symbolic_plan);
     return {matrix, rhs};
 }
@@ -1727,7 +1729,7 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
     const ScalarCellFieldStored<Pack, MeshType>* older_temperature,
     const ScalarCellFieldStored<Pack, MeshType>* old_density,
     const ScalarCellFieldStored<Pack, MeshType>* old_specific_heat_capacity,
-    const ALEControlVolumeState* ale)
+    const ALEControlVolumeState* ale, bool rhs_only = false)
 {
     const std::array<int, 4> local_old_property_state{
         old_density == nullptr ? 0 : 1,
@@ -1778,7 +1780,7 @@ TransportSystem<Pack> stored_physical_temperature_transport_system(
         std::move(boundary_condition), std::move(boundary_value), std::move(power_density), treatment, correction_field,
         std::move(cached_matrix), {}, {}, boundary_thermal_conductivity, geometry_cache, coefficient_interpolation,
         incompatible_fields, "physical_temperature_transport_system", discretization, older_temperature, ale, nullptr,
-        Teuchos::null, true);
+        Teuchos::null, true, rhs_only);
 }
 
 template<TpetraTypePack Pack, class MeshType, class Stencils, class BoundaryLocations, class BoundaryDiffusion>

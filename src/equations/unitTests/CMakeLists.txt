@@ -149,3 +149,11 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;turbulence;sas;small_fixture"
     TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME SolidHeatConduction_PreparedSkewed_2procs
+    TARGET testSolidHeatConductionEquation
+    PROCS 2
+    ARGS "--gtest_filter=SolidHeatConductionEquationTest.PreparedSkewedRHSMatchesFullReassembly"
+    LABELS "mpi;solid_conduction;cache"
+    TIMEOUT 120)

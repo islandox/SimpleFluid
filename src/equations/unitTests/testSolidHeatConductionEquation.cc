@@ -8,6 +8,8 @@
 #include "FVM/details/OperatorDetails.hh"
 #include "equations/SolidHeatConductionEquation.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -62,6 +64,38 @@ std::vector<double> local_values(const Field& field)
         result[local] = field.local_value(static_cast<Pack::local_ordinal_type>(local));
     }
     return result;
+}
+
+SimpleFluid::SP<ParentMesh> make_prepared_skewed_parent()
+{
+    using Unstructured = SimpleFluid::Meshes::UnstructuredMesh;
+    using Partitioned = SimpleFluid::Meshes::PartitionedMesh<Unstructured, Pack>;
+    const auto reference = SimpleFluid::test::make_unstructured_hex_line(8, 0.125);
+    auto nodes = reference->nodes();
+    for (auto& node : nodes)
+    {
+        node.x += 0.3 * node.y;
+    }
+    SimpleFluid::Arr<Unstructured::CellDefinition> cells;
+    for (size_t local = 0; local < reference->num_cells(); ++local)
+    {
+        const auto cell = reference->cell_id(local);
+        cells.push_back({reference->cell_type(cell), reference->cell_nodes(cell)});
+    }
+    SimpleFluid::Arr<Unstructured::BoundaryFaceDefinition> boundaries;
+    for (const auto& [batch_id, batch] : reference->boundary_batches())
+    {
+        for (const auto face : batch.face_lids)
+        {
+            boundaries.push_back(
+                {reference->face_nodes(face), batch_id, reference->boundary_names().at(batch_id)});
+        }
+    }
+    auto geometry = std::make_shared<Unstructured>(nodes, cells, boundaries);
+    const auto communicator = Tpetra::getDefaultComm();
+    auto partition = SimpleFluid::MeshPartitioner<Pack>::partition(*geometry, communicator);
+    auto partitioned = std::make_shared<Partitioned>(geometry, std::move(partition.indexer), communicator);
+    return std::make_shared<ParentMesh>(partitioned);
 }
 
 } // namespace
@@ -378,4 +412,154 @@ TEST(SolidHeatConductionEquationTest, RejectedSolvePreservesAcceptedTemperature)
     {
         EXPECT_DOUBLE_EQ(temperature.local_value(static_cast<Pack::local_ordinal_type>(local)), accepted[local]);
     }
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedFreezesBaselineAndCoefficientsAndWarmStarts)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 1.0, 1.0, 1.0);
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.convection["xmax"].heat_transfer_coefficient = 2.0;
+    Equation equation(mesh, boundaries);
+    Field baseline(mesh, 400.0, "baseline"), candidate(mesh, 0.0, "candidate");
+    // dt*G/C=4: an explicit contact iteration would not be contractive.
+    equation.prepare_advance(baseline, 4.0, material);
+    const auto rhs = equation.prepared_rhs();
+    const auto matrix = equation.prepared_operator();
+    baseline.owned_data().putScalar(900.0);
+    material.density.owned_data().putScalar(17.0);
+    EXPECT_TRUE(equation.advance_prepared(candidate).converged);
+    EXPECT_NEAR(candidate.value(0), 320.0, 1e-10);
+    const auto repeated = equation.advance_prepared(candidate, {}, &candidate);
+    EXPECT_TRUE(repeated.converged);
+    EXPECT_NEAR(candidate.value(0), 320.0, 1e-10);
+    EXPECT_EQ(matrix.get(), equation.prepared_operator().get());
+    EXPECT_NEAR(rhs->norm2(), equation.prepared_rhs()->norm2(), 1e-12);
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedFluxResponseHasNoLargeBaselineCancellation)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 1.0, 1.0, 2.0);
+    Equation equation(mesh, {});
+    Equation::boundary_cache_type flux{{}, mesh};
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+        if (mesh->boundary_batch_name(batch_id) == "xmax")
+            flux.value[batch_id] = SimpleFluid::ArrReal(batch.face_lids.size(), 0.0);
+    equation.set_boundary_heat_flux(flux);
+    Field baseline(mesh, 1e12, "baseline"), candidate(mesh, 0.0, "candidate");
+    equation.prepare_advance(baseline, 1e-10, material);
+    const auto rhs = equation.prepared_rhs();
+    const auto matrix = equation.prepared_operator();
+    for (auto& [batch_id, values] : flux.value) std::fill(values.begin(), values.end(), 3.0);
+    const auto response = equation.prepared_boundary_response(flux);
+    EXPECT_NEAR(response->norm2(), 3.0, 1e-12);
+    EXPECT_NEAR(response->getData()[0], -3.0, 1e-12);
+    EXPECT_EQ(matrix.get(), equation.prepared_operator().get());
+    EXPECT_EQ(equation.boundary_heat_flux()->value.begin()->second.front(), 0.0);
+    EXPECT_EQ(rhs->norm2(), equation.prepared_rhs()->norm2());
+    Equation::boundary_cache_type changed{{}, mesh};
+    EXPECT_NO_THROW(equation.set_boundary_heat_flux(changed));
+    EXPECT_THROW(equation.prepared_rhs(), std::logic_error);
+    equation.prepare_advance(baseline, 1e-10, material);
+    EXPECT_NO_THROW(equation.prepared_rhs());
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedSkewedRHSMatchesFullReassembly)
+{
+    auto parent = make_prepared_skewed_parent();
+    SimpleFluid::SP<const SolidMesh> mesh = std::make_shared<SolidMesh>(std::move(parent),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 2.0, 3.0, 4.0);
+    Equation prepared(mesh, {}), fresh(mesh, {});
+    Equation::boundary_cache_type flux{{}, mesh};
+    for (const auto& [id, batch] : mesh->boundary_batches())
+        if (mesh->boundary_batch_name(id) == "ymax")
+            flux.value[id] = SimpleFluid::ArrReal(batch.face_lids.size(), 1.0);
+    prepared.set_boundary_heat_flux(flux);
+    Field baseline(mesh, 310.0, "baseline"), cached(mesh, 0.0, "cached"), reference(mesh, 0.0, "reference");
+    for (size_t local = 0; local < mesh->num_owned_cells(); ++local)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(local);
+        baseline.set_owned_value(cell, 310.0 + 2.0 * mesh->cell_centroid(cell).x);
+    }
+    baseline.sync_ghosts();
+    prepared.prepare_advance(baseline, 0.1, material);
+    prepared.prepared_rhs();
+    const auto matrix = prepared.prepared_operator();
+    for (const double value : {2.0, -3.0, 0.25})
+    {
+        for (auto& [id, values] : flux.value) std::fill(values.begin(), values.end(), value);
+        prepared.set_boundary_heat_flux(flux);
+        fresh.set_boundary_heat_flux(flux);
+        EXPECT_TRUE(prepared.advance_prepared(cached, {}, &cached).converged);
+        EXPECT_TRUE(fresh.advance(baseline, 0.1, material, reference).converged);
+        for (size_t local = 0; local < mesh->num_owned_cells(); ++local)
+            EXPECT_NEAR(cached.value(static_cast<Pack::local_ordinal_type>(local)),
+                reference.value(static_cast<Pack::local_ordinal_type>(local)), 1e-8);
+        EXPECT_EQ(matrix.get(), prepared.prepared_operator().get());
+    }
+    const auto physical_rhs = prepared.prepared_rhs();
+    const auto response = prepared.prepared_boundary_response(flux);
+    for (auto& [id, values] : flux.value) std::fill(values.begin(), values.end(), 0.0);
+    prepared.set_boundary_heat_flux(flux);
+    const auto zero_rhs = prepared.prepared_rhs();
+    auto difference = Teuchos::rcp(new Pack::vector_type(*physical_rhs, Teuchos::Copy));
+    difference->update(-1.0, *zero_rhs, 1.0);
+    difference->update(-1.0, *response, 1.0);
+    EXPECT_LT(difference->norm2(), 1e-9);
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedBoundaryResponseFreezesExteriorConvection)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 1.0, 1.0, 1.0);
+    for (const auto correlation : {SimpleFluid::ConvectionCorrelation::Constant,
+             SimpleFluid::ConvectionCorrelation::ChurchillChuVerticalPlate})
+    {
+        SimpleFluid::BoundaryConditionSet boundaries;
+        auto& boundary = boundaries.convection["xmax"];
+        boundary.correlation = correlation;
+        boundary.heat_transfer_coefficient = 2.0;
+        boundary.characteristic_length = 1.0;
+        boundary.fluid_thermal_conductivity = 0.026;
+        boundary.kinematic_viscosity = 1.6e-5;
+        boundary.thermal_diffusivity = 2.3e-5;
+        boundary.thermal_expansion = 1.0 / 300.0;
+        Equation equation(mesh, boundaries);
+        Equation::boundary_cache_type flux{{}, mesh};
+        for (const auto& [id, batch] : mesh->boundary_batches())
+            if (mesh->boundary_batch_name(id) == "xmin")
+                flux.value[id] = SimpleFluid::ArrReal(batch.face_lids.size(), 0.0);
+        equation.set_boundary_heat_flux(flux);
+        Field baseline(mesh, 400.0, "baseline");
+        equation.prepare_advance(baseline, 1.0, material);
+        const auto rhs = equation.prepared_rhs();
+        const auto matrix = equation.prepared_operator();
+        for (auto& [id, values] : flux.value) std::fill(values.begin(), values.end(), 3.0);
+        const auto response = equation.prepared_boundary_response(flux);
+        EXPECT_NEAR(response->getData()[0], -3.0, 1e-12);
+        EXPECT_EQ(matrix.get(), equation.prepared_operator().get());
+        EXPECT_EQ(rhs->norm2(), equation.prepared_rhs()->norm2());
+    }
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedZeroConductivityRetainsOperator)
+{
+    auto mesh = make_solid_subdomain(SimpleFluid::test::make_single_hex_database(),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 2.0, 3.0, 0.0);
+    Equation equation(mesh, {});
+    Field baseline(mesh, 400.0, "baseline"), candidate(mesh, 0.0, "candidate");
+    equation.prepare_advance(baseline, 1.0, material);
+    equation.prepared_rhs();
+    const auto matrix = equation.prepared_operator();
+    EXPECT_NO_THROW(equation.prepared_rhs());
+    EXPECT_TRUE(equation.advance_prepared(candidate).converged);
+    EXPECT_TRUE(equation.advance_prepared(candidate, {}, &candidate).converged);
+    EXPECT_NEAR(candidate.value(0), 400.0, 1e-10);
+    EXPECT_EQ(matrix.get(), equation.prepared_operator().get());
 }
