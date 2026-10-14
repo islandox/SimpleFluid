@@ -407,7 +407,7 @@ public:
      * Pointer alternatives are dereferenced before dispatch.
      */
     template<class Visitor>
-    decltype(auto) visit(Visitor&& visitor) const
+    SIMPLEFLUID_LOCAL decltype(auto) visit(Visitor&& visitor) const
     {
         return std::visit(
             [&](const auto& mesh) -> decltype(auto)
