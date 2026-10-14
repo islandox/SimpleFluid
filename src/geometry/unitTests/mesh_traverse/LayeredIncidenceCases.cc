@@ -1,3 +1,6 @@
+/** @file LayeredIncidenceCases.cc
+ * @brief Layered cell-face incidence geometry and orientation checks.
+ */
 #include "test_helpers.hh"
 
 namespace

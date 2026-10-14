@@ -1,3 +1,6 @@
+/** @file StructuredIncidenceCases.cc
+ * @brief Structured cell-face incidence geometry and orientation checks.
+ */
 #include "test_helpers.hh"
 
 namespace

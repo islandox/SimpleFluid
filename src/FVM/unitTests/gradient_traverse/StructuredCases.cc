@@ -1,3 +1,6 @@
+/** @file StructuredCases.cc
+ * @brief Structured gradient traversal geometry checks.
+ */
 #include "reconstruction_helpers.hh"
 
 TEST(GradientTraverseTest, StructuredNumericalCachesPreserveScalarVectorOrderAndLiveBoundaries)

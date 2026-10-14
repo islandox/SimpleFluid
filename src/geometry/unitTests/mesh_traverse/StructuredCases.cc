@@ -1,3 +1,6 @@
+/** @file StructuredCases.cc
+ * @brief Structured Cartesian and cylindrical traversal selection and ordering checks.
+ */
 #include "test_helpers.hh"
 
 TEST(MeshTraverseTest, StructuredCartesianRangesPreserveAllPeriodicMasks)

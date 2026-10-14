@@ -1,3 +1,6 @@
+/** @file LayeredCases.cc
+ * @brief Layered and multi-region gradient traversal checks.
+ */
 #include "reconstruction_helpers.hh"
 
 namespace

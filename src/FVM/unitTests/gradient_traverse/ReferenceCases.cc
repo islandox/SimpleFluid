@@ -1,3 +1,6 @@
+/** @file ReferenceCases.cc
+ * @brief Gradient traversal comparisons against reference reconstructions.
+ */
 #include "reconstruction_helpers.hh"
 
 TEST(GradientTraverseTest, CompositeCacheBuildsAndRefreshesMatchOrderedPointGeometry)
