@@ -834,6 +834,14 @@ void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
     const field_type* conductivity_override, const boundary_cache_type* boundary_conductivity,
     FVM::FaceCoefficientInterpolation interpolation)
 {
+    if (d_prepared_owner != nullptr && d_prepared_owner != this)
+    {
+        d_cached_physical_transport_matrix = Teuchos::null;
+        d_cached_physical_graph_supports_non_orthogonal_correction = false;
+        d_prepared_operator_ready = false;
+        d_prepared_rhs = Teuchos::null;
+        d_linear_solver = BelosLinearSolver<Pack>{};
+    }
     collective_detail::collective_local_validation(*d_mesh, "Prepare physical conduction inputs", [&]
     {
         EquationValidation::require_mesh_match(*d_mesh, old_temperature, "Prepared conduction");
@@ -866,19 +874,31 @@ void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
         : std::make_shared<boundary_cache_type>(*boundary_conductivity);
     d_prepared_operator_ready = false;
     d_prepared_rhs = Teuchos::null;
-    d_prepared_advance = [this, baseline, zero_baseline, coefficients, fluxes, boundary_k, time_step, treatment, interpolation]
-        (field_type& output, const source_type& source, const LinearSolverOptions& options)
+    d_prepared_owner = this;
+    d_prepared_advance = [baseline, zero_baseline, coefficients, fluxes, boundary_k, time_step, treatment, interpolation]
+        (const TemperatureDiffusionEquation& owner, field_type& output, const source_type& source, const LinearSolverOptions& options)
     {
-        d_using_prepared = true;
+        // A default copy retains immutable snapshots, but must own its mutable
+        // operator and solver state before any prepared evaluation.
+        if (owner.d_prepared_owner != &owner)
+        {
+            owner.d_cached_physical_transport_matrix = Teuchos::null;
+            owner.d_cached_physical_graph_supports_non_orthogonal_correction = false;
+            owner.d_prepared_operator_ready = false;
+            owner.d_prepared_rhs = Teuchos::null;
+            owner.d_linear_solver = BelosLinearSolver<Pack>{};
+            owner.d_prepared_owner = &owner;
+        }
+        owner.d_using_prepared = true;
         try
         {
-            const auto result = advance_physical(d_boundary_response == nullptr ? *baseline : *zero_baseline, *fluxes, time_step, *coefficients, output,
+            const auto result = owner.advance_physical(owner.d_boundary_response == nullptr ? *baseline : *zero_baseline, *fluxes, time_step, *coefficients, output,
                 source ? source : source_type{[](local_ordinal_type) { return scalar_type{}; }},
                 treatment, options, nullptr, boundary_k.get(), interpolation);
-            d_using_prepared = false;
+            owner.d_using_prepared = false;
             return result;
         }
-        catch (...) { d_using_prepared = false; d_prepared_operator_ready = false; throw; }
+        catch (...) { owner.d_using_prepared = false; owner.d_prepared_operator_ready = false; throw; }
     };
 }
 
@@ -895,7 +915,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_prepared(field_type& 
     d_prepared_initial_guess = initial_guess;
     try
     {
-        const auto result = d_prepared_advance(temperature, source, options);
+        const auto result = d_prepared_advance(*this, temperature, source, options);
         d_prepared_initial_guess = nullptr;
         return result;
     }
@@ -908,7 +928,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_rhs(const source_typ
 {
     if (!d_prepared_advance) throw std::logic_error("Physical advance has not been prepared.");
     d_prepared_rhs_only = true;
-    try { d_prepared_advance(d_candidate_temperature, source, {}); }
+    try { d_prepared_advance(*this, d_candidate_temperature, source, {}); }
     catch (...) { d_prepared_rhs_only = false; throw; }
     d_prepared_rhs_only = false;
     return d_prepared_rhs;
@@ -919,6 +939,7 @@ template<TpetraTypePack Pack, class MeshType>
 auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(const boundary_cache_type& increment) const
     -> Teuchos::RCP<const typename Pack::vector_type>
 {
+    if (d_prepared_operator_ready && d_prepared_owner != this) prepared_rhs();
     if (!d_prepared_operator_ready) throw std::logic_error("Assemble the prepared operator before its boundary response.");
     collective_detail::collective_local_validation(*d_mesh, "Prepared boundary response", [&]
     {
