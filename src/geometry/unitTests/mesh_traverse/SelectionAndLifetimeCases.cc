@@ -1,3 +1,6 @@
+/** @file SelectionAndLifetimeCases.cc
+ * @brief Traversal selection, fallback, and retained geometry lifetime checks.
+ */
 #include "test_helpers.hh"
 #include "geometry/SolidSubdomain.hh"
 

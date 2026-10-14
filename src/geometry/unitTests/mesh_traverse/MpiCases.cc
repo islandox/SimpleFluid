@@ -1,3 +1,6 @@
+/** @file MpiCases.cc
+ * @brief Distributed traversal ownership and partition checks.
+ */
 #include "test_helpers.hh"
 
 TEST(MeshTraverseMultiRankTest, ZeroHaloDoesNotTurnPartitionInterfacesIntoPhysicalBoundaries)

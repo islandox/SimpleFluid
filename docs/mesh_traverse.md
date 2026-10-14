@@ -11,6 +11,8 @@ in `.ipp` files, which the headers include. Plan construction and layout detecti
 `.tcc` files, included by `geometry/explicit_instantiation/MeshTraverse.cc`.
 The headers do not include `.tcc` files. Layered XY metadata construction is
 compiled separately in `geometry/details/LayeredTraverseLayout.cc`.
+This boundary keeps setup compiled while leaving caller-defined numerical callbacks
+available at instantiation.
 
 `SimpleFluid::Mesh` supplies compiled plans for native Cartesian, cylindrical,
 layered, unstructured, and composite meshes, plus `Mesh`, `MeshHandle`,
@@ -19,6 +21,8 @@ layered, unstructured, and composite meshes, plus `Mesh`, `MeshHandle`,
 inline traversal templates. Other mesh types or Tpetra packs require an owning
 instantiation unit that includes `geometry/MeshTraverse.tcc` and instantiates
 the plan and any directly used layout-detection methods.
+This preserves compiled default consumers and a deliberate custom-template extension
+path.
 
 A derived mesh wrapper is a distinct template specialization. For a wrapper
 defined in an anonymous namespace, include `geometry/MeshTraverse.tcc` in that
@@ -48,10 +52,13 @@ borrows its `MeshTraversePlan`. The mesh must outlive all of them. Plans and
 executions cannot be moved or copied. Neither the factory nor the plan
 constructor accepts a temporary mesh; execution selectors require an lvalue
 execution scope.
+These nested lifetimes prevent dangling topology, geometry, and lease references.
 
 All selectors default to owned entities. `.local()` includes locally visible
 ghost entities; `.owned()` selects owned entities explicitly. These options
 are independent of physical boundary classification.
+This keeps partition interfaces and ghost visibility from becoming physical boundary
+conditions.
 
 | Selection | Meaning |
 | --- | --- |
@@ -66,6 +73,9 @@ ownership scope. Boundary here is deliberately broader than the older
 operation that needs a prescribed condition must validate the tag separately.
 Unknown or locally absent patch IDs select an empty range. Named patch
 membership alone does not turn a periodic or stitched face into a boundary.
+
+Field-local IDs keep field access tied to its storage; a batch-array position is an
+unrelated ordinal.
 
 References expose `id()` in the existing field-local ordinal space, even for
 native structured meshes. Cell references provide `volume()` and `centroid()`.
@@ -91,6 +101,8 @@ Adjacency access then returns the mesh's invalid local sentinel. Call
 values. This is local validation: an MPI numerical operation must coordinate
 rank-local failures before later collectives. Traversal itself never performs
 communication or publishes field values.
+The numerical operation owns synchronization and can coordinate failures before its
+collectives.
 
 ## Batches and ordering
 
@@ -184,6 +196,9 @@ Reordered handles and composite providers retain the generic fallback. This
 specialization adds neither semi-structured MPI distribution nor public periodic
 geometry support. Geometry-only axial motion may reuse the plan; XY topology
 changes require a replacement plan and cache.
+Preserving original boundary IDs and slots prevents regrouping from changing prescribed
+values. The support restrictions keep compact batching from implying an unimplemented
+distribution or periodic geometry.
 
 ### Typed interior cell-face ranges
 
@@ -210,6 +225,8 @@ creation rejects foreign plans/meshes, invalid IDs and plans without
 empty selections and adjacency preflight. These references and ranges borrow the
 enclosing execution/access scope and must remain inside its callback lifetime.
 Generic fallback and supported geometry-motion/invalidation policies are unchanged.
+The originating-plan and eligibility checks prevent a foreign or stale typed-cell proof
+from bypassing incidence validation.
 Structured interior ranges borrow the layout and cell ID; applying the range
 creates six arithmetic incidences as local scratch. Selecting a range does not
 copy that scratch. This bypasses mixed incidence classification and dispatch.
@@ -288,6 +305,7 @@ induction variable. No mesh query, provider visitation, geometry-index vector,
 lease acquisition, or selection predicate occurs in this loop. The owner must
 outlive the range. `subrange(begin, count)` has the same valid-bounds precondition
 as an unchecked span subview.
+Matched ordering and valid origins keep topology and metrics attached to the same face.
 
 The stored pressure-weighted face-flux workspace uses these ranges directly:
 
@@ -308,6 +326,8 @@ entering generic mesh traversal again. Numerical boundary types and values are
 resolved once per group on each flux call, preserving missing/short arrays,
 Slip slot availability, and independent pressure-Dirichlet corrections. The
 regrouped output must not alias input fields.
+This protects input values across category passes; live per-group boundary lookup
+prevents stale data and preserves independent pressure correction.
 
 `topology_groups()` is shared and retained across geometry-only ALE changes.
 Initial construction classifies/counts owned faces, fills final interior and
@@ -318,6 +338,8 @@ success. Shared older snapshots retain their own metrics. Rollback creates a
 new geometry epoch and needs refresh even when coordinates return to an earlier
 state. Replacement snapshots also retain their gradient cache's traversal plan;
 the new snapshot owns independently rebuilt gradient weights.
+Retained readers therefore keep their own numerical state instead of aliasing a
+replacement workspace.
 
 Topology/partition/order edits require workspace reconstruction. Call
 `invalidate_topology()` before an in-place edit; all snapshots sharing the same
@@ -326,6 +348,8 @@ are checked at operation entry, but same-count edits still need explicit
 invalidation. The pressure-flux entry aggregates input, topology, snapshot and
 lease failures once before gradient synchronization or numerical writes; the
 zero-pressure-coefficient fast path retains its previous behavior.
+Aggregating failures before synchronization and writes prevents rank divergence and
+partially updated output.
 
 For source compatibility, `face_geometry()` lazily materializes the old ordered
 vector only when explicitly requested. `face_batches()` and `traverse_plan()`
@@ -369,6 +393,8 @@ boundary sample arrays, preserving each array's order. The boundary-aware
 cache builds only boundary-cell rows; interior rows retain their established
 empty boundary-cache representation. Boundary direction callbacks run in their
 original order and remain live during refresh.
+Retaining the numerical expressions and accumulation order prevents a layout change from
+silently changing arithmetic or observable callbacks.
 
 The shared least-squares, scalar affine (including Robin), and vector affine
 stencil builders also accept a retained traversal plan. Their existing entry
@@ -436,6 +462,9 @@ The matched cache-layout qualification is retained in
 `build/verification/structured-gradient-cache-final-20261013/REPORT.txt`.
 It separates fresh evaluation, evaluation after a fixed geometry refresh, and
 cache construction/refresh with fixed iteration counts in both variants.
+These byte estimates describe the stated retained capacities, including shared topology
+where specified; they are not total process RSS or additive totals across snapshots
+sharing storage.
 
 ### Layered numerical gradient storage
 
@@ -510,6 +539,8 @@ largest row, holds that row's resolved face metrics while its runs execute.
 There is no persistent global resolved-metric table. Canonical coarse/fine
 faces, periodic images, field-local IDs, repeated neighbours and numerical
 accumulation order retain their existing meaning.
+Bounded row scratch preserves compact storage without a persistent global geometry
+table.
 
 The legacy uniform scalar/vector builders still apply boundary conditions
 after the row pass. Their preclassified boundary descriptors preserve the
@@ -529,6 +560,8 @@ cached-matrix mutation. This adds one setup reduction per builder on MPI
 communicators; serial execution needs no reduction. A supplied geometry cache
 does not let one rank skip that collective. This validation does not change
 the enclosing operator's existing boundary/source failure policy.
+Every rank must reach the same setup decision before peers enter assembly collectives or
+mutate cached matrices.
 
 No transport speedup is claimed without matched timing measurements. Exact
 metric/coefficient, matrix/RHS, boundary order, retained topology, cache-reuse,

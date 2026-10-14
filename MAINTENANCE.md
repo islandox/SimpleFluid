@@ -11,20 +11,29 @@ Before changing code:
 
 1. Read the relevant public header, its implementation (`.cc`, `.tcc`, or
    `.ipp`), and its unit tests together.
+   This keeps the declared contract, its implementation, and the evidence aligned.
 2. Check `git status --short` and preserve unrelated worktree changes.
+   This protects work owned by the user or another contributor.
 3. Build the narrowest affected target in Debug mode.
+   This catches local regressions without unrelated build churn.
 4. Run focused serial tests, then the affected MPI or integration tests.
+   This exercises local logic and distributed behavior.
 5. For numerical or performance changes, compare results before and after the
    change rather than relying only on test exit status.
+   This detects silent accuracy or efficiency regressions.
 
 The code requires C++23 and a Trilinos build containing Kokkos, Teuchos,
 Tpetra, STK, Belos, Ifpack2, MueLu, and Zoltan2. MPI and Google Test are used
 for distributed execution and testing.
+These dependencies define the build and distributed-runtime assumptions needed to
+reproduce tests.
 
 The solver has two deliberate backend paths. Supported mapped meshes execute
 natively through `MeshHandle` and `FieldStored`; callers that provide the
 legacy `Mesh` use synchronized compatibility fields. Preserve that boundary
 instead of converting a supplied native mesh into a legacy mesh.
+This avoids hidden conversions and duplicated storage while preserving compatibility
+consumers.
 
 Within the native path, Cartesian and cylindrical meshes construct their
 distributed slab views directly. An `UnstructuredMesh` must first be
@@ -45,6 +54,8 @@ rings, fixed Delaunay boundary segments, and one-to-one corner interfaces
 intact; do not normalize polygonal volumes to an analytic annulus. See the
 [annular mesh guide](docs/annular_meshes.md) for options, counts, quality limits,
 and focused regression commands.
+Collective construction aligns ownership with field maps; retaining the actual polygonal
+geometry preserves conservative interfaces.
 
 ### Compact region composition
 
@@ -60,11 +71,15 @@ are rejected. Coarse/fine seams keep canonical fine faces; coarse cells traverse
 all covering subfaces, and integrated flux restriction uses signs without
 multiplying by area fractions again. Periodic geometry must use incident-cell
 image vectors in both reconstruction and Rhie--Chow stabilization.
+These identities and signed restrictions prevent duplicated or misweighted interface
+flux. Compact provider metadata preserves distributed scaling, while incident-cell image
+vectors give reconstruction the correct local displacement.
 
 Composite `PlanarALEMeshMotion` changes a common affine Z map while child
 providers stay frozen. Keep its existing lease, epoch, GCL, numeric-cache refresh
 and rollback contract. Reject buffered/nonaxial composite deformation and a
 changing axial periodic length rather than relaxing conservation checks.
+This limits moving-mesh support to the implemented conservative transformation.
 
 Normal `MeshHandle::faces()` queries return independent sized/indexable ranges.
 Do not reintroduce implicit cell-face CSR while building fields, graphs, or
@@ -73,6 +88,8 @@ Serial IDs are arithmetic and distributed lookup reuses required Tpetra maps;
 `indexer()` remains an opt-in compatibility allocation. Arbitrary native
 reordering is explicit and retains its permutation; composite reordering is
 currently rejected. See [region contracts and storage categories](docs/region_meshes.md).
+These choices keep ordinary queries compact and reserve extra connectivity or indexing
+storage for explicit compatibility use.
 
 Conservative `MeshToMeshTransfer` supports a native cylindrical endpoint paired
 with a composite containing native XY/Z, `ExtrudedRegion`, and `SweptRZRegion`
@@ -81,6 +98,8 @@ motion or rollback. Preserve explicit partial-coverage accounting and the
 intensive/extensive quantity distinction. This spatial utility does not own
 phase occupancy or the coupling schedule. See
 [transfer contracts and limitations](docs/mesh_to_mesh_transfer.md).
+This prevents stale spatial maps and leaves physical occupancy and time scheduling with
+their coupling owners.
 
 ### Liquid-mass inventory transactions
 
@@ -108,6 +127,7 @@ When free-surface coupling has enabled boiling phase-inventory tracking,
 `remove_free_surface_model()` must reject removal while submerged steam remains.
 Do not weaken that guard or silently reset the steam ledger; add a conservative
 transfer/disposition policy first.
+This protects the phase inventory until it has an explicit conservative disposition.
 
 ### Geometry epochs and motion transactions
 
@@ -121,6 +141,8 @@ the shared concrete mesh, so every alias `MeshHandle` observes the same
 revision. The solver's mutable constructor is an opt-in ownership seam for the
 same native handle; it does not authorize arbitrary geometry mutation or
 weaken const access for equations and fields.
+The transaction makes geometry changes visible to every consumer instead of bypassing
+invalidation.
 
 The geometry epoch is the authoritative numeric-cache revision. After a trial
 changes coordinates, refresh or invalidate all of these before assembly or
@@ -137,6 +159,9 @@ output:
 - model-owned transport geometry used by the liquid inventory, reacting gas,
   or another enabled extensive equation; and
 - geometry-derived output state, including VTU point coordinates.
+
+Together these refreshes keep reconstruction, numerical operators, models, and output on
+the same geometry.
 
 Topology-stable graphs, maps, entity IDs, and boundary membership may survive
 motion; geometry-dependent numeric values may not. A surviving cache must
@@ -178,6 +203,10 @@ Treat one ALE step as an accepted-state transaction:
    all snapshots, refresh the accepted-epoch caches, and leave no output or
    history record for the rejected attempt.
 
+Complete snapshots prevent partial rollback and cumulative corrector drift. One shared
+trial description and collective closure gates keep all equations consistent; single
+publication prevents double counting and rejected-trial leakage.
+
 For ALE temperature transport, the extensive sensible energy is
 $V_c m_{l,c}^*c_{p,c}T_c$. Use accepted-old and trial-new
 `liquidMassInventory` densities in the corresponding old/new control volumes.
@@ -190,6 +219,8 @@ trial-new liquid mass divided by pure density uses the carrier upwind, while
 each post-transport/pre-kinetics bubble fraction uses the combined
 carrier-plus-slip upwind from its population equation. Do not reconstruct this
 term from accepted-old aggregate occupancy or from post-kinetics bubbles.
+This keeps the volume source on the exact transport state and upwind rule that produced
+it.
 
 `PlanarALEBoundary` marks the moving patch's trial velocity cache as `Slip`, so
 face reconstruction retains the owner-cell tangential velocity while momentum
@@ -200,6 +231,7 @@ mesh. Accepted `PlanarALEStepDiagnostics` retain the
 per-outer level, target, continuity, material-state, and gas-state histories, and
 each accepted free-surface history record copies that diagnostic snapshot.
 Rejected trials do not publish a new history record.
+This makes every diagnostic attributable to the accepted transaction.
 
 `FluidSolver::maximum_courant_number()` uses the accepted transport flux:
 absolute projected flux on a fixed mesh and mesh-relative flux for planar ALE.
@@ -239,6 +271,7 @@ zeros the supplied solution and retains the ordinary final-residual contract.
 Temperature, momentum, and turbulence scalar reassembly invalidate numerical
 preconditioners even when their matrix allocation is reused. Coefficient-based
 graph eligibility is a collective decision, including on empty ranks.
+This keeps every rank on the same numerical setup and recovery path.
 
 `testBelosLinearSolver` and the registered `BelosAccurateResidual_2procs` case
 cover residual precision, bounded refinement, failure paths, and vector
@@ -291,6 +324,8 @@ and solver specializations share the `SimpleFluidSolvers` DSO. On ELF builds,
 enforce the public API and the narrowly reviewed Trilinos/Kokkos runtime
 bridges. Changes to explicit instantiations, visibility, or the shared PCH must
 retain that audit.
+The shared ownership and export audit prevent duplicate runtime ownership and missing
+consumer symbols.
 
 Important entry points for a manual review are:
 
@@ -328,6 +363,7 @@ Template declarations and definitions are intentionally split among `.hh`,
 should remain thin forwarding surfaces where a mapped implementation already
 exists. Review all included implementation fragments before changing a
 template interface.
+This avoids incomplete interface edits across deliberately split template definitions.
 
 FVM's compiled gradient caches cover `DefaultTpetraTypes` with `Mesh` and
 `MeshHandle`. Consumers using other packs or statically dispatched mesh types
@@ -355,6 +391,7 @@ ctest --preset GCC-Debug
 The GCC and LLVM presets use `build/gcc` and `build/llvm`. Keep the selected C++
 standard library consistent across SimpleFluid, Trilinos, Google Test, and the
 final link.
+This prevents incompatible C++ runtime and ABI combinations.
 
 An explicit configuration is useful on a new machine or in CI:
 
@@ -394,12 +431,16 @@ change focused and reviewable.
 
 - Use the configured `Pack` aliases for scalar, local ordinal, global ordinal,
   map, matrix, and vector types in templated numerical code.
+  This preserves the supported template and type configurations.
 - Keep mesh-local IDs, Tpetra local rows, and global IDs distinct. Convert at
   the existing mesh/map boundaries instead of relying on coincident values.
+  This prevents accidental reliance on unrelated indices having the same value.
 - Make ownership explicit in names and comments: owned storage is authoritative;
   overlap storage may require `sync_ghosts()` before a stencil read.
+  This avoids stale ghost values and ambiguous ownership.
 - Keep fields, caches, equations, and solvers bound to the same mesh object;
   reject mismatches instead of relying on equivalent-looking topology.
+  This catches identity errors hidden by similar-looking topology.
 - `FieldStored` shares immutable importer and face-ID layout metadata for exact
   mesh/map identities. Numerical storage remains field-owned; cache hits must
   agree collectively because importer construction communicates.
@@ -411,21 +452,32 @@ change focused and reviewable.
   indexers and connectivity.
 - Keep `SolidSubdomain` range-backed. Do not reintroduce parent-sized selection
   masks or dense parent-to-subdomain cell/face reverse arrays.
+  This preserves compact selected-domain storage.
 - Select native and legacy field families through `MeshFieldTraits` rather
   than adding another parallel equation implementation.
+  This keeps shared algebra and behavior from drifting between backends.
 - Keep mapped FVM implementation bodies under `src/FVM/details` and preserve
   the stable public forwarding surface under `src/FVM`.
+  This preserves the established source and template-inclusion boundary.
 - Validate rank-local inputs collectively before a rank can throw while peers
   enter assembly or a Trilinos collective.
+  This prevents deadlock on asymmetric local failures.
 - Material update callbacks may be absent on individual ranks. If any rank has
   one, every rank participates in validation and ghost synchronization.
+  This prevents collective mismatch when callback ownership is empty or local to one
+  rank.
 - State physical units in option, source, and output-field documentation.
+  This prevents dimensional mistakes at API and file boundaries.
 - Parse `Database` options with defaults and validate them before allocating
   distributed state.
+  This rejects invalid configuration before collective resources are partially
+  constructed.
 - Preserve established public names, including historical spellings, unless a
   compatibility plan is part of the change.
+  This protects source and configuration consumers from incidental renaming.
 - Prefer a focused exception with the invalid value or invariant in its message
   over an unchecked assertion on user-provided configuration.
+  This gives actionable failures in Debug and production builds.
 
 ## Test strategy
 
@@ -482,9 +534,14 @@ For discretization, solver, or physics work, verify the applicable invariants:
 - residuals, conservation errors, and Krylov iteration counts do not regress;
 - results remain valid in the supported non-orthogonal treatment modes.
 
+The ownership, identity, synchronization, and collective-validation conventions above
+protect mapping and conservation. The remaining checks detect numerical regressions
+beyond a single enabled happy path.
+
 Tests should state the behavior they protect. Prefer analytical checks,
 conservation balances, convergence rates, and cross-rank invariants over smoke
 tests alone.
+This makes each test explain the correctness it establishes.
 
 ## Common extension paths
 
@@ -500,6 +557,9 @@ tests alone.
    multi-rank tests.
 5. Register compiled sources in `SimpleFluidMesh` and explicit template
    instantiations where required.
+
+These steps define a coherent mesh/storage contract, make distribution and type erasure
+deliberate, and leave the backend buildable and independently testable.
 
 Preserve mesh object identity when refining or grading an existing mesh; fields
 and solver components may retain shared pointers to it.
@@ -526,6 +586,8 @@ default-overload compatibility, validate policy and optional-field selections
 collectively, and add weighted-scalar parity tests across legacy `CellField`
 and native `FieldStored` paths. A higher-order policy for scalar transport does
 not by itself extend vector or momentum transport.
+Explicit compatible choices protect existing callers while keeping higher-order state
+and conservation requirements testable.
 
 ### Add coupled physics
 
@@ -624,6 +686,8 @@ Leave self-explanatory variables, aliases, trivial inline accessors, and simple
 forwarders uncommented. Do not restate an identifier in prose or add
 speculative `@throws` tags.
 Update comments in the same change as an interface or invariant.
+This avoids comment noise and keeps contracts from drifting away from the
+implementation.
 
 Generate the plain API reference with Doxygen installed. This mode does not
 require Java, PlantUML, or Graphviz:
@@ -673,6 +737,7 @@ The solver workflow index is
 control flow, loop bounds, optional-model ordering, or rollback ownership
 changes; the canonical PlantUML definitions remain in API comments on the
 documented symbols.
+This keeps workflow diagrams aligned with actual execution.
 
 The ELF export-boundary test checks symbol presence and visibility; it is not
 a class-layout ABI checker. Public solver/equation templates and by-value
@@ -701,5 +766,9 @@ Then confirm:
 - public comments and this guide remain consistent with the code;
 - `README.md` and `TODO.md` claims are updated only after verification.
 
+This checklist applies the source-registration, test, export, documentation, and
+evidence requirements above to the final diff, so the handoff is scoped and reviewable.
+
 When a full suite cannot run, record exactly what was built and tested, the
 reason for omissions, and the command another maintainer should run.
+This makes incomplete validation visible and reproducible.

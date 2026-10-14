@@ -1,3 +1,6 @@
+/** @file OnePassCases.cc
+ * @brief One-pass gradient traversal and cache behavior checks.
+ */
 #include "reconstruction_helpers.hh"
 
 TEST(GradientTraverseTest, OnePassCompactCachesPreserveBothNormalsAndBoundaryCallbackOrder)
