@@ -8,6 +8,8 @@
 // The TU-local ReferenceHandle needs its own ALE validation instantiation.
 #include "FVM/ALEControlVolumeState.tcc"
 #include "geometry/MeshHandle.hh"
+// The TU-local ReferenceHandle also owns its traversal-plan instantiation.
+#include "geometry/MeshTraverse.tcc"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "utils/testing_environment.hh"

@@ -57,9 +57,9 @@ public:
     const mesh_type& mesh() const noexcept { return d_mesh; }
 
     /** Canonical orthogonal ordinals admit an allocation-free range plan. */
-    std::optional<StructuredTraverseLayout> structured_layout() const;
+    SIMPLEFLUID_LOCAL std::optional<StructuredTraverseLayout> structured_layout() const;
 
-    std::shared_ptr<const LayeredTraverseLayout> layered_layout() const;
+    SIMPLEFLUID_LOCAL std::shared_ptr<const LayeredTraverseLayout> layered_layout() const;
 
     bool is_owned_cell(size_t cell) const
     {

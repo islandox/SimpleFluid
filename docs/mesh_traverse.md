@@ -20,6 +20,11 @@ inline traversal templates. Other mesh types or Tpetra packs require an owning
 instantiation unit that includes `geometry/MeshTraverse.tcc` and instantiates
 the plan and any directly used layout-detection methods.
 
+A derived mesh wrapper is a distinct template specialization. For a wrapper
+defined in an anonymous namespace, include `geometry/MeshTraverse.tcc` in that
+same translation unit before constructing traversal, gradient, or transport
+caches. Its implementation cannot be supplied by another translation unit.
+
 ```cpp
 #include "geometry/MeshTraverse.hh"
 
