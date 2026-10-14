@@ -154,8 +154,8 @@ public:
         const source_type& power_density = {}, const field_type* initial_guess = nullptr,
         const LinearSolverOptions& linear_options = {}) const;
 
-    /** Refresh the complete prepared RHS without solving; usable for sparse
-     * matrix-free boundary response operators. The operator must already exist.
+    /** Refresh the complete prepared RHS without solving; the first call
+     * assembles the prepared operator. Boundary responses require that assembly.
      */
     Teuchos::RCP<const typename Pack::vector_type> prepared_rhs(const source_type& power_density = {}) const;
     Teuchos::RCP<const typename Pack::vector_type> prepared_boundary_response(const boundary_cache_type& flux_increment) const;
