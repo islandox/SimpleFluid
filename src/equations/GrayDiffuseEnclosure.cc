@@ -83,25 +83,60 @@ GrayDiffuseEnclosure::GrayDiffuseEnclosure(std::vector<real_t> areas,
     lapack.GETRF(n, n, lu_.data(), n, pivots_.data(), &info);
     if (info != 0)
         throw std::domain_error("Gray diffuse enclosure LAPACK factorization failed or is singular.");
-    // Compute the inverse 1-norm through the cached LAPACK solve. This also
-    // rejects numerically singular, almost perfectly reflecting enclosures.
-    std::vector<real_t> column(count);
-    real_t inverse_norm = 0.0;
+    // Strict row diagonal dominance bounds ||A^-1||inf by 1/min(delta).
+    // Therefore ||A^-1||1 <= n/min(delta). Use a conservative roundoff
+    // allowance before screening; uncertain/reflective cases retain the
+    // previous inverse-column metric and its unchanged rejection threshold.
+    const auto epsilon = std::numeric_limits<real_t>::epsilon();
+    const long double roundoff = 64.0L * epsilon * count * count;
+    long double minimum_delta = std::numeric_limits<long double>::infinity();
+    long double norm_upper = 0.0L;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        long double off_diagonal = 0.0L;
+        for (std::size_t j = 0; j < count; ++j)
+            if (i != j) off_diagonal += std::abs(matrix_[j * count + i]);
+        const auto diagonal = static_cast<long double>(std::abs(matrix_[i * count + i]));
+        minimum_delta = std::min(minimum_delta,
+            diagonal - off_diagonal - roundoff * (diagonal + off_diagonal));
+    }
     for (std::size_t j = 0; j < count; ++j)
     {
-        std::fill(column.begin(), column.end(), 0.0);
-        column[j] = 1.0;
-        lapack.GETRS('N', n, 1, lu_.data(), n, pivots_.data(), column.data(), n, &info);
-        if (info != 0)
-            throw std::runtime_error("Gray diffuse enclosure LAPACK condition solve failed.");
-        real_t sum = 0.0;
-        for (const auto value : column)
-            sum = checked(sum + std::abs(checked(value)));
-        inverse_norm = std::max(inverse_norm, sum);
+        long double column_sum = 0.0L;
+        for (std::size_t i = 0; i < count; ++i)
+            column_sum += std::abs(matrix_[j * count + i]);
+        norm_upper = std::max(norm_upper, column_sum * (1.0L + roundoff));
     }
-    reciprocal_condition_ = 1.0 / (norm * inverse_norm);
+    const auto threshold = 64.0 * epsilon;
+    bool condition_is_estimate = false;
+    const auto reciprocal_lower_bound = minimum_delta / (count * norm_upper);
+    if (minimum_delta > 0.0L && std::isfinite(reciprocal_lower_bound) && reciprocal_lower_bound > threshold)
+    {
+        std::vector<real_t> work(4 * count);
+        std::vector<int> integer_work(count);
+        lapack.GECON('1', n, lu_.data(), n, norm, &reciprocal_condition_, work.data(), integer_work.data(), &info);
+        condition_is_estimate = info == 0 && std::isfinite(reciprocal_condition_) && reciprocal_condition_ > threshold;
+    }
+    if (!condition_is_estimate)
+    {
+        std::vector<real_t> column(count);
+        real_t inverse_norm = 0.0;
+        for (std::size_t j = 0; j < count; ++j)
+        {
+            std::fill(column.begin(), column.end(), 0.0);
+            column[j] = 1.0;
+            lapack.GETRS('N', n, 1, lu_.data(), n, pivots_.data(), column.data(), n, &info);
+            if (info != 0)
+                throw std::runtime_error("Gray diffuse enclosure LAPACK condition solve failed.");
+            real_t sum = 0.0;
+            for (const auto value : column)
+                sum = checked(sum + std::abs(checked(value)));
+            inverse_norm = std::max(inverse_norm, sum);
+        }
+        reciprocal_condition_ = 1.0 / (norm * inverse_norm);
+    }
     if (!std::isfinite(reciprocal_condition_) ||
-        reciprocal_condition_ <= 64.0 * std::numeric_limits<real_t>::epsilon())
+        reciprocal_condition_ <= threshold)
         throw std::domain_error("Gray diffuse enclosure is numerically singular.");
 }
 
