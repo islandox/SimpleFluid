@@ -69,4 +69,43 @@ auto SolidHeatConductionEquation<Pack, MeshType>::advance(const field_type& old_
         coefficient_interpolation);
 }
 
+
+template<TpetraTypePack Pack, class MeshType>
+void SolidHeatConductionEquation<Pack, MeshType>::prepare_advance(const field_type& baseline,
+    scalar_type dt, const material_type& material, FVM::NonOrthogonalTreatment treatment,
+    const field_type* conductivity, const boundary_cache_type* boundary_conductivity,
+    FVM::FaceCoefficientInterpolation interpolation)
+{
+    d_temperature_equation->prepare_physical_advance(baseline, d_zero_face_flux, dt, material,
+        treatment, conductivity, boundary_conductivity, interpolation);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto SolidHeatConductionEquation<Pack, MeshType>::advance_prepared(field_type& temperature,
+    const source_type& source, const field_type* guess, const LinearSolverOptions& options) const -> LinearSolveStatistics
+{
+    return d_temperature_equation->advance_prepared(temperature, source, guess, options);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto SolidHeatConductionEquation<Pack, MeshType>::prepared_rhs(const source_type& source) const
+    -> Teuchos::RCP<const typename Pack::vector_type>
+{
+    return d_temperature_equation->prepared_rhs(source);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto SolidHeatConductionEquation<Pack, MeshType>::prepared_operator() const
+    -> Teuchos::RCP<const typename Pack::matrix_type>
+{
+    return d_temperature_equation->prepared_operator();
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto SolidHeatConductionEquation<Pack, MeshType>::prepared_boundary_response(const boundary_cache_type& increment) const
+    -> Teuchos::RCP<const typename Pack::vector_type>
+{
+    return d_temperature_equation->prepared_boundary_response(increment);
+}
+
 } // namespace SimpleFluid

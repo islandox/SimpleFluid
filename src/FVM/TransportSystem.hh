@@ -511,14 +511,14 @@ TransportSystem<Pack> physical_temperature_transport_system(
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic,
     const ALEControlVolumeState* ale = nullptr,
     const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_density = nullptr,
-    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr)
+    const std::type_identity_t<ScalarCellFieldStored<Pack, MeshType>>* old_specific_heat_capacity = nullptr, bool rhs_only = false)
 {
     return detail::stored_physical_temperature_transport_system<Pack>(old_temperature, face_fluxes, time_step, density,
         specific_heat_capacity, thermal_conductivity, std::move(boundary_condition), std::move(boundary_value),
         std::move(power_density), treatment, correction_field, std::move(cached_matrix), boundary_thermal_conductivity,
         geometry_cache, coefficient_interpolation, ScalarTransportDiscretization{},
         static_cast<const ScalarCellFieldStored<Pack, MeshType>*>(nullptr), old_density, old_specific_heat_capacity,
-        ale);
+        ale, rhs_only);
 }
 
 /**
@@ -923,6 +923,19 @@ SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_syst
     const BoundaryCache<Pack>* boundary_thermal_conductivity = nullptr,
     const TransportGeometryCache<Mesh<Pack>>* geometry_cache = nullptr,
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic);
+
+/** Explicitly retain an already prepared physical operator while refreshing the complete RHS. */
+template<TpetraTypePack Pack>
+SIMPLEFLUID_FVM_EXPORT TransportSystem<Pack> physical_temperature_transport_system(
+    const CellField<Pack>& old_temperature, const FaceField<Pack>& face_fluxes, typename Pack::scalar_type time_step,
+    const CellField<Pack>& density, const CellField<Pack>& specific_heat_capacity,
+    const CellField<Pack>& thermal_conductivity, ScalarBoundaryConditionProvider<Pack> boundary_condition,
+    ScalarBoundaryValueProvider<Pack> boundary_value, ScalarCellValueProvider<Pack> power_density,
+    NonOrthogonalTreatment treatment, const CellField<Pack>* correction_field,
+    Teuchos::RCP<typename Pack::matrix_type> cached_matrix,
+    const BoundaryCache<Pack>* boundary_thermal_conductivity,
+    const TransportGeometryCache<Mesh<Pack>>* geometry_cache,
+    FaceCoefficientInterpolation coefficient_interpolation, bool rhs_only);
 
 /**
  * @brief Assemble incompressible momentum transport with a variable dynamic

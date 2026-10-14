@@ -27,6 +27,7 @@
 #include <concepts>
 #include <functional>
 #include <optional>
+#include <map>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -137,6 +138,29 @@ public:
         const field_type* old_specific_heat_capacity,
         const field_type* transport_density_override) const;
 
+    /** Freeze a fixed-grid physical conduction session. Coefficients and old-time
+     * temperature are copied. Boundary affine values may change; support, types,
+     * Robin coefficients and geometry must remain fixed until preparing again.
+     * The first prepared evaluation assembles the operator lazily.
+     */
+    void prepare_physical_advance(const field_type& old_temperature,
+        const face_flux_field_type& face_fluxes, scalar_type time_step, const material_type& material,
+        FVM::NonOrthogonalTreatment treatment = FVM::NonOrthogonalTreatment::Implicit,
+        const field_type* thermal_conductivity_override = nullptr,
+        const boundary_cache_type* boundary_thermal_conductivity = nullptr,
+        FVM::FaceCoefficientInterpolation coefficient_interpolation = FVM::FaceCoefficientInterpolation::Harmonic);
+
+    LinearSolveStatistics advance_prepared(field_type& temperature,
+        const source_type& power_density = {}, const field_type* initial_guess = nullptr,
+        const LinearSolverOptions& linear_options = {}) const;
+
+    /** Refresh the complete prepared RHS without solving; usable for sparse
+     * matrix-free boundary response operators. The operator must already exist.
+     */
+    Teuchos::RCP<const typename Pack::vector_type> prepared_rhs(const source_type& power_density = {}) const;
+    Teuchos::RCP<const typename Pack::vector_type> prepared_boundary_response(const boundary_cache_type& flux_increment) const;
+    Teuchos::RCP<const typename Pack::matrix_type> prepared_operator() const { return d_cached_physical_transport_matrix; }
+
 private:
     friend struct detail::TransportEquationTestAccess<Pack>;
     SIMPLEFLUID_EQUATIONS_LOCAL
@@ -145,6 +169,15 @@ private:
         field_type& temperature, const source_type& right_hand_source,
         std::optional<FVM::NonOrthogonalTreatment> treatment, const LinearSolverOptions& linear_options) const;
 
+    std::function<LinearSolveStatistics(field_type&, const source_type&, const LinearSolverOptions&)> d_prepared_advance;
+    mutable const boundary_cache_type* d_boundary_response = nullptr;
+    mutable std::map<std::pair<int, size_t>, BoundaryCondition> d_prepared_boundary_conditions;
+    mutable bool d_using_prepared = false;
+    mutable bool d_prepared_operator_ready = false;
+    mutable bool d_prepared_rhs_only = false;
+    mutable const field_type* d_prepared_initial_guess = nullptr;
+    mutable Teuchos::RCP<typename Pack::vector_type> d_prepared_rhs;
+    mutable std::vector<std::pair<BoundaryConditionType, scalar_type>> d_prepared_boundary_signature;
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     mutable field_type d_candidate_temperature;
