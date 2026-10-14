@@ -563,3 +563,75 @@ TEST(SolidHeatConductionEquationTest, PreparedZeroConductivityRetainsOperator)
     EXPECT_NEAR(candidate.value(0), 400.0, 1e-10);
     EXPECT_EQ(matrix.get(), equation.prepared_operator().get());
 }
+
+TEST(SolidHeatConductionEquationTest, PreparedTemperatureCopyUsesItsOwnOwnerAfterOriginalDestruction)
+{
+    using TemperatureEquation = SimpleFluid::TemperatureDiffusionEquation<Pack, ParentMesh>;
+    using TemperatureField = SimpleFluid::ScalarCellFieldStored<Pack, ParentMesh>;
+    auto legacy = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::SP<const ParentMesh> mesh = std::make_shared<ParentMesh>(std::move(legacy));
+    SimpleFluid::BoussinesqModelOptions material_options;
+    material_options.density = 1.0;
+    material_options.specific_heat_capacity = 1.0;
+    material_options.thermal_conductivity = 1.0;
+    SimpleFluid::MaterialPropertyFields<Pack, ParentMesh> material(mesh, material_options, {});
+    TemperatureField baseline(mesh, 400.0, "baseline"), candidate(mesh, 0.0, "candidate");
+    SimpleFluid::ScalarFaceFieldStored<Pack, ParentMesh> zero_flux(mesh, 0.0, "zero_flux");
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.convection["xmax"].heat_transfer_coefficient = 2.0;
+    std::unique_ptr<TemperatureEquation> copied;
+    {
+        TemperatureEquation original(mesh, boundaries);
+        original.prepare_physical_advance(baseline, zero_flux, 1.0, material);
+        copied = std::make_unique<TemperatureEquation>(original);
+        const auto rhs = copied->prepared_rhs();
+        ASSERT_FALSE(rhs.is_null());
+        EXPECT_NEAR(rhs->getData()[0], 700.0, 1e-10);
+        EXPECT_TRUE(original.prepared_operator().is_null());
+        EXPECT_TRUE(copied->advance_prepared(candidate).converged);
+        EXPECT_NEAR(candidate.value(0), 350.0, 1e-10);
+    }
+    // The callable retains frozen inputs, and receives the invoking owner.
+    // Neither it nor a later solve depends on the original object's lifetime.
+    baseline.owned_data().putScalar(900.0);
+    material.density.owned_data().putScalar(17.0);
+    EXPECT_NO_THROW(copied->prepared_rhs());
+    EXPECT_TRUE(copied->advance_prepared(candidate, {}, &candidate).converged);
+    EXPECT_NEAR(candidate.value(0), 350.0, 1e-10);
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedTemperatureCopyDetachesPreviouslyAssembledOperator)
+{
+    using TemperatureEquation = SimpleFluid::TemperatureDiffusionEquation<Pack, ParentMesh>;
+    using TemperatureField = SimpleFluid::ScalarCellFieldStored<Pack, ParentMesh>;
+    auto legacy = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
+    SimpleFluid::SP<const ParentMesh> mesh = std::make_shared<ParentMesh>(std::move(legacy));
+    SimpleFluid::BoussinesqModelOptions material_options;
+    material_options.density = 1.0;
+    material_options.specific_heat_capacity = 1.0;
+    material_options.thermal_conductivity = 1.0;
+    SimpleFluid::MaterialPropertyFields<Pack, ParentMesh> material(mesh, material_options, {});
+    TemperatureField baseline(mesh, 400.0, "baseline"), candidate(mesh, 0.0, "candidate");
+    SimpleFluid::ScalarFaceFieldStored<Pack, ParentMesh> zero_flux(mesh, 0.0, "zero_flux");
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.convection["xmax"].heat_transfer_coefficient = 2.0;
+    TemperatureEquation original(mesh, boundaries);
+    original.prepare_physical_advance(baseline, zero_flux, 1.0, material);
+    ASSERT_TRUE(original.advance_prepared(candidate).converged);
+    TemperatureEquation copied(original);
+    const auto original_matrix = original.prepared_operator();
+    // Repreparing the original may refill its existing matrix in place.
+    // The copy must detach it and rebuild from its own frozen coefficients.
+    material.density.owned_data().putScalar(2.0);
+    original.prepare_physical_advance(baseline, zero_flux, 1.0, material);
+    const auto original_rhs = original.prepared_rhs();
+    EXPECT_NEAR(original_rhs->getData()[0], 1100.0, 1e-10);
+    const auto copied_rhs = copied.prepared_rhs();
+    ASSERT_FALSE(copied_rhs.is_null());
+    EXPECT_NEAR(copied_rhs->getData()[0], 700.0, 1e-10);
+    EXPECT_NE(original_matrix.get(), copied.prepared_operator().get());
+    EXPECT_TRUE(copied.advance_prepared(candidate).converged);
+    EXPECT_NEAR(candidate.value(0), 350.0, 1e-10);
+    EXPECT_TRUE(original.advance_prepared(candidate).converged);
+    EXPECT_NEAR(candidate.value(0), 1100.0 / 3.0, 1e-10);
+}

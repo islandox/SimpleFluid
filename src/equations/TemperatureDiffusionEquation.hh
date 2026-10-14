@@ -169,7 +169,9 @@ private:
         field_type& temperature, const source_type& right_hand_source,
         std::optional<FVM::NonOrthogonalTreatment> treatment, const LinearSolverOptions& linear_options) const;
 
-    std::function<LinearSolveStatistics(field_type&, const source_type&, const LinearSolverOptions&)> d_prepared_advance;
+    std::function<LinearSolveStatistics(const TemperatureDiffusionEquation&, field_type&,
+        const source_type&, const LinearSolverOptions&)> d_prepared_advance;
+    mutable const TemperatureDiffusionEquation* d_prepared_owner = nullptr;
     mutable const boundary_cache_type* d_boundary_response = nullptr;
     mutable std::map<std::pair<int, size_t>, BoundaryCondition> d_prepared_boundary_conditions;
     mutable bool d_using_prepared = false;
