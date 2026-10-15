@@ -30,7 +30,7 @@
 
 namespace SimpleFluid
 {
-template<TpetraTypePack Pack> class MultiphysicsSolverCoupler;
+template<TpetraTypePack Pack> class SIMPLEFLUID_SOLVERS_EXPORT MultiphysicsSolverCoupler;
 /** Local elapsed times; reduce across ranks when exporting diagnostics. */
 struct RadiolyticTransportWork
 {

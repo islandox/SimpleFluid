@@ -263,11 +263,7 @@ public:
 
     /** @brief Return the current pressure-corrected volumetric face fluxes. */
     const face_flux_field_type&
-    pressure_corrected_face_fluxes() const
-    {
-        return d_problem.template object<face_flux_field_type>(
-            "projected_face_flux");
-    }
+    pressure_corrected_face_fluxes() const;
 
     void write_vtu(const std::string& filename) const
     {

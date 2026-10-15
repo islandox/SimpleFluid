@@ -26,7 +26,7 @@
 
 namespace SimpleFluid
 {
-template<TpetraTypePack Pack> class MultiphysicsSolverCoupler;
+template<TpetraTypePack Pack> class SIMPLEFLUID_SOLVERS_EXPORT MultiphysicsSolverCoupler;
 
 /**
  * @brief Minimal transient Boussinesq natural-convection solver.
