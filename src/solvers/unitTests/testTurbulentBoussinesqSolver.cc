@@ -16,6 +16,7 @@
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -128,9 +129,10 @@ SimpleFluid::TurbulenceModelOptions standard_k_epsilon_options()
  *
  * @param solver Solver whose velocity field is initialized.
  */
-void initialize_shear(SimpleFluid::BoussinesqSolver<Pack>& solver)
+void initialize_shear(
+    SimpleFluid::BoussinesqSolver<Pack>& solver, SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
 {
-    solver.initialize_heated_box(1.0, 1.0);
+    coupling.initialize_heated_box(1.0, 1.0);
     const auto& mesh = solver.velocity().mesh();
     for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
     {
@@ -144,9 +146,10 @@ void initialize_shear(SimpleFluid::BoussinesqSolver<Pack>& solver)
 }
 
 /** @brief Initialize a divergence-free recirculating shear field with nonzero face transport. */
-void initialize_transporting_shear(SimpleFluid::BoussinesqSolver<Pack>& solver)
+void initialize_transporting_shear(
+    SimpleFluid::BoussinesqSolver<Pack>& solver, SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
 {
-    solver.initialize_heated_box(1.0, 1.0);
+    coupling.initialize_heated_box(1.0, 1.0);
     constexpr double domain_length = 3.0;
     constexpr double velocity_scale = 0.2;
     const auto wave_number = std::numbers::pi / domain_length;
@@ -320,9 +323,11 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-11;
     linear_options.max_iterations = 400;
-    InspectableTurbulentBoussinesqSolver solver(
+    auto solver_shared = std::make_shared<InspectableTurbulentBoussinesqSolver>(
         mesh, slip_box_boundaries(), time_options, linear_options, model_options);
-    initialize_transporting_shear(solver);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    initialize_transporting_shear(solver, solver_coupling);
     solver.temperature().put_scalar(300.0);
     solver.temperature().sync_ghosts();
 
@@ -345,7 +350,7 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     prescribed_heat.total_power = total_prescribed_heat_power;
     prescribed_heat.center = SimpleFluid::vec3<>{0.65, 1.1, 0.65};
     prescribed_heat.standard_deviation = SimpleFluid::vec3<>{0.55, 0.75, 0.45};
-    solver.configure_prescribed_heat_source(prescribed_heat);
+    solver_coupling.configure_prescribed_heat_source(prescribed_heat);
 
     SimpleFluid::ReactingGasOptions reaction_source_options;
     reaction_source_options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
@@ -373,7 +378,7 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     reaction_source_options.max_radius = 1.0e-3;
     reaction_source_options.min_population = 1.0e-40;
     reaction_source_options.max_population = 1.0e40;
-    auto& reaction_source = solver.configure_reacting_gas(reaction_source_options);
+    auto& reaction_source = solver_coupling.configure_reacting_gas(reaction_source_options);
 
     SimpleFluid::MaterialFeedbackOptions feedback_options;
     feedback_options.density_mode = SimpleFluid::DensityFeedbackMode::Mixture;
@@ -382,20 +387,22 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     feedback_options.gas_density = 1.0;
     feedback_options.reference_temperature = 300.0;
     feedback_options.reference_dynamic_viscosity = 1.0e-3;
-    auto& feedback = solver.configure_material_feedback(feedback_options);
+    auto& feedback = solver_coupling.configure_material_feedback(feedback_options);
 
-    InspectableTurbulentBoussinesqSolver zero_slip_solver(
+    auto zero_slip_solver_shared = std::make_shared<InspectableTurbulentBoussinesqSolver>(
         mesh, slip_box_boundaries(), time_options, linear_options, model_options);
-    initialize_transporting_shear(zero_slip_solver);
+    auto& zero_slip_solver = *zero_slip_solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> zero_slip_solver_coupling(zero_slip_solver_shared);
+    initialize_transporting_shear(zero_slip_solver, zero_slip_solver_coupling);
     zero_slip_solver.temperature().put_scalar(300.0);
     zero_slip_solver.temperature().sync_ghosts();
     zero_slip_solver.configure_turbulence(standard_k_epsilon_options());
-    zero_slip_solver.configure_prescribed_heat_source(prescribed_heat);
+    zero_slip_solver_coupling.configure_prescribed_heat_source(prescribed_heat);
     auto zero_slip_options = reaction_source_options;
     zero_slip_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
     zero_slip_options.constant_slip_velocity = 0.0;
-    auto& zero_slip_reaction_source = zero_slip_solver.configure_reacting_gas(zero_slip_options);
-    zero_slip_solver.configure_material_feedback(feedback_options);
+    auto& zero_slip_reaction_source = zero_slip_solver_coupling.configure_reacting_gas(zero_slip_options);
+    zero_slip_solver_coupling.configure_material_feedback(feedback_options);
 
     // Matched microbubble kinetics leave axial slip as the centroid discriminator.
     const auto expect_upward_slip_shift = [&]
@@ -417,18 +424,16 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     EXPECT_GT(reaction_source.options().constant_slip_velocity, 0.0);
     EXPECT_EQ(zero_slip_reaction_source.options().rise_velocity_mode, SimpleFluid::BubbleRiseVelocityMode::ZeroSlip);
     EXPECT_DOUBLE_EQ(zero_slip_reaction_source.options().constant_slip_velocity, 0.0);
-    ASSERT_NE(solver.find_prescribed_heat_source(), nullptr);
-    EXPECT_NEAR(
-        solver.find_prescribed_heat_source()->integrated_power(),
-        total_prescribed_heat_power,
+    ASSERT_NE(solver_coupling.find_prescribed_heat_source(), nullptr);
+    EXPECT_NEAR(solver_coupling.find_prescribed_heat_source()->integrated_power(), total_prescribed_heat_power,
         total_prescribed_heat_power * 1.0e-12);
-    const auto [minimum_power, maximum_power] = global_range(solver.find_prescribed_heat_source()->field());
+    const auto [minimum_power, maximum_power] = global_range(solver_coupling.find_prescribed_heat_source()->field());
     EXPECT_GT(maximum_power, minimum_power);
 
     const auto expect_coupled_state = [&]
     {
         expect_positive_turbulence_fields(turbulence);
-        ASSERT_NE(solver.find_scalar_void_fraction_model(), nullptr);
+        ASSERT_NE(solver_coupling.find_scalar_void_fraction_model(), nullptr);
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
             const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
@@ -437,7 +442,7 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
             EXPECT_GE(alpha, reaction_source_options.alpha_min);
             EXPECT_LE(alpha, reaction_source_options.alpha_max);
             EXPECT_NEAR(reaction_source.alpha_l().value(cell_lid), 1.0 - alpha, 1.0e-14);
-            EXPECT_NEAR(solver.find_scalar_void_fraction_model()->alpha_g().value(cell_lid), alpha, 1.0e-14);
+            EXPECT_NEAR(solver_coupling.find_scalar_void_fraction_model()->alpha_g().value(cell_lid), alpha, 1.0e-14);
 
             for (const auto value : {reaction_source.dissolved_hydrogen_inventory().value(cell_lid),
                      reaction_source.micro_number_density().value(cell_lid), reaction_source.micro_moles().value(cell_lid),
@@ -464,11 +469,11 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     const auto hydrogen_before_prescribed_heat = global_hydrogen_inventory(reaction_source);
     const auto expected_produced = reaction_source_options.gas_release_efficiency *
                                    reaction_source_options.hydrogen_yield_mol_per_j * total_prescribed_heat_power * time_step;
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(solver_coupling.step());
     ASSERT_TRUE(solver.last_step_statistics().converged);
     EXPECT_EQ(solver.step_index(), 1);
     EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
-    ASSERT_NO_THROW(zero_slip_solver.step());
+    ASSERT_NO_THROW(zero_slip_solver_coupling.step());
     ASSERT_TRUE(zero_slip_solver.last_step_statistics().converged);
     EXPECT_EQ(zero_slip_solver.step_index(), 1);
     expect_upward_slip_shift();
@@ -531,15 +536,15 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     const auto global_micro_moles_before_transport = global_integral(reaction_source.micro_moles());
     const auto hydrogen_before_transport = global_hydrogen_inventory(reaction_source);
 
-    solver.find_prescribed_heat_source()->initialize_constant(0.0);
-    EXPECT_DOUBLE_EQ(solver.find_prescribed_heat_source()->integrated_power(), 0.0);
-    zero_slip_solver.find_prescribed_heat_source()->initialize_constant(0.0);
-    EXPECT_DOUBLE_EQ(zero_slip_solver.find_prescribed_heat_source()->integrated_power(), 0.0);
-    ASSERT_NO_THROW(solver.step());
+    solver_coupling.find_prescribed_heat_source()->initialize_constant(0.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.find_prescribed_heat_source()->integrated_power(), 0.0);
+    zero_slip_solver_coupling.find_prescribed_heat_source()->initialize_constant(0.0);
+    EXPECT_DOUBLE_EQ(zero_slip_solver_coupling.find_prescribed_heat_source()->integrated_power(), 0.0);
+    ASSERT_NO_THROW(solver_coupling.step());
     ASSERT_TRUE(solver.last_step_statistics().converged);
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GE(solver.last_step_statistics().linear_solves, 3);
-    ASSERT_NO_THROW(zero_slip_solver.step());
+    ASSERT_NO_THROW(zero_slip_solver_coupling.step());
     ASSERT_TRUE(zero_slip_solver.last_step_statistics().converged);
     EXPECT_EQ(zero_slip_solver.step_index(), 2);
     expect_upward_slip_shift();
@@ -577,28 +582,24 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
     EXPECT_NEAR(global_integral(reaction_source.micro_moles()), global_micro_moles_before_transport,
         std::max(1.0e-14, global_micro_moles_before_transport * 1.0e-9));
 
-    InspectableTurbulentBoussinesqSolver no_advection_solver(
-        mesh,
-        slip_box_boundaries(),
-        time_options,
-        linear_options,
-        model_options);
-    initialize_transporting_shear(no_advection_solver);
+    auto no_advection_solver_shared = std::make_shared<InspectableTurbulentBoussinesqSolver>(
+        mesh, slip_box_boundaries(), time_options, linear_options, model_options);
+    auto& no_advection_solver = *no_advection_solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> no_advection_solver_coupling(no_advection_solver_shared);
+    initialize_transporting_shear(no_advection_solver, no_advection_solver_coupling);
     no_advection_solver.temperature().put_scalar(300.0);
     no_advection_solver.temperature().sync_ghosts();
     no_advection_solver.configure_turbulence(
         standard_k_epsilon_options());
-    no_advection_solver.configure_prescribed_heat_source(prescribed_heat);
+    no_advection_solver_coupling.configure_prescribed_heat_source(prescribed_heat);
     auto no_advection_options = reaction_source_options;
     no_advection_options.dissolved_transport =
         SimpleFluid::ReactingTransportMode::NoAdvection;
-    auto& no_advection_reaction_source =
-        no_advection_solver.configure_reacting_gas(
-            no_advection_options);
-    no_advection_solver.configure_material_feedback(feedback_options);
-    ASSERT_NO_THROW(no_advection_solver.step());
-    no_advection_solver.find_prescribed_heat_source()->initialize_constant(0.0);
-    ASSERT_NO_THROW(no_advection_solver.step());
+    auto& no_advection_reaction_source = no_advection_solver_coupling.configure_reacting_gas(no_advection_options);
+    no_advection_solver_coupling.configure_material_feedback(feedback_options);
+    ASSERT_NO_THROW(no_advection_solver_coupling.step());
+    no_advection_solver_coupling.find_prescribed_heat_source()->initialize_constant(0.0);
+    ASSERT_NO_THROW(no_advection_solver_coupling.step());
 
     double local_dissolved_advection_effect = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -623,8 +624,10 @@ void exercise_combined_rans_reaction_source(const SimpleFluid::SP<MeshType>& mes
 TEST(TurbulentBoussinesqSolverTest, ConfiguresProblemOwnedModelAndRestoresLaminarMode)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
-    SimpleFluid::BoussinesqSolver<Pack> solver(
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
         mesh, slip_box_boundaries(), stable_time_options(SimpleFluid::PressureVelocityCoupling::PISO));
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
 
     EXPECT_EQ(solver.find_turbulence_model(), nullptr);
     auto& configured = solver.configure_turbulence(standard_k_epsilon_options());
@@ -651,13 +654,15 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesTurbulenceThroughSegregatedAndCouple
             SimpleFluid::LinearSolverOptions linear_options;
             linear_options.tolerance = 1.0e-11;
             linear_options.max_iterations = 300;
-            SimpleFluid::BoussinesqSolver<Pack> solver(mesh, slip_box_boundaries(),
+            auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, slip_box_boundaries(),
                 SimpleFluid::test::with_coupled_backend(stable_time_options(coupling), selection), linear_options);
-            initialize_shear(solver);
+            auto& solver = *solver_shared;
+            SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+            initialize_shear(solver, solver_coupling);
 
             auto& model = solver.configure_turbulence(standard_k_epsilon_options());
             const auto molecular_viscosity = std::as_const(solver).material_properties().dynamic_viscosity.value(0);
-            solver.step();
+            solver_coupling.step();
 
             ASSERT_EQ(solver.step_index(), 1);
             ASSERT_EQ(solver.find_turbulence_model(), &model);
@@ -696,14 +701,17 @@ TEST(TurbulentBoussinesqSolverTest, PassesDirectBuoyancyContextThroughSegregated
             SimpleFluid::LinearSolverOptions linear_options;
             linear_options.tolerance = 1.0e-11;
             linear_options.max_iterations = 400;
-            SimpleFluid::BoussinesqSolver<Pack> solver(mesh, buoyant_box_boundaries(), time_options, linear_options);
-            solver.initialize_heated_box(2.0, 0.0);
+            auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+                mesh, buoyant_box_boundaries(), time_options, linear_options);
+            auto& solver = *solver_shared;
+            SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+            solver_coupling.initialize_heated_box(2.0, 0.0);
 
             auto options = standard_k_epsilon_options();
             options.buoyancy_model = SimpleFluid::TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
             auto& model = solver.configure_turbulence(options);
             ASSERT_NE(model.buoyancy_production(), nullptr);
-            ASSERT_NO_THROW(solver.step());
+            ASSERT_NO_THROW(solver_coupling.step());
             ASSERT_TRUE(solver.last_step_statistics().converged);
 
             const auto* production = model.buoyancy_production();
@@ -734,15 +742,18 @@ TEST(TurbulentBoussinesqSolverTest, EnablesTurbulenceAfterLaminarStepWithImplici
     time_options.kinematic_viscosity = 0.0;
     time_options.thermal_diffusivity = 0.0;
     time_options.non_orthogonal_treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Implicit;
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, slip_box_boundaries(), time_options);
-    solver.initialize_heated_box(1.0, 1.0);
+    auto solver_shared =
+        std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, slip_box_boundaries(), time_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.0, 1.0);
 
-    solver.step();
+    solver_coupling.step();
     ASSERT_EQ(solver.step_index(), 1);
     ASSERT_EQ(solver.find_turbulence_model(), nullptr);
 
     auto& turbulence = solver.configure_turbulence(standard_k_epsilon_options());
-    EXPECT_NO_THROW(solver.step());
+    EXPECT_NO_THROW(solver_coupling.step());
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_EQ(solver.find_turbulence_model(), &turbulence);
     expect_positive_turbulence_fields(turbulence);
@@ -757,14 +768,17 @@ TEST(TurbulentBoussinesqSolverTest, ExpandsZeroDiffusivityPhysicalGraphsWhenTurb
     time_options.thermal_diffusivity = 0.0;
     time_options.non_orthogonal_treatment = SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid;
     auto model_options = SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, slip_box_boundaries(), time_options, {}, model_options);
-    solver.initialize_heated_box(1.0, 1.0);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, slip_box_boundaries(), time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.0, 1.0);
 
-    solver.step();
+    solver_coupling.step();
     ASSERT_EQ(solver.step_index(), 1);
 
     auto& turbulence = solver.configure_turbulence(standard_k_epsilon_options());
-    EXPECT_NO_THROW(solver.step());
+    EXPECT_NO_THROW(solver_coupling.step());
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_EQ(solver.find_turbulence_model(), &turbulence);
     expect_positive_turbulence_fields(turbulence);
@@ -803,9 +817,11 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesWallTreatmentClosurePairingsThroughS
                 SimpleFluid::LinearSolverOptions linear_options;
                 linear_options.tolerance = 1.0e-10;
                 linear_options.max_iterations = 400;
-                SimpleFluid::BoussinesqSolver<Pack> solver(
+                auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
                     mesh, single_wall_box_boundaries(), time_options, linear_options);
-                initialize_shear(solver);
+                auto& solver = *solver_shared;
+                SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+                initialize_shear(solver, solver_coupling);
 
                 SimpleFluid::TurbulenceModelOptions options;
                 options.model = wall_case.model;
@@ -821,7 +837,7 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesWallTreatmentClosurePairingsThroughS
                     options.initial_wall_distance = 0.5;
 
                 auto& model = solver.configure_turbulence(options);
-                EXPECT_NO_THROW(solver.step());
+                EXPECT_NO_THROW(solver_coupling.step());
                 EXPECT_TRUE(solver.last_step_statistics().converged);
                 EXPECT_EQ(solver.step_index(), 1);
                 ASSERT_NE(model.wall_y_plus(), nullptr);
@@ -865,17 +881,19 @@ TEST(TurbulentBoussinesqSolverTest, AdvancesWallTreatmentClosurePairingsThroughS
 TEST(TurbulentBoussinesqSolverTest, TurbulenceFieldsAreOptInForSolutionOutput)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
-    SimpleFluid::BoussinesqSolver<Pack> solver(
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
         mesh, slip_box_boundaries(), stable_time_options(SimpleFluid::PressureVelocityCoupling::PISO));
-    solver.initialize_heated_box(1.0, 1.0);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.0, 1.0);
     solver.configure_turbulence(standard_k_epsilon_options());
 
     const auto unique_id = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto directory = std::filesystem::temp_directory_path();
     const auto default_file = directory / ("SimpleFluid_laminar_output_" + std::to_string(unique_id) + ".vtu");
     const auto turbulence_file = directory / ("SimpleFluid_turbulence_output_" + std::to_string(unique_id) + ".vtu");
-    solver.write_solution_vtu(default_file.string());
-    solver.write_solution_vtu(turbulence_file.string(), {.include_turbulence_fields = true});
+    solver_coupling.write_solution_vtu(default_file.string());
+    solver_coupling.write_solution_vtu(turbulence_file.string(), {.include_turbulence_fields = true});
 
     auto read = [](const std::filesystem::path& path)
     {
@@ -941,8 +959,10 @@ TEST(TurbulentBoussinesqSolverTest, SASActivatesAndRestoresAfterDownstreamFailur
     auto time = stable_time_options(PressureVelocityCoupling::PIMPLE);
     time.n_outer_correctors = 2; time.n_pressure_correctors = 2;
     time.thermal_expansion = .001; time.gravity_z = -9.81;
-    BoussinesqSolver<Pack> solver(legacy, bc, time);
-    solver.initialize_linear_temperature({0,0,1}, 2, 1);
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(legacy, bc, time);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_linear_temperature({0, 0, 1}, 2, 1);
     TurbulenceModelOptions options;
     options.model = TurbulenceModelType::SSTKOmegaSAS;
     options.initial_turbulent_kinetic_energy = .2;
@@ -960,7 +980,7 @@ TEST(TurbulentBoussinesqSolverTest, SASActivatesAndRestoresAfterDownstreamFailur
             -std::sin(2*pi*p.x)*std::sin(pi*p.y)*std::sin(pi*p.y), 0});
     }
     solver.velocity().sync_ghosts();
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(solver_coupling.step());
     ASSERT_GT(model.sas_statistics().max_source, .01);
     double local_buoyancy = 0, total_buoyancy = 0;
     for (size_t i = 0; i < mesh.num_owned_cells(); ++i)
@@ -983,7 +1003,7 @@ TEST(TurbulentBoussinesqSolverTest, SASActivatesAndRestoresAfterDownstreamFailur
     // overflows in temperature assembly, which follows both turbulence solves.
     solver.add_temperature_source("overflow_one", std::numeric_limits<double>::max());
     solver.add_temperature_source("overflow_two", std::numeric_limits<double>::max());
-    EXPECT_ANY_THROW(solver.step());
+    EXPECT_ANY_THROW(solver_coupling.step());
     EXPECT_EQ(solver.step_index(), 1);
     EXPECT_DOUBLE_EQ(solver.time(), saved_time);
     EXPECT_DOUBLE_EQ(solver.last_pressure_velocity_residuals().continuity, saved_continuity);
@@ -997,7 +1017,7 @@ TEST(TurbulentBoussinesqSolverTest, SASActivatesAndRestoresAfterDownstreamFailur
     }
     solver.remove_temperature_source("overflow_one");
     solver.remove_temperature_source("overflow_two");
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(solver_coupling.step());
     EXPECT_EQ(solver.step_index(), 2);
 }
 
@@ -1014,16 +1034,19 @@ TEST(TurbulentBoussinesqSolverTest, SASRejectsPseudoTimeAndAdvancesTurbulenceOnc
     for (bool physical : {false, true})
     {
         time.physical_time = physical;
-        BoussinesqSolver<Pack> solver(legacy, {}, time);
-        solver.initialize_heated_box(1,1);
+        auto solver_shared =
+            std::make_shared<BoussinesqSolver<Pack>>(legacy, SimpleFluid::BoundaryConditionSet{}, time);
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        solver_coupling.initialize_heated_box(1, 1);
         auto& model = solver.configure_turbulence(config);
         if (!physical)
         {
-            EXPECT_ANY_THROW(solver.step());
+            EXPECT_ANY_THROW(solver_coupling.step());
             EXPECT_EQ(solver.step_index(), 0);
             continue;
         }
-        ASSERT_NO_THROW(solver.step());
+        ASSERT_NO_THROW(solver_coupling.step());
         for (size_t i = 0; i < model.turbulent_kinetic_energy().num_owned_cells(); ++i)
             EXPECT_NEAR(model.turbulent_kinetic_energy().value(i), .2/(1+time.time_step*.09*2), 1e-13);
     }
@@ -1051,11 +1074,13 @@ TEST(TurbulentBoussinesqSolverTest, SASRollsBackNonlinearResultAfterTemperatureF
     BoussinesqModelOptions material;
     material.reference_density = material.density = 1.;
     material.dynamic_viscosity = .01;
-    BoussinesqSolver<Pack> solver(mesh, boundaries, time, linear, material);
-    solver.initialize_heated_box(1., 1.);
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, boundaries, time, linear, material);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1., 1.);
     solver.add_temperature_source("heat", .1);
     int material_updates = 0;
-    solver.set_material_updater([&](const auto&, auto&) { ++material_updates; });
+    solver_coupling.set_material_updater([&](const auto&, auto&) { ++material_updates; });
 
     TurbulenceModelOptions options;
     options.model = TurbulenceModelType::SSTKOmegaSAS;
@@ -1065,7 +1090,7 @@ TEST(TurbulentBoussinesqSolverTest, SASRollsBackNonlinearResultAfterTemperatureF
     options.sas.diagnostics = true;
     options.sas.enabled = false;
     solver.configure_turbulence(options);
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(solver_coupling.step());
     ASSERT_EQ(solver.step_index(), 1);
     ASSERT_EQ(material_updates, 1);
     ASSERT_TRUE(solver.last_nonlinear_result().converged);
@@ -1073,7 +1098,7 @@ TEST(TurbulentBoussinesqSolverTest, SASRollsBackNonlinearResultAfterTemperatureF
 
     options.sas.enabled = true;
     solver.configure_turbulence(options);
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(solver_coupling.step());
     ASSERT_TRUE(solver.find_turbulence_model()->sas_statistics().valid);
     ASSERT_EQ(solver.step_index(), 2);
     ASSERT_EQ(material_updates, 2);
@@ -1106,7 +1131,7 @@ TEST(TurbulentBoussinesqSolverTest, SASRollsBackNonlinearResultAfterTemperatureF
     // per attempt; their external side effects are intentionally not undone.
     solver.add_temperature_source("overflow_one", std::numeric_limits<double>::max());
     solver.add_temperature_source("overflow_two", std::numeric_limits<double>::max());
-    EXPECT_ANY_THROW(solver.step());
+    EXPECT_ANY_THROW(solver_coupling.step());
     EXPECT_EQ(accepted_fields(), saved_fields);
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_DOUBLE_EQ(solver.time(), saved_time);
@@ -1127,7 +1152,7 @@ TEST(TurbulentBoussinesqSolverTest, SASRollsBackNonlinearResultAfterTemperatureF
 
     solver.remove_temperature_source("overflow_one");
     solver.remove_temperature_source("overflow_two");
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(solver_coupling.step());
     EXPECT_EQ(solver.step_index(), 3);
     EXPECT_NEAR(solver.time(), 3 * time.time_step, 1.e-14);
     EXPECT_EQ(material_updates, 4);

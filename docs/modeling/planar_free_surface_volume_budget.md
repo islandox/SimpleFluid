@@ -46,7 +46,8 @@ Ownership is deliberately split along existing model boundaries:
   closure, headspace closure state, and a reporting snapshot. It neither
   recomputes bubble kinetics nor material properties.
 
-`BoussinesqSolver` owns the optional model and liquid inventory. In fixed-grid
+`MultiphysicsSolverCoupler` owns the optional model and liquid inventory and
+calls its retained `BoussinesqSolver` for flow and heat. In fixed-grid
 mode its accepted post-temperature order is: advance the Sheng bubble/void
 state when selected;
 advance scalar source-decay groups; refresh material properties and pure-liquid density;
@@ -278,7 +279,7 @@ authoritative cumulative submerged-bubble escape minus the planar model's
 committed-transfer watermark. Every positive decrement is retained, including
 values small relative to a large remaining inventory. Because upstream flow,
 temperature, gas, boiling, void, and scalar source-decay states are not generally
-transactional in the fixed-grid path, `BoussinesqSolver` fail-stops after such a
+transactional in the fixed-grid path, `MultiphysicsSolverCoupler` fail-stops after such a
 step error and rejects a full-step retry; reconstruct the solver from an
 accepted state instead. The constrained ALE path instead snapshots its complete
 supported state and restores it together with the geometry on rejection.
@@ -300,7 +301,7 @@ cannot be used to explain collapse of the old aggregate void. It returns that
 condensate to liquid, adds the matching latent heat through
 `condensationLatentHeatRelease`, and reports any remaining non-steam collapse.
 This steam/condensate ownership mode is selected explicitly by the
-`BoussinesqSolver` only while a free-surface liquid inventory is active; its
+`MultiphysicsSolverCoupler` only while a free-surface liquid inventory is active; its
 default-off completion path preserves pre-feature boiling and latent-sink
 behavior.
 Because steam ownership is currently lumped, the accepted release is
@@ -328,7 +329,7 @@ closure. For constant and reconstructed reacting pressure modes,
 preserving reconstructed gauge-pressure variation. Candidate bubble-volume
 queries are non-mutating. Prescribed-history and inertial pressure modes reject
 an externally coupled offset because their pressure ownership is different.
-`BoussinesqSolver` therefore rejects those Sheng pressure modes when the
+`MultiphysicsSolverCoupler` therefore rejects those Sheng pressure modes when the
 free-surface budget is enabled; constant and reconstructed pressure are the
 supported combinations. It also rejects `idealGasSource`, which has no
 conservative gas inventory, and nonzero scalar void that cannot be matched to
@@ -659,7 +660,7 @@ vessel. If both volume and level are provided, they must agree through the map
 within the setup consistency tolerance. If mass is omitted, the liquid
 inventory infers it from the selected initial volume and the global
 volume-weighted pure-liquid density. If mass and a volume/level are both
-provided, `BoussinesqSolver` verifies that the initialized pure-density volume
+provided, `MultiphysicsSolverCoupler` verifies that the initialized pure-density volume
 is consistent rather than silently choosing one.
 
 ### Planar ALE controls
@@ -729,6 +730,12 @@ enabled free surface rather than inventing SI material properties. Install any
 custom material updater before initializing the free-surface liquid-mass
 reference state. The initializer evaluates that updater at the accepted initial
 temperature before inferring mass.
+
+`MultiphysicsSolverCoupler` owns the optional models, ALE trials, and interval
+checkpoints. Construct it with a shared solver pointer using
+`MultiphysicsSolverCoupler<Pack> coupling(solver)` and use its configuration,
+initialization, step, and output APIs; see the
+[coupling ownership and transaction design](../architecture/multiphysics_solver_coupler.md).
 
 The examples in this repository configure `Database` programmatically; this
 block documents keys and is not a promise of a general file-backed case
@@ -817,7 +824,7 @@ steam; and phase-change residuals. The boiling output registry exposes
 `latentHeatSink` fields. The reacting output retains raw,
 bounded, and excess void/inventory diagnostics.
 
-`BoussinesqSolver::planar_ale_diagnostics()` adds the latest accepted old/new
+`MultiphysicsSolverCoupler::planar_ale_diagnostics()` adds the latest accepted old/new
 geometry epochs and mesh volumes, actual mesh-to-closure-pool mismatch, maximum absolute and
 normalized GCL residual, mesh-quality metrics, outer-corrector count, level and
 pressure, material-state, and gas-primary-state residuals, sensible-energy and liquid/H2 inventory residuals, the
@@ -900,7 +907,7 @@ agreement before the relative term is added.
 The feedback-field registry has stable optional names `rhoLiquid`,
 `clearLevel`, `poolLevel`, `headspacePressure`, and `poolOccupancy`, and can
 collectively require that set without changing the older standard-field
-contract. `BoussinesqSolver` publishes `rhoLiquid` cellwise and replicates the
+contract. `MultiphysicsSolverCoupler` publishes `rhoLiquid` cellwise and replicates the
 three global scalars over cells. `poolOccupancy` is exactly 1 when the cell
 centroid coordinate on the configured gravity axis is at or below `poolLevel`
 and 0 otherwise. It is a visualization/feedback approximation, not a cut-cell
@@ -920,7 +927,7 @@ When enabled, VTU output includes `rhoLiquid`, `clearLevel`, `poolLevel`,
 `bubbleSlipVolumeRate = -div(Phi_b,slip)`, `continuityTarget = Q_V`, and
 `continuityResidual = sum(phi_abs)-Q_V`, all as signed cell rates in m3/s.
 Their underlying face fluxes use owner-normal signs. The default preserves the
-existing output schema. `BoussinesqSolver::free_surface_history()` automatically retains
+existing output schema. `MultiphysicsSolverCoupler::free_surface_history()` automatically retains
 the initialization snapshot and one record per accepted step without repeating
 the underlying reductions. `write_free_surface_history_csv()` writes that
 history on mesh rank zero with fixed SI-unit columns for liquid mass and

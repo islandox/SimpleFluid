@@ -690,7 +690,8 @@ factors, and a pool/wall example.
 
 `PrescribedHeatSource` registers the specialized temperature source
 `qdot_external` in W/m³. Constant power density, normalized three-axis Gaussian
-profiles, and caller-provided cell fields are supported:
+profiles, and caller-provided cell fields are supported. The controller below
+accepts a shared solver pointer (`SP<BoussinesqSolver<Pack>>`):
 
 ```cpp
 SimpleFluid::PrescribedHeatSourceOptions prescribed_heat;
@@ -698,7 +699,9 @@ prescribed_heat.profile = SimpleFluid::PrescribedHeatProfile::Gaussian;
 prescribed_heat.total_power = 1.0e6;
 prescribed_heat.center = {0.0, 0.0, 1.0};
 prescribed_heat.standard_deviation = {0.25, 0.25, 0.5};
-solver.configure_prescribed_heat_source(prescribed_heat);
+SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+coupling.configure_prescribed_heat_source(prescribed_heat);
+// Advance coupled physics with coupling.step() or coupling.run().
 ```
 
 Gaussian values are sampled at cell centroids and normalized with the

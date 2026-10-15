@@ -12,6 +12,8 @@
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
+#include <memory>
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -294,15 +296,17 @@ void run_ale(const Options& options)
     material.specific_heat_capacity = 4200.0;
     material.dynamic_viscosity = 1.e-3;
     material.thermal_conductivity = 0.6;
-    Solver solver(mesh, boundaries, time, linear, material);
+    auto solver_shared = std::make_shared<Solver>(mesh, boundaries, time, linear, material);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::MaterialFeedbackOptions thermal;
     thermal.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqTemperatureOnly;
     thermal.reference_density = thermal.liquid_density = density;
     thermal.reference_temperature = initial_temperature;
     thermal.thermal_expansion = 2.1e-4;
     thermal.reference_dynamic_viscosity = 1.e-3;
-    solver.configure_material_feedback(thermal);
-    solver.add_prescribed_heat_source().initialize_constant(0.0);
+    solver_coupling.configure_material_feedback(thermal);
+    solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
     SimpleFluid::ReactingGasOptions gas_options;
     gas_options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
     gas_options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
@@ -322,9 +326,9 @@ void run_ale(const Options& options)
     gas_options.initial_dissolved_hydrogen = 0.0;
     gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};
-    auto& gas = solver.configure_reacting_gas(gas_options);
+    auto& gas = solver_coupling.configure_reacting_gas(gas_options);
     gas.enable_donor_hydrogen_deficit_tracking();
-    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
+    solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
     SimpleFluid::FreeSurfaceOptions surface;
     surface.enabled = true;
     surface.mode = SimpleFluid::FreeSurfaceMode::PlanarALE;
@@ -343,7 +347,7 @@ void run_ale(const Options& options)
     surface.headspace.initial_temperature = initial_temperature;
     surface.ale.top_boundary = "zmax";
     surface.ale.maximum_correctors = 30;
-    require(solver.configure_free_surface(surface) != nullptr, "ALE setup failed");
+    require(solver_coupling.configure_free_surface(surface) != nullptr, "ALE setup failed");
     const std::array<double, 8> axial_shape{0.5, 0.8, 1.2, 1.5, 1.4, 1.1, 0.8, 0.5};
     const std::array<double, 4> radial_shape{1.0, 1.2, 0.9, 0.7};
     std::vector<double> energy(mesh->num_owned_cells());
@@ -379,7 +383,7 @@ void run_ale(const Options& options)
         Tpetra::getDefaultComm()->barrier();
         auto begin = Clock::now();
         auto cpu_begin = std::clock();
-        auto checkpoint = solver.create_coupling_checkpoint();
+        auto checkpoint = solver_coupling.create_coupling_checkpoint();
         elapsed += std::chrono::duration<double>(Clock::now() - begin).count();
         cpu += double(std::clock() - cpu_begin) / CLOCKS_PER_SEC;
         std::vector<double> first_temperature;
@@ -389,18 +393,18 @@ void run_ale(const Options& options)
             Tpetra::getDefaultComm()->barrier();
             begin = Clock::now();
             cpu_begin = std::clock();
-            solver.restore_coupling_checkpoint(checkpoint);
-            solver.set_coupling_interval_energy(energy, duration);
+            solver_coupling.restore_coupling_checkpoint(checkpoint);
+            solver_coupling.set_coupling_interval_energy(energy, duration);
             for (int substep = 0; substep < substeps; ++substep)
             {
                 const double endpoint = substep + 1 == substeps ? end : start + duration * (substep + 1) / substeps;
                 solver.set_time_step(endpoint - solver.time());
-                solver.step();
+                solver_coupling.step();
                 ++advances;
             }
             elapsed += std::chrono::duration<double>(Clock::now() - begin).count();
             cpu += double(std::clock() - cpu_begin) / CLOCKS_PER_SEC;
-            const double mass = solver.liquid_mass_inventory().totalMass();
+            const double mass = solver_coupling.liquid_mass_inventory().totalMass();
             const double produced = (interval + 1) * interval_energy * yield;
             const double retained = gas.global_submerged_hydrogen_moles();
             const double escaped = gas.cumulative_submerged_bubble_hydrogen_escaped();
@@ -417,14 +421,14 @@ void run_ale(const Options& options)
             }
             if (trial == 0) first_top = height;
             require(replay_matches && std::abs(height - first_top) <= 1.e-13, "ALE replay field mismatch");
-            const auto& diagnostics = solver.planar_ale_diagnostics();
+            const auto& diagnostics = solver_coupling.planar_ale_diagnostics();
             history << interval << ',' << trial << ',' << solver.time() << ',' << mass << ','
                     << gas.cumulative_hydrogen_produced() << ',' << retained << ',' << escaped << ',' << height << ','
                     << diagnostics.maximum_gcl_residual << ',' << diagnostics.continuity.maximum << '\n';
         }
         begin = Clock::now();
         cpu_begin = std::clock();
-        solver.accept_coupling_checkpoint(checkpoint);
+        solver_coupling.accept_coupling_checkpoint(checkpoint);
         elapsed += std::chrono::duration<double>(Clock::now() - begin).count();
         cpu += double(std::clock() - cpu_begin) / CLOCKS_PER_SEC;
     }
@@ -432,19 +436,20 @@ void run_ale(const Options& options)
     fields.emplace("temperature_K", &solver.temperature());
     fields.emplace("pressure_Pa", &solver.pressure());
     fields.emplace("density_kg_m3", &solver.material_properties().density);
-    fields.emplace("liquid_inventory_kg_m3", &solver.liquid_mass_inventory().cellMassInventory());
+    fields.emplace("liquid_inventory_kg_m3", &solver_coupling.liquid_mass_inventory().cellMassInventory());
     fields.emplace("donor_deficit_mol_m3", &gas.donor_hydrogen_deficit());
-    fields.emplace("power_W_m3", &solver.find_prescribed_heat_source()->field());
+    fields.emplace("power_W_m3", &solver_coupling.find_prescribed_heat_source()->field());
     write_fields(options, *mesh, fields, &solver.velocity());
     long double local_energy = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell = static_cast<Local>(owned);
-        local_energy += static_cast<long double>(solver.liquid_mass_inventory().cellMassInventory().value(cell)) *
+        local_energy +=
+            static_cast<long double>(solver_coupling.liquid_mass_inventory().cellMassInventory().value(cell)) *
             mesh->cell_volume(cell) * material.specific_heat_capacity * solver.temperature().value(cell);
     }
     const double total_energy = reduce(static_cast<double>(local_energy));
-    const double mass = solver.liquid_mass_inventory().totalMass();
+    const double mass = solver_coupling.liquid_mass_inventory().totalMass();
     const double height = top();
     write_summary(options, *mesh, elapsed, cpu, advances, gas, solver.time(), mass, total_energy, height);
 }

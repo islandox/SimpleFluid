@@ -5,6 +5,7 @@
 
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -40,7 +41,8 @@ constexpr scalar_type thermal_expansion = 1.0e-3;
 struct ConfiguredCase
 {
     std::shared_ptr<Mesh> mesh;
-    std::unique_ptr<Solver> solver;
+    std::shared_ptr<Solver> solver;
+    std::unique_ptr<SimpleFluid::MultiphysicsSolverCoupler<Pack>> coupling;
     SimpleFluid::VolumetricScalarSource<Pack, Mesh>* heat_source = nullptr;
 };
 
@@ -214,20 +216,21 @@ ConfiguredCase make_case(
     SimpleFluid::LinearSolverOptions linear;
     linear.tolerance = 1.0e-13;
     linear.max_iterations = 500;
-    auto solver = std::make_unique<Solver>(mesh, boundaries(), time_options(), linear, model_options());
-    solver->configure_material_feedback(feedback_options());
+    auto solver = std::make_shared<Solver>(mesh, boundaries(), time_options(), linear, model_options());
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(feedback_options());
     auto* heat_source = &solver->add_temperature_source("ale_heat", heat);
     if (include_gas)
     {
-        solver->add_prescribed_heat_source().initialize_constant(0.0);
-        solver->configure_reacting_gas(gas_options(slip_velocity));
+        solver_coupling->add_prescribed_heat_source().initialize_constant(0.0);
+        solver_coupling->configure_reacting_gas(gas_options(slip_velocity));
     }
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
-    if (solver->configure_free_surface(surface_options(maximum_correctors)) == nullptr)
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
+    if (solver_coupling->configure_free_surface(surface_options(maximum_correctors)) == nullptr)
     {
         throw std::runtime_error("planar ALE verification failed to configure");
     }
-    return {std::move(mesh), std::move(solver), heat_source};
+    return {std::move(mesh), std::move(solver), std::move(solver_coupling), heat_source};
 }
 
 ConfiguredCase make_complete_escape_case()
@@ -237,10 +240,11 @@ ConfiguredCase make_complete_escape_case()
     SimpleFluid::LinearSolverOptions linear;
     linear.tolerance = 1.0e-13;
     linear.max_iterations = 500;
-    auto solver = std::make_unique<Solver>(mesh, boundaries(), time_options(), linear, model_options());
-    solver->configure_material_feedback(feedback_options());
+    auto solver = std::make_shared<Solver>(mesh, boundaries(), time_options(), linear, model_options());
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(feedback_options());
     auto* heat_source = &solver->add_temperature_source("ale_heat", 0.0);
-    solver->add_prescribed_heat_source().initialize_constant(0.0);
+    solver_coupling->add_prescribed_heat_source().initialize_constant(0.0);
 
     auto gas = gas_options(slip_velocity);
     gas.initial_dissolved_hydrogen = 0.0;
@@ -254,10 +258,10 @@ ConfiguredCase make_complete_escape_case()
     // Keep the required positive Henry coefficient while making the residual
     // mass-transfer term negligible compared with the explicit molar checks.
     gas.henry_coefficient = 1.0e-100;
-    solver->configure_reacting_gas(gas);
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
+    solver_coupling->configure_reacting_gas(gas);
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
 
-    const auto* gas_model = solver->find_reacting_gas_model();
+    const auto* gas_model = solver_coupling->find_reacting_gas_model();
     if (gas_model == nullptr)
     {
         throw std::runtime_error("ALE complete-escape verification lacks its gas model");
@@ -270,11 +274,11 @@ ConfiguredCase make_complete_escape_case()
 
     auto surface = surface_options(12);
     surface.initial_liquid_volume = 1.0 - initial_bubble_volume;
-    if (solver->configure_free_surface(surface) == nullptr)
+    if (solver_coupling->configure_free_surface(surface) == nullptr)
     {
         throw std::runtime_error("planar ALE complete-escape verification failed to configure");
     }
-    return {std::move(mesh), std::move(solver), heat_source};
+    return {std::move(mesh), std::move(solver), std::move(solver_coupling), heat_source};
 }
 
 scalar_type global_mesh_volume(const Mesh& mesh)
@@ -291,7 +295,7 @@ scalar_type global_mesh_volume(const Mesh& mesh)
 
 scalar_type global_liquid_energy(const ConfiguredCase& state)
 {
-    const auto& mass_density = state.solver->liquid_mass_inventory().cellMassInventory();
+    const auto& mass_density = state.coupling->liquid_mass_inventory().cellMassInventory();
     scalar_type local{};
     for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
     {
@@ -312,8 +316,8 @@ scalar_type species_value(const SimpleFluid::GasMolesBySpecies& values, std::str
 
 VerificationResult result(std::string_view name, const ConfiguredCase& state)
 {
-    const auto surface = state.solver->free_surface_diagnostics();
-    const auto& ale = state.solver->planar_ale_diagnostics();
+    const auto surface = state.coupling->free_surface_diagnostics();
+    const auto& ale = state.coupling->planar_ale_diagnostics();
     VerificationResult value{name, static_cast<scalar_type>(surface.pool_level), global_mesh_volume(*state.mesh),
         ale.maximum_gcl_residual, ale.continuity.maximum, ale.liquid_mass_residual, ale.gas_inventory_residual,
         ale.mesh_vessel_mismatch, ale.volume_source.source_pool_closure_residual, ale.energy_residual};
@@ -324,11 +328,11 @@ VerificationResult result(std::string_view name, const ConfiguredCase& state)
     require_residual("ALE GCL closure", value.maximum_gcl, 1.0e-13, volume_rate_scale, 1.0e-14);
     require_residual("ALE continuity closure", value.maximum_continuity, 1.0e-10, volume_rate_scale, 2.0e-12);
     require_residual("ALE liquid-mass closure", value.liquid_mass_residual, 1.0e-12,
-        state.solver->liquid_mass_inventory().totalMass(), 1.0e-13);
+        state.coupling->liquid_mass_inventory().totalMass(), 1.0e-13);
     require_residual("ALE gas-inventory closure", value.gas_inventory_residual, 1.0e-12,
-        state.solver->find_reacting_gas_model() == nullptr
+        state.coupling->find_reacting_gas_model() == nullptr
             ? 0.0
-            : state.solver->find_reacting_gas_model()->global_submerged_hydrogen_moles(),
+            : state.coupling->find_reacting_gas_model()->global_submerged_hydrogen_moles(),
         1.0e-12);
     require_residual("ALE mesh/pool closure", value.mesh_pool_mismatch, 1.0e-12, value.mesh_volume, 2.0e-12);
     require_residual("ALE source/pool closure", value.source_pool_residual, 1.0e-12, volume_rate_scale, 2.0e-12);
@@ -340,9 +344,9 @@ VerificationResult run_uniform_heating()
 {
     constexpr scalar_type power_density = 1.0e-3;
     auto state = make_case(power_density, 6);
-    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
     const auto initial_energy = global_liquid_energy(state);
-    state.solver->step();
+    state.coupling->step();
     const auto temperature_scale = power_density * time_step / (density * heat_capacity);
     const auto discriminant = 1.0 - 4.0 * thermal_expansion * temperature_scale;
     if (!(discriminant > 0.0))
@@ -358,10 +362,10 @@ VerificationResult run_uniform_heating()
         require_near("ALE heated temperature",
             state.solver->temperature().value(static_cast<local_ordinal_type>(owned)), expected_temperature, 3.0e-9);
     }
-    require_near("ALE heated level", state.solver->free_surface_diagnostics().pool_level, expected_level, 3.0e-12);
+    require_near("ALE heated level", state.coupling->free_surface_diagnostics().pool_level, expected_level, 3.0e-12);
     require_near("ALE heated mesh volume", global_mesh_volume(*state.mesh), expected_level, 3.0e-12);
     require_near(
-        "ALE heated liquid mass", state.solver->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12, 1.0e-13);
+        "ALE heated liquid mass", state.coupling->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12, 1.0e-13);
     const auto expected_energy_input = power_density * global_mesh_volume(*state.mesh) * time_step;
     require_near(
         "ALE heated energy", global_liquid_energy(state) - initial_energy, expected_energy_input, 1.0e-10, 1.0e-9);
@@ -372,8 +376,8 @@ VerificationResult run_gas_generation()
 {
     constexpr scalar_type power_density = 1.0e3;
     auto state = make_case(0.0, 10, true);
-    auto* gas = state.solver->find_reacting_gas_model();
-    auto* prescribed_heat = state.solver->find_prescribed_heat_source();
+    auto* gas = state.coupling->find_reacting_gas_model();
+    auto* prescribed_heat = state.coupling->find_prescribed_heat_source();
     if (gas == nullptr || prescribed_heat == nullptr)
     {
         throw std::runtime_error("ALE gas verification lacks its model owners");
@@ -381,9 +385,9 @@ VerificationResult run_gas_generation()
     prescribed_heat->initialize_constant(power_density);
     const auto before = gas->cumulative_hydrogen_produced();
     const auto before_submerged = gas->global_submerged_hydrogen_moles();
-    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
-    state.solver->step();
-    const auto surface = state.solver->free_surface_diagnostics();
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
+    state.coupling->step();
+    const auto surface = state.coupling->free_surface_diagnostics();
     const auto expected_generation = power_density * global_mesh_volume(*state.mesh) *
                                      gas->options().hydrogen_yield_mol_per_j * gas->options().gas_release_efficiency *
                                      time_step;
@@ -431,13 +435,13 @@ VerificationResult run_complete_escape()
     constexpr int maximum_escape_steps = 16;
 
     auto state = make_complete_escape_case();
-    auto* gas = state.solver->find_reacting_gas_model();
-    auto* prescribed_heat = state.solver->find_prescribed_heat_source();
+    auto* gas = state.coupling->find_reacting_gas_model();
+    auto* prescribed_heat = state.coupling->find_prescribed_heat_source();
     if (gas == nullptr || prescribed_heat == nullptr)
     {
         throw std::runtime_error("ALE complete-escape verification lacks its model owners");
     }
-    const auto initial_surface = state.solver->free_surface_diagnostics();
+    const auto initial_surface = state.coupling->free_surface_diagnostics();
     // Late escape steps remove bubble volumes below the resolution of the
     // O(1 m) pool level. Allow a few rounding errors in the liquid-volume sum
     // and volume-to-level conversion, while still requiring a resolved drop.
@@ -466,18 +470,18 @@ VerificationResult run_complete_escape()
     { return gas->global_microbubble_hydrogen_moles() + gas->global_large_bubble_hydrogen_moles(); };
     while (remaining_bubble_moles() > completion_tolerance && completed_steps < maximum_escape_steps)
     {
-        const auto before_surface = state.solver->free_surface_diagnostics();
+        const auto before_surface = state.coupling->free_surface_diagnostics();
         const auto before_micro = gas->global_microbubble_hydrogen_moles();
         const auto before_large = gas->global_large_bubble_hydrogen_moles();
         const auto before_raw_bubble_volume = gas->global_submerged_bubble_volume();
         const auto before_cumulative_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
         const auto before_vent = species_value(before_surface.vented_gas_moles, "H2");
 
-        state.solver->step();
+        state.coupling->step();
         ++completed_steps;
 
         const auto& statistics = gas->last_statistics();
-        const auto after_surface = state.solver->free_surface_diagnostics();
+        const auto after_surface = state.coupling->free_surface_diagnostics();
         const auto after_micro = gas->global_microbubble_hydrogen_moles();
         const auto after_large = gas->global_large_bubble_hydrogen_moles();
         const auto after_raw_bubble_volume = gas->global_submerged_bubble_volume();
@@ -527,7 +531,7 @@ VerificationResult run_complete_escape()
     const auto final_micro = gas->global_microbubble_hydrogen_moles();
     const auto final_large = gas->global_large_bubble_hydrogen_moles();
     const auto final_total = final_micro + final_large;
-    const auto final_level_drop = initial_surface.pool_level - state.solver->free_surface_diagnostics().pool_level;
+    const auto final_level_drop = initial_surface.pool_level - state.coupling->free_surface_diagnostics().pool_level;
     if (!(completed_steps > 1) || final_total > completion_tolerance || !observed_resolved_level_drop ||
         !(final_level_drop > level_roundoff_tolerance))
     {
@@ -544,15 +548,15 @@ VerificationResult run_complete_escape()
     require_near("ALE complete cumulative escape", gas->cumulative_submerged_bubble_hydrogen_escaped(),
         initial_total - final_total, 5.0e-18, 5.0e-10);
     require_near("ALE complete vent transfer",
-        species_value(state.solver->free_surface_diagnostics().vented_gas_moles, "H2"), initial_total - final_total,
+        species_value(state.coupling->free_surface_diagnostics().vented_gas_moles, "H2"), initial_total - final_total,
         5.0e-18, 5.0e-10);
     require_near("ALE complete-escape residual dissolved inventory", gas->global_dissolved_hydrogen_moles(), 0.0,
         completion_absolute_tolerance);
     require_near("ALE complete pool/raw-volume drop",
-        initial_surface.pool_volume - state.solver->free_surface_diagnostics().pool_volume,
+        initial_surface.pool_volume - state.coupling->free_surface_diagnostics().pool_volume,
         initial_raw_bubble_volume - gas->global_submerged_bubble_volume(), 2.0e-12, 1.0e-10);
-    require_near("ALE final pool decomposition", state.solver->free_surface_diagnostics().pool_volume,
-        state.solver->free_surface_diagnostics().liquid_volume + gas->global_submerged_bubble_volume(), 1.0e-12,
+    require_near("ALE final pool decomposition", state.coupling->free_surface_diagnostics().pool_volume,
+        state.coupling->free_surface_diagnostics().liquid_volume + gas->global_submerged_bubble_volume(), 1.0e-12,
         1.0e-12);
     return result("aleCompleteEscape", state);
 }
@@ -566,12 +570,12 @@ VerificationResult run_failure_rollback()
         accepted_temperature[owned] = state.solver->temperature().value(static_cast<local_ordinal_type>(owned));
     }
     const auto accepted_volume = global_mesh_volume(*state.mesh);
-    const auto accepted_mass = state.solver->liquid_mass_inventory().totalMass();
-    const auto accepted_history = state.solver->free_surface_history().size();
+    const auto accepted_mass = state.coupling->liquid_mass_inventory().totalMass();
+    const auto accepted_history = state.coupling->free_surface_history().size();
     std::string rejection;
     try
     {
-        state.solver->step();
+        state.coupling->step();
     }
     catch (const std::runtime_error& error)
     {
@@ -589,20 +593,20 @@ VerificationResult run_failure_rollback()
             0.0);
     }
     require_near("ALE rollback volume", global_mesh_volume(*state.mesh), accepted_volume, 0.0);
-    require_near("ALE rollback liquid mass", state.solver->liquid_mass_inventory().totalMass(), accepted_mass, 0.0);
+    require_near("ALE rollback liquid mass", state.coupling->liquid_mass_inventory().totalMass(), accepted_mass, 0.0);
     if (state.solver->step_index() != 0 || state.solver->time() != 0.0 ||
-        state.solver->free_surface_history().size() != accepted_history)
+        state.coupling->free_surface_history().size() != accepted_history)
     {
         throw std::runtime_error("ALE rollback advanced accepted time/history");
     }
-    if (state.solver->planar_ale_diagnostics().rejected_transactions != 1 ||
-        state.solver->planar_ale_diagnostics().last_rejection_reason != rejection)
+    if (state.coupling->planar_ale_diagnostics().rejected_transactions != 1 ||
+        state.coupling->planar_ale_diagnostics().last_rejection_reason != rejection)
     {
         throw std::runtime_error("ALE rollback did not publish its rejection count/reason exactly once");
     }
     state.heat_source->set_enabled(false);
-    state.solver->step();
-    if (state.solver->step_index() != 1 || state.solver->planar_ale_diagnostics().rejected_transactions != 1)
+    state.coupling->step();
+    if (state.solver->step_index() != 1 || state.coupling->planar_ale_diagnostics().rejected_transactions != 1)
     {
         throw std::runtime_error("ALE rollback retry did not accept exactly one step while retaining rejection count");
     }

@@ -21,8 +21,9 @@ includes the complete planar ALE transaction, and `sf.ale_trial` includes an out
 corrector attempt. `sf.ale_geometry` covers moving the trial geometry, creating
 control-volume state, and refreshing geometry-dependent caches. `sf.ale_restore`
 counts internal Picard replay and outward failure restoration; `sf.geometry_refresh`
-measures Boussinesq geometry-dependent cache refresh, including candidate and
-outward rollback refreshes. Internal replay restores physical fields and ledgers
+measures core Boussinesq geometry-dependent cache refresh, including candidate
+and outward rollback refreshes. The external controller then refreshes its
+optional-model geometry outside that core scope. Internal replay restores physical fields and ledgers
 immediately but defers metrics reconstruction to the next candidate; outward
 failure always refreshes accepted geometry. Gas and scalar void mirrors preserve
 their snapshot validation and solver invalidation during deferred replay; public
@@ -34,7 +35,7 @@ methods; coupled Krylov/NOX work belongs to `sf.pressure_velocity` and does not
 pretend to have separate segregated solve times. Physical model refresh,
 turbulence, pre-temperature models, temperature transport, post-temperature
 models, reacting gas advance, and fixed-grid free-surface advance follow the
-existing flow charts in `FluidSolver.hh`, `BoussinesqSolver.hh`, and
+existing flow charts in `FluidSolver.hh`, `MultiphysicsSolverCoupler.hh`, and
 `IncompressibleIsothermalSolver.hh`. Isothermal steps record flow and turbulence
 without a temperature phase. The collector cannot be copied or moved while
 scopes retain references to it.

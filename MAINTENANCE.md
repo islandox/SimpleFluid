@@ -591,13 +591,18 @@ and conservation requirements testable.
 
 ### Add coupled physics
 
-`BoussinesqSolver` owns the current source/model registries and configure,
-find, and remove APIs. Extend those seams so optional models remain lazily
+`MultiphysicsSolverCoupler` owns optional models, their configure/find/remove
+APIs, ALE transactions, and checkpoint replay. Construct it externally with a
+`SP<BoussinesqSolver<Pack>>`; it retains shared ownership and calls the solver
+equation stages. The solver
+owns no coupler or model-configuration forwarding API. Extend
+those seams so optional models remain lazily
 allocated and disabled cases retain existing behavior. Publish diagnostics
 through existing output-field maps when possible instead of adding one getter
 per field. Template mesh-dependent models on their mesh type, select storage
 through `MeshFieldTraits`, and retain explicit native and legacy
 specializations at the shared-library boundary.
+See [the coupling ownership and transaction design](docs/architecture/multiphysics_solver_coupler.md).
 
 ### Add an executable
 

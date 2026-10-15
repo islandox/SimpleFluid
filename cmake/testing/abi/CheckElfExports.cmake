@@ -217,6 +217,8 @@ string(REPLACE "\n" ";"
        simplefluid_demangled_symbols "${simplefluid_demangled_symbols}")
 
 set(simplefluid_forbidden_api_patterns
+    "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(].*BoussinesqSolver<.*>&[)]$"
+    "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::PlanarALEStep::"
     "SimpleFluid::BoilingSourceModel<.*>[ ]*::(validate_void_inputs|limit_to_available_void|add_bulk_boiling|add_wall_boiling)[(]"
     "SimpleFluid::ScalarSourceDecayTransport<.*>[ ]*::(validate_collective_configuration|validate_collective_advance_selection|validate_liquid_fraction_field|reconstruct_concentrations|transport|update_inventory_diagnostics)[(]"
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::(require_uniform_value|require_uniform_configuration|copy_scaled_field|integrate|apply_base_profile|apply_time_multiplier)[(]"
@@ -227,7 +229,8 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::detail::"
     "SimpleFluid::FluidSolver<.*>[ ]*::(run_momentum_predictor|global_sum|write_step_progress|run_pressure_correction|solve_coupled_krylov)[(]"
     "SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*bool[)]$"
-    "SimpleFluid::BoussinesqSolver<.*>[ ]*::(temperature_equation|stored_material_properties|stored_turbulence_model|physical_transport_enabled|solution_writer|stored_temperature_sources|refresh_physical_models|refresh_material_feedback|initialize_reacting_gas_state|update_void_fraction_models|active_alpha_g_field|active_alpha_l_field|ensure_scalar_void_fraction_model)[(]"
+    "SimpleFluid::BoussinesqSolver<.*>[ ]*::(temperature_equation|stored_material_properties|stored_turbulence_model|physical_transport_enabled|solution_writer|solve_flow|momentum_transport_flux|advance_temperature_transport|stored_temperature_sources|refresh_physical_models|refresh_material_feedback|initialize_reacting_gas_state|update_void_fraction_models|active_alpha_g_field|active_alpha_l_field|ensure_scalar_void_fraction_model)[(]"
+    "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::(momentum_transport_flux|temperature_transport_flux|temperature_transport_state|initialize_primary_state|refresh_geometry_dependent_models|append_material_feedback_fields|append_solution_fields|refresh_physical_models|refresh_material_feedback|initialize_reacting_gas_state|update_void_fraction_models|active_alpha_g_field|active_alpha_l_field|ensure_scalar_void_fraction_model|step_planar_ale|validate_step_coupling|validate_coupling_checkpoint|coupling_configuration_signature)[(]"
     "SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::(isothermal_momentum_equation|isothermal_velocity_boundary_cache|isothermal_pressure_face_flux_workspace|isothermal_coupled_pressure_velocity_solver|stored_material_properties|stored_turbulence_model|solution_writer)[(]"
     "PhysicalModelTag"
     "SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::(detect_family|current_axis_edges|geometry_edge_coordinates|geometry_motion_available|geometry_motion_owned|claim_geometry_motion|release_geometry_motion|replace_axis_edges|candidate_axis_edges|candidate_geometry_edges|capture_cell_volumes|capture_face_centroids|validate_collective_construction|validate_collective_trial|validate_collective_transaction|compute_trial_state|rollback_impl|reset_stationary_state)[(]"
@@ -273,6 +276,15 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::FluidSolver<.*>[ ]*::pressure[(][)]$"
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::step[(][)]$"
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::temperature[(][)]$"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(]std::shared_ptr<SimpleFluid::BoussinesqSolver<.*>[ ]*>[)]$"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::step[(][)]$"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::configure_reacting_gas[(]"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::configure_free_surface[(]"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::create_coupling_checkpoint[(][)]$"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::restore_coupling_checkpoint[(]"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::accept_coupling_checkpoint[(]"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::validate_coupling_checkpoint_acceptance[(]"
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::set_thermal_step_participant[(]"
     "^SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::step[(][)]$"
     "^SimpleFluid::TurbulenceModel<.*>[ ]*::advance[(]"
     "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project[(]"
@@ -287,7 +299,6 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::TemperatureDiffusionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_physical[(]"
     "^SimpleFluid::SolidHeatConductionEquation<.*SimpleFluid::SolidSubdomain<.*>[ ]*::advance[(]"
     "^SimpleFluid::VentedLumpedCavityModel::preview[(]"
-    "^SimpleFluid::BoussinesqSolver<.*::set_thermal_step_participant[(]"
     "^SimpleFluid::BoussinesqMomentumEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::advance_velocity_physical[(]"
     "^SimpleFluid::TurbulenceModel<.*SimpleFluid::MeshHandle<.*>[ ]*::advance[(]"
     "^SimpleFluid::AdaptiveSteadyStateController::observe[(]"
@@ -486,8 +497,6 @@ simplefluid_require_exact_api(
     "^SimpleFluid::FluidSolver<.*>[ ]*::courant_transport_face_fluxes[(][)] const$" 1)
 simplefluid_require_exact_api(
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::refresh_geometry_dependent_state[(][)]$" 1)
-simplefluid_require_exact_api(
-    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::courant_transport_face_fluxes[(][)] const$" 1)
 
 # Anchor the out-of-line planar-motion lifecycle and solver observer. Inline
 # getters remain consumer-instantiable and are not stable per-configuration
@@ -503,7 +512,7 @@ simplefluid_require_exact_api(
 simplefluid_require_exact_api(
     "^SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::rollback_trial[(][)]$" 1)
 simplefluid_require_exact_api(
-    "^SimpleFluid::BoussinesqSolver<.*>[ ]*::mesh_relative_face_fluxes[(][)] const$" 1)
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::mesh_relative_face_fluxes[(][)] const$" 1)
 
 # The fixed-grid closure exposes an explicit preview/commit transaction and an
 # accepted-state snapshot/restore transaction.
@@ -732,7 +741,11 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # GCC Release/LTO has 1414 API exports and LLVM Debug has 1426 (2026-10-14).
 # Keep modest toolchain headroom; private-family exclusions and exact API
 # anchors above remain authoritative.
-set(simplefluid_api_symbol_upper_bound 1450)
+# The external multiphysics controller exports its own lifecycle/configuration
+# API; model forwarding APIs no longer belong to BoussinesqSolver. GCC Debug
+# exports 1453 API symbols (2026-10-15). Keep modest toolchain headroom while
+# exact API anchors and private-family exclusions remain authoritative.
+set(simplefluid_api_symbol_upper_bound 1480)
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

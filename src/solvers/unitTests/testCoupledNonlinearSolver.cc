@@ -5,10 +5,11 @@
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
-#include "solvers/CoupledNonlinearProblem.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/CoupledNonlinearProblem.hh"
 #include "solvers/FluidSolver.hh"
 #include "solvers/IncompressibleIsothermalSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "solvers/NoxNonlinearSolver.hh"
 #include "utils/testing_environment.hh"
 
@@ -1447,15 +1448,18 @@ TEST(CoupledNonlinearSolverTest, BoussinesqAdvancesHeatAndMaterialUpdaterOnceAft
     BoussinesqModelOptions material;
     material.reference_density = material.density = 7.;
     material.dynamic_viscosity = .28;
-    BoussinesqSolver<Pack> solver(state.mesh, state.boundaries, state.time, state.linear, material);
+    auto solver_shared =
+        std::make_shared<BoussinesqSolver<Pack>>(state.mesh, state.boundaries, state.time, state.linear, material);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_value(300.);
     State::seed(solver.velocity(), solver.pressure());
     int updates = 0;
-    solver.set_material_updater([&](const auto&, auto&) { ++updates; });
+    solver_coupling.set_material_updater([&](const auto&, auto&) { ++updates; });
     solver.add_temperature_source("heat", 14.);
     for (int step = 1; step <= 2; ++step)
     {
-        ASSERT_NO_THROW(solver.step());
+        ASSERT_NO_THROW(solver_coupling.step());
         EXPECT_EQ(solver.step_index(), step);
         EXPECT_DOUBLE_EQ(solver.time(), step * state.time.time_step);
         EXPECT_EQ(updates, step);
@@ -1481,9 +1485,12 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     BoussinesqModelOptions material;
     material.reference_density = material.density = 7.;
     material.dynamic_viscosity = .28;
-    BoussinesqSolver<Pack> solver(state.mesh, state.boundaries, state.time, state.linear, material);
+    auto solver_shared =
+        std::make_shared<BoussinesqSolver<Pack>>(state.mesh, state.boundaries, state.time, state.linear, material);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_value(300.);
-    solver.add_prescribed_heat_source().initialize_constant(0.);
+    solver_coupling.add_prescribed_heat_source().initialize_constant(0.);
     ReactingGasOptions gas_options;
     gas_options.mode = ReactingGasMode::Sheng2024TwoPopulation;
     gas_options.hydrogen_yield_mol_per_j = 2.e-7;
@@ -1495,9 +1502,9 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     gas_options.initial_dissolved_hydrogen = 1.;
     gas_options.nucleation_radius = 6.6359547089482127e-8;
 
-    auto& gas = solver.configure_reacting_gas(gas_options);
+    auto& gas = solver_coupling.configure_reacting_gas(gas_options);
     State::seed(solver.velocity(), solver.pressure());
-    solver.set_material_updater([](const auto&, auto& properties) { properties.density.put_scalar(6.9); });
+    solver_coupling.set_material_updater([](const auto&, auto& properties) { properties.density.put_scalar(6.9); });
     const auto accepted_u = values(solver.velocity().owned_data());
     const auto accepted_p = values(solver.pressure().owned_data());
     const auto accepted_t = values(solver.temperature().owned_data());
@@ -1509,7 +1516,7 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     const bool accepted_initialization = gas.initial_state_initialized();
     for (int attempt = 0; attempt < 2; ++attempt)
     {
-        EXPECT_THROW(solver.step(), std::runtime_error);
+        EXPECT_THROW(solver_coupling.step(), std::runtime_error);
         EXPECT_EQ(solver.step_index(), 0);
         EXPECT_DOUBLE_EQ(solver.time(), 0.);
         EXPECT_EQ(values(solver.velocity().owned_data()), accepted_u);
@@ -1524,7 +1531,7 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     }
     state.linear.max_iterations = 250;
     solver.set_linear_solver_options(state.linear);
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(solver_coupling.step());
     EXPECT_EQ(solver.step_index(), 1);
     EXPECT_DOUBLE_EQ(solver.time(), state.time.time_step);
     EXPECT_TRUE(solver.last_nonlinear_result().converged);

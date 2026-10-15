@@ -30,7 +30,7 @@
 
 namespace SimpleFluid
 {
-template<TpetraTypePack Pack> class BoussinesqSolver;
+template<TpetraTypePack Pack> class MultiphysicsSolverCoupler;
 /** Local elapsed times; reduce across ranks when exporting diagnostics. */
 struct ReactingTransportWork
 {
@@ -474,8 +474,8 @@ public:
     }
 
 private:
-    template<TpetraTypePack> friend class BoussinesqSolver;
-    // Only the solver's internal Picard replay can leave metrics stale. Public
+    template<TpetraTypePack> friend class MultiphysicsSolverCoupler;
+    // Only the coupler's internal Picard replay can leave metrics stale. Public
     // restore always refreshes, and outward failure paths restore eagerly.
     SIMPLEFLUID_EQUATIONS_LOCAL
     void restore_for_ale_replay(const StateSnapshot& snapshot);

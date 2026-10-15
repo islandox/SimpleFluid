@@ -12,6 +12,8 @@
 
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
+#include <type_traits>
 
 #include <iostream>
 #include <memory>
@@ -73,13 +75,18 @@ void run_boussinesq_example(
     MeshFactory factory(db);
     auto mesh = factory.build_handle<Pack>();
 
-    BoussinesqSolver<Pack> solver(mesh, boundary_conditions,
-                                  time_options, linear_options);
-    std::forward<Initializer>(initialize)(solver);
-    solver.run();
+    auto solver_shared =
+        std::make_shared<BoussinesqSolver<Pack>>(mesh, boundary_conditions, time_options, linear_options);
+    auto& solver = *solver_shared;
+    MultiphysicsSolverCoupler<Pack> coupling(solver_shared);
+    if constexpr (std::is_invocable_v<Initializer, BoussinesqSolver<Pack>&, MultiphysicsSolverCoupler<Pack>&>)
+        std::forward<Initializer>(initialize)(solver, coupling);
+    else
+        std::forward<Initializer>(initialize)(solver);
+    coupling.run();
 
     const auto communicator = mesh->owned_cell_map()->getComm();
-    solver.write_parallel_solution_vtu(vtu_filename, output_options);
+    coupling.write_parallel_solution_vtu(vtu_filename, output_options);
 
     if (communicator->getRank() == 0)
     {
@@ -122,17 +129,18 @@ void run_boussinesq_example(
     MeshFactory factory(db);
     auto mesh = factory.build_handle<Pack>();
 
-    BoussinesqSolver<Pack> solver(
-        mesh,
-        boundary_conditions,
-        time_options,
-        linear_options,
-        std::move(model_options));
-    std::forward<Initializer>(initialize)(solver);
-    solver.run();
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(
+        mesh, boundary_conditions, time_options, linear_options, std::move(model_options));
+    auto& solver = *solver_shared;
+    MultiphysicsSolverCoupler<Pack> coupling(solver_shared);
+    if constexpr (std::is_invocable_v<Initializer, BoussinesqSolver<Pack>&, MultiphysicsSolverCoupler<Pack>&>)
+        std::forward<Initializer>(initialize)(solver, coupling);
+    else
+        std::forward<Initializer>(initialize)(solver);
+    coupling.run();
 
     const auto communicator = mesh->owned_cell_map()->getComm();
-    solver.write_parallel_solution_vtu(vtu_filename, output_options);
+    coupling.write_parallel_solution_vtu(vtu_filename, output_options);
 
     if (communicator->getRank() == 0)
     {

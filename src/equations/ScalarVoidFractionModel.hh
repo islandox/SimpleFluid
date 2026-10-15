@@ -30,7 +30,7 @@
 
 namespace SimpleFluid
 {
-template<TpetraTypePack Pack> class BoussinesqSolver;
+template<TpetraTypePack Pack> class MultiphysicsSolverCoupler;
 
 /**
  * @brief Runtime controls for the bounded scalar void-fraction model.
@@ -267,8 +267,8 @@ public:
         scalar_type time_step);
 
 private:
-    template<TpetraTypePack> friend class BoussinesqSolver;
-    // Solver-only internal replay; public restore keeps geometry current.
+    template<TpetraTypePack> friend class MultiphysicsSolverCoupler;
+    // Coupler-only internal replay; public restore keeps geometry current.
     SIMPLEFLUID_EQUATIONS_LOCAL
     void restore_for_ale_replay(const StateSnapshot& snapshot);
     SIMPLEFLUID_EQUATIONS_LOCAL

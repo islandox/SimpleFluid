@@ -65,20 +65,17 @@ int main(int argc, char** argv)
     linear_options.tolerance = 1.0e-10;
 
     SimpleFluid::run_boussinesq_example<>(
-        db,
-        bcs,
-        time_options,
-        linear_options,
-        [](auto& solver)
+        db, bcs, time_options, linear_options,
+        [](auto& solver, auto& coupling)
         {
-            solver.initialize_bottom_hot_top_cold(300.0, 300.0);
+            coupling.initialize_bottom_hot_top_cold(300.0, 300.0);
 
             SimpleFluid::PrescribedHeatSourceOptions prescribed_heat;
             prescribed_heat.profile = SimpleFluid::PrescribedHeatProfile::Gaussian;
             prescribed_heat.total_power = 1.0e3;
             prescribed_heat.center = {0.0, 0.0, 0.5};
             prescribed_heat.standard_deviation = {0.15, 0.15, 0.25};
-            solver.configure_prescribed_heat_source(prescribed_heat);
+            coupling.configure_prescribed_heat_source(prescribed_heat);
 
             SimpleFluid::ReactingGasOptions reaction_source;
             reaction_source.mode =
@@ -86,15 +83,15 @@ int main(int argc, char** argv)
             reaction_source.hydrogen_yield_mol_per_j = 2.0e-7;
             reaction_source.max_source_alpha_rate = 10.0;
             reaction_source.reference_pressure = 101325.0;
-            solver.configure_reacting_gas(reaction_source);
+            coupling.configure_reacting_gas(reaction_source);
 
             SimpleFluid::ScalarVoidFractionOptions alpha_options;
             alpha_options.alpha_max = 0.5;
-            solver.configure_scalar_void_fraction(alpha_options);
+            coupling.configure_scalar_void_fraction(alpha_options);
 
             SimpleFluid::BoilingSourceOptions boiling;
             boiling.enable_bulk_boiling = false;
-            solver.configure_boiling_source(boiling);
+            coupling.configure_boiling_source(boiling);
 
             SimpleFluid::MaterialFeedbackOptions feedback;
             feedback.density_mode =
@@ -105,13 +102,11 @@ int main(int argc, char** argv)
             feedback.reference_temperature = 300.0;
             feedback.thermal_expansion = 2.1e-4;
             feedback.reference_dynamic_viscosity = 1.0e-3;
-            solver.configure_material_feedback(feedback);
+            coupling.configure_material_feedback(feedback);
         },
         "reacting_solution_tank_demo.vtu",
         SimpleFluid::SolutionOutputOptions{
-            .include_sources = true,
-            .include_material_properties = true,
-            .include_reacting_gas_fields = true});
+            .include_sources = true, .include_material_properties = true, .include_reacting_gas_fields = true});
 
     return 0;
 }

@@ -7,6 +7,7 @@
 #include "VerificationParallel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 
 #include <Tpetra_Core.hpp>
 
@@ -98,7 +99,9 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
     model.specific_heat_capacity = cp;
     model.dynamic_viscosity = water.dynamic_viscosity;
     model.thermal_conductivity = water.thermal_conductivity;
-    Solver solver(mesh, bc, time, linear, model);
+    auto solver_shared = std::make_shared<Solver>(mesh, bc, time, linear, model);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     // The enlarged 3-D pressure system reaches its explicit residual floor
     // near 1e-13. Keep temperature accuracy and physical conservation gates
     // independent of this pressure-only algebraic stopping criterion.
@@ -116,9 +119,9 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
     // IF97 callback would violate its material/energy rollback contract.
     material.reference_dynamic_viscosity = water.dynamic_viscosity;
     material.min_density = 1.0;
-    solver.configure_material_feedback(material);
+    solver_coupling.configure_material_feedback(material);
     auto& source = solver.add_temperature_source("uniform_heat", power);
-    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, T0, T0);
+    solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, T0, T0);
     SimpleFluid::FreeSurfaceOptions surface;
     surface.enabled = true;
     surface.mode = SimpleFluid::FreeSurfaceMode::PlanarALE;
@@ -143,7 +146,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
     surface.ale.level_absolute_tolerance = 1.0e-13 / length_scale;
     surface.ale.level_relative_tolerance = 0.0;
     surface.ale.relaxation = 1.0;
-    if (solver.configure_free_surface(surface) == nullptr)
+    if (solver_coupling.configure_free_surface(surface) == nullptr)
     {
         throw std::runtime_error("Could not configure solver-integrated ALE.");
     }
@@ -179,7 +182,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         if (step > 0)
         {
             source.set_enabled(q > 0.0);
-            solver.step();
+            solver_coupling.step();
             linear_history.write(step, solver.time(), solver.last_step_statistics());
             // Stable small root of BE: dT [1-beta(Told-T0)-beta*dT] = q*dt/(rho0*cp).
             const double a = 1.0 - beta * (exact_temperature - T0);
@@ -194,8 +197,8 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         double integrated_mu = 0.0;
         double integrated_k = 0.0;
         double maximum_temperature_error = 0.0;
-        const double level = solver.free_surface_diagnostics().pool_level;
-        const auto& mass_density = solver.liquid_mass_inventory().cellMassInventory();
+        const double level = solver_coupling.free_surface_diagnostics().pool_level;
+        const auto& mass_density = solver_coupling.liquid_mass_inventory().cellMassInventory();
         const auto& fields = solver.material_properties();
         for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
         {
@@ -240,7 +243,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         integrated_mu = global_integrals[4];
         integrated_k = global_integrals[5];
         check(parallel.max(maximum_temperature_error), 2.0e-7, "Cell temperature analytic error");
-        const double mass = solver.liquid_mass_inventory().totalMass();
+        const double mass = solver_coupling.liquid_mass_inventory().totalMass();
         const double temperature = energy / (mass * cp);
         const double exact_level = initial_height / (1.0 - beta * (exact_temperature - T0));
         const double density = integrated_density / volume;
@@ -251,7 +254,7 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
         if (step > 0)
         {
             cumulative_heat += q * volume * dt;
-            const auto& relative_flux = solver.mesh_relative_face_fluxes();
+            const auto& relative_flux = solver_coupling.mesh_relative_face_fluxes();
             for (const auto face : relative_flux.owned_face_ids())
             {
                 const auto value = relative_flux.value(face);
@@ -263,12 +266,12 @@ int run(const std::string& mode, const std::filesystem::path& output, const std:
             // its domain-volume-normalized transport independently of the
             // unchanged cell continuity, GCL and uniform-temperature gates.
             check(maximum_relative_flux / initial_volume, 2.0e-10, "Relative face flux per reference volume");
-            check(parallel.max(solver.planar_ale_diagnostics().continuity.maximum), 2.0e-10,
+            check(parallel.max(solver_coupling.planar_ale_diagnostics().continuity.maximum), 2.0e-10,
                 "Absolute volume continuity");
         }
         const double mass_residual = mass - initial_mass;
         const double energy_residual = energy - initial_mass * cp * T0 - cumulative_heat;
-        const double gcl = step ? parallel.max(solver.planar_ale_diagnostics().maximum_gcl_residual) : 0.0;
+        const double gcl = step ? parallel.max(solver_coupling.planar_ale_diagnostics().maximum_gcl_residual) : 0.0;
         check(mass_residual, 2.0e-10 * volume_scale, "Liquid mass conservation");
         check(energy_residual, energy_tolerance * volume_scale, "Liquid energy conservation");
         check(gcl, 2.0e-11, "Mesh GCL");

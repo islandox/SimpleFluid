@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <memory>
 
 #include "FVM/FaceFlux.hh"
 #include "equations/ReactingGasModel.hh"
@@ -19,6 +20,7 @@
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -2997,33 +2999,31 @@ TEST(ReactingGasModelTest,
 
     {
         auto mesh = make_single_cell_mesh();
-        SimpleFluid::BoussinesqSolver<Pack> solver(
-            mesh, {}, time_options, {}, model_options);
-        solver.initialize_heated_box(300.0, 300.0);
-        const auto& reaction_source =
-            solver.configure_reacting_gas(options);
-        const auto& scalar_groups =
-            solver.configure_scalar_groups(scalar_group_options);
-        const auto* scalar_void =
-            solver.find_scalar_void_fraction_model();
+        auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+            mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        solver_coupling.initialize_heated_box(300.0, 300.0);
+        const auto& reaction_source = solver_coupling.configure_reacting_gas(options);
+        const auto& scalar_groups = solver_coupling.configure_scalar_groups(scalar_group_options);
+        const auto* scalar_void = solver_coupling.find_scalar_void_fraction_model();
         ASSERT_NE(scalar_void, nullptr);
         expect_published(reaction_source, *scalar_void, scalar_groups);
     }
 
     {
         auto mesh = make_single_cell_mesh();
-        SimpleFluid::BoussinesqSolver<Pack> solver(
-            mesh, {}, time_options, {}, model_options);
-        const auto& reaction_source =
-            solver.configure_reacting_gas(options);
+        auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+            mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        const auto& reaction_source = solver_coupling.configure_reacting_gas(options);
         ASSERT_FALSE(reaction_source.initial_state_initialized());
-        const auto& scalar_groups =
-            solver.configure_scalar_groups(scalar_group_options);
+        const auto& scalar_groups = solver_coupling.configure_scalar_groups(scalar_group_options);
 
-        solver.initialize_heated_box(300.0, 300.0);
+        solver_coupling.initialize_heated_box(300.0, 300.0);
 
-        const auto* scalar_void =
-            solver.find_scalar_void_fraction_model();
+        const auto* scalar_void = solver_coupling.find_scalar_void_fraction_model();
         ASSERT_NE(scalar_void, nullptr);
         expect_published(reaction_source, *scalar_void, scalar_groups);
     }
@@ -3048,14 +3048,16 @@ TEST(ReactingGasModelTest,
     model_options.specific_heat_capacity = 1.0;
     model_options.dynamic_viscosity = 1.0e-3;
     model_options.thermal_conductivity = 0.0;
-    SimpleFluid::BoussinesqSolver<Pack> solver(
-        mesh, {}, time_options, {}, model_options);
-    solver.initialize_heated_box(300.0, 300.0);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
     SimpleFluid::PrescribedHeatSourceOptions prescribed_heat;
     prescribed_heat.profile = SimpleFluid::PrescribedHeatProfile::Constant;
     prescribed_heat.power_density = 0.0;
-    solver.configure_prescribed_heat_source(prescribed_heat);
+    solver_coupling.configure_prescribed_heat_source(prescribed_heat);
     constexpr double power_density = 1.0e6;
     solver.add_temperature_source("startup_heating", power_density);
 
@@ -3064,8 +3066,7 @@ TEST(ReactingGasModelTest,
     options.initial_micro_moles = 5.0;
     options.microbubble_lifetime = 1.0e30;
     options.micro_to_large_conversion_coefficient = 0.0;
-    const auto& reaction_source =
-        solver.configure_reacting_gas(options);
+    const auto& reaction_source = solver_coupling.configure_reacting_gas(options);
     const auto initial_alpha = reaction_source.alpha_g().value(0);
     ASSERT_GT(initial_alpha, 0.05);
 
@@ -3076,9 +3077,9 @@ TEST(ReactingGasModelTest,
     feedback.liquid_density = 1000.0;
     feedback.gas_density = 1.0;
     feedback.reference_dynamic_viscosity = 1.0e-3;
-    solver.configure_material_feedback(feedback);
+    solver_coupling.configure_material_feedback(feedback);
 
-    solver.step();
+    solver_coupling.step();
 
     const auto initial_mixture_density =
         feedback.liquid_density * (1.0 - initial_alpha)
@@ -3108,10 +3109,12 @@ TEST(ReactingGasModelTest, SolverOwnsAndPublishesOptionalModel)
     auto model_options =
         SimpleFluid::BoussinesqModelOptions::legacy_defaults(
             time_options);
-    SimpleFluid::BoussinesqSolver<Pack> solver(
-        mesh, {}, time_options, {}, model_options);
-    solver.configure_reacting_gas(ideal_options());
-    ASSERT_NE(solver.find_reacting_gas_model(), nullptr);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_reacting_gas(ideal_options());
+    ASSERT_NE(solver_coupling.find_reacting_gas_model(), nullptr);
 
     const auto unique_id =
         std::chrono::steady_clock::now().time_since_epoch().count();
@@ -3119,11 +3122,8 @@ TEST(ReactingGasModelTest, SolverOwnsAndPublishesOptionalModel)
         std::filesystem::temp_directory_path()
         / ("SimpleFluid_reaction_source_" + std::to_string(unique_id)
            + ".vtu");
-    solver.write_solution_vtu(
-        output.string(),
-        SimpleFluid::SolutionOutputOptions{
-            .include_sources = true,
-            .include_reacting_gas_fields = true});
+    solver_coupling.write_solution_vtu(output.string(),
+        SimpleFluid::SolutionOutputOptions{.include_sources = true, .include_reacting_gas_fields = true});
 
     std::ifstream input(output);
     const std::string contents{
@@ -3134,8 +3134,8 @@ TEST(ReactingGasModelTest, SolverOwnsAndPublishesOptionalModel)
     EXPECT_NE(contents.find("Name=\"alpha_g\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"p_abs\""), std::string::npos);
 
-    EXPECT_TRUE(solver.remove_reacting_gas_model());
-    EXPECT_EQ(solver.find_reacting_gas_model(), nullptr);
+    EXPECT_TRUE(solver_coupling.remove_reacting_gas_model());
+    EXPECT_EQ(solver_coupling.find_reacting_gas_model(), nullptr);
     std::filesystem::remove(output);
 }
 
