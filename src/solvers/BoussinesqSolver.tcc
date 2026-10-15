@@ -4147,7 +4147,30 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     scalar_type last_gas_state_residual{};
     scalar_type last_thermal_state_residual{};
     constexpr scalar_type state_relative_tolerance{1.0e-10};
-    std::vector<scalar_type> previous_gas_state;
+    const auto capture_gas_state = [&]
+    {
+        std::vector<scalar_type> state;
+        if (d_reacting_gas_model && d_reacting_gas_model->enabled())
+        {
+            const std::array<const field_type*, 5> fields{
+                &d_reacting_gas_model->dissolved_hydrogen_inventory(),
+                &d_reacting_gas_model->micro_number_density(),
+                &d_reacting_gas_model->micro_moles(),
+                &d_reacting_gas_model->large_number_density(),
+                &d_reacting_gas_model->large_moles()};
+            state.reserve(fields.size() * d_mesh->num_owned_cells());
+            for (const auto* field : fields)
+            {
+                const auto values = field->owned_read_view();
+                for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                    state.push_back(values(owned, 0));
+            }
+        }
+        return state;
+    };
+    // The first comparison is the accepted-to-trial time increment. Later
+    // comparisons measure changes between new-time nonlinear trials.
+    auto previous_gas_state = capture_gas_state();
     std::vector<scalar_type> level_residual_history;
     std::vector<scalar_type> target_change_history;
     std::vector<scalar_type> continuity_maximum_history;
@@ -4306,26 +4329,10 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                 Teuchos::REDUCE_MAX, 1, &local_material_state_residual,
                 &material_state_residual);
 
-            std::vector<scalar_type> current_gas_state;
+            auto current_gas_state = capture_gas_state();
             scalar_type local_gas_state_residual{};
             if (d_reacting_gas_model && d_reacting_gas_model->enabled())
             {
-                const std::array<const field_type*, 5> gas_fields{
-                    &d_reacting_gas_model->dissolved_hydrogen_inventory(),
-                    &d_reacting_gas_model->micro_number_density(),
-                    &d_reacting_gas_model->micro_moles(),
-                    &d_reacting_gas_model->large_number_density(),
-                    &d_reacting_gas_model->large_moles()};
-                current_gas_state.reserve(
-                    gas_fields.size() * d_mesh->num_owned_cells());
-                for (const auto* field : gas_fields)
-                {
-                    const auto values = field->owned_read_view();
-                    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-                    {
-                        current_gas_state.push_back(values(owned, 0));
-                    }
-                }
                 if (previous_gas_state.size() != current_gas_state.size())
                 {
                     local_gas_state_residual = scalar_type{1};

@@ -841,6 +841,11 @@ tolerances. Target change and generalized-continuity maximum residual use
 relative tolerance scaled by `max(1 m3/s, integrated-target scale)`. A
 succeeding Picard trial must also change material coefficients and gas primary
 inventories by no more than `1e-10` in the reported scale-normalized maximum.
+The first gas comparison uses the accepted old-time state as its reference;
+later comparisons use the preceding new-time trial. Thus stationary gas can
+converge on the first pass, while a physical time increment above tolerance
+requires a subsequent trial comparison. The accepted gas reference is captured
+again after checkpoint restore or a timestep change.
 Each trial starts from the actual accepted mesh height and derives its height
 from the same target supplied to pressure:
 `h_trial = h_mesh_old + dt * sum_owned(target) / top_area`.

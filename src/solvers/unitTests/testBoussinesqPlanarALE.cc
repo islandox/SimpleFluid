@@ -1086,6 +1086,43 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionWritesCurrentParallelPiecesAndPvtuDi
     comm->barrier();
 }
 
+TEST(BoussinesqPlanarALETest, StationaryGasCanConvergeOnTheFirstAleTrial)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 4, true);
+    auto checkpoint = state.solver->create_coupling_checkpoint();
+    for (double dt : {0.01, 0.004})
+    {
+        state.solver->restore_coupling_checkpoint(checkpoint);
+        state.solver->set_time_step(dt);
+        ASSERT_NO_THROW(state.solver->step());
+        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        EXPECT_EQ(diagnostics.outer_correctors, 1);
+        ASSERT_EQ(diagnostics.gas_state_residual_history.size(), 1u);
+        EXPECT_LE(diagnostics.gas_state_residual_history.front(), 8 * std::numeric_limits<double>::epsilon());
+        EXPECT_NEAR(state.solver->find_reacting_gas_model()->global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
+        expect_zero_relative_top_flux(state);
+    }
+    state.solver->accept_coupling_checkpoint(checkpoint);
+}
+
+TEST(BoussinesqPlanarALETest, GasProductionStillRequiresAConvergedTrialComparison)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 40, true);
+    state.solver->find_prescribed_heat_source()->initialize_constant(2000.0);
+    ASSERT_NO_THROW(state.solver->step());
+    const auto& diagnostics = state.solver->planar_ale_diagnostics();
+    ASSERT_GE(diagnostics.gas_state_residual_history.size(), 2u);
+    // New bubble populations start from zero; their normalized physical
+    // increment is one, even though the artificial first-pass sentinel is gone.
+    EXPECT_DOUBLE_EQ(diagnostics.gas_state_residual_history.front(), 1.0);
+    EXPECT_LE(diagnostics.gas_state_residual_history.back(), 1.e-10);
+    const auto* gas = state.solver->find_reacting_gas_model();
+    const double produced = gas->cumulative_hydrogen_produced();
+    EXPECT_NEAR(produced, 2000.0 * 0.01 * 2.e-7 * global_mesh_volume(*state.mesh), 1.e-15);
+    EXPECT_NEAR(gas->global_submerged_hydrogen_moles() +
+        gas->cumulative_submerged_bubble_hydrogen_escaped(), 1.0 + produced, 1.e-12);
+}
+
 TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeometryAndClosesInventory)
 {
     // This unchanged zero-slip fixture has Sc=100; selection checks ALE dispatch,
