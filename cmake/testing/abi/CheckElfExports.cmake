@@ -274,9 +274,11 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::FluidSolver<.*>[ ]*::step[(][)]$"
     "^SimpleFluid::FluidSolver<.*>[ ]*::run[(]int[)]$"
     "^SimpleFluid::FluidSolver<.*>[ ]*::pressure[(][)]$"
+    "^SimpleFluid::FluidSolver<.*>[ ]*::pressure_corrected_face_fluxes[(][)] const$"
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::step[(][)]$"
     "^SimpleFluid::BoussinesqSolver<.*>[ ]*::temperature[(][)]$"
-    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(]std::shared_ptr<SimpleFluid::BoussinesqSolver<.*>[ ]*>[)]$"
+    # libc++ names shared_ptr inside its versioned inline ABI namespace.
+    "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(]std::(__[0-9]+::)?shared_ptr<SimpleFluid::BoussinesqSolver<.*>[ ]*>[)]$"
     "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::step[(][)]$"
     "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::configure_radiolytic_gas[(]"
     "^SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::configure_free_surface[(]"
