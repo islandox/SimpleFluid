@@ -10,6 +10,7 @@
  */
 
 #include "TemperatureDiffusionEquation.hh"
+#include "FVM/details/PrescribedFluxResponse.hh"
 #include "equations/CollectiveValidation.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -153,6 +154,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::set_boundary_heat_flux_snapsh
     // replace Dirichlet/Robin stencils, so all ranks invalidate together.
     if (global_flags[1])
     {
+        d_prepared_flux_response.reset();
         d_prepared_operator_ready = false;
         d_prepared_advance = {};
         d_cached_physical_transport_matrix = Teuchos::null;
@@ -178,6 +180,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::refresh_geometry(
     d_cached_physical_graph_supports_non_orthogonal_correction = false;
     d_linear_solver.reset();
     d_prepared_advance = {};
+    d_prepared_flux_response.reset();
     d_prepared_operator_ready = false;
     d_transport_geometry_cache.refresh(std::move(geometry));
 }
@@ -532,7 +535,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     const field_type* old_specific_heat_capacity,
     const field_type* transport_density_override) const -> LinearSolveStatistics
 {
-    if (!d_using_prepared) d_prepared_operator_ready = false;
+    if (!d_using_prepared) { d_prepared_operator_ready = false; d_prepared_flux_response.reset(); }
     collective_detail::collective_local_validation(*d_mesh, "TemperatureDiffusionEquation physical input validation",
         [&]
         {
@@ -801,6 +804,18 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::advance_physical(const field_
     }
 
     d_prepared_rhs = system.rhs;
+    if constexpr (!std::same_as<mesh_type, Mesh<Pack>>)
+    {
+        if (d_using_prepared && !d_prepared_operator_ready)
+        {
+            d_prepared_flux_response = std::make_shared<FVM::detail::PrescribedFluxResponsePlan<Pack, mesh_type>>(
+                d_mesh, *d_boundary_heat_flux, d_transport_geometry_cache,
+                [&](local_ordinal_type cell) { return conductivity_values(cell, 0); },
+                [&](int batch, size_t slot, scalar_type fallback) {
+                    return FVM::boundary_coefficient<Pack>(boundary_thermal_conductivity, batch, slot, fallback);
+                }, boundary_condition, treatment, coefficient_interpolation);
+        }
+    }
     if (d_using_prepared) d_prepared_operator_ready = true;
     if (d_prepared_rhs_only)
     {
@@ -873,6 +888,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
     auto boundary_k = boundary_conductivity == nullptr ? std::shared_ptr<boundary_cache_type>{}
         : std::make_shared<boundary_cache_type>(*boundary_conductivity);
     d_prepared_operator_ready = false;
+    d_prepared_flux_response.reset();
     d_prepared_rhs = Teuchos::null;
     d_prepared_owner = this;
     d_prepared_advance = [baseline, zero_baseline, coefficients, fluxes, boundary_k, time_step, treatment, interpolation]
@@ -886,6 +902,7 @@ void TemperatureDiffusionEquation<Pack, MeshType>::prepare_physical_advance(
             owner.d_cached_physical_graph_supports_non_orthogonal_correction = false;
             owner.d_prepared_operator_ready = false;
             owner.d_prepared_rhs = Teuchos::null;
+            owner.d_prepared_flux_response.reset();
             owner.d_linear_solver = BelosLinearSolver<Pack>{};
             owner.d_prepared_owner = &owner;
         }
@@ -943,6 +960,7 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(co
     if (!d_prepared_operator_ready) throw std::logic_error("Assemble the prepared operator before its boundary response.");
     collective_detail::collective_local_validation(*d_mesh, "Prepared boundary response", [&]
     {
+        d_transport_geometry_cache.require_mesh(*d_mesh);
         if (increment.mesh.get() != d_mesh.get())
             throw std::invalid_argument("Boundary response requires the prepared mesh.");
         for (const auto& [batch_id, values] : increment.value)
@@ -953,7 +971,11 @@ auto TemperatureDiffusionEquation<Pack, MeshType>::prepared_boundary_response(co
             for (const auto value : values)
                 if (!std::isfinite(value)) throw std::invalid_argument("Boundary response requires finite flux increments.");
         }
+        if constexpr (!std::same_as<mesh_type, Mesh<Pack>>)
+            if (d_prepared_flux_response) d_prepared_flux_response->validate_increment(increment);
     });
+    if constexpr (!std::same_as<mesh_type, Mesh<Pack>>)
+        if (d_prepared_flux_response) return d_prepared_flux_response->response();
     d_boundary_response = &increment;
     const auto saved_rhs = d_prepared_rhs;
     const auto saved_power = d_last_prescribed_boundary_power;

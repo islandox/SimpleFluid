@@ -28,12 +28,18 @@
 #include <functional>
 #include <optional>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 namespace SimpleFluid
 {
+
+namespace FVM::detail
+{
+template<TpetraTypePack Pack, class MeshType> class PrescribedFluxResponsePlan;
+}
 
 namespace detail
 {
@@ -158,6 +164,12 @@ public:
      * assembles the prepared operator. Boundary responses require that assembly.
      */
     Teuchos::RCP<const typename Pack::vector_type> prepared_rhs(const source_type& power_density = {}) const;
+    /** Collective homogeneous RHS response to outward heat-flux increments
+     * (power per area) on existing prescribed-flux support. Geometry, material
+     * coefficients and boundary types stay frozen for the prepared session.
+     * Native meshes reuse a boundary response plan, including nonorthogonal
+     * gradient terms; each returned vector is an independent snapshot.
+     */
     Teuchos::RCP<const typename Pack::vector_type> prepared_boundary_response(const boundary_cache_type& flux_increment) const;
     Teuchos::RCP<const typename Pack::matrix_type> prepared_operator() const { return d_cached_physical_transport_matrix; }
 
@@ -179,6 +191,7 @@ private:
     mutable bool d_prepared_rhs_only = false;
     mutable const field_type* d_prepared_initial_guess = nullptr;
     mutable Teuchos::RCP<typename Pack::vector_type> d_prepared_rhs;
+    mutable std::shared_ptr<FVM::detail::PrescribedFluxResponsePlan<Pack, mesh_type>> d_prepared_flux_response;
     mutable std::vector<std::pair<BoundaryConditionType, scalar_type>> d_prepared_boundary_signature;
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
