@@ -3064,11 +3064,16 @@ TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycl
     const auto epoch = state.mesh->geometry_epoch();
     EXPECT_GT(boundary_elevation(*state.mesh, state.definition), 1.0);
     const auto attempt_timings = solver.solver_phase_timings();
+    const auto gates = solver_coupling.ale_convergence_statistics();
+    EXPECT_EQ(gates.checks,solver.solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls);
+    EXPECT_EQ(gates.converged_checks,2u);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 2u);
     EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls, 2u);
     solver_coupling.restore_coupling_checkpoint(checkpoint);
     const auto restored_timings = solver.solver_phase_timings();
+    EXPECT_EQ(solver_coupling.ale_convergence_statistics().checks,gates.checks);
+    EXPECT_EQ(solver_coupling.ale_convergence_statistics().blocking_combinations,gates.blocking_combinations);
     for (std::size_t phase = 0; phase < attempt_timings.size(); ++phase)
     {
         SCOPED_TRACE(attempt_timings[phase].name);
@@ -3113,9 +3118,11 @@ TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnl
     const auto first_step_seconds = solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds;
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
     const auto gas_attempts = solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls;
+    const auto gate_attempts = solver_coupling.ale_convergence_statistics().checks;
     EXPECT_GT(gas_attempts, 0u);
     solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
+    EXPECT_EQ(solver_coupling.ale_convergence_statistics().checks,gate_attempts);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
     EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), escape_before);
     EXPECT_EQ(solver_coupling.free_surface_history().size(), history_size);
@@ -3124,6 +3131,7 @@ TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnl
     solver_coupling.step();
     solver_coupling.accept_coupling_checkpoint(checkpoint);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 4u);
+    EXPECT_GT(solver_coupling.ale_convergence_statistics().checks,gate_attempts);
     EXPECT_GT(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
     EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds, first_step_seconds);
     EXPECT_NEAR(gas->cumulative_submerged_bubble_hydrogen_escaped(), escaped, 1.e-14);

@@ -29,6 +29,16 @@ enum class SolverPhase : std::size_t
     ALERestore,
     GeometryRefresh,
     GasRestore,
+    ALEPrepare,
+    ALEMassPreview,
+    ALESurfacePreview,
+    ALEVolumeBalance,
+    ALEVolumePreview,
+    ALEMaterial,
+    ALEResidual,
+    ALEEnergyBalance,
+    ALEReplay,
+    ALECommit,
     Count
 };
 
@@ -101,6 +111,16 @@ private:
         {"sf.ale_restore", 0, 0, 3},
         {"sf.geometry_refresh", 0, 0, 4},
         {"sf.gas_restore", 0, 0, 4},
+        {"sf.ale_prepare", 0, 0, 3},
+        {"sf.ale_mass_preview", 0, 0, 3},
+        {"sf.ale_surface_preview", 0, 0, 3},
+        {"sf.ale_volume_balance", 0, 0, 3},
+        {"sf.ale_volume_preview", 0, 0, 4},
+        {"sf.ale_material", 0, 0, 3},
+        {"sf.ale_residual", 0, 0, 3},
+        {"sf.ale_energy_balance", 0, 0, 3},
+        {"sf.ale_replay", 0, 0, 3},
+        {"sf.ale_commit", 0, 0, 3},
     }};
     unsigned d_active = 0;
 };
