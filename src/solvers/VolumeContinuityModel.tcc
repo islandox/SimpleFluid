@@ -44,6 +44,10 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
                         "VolumeContinuityModel requires finite non-negative pool volumes and outflow rates.");
                 }
             }
+            if (!std::isfinite(inputs.mesh_volume_correction_rate))
+            {
+                throw std::invalid_argument("VolumeContinuityModel mesh-volume correction must be finite.");
+            }
         });
 
     collective_detail::require_uniform_value(*d_mesh, static_cast<int>(!inputs.carrier_material_fraction.empty()),
@@ -64,6 +68,8 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
     collective_detail::require_uniform_value(
         *d_mesh, inputs.other_outflow_volume_rate, "VolumeContinuityModel other outflow volume rate");
     collective_detail::require_uniform_value(
+        *d_mesh, inputs.mesh_volume_correction_rate, "VolumeContinuityModel mesh-volume correction rate");
+    collective_detail::require_uniform_value(
         *d_mesh, d_volume_absolute_tolerance, "VolumeContinuityModel absolute volume-closure tolerance");
     collective_detail::require_uniform_value(
         *d_mesh, d_relative_tolerance, "VolumeContinuityModel relative closure tolerance");
@@ -82,7 +88,7 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
     scalar_type local_material_source{};
     scalar_type local_carrier_transport{};
     scalar_type local_slip_divergence{};
-    scalar_type local_maximum_target_change{};
+    scalar_type local_old_mesh_volume{};
     // The preview traversal has no callbacks, communication or geometry mutation.
     // Validate composite constituents once while pinning them for these reads;
     // release before reductions, including on every local failure path.
@@ -143,11 +149,7 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
                 local_material_source += material_source[owned];
                 local_carrier_transport += carrier_divergence;
                 local_slip_divergence += slip_divergence;
-                if (!inputs.previous_target.empty())
-                {
-                    local_maximum_target_change = std::max(
-                        local_maximum_target_change, std::abs(target_values[owned] - inputs.previous_target[owned]));
-                }
+                local_old_mesh_volume += static_cast<scalar_type>(old_volumes[owned]);
             }
             for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
             {
@@ -168,12 +170,9 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
     }
 
     const scalar_type local_totals[]{local_old_material, local_new_material, local_material_source,
-        local_carrier_transport, local_slip_divergence};
-    scalar_type global_totals[5]{};
-    scalar_type maximum_target_change{};
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 5, local_totals, global_totals);
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_maximum_target_change,
-        &maximum_target_change);
+        local_carrier_transport, local_slip_divergence, local_old_mesh_volume};
+    scalar_type global_totals[6]{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 6, local_totals, global_totals);
 
     diagnostics_type diagnostics;
     diagnostics.old_material_volume = global_totals[0];
@@ -191,7 +190,7 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
         std::abs((inputs.new_pool_volume - inputs.old_pool_volume) / time_step),
         std::abs(inputs.bubble_escape_volume_rate), std::abs(inputs.other_outflow_volume_rate)});
     diagnostics.normalized_source_pool_closure_residual = diagnostics.source_pool_closure_residual / scale;
-    diagnostics.maximum_target_change = maximum_target_change;
+    diagnostics.global_mesh_volume_correction = inputs.mesh_volume_correction_rate;
     const auto tolerance = d_volume_absolute_tolerance / time_step + d_relative_tolerance * scale;
     if (std::abs(diagnostics.source_pool_closure_residual) > tolerance)
     {
@@ -208,6 +207,26 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
         throw std::runtime_error(message.str());
     }
 
+    // Close the accepted geometric defect through the pressure constraint,
+    // without counting it as material production or altering the pool ledger.
+    // Owned volumes alone provide partition-independent normalized weights.
+    if (inputs.mesh_volume_correction_rate != scalar_type{} &&
+        (!std::isfinite(global_totals[5]) || global_totals[5] <= scalar_type{}))
+    {
+        throw std::invalid_argument("VolumeContinuityModel mesh-volume correction requires positive mesh volume.");
+    }
+    scalar_type local_maximum_target_change{};
+    for (size_t owned = 0; owned < target_values.size(); ++owned)
+    {
+        if (inputs.mesh_volume_correction_rate != scalar_type{})
+            target_values[owned] += inputs.mesh_volume_correction_rate *
+                (static_cast<scalar_type>(old_volumes[owned]) / global_totals[5]);
+        if (!inputs.previous_target.empty())
+            local_maximum_target_change = std::max(local_maximum_target_change,
+                std::abs(target_values[owned] - inputs.previous_target[owned]));
+    }
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_maximum_target_change,
+        &diagnostics.maximum_target_change);
     auto target = target_type(d_mesh, std::move(target_values), generation);
     target.validate(*d_mesh, "Volume continuity model target");
     const auto trial_nonce = invalidated_counter(d_trial_nonce, d_trial_nonce, "trial nonce");

@@ -308,7 +308,7 @@ simplefluid_add_mpi_test(
     NAME VolumeContinuityModelValidation_2procs
     TARGET testPlanarALEBoundary
     PROCS 2
-    ARGS "--gtest_filter=VolumeContinuityModelTest.CollectivelyRejectsRankDivergentGlobalAndOptionalInputs"
+    ARGS "--gtest_filter=VolumeContinuityModelTest.CollectivelyRejectsRankDivergentGlobalAndOptionalInputs:VolumeContinuityModelTest.MeshDefectCorrectionPreservesPhysicalSourceAndUsesOwnedVolumeWeights"
     LABELS "mpi;ale;continuity;validation"
     TIMEOUT 120)
 

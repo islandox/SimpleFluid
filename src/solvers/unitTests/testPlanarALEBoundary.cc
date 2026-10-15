@@ -13,6 +13,7 @@
 
 #include <Teuchos_CommHelpers.hpp>
 
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -313,6 +314,59 @@ TEST(VolumeContinuityModelTest, UniformExpansionProducesExactIntegratedTargetAnd
     model.commit(trial);
     EXPECT_DOUBLE_EQ(model.continuity_target_field().value(0), 1.0);
     motion.rollback_trial();
+}
+
+TEST(VolumeContinuityModelTest, MeshDefectCorrectionPreservesPhysicalSourceAndUsesOwnedVolumeWeights)
+{
+    for (double defect : {-0.125, 0.125})
+    {
+        SCOPED_TRACE(defect);
+        auto geometry = std::make_shared<Mesh::Cartesian>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 0.25, 1.0}}});
+        auto mesh = std::make_shared<Mesh>(geometry);
+        Motion motion(mesh);
+        constexpr double dt = 0.5;
+        const auto old_pool = 1.0 + defect;
+        const auto new_pool = old_pool + 0.25;
+        motion.begin_trial(new_pool, dt);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+        Flux relative(mesh, 0.0, "relative");
+        std::vector<double> old_material(mesh->num_local_cells()), new_material(mesh->num_local_cells());
+        std::vector<double> previous(mesh->num_owned_cells());
+        for (size_t local = 0; local < old_material.size(); ++local)
+        {
+            const auto weight = ale.old_cell_volumes()[local];
+            old_material[local] = old_pool * weight;
+            new_material[local] = new_pool * weight;
+            if (local < previous.size()) previous[local] = (new_pool - 1.0) / dt * weight;
+        }
+        SimpleFluid::VolumeContinuityModel<Pack> model(mesh);
+        auto preview = [&](double correction)
+        {
+            return model.preview({.ale = ale, .old_material_volume = old_material,
+                .new_material_volume = new_material, .carrier_relative_flux = relative,
+                .old_pool_volume = old_pool, .new_pool_volume = new_pool,
+                .previous_target = previous, .mesh_volume_correction_rate = correction}, 1);
+        };
+        const auto trial = preview(defect / dt);
+        EXPECT_DOUBLE_EQ(trial.diagnostics().global_material_source, 0.5);
+        EXPECT_DOUBLE_EQ(trial.diagnostics().global_mesh_volume_correction, defect / dt);
+        EXPECT_DOUBLE_EQ(trial.diagnostics().source_pool_closure_residual, 0.0);
+        EXPECT_DOUBLE_EQ(trial.diagnostics().maximum_target_change, 0.0);
+        for (size_t owned = 0; owned < previous.size(); ++owned)
+        {
+            EXPECT_DOUBLE_EQ(trial.target().integrated_rate(owned), previous[owned]);
+            EXPECT_DOUBLE_EQ(trial.material_source()[owned], 0.5 * ale.old_cell_volumes()[owned]);
+        }
+        model.commit(trial);
+        const auto snapshot = model.snapshot();
+        model.commit(preview(0.0));
+        model.restore(snapshot);
+        EXPECT_DOUBLE_EQ(model.diagnostics().global_mesh_volume_correction, defect / dt);
+        for (size_t owned = 0; owned < previous.size(); ++owned)
+            EXPECT_DOUBLE_EQ(model.continuity_target_field().value(owned), previous[owned]);
+        motion.rollback_trial();
+    }
 }
 
 TEST(VolumeContinuityModelTest, UniformContractionProducesExactNegativeTargetAndClosure)
@@ -629,6 +683,21 @@ TEST(VolumeContinuityModelTest, CollectivelyRejectsRankDivergentGlobalAndOptiona
         .carrier_material_volume_flux = comm->getRank() == 0 ? &exact_material_flux : nullptr,
         .old_pool_volume = 1.0,
         .new_pool_volume = 1.0});
+
+    every_rank_rejects(typename SimpleFluid::VolumeContinuityModel<Pack>::Inputs{.ale = ale,
+        .old_material_volume = old_material,
+        .new_material_volume = new_material,
+        .carrier_relative_flux = relative,
+        .old_pool_volume = 1.0,
+        .new_pool_volume = 1.0,
+        .mesh_volume_correction_rate = comm->getRank() == 0 ? 0.0 : 0.1});
+    every_rank_rejects(typename SimpleFluid::VolumeContinuityModel<Pack>::Inputs{.ale = ale,
+        .old_material_volume = old_material,
+        .new_material_volume = new_material,
+        .carrier_relative_flux = relative,
+        .old_pool_volume = 1.0,
+        .new_pool_volume = 1.0,
+        .mesh_volume_correction_rate = comm->getRank() == 0 ? 0.0 : std::numeric_limits<double>::infinity()});
 
     if (comm->getRank() != 0)
     {
