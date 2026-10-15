@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -510,6 +511,122 @@ TEST(SolidHeatConductionEquationTest, PreparedSkewedRHSMatchesFullReassembly)
     difference->update(-1.0, *zero_rhs, 1.0);
     difference->update(-1.0, *response, 1.0);
     EXPECT_LT(difference->norm2(), 1e-9);
+}
+
+// A response must include flux-induced affine gradients on skewed and partition faces.
+TEST(SolidHeatConductionEquationTest, PreparedBoundaryResponseMatchesHomogeneousFullAssembly)
+{
+    auto parent = make_prepared_skewed_parent();
+    SimpleFluid::SP<const SolidMesh> mesh = std::make_shared<SolidMesh>(std::move(parent),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh, 2., 3., 4.);
+    for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
+        material.thermal_conductivity.set_owned_value(int(i), 2. + mesh->cell_centroid(int(i)).x);
+    material.thermal_conductivity.sync_ghosts();
+    Equation::boundary_cache_type flux{{},mesh}, boundary_k{{},mesh};
+    for (const auto& [id,batch] : mesh->boundary_batches()) {
+        if (mesh->boundary_batch_name(id) == "ymax" || mesh->boundary_batch_name(id) == "ymin")
+            flux.value[id] = SimpleFluid::ArrReal(batch.face_lids.size(), 0.);
+        auto& values = boundary_k.value[id];
+        for (auto face : batch.face_lids) values.push_back(3. + .2*mesh->face_centroid(face).x);
+    }
+    SimpleFluid::BoundaryConditionSet boundaries;
+    boundaries.temperature["xmin"] = {SimpleFluid::BoundaryConditionType::Dirichlet, 310.};
+    boundaries.temperature["xmax"] = {SimpleFluid::BoundaryConditionType::Robin, 300., .4};
+    auto homogeneous = boundaries;
+    homogeneous.temperature["xmin"].value = 0.;
+    homogeneous.temperature["xmax"].value = 0.;
+    Field old(mesh, 1e12, "response_large_baseline"), zero(mesh, 0., "response_zero_baseline");
+    for (auto treatment : {SimpleFluid::FVM::NonOrthogonalTreatment::Implicit,
+             SimpleFluid::FVM::NonOrthogonalTreatment::Explicit, SimpleFluid::FVM::NonOrthogonalTreatment::Hybrid})
+        for (auto interpolation : {SimpleFluid::FVM::FaceCoefficientInterpolation::Harmonic,
+                 SimpleFluid::FVM::FaceCoefficientInterpolation::Linear}) {
+            Equation prepared(mesh,boundaries), full(mesh,homogeneous);
+            prepared.set_boundary_heat_flux(flux); full.set_boundary_heat_flux(flux);
+            prepared.prepare_advance(old,.1,material,treatment,nullptr,&boundary_k,interpolation);
+            full.prepare_advance(zero,.1,material,treatment,nullptr,&boundary_k,interpolation);
+            const auto baseline_rhs = prepared.prepared_rhs();
+            const auto baseline_norm = baseline_rhs->norm2();
+            const auto matrix = prepared.prepared_operator();
+            Teuchos::RCP<const Pack::vector_type> retained;
+            double retained_norm = 0.;
+            for (double sign : {1.,-2.,.25}) {
+                auto increment = flux;
+                for (auto& [id,values] : increment.value) {
+                    const auto& faces = mesh->boundary_face_batch(id).face_lids;
+                    for (size_t slot = 0; slot < values.size(); ++slot)
+                        values[slot] = sign*(.3 + mesh->face_centroid(faces[slot]).x);
+                }
+                const auto response = prepared.prepared_boundary_response(increment);
+                full.set_boundary_heat_flux(increment);
+                const auto reference = full.prepared_rhs();
+                Pack::vector_type error(*response,Teuchos::Copy);
+                error.update(-1.,*reference,1.);
+                EXPECT_LT(error.normInf(),1e-11);
+                EXPECT_EQ(matrix.get(),prepared.prepared_operator().get());
+                EXPECT_EQ(baseline_norm,baseline_rhs->norm2());
+                if (!retained.is_null()) EXPECT_EQ(retained_norm,retained->norm2());
+                retained = response;retained_norm = response->norm2();
+            }
+            auto invalid = flux;
+            if (Tpetra::getDefaultComm()->getRank() == 0 && !invalid.value.empty())
+                invalid.value.begin()->second.front() = std::numeric_limits<double>::quiet_NaN();
+            EXPECT_THROW(prepared.prepared_boundary_response(invalid),std::exception);
+            EXPECT_DOUBLE_EQ(prepared.prepared_boundary_response(flux)->norm2(),0.);
+            prepared.set_boundary_conditions(boundaries);
+            EXPECT_THROW(prepared.prepared_boundary_response(flux),std::logic_error);
+        }
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedBoundaryResponseRejectsNonzeroFluxAtZeroConductivity)
+{
+    auto parent = make_prepared_skewed_parent();
+    SimpleFluid::SP<const SolidMesh> mesh = std::make_shared<SolidMesh>(std::move(parent),
+        [](Pack::global_ordinal_type, const SolidMesh::Vec3&) { return true; });
+    auto material = make_material(mesh,2.,3.,0.);
+    Equation equation(mesh,{});
+    Equation::boundary_cache_type flux{{},mesh};
+    for (const auto& [id,batch] : mesh->boundary_batches())
+        if (mesh->boundary_batch_name(id) == "ymax")
+            flux.value[id] = SimpleFluid::ArrReal(batch.face_lids.size(),0.);
+    equation.set_boundary_heat_flux(flux);
+    Field baseline(mesh,300.,"zero_k_response");
+    equation.prepare_advance(baseline,.1,material);
+    equation.prepared_rhs();
+    EXPECT_DOUBLE_EQ(equation.prepared_boundary_response(flux)->norm2(),0.);
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        for (auto& [id,values] : flux.value) std::fill(values.begin(),values.end(),1.);
+    EXPECT_THROW(equation.prepared_boundary_response(flux),std::exception);
+    Equation::boundary_cache_type empty{{},mesh};
+    EXPECT_DOUBLE_EQ(equation.prepared_boundary_response(empty)->norm2(),0.);
+}
+
+TEST(SolidHeatConductionEquationTest, PreparedBoundaryResponseSupportsEmptySolidRanks)
+{
+    auto parent = make_prepared_skewed_parent();
+    SimpleFluid::SP<const SolidMesh> mesh = std::make_shared<SolidMesh>(std::move(parent),
+        [](Pack::global_ordinal_type id, const SolidMesh::Vec3&) { return id == 0; });
+    const auto comm = Tpetra::getDefaultComm();
+    int empty = mesh->num_owned_cells() == 0, total_empty = 0;
+    Teuchos::reduceAll(*comm,Teuchos::REDUCE_SUM,1,&empty,&total_empty);
+    EXPECT_EQ(total_empty,comm->getSize()-1);
+    auto material = make_material(mesh,2.,3.,4.);
+    Equation prepared(mesh,{}), full(mesh,{});
+    Equation::boundary_cache_type flux{{},mesh};
+    for (const auto& [id,batch] : mesh->boundary_batches())
+        if (mesh->boundary_batch_name(id) == "ymax")
+            flux.value[id] = SimpleFluid::ArrReal(batch.face_lids.size(),0.);
+    prepared.set_boundary_heat_flux(flux);full.set_boundary_heat_flux(flux);
+    Field baseline(mesh,300.,"empty_rank_baseline"), zero(mesh,0.,"empty_rank_zero");
+    prepared.prepare_advance(baseline,.1,material);full.prepare_advance(zero,.1,material);
+    prepared.prepared_rhs();
+    for (auto& [id,values] : flux.value) std::fill(values.begin(),values.end(),3.);
+    full.set_boundary_heat_flux(flux);
+    const auto response = prepared.prepared_boundary_response(flux);
+    const auto reference = full.prepared_rhs();
+    Pack::vector_type error(*response,Teuchos::Copy);error.update(-1.,*reference,1.);
+    EXPECT_LT(error.norm2(),1e-12);
+    EXPECT_GT(response->norm2(),0.);
 }
 
 TEST(SolidHeatConductionEquationTest, PreparedBoundaryResponseFreezesExteriorConvection)
