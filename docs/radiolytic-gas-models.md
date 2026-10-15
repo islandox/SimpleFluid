@@ -7,9 +7,11 @@ modes:
 - `idealGasSource`
 - `sheng2024TwoPopulation`
 
-The subsystem is owned by `BoussinesqSolver` only after
-`configure_radiolytic_gas(...)` is called. An unconfigured solver retains the
-pre-Phase-12 execution path.
+The subsystem is owned by an external `MultiphysicsSolverCoupler` after
+`configure_radiolytic_gas(...)` is called. Construct the coupler with a
+`SP<BoussinesqSolver<Pack>>` and use `coupling.step()` or `coupling.run()` for
+advancement. The standalone Boussinesq solver owns no radiolytic model. See
+[the controller ownership and migration guide](architecture/multiphysics_solver_coupler.md).
 
 ## Public units
 

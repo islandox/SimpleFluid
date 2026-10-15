@@ -4,6 +4,7 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     explicit_instantiation/PlanarALEBoundary.cc
     explicit_instantiation/CoupledBlockOperator.cc
     explicit_instantiation/BoussinesqSolver.cc
+    explicit_instantiation/MultiphysicsSolverCoupler.cc
     explicit_instantiation/CoupledPressureVelocitySolver.cc
     CoupledNonlinearProblem.cc
     NoxNonlinearSolver.cc

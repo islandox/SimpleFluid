@@ -10,6 +10,7 @@
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -27,6 +28,7 @@
 #include <numbers>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -183,7 +185,8 @@ SimpleFluid::RadiolyticGasOptions gas_options()
 struct ConfiguredCase
 {
     SimpleFluid::SP<Handle> mesh;
-    std::unique_ptr<Solver> solver;
+    std::shared_ptr<Solver> solver;
+    std::unique_ptr<SimpleFluid::MultiphysicsSolverCoupler<Pack>> coupling;
     Source* heat_source = nullptr;
 };
 
@@ -205,13 +208,14 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
     options.coupled_operator_backend = backend;
     options.coupled_workspace_policy = workspace;
     options.pressure_gradient_scheme = gradient;
-    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), options, linear_options, physical_options());
+    auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), options, linear_options, physical_options());
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
 
-    solver->configure_material_feedback(material_feedback_options());
+    solver_coupling->configure_material_feedback(material_feedback_options());
     auto* heat_source = &solver->add_temperature_source("planar_ale_heat", power_density);
     if (include_gas)
     {
-        solver->add_fission_power_source().initialize_constant(0.0);
+        solver_coupling->add_fission_power_source().initialize_constant(0.0);
         auto gas = gas_options();
         gas.pressure_mode = pressure_mode;
         gas.mass_transfer_mode = mass_transfer_mode;
@@ -224,48 +228,51 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
         {
             gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::Celata2007;
         }
-        auto& gas_model = solver->configure_radiolytic_gas(gas);
+        auto& gas_model = solver_coupling->configure_radiolytic_gas(gas);
         if (track_donor) gas_model.enable_donor_hydrogen_deficit_tracking();
     }
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto surface_options = free_surface_options(maximum_correctors);
     if (zero_gas_tolerance)
     {
         surface_options.coupling.gas_absolute_tolerance = 0.0;
         surface_options.coupling.gas_relative_tolerance = 0.0;
     }
-    if (solver->configure_free_surface(surface_options) == nullptr)
+    if (solver_coupling->configure_free_surface(surface_options) == nullptr)
     {
         throw std::logic_error("The planar-ALE test fixture did not create a free-surface model.");
     }
-    return {std::move(mesh), std::move(solver), heat_source};
+    return {std::move(mesh), std::move(solver), std::move(solver_coupling), heat_source};
 }
 
 template<class Mutator> void expect_free_surface_option_rejected(Mutator&& mutator)
 {
     auto mesh = make_column();
-    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto options = free_surface_options(4);
     std::forward<Mutator>(mutator)(options);
-    EXPECT_THROW(static_cast<void>(solver->configure_free_surface(options)), std::invalid_argument);
-    EXPECT_FALSE(solver->planar_ale_enabled());
-    EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+    EXPECT_THROW(static_cast<void>(solver_coupling->configure_free_surface(options)), std::invalid_argument);
+    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
+    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
 }
 
 template<class Configure> void expect_active_model_rejected(Configure&& configure)
 {
     auto mesh = make_column();
-    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
-    std::forward<Configure>(configure)(*solver);
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
-    EXPECT_THROW(static_cast<void>(solver->configure_free_surface(free_surface_options(4))), std::invalid_argument);
-    EXPECT_FALSE(solver->planar_ale_enabled());
-    EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    std::forward<Configure>(configure)(*solver_coupling);
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    EXPECT_THROW(
+        static_cast<void>(solver_coupling->configure_free_surface(free_surface_options(4))), std::invalid_argument);
+    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
+    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
 }
 
 double global_mesh_volume(const Handle& mesh)
@@ -312,7 +319,7 @@ double top_elevation(const Handle& mesh)
 
 void expect_zero_relative_top_flux(const ConfiguredCase& state)
 {
-    const auto& flux = state.solver->mesh_relative_face_fluxes();
+    const auto& flux = state.coupling->mesh_relative_face_fluxes();
     double local_maximum = 0.0;
     int local_faces = 0;
     for (const auto& [batch_id, batch] : state.mesh->boundary_batches())
@@ -359,7 +366,7 @@ double independent_maximum_courant_number(const ConfiguredCase& state, const Fac
     return global_maximum;
 }
 
-void record_ale_residuals(const Solver::PlanarALEStepDiagnostics& diagnostics)
+void record_ale_residuals(const SimpleFluid::MultiphysicsSolverCoupler<Pack>::PlanarALEStepDiagnostics& diagnostics)
 {
     testing::Test::RecordProperty("gcl_max_m3_per_s", diagnostics.maximum_gcl_residual);
     testing::Test::RecordProperty("continuity_max_m3_per_s", diagnostics.continuity.maximum);
@@ -510,7 +517,7 @@ void expect_owned_face_values(const Solver::face_flux_field_type& field, const F
     }
 }
 
-FieldValues capture_gas_fields(const Solver::radiolytic_gas_model_type& gas)
+FieldValues capture_gas_fields(const SimpleFluid::MultiphysicsSolverCoupler<Pack>::radiolytic_gas_model_type& gas)
 {
     FieldValues result;
     for (const auto& [name, field] : gas.output_fields())
@@ -525,7 +532,8 @@ FieldValues capture_gas_fields(const Solver::radiolytic_gas_model_type& gas)
     return result;
 }
 
-void expect_gas_fields_restored(const Solver::radiolytic_gas_model_type& gas, const FieldValues& expected)
+void expect_gas_fields_restored(
+    const SimpleFluid::MultiphysicsSolverCoupler<Pack>::radiolytic_gas_model_type& gas, const FieldValues& expected)
 {
     const auto actual = capture_gas_fields(gas);
     ASSERT_EQ(actual.size(), expected.size());
@@ -567,25 +575,25 @@ TEST_P(BoussinesqPlanarALECouplingTest, AcceptsStationaryStepWithoutChangingExte
     const auto initial_epoch = state.mesh->geometry_epoch();
     const auto initial_volume = global_mesh_volume(*state.mesh);
     const auto initial_top = top_elevation(*state.mesh);
-    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
-    const auto initial_history = state.solver->free_surface_history().size();
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
+    const auto initial_history = state.coupling->free_surface_history().size();
 
-    ASSERT_TRUE(state.solver->planar_ale_enabled());
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_TRUE(state.coupling->planar_ale_enabled());
+    ASSERT_NO_THROW(state.coupling->step());
 
     EXPECT_EQ(state.solver->step_index(), 1);
     EXPECT_NEAR(state.solver->time(), 1.0e-2, 1.0e-15);
-    EXPECT_EQ(state.solver->free_surface_history().size(), initial_history + 1);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history + 1);
     EXPECT_GT(state.mesh->geometry_epoch(), initial_epoch);
     EXPECT_DOUBLE_EQ(global_mesh_volume(*state.mesh), initial_volume);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), initial_top);
-    EXPECT_DOUBLE_EQ(state.solver->liquid_mass_inventory().totalMass(), initial_mass);
-    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().pool_level, initial_top);
-    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().pool_volume, initial_volume);
+    EXPECT_DOUBLE_EQ(state.coupling->liquid_mass_inventory().totalMass(), initial_mass);
+    EXPECT_DOUBLE_EQ(state.coupling->free_surface_diagnostics().pool_level, initial_top);
+    EXPECT_DOUBLE_EQ(state.coupling->free_surface_diagnostics().pool_volume, initial_volume);
     EXPECT_TRUE(state.solver->last_step_statistics().converged);
     EXPECT_LE(state.solver->last_volume_continuity_residuals().maximum, 1.0e-12);
 
-    const auto& diagnostics = state.solver->planar_ale_diagnostics();
+    const auto& diagnostics = state.coupling->planar_ale_diagnostics();
     EXPECT_TRUE(diagnostics.initialized);
     EXPECT_EQ(diagnostics.outer_correctors, 1);
     EXPECT_DOUBLE_EQ(diagnostics.old_mesh_volume, initial_volume);
@@ -599,10 +607,10 @@ TEST_P(BoussinesqPlanarALECouplingTest, AppliesOneNonzeroThermalVolumeTargetInEv
 {
     auto state = make_case(GetParam(), 1.0e-4, 8);
 
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
 
-    const auto surface = state.solver->free_surface_diagnostics();
-    const auto& diagnostics = state.solver->planar_ale_diagnostics();
+    const auto surface = state.coupling->free_surface_diagnostics();
+    const auto& diagnostics = state.coupling->planar_ale_diagnostics();
     record_ale_residuals(diagnostics);
     EXPECT_GT(diagnostics.volume_source.global_material_source, 0.0);
     EXPECT_NEAR(global_mesh_volume(*state.mesh), surface.pool_volume, 2.0e-12);
@@ -624,7 +632,7 @@ TEST_P(BoussinesqPlanarALECouplingTest, PreservesTangentialFlowAtMovingSlipTop)
     state.solver->velocity().sync_ghosts();
     const auto old_top = top_elevation(*state.mesh);
 
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     ASSERT_GT(top_elevation(*state.mesh), old_top);
     ASSERT_EQ(state.solver->cached_velocity_boundary_type("zmax"), SimpleFluid::BoundaryConditionType::Slip);
 
@@ -672,20 +680,22 @@ TEST_P(BoussinesqPlanarALECouplingTest, CourantUsesMeshRelativeTransportFluxWith
 {
     auto state = make_case(GetParam(), 0.1, 8);
     const auto old_top = top_elevation(*state.mesh);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     ASSERT_GT(top_elevation(*state.mesh), old_top);
     expect_zero_relative_top_flux(state);
 
-    const auto relative_courant = independent_maximum_courant_number(state, state.solver->mesh_relative_face_fluxes());
+    const auto relative_courant =
+        independent_maximum_courant_number(state, state.coupling->mesh_relative_face_fluxes());
     const auto absolute_courant =
         independent_maximum_courant_number(state, state.solver->pressure_corrected_face_fluxes());
     ASSERT_GT(absolute_courant, 1.0e-9);
     EXPECT_LT(relative_courant, 1.0e-11);
     EXPECT_LT(relative_courant, absolute_courant * 1.0e-3);
-    EXPECT_NEAR(state.solver->maximum_courant_number(), relative_courant, 1.0e-15);
+    EXPECT_NEAR(state.coupling->maximum_courant_number(), relative_courant, 1.0e-15);
 
     const auto& base_solver = static_cast<const SimpleFluid::FluidSolver<Pack>&>(*state.solver);
-    EXPECT_NEAR(base_solver.maximum_courant_number(), relative_courant, 1.0e-15);
+    // The core keeps its standalone absolute-flux diagnostic; ALE diagnostics belong to the external controller.
+    EXPECT_NEAR(base_solver.maximum_courant_number(), absolute_courant, 1.0e-15);
 }
 
 INSTANTIATE_TEST_SUITE_P(PlanarALECouplingModes, BoussinesqPlanarALECouplingTest,
@@ -697,11 +707,11 @@ TEST_P(BoussinesqPlanarALECouplingTest, RemovesAcceptedMeshPoolDefectAfterHeatin
     auto options = free_surface_options(40);
     options.ale.level_absolute_tolerance = 2.0e-10;
     options.ale.relaxation = 0.5;
-    state.solver->configure_free_surface(options);
-    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
-    ASSERT_NO_THROW(state.solver->step());
-    const auto initial_defect = state.solver->free_surface_diagnostics().pool_volume -
-                                global_mesh_volume(*state.mesh);
+    state.coupling->configure_free_surface(options);
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
+    ASSERT_NO_THROW(state.coupling->step());
+    const auto initial_defect =
+        state.coupling->free_surface_diagnostics().pool_volume - global_mesh_volume(*state.mesh);
     ASSERT_GT(initial_defect, 1.0e-13);
     ASSERT_LT(initial_defect, options.ale.level_absolute_tolerance);
 
@@ -709,11 +719,11 @@ TEST_P(BoussinesqPlanarALECouplingTest, RemovesAcceptedMeshPoolDefectAfterHeatin
     for (int step = 0; step < 3; ++step)
     {
         SCOPED_TRACE(step);
-        ASSERT_NO_THROW(state.solver->step());
-        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        ASSERT_NO_THROW(state.coupling->step());
+        const auto& diagnostics = state.coupling->planar_ale_diagnostics();
         if (step > 0)
             EXPECT_LT(std::abs(diagnostics.mesh_vessel_mismatch), initial_defect * 0.1);
-        EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+        EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
         EXPECT_LE(diagnostics.continuity.maximum, 2.0e-10);
         EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-12);
         EXPECT_NEAR(diagnostics.energy_residual, 0.0, 1.0e-8);
@@ -730,30 +740,31 @@ TEST(BoussinesqPlanarALETest, CorrectsBothDefectSignsAcrossCheckpointReplayAndTi
         auto options = free_surface_options(12);
         options.initial_liquid_volume = 1.0 + defect;
         options.ale.level_absolute_tolerance = 2.0e-10;
-        state.solver->configure_free_surface(options);
+        state.coupling->configure_free_surface(options);
         auto& solver = *state.solver;
-        auto checkpoint = solver.create_coupling_checkpoint();
-        const auto initial_mass = solver.liquid_mass_inventory().totalMass();
+        auto& solver_coupling = *state.coupling;
+        auto checkpoint = solver_coupling.create_coupling_checkpoint();
+        const auto initial_mass = solver_coupling.liquid_mass_inventory().totalMass();
         const auto initial_volume = global_mesh_volume(*state.mesh);
-        const auto initial_defect = solver.free_surface_diagnostics().pool_volume - initial_volume;
+        const auto initial_defect = solver_coupling.free_surface_diagnostics().pool_volume - initial_volume;
         ASSERT_GT(std::abs(initial_defect), 5.0e-11);
         for (double dt : {0.01, 0.004})
         {
             SCOPED_TRACE(dt);
-            solver.restore_coupling_checkpoint(checkpoint);
+            solver_coupling.restore_coupling_checkpoint(checkpoint);
             EXPECT_DOUBLE_EQ(global_mesh_volume(*state.mesh), initial_volume);
             solver.set_time_step(dt);
-            ASSERT_NO_THROW(solver.step());
-            const auto& diagnostics = solver.planar_ale_diagnostics();
+            ASSERT_NO_THROW(solver_coupling.step());
+            const auto& diagnostics = solver_coupling.planar_ale_diagnostics();
             EXPECT_NEAR(diagnostics.volume_source.global_mesh_volume_correction, initial_defect / dt, 1.0e-18);
             EXPECT_NEAR(diagnostics.volume_source.global_material_source, 0.0, 1.0e-12);
             EXPECT_NEAR(diagnostics.mesh_vessel_mismatch, 0.0, 2.0e-14);
             EXPECT_NEAR(diagnostics.maximum_gcl_residual, 0.0, 2.0e-13);
-            EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+            EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
             EXPECT_NEAR(diagnostics.energy_residual, 0.0, 1.0e-8);
             expect_zero_relative_top_flux(state);
         }
-        solver.accept_coupling_checkpoint(checkpoint);
+        solver_coupling.accept_coupling_checkpoint(checkpoint);
     }
 }
 
@@ -766,28 +777,29 @@ TEST(BoussinesqPlanarALETest, VolumeBudgetLevelPolicyAcceptsAndCorrectsAnInitial
         auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
             SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, area}, {0.0, 1.0}, {0.0, 0.5, 1.0}}});
         auto mesh = std::make_shared<Handle>(std::move(geometry));
-        auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+        auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
             SimpleFluid::LinearSolverOptions{}, physical_options());
-        solver->configure_material_feedback(material_feedback_options());
-        solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
-        ConfiguredCase state{mesh, std::move(solver), nullptr};
+        auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+        solver_coupling->configure_material_feedback(material_feedback_options());
+        solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+        ConfiguredCase state{mesh, std::move(solver), std::move(solver_coupling), nullptr};
         auto options = free_surface_options(12);
         options.initial_liquid_volume = area + defect;
         options.vessel.cross_section_area = area;
         options.vessel.total_internal_volume = 2.0 * area;
         options.ale.level_absolute_tolerance = 0.0;
         options.ale.level_relative_tolerance = 0.0;
-        EXPECT_THROW(state.solver->configure_free_surface(options), std::invalid_argument);
+        EXPECT_THROW(state.coupling->configure_free_surface(options), std::invalid_argument);
         options.ale.level_tolerance_from_volume = true;
         options.initial_liquid_volume = area + 2.0e-10;
-        EXPECT_THROW(state.solver->configure_free_surface(options), std::invalid_argument);
+        EXPECT_THROW(state.coupling->configure_free_surface(options), std::invalid_argument);
         options.initial_liquid_volume = area + defect;
-        ASSERT_NO_THROW(state.solver->configure_free_surface(options));
-        const auto mass = state.solver->liquid_mass_inventory().totalMass();
-        ASSERT_NO_THROW(state.solver->step());
-        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        ASSERT_NO_THROW(state.coupling->configure_free_surface(options));
+        const auto mass = state.coupling->liquid_mass_inventory().totalMass();
+        ASSERT_NO_THROW(state.coupling->step());
+        const auto& diagnostics = state.coupling->planar_ale_diagnostics();
         EXPECT_NEAR(diagnostics.mesh_vessel_mismatch, 0.0, 2.0e-14);
-        EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), mass, 1.0e-12);
+        EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), mass, 1.0e-12);
         EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-12);
         expect_zero_relative_top_flux(state);
     }
@@ -799,16 +811,16 @@ TEST(BoussinesqPlanarALETest, RepeatedWeakHeatingKeepsMeshPoolDefectBounded)
     auto options = free_surface_options(40);
     options.ale.level_absolute_tolerance = 2.0e-10;
     options.ale.relaxation = 0.5;
-    state.solver->configure_free_surface(options);
-    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
+    state.coupling->configure_free_surface(options);
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
     for (int step = 0; step < 40; ++step)
     {
         SCOPED_TRACE(step);
         state.heat_source->initialize(1.0e-4 * (1 + step % 3));
-        ASSERT_NO_THROW(state.solver->step());
-        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        ASSERT_NO_THROW(state.coupling->step());
+        const auto& diagnostics = state.coupling->planar_ale_diagnostics();
         EXPECT_LT(std::abs(diagnostics.mesh_vessel_mismatch), 5.0e-12);
-        EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+        EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
         EXPECT_LE(diagnostics.continuity.maximum, 2.0e-10);
         EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-12);
         expect_zero_relative_top_flux(state);
@@ -825,19 +837,20 @@ TEST(BoussinesqPlanarALETest, CompositeCoupledHeatingAndRollback)
             SCOPED_TRACE(static_cast<int>(gradient));
             auto state = make_case(Coupling::CoupledKrylov, 1.0e-4, 8, false, 0., false,
                 SimpleFluid::RadiolyticPressureMode::Constant, false, selection.backend, selection.workspace, gradient);
-            ASSERT_NO_THROW(state.solver->step());
-            const auto& diagnostics = state.solver->planar_ale_diagnostics();
+            ASSERT_NO_THROW(state.coupling->step());
+            const auto& diagnostics = state.coupling->planar_ale_diagnostics();
             EXPECT_GT(diagnostics.volume_source.global_material_source, 0.);
             EXPECT_LE(diagnostics.continuity.maximum, 3.0e-10);
             EXPECT_NEAR(diagnostics.liquid_mass_residual, 0., 1.0e-12);
-            EXPECT_NEAR(global_mesh_volume(*state.mesh), state.solver->free_surface_diagnostics().pool_volume, 2.0e-12);
+            EXPECT_NEAR(
+                global_mesh_volume(*state.mesh), state.coupling->free_surface_diagnostics().pool_volume, 2.0e-12);
             expect_zero_relative_top_flux(state);
 
             auto rejected = make_case(Coupling::CoupledKrylov, 1.0, 2, false, 0., false,
                 SimpleFluid::RadiolyticPressureMode::Constant, false, selection.backend, selection.workspace, gradient);
             const auto volume = global_mesh_volume(*rejected.mesh);
             const auto top = top_elevation(*rejected.mesh);
-            EXPECT_THROW(rejected.solver->step(), std::runtime_error);
+            EXPECT_THROW(rejected.coupling->step(), std::runtime_error);
             EXPECT_EQ(rejected.solver->step_index(), 0);
             EXPECT_DOUBLE_EQ(global_mesh_volume(*rejected.mesh), volume);
             EXPECT_DOUBLE_EQ(top_elevation(*rejected.mesh), top);
@@ -856,38 +869,38 @@ TEST(BoussinesqPlanarALETest, UniformHeatingMovesTopAndClosesConservativeBalance
     auto state = make_case(Coupling::PISO, power_density, 4);
     const auto old_epoch = state.mesh->geometry_epoch();
     const auto old_top = top_elevation(*state.mesh);
-    const auto old_mass = state.solver->liquid_mass_inventory().totalMass();
-    const auto old_history = state.solver->free_surface_history().size();
+    const auto old_mass = state.coupling->liquid_mass_inventory().totalMass();
+    const auto old_history = state.coupling->free_surface_history().size();
 
     state.solver->reset_solver_phase_timings();
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
 
     const auto expected_temperature = initial_temperature + power_density * time_step / (density * heat_capacity);
     const auto expected_density = density * (1.0 - expansion * (expected_temperature - initial_temperature));
     const auto expected_level = old_mass / expected_density;
     const auto new_top = top_elevation(*state.mesh);
     const auto mesh_volume = global_mesh_volume(*state.mesh);
-    const auto surface = state.solver->free_surface_diagnostics();
-    const auto& diagnostics = state.solver->planar_ale_diagnostics();
+    const auto surface = state.coupling->free_surface_diagnostics();
+    const auto& diagnostics = state.coupling->planar_ale_diagnostics();
     record_ale_residuals(diagnostics);
 
     EXPECT_EQ(state.solver->step_index(), 1);
     EXPECT_NEAR(state.solver->time(), time_step, 1.0e-15);
-    EXPECT_EQ(state.solver->free_surface_history().size(), old_history + 1);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), old_history + 1);
     EXPECT_GT(state.mesh->geometry_epoch(), old_epoch);
     EXPECT_GT(new_top, old_top);
     EXPECT_NEAR(new_top, expected_level, 2.0e-12);
     EXPECT_NEAR(mesh_volume, expected_level, 2.0e-12);
     EXPECT_NEAR(surface.pool_level, new_top, 2.0e-12);
     EXPECT_NEAR(surface.pool_volume, mesh_volume, 2.0e-12);
-    EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), old_mass, 1.0e-12);
+    EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), old_mass, 1.0e-12);
     for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
     {
         const auto cell = static_cast<Pack::local_ordinal_type>(owned);
         // The strict pressure correction redistributes the uniform heating by
         // at most 1.197e-9 K between these two moving control volumes.
         EXPECT_NEAR(state.solver->temperature().value(cell), expected_temperature, 2.0e-9);
-        EXPECT_NEAR(state.solver->rho_liquid().value(cell), expected_density, 2.0e-10);
+        EXPECT_NEAR(state.coupling->rho_liquid().value(cell), expected_density, 2.0e-10);
     }
     EXPECT_GE(diagnostics.outer_correctors, 2);
     EXPECT_LE(diagnostics.outer_correctors, 4);
@@ -923,10 +936,11 @@ TEST(BoussinesqPlanarALETest, ConfiguringAlePreservesAcceptedStationaryCourantFl
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
     linear_options.max_iterations = 500;
-    auto solver = std::make_unique<Solver>(
+    auto solver = std::make_shared<Solver>(
         mesh, planar_boundaries(), time_options(Coupling::PISO), linear_options, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
 
     auto& accepted_absolute_flux = solver->mutable_pressure_corrected_face_fluxes();
     for (const auto face_lid : accepted_absolute_flux.owned_face_ids())
@@ -934,18 +948,18 @@ TEST(BoussinesqPlanarALETest, ConfiguringAlePreservesAcceptedStationaryCourantFl
         accepted_absolute_flux.set_owned_value(face_lid, 0.01 * (1.0 + static_cast<double>(face_lid)));
     }
     accepted_absolute_flux.sync_ghosts();
-    const auto fixed_grid_courant = solver->maximum_courant_number();
+    const auto fixed_grid_courant = solver_coupling->maximum_courant_number();
     ASSERT_GT(fixed_grid_courant, 0.0);
 
-    ASSERT_NE(solver->configure_free_surface(free_surface_options(4)), nullptr);
-    ASSERT_TRUE(solver->planar_ale_enabled());
-    const auto& accepted_relative_flux = solver->mesh_relative_face_fluxes();
+    ASSERT_NE(solver_coupling->configure_free_surface(free_surface_options(4)), nullptr);
+    ASSERT_TRUE(solver_coupling->planar_ale_enabled());
+    const auto& accepted_relative_flux = solver_coupling->mesh_relative_face_fluxes();
     for (size_t face = 0; face < mesh->num_faces(); ++face)
     {
         const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
         EXPECT_DOUBLE_EQ(accepted_relative_flux.local_value(face_lid), accepted_absolute_flux.local_value(face_lid));
     }
-    EXPECT_DOUBLE_EQ(solver->maximum_courant_number(), fixed_grid_courant);
+    EXPECT_DOUBLE_EQ(solver_coupling->maximum_courant_number(), fixed_grid_courant);
     const auto& base_solver = static_cast<const SimpleFluid::FluidSolver<Pack>&>(*solver);
     EXPECT_DOUBLE_EQ(base_solver.maximum_courant_number(), fixed_grid_courant);
 }
@@ -957,10 +971,10 @@ TEST(BoussinesqPlanarALETest, HeatingThenCoolingContractsAndRecoversTheAcceptedS
     auto state = make_case(Coupling::PISO, power_density, 5);
     const auto initial_top = top_elevation(*state.mesh);
     const auto initial_volume = global_mesh_volume(*state.mesh);
-    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
     const auto initial_temperature = state.solver->temperature().value(0);
 
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     const auto expanded_top = top_elevation(*state.mesh);
     const auto expanded_volume = global_mesh_volume(*state.mesh);
     ASSERT_GT(expanded_top, initial_top);
@@ -969,14 +983,14 @@ TEST(BoussinesqPlanarALETest, HeatingThenCoolingContractsAndRecoversTheAcceptedS
     // The source is volumetric on the trial-new mesh.  Scale the cooling so
     // its final-volume integral exactly removes the preceding accepted heat.
     state.heat_source->initialize(-power_density * expanded_volume / initial_volume);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
 
-    const auto& diagnostics = state.solver->planar_ale_diagnostics();
+    const auto& diagnostics = state.coupling->planar_ale_diagnostics();
     EXPECT_LT(top_elevation(*state.mesh), expanded_top);
     EXPECT_NEAR(top_elevation(*state.mesh), initial_top, 3.0e-12);
     EXPECT_NEAR(global_mesh_volume(*state.mesh), initial_volume, 3.0e-12);
     EXPECT_NEAR(state.solver->temperature().value(0), initial_temperature, 3.0e-9);
-    EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), initial_mass, 2.0e-12);
+    EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), initial_mass, 2.0e-12);
     EXPECT_NEAR(diagnostics.maximum_gcl_residual, 0.0, 1.0e-12);
     EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-10);
     EXPECT_LE(diagnostics.continuity.maximum, 3.0e-10);
@@ -991,11 +1005,11 @@ TEST(BoussinesqPlanarALETest, KeepsConfiguredSlipBoundaryDuringAndAfterAle)
 {
     auto state = make_case(Coupling::PISO, 1.0, 6);
     const auto old_top = top_elevation(*state.mesh);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     ASSERT_GT(top_elevation(*state.mesh), old_top);
     EXPECT_EQ(state.solver->cached_velocity_boundary_type("zmax"), SimpleFluid::BoundaryConditionType::Slip);
 
-    ASSERT_TRUE(state.solver->remove_free_surface_model());
+    ASSERT_TRUE(state.coupling->remove_free_surface_model());
     EXPECT_EQ(state.solver->cached_velocity_boundary_type("zmax"), SimpleFluid::BoundaryConditionType::Slip);
 }
 
@@ -1006,7 +1020,7 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionUpdatesVtuPointsAndPublishesAleDiagn
         GTEST_SKIP() << "This accepted-file assertion uses one serial output path.";
     }
     auto state = make_case(Coupling::PISO, 1.0, 6);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     const auto accepted_top = top_elevation(*state.mesh);
     const auto topology = state.solver->solution_topology();
     ASSERT_TRUE(topology);
@@ -1016,7 +1030,7 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionUpdatesVtuPointsAndPublishesAleDiagn
     const auto filename = std::filesystem::temp_directory_path() / "simplefluid_planar_ale_accepted.vtu";
     SimpleFluid::SolutionOutputOptions output_options;
     output_options.include_free_surface_fields = true;
-    ASSERT_NO_THROW(state.solver->write_solution_vtu(filename.string(), output_options));
+    ASSERT_NO_THROW(state.coupling->write_solution_vtu(filename.string(), output_options));
     std::ifstream input(filename, std::ios::binary);
     ASSERT_TRUE(input);
     const std::string contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -1037,7 +1051,7 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionWritesCurrentParallelPiecesAndPvtuDi
         GTEST_SKIP() << "This PVTU assertion requires exactly two ranks.";
     }
     auto state = make_case(Coupling::PISO, 1.0, 6);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     const auto accepted_top = top_elevation(*state.mesh);
     const auto topology = state.solver->solution_topology();
     ASSERT_TRUE(topology);
@@ -1050,7 +1064,7 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionWritesCurrentParallelPiecesAndPvtuDi
     const auto filename = std::filesystem::temp_directory_path() / "simplefluid_planar_ale_parallel_accepted.vtu";
     SimpleFluid::SolutionOutputOptions output_options;
     output_options.include_free_surface_fields = true;
-    ASSERT_NO_THROW(state.solver->write_parallel_solution_vtu(filename.string(), output_options));
+    ASSERT_NO_THROW(state.coupling->write_parallel_solution_vtu(filename.string(), output_options));
 
     const auto piece_filename =
         SimpleFluid::VTUWriter::rank_piece_filename(filename.string(), comm->getRank(), comm->getSize());
@@ -1089,34 +1103,34 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionWritesCurrentParallelPiecesAndPvtuDi
 TEST(BoussinesqPlanarALETest, StationaryGasCanConvergeOnTheFirstAleTrial)
 {
     auto state = make_case(Coupling::PISO, 0.0, 4, true);
-    auto checkpoint = state.solver->create_coupling_checkpoint();
+    auto checkpoint = state.coupling->create_coupling_checkpoint();
     for (double dt : {0.01, 0.004})
     {
-        state.solver->restore_coupling_checkpoint(checkpoint);
+        state.coupling->restore_coupling_checkpoint(checkpoint);
         state.solver->set_time_step(dt);
-        ASSERT_NO_THROW(state.solver->step());
-        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        ASSERT_NO_THROW(state.coupling->step());
+        const auto& diagnostics = state.coupling->planar_ale_diagnostics();
         EXPECT_EQ(diagnostics.outer_correctors, 1);
         ASSERT_EQ(diagnostics.gas_state_residual_history.size(), 1u);
         EXPECT_LE(diagnostics.gas_state_residual_history.front(), 8 * std::numeric_limits<double>::epsilon());
-        EXPECT_NEAR(state.solver->find_radiolytic_gas_model()->global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
+        EXPECT_NEAR(state.coupling->find_radiolytic_gas_model()->global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
         expect_zero_relative_top_flux(state);
     }
-    state.solver->accept_coupling_checkpoint(checkpoint);
+    state.coupling->accept_coupling_checkpoint(checkpoint);
 }
 
 TEST(BoussinesqPlanarALETest, GasProductionStillRequiresAConvergedTrialComparison)
 {
     auto state = make_case(Coupling::PISO, 0.0, 40, true);
-    state.solver->find_fission_power_source()->initialize_constant(2000.0);
-    ASSERT_NO_THROW(state.solver->step());
-    const auto& diagnostics = state.solver->planar_ale_diagnostics();
+    state.coupling->find_fission_power_source()->initialize_constant(2000.0);
+    ASSERT_NO_THROW(state.coupling->step());
+    const auto& diagnostics = state.coupling->planar_ale_diagnostics();
     ASSERT_GE(diagnostics.gas_state_residual_history.size(), 2u);
     // New bubble populations start from zero; their normalized physical
     // increment is one, even though the artificial first-pass sentinel is gone.
     EXPECT_DOUBLE_EQ(diagnostics.gas_state_residual_history.front(), 1.0);
     EXPECT_LE(diagnostics.gas_state_residual_history.back(), 1.e-10);
-    const auto* gas = state.solver->find_radiolytic_gas_model();
+    const auto* gas = state.coupling->find_radiolytic_gas_model();
     const double produced = gas->cumulative_hydrogen_produced();
     EXPECT_NEAR(produced, 2000.0 * 0.01 * 2.e-7 * global_mesh_volume(*state.mesh), 1.e-15);
     EXPECT_NEAR(gas->global_submerged_hydrogen_moles() +
@@ -1133,8 +1147,8 @@ TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeomet
         SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
         SimpleFluid::FVM::CellGradientScheme::LeastSquares, false,
         SimpleFluid::BubbleMassTransferMode::SphericalDiffusion);
-    auto* gas = state.solver->find_radiolytic_gas_model();
-    auto* fission = state.solver->find_fission_power_source();
+    auto* gas = state.coupling->find_radiolytic_gas_model();
+    auto* fission = state.coupling->find_fission_power_source();
     ASSERT_NE(gas, nullptr);
     ASSERT_NE(fission, nullptr);
     EXPECT_EQ(gas->options().mass_transfer_mode, SimpleFluid::BubbleMassTransferMode::SphericalDiffusion);
@@ -1142,10 +1156,10 @@ TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeomet
     const auto old_generated = gas->cumulative_hydrogen_produced();
     const auto old_epoch = state.mesh->geometry_epoch();
 
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
 
-    const auto surface = state.solver->free_surface_diagnostics();
-    const auto& ale = state.solver->planar_ale_diagnostics();
+    const auto surface = state.coupling->free_surface_diagnostics();
+    const auto& ale = state.coupling->planar_ale_diagnostics();
     record_ale_residuals(ale);
     EXPECT_GT(gas->cumulative_hydrogen_produced(), old_generated);
     EXPECT_GT(state.mesh->geometry_epoch(), old_epoch);
@@ -1175,8 +1189,8 @@ TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeomet
 TEST(BoussinesqPlanarALETest, MovingTopBubbleEscapeTransfersToTheVentExactlyOnceAfterCommit)
 {
     auto state = make_case(Coupling::PISO, 0.0, 10, true, 100.0);
-    auto* gas = state.solver->find_radiolytic_gas_model();
-    auto* fission = state.solver->find_fission_power_source();
+    auto* gas = state.coupling->find_radiolytic_gas_model();
+    auto* fission = state.coupling->find_fission_power_source();
     ASSERT_NE(gas, nullptr);
     ASSERT_NE(fission, nullptr);
     fission->initialize_constant(1.0e3);
@@ -1184,16 +1198,16 @@ TEST(BoussinesqPlanarALETest, MovingTopBubbleEscapeTransfersToTheVentExactlyOnce
     // The Sheng split transports accepted populations before applying this
     // step's local kinetics.  Prime one accepted step so the following
     // moving-mesh transport step has a nonzero bubble population to vent.
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     const auto old_cumulative_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
-    const auto old_vented = state.solver->free_surface_diagnostics().vented_gas_moles;
+    const auto old_vented = state.coupling->free_surface_diagnostics().vented_gas_moles;
     const auto old_vented_h2 = old_vented.contains("H2") ? old_vented.at("H2") : 0.0;
 
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
 
     const auto statistics = gas->last_statistics();
-    const auto surface = state.solver->free_surface_diagnostics();
-    record_ale_residuals(state.solver->planar_ale_diagnostics());
+    const auto surface = state.coupling->free_surface_diagnostics();
+    record_ale_residuals(state.coupling->planar_ale_diagnostics());
     ASSERT_GT(statistics.submerged_bubble_hydrogen_escaped, 0.0);
     ASSERT_TRUE(surface.escaped_gas_moles_this_step.contains("H2"));
     ASSERT_TRUE(surface.vented_gas_moles.contains("H2"));
@@ -1202,9 +1216,9 @@ TEST(BoussinesqPlanarALETest, MovingTopBubbleEscapeTransfersToTheVentExactlyOnce
         statistics.submerged_bubble_hydrogen_escaped, 1.0e-14);
     EXPECT_NEAR(
         surface.vented_gas_moles.at("H2") - old_vented_h2, statistics.submerged_bubble_hydrogen_escaped, 1.0e-14);
-    EXPECT_NEAR(state.solver->planar_ale_diagnostics().gas_inventory_residual, 0.0, 1.0e-12);
-    EXPECT_GE(state.solver->planar_ale_diagnostics().outer_correctors, 2);
-    EXPECT_LE(state.solver->planar_ale_diagnostics().gas_state_residual, 1.0e-10);
+    EXPECT_NEAR(state.coupling->planar_ale_diagnostics().gas_inventory_residual, 0.0, 1.0e-12);
+    EXPECT_GE(state.coupling->planar_ale_diagnostics().outer_correctors, 2);
+    EXPECT_LE(state.coupling->planar_ale_diagnostics().gas_state_residual, 1.0e-10);
     EXPECT_NEAR(global_mesh_volume(*state.mesh), surface.pool_volume, 2.0e-12);
     expect_zero_relative_top_flux(state);
 }
@@ -1213,43 +1227,43 @@ TEST(BoussinesqPlanarALETest, ReconstructedPressureRunsInsideTheAcceptedAleTrans
 {
     auto state =
         make_case(Coupling::PISO, 0.0, 10, true, 0.0, false, SimpleFluid::RadiolyticPressureMode::Reconstructed);
-    auto* gas = state.solver->find_radiolytic_gas_model();
-    auto* fission = state.solver->find_fission_power_source();
+    auto* gas = state.coupling->find_radiolytic_gas_model();
+    auto* fission = state.coupling->find_fission_power_source();
     ASSERT_NE(gas, nullptr);
     ASSERT_NE(fission, nullptr);
     fission->initialize_constant(1.0e-3);
 
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
     {
         EXPECT_GT(gas->absolute_pressure().value(static_cast<Pack::local_ordinal_type>(owned)), 0.0);
     }
     EXPECT_NEAR(gas->last_statistics().inventory_error, 0.0, 1.0e-12);
-    EXPECT_LE(state.solver->planar_ale_diagnostics().continuity.maximum, 3.0e-10);
+    EXPECT_LE(state.coupling->planar_ale_diagnostics().continuity.maximum, 3.0e-10);
 }
 
 TEST(BoussinesqPlanarALETest, CelataSlipRunsThroughSolverIntegratedMovingTopEscape)
 {
     auto state =
         make_case(Coupling::PISO, 0.0, 12, true, 0.0, false, SimpleFluid::RadiolyticPressureMode::Constant, true);
-    auto* gas = state.solver->find_radiolytic_gas_model();
-    auto* fission = state.solver->find_fission_power_source();
+    auto* gas = state.coupling->find_radiolytic_gas_model();
+    auto* fission = state.coupling->find_fission_power_source();
     ASSERT_NE(gas, nullptr);
     ASSERT_NE(fission, nullptr);
     fission->initialize_constant(1.0e3);
 
-    ASSERT_NO_THROW(state.solver->step());
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
+    ASSERT_NO_THROW(state.coupling->step());
     EXPECT_GT(gas->last_statistics().submerged_bubble_hydrogen_escaped, 0.0);
     EXPECT_NEAR(gas->last_statistics().inventory_error, 0.0, 1.0e-12);
-    EXPECT_LE(state.solver->planar_ale_diagnostics().continuity.maximum, 3.0e-10);
+    EXPECT_LE(state.coupling->planar_ale_diagnostics().continuity.maximum, 3.0e-10);
 }
 
 TEST(BoussinesqPlanarALETest, StrictGasStepClosureFailureRollsBackTheWholeTransaction)
 {
     auto state = make_case(Coupling::PISO, 0.0, 8, true, 0.0, true);
-    auto* gas = state.solver->find_radiolytic_gas_model();
-    auto* fission = state.solver->find_fission_power_source();
+    auto* gas = state.coupling->find_radiolytic_gas_model();
+    auto* fission = state.coupling->find_fission_power_source();
     ASSERT_NE(gas, nullptr);
     ASSERT_NE(fission, nullptr);
     fission->initialize_constant(1.0e-3);
@@ -1257,12 +1271,12 @@ TEST(BoussinesqPlanarALETest, StrictGasStepClosureFailureRollsBackTheWholeTransa
     const auto primary = capture_primary(*state.solver);
     const auto old_generated = gas->cumulative_hydrogen_produced();
     const auto old_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
-    const auto old_history = state.solver->free_surface_history().size();
+    const auto old_history = state.coupling->free_surface_history().size();
 
     std::string failure;
     try
     {
-        state.solver->step();
+        state.coupling->step();
         FAIL() << "Expected zero-tolerance gas closure to reject roundoff.";
     }
     catch (const std::runtime_error& error)
@@ -1276,8 +1290,8 @@ TEST(BoussinesqPlanarALETest, StrictGasStepClosureFailureRollsBackTheWholeTransa
     EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), old_escape);
     EXPECT_EQ(state.solver->step_index(), 0);
     EXPECT_DOUBLE_EQ(state.solver->time(), 0.0);
-    EXPECT_EQ(state.solver->free_surface_history().size(), old_history);
-    EXPECT_EQ(state.solver->planar_ale_diagnostics().rejected_transactions, 1U);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), old_history);
+    EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
 }
 
 TEST(BoussinesqPlanarALETest, PublicScalarVoidRestoreRefreshesRollbackGeometry)
@@ -1318,20 +1332,21 @@ TEST(BoussinesqPlanarALETest, MeshMotionLimitFailureLeavesAcceptedStateUntouched
     auto mesh = make_column();
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
-    auto solver = std::make_unique<Solver>(
+    auto solver = std::make_shared<Solver>(
         mesh, planar_boundaries(), time_options(Coupling::PISO), linear_options, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
     solver->add_temperature_source("motion_limit_heat", 1.0);
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto options = free_surface_options(6);
     options.ale.maximum_level_change = 1.0e-12;
-    ASSERT_NE(solver->configure_free_surface(options), nullptr);
+    ASSERT_NE(solver_coupling->configure_free_surface(options), nullptr);
     const auto geometry = capture_geometry(*mesh);
     const auto primary = capture_primary(*solver);
-    const auto history = solver->free_surface_history().size();
+    const auto history = solver_coupling->free_surface_history().size();
 
     solver->reset_solver_phase_timings();
-    EXPECT_THROW(solver->step(), std::invalid_argument);
+    EXPECT_THROW(solver_coupling->step(), std::invalid_argument);
     // The stationary first candidate completes and rolls back internally;
     // the next candidate fails begin_trial's movement limit. The outward
     // catch must still refresh the accepted mesh before returning.
@@ -1342,8 +1357,8 @@ TEST(BoussinesqPlanarALETest, MeshMotionLimitFailureLeavesAcceptedStateUntouched
     expect_primary_restored(*solver, primary);
     EXPECT_EQ(solver->step_index(), 0);
     EXPECT_DOUBLE_EQ(solver->time(), 0.0);
-    EXPECT_EQ(solver->free_surface_history().size(), history);
-    EXPECT_EQ(solver->planar_ale_diagnostics().rejected_transactions, 1U);
+    EXPECT_EQ(solver_coupling->free_surface_history().size(), history);
+    EXPECT_EQ(solver_coupling->planar_ale_diagnostics().rejected_transactions, 1U);
 }
 
 TEST(BoussinesqPlanarALETest, MomentumTransportPolicyFailureRollsBackAndCanRetry)
@@ -1351,22 +1366,22 @@ TEST(BoussinesqPlanarALETest, MomentumTransportPolicyFailureRollsBackAndCanRetry
     auto state = make_case(Coupling::PISO, 1.0, 6);
     const auto geometry = capture_geometry(*state.mesh);
     const auto primary = capture_primary(*state.solver);
-    const auto history = state.solver->free_surface_history().size();
+    const auto history = state.coupling->free_surface_history().size();
     const auto valid_options = state.solver->linear_solver_options();
     auto invalid_options = valid_options;
     invalid_options.max_iterations = 0;
     state.solver->set_linear_solver_options(invalid_options);
 
-    EXPECT_THROW(state.solver->step(), std::invalid_argument);
+    EXPECT_THROW(state.coupling->step(), std::invalid_argument);
     expect_geometry_restored(*state.mesh, geometry);
     expect_primary_restored(*state.solver, primary);
     EXPECT_EQ(state.solver->step_index(), 0);
     EXPECT_DOUBLE_EQ(state.solver->time(), 0.0);
-    EXPECT_EQ(state.solver->free_surface_history().size(), history);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), history);
 
     state.solver->set_linear_solver_options(valid_options);
     state.heat_source->set_enabled(false);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     EXPECT_EQ(state.solver->step_index(), 1);
 }
 
@@ -1377,26 +1392,26 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     const auto primary = capture_primary(*state.solver);
     const auto initial_time = state.solver->time();
     const auto initial_step = state.solver->step_index();
-    const auto initial_history = state.solver->free_surface_history().size();
-    const auto initial_surface = state.solver->free_surface_diagnostics();
-    const auto initial_liquid = state.solver->liquid_mass_inventory().diagnostics();
-    const auto initial_liquid_field = capture_owned_values(state.solver->liquid_mass_inventory().cellMassInventory());
-    const auto initial_density = capture_owned_values(state.solver->liquid_mass_inventory().pureLiquidDensity());
+    const auto initial_history = state.coupling->free_surface_history().size();
+    const auto initial_surface = state.coupling->free_surface_diagnostics();
+    const auto initial_liquid = state.coupling->liquid_mass_inventory().diagnostics();
+    const auto initial_liquid_field = capture_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory());
+    const auto initial_density = capture_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity());
     const auto initial_material_density = capture_owned_values(state.solver->material_properties().density);
     const auto initial_heat_capacity = capture_owned_values(state.solver->material_properties().specific_heat_capacity);
-    const auto initial_clear_level_field = capture_owned_values(state.solver->clear_level());
-    const auto initial_pool_level_field = capture_owned_values(state.solver->pool_level());
-    const auto initial_headspace_pressure_field = capture_owned_values(state.solver->headspace_pressure());
-    const auto initial_pool_occupancy_field = capture_owned_values(state.solver->pool_occupancy());
+    const auto initial_clear_level_field = capture_owned_values(state.coupling->clear_level());
+    const auto initial_pool_level_field = capture_owned_values(state.coupling->pool_level());
+    const auto initial_headspace_pressure_field = capture_owned_values(state.coupling->headspace_pressure());
+    const auto initial_pool_occupancy_field = capture_owned_values(state.coupling->pool_occupancy());
     const auto initial_absolute_flux = capture_owned_face_values(state.solver->pressure_corrected_face_fluxes());
-    const auto initial_relative_flux = capture_owned_face_values(state.solver->mesh_relative_face_fluxes());
-    const auto initial_occupancy_error = state.solver->pool_occupancy_volume_error();
-    const auto* initial_feedback = state.solver->find_material_feedback_model();
+    const auto initial_relative_flux = capture_owned_face_values(state.coupling->mesh_relative_face_fluxes());
+    const auto initial_occupancy_error = state.coupling->pool_occupancy_volume_error();
+    const auto* initial_feedback = state.coupling->find_material_feedback_model();
     ASSERT_NE(initial_feedback, nullptr);
     const auto initial_feedback_density = capture_owned_values(initial_feedback->density_feedback());
     const auto initial_feedback_viscosity = capture_owned_values(initial_feedback->viscosity_feedback());
 
-    auto* gas = state.solver->find_radiolytic_gas_model();
+    auto* gas = state.coupling->find_radiolytic_gas_model();
     ASSERT_NE(gas, nullptr);
     const auto initial_gas_fields = capture_gas_fields(*gas);
     const auto initial_dissolved = gas->global_dissolved_hydrogen_moles();
@@ -1405,13 +1420,13 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     const auto initial_generated = gas->cumulative_hydrogen_produced();
     const auto initial_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
     const auto initial_pressure_offset = gas->absolute_pressure_offset();
-    const auto initial_committed_escape = state.solver->find_free_surface_model()->committedEscapedMoles();
+    const auto initial_committed_escape = state.coupling->find_free_surface_model()->committedEscapedMoles();
 
     state.solver->reset_solver_phase_timings();
     std::string failure;
     try
     {
-        state.solver->step();
+        state.coupling->step();
         FAIL() << "Expected the bounded planar-ALE trial to fail.";
     }
     catch (const std::runtime_error& error)
@@ -1428,22 +1443,23 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     expect_primary_restored(*state.solver, primary);
     EXPECT_DOUBLE_EQ(state.solver->time(), initial_time);
     EXPECT_EQ(state.solver->step_index(), initial_step);
-    EXPECT_EQ(state.solver->free_surface_history().size(), initial_history);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history);
 
-    const auto restored_surface = state.solver->free_surface_diagnostics();
+    const auto restored_surface = state.coupling->free_surface_diagnostics();
     EXPECT_DOUBLE_EQ(restored_surface.clear_level, initial_surface.clear_level);
     EXPECT_DOUBLE_EQ(restored_surface.pool_level, initial_surface.pool_level);
     EXPECT_DOUBLE_EQ(restored_surface.liquid_volume, initial_surface.liquid_volume);
     EXPECT_DOUBLE_EQ(restored_surface.pool_volume, initial_surface.pool_volume);
     EXPECT_DOUBLE_EQ(restored_surface.headspace.pressure, initial_surface.headspace.pressure);
-    EXPECT_EQ(state.solver->find_free_surface_model()->committedEscapedMoles(), initial_committed_escape);
+    EXPECT_EQ(state.coupling->find_free_surface_model()->committedEscapedMoles(), initial_committed_escape);
 
-    const auto restored_liquid = state.solver->liquid_mass_inventory().diagnostics();
+    const auto restored_liquid = state.coupling->liquid_mass_inventory().diagnostics();
     EXPECT_DOUBLE_EQ(restored_liquid.total_mass, initial_liquid.total_mass);
     EXPECT_DOUBLE_EQ(restored_liquid.liquid_volume, initial_liquid.liquid_volume);
     EXPECT_DOUBLE_EQ(restored_liquid.step_mass_balance_residual, initial_liquid.step_mass_balance_residual);
-    const auto restored_liquid_field = capture_owned_values(state.solver->liquid_mass_inventory().cellMassInventory());
-    const auto restored_density = capture_owned_values(state.solver->liquid_mass_inventory().pureLiquidDensity());
+    const auto restored_liquid_field =
+        capture_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory());
+    const auto restored_density = capture_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity());
     ASSERT_EQ(restored_liquid_field.size(), initial_liquid_field.size());
     ASSERT_EQ(restored_density.size(), initial_density.size());
     for (size_t owned = 0; owned < initial_liquid_field.size(); ++owned)
@@ -1453,14 +1469,14 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     }
     expect_owned_values(state.solver->material_properties().density, initial_material_density);
     expect_owned_values(state.solver->material_properties().specific_heat_capacity, initial_heat_capacity);
-    expect_owned_values(state.solver->clear_level(), initial_clear_level_field);
-    expect_owned_values(state.solver->pool_level(), initial_pool_level_field);
-    expect_owned_values(state.solver->headspace_pressure(), initial_headspace_pressure_field);
-    expect_owned_values(state.solver->pool_occupancy(), initial_pool_occupancy_field);
+    expect_owned_values(state.coupling->clear_level(), initial_clear_level_field);
+    expect_owned_values(state.coupling->pool_level(), initial_pool_level_field);
+    expect_owned_values(state.coupling->headspace_pressure(), initial_headspace_pressure_field);
+    expect_owned_values(state.coupling->pool_occupancy(), initial_pool_occupancy_field);
     expect_owned_face_values(state.solver->pressure_corrected_face_fluxes(), initial_absolute_flux);
-    expect_owned_face_values(state.solver->mesh_relative_face_fluxes(), initial_relative_flux);
-    EXPECT_DOUBLE_EQ(state.solver->pool_occupancy_volume_error(), initial_occupancy_error);
-    const auto* restored_feedback = state.solver->find_material_feedback_model();
+    expect_owned_face_values(state.coupling->mesh_relative_face_fluxes(), initial_relative_flux);
+    EXPECT_DOUBLE_EQ(state.coupling->pool_occupancy_volume_error(), initial_occupancy_error);
+    const auto* restored_feedback = state.coupling->find_material_feedback_model();
     ASSERT_NE(restored_feedback, nullptr);
     expect_owned_values(restored_feedback->density_feedback(), initial_feedback_density);
     expect_owned_values(restored_feedback->viscosity_feedback(), initial_feedback_viscosity);
@@ -1473,21 +1489,21 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), initial_escape);
     EXPECT_DOUBLE_EQ(gas->absolute_pressure_offset(), initial_pressure_offset);
 
-    const auto& rejected = state.solver->planar_ale_diagnostics();
+    const auto& rejected = state.coupling->planar_ale_diagnostics();
     EXPECT_EQ(rejected.rejected_transactions, 1U);
     EXPECT_EQ(rejected.last_rejection_reason, failure);
 
     state.heat_source->set_enabled(false);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
 
     EXPECT_EQ(state.solver->step_index(), initial_step + 1);
     EXPECT_NEAR(state.solver->time(), initial_time + 1.0e-2, 1.0e-15);
-    EXPECT_EQ(state.solver->free_surface_history().size(), initial_history + 1);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history + 1);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), initial_surface.pool_level);
-    EXPECT_DOUBLE_EQ(state.solver->liquid_mass_inventory().totalMass(), initial_liquid.total_mass);
+    EXPECT_DOUBLE_EQ(state.coupling->liquid_mass_inventory().totalMass(), initial_liquid.total_mass);
     EXPECT_DOUBLE_EQ(gas->global_dissolved_hydrogen_moles(), initial_dissolved);
     EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), initial_escape);
-    EXPECT_EQ(state.solver->planar_ale_diagnostics().rejected_transactions, 1U);
+    EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
     EXPECT_TRUE(state.solver->last_step_statistics().converged);
     expect_zero_relative_top_flux(state);
 
@@ -1498,7 +1514,7 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     auto invalid_pressure_options = state.solver->pressure_linear_solver_options();
     invalid_pressure_options.max_iterations = 0;
     state.solver->set_pressure_linear_solver_options(invalid_pressure_options);
-    EXPECT_THROW(state.solver->step(), std::invalid_argument);
+    EXPECT_THROW(state.coupling->step(), std::invalid_argument);
     const auto& restored_statistics = state.solver->last_step_statistics();
     EXPECT_EQ(restored_statistics.converged, accepted_statistics.converged);
     EXPECT_EQ(restored_statistics.nonlinear_iterations, accepted_statistics.nonlinear_iterations);
@@ -1523,15 +1539,15 @@ TEST(BoussinesqPlanarALETest, PressureSolveFailureInsideTrialRollsBackAndCanRetr
     const auto primary = capture_primary(*state.solver);
     const auto initial_time = state.solver->time();
     const auto initial_step = state.solver->step_index();
-    const auto initial_history = state.solver->free_surface_history().size();
-    const auto initial_surface = state.solver->free_surface_diagnostics();
-    const auto initial_liquid = state.solver->liquid_mass_inventory().diagnostics();
-    const auto initial_liquid_field = capture_owned_values(state.solver->liquid_mass_inventory().cellMassInventory());
-    const auto initial_density = capture_owned_values(state.solver->liquid_mass_inventory().pureLiquidDensity());
-    const auto initial_clear_level_field = capture_owned_values(state.solver->clear_level());
-    const auto initial_pool_level_field = capture_owned_values(state.solver->pool_level());
-    const auto initial_headspace_pressure_field = capture_owned_values(state.solver->headspace_pressure());
-    const auto initial_pool_occupancy_field = capture_owned_values(state.solver->pool_occupancy());
+    const auto initial_history = state.coupling->free_surface_history().size();
+    const auto initial_surface = state.coupling->free_surface_diagnostics();
+    const auto initial_liquid = state.coupling->liquid_mass_inventory().diagnostics();
+    const auto initial_liquid_field = capture_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory());
+    const auto initial_density = capture_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity());
+    const auto initial_clear_level_field = capture_owned_values(state.coupling->clear_level());
+    const auto initial_pool_level_field = capture_owned_values(state.coupling->pool_level());
+    const auto initial_headspace_pressure_field = capture_owned_values(state.coupling->headspace_pressure());
+    const auto initial_pool_occupancy_field = capture_owned_values(state.coupling->pool_occupancy());
     const auto initial_absolute_flux = capture_owned_face_values(state.solver->pressure_corrected_face_fluxes());
 
     state.solver->reset_solver_phase_timings();
@@ -1543,7 +1559,7 @@ TEST(BoussinesqPlanarALETest, PressureSolveFailureInsideTrialRollsBackAndCanRetr
     std::string failure;
     try
     {
-        state.solver->step();
+        state.coupling->step();
         FAIL() << "Expected the in-trial pressure solve to reject its policy.";
     }
     catch (const std::invalid_argument& error)
@@ -1561,39 +1577,39 @@ TEST(BoussinesqPlanarALETest, PressureSolveFailureInsideTrialRollsBackAndCanRetr
     expect_primary_restored(*state.solver, primary);
     EXPECT_DOUBLE_EQ(state.solver->time(), initial_time);
     EXPECT_EQ(state.solver->step_index(), initial_step);
-    EXPECT_EQ(state.solver->free_surface_history().size(), initial_history);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history);
 
-    const auto restored_surface = state.solver->free_surface_diagnostics();
+    const auto restored_surface = state.coupling->free_surface_diagnostics();
     EXPECT_DOUBLE_EQ(restored_surface.clear_level, initial_surface.clear_level);
     EXPECT_DOUBLE_EQ(restored_surface.pool_level, initial_surface.pool_level);
     EXPECT_DOUBLE_EQ(restored_surface.liquid_volume, initial_surface.liquid_volume);
     EXPECT_DOUBLE_EQ(restored_surface.pool_volume, initial_surface.pool_volume);
     EXPECT_DOUBLE_EQ(restored_surface.headspace.pressure, initial_surface.headspace.pressure);
-    const auto restored_liquid = state.solver->liquid_mass_inventory().diagnostics();
+    const auto restored_liquid = state.coupling->liquid_mass_inventory().diagnostics();
     EXPECT_DOUBLE_EQ(restored_liquid.total_mass, initial_liquid.total_mass);
     EXPECT_DOUBLE_EQ(restored_liquid.liquid_volume, initial_liquid.liquid_volume);
-    expect_owned_values(state.solver->liquid_mass_inventory().cellMassInventory(), initial_liquid_field);
-    expect_owned_values(state.solver->liquid_mass_inventory().pureLiquidDensity(), initial_density);
-    expect_owned_values(state.solver->clear_level(), initial_clear_level_field);
-    expect_owned_values(state.solver->pool_level(), initial_pool_level_field);
-    expect_owned_values(state.solver->headspace_pressure(), initial_headspace_pressure_field);
-    expect_owned_values(state.solver->pool_occupancy(), initial_pool_occupancy_field);
+    expect_owned_values(state.coupling->liquid_mass_inventory().cellMassInventory(), initial_liquid_field);
+    expect_owned_values(state.coupling->liquid_mass_inventory().pureLiquidDensity(), initial_density);
+    expect_owned_values(state.coupling->clear_level(), initial_clear_level_field);
+    expect_owned_values(state.coupling->pool_level(), initial_pool_level_field);
+    expect_owned_values(state.coupling->headspace_pressure(), initial_headspace_pressure_field);
+    expect_owned_values(state.coupling->pool_occupancy(), initial_pool_occupancy_field);
     expect_owned_face_values(state.solver->pressure_corrected_face_fluxes(), initial_absolute_flux);
-    EXPECT_EQ(state.solver->planar_ale_diagnostics().rejected_transactions, 1U);
-    EXPECT_EQ(state.solver->planar_ale_diagnostics().last_rejection_reason, failure);
+    EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
+    EXPECT_EQ(state.coupling->planar_ale_diagnostics().last_rejection_reason, failure);
 
     state.solver->set_pressure_linear_solver_options(valid_pressure_options);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
     EXPECT_EQ(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 2u);
     EXPECT_GT(state.solver->solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls, rejected_trial_calls);
 
     EXPECT_EQ(state.solver->step_index(), initial_step + 1);
     EXPECT_NEAR(state.solver->time(), initial_time + 1.0e-2, 1.0e-15);
-    EXPECT_EQ(state.solver->free_surface_history().size(), initial_history + 1);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history + 1);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), initial_surface.pool_level);
-    EXPECT_DOUBLE_EQ(state.solver->liquid_mass_inventory().totalMass(), initial_liquid.total_mass);
-    EXPECT_EQ(state.solver->planar_ale_diagnostics().rejected_transactions, 1U);
+    EXPECT_DOUBLE_EQ(state.coupling->liquid_mass_inventory().totalMass(), initial_liquid.total_mass);
+    EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
     EXPECT_TRUE(state.solver->last_step_statistics().converged);
     expect_zero_relative_top_flux(state);
 }
@@ -1695,7 +1711,8 @@ SimpleFluid::FreeSurfaceOptions matrix_free_surface_options(const MatrixCase& te
 struct MatrixConfiguredCase
 {
     SimpleFluid::SP<Handle> mesh;
-    std::unique_ptr<Solver> solver;
+    std::shared_ptr<Solver> solver;
+    std::unique_ptr<SimpleFluid::MultiphysicsSolverCoupler<Pack>> coupling;
     MatrixCase definition;
 };
 
@@ -1710,19 +1727,20 @@ MatrixConfiguredCase configure_matrix_case(const MatrixCase& test_case, double p
     auto options = SimpleFluid::test::with_coupled_backend(matrix_time_options(test_case.axis), selection);
     options.pressure_velocity_coupling = coupling;
     options.pressure_gradient_scheme = gradient;
-    auto solver = std::make_unique<Solver>(
+    auto solver = std::make_shared<Solver>(
         mesh, matrix_boundaries(*mesh, test_case.moving_boundary), options, linear_options, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
     solver->add_temperature_source("matrix_uniform_heat", power_density);
 
     Handle::Vec3 direction{};
     direction.component(static_cast<size_t>(test_case.axis)) = 1.0;
-    solver->initialize_linear_temperature(direction, 300.0, 300.0);
-    if (solver->configure_free_surface(matrix_free_surface_options(test_case)) == nullptr)
+    solver_coupling->initialize_linear_temperature(direction, 300.0, 300.0);
+    if (solver_coupling->configure_free_surface(matrix_free_surface_options(test_case)) == nullptr)
     {
         throw std::logic_error("The planar-ALE support-matrix case did not create a model.");
     }
-    return {std::move(mesh), std::move(solver), test_case};
+    return {std::move(mesh), std::move(solver), std::move(solver_coupling), test_case};
 }
 
 double boundary_elevation(const Handle& mesh, const MatrixCase& test_case)
@@ -1768,7 +1786,7 @@ double boundary_elevation(const Handle& mesh, const MatrixCase& test_case)
 void expect_matrix_top_kinematics(const MatrixConfiguredCase& state, double old_surface_elevation, double time_step)
 {
     const auto& absolute = state.solver->pressure_corrected_face_fluxes();
-    const auto& relative = state.solver->mesh_relative_face_fluxes();
+    const auto& relative = state.coupling->mesh_relative_face_fluxes();
     const auto new_surface_elevation = boundary_elevation(*state.mesh, state.definition);
     const auto speed = (new_surface_elevation - old_surface_elevation) / time_step;
 
@@ -1824,15 +1842,15 @@ void exercise_supported_matrix_case(const MatrixCase& test_case, Coupling coupli
     const auto old_epoch = state.mesh->geometry_epoch();
     const auto old_surface = boundary_elevation(*state.mesh, test_case);
     const auto old_volume = global_mesh_volume(*state.mesh);
-    const auto old_mass = state.solver->liquid_mass_inventory().totalMass();
+    const auto old_mass = state.coupling->liquid_mass_inventory().totalMass();
 
-    ASSERT_TRUE(state.solver->planar_ale_enabled());
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_TRUE(state.coupling->planar_ale_enabled());
+    ASSERT_NO_THROW(state.coupling->step());
 
     const auto new_surface = boundary_elevation(*state.mesh, test_case);
     const auto new_volume = global_mesh_volume(*state.mesh);
-    const auto surface = state.solver->free_surface_diagnostics();
-    const auto& diagnostics = state.solver->planar_ale_diagnostics();
+    const auto surface = state.coupling->free_surface_diagnostics();
+    const auto& diagnostics = state.coupling->planar_ale_diagnostics();
     record_ale_residuals(diagnostics);
     EXPECT_EQ(state.solver->step_index(), 1);
     EXPECT_NEAR(state.solver->time(), time_step, 1.0e-15);
@@ -1842,7 +1860,7 @@ void exercise_supported_matrix_case(const MatrixCase& test_case, Coupling coupli
     EXPECT_NEAR(surface.pool_level, new_surface, 2.0e-11);
     EXPECT_NEAR(surface.pool_volume, new_volume, 2.0e-11);
     EXPECT_NEAR(new_volume, test_case.cross_section_area * new_surface, 2.0e-11);
-    EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), old_mass, 2.0e-11);
+    EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), old_mass, 2.0e-11);
     EXPECT_TRUE(state.solver->last_step_statistics().converged);
     EXPECT_TRUE(diagnostics.initialized);
     EXPECT_GE(diagnostics.outer_correctors, 2);
@@ -1928,15 +1946,16 @@ void expect_nonaxial_family_rejected(MatrixCase test_case)
 
     auto mesh = make_matrix_mesh(test_case);
     SimpleFluid::LinearSolverOptions linear_options;
-    auto solver = std::make_unique<Solver>(mesh, matrix_boundaries(*mesh, test_case.moving_boundary),
+    auto solver = std::make_shared<Solver>(mesh, matrix_boundaries(*mesh, test_case.moving_boundary),
         matrix_time_options(test_case.axis), linear_options, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
 
     std::string diagnostic;
     try
     {
-        static_cast<void>(solver->configure_free_surface(matrix_free_surface_options(test_case)));
+        static_cast<void>(solver_coupling->configure_free_surface(matrix_free_surface_options(test_case)));
         FAIL() << "Expected a nonaxial planar-ALE mesh family to be rejected.";
     }
     catch (const std::invalid_argument& error)
@@ -1944,8 +1963,8 @@ void expect_nonaxial_family_rejected(MatrixCase test_case)
         diagnostic = error.what();
     }
     EXPECT_NE(diagnostic.find("axial"), std::string::npos) << diagnostic;
-    EXPECT_FALSE(solver->planar_ale_enabled());
-    EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
+    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsNonaxialCylindricalMotion)
@@ -1984,32 +2003,33 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsUnsupportedVesselLiquidRangeAn
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsUnmigratedOptionalTransportModelsBeforeMotion)
 {
+    expect_active_model_rejected([](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
+        { coupling.configure_scalar_void_fraction(SimpleFluid::ScalarVoidFractionOptions{}); });
     expect_active_model_rejected(
-        [](Solver& solver) { solver.configure_scalar_void_fraction(SimpleFluid::ScalarVoidFractionOptions{}); });
-    expect_active_model_rejected(
-        [](Solver& solver)
+        [](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
         {
             SimpleFluid::BoilingSourceOptions options;
             options.enable_bulk_boiling = true;
-            solver.configure_boiling_source(options);
+            coupling.configure_boiling_source(options);
         });
     expect_active_model_rejected(
-        [](Solver& solver)
+        [](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
         {
             SimpleFluid::DelayedNeutronPrecursorOptions options;
             options.group_count = 1;
-            solver.configure_precursors(options);
+            coupling.configure_precursors(options);
         });
     expect_active_model_rejected(
-        [](Solver& solver)
+        [](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
         {
             SimpleFluid::TurbulenceModelOptions options;
             options.model = SimpleFluid::TurbulenceModelType::StandardKEpsilon;
-            solver.configure_turbulence(options);
+            coupling.boussinesq_solver().configure_turbulence(options);
         });
-    expect_active_model_rejected([](Solver& solver) { solver.set_material_updater([](const auto&, auto&) {}); });
-    expect_active_model_rejected([](Solver& solver)
-        { solver.add_temperature_source("dynamic_source", 0.0).set_updater([](const auto&, auto&) {}); });
+    expect_active_model_rejected([](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
+        { coupling.set_material_updater([](const auto&, auto&) {}); });
+    expect_active_model_rejected([](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
+        { coupling.add_temperature_source("dynamic_source", 0.0).set_updater([](const auto&, auto&) {}); });
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsNonadiabaticAndOpenNonmovingBoundaries)
@@ -2026,54 +2046,59 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsNonadiabaticAndOpenNonmovingBo
             boundaries.velocity["xmax"] = {SimpleFluid::BoundaryConditionType::Dirichlet, Handle::Vec3{1.0, 0.0, 0.0}};
         }
         auto mesh = make_column();
-        auto solver = std::make_unique<Solver>(
+        auto solver = std::make_shared<Solver>(
             mesh, boundaries, time_options(Coupling::PISO), SimpleFluid::LinearSolverOptions{}, physical_options());
-        solver->configure_material_feedback(material_feedback_options());
-        solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
-        EXPECT_THROW(static_cast<void>(solver->configure_free_surface(free_surface_options(4))), std::invalid_argument);
-        EXPECT_FALSE(solver->planar_ale_enabled());
-        EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+        auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+        solver_coupling->configure_material_feedback(material_feedback_options());
+        solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+        EXPECT_THROW(
+            static_cast<void>(solver_coupling->configure_free_surface(free_surface_options(4))), std::invalid_argument);
+        EXPECT_FALSE(solver_coupling->planar_ale_enabled());
+        EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
     }
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengRadiolysisWithoutFissionSourceAtSetup)
 {
     auto mesh = make_column();
-    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
-    solver->configure_radiolytic_gas(gas_options());
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
-    EXPECT_THROW(static_cast<void>(solver->configure_free_surface(free_surface_options(4))), std::invalid_argument);
-    EXPECT_FALSE(solver->planar_ale_enabled());
-    EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    solver_coupling->configure_radiolytic_gas(gas_options());
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    EXPECT_THROW(
+        static_cast<void>(solver_coupling->configure_free_surface(free_surface_options(4))), std::invalid_argument);
+    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
+    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengRadiolysisWithOnlyOneOuterCorrector)
 {
     auto mesh = make_column();
-    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
-    solver->add_fission_power_source().initialize_constant(0.0);
-    solver->configure_radiolytic_gas(gas_options());
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    solver_coupling->add_fission_power_source().initialize_constant(0.0);
+    solver_coupling->configure_radiolytic_gas(gas_options());
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto options = free_surface_options(1);
-    EXPECT_THROW(static_cast<void>(solver->configure_free_surface(options)), std::invalid_argument);
-    EXPECT_FALSE(solver->planar_ale_enabled());
-    EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+    EXPECT_THROW(static_cast<void>(solver_coupling->configure_free_surface(options)), std::invalid_argument);
+    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
+    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsGeometryDependentFissionProfileBeforeMotion)
 {
     auto state = make_case(Coupling::PISO, 0.0, 5, true);
-    auto* fission = state.solver->find_fission_power_source();
+    auto* fission = state.coupling->find_fission_power_source();
     ASSERT_NE(fission, nullptr);
     fission->initialize_gaussian(1.0, Handle::Vec3{0.5, 0.5, 0.0}, Handle::Vec3{1.0, 1.0, 0.5});
     const auto geometry = capture_geometry(*state.mesh);
     const auto primary = capture_primary(*state.solver);
 
-    EXPECT_THROW(state.solver->step(), std::invalid_argument);
+    EXPECT_THROW(state.coupling->step(), std::invalid_argument);
     EXPECT_EQ(state.solver->step_index(), 0);
     EXPECT_DOUBLE_EQ(state.solver->time(), 0.0);
     EXPECT_EQ(state.mesh->geometry_epoch(), geometry.epoch);
@@ -2083,12 +2108,12 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsGeometryDependentFissionProfil
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsGeometryDependentThermalFissionProfileWithoutRadiolysis)
 {
     auto state = make_case(Coupling::PISO, 0.0, 5);
-    auto& fission = state.solver->add_fission_power_source();
+    auto& fission = state.coupling->add_fission_power_source();
     fission.initialize_gaussian(1.0, Handle::Vec3{0.5, 0.5, 0.0}, Handle::Vec3{1.0, 1.0, 0.5});
     const auto geometry = capture_geometry(*state.mesh);
     const auto primary = capture_primary(*state.solver);
 
-    EXPECT_THROW(state.solver->step(), std::invalid_argument);
+    EXPECT_THROW(state.coupling->step(), std::invalid_argument);
     EXPECT_EQ(state.solver->step_index(), 0);
     EXPECT_DOUBLE_EQ(state.solver->time(), 0.0);
     EXPECT_EQ(state.mesh->geometry_epoch(), geometry.epoch);
@@ -2104,29 +2129,32 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsGravityThatIsNotInwardAndAxial
         options.gravity_x = gravity.x;
         options.gravity_y = gravity.y;
         options.gravity_z = gravity.z;
-        auto solver = std::make_unique<Solver>(
+        auto solver = std::make_shared<Solver>(
             mesh, planar_boundaries(), options, SimpleFluid::LinearSolverOptions{}, physical_options());
-        solver->configure_material_feedback(material_feedback_options());
-        solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
-        EXPECT_THROW(static_cast<void>(solver->configure_free_surface(free_surface_options(4))), std::invalid_argument);
-        EXPECT_FALSE(solver->planar_ale_enabled());
+        auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+        solver_coupling->configure_material_feedback(material_feedback_options());
+        solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+        EXPECT_THROW(
+            static_cast<void>(solver_coupling->configure_free_surface(free_surface_options(4))), std::invalid_argument);
+        EXPECT_FALSE(solver_coupling->planar_ale_enabled());
     }
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, ConfigurationRejectsGeometryBeforePrimaryFieldsOrHistory)
 {
     auto mesh = make_column();
-    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
     auto invalid_geometry = free_surface_options(4);
     invalid_geometry.vessel.cross_section_area = 2.0;
     invalid_geometry.vessel.total_internal_volume = 4.0;
     const auto initial_primary = capture_primary(*solver);
-    EXPECT_THROW(static_cast<void>(solver->configure_free_surface(invalid_geometry)), std::invalid_argument);
-    EXPECT_EQ(solver->find_free_surface_model(), nullptr);
-    EXPECT_TRUE(solver->free_surface_history().empty());
-    EXPECT_FALSE(solver->planar_ale_enabled());
+    EXPECT_THROW(static_cast<void>(solver_coupling->configure_free_surface(invalid_geometry)), std::invalid_argument);
+    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
+    EXPECT_TRUE(solver_coupling->free_surface_history().empty());
+    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
     expect_primary_restored(*solver, initial_primary);
 }
 
@@ -2139,13 +2167,15 @@ TEST(BoussinesqPlanarALESupportMatrixTest, CollectivelyRejectsRankDivergentRunti
     }
     auto mesh = make_column();
     const auto coupling = communicator->getRank() == 0 ? Coupling::SIMPLE : Coupling::CoupledKrylov;
-    auto solver = std::make_unique<Solver>(
+    auto solver = std::make_shared<Solver>(
         mesh, planar_boundaries(), time_options(coupling), SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver->configure_material_feedback(material_feedback_options());
-    solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
-    EXPECT_THROW(static_cast<void>(solver->configure_free_surface(free_surface_options(4))), std::invalid_argument);
-    EXPECT_FALSE(solver->planar_ale_enabled());
-    EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    EXPECT_THROW(
+        static_cast<void>(solver_coupling->configure_free_surface(free_surface_options(4))), std::invalid_argument);
+    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
+    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsRankDivergentLevelTolerancePolicyBeforeMotion)
@@ -2153,14 +2183,16 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsRankDivergentLevelTolerancePol
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
     auto mesh = make_column();
-    Solver solver(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver_shared = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver.configure_material_feedback(material_feedback_options());
-    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_material_feedback(material_feedback_options());
+    solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto options = free_surface_options(4);
     options.ale.level_tolerance_from_volume = comm->getRank() == 1;
-    EXPECT_THROW(static_cast<void>(solver.configure_free_surface(options)), std::invalid_argument);
-    EXPECT_FALSE(solver.planar_ale_enabled());
+    EXPECT_THROW(static_cast<void>(solver_coupling.configure_free_surface(options)), std::invalid_argument);
+    EXPECT_FALSE(solver_coupling.planar_ale_enabled());
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsDivergentMomentumPolicyBeforeMotion)
@@ -2168,17 +2200,20 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsDivergentMomentumPolicyBeforeM
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
     auto mesh = make_column();
-    Solver solver(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver_shared = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver.configure_material_feedback(material_feedback_options());
-    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_material_feedback(material_feedback_options());
+    solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto momentum = solver.linear_solver_options();
     momentum.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
     momentum.preconditioner = SimpleFluid::LinearPreconditioner::ILU0;
     solver.set_momentum_linear_solver_options(momentum);
     if (comm->getRank() == 1) solver.clear_momentum_linear_solver_options();
-    EXPECT_THROW(static_cast<void>(solver.configure_free_surface(free_surface_options(4))), std::invalid_argument);
-    EXPECT_FALSE(solver.planar_ale_enabled());
+    EXPECT_THROW(
+        static_cast<void>(solver_coupling.configure_free_surface(free_surface_options(4))), std::invalid_argument);
+    EXPECT_FALSE(solver_coupling.planar_ale_enabled());
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsMultiRankSemiStructuredBeforeSolverConfiguration)
@@ -2207,7 +2242,7 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsMultiRankSemiStructuredBeforeS
 double coupling_sensible_energy(const ConfiguredCase& state)
 {
     double local = 0.0;
-    const auto& mass = state.solver->liquid_mass_inventory().cellMassInventory();
+    const auto& mass = state.coupling->liquid_mass_inventory().cellMassInventory();
     const auto& cp = state.solver->material_properties().specific_heat_capacity;
     for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
     {
@@ -2227,22 +2262,24 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
         SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
         SimpleFluid::FVM::CellGradientScheme::LeastSquares, true);
     auto& solver = *state.solver;
-    auto* gas = solver.find_radiolytic_gas_model();
+    auto& solver_coupling = *state.coupling;
+    auto& coupling = solver_coupling;
+    auto* gas = coupling.find_radiolytic_gas_model();
     const auto initial_energy = coupling_sensible_energy(state);
     const auto initial_hydrogen = gas->global_submerged_hydrogen_moles();
-    const auto initial_history = solver.free_surface_history().size();
+    const auto initial_history = solver_coupling.free_surface_history().size();
     std::vector<double> energy(state.mesh->num_owned_cells());
     for (size_t owned = 0; owned < energy.size(); ++owned)
         energy[owned] = state.mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(owned)).z < 0.5 ? 0.01 : 0.02;
-    auto checkpoint = solver.create_coupling_checkpoint();
-    EXPECT_THROW(static_cast<void>(solver.create_coupling_checkpoint()), std::logic_error);
+    auto checkpoint = coupling.create_coupling_checkpoint();
+    EXPECT_THROW(static_cast<void>(solver_coupling.create_coupling_checkpoint()), std::logic_error);
     solver.reset_solver_phase_timings();
-    solver.set_coupling_interval_energy(energy, 0.02);
-    solver.step();
-    EXPECT_NEAR(solver.find_fission_power_source()->integrated_power(), 1.5, 1.e-13);
-    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::logic_error);
-    EXPECT_THROW(solver.set_coupling_interval_energy(energy, 0.02), std::logic_error);
-    solver.step();
+    coupling.set_coupling_interval_energy(energy, 0.02);
+    coupling.step();
+    EXPECT_NEAR(solver_coupling.find_fission_power_source()->integrated_power(), 1.5, 1.e-13);
+    EXPECT_THROW(solver_coupling.accept_coupling_checkpoint(checkpoint), std::logic_error);
+    EXPECT_THROW(solver_coupling.set_coupling_interval_energy(energy, 0.02), std::logic_error);
+    solver_coupling.step();
     const auto accepted_time = solver.time();
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::GeometryRefresh).calls,
         solver.solver_phase_timing(SimpleFluid::SolverPhase::ALEGeometry).calls);
@@ -2257,10 +2294,10 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     const auto accepted_geometry = capture_geometry(*state.mesh);
     const auto accepted_primary = capture_primary(solver);
     const auto accepted_absolute_flux = capture_owned_face_values(solver.pressure_corrected_face_fluxes());
-    const auto accepted_relative_flux = capture_owned_face_values(solver.mesh_relative_face_fluxes());
-    const auto accepted_mass = capture_owned_values(solver.liquid_mass_inventory().cellMassInventory());
+    const auto accepted_relative_flux = capture_owned_face_values(solver_coupling.mesh_relative_face_fluxes());
+    const auto accepted_mass = capture_owned_values(solver_coupling.liquid_mass_inventory().cellMassInventory());
     const auto accepted_gas_fields = capture_gas_fields(*gas);
-    const auto accepted_history = solver.free_surface_history();
+    const auto accepted_history = solver_coupling.free_surface_history();
     std::vector<double> accepted_temperature;
     for (size_t owned = 0; owned < energy.size(); ++owned)
         accepted_temperature.push_back(solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned)));
@@ -2279,78 +2316,79 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     Teuchos::reduceAll(*state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
         1, &local_donor, &global_donor);
     EXPECT_NEAR(global_donor, initial_hydrogen + accepted_generation, 2.e-12);
-    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_THROW(solver_coupling.step(), std::invalid_argument);
     EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
 
-    solver.restore_coupling_checkpoint(checkpoint);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_GT(state.mesh->geometry_epoch(), advanced_epoch);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_EQ(solver.step_index(), 0);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
-    EXPECT_EQ(solver.free_surface_history().size(), initial_history);
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), initial_history);
     EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), 0.0);
     EXPECT_NEAR(gas->global_submerged_hydrogen_moles(), initial_hydrogen, 1.e-14);
     for (size_t owned = 0; owned < energy.size(); ++owned)
         EXPECT_DOUBLE_EQ(gas->donor_hydrogen_deficit().value(static_cast<Pack::local_ordinal_type>(owned)), 1.0);
     auto alternate_energy = energy;
     for (auto& value : alternate_energy) value *= 0.5;
-    solver.set_coupling_interval_energy(alternate_energy, 0.02);
-    solver.step();
-    solver.step();
+    solver_coupling.set_coupling_interval_energy(alternate_energy, 0.02);
+    solver_coupling.step();
+    solver_coupling.step();
     EXPECT_LT(coupling_sensible_energy(state), accepted_energy);
-    solver.restore_coupling_checkpoint(checkpoint);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
     EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), 0.0);
-    solver.set_coupling_interval_energy(energy, 0.02);
-    solver.step();
-    solver.step();
+    solver_coupling.set_coupling_interval_energy(energy, 0.02);
+    solver_coupling.step();
+    solver_coupling.step();
     EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
     EXPECT_NEAR(top_elevation(*state.mesh), accepted_level, 1.e-13);
     EXPECT_NEAR(coupling_sensible_energy(state), accepted_energy, 2.e-8);
     EXPECT_NEAR(gas->cumulative_hydrogen_produced(), accepted_generation, 1.e-16);
-    EXPECT_EQ(solver.free_surface_history().size(), initial_history + 2);
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), initial_history + 2);
     expect_geometry_restored(*state.mesh, accepted_geometry);
     expect_primary_restored(solver, accepted_primary);
     expect_owned_face_values(solver.pressure_corrected_face_fluxes(), accepted_absolute_flux);
-    expect_owned_face_values(solver.mesh_relative_face_fluxes(), accepted_relative_flux);
-    expect_owned_values(solver.liquid_mass_inventory().cellMassInventory(), accepted_mass);
+    expect_owned_face_values(solver_coupling.mesh_relative_face_fluxes(), accepted_relative_flux);
+    expect_owned_values(solver_coupling.liquid_mass_inventory().cellMassInventory(), accepted_mass);
     expect_gas_fields_restored(*gas, accepted_gas_fields);
-    ASSERT_EQ(solver.free_surface_history().size(), accepted_history.size());
+    ASSERT_EQ(solver_coupling.free_surface_history().size(), accepted_history.size());
     for (size_t step = 0; step < accepted_history.size(); ++step)
     {
-        EXPECT_DOUBLE_EQ(solver.free_surface_history()[step].free_surface.pool_level,
+        EXPECT_DOUBLE_EQ(solver_coupling.free_surface_history()[step].free_surface.pool_level,
             accepted_history[step].free_surface.pool_level);
-        EXPECT_DOUBLE_EQ(solver.free_surface_history()[step].liquid_mass.total_mass,
+        EXPECT_DOUBLE_EQ(solver_coupling.free_surface_history()[step].liquid_mass.total_mass,
             accepted_history[step].liquid_mass.total_mass);
     }
     for (size_t owned = 0; owned < energy.size(); ++owned)
         EXPECT_NEAR(solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned)),
             accepted_temperature[owned], 1.e-11);
-    solver.accept_coupling_checkpoint(checkpoint);
-    EXPECT_THROW(solver.restore_coupling_checkpoint(checkpoint), std::invalid_argument);
+    coupling.accept_coupling_checkpoint(checkpoint);
+    EXPECT_THROW(solver_coupling.restore_coupling_checkpoint(checkpoint), std::invalid_argument);
 }
 
 TEST(BoussinesqCouplingIntervalTest, RepeatedReplayPreservesAcceptedHistoryPrefix)
 {
     auto state = make_case(Coupling::PISO, 0.0, 4);
     auto& solver = *state.solver;
-    solver.step();
-    solver.step();
-    const auto prefix = solver.free_surface_history();
+    auto& solver_coupling = *state.coupling;
+    solver_coupling.step();
+    solver_coupling.step();
+    const auto prefix = solver_coupling.free_surface_history();
     ASSERT_GE(prefix.size(), 2U);
     const auto accepted_time = solver.time();
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     for (int replay = 0; replay < 2; ++replay)
     {
-        solver.step();
-        ASSERT_EQ(solver.free_surface_history().size(), prefix.size() + 1);
-        solver.restore_coupling_checkpoint(checkpoint);
+        solver_coupling.step();
+        ASSERT_EQ(solver_coupling.free_surface_history().size(), prefix.size() + 1);
+        solver_coupling.restore_coupling_checkpoint(checkpoint);
         EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
-        ASSERT_EQ(solver.free_surface_history().size(), prefix.size());
+        ASSERT_EQ(solver_coupling.free_surface_history().size(), prefix.size());
         for (size_t record = 0; record < prefix.size(); ++record)
         {
-            const auto& actual = solver.free_surface_history()[record];
+            const auto& actual = solver_coupling.free_surface_history()[record];
             EXPECT_DOUBLE_EQ(actual.free_surface.pool_level, prefix[record].free_surface.pool_level);
             EXPECT_DOUBLE_EQ(actual.liquid_mass.total_mass, prefix[record].liquid_mass.total_mass);
             ASSERT_EQ(actual.planar_ale.has_value(), prefix[record].planar_ale.has_value());
@@ -2364,165 +2402,175 @@ TEST(BoussinesqCouplingIntervalTest, RepeatedReplayPreservesAcceptedHistoryPrefi
             }
         }
     }
-    solver.step();
-    solver.accept_coupling_checkpoint(checkpoint);
-    EXPECT_EQ(solver.free_surface_history().size(), prefix.size() + 1);
+    solver_coupling.step();
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), prefix.size() + 1);
 }
 
 TEST(BoussinesqCouplingIntervalTest, RejectsInvalidBudgetAndRestoresSourceAfterFailedTrial)
 {
     auto state = make_case(Coupling::PISO, 0.0, 1);
-    state.solver->add_fission_power_source().initialize_constant(0.0);
+    state.coupling->add_fission_power_source().initialize_constant(0.0);
     auto& solver = *state.solver;
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto& solver_coupling = *state.coupling;
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     std::vector<double> invalid(state.mesh->num_owned_cells(), 0.0);
     if (state.mesh->owned_cell_map()->getComm()->getRank() == 0 && !invalid.empty())
         invalid[0] = -1.0;
-    EXPECT_THROW(solver.set_coupling_interval_energy(invalid, 0.01), std::exception);
+    EXPECT_THROW(solver_coupling.set_coupling_interval_energy(invalid, 0.01), std::exception);
     std::vector<double> energy(state.mesh->num_owned_cells(), 0.01);
-    EXPECT_THROW(solver.set_coupling_interval_energy(energy, 0.0), std::invalid_argument);
-    solver.set_coupling_interval_energy(energy, 0.01);
-    const auto before_source = solver.find_fission_power_source()->integrated_power();
-    EXPECT_THROW(solver.step(), std::runtime_error);
+    EXPECT_THROW(solver_coupling.set_coupling_interval_energy(energy, 0.0), std::invalid_argument);
+    solver_coupling.set_coupling_interval_energy(energy, 0.01);
+    const auto before_source = solver_coupling.find_fission_power_source()->integrated_power();
+    EXPECT_THROW(solver_coupling.step(), std::runtime_error);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
-    EXPECT_DOUBLE_EQ(solver.find_fission_power_source()->integrated_power(), before_source);
+    EXPECT_DOUBLE_EQ(solver_coupling.find_fission_power_source()->integrated_power(), before_source);
     const Solver& observer = solver;
-    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
-    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
-    solver.restore_coupling_checkpoint(checkpoint);
-    EXPECT_DOUBLE_EQ(solver.find_fission_power_source()->integrated_power(), 0.0);
-    EXPECT_FALSE(solver.find_fission_power_source()->has_interval_energy());
-    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
-    solver.accept_coupling_checkpoint(checkpoint);
+    auto& observer_coupling = solver_coupling;
+    EXPECT_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    EXPECT_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
+    EXPECT_DOUBLE_EQ(solver_coupling.find_fission_power_source()->integrated_power(), 0.0);
+    EXPECT_FALSE(solver_coupling.find_fission_power_source()->has_interval_energy());
+    EXPECT_NO_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint));
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
 }
 
 TEST(BoussinesqCouplingIntervalTest, AcceptancePreflightPreservesPartialAndCompleteCheckpoints)
 {
     auto state = make_case(Coupling::PISO, 0.0, 25);
     auto& solver = *state.solver;
+    auto& solver_coupling = *state.coupling;
     const Solver& observer = solver;
-    auto& source = solver.add_fission_power_source();
+    auto& observer_coupling = solver_coupling;
+    auto& source = solver_coupling.add_fission_power_source();
     source.initialize_constant(0.0);
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     const std::vector<double> energy(state.mesh->num_owned_cells(), 0.01);
-    solver.set_coupling_interval_energy(energy, 0.02);
-    solver.step();
-    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
-    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
-    solver.restore_coupling_checkpoint(checkpoint);
+    solver_coupling.set_coupling_interval_energy(energy, 0.02);
+    solver_coupling.step();
+    EXPECT_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    EXPECT_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_FALSE(source.has_interval_energy());
-    solver.set_coupling_interval_energy(energy, 0.02);
-    solver.step();
-    solver.step();
+    solver_coupling.set_coupling_interval_energy(energy, 0.02);
+    solver_coupling.step();
+    solver_coupling.step();
 
     const auto primary = capture_primary(observer);
     const auto source_values = capture_owned_values(source.field());
-    const auto mass_values = capture_owned_values(solver.liquid_mass_inventory().cellMassInventory());
+    const auto mass_values = capture_owned_values(solver_coupling.liquid_mass_inventory().cellMassInventory());
     const auto geometry = capture_geometry(*state.mesh);
-    const auto history = solver.free_surface_history();
+    const auto history = solver_coupling.free_surface_history();
     const double power = source.integrated_power();
-    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
-    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
+    EXPECT_NO_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint));
+    EXPECT_NO_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint));
     EXPECT_DOUBLE_EQ(solver.time(), 0.02);
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_EQ(state.mesh->geometry_epoch(), geometry.epoch);
     EXPECT_EQ(capture_geometry(*state.mesh).cell_volumes, geometry.cell_volumes);
     expect_primary_restored(observer, primary);
     expect_owned_values(source.field(), source_values);
-    expect_owned_values(solver.liquid_mass_inventory().cellMassInventory(), mass_values);
+    expect_owned_values(solver_coupling.liquid_mass_inventory().cellMassInventory(), mass_values);
     EXPECT_TRUE(source.has_interval_energy());
     EXPECT_DOUBLE_EQ(source.interval_duration(), 0.02);
     EXPECT_DOUBLE_EQ(source.interval_end_time(), 0.02);
     EXPECT_DOUBLE_EQ(source.integrated_power(), power);
-    ASSERT_EQ(solver.free_surface_history().size(), history.size());
+    ASSERT_EQ(solver_coupling.free_surface_history().size(), history.size());
     for (size_t record = 0; record < history.size(); ++record)
     {
-        EXPECT_DOUBLE_EQ(solver.free_surface_history()[record].free_surface.pool_level,
-                         history[record].free_surface.pool_level);
-        EXPECT_DOUBLE_EQ(solver.free_surface_history()[record].liquid_mass.total_mass,
-                         history[record].liquid_mass.total_mass);
+        EXPECT_DOUBLE_EQ(solver_coupling.free_surface_history()[record].free_surface.pool_level,
+            history[record].free_surface.pool_level);
+        EXPECT_DOUBLE_EQ(solver_coupling.free_surface_history()[record].liquid_mass.total_mass,
+            history[record].liquid_mass.total_mass);
     }
-    EXPECT_THROW(static_cast<void>(solver.create_coupling_checkpoint()), std::logic_error);
-    solver.accept_coupling_checkpoint(checkpoint);
-    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::invalid_argument);
-    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(solver_coupling.create_coupling_checkpoint()), std::logic_error);
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
+    EXPECT_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint), std::invalid_argument);
+    EXPECT_THROW(solver_coupling.accept_coupling_checkpoint(checkpoint), std::invalid_argument);
 }
 
 TEST(BoussinesqCouplingIntervalTest, AcceptancePreflightRejectsForeignAndRankLocalForeignTokens)
 {
     auto first = make_case(Coupling::PISO, 0.0, 25);
     auto second = make_case(Coupling::PISO, 0.0, 25);
-    auto first_checkpoint = first.solver->create_coupling_checkpoint();
-    auto second_checkpoint = second.solver->create_coupling_checkpoint();
+    auto first_checkpoint = first.coupling->create_coupling_checkpoint();
+    auto second_checkpoint = second.coupling->create_coupling_checkpoint();
     const Solver& first_observer = *first.solver;
+    auto& first_observer_coupling = *first.coupling;
     const Solver& second_observer = *second.solver;
-    EXPECT_THROW(first_observer.validate_coupling_checkpoint_acceptance(second_checkpoint),
-                 std::invalid_argument);
+    auto& second_observer_coupling = *second.coupling;
+    EXPECT_THROW(
+        first_observer_coupling.validate_coupling_checkpoint_acceptance(second_checkpoint), std::invalid_argument);
     const auto& rank_local_token = Tpetra::getDefaultComm()->getRank() == 0
         ? second_checkpoint : first_checkpoint;
-    EXPECT_THROW(first_observer.validate_coupling_checkpoint_acceptance(rank_local_token), std::exception);
-    EXPECT_NO_THROW(first_observer.validate_coupling_checkpoint_acceptance(first_checkpoint));
-    EXPECT_NO_THROW(second_observer.validate_coupling_checkpoint_acceptance(second_checkpoint));
-    first.solver->restore_coupling_checkpoint(first_checkpoint);
-    second.solver->restore_coupling_checkpoint(second_checkpoint);
-    first.solver->accept_coupling_checkpoint(first_checkpoint);
-    second.solver->accept_coupling_checkpoint(second_checkpoint);
+    EXPECT_THROW(first_observer_coupling.validate_coupling_checkpoint_acceptance(rank_local_token), std::exception);
+    EXPECT_NO_THROW(first_observer_coupling.validate_coupling_checkpoint_acceptance(first_checkpoint));
+    EXPECT_NO_THROW(second_observer_coupling.validate_coupling_checkpoint_acceptance(second_checkpoint));
+    first.coupling->restore_coupling_checkpoint(first_checkpoint);
+    second.coupling->restore_coupling_checkpoint(second_checkpoint);
+    first.coupling->accept_coupling_checkpoint(first_checkpoint);
+    second.coupling->accept_coupling_checkpoint(second_checkpoint);
 }
 
 TEST(BoussinesqCouplingIntervalTest, ShortEnergyIntervalCannotBeAcceptedWithoutAdvancing)
 {
     auto state = make_case(Coupling::PISO, 0.0, 25);
     auto& solver = *state.solver;
-    solver.add_fission_power_source().initialize_constant(0.0);
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto& solver_coupling = *state.coupling;
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     const std::vector<double> energy(state.mesh->num_owned_cells(), 1.e-6);
-    solver.set_coupling_interval_energy(energy, 1.e-16);
+    solver_coupling.set_coupling_interval_energy(energy, 1.e-16);
     const Solver& observer = solver;
-    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
-    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::logic_error);
+    auto& observer_coupling = solver_coupling;
+    EXPECT_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    EXPECT_THROW(solver_coupling.accept_coupling_checkpoint(checkpoint), std::logic_error);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
-    solver.restore_coupling_checkpoint(checkpoint);
-    EXPECT_FALSE(solver.find_fission_power_source()->has_interval_energy());
-    solver.accept_coupling_checkpoint(checkpoint);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
+    EXPECT_FALSE(solver_coupling.find_fission_power_source()->has_interval_energy());
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
 }
 
 TEST(BoussinesqCouplingIntervalTest, AcceptanceRejectsOneUlpShortOfCanonicalIntervalEnd)
 {
     auto state = make_case(Coupling::PISO, 0.0, 25);
     auto& solver = *state.solver;
+    auto& solver_coupling = *state.coupling;
     const Solver& observer = solver;
-    solver.add_fission_power_source().initialize_constant(0.0);
+    auto& observer_coupling = solver_coupling;
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
     solver.set_time_step(0.002);
-    solver.step();
-    auto checkpoint = solver.create_coupling_checkpoint();
+    solver_coupling.step();
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     const double start = solver.time();
     const double canonical_end = start + 5.e-5;
     const double duration = canonical_end - start;
     const std::vector<double> energy(state.mesh->num_owned_cells(), 0.0);
-    solver.set_coupling_interval_energy(energy, duration);
+    solver_coupling.set_coupling_interval_energy(energy, duration);
     const double partial_end = std::nextafter(canonical_end, start);
     solver.set_time_step(partial_end - start);
-    solver.step();
+    solver_coupling.step();
     EXPECT_DOUBLE_EQ(solver.time(), partial_end);
     ASSERT_GT(canonical_end - solver.time(),
         32.0 * std::numeric_limits<double>::epsilon() * duration);
-    EXPECT_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
-    EXPECT_THROW(solver.accept_coupling_checkpoint(checkpoint), std::logic_error);
-    solver.restore_coupling_checkpoint(checkpoint);
-    solver.set_coupling_interval_energy(energy, duration);
+    EXPECT_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint), std::logic_error);
+    EXPECT_THROW(solver_coupling.accept_coupling_checkpoint(checkpoint), std::logic_error);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
+    solver_coupling.set_coupling_interval_energy(energy, duration);
     solver.set_time_step(duration);
-    solver.step();
+    solver_coupling.step();
     EXPECT_DOUBLE_EQ(solver.time(), canonical_end);
-    EXPECT_NO_THROW(observer.validate_coupling_checkpoint_acceptance(checkpoint));
-    solver.accept_coupling_checkpoint(checkpoint);
+    EXPECT_NO_THROW(observer_coupling.validate_coupling_checkpoint_acceptance(checkpoint));
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
 }
 
 TEST(BoussinesqCouplingIntervalTest, RejectsEndpointOverrunAndUnresolvableSourceTimes)
 {
     auto state = make_case(Coupling::PISO, 0.0, 25);
-    auto& source = state.solver->add_fission_power_source();
+    auto& source = state.coupling->add_fission_power_source();
     const std::vector<double> energy(state.mesh->num_owned_cells(), 1.e-6);
     source.set_interval_energy(energy, 0.0, 1.e-16);
     const double short_power = source.integrated_power();
@@ -2557,26 +2605,28 @@ TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydro
         SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
         SimpleFluid::FVM::CellGradientScheme::LeastSquares, true);
     auto& solver = *state.solver;
-    auto* gas = solver.find_radiolytic_gas_model();
+    auto& solver_coupling = *state.coupling;
+    auto* gas = solver_coupling.find_radiolytic_gas_model();
     const auto before_energy = coupling_sensible_energy(state);
     const auto before_hydrogen = gas->global_submerged_hydrogen_moles();
-    const auto history_size = solver.free_surface_history().size();
+    const auto history_size = solver_coupling.free_surface_history().size();
     std::vector<double> energy(state.mesh->num_owned_cells());
     for (size_t owned = 0; owned < energy.size(); ++owned)
         energy[owned] = state.mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(owned)).z < 0.5
             ? 0.01 : 0.02;
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     std::vector<double> first_temperatures;
     double first_level = 0.0;
     for (int attempt = 0; attempt < 2; ++attempt)
     {
         SCOPED_TRACE(attempt);
-        if (attempt != 0) solver.restore_coupling_checkpoint(checkpoint);
-        solver.set_coupling_interval_energy(energy, 0.02);
+        if (attempt != 0)
+            solver_coupling.restore_coupling_checkpoint(checkpoint);
+        solver_coupling.set_coupling_interval_energy(energy, 0.02);
         for (double dt : {0.003, 0.007, 0.01})
         {
             solver.set_time_step(dt);
-            solver.step();
+            solver_coupling.step();
         }
         EXPECT_NEAR(solver.time(), 0.02, 1.e-17);
         EXPECT_NEAR(coupling_sensible_energy(state) - before_energy, 0.03, 2.e-8);
@@ -2584,7 +2634,7 @@ TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydro
         EXPECT_NEAR(gas->cumulative_hydrogen_produced(), generated, 1.e-16);
         EXPECT_NEAR(gas->global_submerged_hydrogen_moles() - before_hydrogen, generated, 2.e-12);
         EXPECT_NEAR(gas->last_statistics().donor_inventory_error, 0.0, 2.e-12);
-        EXPECT_EQ(solver.free_surface_history().size(), history_size + 3);
+        EXPECT_EQ(solver_coupling.free_surface_history().size(), history_size + 3);
         for (size_t owned = 0; owned < energy.size(); ++owned)
         {
             const double temperature = solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned));
@@ -2594,7 +2644,7 @@ TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydro
         if (attempt == 0) first_level = top_elevation(*state.mesh);
         else EXPECT_NEAR(top_elevation(*state.mesh), first_level, 1.e-13);
     }
-    solver.accept_coupling_checkpoint(checkpoint);
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
 }
 
 TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnergyAndHydrogen)
@@ -2658,8 +2708,10 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     material.specific_heat_capacity = specific_heat;
     material.dynamic_viscosity = 1.e-3;
     material.thermal_conductivity = 0.6;
-    auto solver_owner = std::make_unique<Solver>(mesh, boundaries, time, linear, material);
+    auto solver_owner = std::make_shared<Solver>(mesh, boundaries, time, linear, material);
+    auto solver_owner_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver_owner);
     auto& solver = *solver_owner;
+    auto& solver_coupling = *solver_owner_coupling;
     SimpleFluid::MaterialFeedbackOptions thermal;
     thermal.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqTemperatureOnly;
     thermal.reference_density = density;
@@ -2667,8 +2719,8 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     thermal.reference_temperature = initial_temperature;
     thermal.thermal_expansion = 2.1e-4;
     thermal.reference_dynamic_viscosity = 1.e-3;
-    solver.configure_material_feedback(thermal);
-    solver.add_fission_power_source().initialize_constant(0.0);
+    solver_coupling.configure_material_feedback(thermal);
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
     SimpleFluid::RadiolyticGasOptions gas_options;
     gas_options.mode = SimpleFluid::RadiolyticGasMode::Sheng2024TwoPopulation;
     gas_options.pressure_mode = SimpleFluid::RadiolyticPressureMode::Constant;
@@ -2687,9 +2739,9 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     gas_options.initial_dissolved_hydrogen = 0.0;
     gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};
-    auto& gas = solver.configure_radiolytic_gas(gas_options);
+    auto& gas = solver_coupling.configure_radiolytic_gas(gas_options);
     gas.enable_donor_hydrogen_deficit_tracking();
-    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
+    solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
     SimpleFluid::FreeSurfaceOptions surface;
     surface.enabled = true;
     surface.mode = SimpleFluid::FreeSurfaceMode::PlanarALE;
@@ -2709,8 +2761,8 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     surface.headspace.initial_temperature = initial_temperature;
     surface.ale.top_boundary = "zmax";
     surface.ale.maximum_correctors = 30;
-    ASSERT_NE(solver.configure_free_surface(surface), nullptr);
-    ConfiguredCase state{mesh, std::move(solver_owner), nullptr};
+    ASSERT_NE(solver_coupling.configure_free_surface(surface), nullptr);
+    ConfiguredCase state{mesh, std::move(solver_owner), std::move(solver_owner_coupling), nullptr};
 
     // Axisymmetric, nonuniform radial/axial source; normalize owned volumes
     // so serial and independently partitioned MPI runs receive the same joules.
@@ -2730,21 +2782,21 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_weight, &global_weight);
     for (auto& value : energy) value *= interval_energy / global_weight;
     const auto initial_sensible_energy = coupling_sensible_energy(state);
-    const auto initial_history_size = solver.free_surface_history().size();
-    EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), initial_mass, 2.e-11);
+    const auto initial_history_size = solver_coupling.free_surface_history().size();
+    EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), initial_mass, 2.e-11);
 
     for (int interval = 0; interval < 2; ++interval)
     {
         SCOPED_TRACE(interval);
-        auto checkpoint = solver.create_coupling_checkpoint();
+        auto checkpoint = solver_coupling.create_coupling_checkpoint();
         std::vector<double> first_temperatures;
         double first_level = 0.0;
         for (int attempt = 0; attempt < 2; ++attempt)
         {
             SCOPED_TRACE(attempt);
-            solver.restore_coupling_checkpoint(checkpoint);
-            solver.set_coupling_interval_energy(energy, interval_duration);
-            ASSERT_NO_THROW(solver.step());
+            solver_coupling.restore_coupling_checkpoint(checkpoint);
+            solver_coupling.set_coupling_interval_energy(energy, interval_duration);
+            ASSERT_NO_THROW(solver_coupling.step());
             const double cumulative_energy = (interval + 1) * interval_energy;
             const double produced = cumulative_energy * hydrogen_yield;
             EXPECT_NEAR(solver.time(), (interval + 1) * interval_duration, 1.e-19);
@@ -2752,15 +2804,15 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
                         cumulative_energy, 2.e-6);
             // Keep the established cumulative liquid-mass conservation gate
             // at this 148 kg scale, independently of the transport solver.
-            EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), initial_mass,
+            EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), initial_mass,
                 std::max(4096.0 * std::numeric_limits<double>::epsilon(), 1.e-10) * initial_mass);
             EXPECT_NEAR(gas.cumulative_hydrogen_produced(), produced, 1.e-18);
             EXPECT_NEAR(gas.global_submerged_hydrogen_moles() +
                             gas.cumulative_submerged_bubble_hydrogen_escaped(), produced, 1.e-17);
             EXPECT_NEAR(gas.last_statistics().donor_inventory_error, 0.0, 1.e-17);
-            EXPECT_NEAR(top_elevation(*mesh), solver.free_surface_diagnostics().pool_level,
+            EXPECT_NEAR(top_elevation(*mesh), solver_coupling.free_surface_diagnostics().pool_level,
                 surface.ale.level_absolute_tolerance + surface.ale.level_relative_tolerance);
-            EXPECT_EQ(solver.free_surface_history().size(), initial_history_size + interval + 1);
+            EXPECT_EQ(solver_coupling.free_surface_history().size(), initial_history_size + interval + 1);
             for (size_t owned = 0; owned < energy.size(); ++owned)
             {
                 const auto cell = static_cast<Pack::local_ordinal_type>(owned);
@@ -2771,7 +2823,7 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
             if (attempt == 0) first_level = top_elevation(*mesh);
             else EXPECT_NEAR(top_elevation(*mesh), first_level, 1.e-13);
         }
-        solver.accept_coupling_checkpoint(checkpoint);
+        solver_coupling.accept_coupling_checkpoint(checkpoint);
     }
 }
 
@@ -2838,7 +2890,9 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     material.specific_heat_capacity = 4200.0;
     material.dynamic_viscosity = 1.e-3;
     material.thermal_conductivity = 0.6;
-    Solver solver(mesh, boundaries, time, linear, material);
+    auto solver_shared = std::make_shared<Solver>(mesh, boundaries, time, linear, material);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::MaterialFeedbackOptions thermal;
     thermal.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqTemperatureOnly;
     thermal.reference_density = density;
@@ -2846,8 +2900,8 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     thermal.reference_temperature = initial_temperature;
     thermal.thermal_expansion = 2.1e-4;
     thermal.reference_dynamic_viscosity = 1.e-3;
-    solver.configure_material_feedback(thermal);
-    solver.add_fission_power_source().initialize_constant(0.0);
+    solver_coupling.configure_material_feedback(thermal);
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
     SimpleFluid::RadiolyticGasOptions gas_options;
     gas_options.mode = SimpleFluid::RadiolyticGasMode::Sheng2024TwoPopulation;
     gas_options.pressure_mode = SimpleFluid::RadiolyticPressureMode::Constant;
@@ -2867,9 +2921,9 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     gas_options.initial_dissolved_hydrogen = 0.0;
     gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};
-    auto& gas = solver.configure_radiolytic_gas(gas_options);
+    auto& gas = solver_coupling.configure_radiolytic_gas(gas_options);
     gas.enable_donor_hydrogen_deficit_tracking();
-    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
+    solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
     SimpleFluid::FreeSurfaceOptions surface;
     surface.enabled = true;
     surface.mode = SimpleFluid::FreeSurfaceMode::PlanarALE;
@@ -2889,7 +2943,7 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     surface.headspace.initial_temperature = initial_temperature;
     surface.ale.top_boundary = "zmax";
     surface.ale.maximum_correctors = 30;
-    ASSERT_NE(solver.configure_free_surface(surface), nullptr);
+    ASSERT_NE(solver_coupling.configure_free_surface(surface), nullptr);
 
     const std::array<double, axial_cells> axial_shape{0.5, 0.8, 1.2, 1.5, 1.4, 1.1, 0.8, 0.5};
     const std::array<double, radial_cells> radial_shape{1.0, 1.2, 0.9, 0.7};
@@ -2907,8 +2961,8 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     double global_weight = 0.0;
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_weight, &global_weight);
     for (auto& value : energy) value *= interval_energy / global_weight;
-    const auto initial_history_size = solver.free_surface_history().size();
-    EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), initial_mass, mass_tolerance);
+    const auto initial_history_size = solver_coupling.free_surface_history().size();
+    EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), initial_mass, mass_tolerance);
 
     size_t accepted_substeps = 0;
     for (int interval = 0; interval < 12; ++interval)
@@ -2920,32 +2974,33 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
         // Match the consumer's endpoint arithmetic: a represented 0.01 s
         // interval may need three substeps under the 0.005 s maximum.
         const int substeps = static_cast<int>(std::ceil(duration / time.time_step));
-        auto checkpoint = solver.create_coupling_checkpoint();
+        auto checkpoint = solver_coupling.create_coupling_checkpoint();
         std::vector<double> first_temperatures;
         double first_level = 0.0, first_mass = 0.0, first_hydrogen = 0.0;
         const int attempts = interval == 5 ? 2 : 1;
         for (int attempt = 0; attempt < attempts; ++attempt)
         {
             SCOPED_TRACE(attempt);
-            solver.restore_coupling_checkpoint(checkpoint);
+            solver_coupling.restore_coupling_checkpoint(checkpoint);
             EXPECT_DOUBLE_EQ(solver.time(), start);
-            solver.set_coupling_interval_energy(energy, duration);
+            solver_coupling.set_coupling_interval_energy(energy, duration);
             for (int substep = 0; substep < substeps; ++substep)
             {
                 const double endpoint = substep + 1 == substeps ? end :
                     start + duration * (substep + 1) / substeps;
                 solver.set_time_step(endpoint - solver.time());
-                ASSERT_NO_THROW(solver.step());
+                ASSERT_NO_THROW(solver_coupling.step());
             }
-            const double mass = solver.liquid_mass_inventory().totalMass();
+            const double mass = solver_coupling.liquid_mass_inventory().totalMass();
             const double produced = (interval + 1) * interval_energy * hydrogen_yield;
             EXPECT_NEAR(mass, initial_mass, mass_tolerance);
             EXPECT_DOUBLE_EQ(solver.time(), end);
             EXPECT_NEAR(gas.cumulative_hydrogen_produced(), produced, 1.e-18);
             EXPECT_NEAR(gas.global_submerged_hydrogen_moles() +
                             gas.cumulative_submerged_bubble_hydrogen_escaped(), produced, 1.e-17);
-            EXPECT_EQ(solver.free_surface_history().size(), initial_history_size + accepted_substeps + substeps);
-            EXPECT_NEAR(top_elevation(*mesh), solver.free_surface_diagnostics().pool_level,
+            EXPECT_EQ(
+                solver_coupling.free_surface_history().size(), initial_history_size + accepted_substeps + substeps);
+            EXPECT_NEAR(top_elevation(*mesh), solver_coupling.free_surface_diagnostics().pool_level,
                 surface.ale.level_absolute_tolerance + surface.ale.level_relative_tolerance);
             if (interval == 5)
             {
@@ -2969,7 +3024,7 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
                 }
             }
         }
-        solver.accept_coupling_checkpoint(checkpoint);
+        solver_coupling.accept_coupling_checkpoint(checkpoint);
         accepted_substeps += static_cast<size_t>(substeps);
     }
 }
@@ -2978,10 +3033,10 @@ TEST(BoussinesqCouplingIntervalTest, RejectsForeignCheckpointAndPreservesTrialSt
 {
     auto first = make_case(Coupling::PISO, 0.0, 25, true);
     auto second = make_case(Coupling::PISO, 0.0, 25, true);
-    auto checkpoint = first.solver->create_coupling_checkpoint();
-    EXPECT_THROW(second.solver->restore_coupling_checkpoint(checkpoint), std::invalid_argument);
+    auto checkpoint = first.coupling->create_coupling_checkpoint();
+    EXPECT_THROW(second.coupling->restore_coupling_checkpoint(checkpoint), std::invalid_argument);
     EXPECT_DOUBLE_EQ(second.solver->time(), 0.0);
-    first.solver->accept_coupling_checkpoint(checkpoint);
+    first.coupling->accept_coupling_checkpoint(checkpoint);
 }
 
 
@@ -2990,11 +3045,12 @@ TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycl
     constexpr double area = 0.75 * std::numbers::pi;
     auto state = configure_matrix_case({MatrixMeshFamily::Cylindrical, SimpleFluid::Dimension::Z, "zmax", area}, 0.0);
     auto& solver = *state.solver;
-    solver.add_fission_power_source().initialize_constant(0.0);
+    auto& solver_coupling = *state.coupling;
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
     const auto original_geometry = capture_geometry(*state.mesh);
     const auto original_map = state.mesh->owned_cell_map();
     solver.reset_solver_phase_timings();
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     std::vector<double> energy(state.mesh->num_owned_cells());
     for (size_t owned = 0; owned < energy.size(); ++owned)
     {
@@ -3002,16 +3058,16 @@ TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycl
         energy[owned] = state.mesh->cell_volume(cell) * 1.e-6 *
             (state.mesh->cell_centroid(cell).z < 0.5 ? 1.0 : 2.0);
     }
-    solver.set_coupling_interval_energy(energy, 0.02);
-    solver.step();
-    solver.step();
+    solver_coupling.set_coupling_interval_energy(energy, 0.02);
+    solver_coupling.step();
+    solver_coupling.step();
     const auto epoch = state.mesh->geometry_epoch();
     EXPECT_GT(boundary_elevation(*state.mesh, state.definition), 1.0);
     const auto attempt_timings = solver.solver_phase_timings();
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::ALE).calls, 2u);
     EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::ALETrial).calls, 2u);
-    solver.restore_coupling_checkpoint(checkpoint);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
     const auto restored_timings = solver.solver_phase_timings();
     for (std::size_t phase = 0; phase < attempt_timings.size(); ++phase)
     {
@@ -3032,69 +3088,72 @@ TEST(BoussinesqCouplingIntervalTest, RestoresAnnularGeometryAfterAcceptedSubcycl
     EXPECT_EQ(state.mesh->owned_cell_map().getRawPtr(), original_map.getRawPtr());
     expect_geometry_restored(*state.mesh, original_geometry);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
-    solver.accept_coupling_checkpoint(checkpoint);
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
 }
 
 TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnlyOnce)
 {
     auto state = make_case(Coupling::PISO, 0.0, 20, true, 100.0);
     auto& solver = *state.solver;
-    auto* gas = solver.find_radiolytic_gas_model();
-    solver.find_fission_power_source()->initialize_constant(1.e3);
-    solver.step(); // Create populations that can escape during the coupled interval.
-    const auto history_size = solver.free_surface_history().size();
+    auto& solver_coupling = *state.coupling;
+    auto* gas = solver_coupling.find_radiolytic_gas_model();
+    solver_coupling.find_fission_power_source()->initialize_constant(1.e3);
+    solver_coupling.step(); // Create populations that can escape during the coupled interval.
+    const auto history_size = solver_coupling.free_surface_history().size();
     const auto escape_before = gas->cumulative_submerged_bubble_hydrogen_escaped();
     solver.reset_solver_phase_timings();
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     std::vector<double> no_energy(state.mesh->num_owned_cells(), 0.0);
-    solver.set_coupling_interval_energy(no_energy, 0.02);
-    solver.step();
-    solver.step();
+    solver_coupling.set_coupling_interval_energy(no_energy, 0.02);
+    solver_coupling.step();
+    solver_coupling.step();
     const auto escaped = gas->cumulative_submerged_bubble_hydrogen_escaped();
-    const auto vented = solver.free_surface_diagnostics().vented_gas_moles.at("H2");
+    const auto vented = solver_coupling.free_surface_diagnostics().vented_gas_moles.at("H2");
     ASSERT_GT(escaped, escape_before);
     const auto first_step_seconds = solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds;
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
     const auto gas_attempts = solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls;
     EXPECT_GT(gas_attempts, 0u);
-    solver.restore_coupling_checkpoint(checkpoint);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
     EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), escape_before);
-    EXPECT_EQ(solver.free_surface_history().size(), history_size);
-    solver.set_coupling_interval_energy(no_energy, 0.02);
-    solver.step();
-    solver.step();
-    solver.accept_coupling_checkpoint(checkpoint);
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), history_size);
+    solver_coupling.set_coupling_interval_energy(no_energy, 0.02);
+    solver_coupling.step();
+    solver_coupling.step();
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 4u);
     EXPECT_GT(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
     EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds, first_step_seconds);
     EXPECT_NEAR(gas->cumulative_submerged_bubble_hydrogen_escaped(), escaped, 1.e-14);
-    EXPECT_NEAR(solver.free_surface_diagnostics().vented_gas_moles.at("H2"), vented, 1.e-14);
-    EXPECT_EQ(solver.free_surface_history().size(), history_size + 2);
+    EXPECT_NEAR(solver_coupling.free_surface_diagnostics().vented_gas_moles.at("H2"), vented, 1.e-14);
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), history_size + 2);
 }
 
 
 TEST(BoussinesqCouplingIntervalTest, CheckpointInitializesLazyMaterialAndGasDependencies)
 {
     auto mesh = make_column();
-    Solver solver(mesh, planar_boundaries(), time_options(Coupling::PISO),
+    auto solver_shared = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
         SimpleFluid::LinearSolverOptions{}, physical_options());
-    solver.configure_material_feedback(material_feedback_options());
-    solver.add_fission_power_source().initialize_constant(0.0);
-    auto& gas = solver.configure_radiolytic_gas(gas_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_material_feedback(material_feedback_options());
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
+    auto& gas = solver_coupling.configure_radiolytic_gas(gas_options());
     gas.enable_donor_hydrogen_deficit_tracking();
     // Supported direct field initialization without initialize_linear_temperature().
     solver.temperature().put_scalar(300.0);
-    ASSERT_NE(solver.configure_free_surface(free_surface_options(10)), nullptr);
+    ASSERT_NE(solver_coupling.configure_free_surface(free_surface_options(10)), nullptr);
     EXPECT_FALSE(gas.initial_state_initialized());
-    auto checkpoint = solver.create_coupling_checkpoint();
+    auto checkpoint = solver_coupling.create_coupling_checkpoint();
     EXPECT_TRUE(gas.initial_state_initialized());
-    EXPECT_TRUE(solver.find_free_surface_model()->initialized());
+    EXPECT_TRUE(solver_coupling.find_free_surface_model()->initialized());
     EXPECT_NEAR(gas.global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
-    solver.restore_coupling_checkpoint(checkpoint);
-    EXPECT_TRUE(solver.planar_ale_enabled());
-    solver.accept_coupling_checkpoint(checkpoint);
+    solver_coupling.restore_coupling_checkpoint(checkpoint);
+    EXPECT_TRUE(solver_coupling.planar_ale_enabled());
+    solver_coupling.accept_coupling_checkpoint(checkpoint);
 }
 
 } // namespace
@@ -3161,25 +3220,27 @@ ConfiguredCase make_thermal_case(double flux, int correctors, bool external_temp
     SimpleFluid::LinearSolverOptions linear;
     linear.tolerance = 1.e-13;
     linear.max_iterations = 500;
-    auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO), linear, physical);
-    solver->configure_material_feedback(material_feedback_options());
-    solver->initialize_linear_temperature({0., 0., 1.}, 300., 300.);
-    solver->set_thermal_step_participant(std::make_shared<ConstantThermalParticipant>(flux));
+    auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO), linear, physical);
+    auto solver_coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    solver_coupling->configure_material_feedback(material_feedback_options());
+    solver_coupling->initialize_linear_temperature({0., 0., 1.}, 300., 300.);
+    solver_coupling->set_thermal_step_participant(std::make_shared<ConstantThermalParticipant>(flux));
     auto surface = free_surface_options(correctors);
     if (external_temperature) surface.headspace.temperature_mode = SimpleFluid::HeadspaceTemperatureMode::External;
-    solver->configure_free_surface(surface);
-    return {mesh, std::move(solver), nullptr};
+    solver_coupling->configure_free_surface(surface);
+    return {mesh, std::move(solver), std::move(solver_coupling), nullptr};
 }
 }
 
 TEST(BoussinesqPlanarALETest, ThermalParticipantUsesMovingAreaAndCheckpointReplay)
 {
     auto state = make_thermal_case(1.e-3, 8);
-    auto participant = std::dynamic_pointer_cast<ConstantThermalParticipant>(state.solver->thermal_step_participant());
+    auto participant =
+        std::dynamic_pointer_cast<ConstantThermalParticipant>(state.coupling->thermal_step_participant());
     const auto old_energy = coupling_sensible_energy(state);
-    auto checkpoint = state.solver->create_coupling_checkpoint();
-    EXPECT_THROW(state.solver->set_thermal_step_participant(nullptr), std::logic_error);
-    ASSERT_NO_THROW(state.solver->step());
+    auto checkpoint = state.coupling->create_coupling_checkpoint();
+    EXPECT_THROW(state.coupling->set_thermal_step_participant(nullptr), std::logic_error);
+    ASSERT_NO_THROW(state.coupling->step());
     const auto accepted_energy = coupling_sensible_energy(state);
     const auto escaped = participant->energy();
     const auto accepted_top = top_elevation(*state.mesh);
@@ -3187,23 +3248,24 @@ TEST(BoussinesqPlanarALETest, ThermalParticipantUsesMovingAreaAndCheckpointRepla
     EXPECT_LT(accepted_top, 1.0);
     EXPECT_NEAR(escaped, 1.e-5 * accepted_top, 1.e-14);
     EXPECT_NEAR(accepted_energy - old_energy + escaped, 0., 2.e-8);
-    EXPECT_NEAR(state.solver->planar_ale_diagnostics().energy_residual, 0., 2.e-8);
-    ASSERT_NO_THROW(state.solver->restore_coupling_checkpoint(checkpoint));
+    EXPECT_NEAR(state.coupling->planar_ale_diagnostics().energy_residual, 0., 2.e-8);
+    ASSERT_NO_THROW(state.coupling->restore_coupling_checkpoint(checkpoint));
     EXPECT_EQ(participant->commits(), 0);
     EXPECT_DOUBLE_EQ(participant->energy(), 0.);
-    ASSERT_NO_THROW(state.solver->step());
+    ASSERT_NO_THROW(state.coupling->step());
     EXPECT_EQ(participant->commits(), 1);
     EXPECT_DOUBLE_EQ(participant->energy(), escaped);
     EXPECT_NEAR(coupling_sensible_energy(state), accepted_energy, 2.e-8);
-    EXPECT_NO_THROW(state.solver->accept_coupling_checkpoint(checkpoint));
+    EXPECT_NO_THROW(state.coupling->accept_coupling_checkpoint(checkpoint));
 }
 
 TEST(BoussinesqPlanarALETest, ThermalParticipantFailedCorrectorRestoresExternalInventory)
 {
     auto state = make_thermal_case(1.e-3, 1);
-    auto participant = std::dynamic_pointer_cast<ConstantThermalParticipant>(state.solver->thermal_step_participant());
+    auto participant =
+        std::dynamic_pointer_cast<ConstantThermalParticipant>(state.coupling->thermal_step_participant());
     const auto old_energy = coupling_sensible_energy(state);
-    EXPECT_THROW(state.solver->step(), std::runtime_error);
+    EXPECT_THROW(state.coupling->step(), std::runtime_error);
     EXPECT_EQ(participant->commits(), 0);
     EXPECT_DOUBLE_EQ(participant->energy(), 0.);
     EXPECT_NEAR(coupling_sensible_energy(state), old_energy, 1.e-12);
@@ -3214,9 +3276,9 @@ TEST(BoussinesqPlanarALETest, ZeroThermalParticipantPreservesDefaultFields)
 {
     auto coupled = make_thermal_case(0., 4);
     auto reference = make_thermal_case(0., 4);
-    reference.solver->set_thermal_step_participant(nullptr);
-    ASSERT_NO_THROW(coupled.solver->step());
-    ASSERT_NO_THROW(reference.solver->step());
+    reference.coupling->set_thermal_step_participant(nullptr);
+    ASSERT_NO_THROW(coupled.coupling->step());
+    ASSERT_NO_THROW(reference.coupling->step());
     for (size_t owned = 0; owned < coupled.mesh->num_owned_cells(); ++owned)
     {
         const auto cell = static_cast<Pack::local_ordinal_type>(owned);
@@ -3229,14 +3291,146 @@ TEST(BoussinesqPlanarALETest, ZeroThermalParticipantPreservesDefaultFields)
 TEST(BoussinesqPlanarALETest, ExternalThermalTemperatureUsesParticipantAndRollsBack)
 {
     auto state = make_thermal_case(1.e-3, 8, true);
-    auto checkpoint = state.solver->create_coupling_checkpoint();
-    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 300.);
-    ASSERT_NO_THROW(state.solver->step());
-    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 310.);
-    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.pressure, 101325.);
-    ASSERT_NO_THROW(state.solver->restore_coupling_checkpoint(checkpoint));
-    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 300.);
-    ASSERT_NO_THROW(state.solver->step());
-    EXPECT_DOUBLE_EQ(state.solver->free_surface_diagnostics().headspace.temperature, 310.);
-    EXPECT_NO_THROW(state.solver->accept_coupling_checkpoint(checkpoint));
+    auto checkpoint = state.coupling->create_coupling_checkpoint();
+    EXPECT_DOUBLE_EQ(state.coupling->free_surface_diagnostics().headspace.temperature, 300.);
+    ASSERT_NO_THROW(state.coupling->step());
+    EXPECT_DOUBLE_EQ(state.coupling->free_surface_diagnostics().headspace.temperature, 310.);
+    EXPECT_DOUBLE_EQ(state.coupling->free_surface_diagnostics().headspace.pressure, 101325.);
+    ASSERT_NO_THROW(state.coupling->restore_coupling_checkpoint(checkpoint));
+    EXPECT_DOUBLE_EQ(state.coupling->free_surface_diagnostics().headspace.temperature, 300.);
+    ASSERT_NO_THROW(state.coupling->step());
+    EXPECT_DOUBLE_EQ(state.coupling->free_surface_diagnostics().headspace.temperature, 310.);
+    EXPECT_NO_THROW(state.coupling->accept_coupling_checkpoint(checkpoint));
+}
+
+/** The external controller shares the core solver and owns its own optional models. */
+TEST(MultiphysicsSolverCouplerTest, ConfiguresExternalModelsAndKeepsSolverInstancesIndependent)
+{
+    auto mesh = make_column();
+    auto solver_shared = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+        SimpleFluid::LinearSolverOptions{}, physical_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    auto& coupling = solver_coupling;
+    EXPECT_EQ(&coupling.boussinesq_solver(), &solver);
+    const auto& observer = std::as_const(solver_coupling);
+    EXPECT_EQ(&coupling, &observer);
+    EXPECT_FALSE(observer.planar_ale_enabled());
+    EXPECT_EQ(observer.find_radiolytic_gas_model(), nullptr);
+
+    auto& feedback = coupling.configure_material_feedback(material_feedback_options());
+    auto& gas = coupling.configure_radiolytic_gas(gas_options());
+    auto& heat = coupling.add_temperature_source("coupler_heat", 0.01);
+    coupling.add_fission_power_source().initialize_constant(0.0);
+    solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto* surface = coupling.configure_free_surface(free_surface_options(25));
+    ASSERT_NE(surface, nullptr);
+    EXPECT_EQ(solver_coupling.find_material_feedback_model(), &feedback);
+    EXPECT_EQ(solver_coupling.find_radiolytic_gas_model(), &gas);
+    EXPECT_EQ(std::as_const(solver_coupling).find_radiolytic_gas_model(), observer.find_radiolytic_gas_model());
+    EXPECT_EQ(solver.find_temperature_source("coupler_heat"), &heat);
+    EXPECT_EQ(solver_coupling.find_free_surface_model(), surface);
+    EXPECT_EQ(&solver_coupling.liquid_mass_inventory(), &observer.liquid_mass_inventory());
+    EXPECT_EQ(&solver_coupling.planar_ale_diagnostics(), &observer.planar_ale_diagnostics());
+    EXPECT_EQ(&solver_coupling.free_surface_history(), &observer.free_surface_history());
+
+    auto other_mesh = make_column();
+    auto other_shared = std::make_shared<Solver>(other_mesh, planar_boundaries(), time_options(Coupling::PISO),
+        SimpleFluid::LinearSolverOptions{}, physical_options());
+    auto& other = *other_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> other_coupling(other_shared);
+    EXPECT_EQ(other_coupling.find_radiolytic_gas_model(), nullptr);
+    EXPECT_FALSE(other_coupling.planar_ale_enabled());
+    EXPECT_EQ(other.find_temperature_source("coupler_heat"), nullptr);
+
+    EXPECT_TRUE(solver_coupling.remove_radiolytic_gas_model());
+    EXPECT_EQ(observer.find_radiolytic_gas_model(), nullptr);
+    EXPECT_EQ(observer.find_free_surface_model(), nullptr);
+    EXPECT_FALSE(observer.planar_ale_enabled());
+}
+
+/** Controller lifetime prevents bypass and releases the solver without a reverse call. */
+TEST(MultiphysicsSolverCouplerTest, SharedBindingIsExclusiveAndReleasesStandaloneAdvancement)
+{
+    auto mesh = make_column();
+    auto boundaries = planar_boundaries();
+    boundaries.pressure["zmax"] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    auto solver_shared = std::make_shared<Solver>(
+        mesh, boundaries, time_options(Coupling::PISO), SimpleFluid::LinearSolverOptions{}, physical_options());
+    auto& solver = *solver_shared;
+    solver.initialize_heated_box(300.0, 300.0);
+    {
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver_shared);
+        EXPECT_THROW(SimpleFluid::MultiphysicsSolverCoupler<Pack> duplicate(solver_shared), std::exception);
+        EXPECT_THROW(solver.step(), std::exception);
+        EXPECT_EQ(solver.step_index(), 0);
+        coupling.step();
+        EXPECT_EQ(solver.step_index(), 1);
+    }
+    EXPECT_NO_THROW(solver.step());
+    EXPECT_EQ(solver.step_index(), 2);
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> replacement(solver_shared);
+    EXPECT_NO_THROW(replacement.step());
+    EXPECT_EQ(solver.step_index(), 3);
+}
+
+/** Shared ownership keeps the core alive through stepping and checkpoint replay. */
+TEST(MultiphysicsSolverCouplerTest, RetainsSolverAfterCallerReleaseAndReleasesItOnDestruction)
+{
+    auto state = make_case(Coupling::PISO, 0.01, 25, true);
+    const std::weak_ptr<Solver> lifetime = state.solver;
+    const auto* identity = state.solver.get();
+    auto coupling = std::move(state.coupling);
+    state.solver.reset();
+    ASSERT_FALSE(lifetime.expired());
+    EXPECT_EQ(&coupling->boussinesq_solver(), identity);
+
+    auto checkpoint = coupling->create_coupling_checkpoint();
+    ASSERT_NO_THROW(coupling->step());
+    EXPECT_EQ(coupling->boussinesq_solver().step_index(), 1);
+    ASSERT_NO_THROW(coupling->restore_coupling_checkpoint(checkpoint));
+    EXPECT_EQ(coupling->boussinesq_solver().step_index(), 0);
+    EXPECT_DOUBLE_EQ(coupling->boussinesq_solver().time(), 0.0);
+    ASSERT_NO_THROW(coupling->accept_coupling_checkpoint(checkpoint));
+
+    coupling.reset();
+    EXPECT_TRUE(lifetime.expired());
+}
+
+/** The controller requires a real shared owner instead of a borrowed solver. */
+TEST(MultiphysicsSolverCouplerTest, RejectsNullSolverOwnership)
+{
+    using Coupler = SimpleFluid::MultiphysicsSolverCoupler<Pack>;
+    static_assert(std::is_constructible_v<Coupler, std::shared_ptr<Solver>>);
+    static_assert(!std::is_constructible_v<Coupler, Solver&>);
+    EXPECT_THROW(Coupler(Coupler::solver_pointer{}), std::invalid_argument);
+}
+
+/** Disabled optional models preserve independent core flow/heat advancement. */
+TEST(MultiphysicsSolverCouplerTest, DisabledControllerMatchesStandaloneSolver)
+{
+    auto bare_mesh = make_column();
+    auto coupled_mesh = make_column();
+    auto time = time_options(Coupling::PISO);
+    auto material = physical_options();
+    SimpleFluid::LinearSolverOptions linear;
+    linear.tolerance = 1.e-13;
+    auto boundaries = planar_boundaries();
+    boundaries.pressure["zmax"] = {SimpleFluid::BoundaryConditionType::Neumann, 0.0};
+    Solver bare(bare_mesh, boundaries, time, linear, material);
+    auto core_shared = std::make_shared<Solver>(coupled_mesh, boundaries, time, linear, material);
+    auto& core = *core_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(core_shared);
+    bare.add_temperature_source("heat", 0.1);
+    coupling.add_temperature_source("heat", 0.1);
+    bare.initialize_heated_box(300.0, 300.0);
+    coupling.initialize_heated_box(300.0, 300.0);
+    for (int step = 0; step < 3; ++step)
+    {
+        bare.step();
+        coupling.step();
+        expect_primary_restored(core, capture_primary(bare));
+        EXPECT_DOUBLE_EQ(core.time(), bare.time());
+        EXPECT_EQ(core.step_index(), bare.step_index());
+    }
 }

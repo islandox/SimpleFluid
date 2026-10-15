@@ -114,19 +114,15 @@ int main(int argc, char** argv)
     model_options.thermal_conductivity = thermal_conductivity;
 
     SimpleFluid::run_boussinesq_example<>(
-        db,
-        bcs,
-        time_options,
-        linear_options,
-        model_options,
-        [=](auto& solver)
+        db, bcs, time_options, linear_options, model_options,
+        [=](auto& solver, auto& coupling)
         {
-            solver.initialize_bottom_hot_top_cold(300.0, 300.0);
+            coupling.initialize_bottom_hot_top_cold(300.0, 300.0);
 
             SimpleFluid::FissionPowerSourceOptions fission;
             fission.profile = SimpleFluid::FissionPowerProfile::Constant;
             fission.power_density = 2.5e3;
-            solver.configure_fission_power_source(fission);
+            coupling.configure_fission_power_source(fission);
 
             SimpleFluid::RadiolyticGasOptions radiolysis;
             radiolysis.mode =
@@ -134,11 +130,11 @@ int main(int argc, char** argv)
             radiolysis.hydrogen_yield_mol_per_j = 2.0e-7;
             radiolysis.max_source_alpha_rate = 10.0;
             radiolysis.reference_pressure = 101325.0;
-            solver.configure_radiolytic_gas(radiolysis);
+            coupling.configure_radiolytic_gas(radiolysis);
 
             SimpleFluid::ScalarVoidFractionOptions alpha_options;
             alpha_options.alpha_max = 0.5;
-            solver.configure_scalar_void_fraction(alpha_options);
+            coupling.configure_scalar_void_fraction(alpha_options);
 
             SimpleFluid::BoilingSourceOptions boiling;
             boiling.enable_bulk_boiling = true;
@@ -148,7 +144,7 @@ int main(int argc, char** argv)
             boiling.wall_evaporation_fraction = 0.2;
             boiling.wall_heat_flux = wall_heat_flux;
             boiling.wall_boiling_patches = {"zmax"};
-            solver.configure_boiling_source(boiling);
+            coupling.configure_boiling_source(boiling);
 
             SimpleFluid::MaterialFeedbackOptions feedback;
             feedback.density_mode =
@@ -159,13 +155,11 @@ int main(int argc, char** argv)
             feedback.reference_temperature = 300.0;
             feedback.thermal_expansion = 2.1e-4;
             feedback.reference_dynamic_viscosity = 1.0e-3;
-            solver.configure_material_feedback(feedback);
+            coupling.configure_material_feedback(feedback);
         },
         "constant_power_cylinder_vessel.vtu",
         SimpleFluid::SolutionOutputOptions{
-            .include_sources = true,
-            .include_material_properties = true,
-            .include_radiolytic_gas_fields = true});
+            .include_sources = true, .include_material_properties = true, .include_radiolytic_gas_fields = true});
 
     return 0;
 }
