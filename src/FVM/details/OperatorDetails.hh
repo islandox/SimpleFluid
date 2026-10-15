@@ -1233,15 +1233,23 @@ void add_materialized_gradient_coefficient(
         iter->coefficient.z + coefficient.z};
 }
 
+/** @brief Default observer for optional prescribed-gradient response capture. */
+struct IgnoreNeumannGradientSample
+{
+    template<class... Values> void operator()(const Values&...) const noexcept {}
+};
+
 /** @brief Materialize scalar affine stencils from cached mesh geometry. */
 template<class MeshType,
          class BoundaryConditionProvider,
-         class BoundaryValueProvider>
+         class BoundaryValueProvider,
+         class BoundaryObserver = IgnoreNeumannGradientSample>
 std::vector<AffineLeastSquaresGradientStencil<MeshType>>
 materialize_scalar_affine_gradient_stencils(
     const std::vector<BoundaryAwareGradientCellGeometry<MeshType>>& geometry,
     BoundaryConditionProvider boundary_condition,
-    BoundaryValueProvider boundary_value)
+    BoundaryValueProvider boundary_value,
+    BoundaryObserver observe_neumann = {})
 {
     using local_ordinal_type = typename MeshType::local_ordinal_type;
     using vec_type = typename MeshType::Vec3;
@@ -1275,6 +1283,7 @@ materialize_scalar_affine_gradient_stencils(
             }
             else if (condition.type == BoundaryConditionType::Neumann)
             {
+                observe_neumann(cell_lid, sample.location, sample.basis, sample.normal_distance);
                 boundary_increment =
                     static_cast<real_t>(condition.value)
                     * sample.normal_distance;
@@ -1356,13 +1365,15 @@ materialize_vector_affine_gradient_stencils(
  */
 template<class MeshType,
          class BoundaryConditionProvider,
-         class BoundaryValueProvider>
+         class BoundaryValueProvider,
+         class BoundaryObserver = IgnoreNeumannGradientSample>
 std::vector<AffineLeastSquaresGradientStencil<MeshType>>
 scalar_affine_gradient_stencils(
     const MeshType& mesh,
     BoundaryConditionProvider boundary_condition,
     BoundaryValueProvider boundary_value,
-    const MeshTraversePlan<MeshType>& plan)
+    const MeshTraversePlan<MeshType>& plan,
+    BoundaryObserver observe_neumann = {})
 {
     if (&plan.mesh() != &mesh || plan.entities() != MeshTraverseEntities::AllWithCellFaces)
         throw std::invalid_argument("Gradient traversal requires cell-face incidence for the same mesh.");
@@ -1493,6 +1504,7 @@ scalar_affine_gradient_stencils(
                     const auto normal_direction = access.face_centroid(face.id()) - access.cell_centroid(cell_lid);
                     const auto normal_distance = static_cast<typename MeshType::scalar_type>(
                         normal_direction.dot(access.face_normal_outward(face.id(), cell_lid)));
+                    observe_neumann(cell_lid, location, basis, normal_distance);
                     boundary_increment = condition.value * static_cast<real_t>(normal_distance);
                 }
                 stencil.constant.x += basis.x * boundary_increment;
