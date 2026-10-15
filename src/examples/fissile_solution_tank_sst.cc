@@ -13,6 +13,7 @@
 #include "dataclass/Database.hh"
 #include "geometry/MeshFactory.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "solvers/SolverProgress.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -257,8 +258,7 @@ void project_axisymmetric_tank_state(SimpleFluid::BoussinesqSolver<Pack>& solver
 template<class Pack>
 void write_profile_cells(const SimpleFluid::MeshHandle<Pack>& mesh, const SimpleFluid::BoussinesqSolver<Pack>& solver,
     const typename SimpleFluid::BoussinesqSolver<Pack>::turbulence_model_type& turbulence,
-    const typename SimpleFluid::BoussinesqSolver<Pack>::fission_power_source_type& fission,
-    int rank)
+    const typename SimpleFluid::MultiphysicsSolverCoupler<Pack>::fission_power_source_type& fission, int rank)
 {
     const char* configured_prefix = std::getenv("SIMPLEFLUID_TANK_OUTPUT_PREFIX");
     const std::string prefix = configured_prefix == nullptr ? "simplefluid_cells" : configured_prefix;
@@ -388,7 +388,10 @@ int main(int argc, char** argv)
     model_options.dynamic_viscosity = dynamic_viscosity;
     model_options.thermal_conductivity = thermal_conductivity;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, boundaries, time_options, linear_options, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, boundaries, time_options, linear_options, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     auto pressure_options = solver.pressure_linear_solver_options();
     pressure_options.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
     pressure_options.preconditioner = SimpleFluid::LinearPreconditioner::MueLu;
@@ -396,15 +399,15 @@ int main(int argc, char** argv)
     pressure_options.tolerance = 1.0e-8;
     pressure_options.reuse_preconditioner = true;
     solver.set_pressure_linear_solver_options(pressure_options);
-    solver.initialize_heated_box(reference_temperature, reference_temperature);
+    solver_coupling.initialize_heated_box(reference_temperature, reference_temperature);
 
     SimpleFluid::FissionPowerSourceOptions fission_options;
     fission_options.profile = SimpleFluid::FissionPowerProfile::Gaussian;
     fission_options.total_power = total_power;
     fission_options.center = {0.0, 0.0, 0.5 * height};
     fission_options.standard_deviation = {gaussian_radial_width, gaussian_radial_width, gaussian_axial_width};
-    solver.configure_fission_power_source(fission_options);
-    auto* fission_pointer = solver.find_fission_power_source();
+    solver_coupling.configure_fission_power_source(fission_options);
+    auto* fission_pointer = solver_coupling.find_fission_power_source();
     if (fission_pointer == nullptr)
         throw std::logic_error("Failed to configure the Gaussian fission source.");
     auto& fission = *fission_pointer;
@@ -516,11 +519,11 @@ int main(int argc, char** argv)
     SimpleFluid::ProgressStream progress(std::cout);
     for (int step = 0; step < steps; ++step)
     {
-        solver.step(progress);
+        solver_coupling.step(progress);
         project_axisymmetric_tank_state(solver, turbulence, radial_projection_edges, axial_projection_edges, density);
         if ((step + 1) % 10 == 0 || step + 1 == steps)
         {
-            const auto courant_number = solver.maximum_courant_number();
+            const auto courant_number = solver_coupling.maximum_courant_number();
             if (rank == 0)
             {
                 std::cout << "tank_diagnostics: step=" << step + 1 << ", time=" << solver.time()
@@ -528,13 +531,13 @@ int main(int argc, char** argv)
             }
         }
     }
-    const auto maximum_courant_number = solver.maximum_courant_number();
+    const auto maximum_courant_number = solver_coupling.maximum_courant_number();
 
     SimpleFluid::SolutionOutputOptions output_options;
     output_options.include_sources = true;
     output_options.include_material_properties = true;
     output_options.include_turbulence_fields = true;
-    solver.write_parallel_solution_vtu("fissile_solution_tank_sst.vtu", output_options);
+    solver_coupling.write_parallel_solution_vtu("fissile_solution_tank_sst.vtu", output_options);
     write_profile_cells(*mesh, solver, turbulence, fission, rank);
 
     if (rank == 0)

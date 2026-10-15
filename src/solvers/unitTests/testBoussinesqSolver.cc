@@ -21,6 +21,7 @@
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -344,7 +345,9 @@ Pack::scalar_type continuity_imbalance_norm(const SimpleFluid::VectorCellFieldSt
 TEST(BoussinesqSolverTest, ReusesExactLegacyMeshWithoutConversion)
 {
     auto legacy = make_box_mesh();
-    InspectableBoussinesqSolver solver(legacy, {});
+    auto solver_shared = std::make_shared<InspectableBoussinesqSolver>(legacy, SimpleFluid::BoundaryConditionSet{});
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
 
     const auto handle = solver.temperature().mesh_ptr();
     ASSERT_TRUE(handle);
@@ -362,7 +365,10 @@ TEST(BoussinesqSolverTest, MutableNativeConstructionPreservesFieldIdentityAndCon
             {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0}}});
     auto handle = std::make_shared<Handle>(geometry);
 
-    InspectableBoussinesqSolver mutable_solver(handle, {});
+    auto mutable_solver_shared =
+        std::make_shared<InspectableBoussinesqSolver>(handle, SimpleFluid::BoundaryConditionSet{});
+    auto& mutable_solver = *mutable_solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> mutable_solver_coupling(mutable_solver_shared);
     EXPECT_TRUE(mutable_solver.has_mutable_mesh_handle());
     EXPECT_EQ(mutable_solver.mutable_runtime_mesh_handle(), handle);
     EXPECT_EQ(mutable_solver.temperature().mesh_ptr().get(), handle.get());
@@ -376,7 +382,10 @@ TEST(BoussinesqSolverTest, MutableNativeConstructionPreservesFieldIdentityAndCon
     EXPECT_NO_THROW(mutable_solver.refresh_geometry_after_motion());
 
     SimpleFluid::SP<const Handle> const_view = handle;
-    InspectableBoussinesqSolver const_solver(const_view, {});
+    auto const_solver_shared =
+        std::make_shared<InspectableBoussinesqSolver>(const_view, SimpleFluid::BoundaryConditionSet{});
+    auto& const_solver = *const_solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> const_solver_coupling(const_solver_shared);
     EXPECT_FALSE(const_solver.has_mutable_mesh_handle());
     EXPECT_FALSE(const_solver.mutable_runtime_mesh_handle());
     EXPECT_EQ(const_solver.temperature().mesh_ptr(), const_view);
@@ -405,9 +414,11 @@ TEST(BoussinesqSolverTest, OneCellBuoyancyStepMatchesAnalyticalVelocityIncrement
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-13;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options, linear_options);
-    solver.initialize_heated_box(1.5, 0.0);
-    solver.run();
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options, linear_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.5, 0.0);
+    solver_coupling.run();
 
     ASSERT_EQ(mesh->num_owned_cells(), 1U);
     EXPECT_EQ(solver.step_index(), 1);
@@ -440,9 +451,11 @@ TEST(BoussinesqSolverTest, RunsHeatedBoxSmokeCase)
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-12;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options, linear_options);
-    solver.initialize_heated_box(1.0, 0.0);
-    solver.run();
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options, linear_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.0, 0.0);
+    solver_coupling.run();
 
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GT(solver.time(), 0.0);
@@ -451,7 +464,7 @@ TEST(BoussinesqSolverTest, RunsHeatedBoxSmokeCase)
     const auto unique_id = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto output_file = std::filesystem::temp_directory_path() /
                              ("SimpleFluid_testBoussinesq_solution_" + std::to_string(unique_id) + ".vtu");
-    solver.write_solution_vtu(output_file.string());
+    solver_coupling.write_solution_vtu(output_file.string());
 
     std::ifstream input(output_file);
     ASSERT_TRUE(input.good());
@@ -480,9 +493,11 @@ TEST(BoussinesqSolverTest, RunsCartesianCRTPMeshSmokeCase)
     time_options.steps = 1;
     time_options.thermal_diffusivity = 1.0e-2;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
-    solver.initialize_heated_box(1.0, 0.0);
-    solver.run();
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.0, 0.0);
+    solver_coupling.run();
 
     EXPECT_EQ(solver.step_index(), 1);
     EXPECT_EQ(solver.temperature().mesh_ptr(), mesh);
@@ -522,8 +537,11 @@ TEST(BoussinesqSolverTest, NativeSemiStructuredTemperatureUsesConfiguredNonOrtho
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-12;
-    InspectableBoussinesqSolver solver(mesh, boundary_conditions, time_options, linear_options);
-    solver.initialize_linear_temperature({1.0, 0.0, 0.0}, 1.0, 0.0);
+    auto solver_shared =
+        std::make_shared<InspectableBoussinesqSolver>(mesh, boundary_conditions, time_options, linear_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_linear_temperature({1.0, 0.0, 0.0}, 1.0, 0.0);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
@@ -579,7 +597,7 @@ TEST(BoussinesqSolverTest, NativeSemiStructuredTemperatureUsesConfiguredNonOrtho
                 orthogonal_matrix, *orthogonal_system.rhs, orthogonal_temperature.owned_data(), linear_options)
             .converged);
 
-    solver.step();
+    solver_coupling.step();
 
     double correction_delta = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -621,16 +639,18 @@ TEST(BoussinesqSolverTest, RunsPhysicalModelsOnNativeMeshHandle)
 
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.tolerance = 1.0e-12;
-    SimpleFluid::BoussinesqSolver<Pack> solver(
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
         mesh, SimpleFluid::BoundaryConditionSet{}, time_options, linear_options, model_options);
-    solver.initialize_linear_temperature({1.0, 0.0, 0.0}, 300.0, 300.0);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_linear_temperature({1.0, 0.0, 0.0}, 300.0, 300.0);
     auto& heat_source = solver.add_temperature_source("native_heat", 24.0);
 
     EXPECT_FALSE(mesh->legacy_mesh());
     EXPECT_EQ(solver.material_properties().density.mesh_ptr(), mesh);
     EXPECT_EQ(heat_source.field().mesh_ptr(), mesh);
 
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_EQ(solver.step_index(), 1);
     EXPECT_NEAR(solver.temperature().value(0), 300.75, 1.0e-10);
@@ -668,25 +688,21 @@ TEST(BoussinesqSolverTest,
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 200;
     linear_options.tolerance = 1.0e-12;
-    SimpleFluid::BoussinesqSolver<Pack> cartesian_solver(
-        cartesian_mesh,
-        SimpleFluid::BoundaryConditionSet{},
-        time_options,
-        linear_options,
-        model_options);
-    SimpleFluid::BoussinesqSolver<Pack> unstructured_solver(
-        unstructured_mesh,
-        SimpleFluid::BoundaryConditionSet{},
-        time_options,
-        linear_options,
-        model_options);
+    auto cartesian_solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        cartesian_mesh, SimpleFluid::BoundaryConditionSet{}, time_options, linear_options, model_options);
+    auto& cartesian_solver = *cartesian_solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> cartesian_solver_coupling(cartesian_solver_shared);
+    auto unstructured_solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        unstructured_mesh, SimpleFluid::BoundaryConditionSet{}, time_options, linear_options, model_options);
+    auto& unstructured_solver = *unstructured_solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> unstructured_solver_coupling(unstructured_solver_shared);
 
-    for (auto* solver : {&cartesian_solver, &unstructured_solver})
+    for (auto* coupling : {&cartesian_solver_coupling, &unstructured_solver_coupling})
     {
-        solver->initialize_linear_temperature(
-            {1.0, 0.0, 0.0}, 300.0, 300.0);
+        auto* solver = &coupling->boussinesq_solver();
+        coupling->initialize_linear_temperature({1.0, 0.0, 0.0}, 300.0, 300.0);
         solver->add_temperature_source("uniform_heat", 24.0);
-        solver->step();
+        coupling->step();
         EXPECT_EQ(solver->step_index(), 1);
     }
 
@@ -765,10 +781,12 @@ TEST(BoussinesqSolverTest, NativePhysicalModelsRunCoupledKrylovOnDistributedCart
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 300;
     linear_options.tolerance = 1.0e-10;
-    SimpleFluid::BoussinesqSolver<Pack> solver(
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
         mesh, SimpleFluid::BoundaryConditionSet{}, time_options, linear_options, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
 
-    solver.initialize_linear_temperature({1.0, 0.0, 0.0}, 301.0, 299.0);
+    solver_coupling.initialize_linear_temperature({1.0, 0.0, 0.0}, 301.0, 299.0);
     constexpr double minimum_cell_center = 0.0625;
     constexpr double maximum_cell_center = 0.9375;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -779,10 +797,10 @@ TEST(BoussinesqSolverTest, NativePhysicalModelsRunCoupledKrylovOnDistributedCart
         EXPECT_NEAR(solver.temperature().value(cell_lid), 301.0 * (1.0 - blend) + 299.0 * blend, 1.0e-12);
     }
 
-    solver.initialize_linear_temperature({1.0, 0.0, 0.0}, 300.0, 300.0);
+    solver_coupling.initialize_linear_temperature({1.0, 0.0, 0.0}, 300.0, 300.0);
     solver.add_temperature_source("distributed_native_heat", 80.0);
 
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_TRUE(solver.last_step_statistics().converged);
     EXPECT_TRUE(std::isfinite(solver.last_pressure_velocity_residuals().continuity));
@@ -838,15 +856,12 @@ TEST(BoussinesqSolverTest,
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 300;
     linear_options.tolerance = 1.0e-10;
-    SimpleFluid::BoussinesqSolver<Pack> solver(
-        mesh,
-        SimpleFluid::BoundaryConditionSet{},
-        time_options,
-        linear_options,
-        model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, linear_options, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
 
-    solver.initialize_linear_temperature(
-        {1.0, 0.0, 0.0}, 301.0, 299.0);
+    solver_coupling.initialize_linear_temperature({1.0, 0.0, 0.0}, 301.0, 299.0);
     constexpr double minimum_cell_center = 0.0625;
     constexpr double maximum_cell_center = 0.9375;
     for (size_t owned = 0;
@@ -903,7 +918,7 @@ TEST(BoussinesqSolverTest,
           / diagonal[cell];
     }
 
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_TRUE(solver.last_step_statistics().converged);
     EXPECT_TRUE(std::isfinite(
@@ -983,16 +998,13 @@ TEST(BoussinesqSolverTest,
     SimpleFluid::LinearSolverOptions linear_options;
     linear_options.max_iterations = 400;
     linear_options.tolerance = 1.0e-11;
-    SimpleFluid::BoussinesqSolver<Pack> solver(
-        mesh,
-        boundaries,
-        time_options,
-        linear_options,
-        model_options);
-    solver.initialize_linear_temperature(
-        {1.0, 0.0, 0.0}, 300.0, 300.0);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, boundaries, time_options, linear_options, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_linear_temperature({1.0, 0.0, 0.0}, 300.0, 300.0);
 
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_TRUE(solver.last_step_statistics().converged);
     const auto& coupled_residuals =
@@ -1106,9 +1118,11 @@ TEST(BoussinesqSolverTest, RunsBottomHotCylinderSmokeCase)
     time_options.steps = 2;
     time_options.thermal_diffusivity = 1.0e-2;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
-    solver.initialize_bottom_hot_top_cold(1.0, 0.0);
-    solver.run();
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_bottom_hot_top_cold(1.0, 0.0);
+    solver_coupling.run();
 
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GT(solver.time(), 0.0);
@@ -1142,9 +1156,11 @@ TEST(BoussinesqSolverTest, RunsBoundariedCylinderSmokeCase)
     linear_options.max_iterations = 100;
     linear_options.tolerance = 1.0e-12;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options, linear_options);
-    solver.initialize_bottom_hot_top_cold(1.0, 0.0);
-    solver.run();
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options, linear_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_bottom_hot_top_cold(1.0, 0.0);
+    solver_coupling.run();
 
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GT(solver.time(), 0.0);
@@ -1177,9 +1193,11 @@ TEST(BoussinesqSolverTest, RunsBottomHotSphereSmokeCase)
     time_options.steps = 2;
     time_options.thermal_diffusivity = 1.0e-2;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
-    solver.initialize_bottom_hot_top_cold(1.0, 0.0);
-    solver.run();
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_bottom_hot_top_cold(1.0, 0.0);
+    solver_coupling.run();
 
     EXPECT_EQ(solver.step_index(), 2);
     EXPECT_GT(solver.time(), 0.0);
@@ -1211,9 +1229,11 @@ TEST(BoussinesqSolverTest, RunsBoundaryLayerBoxWithThreeDirectionGravity)
     time_options.gravity_z = -9.81;
     time_options.reference_temperature = 0.5;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
-    solver.initialize_heated_box(1.0, 0.0);
-    solver.run();
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.0, 0.0);
+    solver_coupling.run();
 
     EXPECT_EQ(solver.step_index(), 1);
     expect_finite_solution(*mesh, solver);
@@ -1257,13 +1277,15 @@ TEST(BoussinesqSolverTest, RunsPressureVelocityCouplingModesAndReportsResiduals)
         linear_options.tolerance = 1.0e-12;
         linear_options.max_iterations = 200;
 
-        InspectableBoussinesqSolver solver(mesh, bcs, time_options, linear_options);
-        solver.initialize_heated_box(1.0, 0.0);
+        auto solver_shared = std::make_shared<InspectableBoussinesqSolver>(mesh, bcs, time_options, linear_options);
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        solver_coupling.initialize_heated_box(1.0, 0.0);
 
         const auto cache =
             SimpleFluid::FVM::cache_velocity_boundary_conditions<Pack>(solver.velocity().mesh_ptr(), bcs);
-        solver.step();
-        solver.step();
+        solver_coupling.step();
+        solver_coupling.step();
 
         const auto after = continuity_imbalance_norm(
             solver.velocity(), solver.pressure(), time_options.time_step, cache, bcs.pressure);
@@ -1376,9 +1398,12 @@ TEST(BoussinesqSolverTest, StoresPressureInPascalsAcrossSegregatedAndCoupledSolv
         linear_options.tolerance = 1.0e-12;
         linear_options.max_iterations = 200;
 
-        SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options, linear_options, model_options);
-        solver.initialize_heated_box(1.0, 0.0);
-        solver.run();
+        auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+            mesh, bcs, time_options, linear_options, model_options);
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        solver_coupling.initialize_heated_box(1.0, 0.0);
+        solver_coupling.run();
 
         CaseState state;
         state.pressure.reserve(mesh->num_owned_cells());
@@ -2138,10 +2163,12 @@ TEST(BoussinesqSolverTest, RejectsInvalidPressureVelocityLoopCounts)
     SimpleFluid::TimeStepperOptions time_options;
     time_options.n_pressure_correctors = 0;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options);
-    solver.initialize_heated_box(1.0, 0.0);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bcs, time_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(1.0, 0.0);
 
-    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_THROW(solver_coupling.step(), std::invalid_argument);
 }
 
 /** @brief Compare one-cell physical heat-source integration to its analytic rise. */
@@ -2163,9 +2190,12 @@ TEST(BoussinesqSolverTest, PhysicalHeatSourcesGiveAnalyticalOneCellRise)
     model_options.temperature_source_names = {"heating", "sink"};
     model_options.temperature_source_power_densities = {20.0, -5.0};
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {}, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_scalar(10.0);
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_NEAR(solver.temperature().value(0), 10.0 + 0.1 * 15.0 / (2.0 * 5.0), 1.0e-12);
 }
@@ -2187,12 +2217,15 @@ TEST(BoussinesqSolverTest, FissionPowerAddsToOtherPhysicalHeatSources)
     model_options.dynamic_viscosity = 0.0;
     model_options.thermal_conductivity = 0.0;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {}, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_scalar(10.0);
     solver.add_temperature_source("heat_sink", -5.0);
-    auto& fission = solver.add_fission_power_source();
+    auto& fission = solver_coupling.add_fission_power_source();
     fission.initialize_constant(20.0);
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_NEAR(solver.temperature().value(0), 10.15, 1.0e-12);
     EXPECT_DOUBLE_EQ(fission.field().value(0), 20.0);
@@ -2210,9 +2243,12 @@ TEST(BoussinesqSolverTest, FissionMultiplierUsesStepStartContext)
     time_options.thermal_diffusivity = 0.0;
 
     auto model_options = SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {}, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_scalar(0.0);
-    auto& fission = solver.add_fission_power_source();
+    auto& fission = solver_coupling.add_fission_power_source();
     fission.initialize_constant(10.0);
 
     std::vector<double> update_times;
@@ -2223,10 +2259,10 @@ TEST(BoussinesqSolverTest, FissionMultiplierUsesStepStartContext)
             return 1.0 + context.time;
         });
 
-    solver.step();
+    solver_coupling.step();
     EXPECT_NEAR(solver.temperature().value(0), 1.0, 1.0e-12);
     EXPECT_DOUBLE_EQ(fission.field().value(0), 10.0);
-    solver.step();
+    solver_coupling.step();
     EXPECT_NEAR(solver.temperature().value(0), 2.1, 1.0e-12);
     EXPECT_DOUBLE_EQ(fission.field().value(0), 11.0);
     EXPECT_EQ(update_times, (std::vector<double>{0.0, 0.1}));
@@ -2236,25 +2272,28 @@ TEST(BoussinesqSolverTest, FissionMultiplierUsesStepStartContext)
 TEST(BoussinesqSolverTest, ManagesSpecializedFissionSourceLifecycle)
 {
     auto mesh = make_single_cell_box_mesh();
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {});
+    auto solver_shared =
+        std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{});
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
 
-    EXPECT_EQ(solver.find_fission_power_source(), nullptr);
+    EXPECT_EQ(solver_coupling.find_fission_power_source(), nullptr);
     EXPECT_THROW(solver.add_temperature_source("qdot_fission", 1.0), std::invalid_argument);
     EXPECT_THROW(solver.remove_temperature_source("qdot_fission"), std::invalid_argument);
 
     SimpleFluid::FissionPowerSourceOptions options;
     options.profile = SimpleFluid::FissionPowerProfile::Constant;
     options.power_density = 4.0;
-    solver.configure_fission_power_source(options);
-    ASSERT_NE(solver.find_fission_power_source(), nullptr);
-    EXPECT_DOUBLE_EQ(solver.find_fission_power_source()->field().value(0), 4.0);
-    EXPECT_THROW(solver.add_fission_power_source(), std::invalid_argument);
+    solver_coupling.configure_fission_power_source(options);
+    ASSERT_NE(solver_coupling.find_fission_power_source(), nullptr);
+    EXPECT_DOUBLE_EQ(solver_coupling.find_fission_power_source()->field().value(0), 4.0);
+    EXPECT_THROW(solver_coupling.add_fission_power_source(), std::invalid_argument);
 
     options.profile = SimpleFluid::FissionPowerProfile::Disabled;
-    solver.configure_fission_power_source(options);
-    EXPECT_EQ(solver.find_fission_power_source(), nullptr);
+    solver_coupling.configure_fission_power_source(options);
+    EXPECT_EQ(solver_coupling.find_fission_power_source(), nullptr);
     EXPECT_EQ(solver.find_temperature_source("qdot_fission"), nullptr);
-    EXPECT_FALSE(solver.remove_fission_power_source());
+    EXPECT_FALSE(solver_coupling.remove_fission_power_source());
 }
 
 /** @brief Verify material properties refresh before step-start source evaluation. */
@@ -2274,11 +2313,14 @@ TEST(BoussinesqSolverTest, RefreshesMaterialBeforeSourcesAtStepStart)
     model_options.dynamic_viscosity = 0.0;
     model_options.thermal_conductivity = 0.0;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {}, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_scalar(10.0);
 
     std::vector<std::string> updates;
-    solver.set_material_updater(
+    solver_coupling.set_material_updater(
         [&](const auto& context, auto& material)
         {
             updates.push_back("material");
@@ -2303,7 +2345,7 @@ TEST(BoussinesqSolverTest, RefreshesMaterialBeforeSourcesAtStepStart)
             field.put_scalar(20.0);
         });
 
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_EQ(updates, (std::vector<std::string>{"material", "alpha", "zeta"}));
     EXPECT_DOUBLE_EQ(solver.material_properties().specific_heat_capacity.value(0), 5.0);
@@ -2332,9 +2374,12 @@ TEST(BoussinesqSolverTest, DensityFeedbackUsesReferenceDensityBuoyancy)
     model_options.thermal_conductivity = 0.0;
     model_options.density_feedback_enabled = true;
 
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {}, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_scalar(1.0);
-    solver.step();
+    solver_coupling.step();
 
     const auto velocity = solver.velocity().value(0);
     EXPECT_NEAR(velocity.x, 0.0, 1.0e-12);
@@ -2360,13 +2405,17 @@ TEST(BoussinesqSolverTest, PhysicalDefaultsMatchLegacySolver)
     time_options.thermal_diffusivity = 0.01;
     time_options.kinematic_viscosity = 0.01;
 
-    SimpleFluid::BoussinesqSolver<Pack> legacy(legacy_mesh, bcs, time_options);
-    SimpleFluid::BoussinesqSolver<Pack> physical(
-        physical_mesh, bcs, time_options, {}, SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options));
-    legacy.initialize_heated_box(1.0, 0.0);
-    physical.initialize_heated_box(1.0, 0.0);
-    legacy.step();
-    physical.step();
+    auto legacy_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(legacy_mesh, bcs, time_options);
+    auto& legacy = *legacy_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> legacy_coupling(legacy_shared);
+    auto physical_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(physical_mesh, bcs, time_options,
+        SimpleFluid::LinearSolverOptions{}, SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options));
+    auto& physical = *physical_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> physical_coupling(physical_shared);
+    legacy_coupling.initialize_heated_box(1.0, 0.0);
+    physical_coupling.initialize_heated_box(1.0, 0.0);
+    legacy_coupling.step();
+    physical_coupling.step();
 
     for (size_t owned = 0; owned < legacy_mesh->num_owned_cells(); ++owned)
     {
@@ -2386,9 +2435,12 @@ TEST(BoussinesqSolverTest, AuxiliaryFieldsAreOptInForVtuOutput)
     auto mesh = make_single_cell_box_mesh();
     SimpleFluid::TimeStepperOptions time_options;
     auto model_options = SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {}, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.add_temperature_source("qdot_test", 12.0);
-    auto& fission = solver.add_fission_power_source();
+    auto& fission = solver_coupling.add_fission_power_source();
     fission.initialize_constant(8.0);
 
     const auto unique_id = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -2396,8 +2448,8 @@ TEST(BoussinesqSolverTest, AuxiliaryFieldsAreOptInForVtuOutput)
     const auto default_file = base.string() + "_default.vtu";
     const auto auxiliary_file = base.string() + "_auxiliary.vtu";
 
-    solver.write_solution_vtu(default_file);
-    solver.write_solution_vtu(auxiliary_file,
+    solver_coupling.write_solution_vtu(default_file);
+    solver_coupling.write_solution_vtu(auxiliary_file,
         SimpleFluid::SolutionOutputOptions{.include_sources = true, .include_material_properties = true});
 
     auto read_file = [](const std::string& filename)
@@ -2428,11 +2480,14 @@ TEST(BoussinesqSolverTest, RejectsNonFiniteSourceUpdaterOutput)
     auto mesh = make_single_cell_box_mesh();
     const SimpleFluid::TimeStepperOptions time_options;
     auto model_options = SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, {}, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     auto& source = solver.add_temperature_source("invalid");
     source.set_updater([](const auto&, auto& field) { field.put_scalar(std::numeric_limits<double>::quiet_NaN()); });
 
-    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_THROW(solver_coupling.step(), std::invalid_argument);
 }
 
 /** @brief Verify coupled Krylov assembly uses configured physical material fields. */
@@ -2454,9 +2509,12 @@ TEST(BoussinesqSolverTest, CoupledKrylovUsesPhysicalMaterialPath)
 
     auto model_options = SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
     model_options.dynamic_viscosity = 0.02;
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bcs, time_options, {}, model_options);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, bcs, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_scalar(0.5);
-    solver.step();
+    solver_coupling.step();
 
     expect_finite_solution(*mesh, solver);
     EXPECT_GT(solver.last_step_statistics().linear_solves, 0);

@@ -9,6 +9,8 @@
 #include "VerificationParallel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
+#include <memory>
 
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -151,7 +153,9 @@ int run(int argc, char** argv)
     model.specific_heat_capacity = water.specific_heat_capacity;
     model.dynamic_viscosity = water.dynamic_viscosity;
     model.thermal_conductivity = water.thermal_conductivity;
-    SimpleFluid::BoussinesqSolver<Pack> solver(mesh, bc, time, linear, model);
+    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, bc, time, linear, model);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     linear_controls.apply_flow(solver);
     SimpleFluid::MaterialFeedbackOptions feedback;
     feedback.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqVoid;
@@ -161,7 +165,7 @@ int run(int argc, char** argv)
     feedback.thermal_expansion = beta;
     feedback.reference_dynamic_viscosity = water.dynamic_viscosity;
     feedback.min_density = water.density * 0.9;
-    solver.configure_material_feedback(feedback);
+    solver_coupling.configure_material_feedback(feedback);
     Field power(mesh, 0.0, "bottom_power");
     for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
     {
@@ -170,7 +174,7 @@ int run(int argc, char** argv)
             power.set_owned_value(static_cast<Pack::local_ordinal_type>(cell), source_scale * p("power_density"));
     }
     power.sync_ghosts();
-    auto& fission = solver.add_fission_power_source();
+    auto& fission = solver_coupling.add_fission_power_source();
     fission.initialize_from_power_density(power);
     const double expected_power = source_scale * p("power_density") * (width / 3) * (height / 8) * depth;
     require(std::abs(fission.integrated_power() - expected_power) < 1e-12 * volume_scale,
@@ -202,8 +206,8 @@ int run(int argc, char** argv)
     gas.min_radius = 1e-12;
     gas.max_radius = 1e-3;
     gas.free_surface_patches = {"zmax"};
-    solver.configure_radiolytic_gas(gas);
-    solver.initialize_linear_temperature({0, 0, 1}, water.temperature, water.temperature);
+    solver_coupling.configure_radiolytic_gas(gas);
+    solver_coupling.initialize_linear_temperature({0, 0, 1}, water.temperature, water.temperature);
     // The source-off rest control also starts at the turbulence floor.
     const double initial_tke = source_scale == 0 ? p("sst_k_min") : p("sst_initial_k");
     SimpleFluid::TurbulenceModelOptions sst;
@@ -241,7 +245,7 @@ int run(int argc, char** argv)
     turbulence.set_wall_distance(distance, solver.material_properties(), water.density);
     turbulence.restore_transported_state(
         initial_k, initial_omega, initial_nut, solver.velocity(), solver.material_properties(), water.density);
-    auto* bubbles = solver.find_radiolytic_gas_model();
+    auto* bubbles = solver_coupling.find_radiolytic_gas_model();
     bubbles->set_skip_zero_auxiliary_transport(skip_zero_auxiliary_gas);
     linear_controls.apply_gas(*bubbles);
     SimpleFluid::Verification::LinearSolverHistory linear_history(output);
@@ -363,7 +367,7 @@ int run(int argc, char** argv)
         }
         try
         {
-            solver.step();
+            solver_coupling.step();
         }
         catch (const std::exception& error)
         {

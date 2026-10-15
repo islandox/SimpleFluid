@@ -21,8 +21,8 @@ through the solver API. See [solver phase timings](solver_timings.md) for
 | Coupling dispatch; segregated corrector detail | @ref SimpleFluid::FluidSolver "FluidSolver" `solve_pressure_velocity_coupling()` | `src/solvers/FluidSolver.tcc`, `src/equations/PressureProjectionEquation.tcc` |
 | Monolithic assembly and Krylov solve | @ref SimpleFluid::CoupledPressureVelocitySolver "CoupledPressureVelocitySolver" | `src/solvers/CoupledPressureVelocitySolver.tcc` |
 | Isothermal flow and optional turbulence | @ref SimpleFluid::IncompressibleIsothermalSolver "IncompressibleIsothermalSolver" `step()` | `src/solvers/IncompressibleIsothermalSolver.tcc` |
-| Boussinesq timestep | @ref SimpleFluid::BoussinesqSolver "BoussinesqSolver" `step()` | `src/solvers/BoussinesqSolver.tcc` |
-| Boussinesq optional-model phases | @ref SimpleFluid::BoussinesqSolver "BoussinesqSolver" model-update helpers | `src/solvers/BoussinesqSolver.tcc` |
+| Boussinesq multiphysics timestep | @ref SimpleFluid::MultiphysicsSolverCoupler "MultiphysicsSolverCoupler" `step()` (calls the referenced Boussinesq equation stages) | `src/solvers/MultiphysicsSolverCoupler.tcc` |
+| Optional-model phases | @ref SimpleFluid::MultiphysicsSolverCoupler "MultiphysicsSolverCoupler" model-update helpers | `src/solvers/MultiphysicsSolverCoupler.tcc` |
 | Adaptive pseudo-transient search | @ref SimpleFluid::AdaptiveSteadyStateController "AdaptiveSteadyStateController" and @ref SimpleFluid::SteadyStateFieldMonitor "SteadyStateFieldMonitor" | `src/examples/pitz_daily.cc`, `src/examples/natural_convection_shiri.cc`, `src/solvers/SteadyStateSearch.cc` |
 
 ## Important distinctions
@@ -37,15 +37,19 @@ through the solver API. See [solver phase timings](solver_timings.md) for
   are not the outer nonlinear iterations used by `CoupledNonlinear`/NOX.
 - @ref SimpleFluid::IncompressibleIsothermalSolver "IncompressibleIsothermalSolver"
   advances no temperature field. @ref SimpleFluid::BoussinesqSolver
-  "BoussinesqSolver" adds buoyancy, temperature transport, and optional
-  multiphysics in a defined sequential order.
+  "BoussinesqSolver" adds buoyancy, temperature transport, and turbulence.
+  An external `MultiphysicsSolverCoupler` orders optional physics around its
+  equation stages.
 - Adaptive steady-state orchestration belongs to example drivers. The
   controller adapts pseudo-time and counts accepted physical-update samples;
   it does not own a solver loop or general rollback checkpoint.
-- Planar ALE has a specialized geometry-trial and acceptance loop in
-  `BoussinesqSolver::step_planar_ale()`. The top-level Boussinesq diagram shows
+- Planar ALE has a specialized geometry-trial and acceptance loop delegated by
+  `MultiphysicsSolverCoupler::step_planar_ale()` to the private `PlanarALEStep`
+  schedule in `MultiphysicsSolverCouplerPlanarALE.tcc`. The top-level coupling diagram shows
   the dispatch boundary instead of compressing that large workflow into the
   fixed-grid multiphysics diagram.
+  See [the coupling design](architecture/multiphysics_solver_coupler.md) for
+  field ownership and the compatibility API.
 
 ## Maintenance
 

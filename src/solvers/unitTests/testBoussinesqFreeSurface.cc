@@ -4,9 +4,11 @@
  */
 
 #include <gtest/gtest.h>
+#include <memory>
 
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "utils/testing_environment.hh"
 
 #include <algorithm>
@@ -107,17 +109,21 @@ std::string read_file(const std::filesystem::path& filename)
 
 TEST(BoussinesqFreeSurfaceTest, DisabledConfigurationPreservesBaseline)
 {
-    Solver baseline(make_mesh(), {}, time_options());
-    Solver configured(make_mesh(), {}, time_options());
+    auto baseline_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options());
+    auto& baseline = *baseline_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> baseline_coupling(baseline_shared);
+    auto configured_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options());
+    auto& configured = *configured_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> configured_coupling(configured_shared);
     SimpleFluid::FreeSurfaceOptions disabled;
-    EXPECT_EQ(configured.configure_free_surface(disabled), nullptr);
-    EXPECT_EQ(configured.find_free_surface_model(), nullptr);
-    EXPECT_EQ(configured.find_liquid_mass_inventory(), nullptr);
+    EXPECT_EQ(configured_coupling.configure_free_surface(disabled), nullptr);
+    EXPECT_EQ(configured_coupling.find_free_surface_model(), nullptr);
+    EXPECT_EQ(configured_coupling.find_liquid_mass_inventory(), nullptr);
 
-    baseline.initialize_heated_box(300.0, 300.0);
-    configured.initialize_heated_box(300.0, 300.0);
-    baseline.step();
-    configured.step();
+    baseline_coupling.initialize_heated_box(300.0, 300.0);
+    configured_coupling.initialize_heated_box(300.0, 300.0);
+    baseline_coupling.step();
+    configured_coupling.step();
 
     EXPECT_DOUBLE_EQ(configured.temperature().value(0), baseline.temperature().value(0));
     EXPECT_DOUBLE_EQ(configured.pressure().value(0), baseline.pressure().value(0));
@@ -130,24 +136,27 @@ TEST(BoussinesqFreeSurfaceTest, DisabledConfigurationPreservesBaseline)
 
 TEST(BoussinesqFreeSurfaceTest, DisabledFreeSurfacePreservesLegacyBoilingEnergyPath)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.alpha_max = 0.9;
     void_options.initial_alpha = 0.1;
     void_options.alpha_collapse_time = 1.0;
-    solver.configure_scalar_void_fraction(void_options);
+    solver_coupling.configure_scalar_void_fraction(void_options);
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
     boiling.saturation_temperature = 300.0;
     boiling.boiling_time_scale = 1.0;
     boiling.latent_heat = 1000.0;
     boiling.gas_density = 1.0;
-    auto& model = solver.configure_boiling_source(boiling);
-    solver.initialize_heated_box(301.0, 301.0);
+    auto& model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.initialize_heated_box(301.0, 301.0);
 
-    solver.step();
+    solver_coupling.step();
 
-    EXPECT_EQ(solver.find_free_surface_model(), nullptr);
+    EXPECT_EQ(solver_coupling.find_free_surface_model(), nullptr);
     EXPECT_DOUBLE_EQ(model.condensed_liquid_mass_this_step(), 0.0);
     EXPECT_DOUBLE_EQ(model.global_submerged_steam_mass(), 0.0);
     EXPECT_DOUBLE_EQ(model.condensation_latent_heat_release().value(0), 0.0);
@@ -155,7 +164,10 @@ TEST(BoussinesqFreeSurfaceTest, DisabledFreeSurfacePreservesLegacyBoilingEnergyP
 
 TEST(BoussinesqFreeSurfaceTest, ThermalExpansionUsesPureTemperatureDependentDensity)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::MaterialFeedbackOptions feedback;
     feedback.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqTemperatureOnly;
     feedback.reference_density = 1000.0;
@@ -164,89 +176,98 @@ TEST(BoussinesqFreeSurfaceTest, ThermalExpansionUsesPureTemperatureDependentDens
     feedback.reference_temperature = 300.0;
     feedback.thermal_expansion = 1.0e-3;
     feedback.reference_dynamic_viscosity = 1.0e-3;
-    solver.configure_material_feedback(feedback);
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(300.0, 300.0);
+    solver_coupling.configure_material_feedback(feedback);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
-    EXPECT_NEAR(solver.free_surface_diagnostics().clear_level, 0.5, 1.0e-13);
-    EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), 500.0, 1.0e-12);
+    EXPECT_NEAR(solver_coupling.free_surface_diagnostics().clear_level, 0.5, 1.0e-13);
+    EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), 500.0, 1.0e-12);
 
     solver.temperature().put_scalar(310.0);
-    solver.step();
+    solver_coupling.step();
 
     constexpr double expected_density = 990.0;
     constexpr double expected_volume = 500.0 / expected_density;
-    const auto diagnostics = solver.free_surface_diagnostics();
-    EXPECT_NEAR(solver.rho_liquid().value(0), expected_density, 1.0e-12);
+    const auto diagnostics = solver_coupling.free_surface_diagnostics();
+    EXPECT_NEAR(solver_coupling.rho_liquid().value(0), expected_density, 1.0e-12);
     EXPECT_NEAR(diagnostics.liquid_volume, expected_volume, 1.0e-12);
     EXPECT_NEAR(diagnostics.clear_level, expected_volume, 1.0e-12);
     EXPECT_NEAR(diagnostics.pool_level, expected_volume, 1.0e-12);
     EXPECT_NEAR(diagnostics.time, 0.1, 1.0e-14);
     EXPECT_NEAR(diagnostics.time_step, 0.1, 1.0e-14);
     EXPECT_NEAR(diagnostics.clear_level_rate, (expected_volume - 0.5) / 0.1, 1.0e-12);
-    EXPECT_NEAR(solver.liquid_mass_inventory().diagnostics().mass_balance_residual, 0.0, 1.0e-13);
+    EXPECT_NEAR(solver_coupling.liquid_mass_inventory().diagnostics().mass_balance_residual, 0.0, 1.0e-13);
 }
 
 TEST(BoussinesqFreeSurfaceTest, InitialMassUsesMaterialUpdaterAtInitializedTemperature)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     int updates = 0;
-    solver.set_material_updater(
+    solver_coupling.set_material_updater(
         [&updates](const auto& context, auto& material)
         {
             ++updates;
             EXPECT_DOUBLE_EQ(context.temperature.value(0), 300.0);
             material.density.put_scalar(800.0);
         });
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(300.0, 300.0);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
-    EXPECT_DOUBLE_EQ(solver.rho_liquid().value(0), 800.0);
-    EXPECT_DOUBLE_EQ(solver.liquid_mass_inventory().totalMass(), 400.0);
-    EXPECT_DOUBLE_EQ(solver.free_surface_diagnostics().liquid_volume, 0.5);
+    EXPECT_DOUBLE_EQ(solver_coupling.rho_liquid().value(0), 800.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.liquid_mass_inventory().totalMass(), 400.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.free_surface_diagnostics().liquid_volume, 0.5);
     EXPECT_EQ(updates, 1);
-    EXPECT_THROW(solver.set_material_updater([](const auto&, auto&) {}), std::logic_error);
+    EXPECT_THROW(solver_coupling.set_material_updater([](const auto&, auto&) {}), std::logic_error);
 }
 
 TEST(BoussinesqFreeSurfaceTest, ConfigurationAfterFieldInitializationRefreshesMaterialUpdater)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     int updates = 0;
-    solver.set_material_updater(
+    solver_coupling.set_material_updater(
         [&updates](const auto& context, auto& material)
         {
             ++updates;
             EXPECT_DOUBLE_EQ(context.temperature.value(0), 300.0);
             material.density.put_scalar(800.0);
         });
-    solver.initialize_heated_box(300.0, 300.0);
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
-    solver.configure_free_surface(free_surface_options());
+    solver_coupling.configure_free_surface(free_surface_options());
 
-    EXPECT_DOUBLE_EQ(solver.rho_liquid().value(0), 800.0);
-    EXPECT_DOUBLE_EQ(solver.liquid_mass_inventory().totalMass(), 400.0);
-    EXPECT_DOUBLE_EQ(solver.free_surface_diagnostics().liquid_volume, 0.5);
+    EXPECT_DOUBLE_EQ(solver_coupling.rho_liquid().value(0), 800.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.liquid_mass_inventory().totalMass(), 400.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.free_surface_diagnostics().liquid_volume, 0.5);
     EXPECT_EQ(updates, 1);
 }
 
 TEST(BoussinesqFreeSurfaceTest, LazyFirstStepInitializesFromOneMaterialUpdate)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     int updates = 0;
-    solver.set_material_updater(
+    solver_coupling.set_material_updater(
         [&updates](const auto&, auto& material)
         {
             ++updates;
             material.density.put_scalar(800.0);
         });
-    solver.configure_free_surface(free_surface_options());
+    solver_coupling.configure_free_surface(free_surface_options());
     EXPECT_EQ(updates, 0);
 
-    solver.step();
+    solver_coupling.step();
 
     EXPECT_EQ(updates, 1);
-    EXPECT_DOUBLE_EQ(solver.rho_liquid().value(0), 800.0);
-    EXPECT_DOUBLE_EQ(solver.liquid_mass_inventory().totalMass(), 400.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.rho_liquid().value(0), 800.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.liquid_mass_inventory().totalMass(), 400.0);
 }
 
 TEST(BoussinesqFreeSurfaceTest, ExplicitInitializationOrdersMaterialBeforeShengReconstruction)
@@ -259,40 +280,49 @@ TEST(BoussinesqFreeSurfaceTest, ExplicitInitializationOrdersMaterialBeforeShengR
     reference_options.reference_density = 800.0;
     reference_options.density = 800.0;
     reference_options.dynamic_viscosity = 1.5e-3;
-    Solver reference(make_mesh(), {}, time_options(), {}, reference_options);
-    auto& reference_gas = reference.configure_radiolytic_gas(radiolysis);
-    reference.configure_free_surface(free_surface_options());
-    reference.initialize_heated_box(300.0, 300.0);
+    auto reference_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, reference_options);
+    auto& reference = *reference_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> reference_coupling(reference_shared);
+    auto& reference_gas = reference_coupling.configure_radiolytic_gas(radiolysis);
+    reference_coupling.configure_free_surface(free_surface_options());
+    reference_coupling.initialize_heated_box(300.0, 300.0);
 
-    Solver updated(make_mesh(), {}, time_options(), {}, material_options());
+    auto updated_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& updated = *updated_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> updated_coupling(updated_shared);
     int updates = 0;
-    updated.set_material_updater(
+    updated_coupling.set_material_updater(
         [&updates](const auto&, auto& material)
         {
             ++updates;
             material.density.put_scalar(800.0);
             material.dynamic_viscosity.put_scalar(1.5e-3);
         });
-    auto& updated_gas = updated.configure_radiolytic_gas(radiolysis);
-    updated.configure_free_surface(free_surface_options());
-    updated.initialize_heated_box(300.0, 300.0);
+    auto& updated_gas = updated_coupling.configure_radiolytic_gas(radiolysis);
+    updated_coupling.configure_free_surface(free_surface_options());
+    updated_coupling.initialize_heated_box(300.0, 300.0);
 
     const auto reference_transfer = reference_gas.output_fields().at("K_L")->value(0);
     const auto updated_transfer = updated_gas.output_fields().at("K_L")->value(0);
     ASSERT_GT(reference_transfer, 0.0);
     EXPECT_NEAR(updated_transfer, reference_transfer, reference_transfer * 1.0e-13);
     EXPECT_EQ(updates, 1);
-    EXPECT_DOUBLE_EQ(updated.liquid_mass_inventory().totalMass(), 400.0);
+    EXPECT_DOUBLE_EQ(updated_coupling.liquid_mass_inventory().totalMass(), 400.0);
 }
 
 TEST(BoussinesqFreeSurfaceTest, BoilingCompletionRemovesAcceptedLiquidMassExactlyOnce)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.alpha_min = 0.0;
     void_options.alpha_max = 0.9;
     void_options.initial_alpha = 0.0;
-    solver.configure_scalar_void_fraction(void_options);
+    solver_coupling.configure_scalar_void_fraction(void_options);
 
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
@@ -300,43 +330,46 @@ TEST(BoussinesqFreeSurfaceTest, BoilingCompletionRemovesAcceptedLiquidMassExactl
     boiling.boiling_time_scale = 1.0;
     boiling.latent_heat = 1000.0;
     boiling.gas_density = 1.0;
-    auto& boiling_model = solver.configure_boiling_source(boiling);
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(301.0, 301.0);
-    const auto initial_mass = solver.liquid_mass_inventory().totalMass();
+    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(301.0, 301.0);
+    const auto initial_mass = solver_coupling.liquid_mass_inventory().totalMass();
 
-    solver.step();
+    solver_coupling.step();
 
     const auto& phase = boiling_model.last_phase_change_diagnostics();
     ASSERT_GT(phase.accepted_evaporation_mass, 0.0);
     EXPECT_FALSE(boiling_model.phase_change_completion_pending());
-    const auto liquid = solver.liquid_mass_inventory().diagnostics();
+    const auto liquid = solver_coupling.liquid_mass_inventory().diagnostics();
     EXPECT_NEAR(
         liquid.total_mass, initial_mass - phase.accepted_evaporation_mass + phase.condensed_liquid_mass, 1.0e-12);
     EXPECT_NEAR(liquid.cumulative_evaporated_mass, phase.accepted_evaporation_mass, 1.0e-14);
     EXPECT_NEAR(liquid.cumulative_condensed_mass, phase.condensed_liquid_mass, 1.0e-14);
-    const auto surface = solver.free_surface_diagnostics();
+    const auto surface = solver_coupling.free_surface_diagnostics();
     EXPECT_NEAR(surface.submerged_bubble_volume, phase.submerged_steam_volume, 1.0e-14);
     EXPECT_NEAR(surface.pool_volume, surface.liquid_volume + phase.submerged_steam_volume, 1.0e-14);
-    ASSERT_EQ(solver.free_surface_history().size(), 2U);
-    ASSERT_TRUE(solver.free_surface_history().back().boiling.has_value());
-    EXPECT_NEAR(solver.free_surface_history().back().boiling->accepted_evaporation_mass,
+    ASSERT_EQ(solver_coupling.free_surface_history().size(), 2U);
+    ASSERT_TRUE(solver_coupling.free_surface_history().back().boiling.has_value());
+    EXPECT_NEAR(solver_coupling.free_surface_history().back().boiling->accepted_evaporation_mass,
         phase.accepted_evaporation_mass, 1.0e-14);
 }
 
 TEST(BoussinesqFreeSurfaceTest, CellMassInventoryZeroFlowStepPreservesLocalAndGlobalMass)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
-    solver.configure_free_surface(cell_mass_free_surface_options());
-    solver.initialize_heated_box(300.0, 300.0);
-    const auto initial_cell_mass = solver.liquid_mass_inventory().cellMassInventory().value(0);
-    const auto initial_mass = solver.liquid_mass_inventory().totalMass();
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_free_surface(cell_mass_free_surface_options());
+    solver_coupling.initialize_heated_box(300.0, 300.0);
+    const auto initial_cell_mass = solver_coupling.liquid_mass_inventory().cellMassInventory().value(0);
+    const auto initial_mass = solver_coupling.liquid_mass_inventory().totalMass();
 
-    solver.step();
+    solver_coupling.step();
 
-    const auto diagnostics = solver.liquid_mass_inventory().diagnostics();
-    EXPECT_EQ(solver.liquid_mass_inventory().mode(), SimpleFluid::LiquidVolumeMode::CellMassInventory);
-    EXPECT_NEAR(solver.liquid_mass_inventory().cellMassInventory().value(0), initial_cell_mass, 1.0e-10);
+    const auto diagnostics = solver_coupling.liquid_mass_inventory().diagnostics();
+    EXPECT_EQ(solver_coupling.liquid_mass_inventory().mode(), SimpleFluid::LiquidVolumeMode::CellMassInventory);
+    EXPECT_NEAR(solver_coupling.liquid_mass_inventory().cellMassInventory().value(0), initial_cell_mass, 1.0e-10);
     EXPECT_NEAR(diagnostics.total_mass, initial_mass, 1.0e-10);
     EXPECT_NEAR(diagnostics.liquid_volume, 0.5, 1.0e-12);
     EXPECT_NEAR(diagnostics.step_mass_balance_residual, 0.0, 1.0e-10);
@@ -345,10 +378,13 @@ TEST(BoussinesqFreeSurfaceTest, CellMassInventoryZeroFlowStepPreservesLocalAndGl
 
 TEST(BoussinesqFreeSurfaceTest, CellMassInventoryConsumesAcceptedLocalBoilingSourceOnce)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.alpha_max = 0.9;
-    solver.configure_scalar_void_fraction(void_options);
+    solver_coupling.configure_scalar_void_fraction(void_options);
 
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
@@ -356,20 +392,20 @@ TEST(BoussinesqFreeSurfaceTest, CellMassInventoryConsumesAcceptedLocalBoilingSou
     boiling.boiling_time_scale = 1.0;
     boiling.latent_heat = 1000.0;
     boiling.gas_density = 1.0;
-    auto& boiling_model = solver.configure_boiling_source(boiling);
-    solver.configure_free_surface(cell_mass_free_surface_options());
-    solver.initialize_heated_box(301.0, 301.0);
-    const auto initial_cell_mass = solver.liquid_mass_inventory().cellMassInventory().value(0);
-    const auto initial_mass = solver.liquid_mass_inventory().totalMass();
+    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.configure_free_surface(cell_mass_free_surface_options());
+    solver_coupling.initialize_heated_box(301.0, 301.0);
+    const auto initial_cell_mass = solver_coupling.liquid_mass_inventory().cellMassInventory().value(0);
+    const auto initial_mass = solver_coupling.liquid_mass_inventory().totalMass();
 
-    solver.step();
+    solver_coupling.step();
 
     const auto& phase = boiling_model.last_phase_change_diagnostics();
-    const auto liquid = solver.liquid_mass_inventory().diagnostics();
+    const auto liquid = solver_coupling.liquid_mass_inventory().diagnostics();
     ASSERT_GT(phase.accepted_evaporation_mass, 0.0);
     EXPECT_NEAR(
         liquid.total_mass, initial_mass - phase.accepted_evaporation_mass + phase.condensed_liquid_mass, 1.0e-9);
-    EXPECT_NEAR(solver.liquid_mass_inventory().cellMassInventory().value(0),
+    EXPECT_NEAR(solver_coupling.liquid_mass_inventory().cellMassInventory().value(0),
         initial_cell_mass - phase.accepted_evaporation_mass + phase.condensed_liquid_mass, 1.0e-9);
     EXPECT_NEAR(liquid.cumulative_evaporated_mass, phase.accepted_evaporation_mass, 1.0e-14);
     EXPECT_NEAR(liquid.cumulative_condensed_mass, phase.condensed_liquid_mass, 1.0e-14);
@@ -378,11 +414,14 @@ TEST(BoussinesqFreeSurfaceTest, CellMassInventoryConsumesAcceptedLocalBoilingSou
 
 TEST(BoussinesqFreeSurfaceTest, CellMassInventoryReturnsPositiveCondensateExactlyOnce)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.alpha_max = 0.9;
     void_options.alpha_collapse_time = 0.5;
-    solver.configure_scalar_void_fraction(void_options);
+    solver_coupling.configure_scalar_void_fraction(void_options);
 
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
@@ -390,25 +429,25 @@ TEST(BoussinesqFreeSurfaceTest, CellMassInventoryReturnsPositiveCondensateExactl
     boiling.boiling_time_scale = 1.0;
     boiling.latent_heat = 1000.0;
     boiling.gas_density = 1.0;
-    auto& boiling_model = solver.configure_boiling_source(boiling);
-    solver.configure_free_surface(cell_mass_free_surface_options());
-    solver.initialize_heated_box(301.0, 301.0);
-    const auto initial_liquid_mass = solver.liquid_mass_inventory().totalMass();
+    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.configure_free_surface(cell_mass_free_surface_options());
+    solver_coupling.initialize_heated_box(301.0, 301.0);
+    const auto initial_liquid_mass = solver_coupling.liquid_mass_inventory().totalMass();
 
-    solver.step();
+    solver_coupling.step();
     const auto first_phase = boiling_model.last_phase_change_diagnostics();
-    const auto first_liquid = solver.liquid_mass_inventory().diagnostics();
-    const auto first_cell_mass = solver.liquid_mass_inventory().cellMassInventory().value(0);
+    const auto first_liquid = solver_coupling.liquid_mass_inventory().diagnostics();
+    const auto first_cell_mass = solver_coupling.liquid_mass_inventory().cellMassInventory().value(0);
     ASSERT_GT(first_phase.accepted_evaporation_mass, 0.0);
     EXPECT_DOUBLE_EQ(first_phase.condensed_liquid_mass, 0.0);
     EXPECT_NEAR(first_phase.submerged_steam_mass, first_phase.accepted_evaporation_mass, 1.0e-14);
     EXPECT_NEAR(first_liquid.total_mass, initial_liquid_mass - first_phase.accepted_evaporation_mass, 1.0e-9);
 
     solver.temperature().put_scalar(299.0);
-    solver.step();
+    solver_coupling.step();
 
     const auto second_phase = boiling_model.last_phase_change_diagnostics();
-    const auto second_liquid = solver.liquid_mass_inventory().diagnostics();
+    const auto second_liquid = solver_coupling.liquid_mass_inventory().diagnostics();
     const auto cell_volume = solver.temperature().mesh().cell_volume(0);
     const auto returned_mass = boiling_model.condensation_mass_rate().value(0) * cell_volume * time_options().time_step;
     ASSERT_GT(second_phase.condensed_liquid_mass, 0.0);
@@ -417,7 +456,7 @@ TEST(BoussinesqFreeSurfaceTest, CellMassInventoryReturnsPositiveCondensateExactl
     EXPECT_NEAR(boiling_model.condensation_latent_heat_release().value(0),
         boiling_model.condensation_mass_rate().value(0) * boiling.latent_heat, 1.0e-14);
     EXPECT_NEAR(second_liquid.total_mass, first_liquid.total_mass + second_phase.condensed_liquid_mass, 1.0e-9);
-    EXPECT_NEAR(solver.liquid_mass_inventory().cellMassInventory().value(0),
+    EXPECT_NEAR(solver_coupling.liquid_mass_inventory().cellMassInventory().value(0),
         first_cell_mass + second_phase.condensed_liquid_mass / cell_volume, 1.0e-9);
     EXPECT_NEAR(second_liquid.cumulative_evaporated_mass, first_phase.accepted_evaporation_mass, 1.0e-14);
     EXPECT_NEAR(second_liquid.cumulative_condensed_mass, second_phase.condensed_liquid_mass, 1.0e-14);
@@ -433,10 +472,13 @@ TEST(BoussinesqFreeSurfaceTest, CellMassInventoryReturnsPositiveCondensateExactl
 
 TEST(BoussinesqFreeSurfaceTest, RejectsRemovalWhileBoilingOwnsSubmergedSteam)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.alpha_max = 0.9;
-    solver.configure_scalar_void_fraction(void_options);
+    solver_coupling.configure_scalar_void_fraction(void_options);
 
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
@@ -444,45 +486,51 @@ TEST(BoussinesqFreeSurfaceTest, RejectsRemovalWhileBoilingOwnsSubmergedSteam)
     boiling.boiling_time_scale = 1.0;
     boiling.latent_heat = 1000.0;
     boiling.gas_density = 1.0;
-    auto& boiling_model = solver.configure_boiling_source(boiling);
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(301.0, 301.0);
-    solver.step();
+    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(301.0, 301.0);
+    solver_coupling.step();
 
     const auto steam_mass = boiling_model.global_submerged_steam_mass();
     ASSERT_GT(steam_mass, 0.0);
     try
     {
-        static_cast<void>(solver.remove_free_surface_model());
+        static_cast<void>(solver_coupling.remove_free_surface_model());
         FAIL() << "Expected nonzero submerged steam to block free-surface removal.";
     }
     catch (const std::logic_error& error)
     {
         EXPECT_NE(std::string(error.what()).find("nonzero submerged steam"), std::string::npos);
     }
-    EXPECT_NE(solver.find_free_surface_model(), nullptr);
-    EXPECT_NE(solver.find_liquid_mass_inventory(), nullptr);
+    EXPECT_NE(solver_coupling.find_free_surface_model(), nullptr);
+    EXPECT_NE(solver_coupling.find_liquid_mass_inventory(), nullptr);
     EXPECT_DOUBLE_EQ(boiling_model.global_submerged_steam_mass(), steam_mass);
 }
 
 TEST(BoussinesqFreeSurfaceTest, AllowsRemovalWhileBoilingSteamInventoryIsZero)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
-    auto& boiling_model = solver.configure_boiling_source(boiling);
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(300.0, 300.0);
+    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
     ASSERT_DOUBLE_EQ(boiling_model.global_submerged_steam_mass(), 0.0);
-    EXPECT_TRUE(solver.remove_free_surface_model());
-    EXPECT_EQ(solver.find_free_surface_model(), nullptr);
-    EXPECT_EQ(solver.find_liquid_mass_inventory(), nullptr);
+    EXPECT_TRUE(solver_coupling.remove_free_surface_model());
+    EXPECT_EQ(solver_coupling.find_free_surface_model(), nullptr);
+    EXPECT_EQ(solver_coupling.find_liquid_mass_inventory(), nullptr);
 }
 
 TEST(BoussinesqFreeSurfaceTest, TransfersOnlyExactSubmergedBubbleEscapeToVent)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::MaterialFeedbackOptions feedback;
     feedback.density_mode = SimpleFluid::DensityFeedbackMode::BoussinesqVoid;
     feedback.reference_density = 1000.0;
@@ -491,7 +539,7 @@ TEST(BoussinesqFreeSurfaceTest, TransfersOnlyExactSubmergedBubbleEscapeToVent)
     feedback.reference_temperature = 300.0;
     feedback.thermal_expansion = 0.0;
     feedback.reference_dynamic_viscosity = 1.0e-3;
-    solver.configure_material_feedback(feedback);
+    solver_coupling.configure_material_feedback(feedback);
     auto radiolysis = sheng_options();
     radiolysis.initial_micro_number_density = 1.0e10;
     radiolysis.initial_micro_moles = 1.0e-6;
@@ -501,25 +549,25 @@ TEST(BoussinesqFreeSurfaceTest, TransfersOnlyExactSubmergedBubbleEscapeToVent)
     radiolysis.microbubble_lifetime = 1.0e30;
     radiolysis.large_bubble_dissolution_time = 1.0e30;
     radiolysis.micro_to_large_conversion_coefficient = 0.0;
-    auto& gas = solver.configure_radiolytic_gas(radiolysis);
-    solver.add_fission_power_source().initialize_constant(0.0);
-    solver.configure_free_surface(free_surface_options(0.4));
-    solver.initialize_heated_box(300.0, 300.0);
-    const auto initial = solver.free_surface_diagnostics();
+    auto& gas = solver_coupling.configure_radiolytic_gas(radiolysis);
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
+    solver_coupling.configure_free_surface(free_surface_options(0.4));
+    solver_coupling.initialize_heated_box(300.0, 300.0);
+    const auto initial = solver_coupling.free_surface_diagnostics();
     ASSERT_GT(initial.submerged_bubble_volume, 0.0);
     ASSERT_TRUE(initial.submerged_population_gas_moles.contains("microbubble"));
     EXPECT_GT(initial.submerged_population_gas_moles.at("microbubble").at("H2"), 0.0);
-    EXPECT_DOUBLE_EQ(solver.free_surface_history().front().microbubble_hydrogen_moles,
+    EXPECT_DOUBLE_EQ(solver_coupling.free_surface_history().front().microbubble_hydrogen_moles,
         initial.submerged_population_gas_moles.at("microbubble").at("H2"));
     EXPECT_GT(initial.pool_level, initial.clear_level);
-    EXPECT_DOUBLE_EQ(solver.rho_liquid().value(0), 1000.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.rho_liquid().value(0), 1000.0);
     EXPECT_LT(solver.material_properties().density.value(0), 1000.0);
 
-    solver.step();
+    solver_coupling.step();
 
     const auto escaped = gas.last_statistics().submerged_bubble_hydrogen_escaped;
     ASSERT_GT(escaped, 0.0);
-    const auto diagnostics = solver.free_surface_diagnostics();
+    const auto diagnostics = solver_coupling.free_surface_diagnostics();
     ASSERT_TRUE(diagnostics.vented_gas_moles.contains("H2"));
     EXPECT_NEAR(diagnostics.vented_gas_moles.at("H2"), escaped, 1.0e-14);
     EXPECT_NEAR(diagnostics.gas_closure_by_species.at("H2"), 0.0, 1.0e-14);
@@ -529,8 +577,11 @@ TEST(BoussinesqFreeSurfaceTest, TransfersOnlyExactSubmergedBubbleEscapeToVent)
 
 TEST(BoussinesqFreeSurfaceTest, PublishesOptInFieldsAndOccupancyApproximationError)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
-    solver.initialize_heated_box(300.0, 300.0);
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
     SimpleFluid::Database database;
     database.set("free_surface_enabled", true);
@@ -542,24 +593,25 @@ TEST(BoussinesqFreeSurfaceTest, PublishesOptInFieldsAndOccupancyApproximationErr
     database.set("free_surface_top_elevation", 1.0);
     database.set("free_surface_cross_section_area", 1.0);
     database.set("free_surface_total_internal_volume", 1.0);
-    ASSERT_NE(solver.configure_free_surface(database), nullptr);
+    ASSERT_NE(solver_coupling.configure_free_surface(database), nullptr);
 
-    EXPECT_DOUBLE_EQ(solver.clear_level().value(0), 0.75);
-    EXPECT_DOUBLE_EQ(solver.pool_level().value(0), 0.75);
-    EXPECT_DOUBLE_EQ(solver.headspace_pressure().value(0), 101325.0);
-    EXPECT_DOUBLE_EQ(solver.pool_occupancy().value(0), 1.0);
-    EXPECT_DOUBLE_EQ(solver.pool_occupancy_volume_error(), 0.25);
+    EXPECT_DOUBLE_EQ(solver_coupling.clear_level().value(0), 0.75);
+    EXPECT_DOUBLE_EQ(solver_coupling.pool_level().value(0), 0.75);
+    EXPECT_DOUBLE_EQ(solver_coupling.headspace_pressure().value(0), 101325.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.pool_occupancy().value(0), 1.0);
+    EXPECT_DOUBLE_EQ(solver_coupling.pool_occupancy_volume_error(), 0.25);
 
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto prefix = std::filesystem::temp_directory_path() / ("SimpleFluid_free_surface_" + std::to_string(unique));
     const auto default_file = prefix.string() + "_default.vtu";
     const auto selected_file = prefix.string() + "_selected.vtu";
-    solver.write_solution_vtu(default_file);
-    solver.write_solution_vtu(selected_file, SimpleFluid::SolutionOutputOptions{.include_free_surface_fields = true});
+    solver_coupling.write_solution_vtu(default_file);
+    solver_coupling.write_solution_vtu(
+        selected_file, SimpleFluid::SolutionOutputOptions{.include_free_surface_fields = true});
 
     const auto default_contents = read_file(default_file);
     const auto selected_contents = read_file(selected_file);
-    EXPECT_EQ(solver.liquid_mass_inventory().mode(), SimpleFluid::LiquidVolumeMode::CellMassInventory);
+    EXPECT_EQ(solver_coupling.liquid_mass_inventory().mode(), SimpleFluid::LiquidVolumeMode::CellMassInventory);
     for (const auto* name :
         {"rhoLiquid", "liquidMassInventory", "clearLevel", "poolLevel", "headspacePressure", "poolOccupancy"})
     {
@@ -570,33 +622,36 @@ TEST(BoussinesqFreeSurfaceTest, PublishesOptInFieldsAndOccupancyApproximationErr
     std::filesystem::remove(default_file);
     std::filesystem::remove(selected_file);
 
-    EXPECT_TRUE(solver.remove_free_surface_model());
-    EXPECT_EQ(solver.find_free_surface_model(), nullptr);
-    EXPECT_EQ(solver.find_liquid_mass_inventory(), nullptr);
-    EXPECT_FALSE(solver.remove_free_surface_model());
+    EXPECT_TRUE(solver_coupling.remove_free_surface_model());
+    EXPECT_EQ(solver_coupling.find_free_surface_model(), nullptr);
+    EXPECT_EQ(solver_coupling.find_liquid_mass_inventory(), nullptr);
+    EXPECT_FALSE(solver_coupling.remove_free_surface_model());
 }
 
 TEST(BoussinesqFreeSurfaceTest, RecordsInitializationAndAcceptedStepHistoryWithFixedCsvSchema)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(300.0, 300.0);
-    ASSERT_EQ(solver.free_surface_history().size(), 1U);
-    EXPECT_DOUBLE_EQ(solver.free_surface_history().front().free_surface.time, 0.0);
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(300.0, 300.0);
+    ASSERT_EQ(solver_coupling.free_surface_history().size(), 1U);
+    EXPECT_DOUBLE_EQ(solver_coupling.free_surface_history().front().free_surface.time, 0.0);
 
-    solver.step();
-    ASSERT_EQ(solver.free_surface_history().size(), 2U);
-    const auto& accepted = solver.free_surface_history().back();
+    solver_coupling.step();
+    ASSERT_EQ(solver_coupling.free_surface_history().size(), 2U);
+    const auto& accepted = solver_coupling.free_surface_history().back();
     EXPECT_DOUBLE_EQ(accepted.free_surface.time, 0.1);
     EXPECT_DOUBLE_EQ(accepted.free_surface.time_step, 0.1);
-    EXPECT_DOUBLE_EQ(accepted.liquid_mass.total_mass, solver.liquid_mass_inventory().totalMass());
-    EXPECT_DOUBLE_EQ(accepted.pool_occupancy_volume_error, solver.pool_occupancy_volume_error());
+    EXPECT_DOUBLE_EQ(accepted.liquid_mass.total_mass, solver_coupling.liquid_mass_inventory().totalMass());
+    EXPECT_DOUBLE_EQ(accepted.pool_occupancy_volume_error, solver_coupling.pool_occupancy_volume_error());
     EXPECT_FALSE(accepted.boiling.has_value());
 
     const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto filename = std::filesystem::temp_directory_path() /
                           ("SimpleFluid_free_surface_history_" + std::to_string(unique) + ".csv");
-    solver.write_free_surface_history_csv(filename.string());
+    solver_coupling.write_free_surface_history_csv(filename.string());
     const auto contents = read_file(filename);
     EXPECT_EQ(contents.rfind("time_s,time_step_s,liquid_mass_kg,", 0), 0U);
     EXPECT_NE(contents.find("h2_generated_mol"), std::string::npos);
@@ -627,45 +682,62 @@ TEST(BoussinesqFreeSurfaceTest, RecordsInitializationAndAcceptedStepHistoryWithF
 TEST(BoussinesqFreeSurfaceTest, RejectsUnsupportedOwnershipAndPressureModes)
 {
     {
-        Solver solver(make_mesh(), {}, time_options());
-        EXPECT_THROW(solver.configure_free_surface(free_surface_options()), std::invalid_argument);
+        auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        EXPECT_THROW(solver_coupling.configure_free_surface(free_surface_options()), std::invalid_argument);
     }
     {
-        Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+        auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+            SimpleFluid::LinearSolverOptions{}, material_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         SimpleFluid::RadiolyticGasOptions ideal;
         ideal.mode = SimpleFluid::RadiolyticGasMode::IdealGasSource;
         ideal.hydrogen_yield_mol_per_j = 2.0e-7;
         ideal.max_source_alpha_rate = 1.0;
-        solver.configure_radiolytic_gas(ideal);
-        EXPECT_THROW(solver.configure_free_surface(free_surface_options()), std::invalid_argument);
+        solver_coupling.configure_radiolytic_gas(ideal);
+        EXPECT_THROW(solver_coupling.configure_free_surface(free_surface_options()), std::invalid_argument);
     }
     {
-        Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+        auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+            SimpleFluid::LinearSolverOptions{}, material_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         SimpleFluid::ScalarVoidFractionOptions scalar_void;
         scalar_void.alpha_max = 0.9;
         scalar_void.initial_alpha = 0.1;
-        solver.configure_scalar_void_fraction(scalar_void);
-        EXPECT_THROW(solver.configure_free_surface(free_surface_options()), std::invalid_argument);
+        solver_coupling.configure_scalar_void_fraction(scalar_void);
+        EXPECT_THROW(solver_coupling.configure_free_surface(free_surface_options()), std::invalid_argument);
     }
     {
-        Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+        auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+            SimpleFluid::LinearSolverOptions{}, material_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         auto ale = free_surface_options();
         ale.mode = SimpleFluid::FreeSurfaceMode::PlanarALE;
-        EXPECT_THROW(solver.configure_free_surface(ale), std::invalid_argument);
+        EXPECT_THROW(solver_coupling.configure_free_surface(ale), std::invalid_argument);
     }
     {
-        Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+        auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+            SimpleFluid::LinearSolverOptions{}, material_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         SimpleFluid::BoilingSourceOptions boiling;
         boiling.enable_bulk_boiling = true;
-        solver.configure_boiling_source(boiling);
+        solver_coupling.configure_boiling_source(boiling);
         auto closed = free_surface_options();
         closed.headspace.mode = SimpleFluid::HeadspaceMode::Closed;
-        EXPECT_THROW(solver.configure_free_surface(closed), std::invalid_argument);
+        EXPECT_THROW(solver_coupling.configure_free_surface(closed), std::invalid_argument);
     }
     for (const auto mode :
         {SimpleFluid::RadiolyticPressureMode::PrescribedHistory, SimpleFluid::RadiolyticPressureMode::Inertial})
     {
-        Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+        auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+            SimpleFluid::LinearSolverOptions{}, material_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         auto radiolysis = sheng_options();
         radiolysis.pressure_mode = mode;
         if (mode == SimpleFluid::RadiolyticPressureMode::PrescribedHistory)
@@ -673,16 +745,19 @@ TEST(BoussinesqFreeSurfaceTest, RejectsUnsupportedOwnershipAndPressureModes)
             radiolysis.pressure_history_times = {0.0, 1.0};
             radiolysis.pressure_history_values = {1.0e5, 1.0e5};
         }
-        solver.configure_radiolytic_gas(radiolysis);
-        EXPECT_THROW(solver.configure_free_surface(free_surface_options()), std::invalid_argument);
+        solver_coupling.configure_radiolytic_gas(radiolysis);
+        EXPECT_THROW(solver_coupling.configure_free_surface(free_surface_options()), std::invalid_argument);
     }
 }
 
 TEST(BoussinesqFreeSurfaceTest, InitializedLedgerRequiresFreeSurfaceToBeReconfiguredLast)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(300.0, 300.0);
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
     SimpleFluid::MaterialFeedbackOptions feedback;
     feedback.reference_density = 1000.0;
@@ -690,30 +765,36 @@ TEST(BoussinesqFreeSurfaceTest, InitializedLedgerRequiresFreeSurfaceToBeReconfig
     feedback.gas_density = 1.0;
     feedback.reference_temperature = 300.0;
     feedback.reference_dynamic_viscosity = 0.0;
-    EXPECT_THROW(solver.configure_material_feedback(feedback), std::logic_error);
+    EXPECT_THROW(solver_coupling.configure_material_feedback(feedback), std::logic_error);
 
-    EXPECT_TRUE(solver.remove_free_surface_model());
-    EXPECT_NO_THROW(solver.configure_material_feedback(feedback));
+    EXPECT_TRUE(solver_coupling.remove_free_surface_model());
+    EXPECT_NO_THROW(solver_coupling.configure_material_feedback(feedback));
 }
 
 TEST(BoussinesqFreeSurfaceTest, RejectsInconsistentExplicitInitialMassAndFillVolume)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     auto options = free_surface_options(0.5);
     options.liquid_mass.initial_liquid_mass = 400.0;
-    solver.configure_free_surface(options);
-    EXPECT_THROW(solver.initialize_heated_box(300.0, 300.0), std::invalid_argument);
-    EXPECT_EQ(solver.find_free_surface_model(), nullptr);
+    solver_coupling.configure_free_surface(options);
+    EXPECT_THROW(solver_coupling.initialize_heated_box(300.0, 300.0), std::invalid_argument);
+    EXPECT_EQ(solver_coupling.find_free_surface_model(), nullptr);
 }
 
 TEST(BoussinesqFreeSurfaceTest, FailedClosureDoesNotCommitLiquidPhaseChange)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.alpha_min = 0.0;
     void_options.alpha_max = 0.9;
     void_options.initial_alpha = 0.0;
-    solver.configure_scalar_void_fraction(void_options);
+    solver_coupling.configure_scalar_void_fraction(void_options);
 
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
@@ -721,40 +802,43 @@ TEST(BoussinesqFreeSurfaceTest, FailedClosureDoesNotCommitLiquidPhaseChange)
     boiling.boiling_time_scale = 1.0;
     boiling.latent_heat = 1000.0;
     boiling.gas_density = 1.0;
-    auto& boiling_model = solver.configure_boiling_source(boiling);
-    solver.configure_free_surface(free_surface_options(0.95));
-    solver.initialize_heated_box(301.0, 301.0);
+    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.configure_free_surface(free_surface_options(0.95));
+    solver_coupling.initialize_heated_box(301.0, 301.0);
 
-    const auto initial_liquid = solver.liquid_mass_inventory().diagnostics();
-    const auto initial_surface = solver.free_surface_diagnostics();
-    EXPECT_THROW(solver.step(), std::out_of_range);
+    const auto initial_liquid = solver_coupling.liquid_mass_inventory().diagnostics();
+    const auto initial_surface = solver_coupling.free_surface_diagnostics();
+    EXPECT_THROW(solver_coupling.step(), std::out_of_range);
     ASSERT_GT(boiling_model.accepted_evaporation_mass_this_step(), 0.0);
 
-    const auto liquid = solver.liquid_mass_inventory().diagnostics();
+    const auto liquid = solver_coupling.liquid_mass_inventory().diagnostics();
     EXPECT_DOUBLE_EQ(liquid.total_mass, initial_liquid.total_mass);
     EXPECT_DOUBLE_EQ(liquid.cumulative_evaporated_mass, initial_liquid.cumulative_evaporated_mass);
     EXPECT_DOUBLE_EQ(liquid.cumulative_condensed_mass, initial_liquid.cumulative_condensed_mass);
-    const auto surface = solver.free_surface_diagnostics();
+    const auto surface = solver_coupling.free_surface_diagnostics();
     EXPECT_DOUBLE_EQ(surface.time, initial_surface.time);
     EXPECT_DOUBLE_EQ(surface.liquid_volume, initial_surface.liquid_volume);
     EXPECT_DOUBLE_EQ(surface.pool_volume, initial_surface.pool_volume);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_EQ(solver.step_index(), 0);
-    EXPECT_THROW(solver.step(), std::logic_error);
+    EXPECT_THROW(solver_coupling.step(), std::logic_error);
 }
 
 TEST(BoussinesqFreeSurfaceTest, ClosedReconstructedPressureUsesCollectiveValidLowerBound)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    Solver solver(mesh, {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     auto radiolysis = sheng_options();
     radiolysis.pressure_mode = SimpleFluid::RadiolyticPressureMode::Reconstructed;
     radiolysis.minimum_absolute_pressure = 90000.0;
     radiolysis.initial_micro_number_density = 1.0e10;
     radiolysis.initial_micro_moles = 1.0e-6;
-    auto& gas = solver.configure_radiolytic_gas(radiolysis);
-    solver.add_fission_power_source().initialize_constant(0.0);
-    solver.initialize_heated_box(300.0, 300.0);
+    auto& gas = solver_coupling.configure_radiolytic_gas(radiolysis);
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
     solver.pressure().set_owned_value(0, -1000.0);
     solver.pressure().set_owned_value(1, 1000.0);
@@ -766,15 +850,18 @@ TEST(BoussinesqFreeSurfaceTest, ClosedReconstructedPressureUsesCollectiveValidLo
     auto closed = free_surface_options(0.4);
     closed.headspace.mode = SimpleFluid::HeadspaceMode::Closed;
     closed.coupling.maximum_absolute_pressure = 2.0e5;
-    ASSERT_NE(solver.configure_free_surface(closed), nullptr);
-    const auto diagnostics = solver.free_surface_diagnostics();
+    ASSERT_NE(solver_coupling.configure_free_surface(closed), nullptr);
+    const auto diagnostics = solver_coupling.free_surface_diagnostics();
     EXPECT_NEAR(diagnostics.headspace.pressure, closed.headspace.initial_pressure, 1.0e-5);
     EXPECT_GT(diagnostics.pool_level, diagnostics.clear_level);
 }
 
 TEST(BoussinesqFreeSurfaceTest, FailedStepRetainsEscapeButRejectsUnsafeFullStepRetry)
 {
-    Solver solver(make_mesh(), {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(make_mesh(), SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     auto radiolysis = sheng_options();
     radiolysis.initial_micro_number_density = 1.0e10;
     radiolysis.initial_micro_moles = 1.0e-6;
@@ -784,30 +871,30 @@ TEST(BoussinesqFreeSurfaceTest, FailedStepRetainsEscapeButRejectsUnsafeFullStepR
     radiolysis.microbubble_lifetime = 1.0e30;
     radiolysis.large_bubble_dissolution_time = 1.0e30;
     radiolysis.micro_to_large_conversion_coefficient = 0.0;
-    auto& gas = solver.configure_radiolytic_gas(radiolysis);
-    solver.add_fission_power_source().initialize_constant(0.0);
+    auto& gas = solver_coupling.configure_radiolytic_gas(radiolysis);
+    solver_coupling.add_fission_power_source().initialize_constant(0.0);
 
     auto surface_options = free_surface_options(0.4);
     surface_options.headspace.total_internal_volume = surface_options.vessel.total_internal_volume;
     surface_options.headspace.temperature_mode = SimpleFluid::HeadspaceTemperatureMode::Prescribed;
     surface_options.headspace.prescribed_temperature_times = {0.0, 0.05};
     surface_options.headspace.prescribed_temperature_values = {300.0, 300.0};
-    solver.configure_free_surface(surface_options);
-    solver.initialize_heated_box(300.0, 300.0);
-    ASSERT_EQ(solver.free_surface_history().size(), 1U);
+    solver_coupling.configure_free_surface(surface_options);
+    solver_coupling.initialize_heated_box(300.0, 300.0);
+    ASSERT_EQ(solver_coupling.free_surface_history().size(), 1U);
 
-    EXPECT_THROW(solver.step(), std::out_of_range);
+    EXPECT_THROW(solver_coupling.step(), std::out_of_range);
     const auto uncommitted_escape = gas.cumulative_submerged_bubble_hydrogen_escaped();
     ASSERT_GT(uncommitted_escape, 0.0);
-    EXPECT_TRUE(solver.free_surface_diagnostics().vented_gas_moles.empty());
-    EXPECT_EQ(solver.free_surface_history().size(), 1U);
+    EXPECT_TRUE(solver_coupling.free_surface_diagnostics().vented_gas_moles.empty());
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), 1U);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_EQ(solver.step_index(), 0);
 
     solver.set_time_step(0.05);
-    EXPECT_THROW(solver.step(), std::logic_error);
-    EXPECT_THROW(solver.configure_free_surface(surface_options), std::logic_error);
-    EXPECT_EQ(solver.free_surface_history().size(), 1U);
+    EXPECT_THROW(solver_coupling.step(), std::logic_error);
+    EXPECT_THROW(solver_coupling.configure_free_surface(surface_options), std::logic_error);
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), 1U);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_EQ(solver.step_index(), 0);
 }
@@ -820,20 +907,23 @@ TEST(BoussinesqFreeSurfaceTest, CellMassInventoryStepIsPartitionIndependent)
     {
         GTEST_SKIP() << "requires at least two MPI ranks";
     }
-    Solver solver(mesh, {}, time_options(), {}, material_options());
-    solver.configure_free_surface(cell_mass_free_surface_options());
-    solver.initialize_heated_box(300.0, 300.0);
+    auto solver_shared = std::make_shared<Solver>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.configure_free_surface(cell_mass_free_surface_options());
+    solver_coupling.initialize_heated_box(300.0, 300.0);
 
-    solver.step();
+    solver_coupling.step();
 
-    const auto diagnostics = solver.liquid_mass_inventory().diagnostics();
+    const auto diagnostics = solver_coupling.liquid_mass_inventory().diagnostics();
     EXPECT_NEAR(diagnostics.total_mass, 500.0, 1.0e-8);
     EXPECT_NEAR(diagnostics.liquid_volume, 0.5, 1.0e-10);
     EXPECT_NEAR(diagnostics.step_mass_balance_residual, 0.0, 1.0e-8);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        EXPECT_NEAR(
-            solver.liquid_mass_inventory().cellMassInventory().value(static_cast<Pack::local_ordinal_type>(owned)),
+        EXPECT_NEAR(solver_coupling.liquid_mass_inventory().cellMassInventory().value(
+                        static_cast<Pack::local_ordinal_type>(owned)),
             125.0, 1.0e-8);
     }
     double minimum_mass{};
@@ -853,14 +943,17 @@ TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRankDivergentOptions)
     {
         GTEST_SKIP() << "requires at least two MPI ranks";
     }
-    Solver solver(mesh, {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     auto options = free_surface_options();
     if (communicator->getRank() != 0)
     {
         options.vessel.cross_section_area = 2.0;
     }
-    EXPECT_THROW(solver.configure_free_surface(options), std::invalid_argument);
-    EXPECT_EQ(solver.find_free_surface_model(), nullptr);
+    EXPECT_THROW(solver_coupling.configure_free_surface(options), std::invalid_argument);
+    EXPECT_EQ(solver_coupling.find_free_surface_model(), nullptr);
 }
 
 TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRemovalWhileBoilingOwnsSubmergedSteam)
@@ -872,33 +965,36 @@ TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRemovalWhileBoilingOwnsSubmer
         GTEST_SKIP() << "requires at least two MPI ranks";
     }
 
-    Solver solver(mesh, {}, time_options(), {}, material_options());
+    auto solver_shared = std::make_shared<Solver>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.alpha_max = 0.9;
-    solver.configure_scalar_void_fraction(void_options);
+    solver_coupling.configure_scalar_void_fraction(void_options);
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
     boiling.saturation_temperature = 300.0;
     boiling.boiling_time_scale = 1.0;
     boiling.latent_heat = 1000.0;
     boiling.gas_density = 1.0;
-    auto& boiling_model = solver.configure_boiling_source(boiling);
-    solver.configure_free_surface(free_surface_options());
-    solver.initialize_heated_box(301.0, 301.0);
-    solver.step();
+    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
+    solver_coupling.configure_free_surface(free_surface_options());
+    solver_coupling.initialize_heated_box(301.0, 301.0);
+    solver_coupling.step();
 
     ASSERT_GT(boiling_model.global_submerged_steam_mass(), 0.0);
     try
     {
-        static_cast<void>(solver.remove_free_surface_model());
+        static_cast<void>(solver_coupling.remove_free_surface_model());
         FAIL() << "Expected nonzero submerged steam to block free-surface removal.";
     }
     catch (const std::logic_error& error)
     {
         EXPECT_NE(std::string(error.what()).find("nonzero submerged steam"), std::string::npos);
     }
-    EXPECT_NE(solver.find_free_surface_model(), nullptr);
-    EXPECT_NE(solver.find_liquid_mass_inventory(), nullptr);
+    EXPECT_NE(solver_coupling.find_free_surface_model(), nullptr);
+    EXPECT_NE(solver_coupling.find_liquid_mass_inventory(), nullptr);
 }
 
 TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRankDivergentExistingStateDuringConfiguration)
@@ -910,13 +1006,16 @@ TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRankDivergentExistingStateDur
         GTEST_SKIP() << "requires at least two MPI ranks";
     }
 
-    Solver solver(mesh, {}, time_options(), {}, material_options());
-    ASSERT_NE(solver.configure_free_surface(free_surface_options()), nullptr);
+    auto solver_shared = std::make_shared<Solver>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    ASSERT_NE(solver_coupling.configure_free_surface(free_surface_options()), nullptr);
     if (communicator->getRank() != 0)
     {
-        EXPECT_TRUE(solver.remove_free_surface_model());
+        EXPECT_TRUE(solver_coupling.remove_free_surface_model());
     }
-    EXPECT_THROW(solver.configure_free_surface(free_surface_options()), std::invalid_argument);
+    EXPECT_THROW(solver_coupling.configure_free_surface(free_surface_options()), std::invalid_argument);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_EQ(solver.step_index(), 0);
 }
@@ -930,14 +1029,17 @@ TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsRankDivergentPresenceBeforeSt
         GTEST_SKIP() << "requires at least two MPI ranks";
     }
 
-    Solver solver(mesh, {}, time_options(), {}, material_options());
-    ASSERT_NE(solver.configure_free_surface(free_surface_options()), nullptr);
+    auto solver_shared = std::make_shared<Solver>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    ASSERT_NE(solver_coupling.configure_free_surface(free_surface_options()), nullptr);
     if (communicator->getRank() != 0)
     {
-        EXPECT_TRUE(solver.remove_free_surface_model());
+        EXPECT_TRUE(solver_coupling.remove_free_surface_model());
     }
 
-    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_THROW(solver_coupling.step(), std::invalid_argument);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_EQ(solver.step_index(), 0);
 }
@@ -951,11 +1053,14 @@ TEST(BoussinesqFreeSurfaceTest, CollectivelyRejectsPositiveRankDivergentTimestep
         GTEST_SKIP() << "requires at least two MPI ranks";
     }
 
-    Solver solver(mesh, {}, time_options(), {}, material_options());
-    ASSERT_NE(solver.configure_free_surface(free_surface_options()), nullptr);
+    auto solver_shared = std::make_shared<Solver>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options(),
+        SimpleFluid::LinearSolverOptions{}, material_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    ASSERT_NE(solver_coupling.configure_free_surface(free_surface_options()), nullptr);
     solver.set_time_step(communicator->getRank() == 0 ? 0.25 : 0.5);
 
-    EXPECT_THROW(solver.step(), std::invalid_argument);
+    EXPECT_THROW(solver_coupling.step(), std::invalid_argument);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_EQ(solver.step_index(), 0);
 }

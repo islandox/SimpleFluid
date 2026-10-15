@@ -690,7 +690,8 @@ factors, and a pool/wall example.
 
 `FissionPowerSource` registers the specialized temperature source
 `qdot_fission` in W/m³. Constant power density, normalized three-axis Gaussian
-profiles, and caller-provided cell fields are supported:
+profiles, and caller-provided cell fields are supported. The controller below
+accepts a shared solver pointer (`SP<BoussinesqSolver<Pack>>`):
 
 ```cpp
 SimpleFluid::FissionPowerSourceOptions fission;
@@ -698,7 +699,9 @@ fission.profile = SimpleFluid::FissionPowerProfile::Gaussian;
 fission.total_power = 1.0e6;
 fission.center = {0.0, 0.0, 1.0};
 fission.standard_deviation = {0.25, 0.25, 0.5};
-solver.configure_fission_power_source(fission);
+SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+coupling.configure_fission_power_source(fission);
+// Advance coupled physics with coupling.step() or coupling.run().
 ```
 
 Gaussian values are sampled at cell centroids and normalized with the

@@ -2,11 +2,13 @@
  * @file testSASSupportedPaths.cc
  * @brief  Transient and transaction gates for SAS extensions.
  */
-#include <gtest/gtest.h>
-#include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/IncompressibleIsothermalSolver.hh"
+#include "solvers/MultiphysicsSolverCoupler.hh"
 #include "utils/testing_environment.hh"
+#include <gtest/gtest.h>
 #include <limits>
+#include <memory>
 #include <numbers>
 
 namespace
@@ -47,9 +49,10 @@ BoundaryConditionSet closed_boundaries(const Handle& mesh)
     return result;
 }
 
-template<class Solver> void expect_active_bounded_step(Solver& solver)
+template<class Solver>
+void expect_active_bounded_step(Solver& solver, MultiphysicsSolverCoupler<Pack>* coupling = nullptr)
 {
-    ASSERT_NO_THROW(solver.step());
+    ASSERT_NO_THROW(coupling ? coupling->step() : solver.step());
     const auto& model=*solver.find_turbulence_model();
     ASSERT_TRUE(model.sas_statistics().valid);
     EXPECT_GT(model.sas_statistics().max_source,1e-6);
@@ -175,12 +178,14 @@ TEST(SASSupportedPathsTest, GaussLinearSASCouplesSignedBoussinesqProduction)
 {
     auto mesh=box_mesh(); auto time=transient_options();
     time.thermal_expansion=.001; time.gravity_z=-9.81;
-    BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),time);
-    solver.initialize_linear_temperature({0,0,1},2,1);
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), time);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_linear_temperature({0, 0, 1}, 2, 1);
     auto options=sas_options(); options.gradient_scheme=FVM::CellGradientScheme::GaussLinear;
     options.buoyancy_model=TurbulenceBuoyancyModel::OpenFOAMBoussinesq;
     const auto& model=solver.configure_turbulence(options); initialize_circulation(solver);
-    expect_active_bounded_step(solver);
+    expect_active_bounded_step(solver, &solver_coupling);
     double local=0,global=0;
     for(size_t i=0;i<mesh->num_owned_cells();++i) local+=std::abs(model.output_fields().at("buoyancy_production")->value(i));
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&global);
@@ -193,21 +198,27 @@ struct SavedSASFields
 {
     using Field=ScalarCellFieldStored<Pack>;
     std::map<const Field*,std::vector<double>> values;
-    template<class Solver> explicit SavedSASFields(const Solver& solver)
+    explicit SavedSASFields(const MultiphysicsSolverCoupler<Pack>& coupling)
     {
+        const auto& solver = coupling.boussinesq_solver();
         capture(solver.temperature()); capture(solver.pressure());
         const auto& m=solver.material_properties();
         capture(m.density); capture(m.dynamic_viscosity); capture(m.specific_heat_capacity); capture(m.thermal_conductivity);
         auto model=[&](const auto* p) { if(p) for(const auto& [name,field]:p->output_fields()) capture(*field); };
-        model(solver.find_turbulence_model()); model(solver.find_material_feedback_model());
-        model(solver.find_scalar_void_fraction_model()); model(solver.find_precursor_model());
-        model(solver.find_radiolytic_gas_model()); model(solver.find_boiling_source_model());
-        if(solver.find_free_surface_model())
+        model(solver.find_turbulence_model());
+        model(coupling.find_material_feedback_model());
+        model(coupling.find_scalar_void_fraction_model());
+        model(coupling.find_precursor_model());
+        model(coupling.find_radiolytic_gas_model());
+        model(coupling.find_boiling_source_model());
+        if (coupling.find_free_surface_model())
         {
-            capture(solver.clear_level()); capture(solver.pool_level());
-            capture(solver.headspace_pressure()); capture(solver.pool_occupancy());
+            capture(coupling.clear_level());
+            capture(coupling.pool_level());
+            capture(coupling.headspace_pressure());
+            capture(coupling.pool_occupancy());
         }
-        if(const auto* inventory=solver.find_liquid_mass_inventory())
+        if (const auto* inventory = coupling.find_liquid_mass_inventory())
         {
             capture(inventory->pureLiquidDensity()); capture(inventory->cellMassInventory());
         }
@@ -226,64 +237,81 @@ struct SavedSASFields
 
 // Feedback runs after temperature, radiolysis and precursors. Inputs remain finite
 // until this final feedback stage; overflow rejects the trial after upstream work.
-void expect_late_multiphysics_rollback(BoussinesqSolver<Pack>& solver, std::function<void()> after_restore={})
+void expect_late_multiphysics_rollback(
+    MultiphysicsSolverCoupler<Pack>& coupling, std::function<void()> after_restore = {})
 {
+    auto& solver = coupling.boussinesq_solver();
     solver.temperature().put_scalar(300.); solver.temperature().sync_ghosts();
     MaterialFeedbackOptions original;
-    if(auto* feedback=solver.find_material_feedback_model()) original=feedback->options();
-    else { original.reference_dynamic_viscosity=.001; solver.configure_material_feedback(original); }
+    if (auto* feedback = coupling.find_material_feedback_model())
+        original = feedback->options();
+    else
+    {
+        original.reference_dynamic_viscosity = .001;
+        coupling.configure_material_feedback(original);
+    }
     auto reject=original;
     reject.density_mode=DensityFeedbackMode::BoussinesqTemperatureOnly;
     reject.reference_density=1.; reject.reference_temperature=300.; reject.thermal_expansion=1e308;
-    solver.configure_material_feedback(reject);
-    const SavedSASFields saved(solver);
+    coupling.configure_material_feedback(reject);
+    const SavedSASFields saved(coupling);
     const auto time=solver.time(); const auto step=solver.step_index();
     const auto source=solver.find_turbulence_model()->sas_statistics().max_source;
     solver.add_temperature_source("sas_rejection_cooling",-2000.);
-    EXPECT_ANY_THROW(solver.step());
+    EXPECT_ANY_THROW(coupling.step());
     saved.expect_restored();
     EXPECT_DOUBLE_EQ(solver.time(),time); EXPECT_EQ(solver.step_index(),step);
     EXPECT_DOUBLE_EQ(solver.find_turbulence_model()->sas_statistics().max_source,source);
     if(after_restore) after_restore();
     solver.remove_temperature_source("sas_rejection_cooling");
-    solver.configure_material_feedback(original);
-    expect_active_bounded_step(solver);
+    coupling.configure_material_feedback(original);
+    expect_active_bounded_step(solver, &coupling);
 }
 }
 
 TEST(SASSupportedPathsTest, MaterialFeedbackPublishesAndRollsBackWithSAS)
 {
-    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    auto mesh = box_mesh();
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300, 300);
+    solver.configure_turbulence(sas_options());
+    initialize_circulation(solver);
     MaterialFeedbackOptions feedback;
     feedback.density_mode=DensityFeedbackMode::BoussinesqTemperatureOnly;
     feedback.reference_density=1.2; feedback.reference_temperature=300;
     feedback.thermal_expansion=.01; feedback.reference_dynamic_viscosity=.002;
-    solver.configure_material_feedback(feedback);
-    expect_active_bounded_step(solver);
+    solver_coupling.configure_material_feedback(feedback);
+    expect_active_bounded_step(solver, &solver_coupling);
     for(size_t i=0;i<mesh->num_owned_cells();++i)
     {
         EXPECT_NEAR(solver.material_properties().density.value(i),1.2,1e-12);
         EXPECT_DOUBLE_EQ(solver.material_properties().dynamic_viscosity.value(i),.002);
     }
-    expect_late_multiphysics_rollback(solver);
+    expect_late_multiphysics_rollback(solver_coupling);
 }
 
 TEST(SASSupportedPathsTest, ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSAS)
 {
-    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    auto mesh = box_mesh();
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300, 300);
+    solver.configure_turbulence(sas_options());
+    initialize_circulation(solver);
     ScalarVoidFractionOptions options; options.initial_alpha=.2; options.alpha_collapse_time=.1; options.alpha_diffusivity=.01;
-    auto& phase=solver.configure_scalar_void_fraction(options);
+    auto& phase = solver_coupling.configure_scalar_void_fraction(options);
     ScalarCellFieldStored<Pack> initial(mesh,"initial_void");
     for(size_t i=0;i<mesh->num_owned_cells();++i) initial.set_owned_value(i,.2+.05*mesh->cell_centroid(i).x);
     initial.sync_ghosts(); phase.initialize_from(initial);
     MaterialFeedbackOptions feedback; feedback.density_mode=DensityFeedbackMode::Mixture;
     feedback.liquid_density=1; feedback.gas_density=.1; feedback.reference_dynamic_viscosity=.001;
-    solver.configure_material_feedback(feedback);
+    solver_coupling.configure_material_feedback(feedback);
     double before=0,after=0;
     for(size_t i=0;i<mesh->num_owned_cells();++i) before+=phase.alpha_g().value(i)*mesh->cell_volume(i);
-    expect_active_bounded_step(solver);
+    expect_active_bounded_step(solver, &solver_coupling);
     for(size_t i=0;i<mesh->num_owned_cells();++i)
     {
         const auto alpha=phase.alpha_g().value(i);
@@ -294,31 +322,37 @@ TEST(SASSupportedPathsTest, ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSA
     std::array<double,2> local{before,after},total{};
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,2,local.data(),total.data());
     EXPECT_NEAR(total[1],total[0]*(1-.001/.1),1e-11);
-    expect_late_multiphysics_rollback(solver);
+    expect_late_multiphysics_rollback(solver_coupling);
 }
 
 TEST(SASSupportedPathsTest, PrecursorInventoryAndDiagnosticsRollBackWithSAS)
 {
-    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    auto mesh = box_mesh();
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300, 300);
+    solver.configure_turbulence(sas_options());
+    initialize_circulation(solver);
     ScalarVoidFractionOptions phase; phase.initial_alpha=.2;
-    solver.configure_scalar_void_fraction(phase);
+    solver_coupling.configure_scalar_void_fraction(phase);
     DelayedNeutronPrecursorOptions options;
     options.group_count=2; options.initial_concentrations={1,2}; options.decay_constants={.1,.2};
     options.source_terms={.2,.1}; options.effective_diffusivity=.01;
-    auto& precursors=solver.configure_precursors(options);
-    expect_active_bounded_step(solver);
+    auto& precursors = solver_coupling.configure_precursors(options);
+    expect_active_bounded_step(solver, &solver_coupling);
     const auto before=precursors.last_inventory_diagnostics(0);
     const double expected=.8*std::exp(-.1*.001)+.2*(-std::expm1(-.1*.001))/.1;
     EXPECT_NEAR(before.inventory_after,expected,1e-11);
     EXPECT_NEAR(before.balance_error,0,1e-11);
-    expect_late_multiphysics_rollback(solver,[&]
-    {
-        const auto& restored=precursors.last_inventory_diagnostics(0);
-        EXPECT_DOUBLE_EQ(restored.inventory_after,before.inventory_after);
-        EXPECT_DOUBLE_EQ(restored.source_added,before.source_added);
-        EXPECT_DOUBLE_EQ(restored.balance_error,before.balance_error);
-    });
+    expect_late_multiphysics_rollback(solver_coupling,
+        [&]
+        {
+            const auto& restored = precursors.last_inventory_diagnostics(0);
+            EXPECT_DOUBLE_EQ(restored.inventory_after, before.inventory_after);
+            EXPECT_DOUBLE_EQ(restored.source_added, before.source_added);
+            EXPECT_DOUBLE_EQ(restored.balance_error, before.balance_error);
+        });
     const auto stale=precursors.snapshot(); precursors.configure(options);
     EXPECT_ANY_THROW(precursors.restore(stale));
 }
@@ -347,13 +381,19 @@ TEST(SASSupportedPathsTest, RadiolysisAndHydrogenLedgersRollBackWithSAS)
 {
     for(auto mode:{RadiolyticGasMode::IdealGasSource,RadiolyticGasMode::Sheng2024TwoPopulation})
     {
-        auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-        solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+        auto mesh = box_mesh();
+        auto solver_shared =
+            std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        solver_coupling.initialize_heated_box(300, 300);
+        solver.configure_turbulence(sas_options());
+        initialize_circulation(solver);
         FissionPowerSourceOptions power; power.profile=FissionPowerProfile::Constant; power.power_density=1.;
-        solver.configure_fission_power_source(power);
+        solver_coupling.configure_fission_power_source(power);
         auto options=seeded_radiolysis_options(mode);
-        auto& gas=solver.configure_radiolytic_gas(options);
-        expect_active_bounded_step(solver);
+        auto& gas = solver_coupling.configure_radiolytic_gas(options);
+        expect_active_bounded_step(solver, &solver_coupling);
         if(mode==RadiolyticGasMode::Sheng2024TwoPopulation)
         {
             EXPECT_GT(gas.last_statistics().hydrogen_produced,0);
@@ -362,41 +402,51 @@ TEST(SASSupportedPathsTest, RadiolysisAndHydrogenLedgersRollBackWithSAS)
         else
         {
             double local=0,global=0;
-            for(size_t i=0;i<mesh->num_owned_cells();++i) local+=solver.find_scalar_void_fraction_model()->alpha_g().value(i);
+            for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
+                local += solver_coupling.find_scalar_void_fraction_model()->alpha_g().value(i);
             Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&global);
             EXPECT_GT(global,0);
         }
         const auto statistics=gas.last_statistics();
         const auto inventory=gas.global_submerged_hydrogen_moles();
-        expect_late_multiphysics_rollback(solver,[&]
-        {
-            EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after,statistics.hydrogen_after);
-            EXPECT_DOUBLE_EQ(gas.last_statistics().cumulative_hydrogen_produced,statistics.cumulative_hydrogen_produced);
-            EXPECT_DOUBLE_EQ(gas.global_submerged_hydrogen_moles(),inventory);
-        });
+        expect_late_multiphysics_rollback(solver_coupling,
+            [&]
+            {
+                EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after, statistics.hydrogen_after);
+                EXPECT_DOUBLE_EQ(
+                    gas.last_statistics().cumulative_hydrogen_produced, statistics.cumulative_hydrogen_produced);
+                EXPECT_DOUBLE_EQ(gas.global_submerged_hydrogen_moles(), inventory);
+            });
     }
 }
 
 TEST(SASSupportedPathsTest, BoilingSourcesAndPendingStateRollBackWithSAS)
 {
-    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    auto mesh = box_mesh();
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300, 300);
+    solver.configure_turbulence(sas_options());
+    initialize_circulation(solver);
     BoilingSourceOptions options; options.enable_bulk_boiling=true; options.enable_wall_boiling=true;
     options.saturation_temperature=299.; options.latent_heat=1000.; options.gas_density=1.;
     options.wall_heat_flux=1.; options.wall_evaporation_fraction=.2; options.wall_boiling_patches={"zmin"};
-    auto& boiling=solver.configure_boiling_source(options);
-    expect_active_bounded_step(solver);
+    auto& boiling = solver_coupling.configure_boiling_source(options);
+    expect_active_bounded_step(solver, &solver_coupling);
     const auto phase=boiling.last_phase_change_diagnostics();
     EXPECT_GT(phase.accepted_evaporation_mass,0);
     double local=0,total=0;
     for(size_t i=0;i<mesh->num_owned_cells();++i) local+=boiling.latent_heat_sink().value(i)*mesh->cell_volume(i)*.001;
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&total);
     EXPECT_NEAR(total,phase.accepted_evaporation_mass*options.latent_heat,1e-13);
-    expect_late_multiphysics_rollback(solver,[&]
-    {
-        EXPECT_DOUBLE_EQ(boiling.last_phase_change_diagnostics().accepted_evaporation_mass,phase.accepted_evaporation_mass);
-        EXPECT_FALSE(boiling.phase_change_completion_pending());
-    });
+    expect_late_multiphysics_rollback(solver_coupling,
+        [&]
+        {
+            EXPECT_DOUBLE_EQ(
+                boiling.last_phase_change_diagnostics().accepted_evaporation_mass, phase.accepted_evaporation_mass);
+            EXPECT_FALSE(boiling.phase_change_completion_pending());
+        });
     const auto stale=boiling.snapshot(); boiling.configure(options);
     EXPECT_ANY_THROW(boiling.restore(stale));
 }
@@ -421,94 +471,111 @@ TEST(SASSupportedPathsTest, FixedFreeSurfaceRestoresBoilingInventoryHistoryAndRe
 {
     for(auto inventory_mode:{LiquidVolumeMode::GlobalConstantMass,LiquidVolumeMode::CellMassInventory})
     {
-        auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-        solver.initialize_heated_box(301,301); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+        auto mesh = box_mesh();
+        auto solver_shared =
+            std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+        auto& solver = *solver_shared;
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+        solver_coupling.initialize_heated_box(301, 301);
+        solver.configure_turbulence(sas_options());
+        initialize_circulation(solver);
         BoilingSourceOptions boiling; boiling.enable_bulk_boiling=true;
         boiling.saturation_temperature=300; boiling.latent_heat=1000; boiling.gas_density=.01;
-        auto& phase=solver.configure_boiling_source(boiling);
+        auto& phase = solver_coupling.configure_boiling_source(boiling);
         auto options=fixed_surface_options(); options.liquid_mass.mode=inventory_mode;
         options.headspace.temperature_mode=HeadspaceTemperatureMode::Prescribed;
         options.headspace.prescribed_temperature_times={0.,.0015};
         options.headspace.prescribed_temperature_values={300.,300.};
-        ASSERT_NE(solver.configure_free_surface(options),nullptr);
-        const auto mass_before=solver.liquid_mass_inventory().totalMass();
-        expect_active_bounded_step(solver);
-        const auto mass=solver.liquid_mass_inventory().totalMass();
+        ASSERT_NE(solver_coupling.configure_free_surface(options), nullptr);
+        const auto mass_before = solver_coupling.liquid_mass_inventory().totalMass();
+        expect_active_bounded_step(solver, &solver_coupling);
+        const auto mass = solver_coupling.liquid_mass_inventory().totalMass();
         EXPECT_GT(phase.last_phase_change_diagnostics().accepted_evaporation_mass,0);
         EXPECT_NEAR(mass,mass_before-phase.last_phase_change_diagnostics().accepted_evaporation_mass,1e-12);
-        const auto history=solver.free_surface_history().size();
-        const auto surface=solver.free_surface_diagnostics();
+        const auto history = solver_coupling.free_surface_history().size();
+        const auto surface = solver_coupling.free_surface_diagnostics();
         const auto steam=phase.global_submerged_steam_mass();
         const auto q=solver.find_turbulence_model()->sas_statistics().max_source;
-        const SavedSASFields saved(solver);
-        EXPECT_ANY_THROW(solver.step()); // Headspace history ends after the next physical time.
+        const SavedSASFields saved(solver_coupling);
+        EXPECT_ANY_THROW(solver_coupling.step()); // Headspace history ends after the next physical time.
         saved.expect_restored();
         EXPECT_DOUBLE_EQ(solver.time(),.001); EXPECT_EQ(solver.step_index(),1);
-        EXPECT_EQ(solver.free_surface_history().size(),history);
-        EXPECT_DOUBLE_EQ(solver.liquid_mass_inventory().totalMass(),mass);
-        EXPECT_DOUBLE_EQ(solver.free_surface_diagnostics().pool_level,surface.pool_level);
+        EXPECT_EQ(solver_coupling.free_surface_history().size(), history);
+        EXPECT_DOUBLE_EQ(solver_coupling.liquid_mass_inventory().totalMass(), mass);
+        EXPECT_DOUBLE_EQ(solver_coupling.free_surface_diagnostics().pool_level, surface.pool_level);
         EXPECT_DOUBLE_EQ(phase.global_submerged_steam_mass(),steam);
         EXPECT_DOUBLE_EQ(solver.find_turbulence_model()->sas_statistics().max_source,q);
-        solver.set_time_step(.00025); expect_active_bounded_step(solver);
-        EXPECT_EQ(solver.free_surface_history().size(),history+1);
+        solver.set_time_step(.00025);
+        expect_active_bounded_step(solver, &solver_coupling);
+        EXPECT_EQ(solver_coupling.free_surface_history().size(), history + 1);
     }
 }
 
 TEST(SASSupportedPathsTest, LazyFreeSurfaceInitializationRemainsOwnedAfterRejection)
 {
-    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
+    auto mesh = box_mesh();
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.configure_turbulence(sas_options()); initialize_circulation(solver);
     solver.temperature().put_scalar(300.); solver.temperature().sync_ghosts();
     auto options=fixed_surface_options(); options.liquid_mass.initial_liquid_mass=.5;
-    ASSERT_NE(solver.configure_free_surface(options),nullptr);
-    ASSERT_FALSE(solver.find_free_surface_model()->initialized());
+    ASSERT_NE(solver_coupling.configure_free_surface(options), nullptr);
+    ASSERT_FALSE(solver_coupling.find_free_surface_model()->initialized());
     bool inconsistent_density=true;
-    solver.set_material_updater([&](const auto&,auto& material){material.density.put_scalar(inconsistent_density ? 2. : 1.);});
-    EXPECT_ANY_THROW(solver.step());
-    ASSERT_NE(solver.find_free_surface_model(),nullptr);
-    EXPECT_FALSE(solver.find_free_surface_model()->initialized());
-    EXPECT_FALSE(solver.liquid_mass_inventory().initialized());
-    EXPECT_TRUE(solver.free_surface_history().empty());
+    solver_coupling.set_material_updater(
+        [&](const auto&, auto& material) { material.density.put_scalar(inconsistent_density ? 2. : 1.); });
+    EXPECT_ANY_THROW(solver_coupling.step());
+    ASSERT_NE(solver_coupling.find_free_surface_model(), nullptr);
+    EXPECT_FALSE(solver_coupling.find_free_surface_model()->initialized());
+    EXPECT_FALSE(solver_coupling.liquid_mass_inventory().initialized());
+    EXPECT_TRUE(solver_coupling.free_surface_history().empty());
     inconsistent_density=false;
     solver.add_temperature_source("late_overflow_one",std::numeric_limits<double>::max());
     solver.add_temperature_source("late_overflow_two",std::numeric_limits<double>::max());
-    EXPECT_ANY_THROW(solver.step()); // Successful lazy initialization must also roll back.
-    ASSERT_NE(solver.find_free_surface_model(),nullptr);
-    EXPECT_FALSE(solver.find_free_surface_model()->initialized());
-    EXPECT_TRUE(solver.free_surface_history().empty());
+    EXPECT_ANY_THROW(solver_coupling.step()); // Successful lazy initialization must also roll back.
+    ASSERT_NE(solver_coupling.find_free_surface_model(), nullptr);
+    EXPECT_FALSE(solver_coupling.find_free_surface_model()->initialized());
+    EXPECT_TRUE(solver_coupling.free_surface_history().empty());
     EXPECT_FALSE(solver.find_turbulence_model()->sas_statistics().valid);
     solver.remove_temperature_source("late_overflow_one"); solver.remove_temperature_source("late_overflow_two");
-    expect_active_bounded_step(solver);
-    EXPECT_TRUE(solver.find_free_surface_model()->initialized());
-    EXPECT_EQ(solver.free_surface_history().size(),2U);
+    expect_active_bounded_step(solver, &solver_coupling);
+    EXPECT_TRUE(solver_coupling.find_free_surface_model()->initialized());
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), 2U);
 }
 
 TEST(SASSupportedPathsTest, FixedFreeSurfaceRadiolysisRestoresClosedHeadspaceAndEscape)
 {
-    auto mesh=box_mesh(); BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),transient_options());
-    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    auto mesh = box_mesh();
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300, 300);
+    solver.configure_turbulence(sas_options());
+    initialize_circulation(solver);
     auto gas_options=seeded_radiolysis_options(RadiolyticGasMode::Sheng2024TwoPopulation);
     gas_options.free_surface_patches={"zmax"};
-    auto& gas=solver.configure_radiolytic_gas(gas_options);
-    solver.add_fission_power_source().initialize_constant(1.);
+    auto& gas = solver_coupling.configure_radiolytic_gas(gas_options);
+    solver_coupling.add_fission_power_source().initialize_constant(1.);
     auto options=fixed_surface_options(); options.headspace.mode=HeadspaceMode::Closed;
     options.coupling.maximum_absolute_pressure=2e5;
     options.headspace.temperature_mode=HeadspaceTemperatureMode::Prescribed;
     options.headspace.prescribed_temperature_times={0.,.0015};
     options.headspace.prescribed_temperature_values={300.,300.};
-    ASSERT_NE(solver.configure_free_surface(options),nullptr);
-    expect_active_bounded_step(solver);
-    const SavedSASFields saved(solver);
-    const auto headspace=solver.free_surface_diagnostics().headspace.pressure;
-    const auto history=solver.free_surface_history().size();
+    ASSERT_NE(solver_coupling.configure_free_surface(options), nullptr);
+    expect_active_bounded_step(solver, &solver_coupling);
+    const SavedSASFields saved(solver_coupling);
+    const auto headspace = solver_coupling.free_surface_diagnostics().headspace.pressure;
+    const auto history = solver_coupling.free_surface_history().size();
     const auto escape=gas.last_statistics().cumulative_hydrogen_escaped;
     EXPECT_GT(escape,0);
-    EXPECT_ANY_THROW(solver.step());
+    EXPECT_ANY_THROW(solver_coupling.step());
     saved.expect_restored();
     EXPECT_DOUBLE_EQ(gas.last_statistics().cumulative_hydrogen_escaped,escape);
-    EXPECT_DOUBLE_EQ(solver.free_surface_diagnostics().headspace.pressure,headspace);
-    EXPECT_EQ(solver.free_surface_history().size(),history);
-    solver.set_time_step(.00025); expect_active_bounded_step(solver);
+    EXPECT_DOUBLE_EQ(solver_coupling.free_surface_diagnostics().headspace.pressure, headspace);
+    EXPECT_EQ(solver_coupling.free_surface_history().size(), history);
+    solver.set_time_step(.00025);
+    expect_active_bounded_step(solver, &solver_coupling);
 }
 
 TEST(SASSupportedPathsTest, FixedFreeSurfaceStillRejectsSASALE)
@@ -516,10 +583,14 @@ TEST(SASSupportedPathsTest, FixedFreeSurfaceStillRejectsSASALE)
     auto mesh=std::make_shared<Handle>(std::make_shared<Meshes::OrthogonalCartesian3D>(
         Vec3D<ArrReal>{{{0.,.5,1.},{0.,.5,1.},{0.,.5,1.}}}));
     auto time=transient_options();
-    BoussinesqSolver<Pack> solver(mesh,closed_boundaries(*mesh),time,{},BoussinesqModelOptions::legacy_defaults(time));
-    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options());
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), time,
+        SimpleFluid::LinearSolverOptions{}, BoussinesqModelOptions::legacy_defaults(time));
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300, 300);
+    solver.configure_turbulence(sas_options());
     auto options=fixed_surface_options(); options.mode=FreeSurfaceMode::PlanarALE; options.ale.top_boundary="zmax";
-    EXPECT_ANY_THROW(solver.configure_free_surface(options));
+    EXPECT_ANY_THROW(solver_coupling.configure_free_surface(options));
 }
 
 namespace
@@ -676,28 +747,33 @@ TEST(SASSupportedPathsTest, NoxBoussinesqRestoresActiveSourceAndMultiphysicsAfte
 {
     auto mesh=box_mesh(); auto time=nox_options();
     time.thermal_expansion=.001; time.gravity_z=-9.81; time.reference_temperature=300;
-    BoussinesqSolver<Pack> solver(mesh,nox_box_boundaries(),time);
-    solver.initialize_heated_box(300,300); solver.configure_turbulence(sas_options()); initialize_circulation(solver);
+    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, nox_box_boundaries(), time);
+    auto& solver = *solver_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
+    solver_coupling.initialize_heated_box(300, 300);
+    solver.configure_turbulence(sas_options());
+    initialize_circulation(solver);
     ScalarVoidFractionOptions phase; phase.initial_alpha=.1; phase.alpha_collapse_time=1.;
-    solver.configure_scalar_void_fraction(phase);
+    solver_coupling.configure_scalar_void_fraction(phase);
     MaterialFeedbackOptions feedback; feedback.reference_dynamic_viscosity=.001;
-    solver.configure_material_feedback(feedback);
+    solver_coupling.configure_material_feedback(feedback);
     auto options=seeded_radiolysis_options(RadiolyticGasMode::IdealGasSource);
-    auto& gas=solver.configure_radiolytic_gas(options);
-    solver.add_fission_power_source().initialize_constant(1.);
-    ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver));
+    auto& gas = solver_coupling.configure_radiolytic_gas(options);
+    solver_coupling.add_fission_power_source().initialize_constant(1.);
+    ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver, &solver_coupling));
     ASSERT_TRUE(solver.last_nonlinear_result().converged);
     const auto report=solver.last_nonlinear_result();
     const auto velocity=owned_values(solver.velocity()), flux=owned_values(solver.pressure_corrected_face_fluxes());
     const auto gas_before=gas.last_statistics();
-    expect_late_multiphysics_rollback(solver,[&]
-    {
-        EXPECT_EQ(owned_values(solver.velocity()),velocity);
-        EXPECT_EQ(owned_values(solver.pressure_corrected_face_fluxes()),flux);
-        EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().total_seconds,report.total_seconds);
-        EXPECT_EQ(solver.last_nonlinear_result().residual_evaluations,report.residual_evaluations);
-        EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after,gas_before.hydrogen_after);
-    });
+    expect_late_multiphysics_rollback(solver_coupling,
+        [&]
+        {
+            EXPECT_EQ(owned_values(solver.velocity()), velocity);
+            EXPECT_EQ(owned_values(solver.pressure_corrected_face_fluxes()), flux);
+            EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().total_seconds, report.total_seconds);
+            EXPECT_EQ(solver.last_nonlinear_result().residual_evaluations, report.residual_evaluations);
+            EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after, gas_before.hydrogen_after);
+        });
     EXPECT_EQ(solver.step_index(),2);
     EXPECT_TRUE(solver.last_nonlinear_result().converged);
 }
@@ -730,9 +806,11 @@ TEST(SASSupportedPathsTest, NoxDisabledBuildRejectsSASBeforeMutation)
     EXPECT_THROW(isothermal.step(),std::invalid_argument);
     EXPECT_EQ(isothermal.step_index(),0); EXPECT_EQ(owned_values(isothermal.velocity()),before);
     EXPECT_FALSE(isothermal.find_turbulence_model()->sas_statistics().valid);
-    BoussinesqSolver<Pack> thermal(mesh,nox_box_boundaries(),time);
+    auto thermal_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, nox_box_boundaries(), time);
+    auto& thermal = *thermal_shared;
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> thermal_coupling(thermal_shared);
     thermal.configure_turbulence(sas_options());
-    EXPECT_THROW(thermal.step(),std::invalid_argument);
+    EXPECT_THROW(thermal_coupling.step(), std::invalid_argument);
     EXPECT_EQ(thermal.step_index(),0); EXPECT_FALSE(thermal.find_turbulence_model()->sas_statistics().valid);
 }
 #endif
