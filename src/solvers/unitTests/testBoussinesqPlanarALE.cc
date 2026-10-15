@@ -691,6 +691,130 @@ TEST_P(BoussinesqPlanarALECouplingTest, CourantUsesMeshRelativeTransportFluxWith
 INSTANTIATE_TEST_SUITE_P(PlanarALECouplingModes, BoussinesqPlanarALECouplingTest,
     testing::Values(Coupling::SIMPLE, Coupling::PISO, Coupling::PIMPLE, Coupling::CoupledKrylov), coupling_name);
 
+TEST_P(BoussinesqPlanarALECouplingTest, RemovesAcceptedMeshPoolDefectAfterHeatingStops)
+{
+    auto state = make_case(GetParam(), 1.0e-4, 40);
+    auto options = free_surface_options(40);
+    options.ale.level_absolute_tolerance = 2.0e-10;
+    options.ale.relaxation = 0.5;
+    state.solver->configure_free_surface(options);
+    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
+    ASSERT_NO_THROW(state.solver->step());
+    const auto initial_defect = state.solver->free_surface_diagnostics().pool_volume -
+                                global_mesh_volume(*state.mesh);
+    ASSERT_GT(initial_defect, 1.0e-13);
+    ASSERT_LT(initial_defect, options.ale.level_absolute_tolerance);
+
+    state.heat_source->initialize(0.0);
+    for (int step = 0; step < 3; ++step)
+    {
+        SCOPED_TRACE(step);
+        ASSERT_NO_THROW(state.solver->step());
+        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        if (step > 0)
+            EXPECT_LT(std::abs(diagnostics.mesh_vessel_mismatch), initial_defect * 0.1);
+        EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+        EXPECT_LE(diagnostics.continuity.maximum, 2.0e-10);
+        EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-12);
+        EXPECT_NEAR(diagnostics.energy_residual, 0.0, 1.0e-8);
+        expect_zero_relative_top_flux(state);
+    }
+}
+
+TEST(BoussinesqPlanarALETest, CorrectsBothDefectSignsAcrossCheckpointReplayAndTimeStepChanges)
+{
+    for (double defect : {-8.0e-11, 8.0e-11})
+    {
+        SCOPED_TRACE(defect);
+        auto state = make_case(Coupling::PISO, 0.0, 12);
+        auto options = free_surface_options(12);
+        options.initial_liquid_volume = 1.0 + defect;
+        options.ale.level_absolute_tolerance = 2.0e-10;
+        state.solver->configure_free_surface(options);
+        auto& solver = *state.solver;
+        auto checkpoint = solver.create_coupling_checkpoint();
+        const auto initial_mass = solver.liquid_mass_inventory().totalMass();
+        const auto initial_volume = global_mesh_volume(*state.mesh);
+        const auto initial_defect = solver.free_surface_diagnostics().pool_volume - initial_volume;
+        ASSERT_GT(std::abs(initial_defect), 5.0e-11);
+        for (double dt : {0.01, 0.004})
+        {
+            SCOPED_TRACE(dt);
+            solver.restore_coupling_checkpoint(checkpoint);
+            EXPECT_DOUBLE_EQ(global_mesh_volume(*state.mesh), initial_volume);
+            solver.set_time_step(dt);
+            ASSERT_NO_THROW(solver.step());
+            const auto& diagnostics = solver.planar_ale_diagnostics();
+            EXPECT_NEAR(diagnostics.volume_source.global_mesh_volume_correction, initial_defect / dt, 1.0e-18);
+            EXPECT_NEAR(diagnostics.volume_source.global_material_source, 0.0, 1.0e-12);
+            EXPECT_NEAR(diagnostics.mesh_vessel_mismatch, 0.0, 2.0e-14);
+            EXPECT_NEAR(diagnostics.maximum_gcl_residual, 0.0, 2.0e-13);
+            EXPECT_NEAR(solver.liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+            EXPECT_NEAR(diagnostics.energy_residual, 0.0, 1.0e-8);
+            expect_zero_relative_top_flux(state);
+        }
+        solver.accept_coupling_checkpoint(checkpoint);
+    }
+}
+
+TEST(BoussinesqPlanarALETest, VolumeBudgetLevelPolicyAcceptsAndCorrectsAnInitialDefect)
+{
+    constexpr double area = 0.25;
+    for (double defect : {-8.0e-11, 8.0e-11})
+    {
+        SCOPED_TRACE(defect);
+        auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, area}, {0.0, 1.0}, {0.0, 0.5, 1.0}}});
+        auto mesh = std::make_shared<Handle>(std::move(geometry));
+        auto solver = std::make_unique<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
+            SimpleFluid::LinearSolverOptions{}, physical_options());
+        solver->configure_material_feedback(material_feedback_options());
+        solver->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+        ConfiguredCase state{mesh, std::move(solver), nullptr};
+        auto options = free_surface_options(12);
+        options.initial_liquid_volume = area + defect;
+        options.vessel.cross_section_area = area;
+        options.vessel.total_internal_volume = 2.0 * area;
+        options.ale.level_absolute_tolerance = 0.0;
+        options.ale.level_relative_tolerance = 0.0;
+        EXPECT_THROW(state.solver->configure_free_surface(options), std::invalid_argument);
+        options.ale.level_tolerance_from_volume = true;
+        options.initial_liquid_volume = area + 2.0e-10;
+        EXPECT_THROW(state.solver->configure_free_surface(options), std::invalid_argument);
+        options.initial_liquid_volume = area + defect;
+        ASSERT_NO_THROW(state.solver->configure_free_surface(options));
+        const auto mass = state.solver->liquid_mass_inventory().totalMass();
+        ASSERT_NO_THROW(state.solver->step());
+        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        EXPECT_NEAR(diagnostics.mesh_vessel_mismatch, 0.0, 2.0e-14);
+        EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), mass, 1.0e-12);
+        EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-12);
+        expect_zero_relative_top_flux(state);
+    }
+}
+
+TEST(BoussinesqPlanarALETest, RepeatedWeakHeatingKeepsMeshPoolDefectBounded)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 40);
+    auto options = free_surface_options(40);
+    options.ale.level_absolute_tolerance = 2.0e-10;
+    options.ale.relaxation = 0.5;
+    state.solver->configure_free_surface(options);
+    const auto initial_mass = state.solver->liquid_mass_inventory().totalMass();
+    for (int step = 0; step < 40; ++step)
+    {
+        SCOPED_TRACE(step);
+        state.heat_source->initialize(1.0e-4 * (1 + step % 3));
+        ASSERT_NO_THROW(state.solver->step());
+        const auto& diagnostics = state.solver->planar_ale_diagnostics();
+        EXPECT_LT(std::abs(diagnostics.mesh_vessel_mismatch), 5.0e-12);
+        EXPECT_NEAR(state.solver->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+        EXPECT_LE(diagnostics.continuity.maximum, 2.0e-10);
+        EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-12);
+        expect_zero_relative_top_flux(state);
+    }
+}
+
 TEST(BoussinesqPlanarALETest, CompositeCoupledHeatingAndRollback)
 {
     for (const auto selection : SimpleFluid::test::coupled_backend_selections)
@@ -1985,6 +2109,21 @@ TEST(BoussinesqPlanarALESupportMatrixTest, CollectivelyRejectsRankDivergentRunti
     EXPECT_THROW(static_cast<void>(solver->configure_free_surface(free_surface_options(4))), std::invalid_argument);
     EXPECT_FALSE(solver->planar_ale_enabled());
     EXPECT_EQ(solver->find_free_surface_model(), nullptr);
+}
+
+TEST(BoussinesqPlanarALESupportMatrixTest, RejectsRankDivergentLevelTolerancePolicyBeforeMotion)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
+    auto mesh = make_column();
+    Solver solver(mesh, planar_boundaries(), time_options(Coupling::PISO),
+        SimpleFluid::LinearSolverOptions{}, physical_options());
+    solver.configure_material_feedback(material_feedback_options());
+    solver.initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
+    auto options = free_surface_options(4);
+    options.ale.level_tolerance_from_volume = comm->getRank() == 1;
+    EXPECT_THROW(static_cast<void>(solver.configure_free_surface(options)), std::invalid_argument);
+    EXPECT_FALSE(solver.planar_ale_enabled());
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsDivergentMomentumPolicyBeforeMotion)

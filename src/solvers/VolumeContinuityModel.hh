@@ -47,6 +47,7 @@ template<class Scalar> struct VolumeSourceDiagnostics
     Scalar source_pool_closure_residual = {};  ///< [m^3/s]
     Scalar normalized_source_pool_closure_residual = {};
     Scalar maximum_target_change = {}; ///< [m^3/s]
+    Scalar global_mesh_volume_correction = {}; ///< Numerical pool/mesh defect correction [m^3/s]
 };
 
 /**
@@ -61,8 +62,11 @@ template<class Scalar> struct VolumeSourceDiagnostics
  * owning equations publish it. The fallback is `phi_rel*C_new`, using the
  * trial post-transport/pre-source fraction so local kinetics is not advected
  * retroactively. The pressure target is then
- * `Q_l = Q_material - div(phi_b,slip)`. Internal face contributions cancel
- * pairwise; moving-surface escape remains an explicit outward boundary term.
+ * `Q_l = Q_material - div(phi_b,slip) + Q_mesh`, where an optional signed
+ * global mesh-volume correction is distributed by accepted cell volume.
+ * This numerical correction is separate from physical source/pool closure.
+ * Internal face contributions cancel pairwise; moving-surface escape remains
+ * an explicit outward boundary term.
  */
 template<TpetraTypePack Pack = DefaultTpetraTypes, class MeshType = MeshHandle<Pack>> class SIMPLEFLUID_SOLVERS_EXPORT VolumeContinuityModel
 {
@@ -105,6 +109,8 @@ public:
         scalar_type bubble_escape_volume_rate = {};   ///< [m^3/s]
         scalar_type other_outflow_volume_rate = {};   ///< [m^3/s]
         std::span<const scalar_type> previous_target; ///< Optional owned order [m^3/s]
+        /** Signed global (old pool - old mesh volume)/dt, separate from physical sources [m^3/s]. */
+        scalar_type mesh_volume_correction_rate = {};
     };
 
     /** @brief Candidate target and diagnostics that can be committed once by this model.

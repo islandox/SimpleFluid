@@ -100,6 +100,7 @@ void compare(const Model::Trial& a, const Model::Trial& b)
     EXPECT_EQ(x.old_material_volume, y.old_material_volume);
     EXPECT_EQ(x.new_material_volume, y.new_material_volume);
     EXPECT_EQ(x.global_material_source, y.global_material_source);
+    EXPECT_EQ(x.global_mesh_volume_correction, y.global_mesh_volume_correction);
     EXPECT_EQ(x.global_carrier_transport, y.global_carrier_transport);
     EXPECT_EQ(x.global_bubble_slip_divergence, y.global_bubble_slip_divergence);
     EXPECT_EQ(x.source_pool_closure_residual, y.source_pool_closure_residual);
@@ -197,9 +198,13 @@ TEST(VolumeContinuityAccessTest, EmptyRankParticipatesAndReleasesItsLease)
     Model model(f.mesh);
     f.mesh->observe=true; f.mesh->acquisitions=0;
     const auto trial=model.preview({.ale=ale,.old_material_volume=old,.new_material_volume=next,
-        .carrier_relative_flux=carrier,.old_pool_volume=1.0,.new_pool_volume=1.25},1);
+        .carrier_relative_flux=carrier,.old_pool_volume=1.0,.new_pool_volume=1.25,
+        .mesh_volume_correction_rate=.125},1);
     EXPECT_EQ(f.mesh->acquisitions,1);
     EXPECT_EQ(trial.diagnostics().global_material_source,.5);
+    EXPECT_EQ(trial.diagnostics().global_mesh_volume_correction,.125);
+    for (size_t owned=0; owned<f.mesh->num_owned_cells(); ++owned)
+        EXPECT_EQ(trial.target().integrated_rate(owned),.625);
     const auto comm=f.mesh->owned_cell_map()->getComm();
     int empty=f.mesh->num_owned_cells()==0, empties=0;
     Teuchos::reduceAll(*comm,Teuchos::REDUCE_SUM,1,&empty,&empties);
