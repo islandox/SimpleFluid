@@ -542,8 +542,22 @@ Q_{mat,c}=\frac{W_c^{n+1}-W_c^n}{\Delta t}
 $$
 
 $$
-Q_{V,c}=Q_{mat,c}-\sum_{f\in c}\Phi_{slip,f}.
+Q_{V,c}=Q_{mat,c}-\sum_{f\in c}\Phi_{slip,f}+Q_{mesh,c},
 $$
+
+$$
+Q_{mesh,c}=\frac{V_c^n}{V_{mesh}^n}
+\frac{V_{pool}^n-V_{mesh}^n}{\Delta t}.
+$$
+
+The mesh correction removes the accepted global pool/mesh volume defect over
+the current timestep, distributed in proportion to accepted cell volumes.
+It is fixed throughout all outer trials of a step and recomputed after every accepted
+step or checkpoint restore, including when the timestep changes. It changes
+the continuity constraint and swept mesh volume together; it does not change
+liquid mass, gas inventories, energy, or the physical material source.
+`VolumeContinuityModel` accepts this signed global correction rate explicitly;
+its default is zero for standalone material-ledger use.
 
 Thus bubble slip changes the material-volume ledger without being imposed as
 liquid-carrier divergence. Internal owner/neighbour face terms cancel
@@ -832,12 +846,26 @@ from the same target supplied to pressure:
 `h_trial = h_mesh_old + dt * sum_owned(target) / top_area`.
 This relation applies to both the next-step predictor and relaxed outer
 correctors. The thermodynamic pool-level diagnostic can differ from mesh
-coordinates within its tolerance; using it as an exact geometric origin would
-add a spurious swept flux in the next interval. The source remains the physical
-volume ledger. Pressure retains its global compatibility check for each trial,
-and the physical ledger retains the existing nonlinear acceptance tolerances.
+coordinates within its tolerance. The continuity target includes the accepted
+volume defect correction above, so geometry and pressure use the same rate.
+Without that correction, the converged update preserves the old defect and
+accepted iteration residuals can accumulate. With it, the next defect is set
+by the current iteration and physical-ledger residuals instead of inheriting
+the previous defect. The predictor uses the previous physical source and slip
+with the newly computed correction, avoiding reuse of the old step's correction.
+Pressure retains its global compatibility check for each trial, and the physical
+ledger retains the existing nonlinear acceptance tolerances. Accepted diagnostics
+report `global_mesh_volume_correction` separately from `global_material_source`;
+the ALE history CSV includes `ale_mesh_volume_correction_m3_per_s`.
 
 Actual trial mesh volume versus closure-implied pool volume uses the configured
+volume budget also for the level check when
+`free_surface_ale_level_tolerance_from_volume` is enabled: the level tolerance
+is the same absolute-plus-relative volume tolerance divided by the moving top
+area. This policy applies at initial configuration and during every trial.
+Explicit level tolerances remain available when the policy is disabled.
+
+The pool/mesh volume check uses the configured
 volume absolute-plus-relative tolerance with `max(1 m3, mesh/pool-volume
 scale)`. The adiabatic sensible-energy gate applies to
 $\sum_c V_cm_{l,c}^*c_{p,c}T_c$ and uses

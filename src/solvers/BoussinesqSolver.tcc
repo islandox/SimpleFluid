@@ -109,6 +109,7 @@ namespace
     scalar(options.ale.gcl_absolute_tolerance);
     scalar(options.ale.gcl_relative_tolerance);
     scalar(options.ale.maximum_correctors);
+    scalar(options.ale.level_tolerance_from_volume);
     scalar(options.ale.level_absolute_tolerance);
     scalar(options.ale.level_relative_tolerance);
     scalar(options.ale.relaxation);
@@ -1784,7 +1785,7 @@ void BoussinesqSolver<Pack>::write_free_surface_history_csv(const std::string& f
                   "ale_continuity_l2_m3_per_s,ale_continuity_max_m3_per_s,"
                   "ale_continuity_normalized,ale_liquid_mass_residual_kg,"
                   "ale_gas_inventory_residual_mol,ale_energy_residual_j,"
-                  "ale_energy_residual_normalized,ale_rejected_transactions";
+                  "ale_energy_residual_normalized,ale_rejected_transactions,ale_mesh_volume_correction_m3_per_s";
     }
     output << '\n';
     output << std::setprecision(std::numeric_limits<scalar_type>::max_digits10);
@@ -1836,7 +1837,7 @@ void BoussinesqSolver<Pack>::write_free_surface_history_csv(const std::string& f
                    << ale.continuity.maximum << ',' << ale.continuity.normalized_l2 << ','
                    << ale.liquid_mass_residual << ',' << ale.gas_inventory_residual << ','
                    << ale.energy_residual << ',' << ale.normalized_energy_residual << ','
-                   << ale.rejected_transactions;
+                   << ale.rejected_transactions << ',' << ale.volume_source.global_mesh_volume_correction;
         }
         output << '\n';
     }
@@ -2360,19 +2361,20 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::initialize_planar_ale
     const auto surface = d_free_surface_model->diagnostics();
     const auto level_scale = std::max({scalar_type{1}, std::abs(surface.pool_level),
         std::abs(boundary->diagnostics().surface_elevation)});
-    const auto level_tolerance = static_cast<scalar_type>(d_free_surface_options.ale.level_absolute_tolerance) +
-                                 static_cast<scalar_type>(d_free_surface_options.ale.level_relative_tolerance) *
-                                     level_scale;
-    if (std::abs(surface.pool_level - boundary->diagnostics().surface_elevation) > level_tolerance)
-    {
-        throw std::invalid_argument(
-            "planarALE initial pool level must coincide with the selected mesh-top elevation.");
-    }
     const auto volume_scale = std::max({scalar_type{1}, std::abs(surface.pool_volume),
         std::abs(boundary->diagnostics().global_mesh_volume)});
     const auto volume_tolerance = static_cast<scalar_type>(d_free_surface_options.coupling.volume_absolute_tolerance) +
                                   static_cast<scalar_type>(d_free_surface_options.coupling.volume_relative_tolerance) *
                                       volume_scale;
+    const auto level_tolerance = d_free_surface_options.ale.level_tolerance_from_volume
+        ? volume_tolerance / boundary->diagnostics().global_area
+        : static_cast<scalar_type>(d_free_surface_options.ale.level_absolute_tolerance) +
+              static_cast<scalar_type>(d_free_surface_options.ale.level_relative_tolerance) * level_scale;
+    if (std::abs(surface.pool_level - boundary->diagnostics().surface_elevation) > level_tolerance)
+    {
+        throw std::invalid_argument(
+            "planarALE initial pool level must coincide with the selected mesh-top elevation.");
+    }
     if (std::abs(surface.pool_volume - boundary->diagnostics().global_mesh_volume) > volume_tolerance)
     {
         throw std::invalid_argument(
@@ -4116,13 +4118,22 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
     const auto accepted_mesh_level = d_ale_boundary->diagnostics().surface_elevation;
     const auto top_area = d_ale_boundary->diagnostics().global_area;
     auto candidate_level = accepted_mesh_level;
-    if (d_volume_continuity_model->generation() != 0)
+    // A rate-only physical ledger preserves any accepted pool/mesh offset.
+    // Remove that offset over this step in both pressure and swept geometry.
+    // Recompute from restored accepted state and the current dt; a previous
+    // step's numerical correction must not become the new physical predictor.
+    const auto mesh_volume_correction_rate =
+        (static_cast<scalar_type>(accepted_surface.pool_volume) - accepted_mesh_volume) / time_step;
+    for (size_t owned = 0; owned < target_guess.size(); ++owned)
     {
-        for (size_t owned = 0; owned < target_guess.size(); ++owned)
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        if (d_volume_continuity_model->generation() != 0)
         {
-            target_guess[owned] = d_volume_continuity_model->continuity_target_field().value(
-                static_cast<local_ordinal_type>(owned));
+            target_guess[owned] = d_volume_continuity_model->material_source_field().value(cell) +
+                                  d_volume_continuity_model->slip_contribution_field().value(cell);
         }
+        target_guess[owned] += mesh_volume_correction_rate *
+            (static_cast<scalar_type>(accepted_cell_volumes[owned]) / accepted_mesh_volume);
     }
 
     scalar_type last_level_residual{};
@@ -4452,7 +4463,8 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                 .new_pool_volume = static_cast<scalar_type>(surface_preview.diagnostics().pool_volume),
                 .bubble_escape_volume_rate = escape_volume_rate,
                 .other_outflow_volume_rate = scalar_type{},
-                .previous_target = target_guess};
+                .previous_target = target_guess,
+                .mesh_volume_correction_rate = mesh_volume_correction_rate};
             const auto volume_trial = d_volume_continuity_model->preview(volume_inputs, ledger_generation);
 
             const auto new_energy = total_sensible_energy(trial_mass,
@@ -4486,7 +4498,7 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
             last_level_residual = level_residual;
             const auto level_scale = std::max({scalar_type{1}, std::abs(candidate_level),
                 std::abs(static_cast<scalar_type>(surface_preview.diagnostics().pool_level))});
-            const auto level_tolerance = static_cast<scalar_type>(d_free_surface_options.ale.level_absolute_tolerance) +
+            auto level_tolerance = static_cast<scalar_type>(d_free_surface_options.ale.level_absolute_tolerance) +
                                          static_cast<scalar_type>(d_free_surface_options.ale.level_relative_tolerance) *
                                              level_scale;
             scalar_type local_target_scale{};
@@ -4503,7 +4515,6 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                                               time_step +
                                           static_cast<scalar_type>(d_free_surface_options.coupling.volume_relative_tolerance) *
                                               std::max(scalar_type{1}, target_scale);
-            last_level_tolerance = level_tolerance;
             last_target_tolerance = target_tolerance;
             scalar_type local_final_l2_squared{};
             scalar_type local_final_normalization_squared{};
@@ -4548,6 +4559,9 @@ template<TpetraTypePack Pack> void BoussinesqSolver<Pack>::step_planar_ale()
                 static_cast<scalar_type>(
                     d_free_surface_options.coupling.volume_relative_tolerance) *
                     pool_volume_scale;
+            if (d_free_surface_options.ale.level_tolerance_from_volume)
+                level_tolerance = pool_volume_tolerance / top_area;
+            last_level_tolerance = level_tolerance;
             last_target_change = volume_trial.diagnostics().maximum_target_change;
             last_continuity_maximum = final_continuity.maximum;
             last_pool_volume_mismatch = pool_volume_mismatch;

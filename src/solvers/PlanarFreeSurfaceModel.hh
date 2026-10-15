@@ -251,6 +251,8 @@ struct FreeSurfaceALEOptions
     real_t gcl_absolute_tolerance = 1.0e-12; ///< [m^3/s]
     real_t gcl_relative_tolerance = 1.0e-10;
     int maximum_correctors = 12;
+    /** Derive the level tolerance from the pool/mesh volume tolerance divided by top area. */
+    bool level_tolerance_from_volume = false;
     real_t level_absolute_tolerance = 1.0e-10; ///< [m]
     real_t level_relative_tolerance = 1.0e-10;
     real_t relaxation = 0.5;

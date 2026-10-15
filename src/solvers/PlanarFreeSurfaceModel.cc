@@ -799,6 +799,8 @@ FreeSurfaceOptions free_surface_options_from_database(const Database& database)
         reader.value_or<real_t>("free_surface_ale_gcl_relative_tolerance", options.ale.gcl_relative_tolerance);
     options.ale.maximum_correctors =
         reader.value_or<int>("free_surface_ale_maximum_correctors", options.ale.maximum_correctors);
+    options.ale.level_tolerance_from_volume = reader.value_or<bool>(
+        "free_surface_ale_level_tolerance_from_volume", options.ale.level_tolerance_from_volume);
     options.ale.level_absolute_tolerance =
         reader.value_or<real_t>("free_surface_ale_level_absolute_tolerance", options.ale.level_absolute_tolerance);
     options.ale.level_relative_tolerance =
