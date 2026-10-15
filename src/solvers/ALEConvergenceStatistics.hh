@@ -13,6 +13,19 @@
 
 namespace SimpleFluid
 {
+/** One completed corrector check, including rejected and replayed attempts. */
+struct ALEConvergenceObservation
+{
+    static constexpr std::size_t gas_field_count = 5;
+    static constexpr std::array<const char*, gas_field_count> gas_field_names{
+        "dissolved_inventory", "micro_number_density", "micro_moles", "large_number_density", "large_moles"};
+    std::uint64_t check = 0;
+    int step = 0, corrector = 0;
+    double time = 0, time_step = 0, gas_tolerance = 0;
+    std::size_t blocking_mask = 0;
+    std::array<double, gas_field_count> gas_relative_change{};
+};
+
 /** Diagnostic counters, independent of accepted/checkpoint state and MPI clocks.
  * A mask records every failed gate, including simultaneous blockers. Ratios are
  * for attribution only; the caller supplies the original boolean gate results.

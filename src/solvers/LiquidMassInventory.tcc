@@ -394,8 +394,60 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
     // Publish overlap values only after refinement and both unchanged physical
     // gates pass; accepted inventory remains untouched until commitPhaseChange.
     d_trial_cell_mass_inventory.sync_ghosts();
-    return PhaseChangePreview(
+    auto result = PhaseChangePreview(
         this, d_phase_change_generation, std::move(preview), true, d_cellwise_trial_nonce, statistics);
+    result.d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+    if (ale != nullptr) result.d_ale = *ale;
+    return result;
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto LiquidMassInventory<Pack, MeshType>::refresh_cellwise_density_impl(const PhaseChangePreview& preview,
+    const std::function<scalar_type(local_ordinal_type)>& density) -> PhaseChangePreview
+{
+    // Validate before updating density: arbitrary stale previews are never
+    // revived, even though a successful density refresh invalidates this one.
+    static_cast<void>(trialCellMassInventory(preview));
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    const std::array<int, 3> local{
+        preview.d_geometry_epoch != mesh_geometry_epoch(*d_mesh), preview.d_ale.has_value(), !preview.d_ale.has_value()};
+    std::array<int, 3> global{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, local.data(), global.data());
+    if (global[0] || (global[1] && global[2]))
+        throw std::logic_error("Cellwise density refresh requires unchanged geometry and a consistent ALE preview.");
+    if (preview.d_ale) preview.d_ale->validate(*d_mesh);
+    const auto nonce = invalidatedCounter(d_cellwise_trial_nonce, d_cellwise_trial_nonce, "cellwise trial nonce");
+    d_cellwise_trial_nonce = nonce;
+    update_pure_liquid_density_impl(density);
+
+    detail::CompensatedSum<> local_volume;
+    int invalid = 0;
+    {
+        const auto mass = d_trial_cell_mass_inventory.owned_read_view();
+        const auto rho = d_pure_liquid_density.owned_read_view();
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto volume = static_cast<scalar_type>(preview.d_ale ? preview.d_ale->new_cell_volumes()[owned]
+                : d_mesh->cell_volume(static_cast<local_ordinal_type>(owned)));
+            invalid |= !std::isfinite(mass(owned, 0)) || mass(owned, 0) < scalar_type{} ||
+                       !std::isfinite(rho(owned, 0)) || rho(owned, 0) <= scalar_type{} ||
+                       !std::isfinite(volume) || volume <= real_t{};
+            local_volume += static_cast<long double>(mass(owned, 0)) / rho(owned, 0) * volume;
+        }
+    }
+    requireCollectivelyValidDensity(invalid);
+    const auto volume = globalSum(static_cast<scalar_type>(local_volume.value()));
+    if (!std::isfinite(volume) || volume < scalar_type{})
+        throw std::runtime_error("Cellwise density refresh produced an invalid liquid volume.");
+    auto result = preview;
+    result.d_generation = d_phase_change_generation;
+    result.d_trial_nonce = nonce;
+    result.d_transport_statistics.reset();
+    result.d_diagnostics.liquid_volume = volume;
+    result.d_diagnostics.mass_weighted_specific_volume = result.d_diagnostics.total_mass > scalar_type{}
+        ? volume / result.d_diagnostics.total_mass : scalar_type{};
+    updateMassBalance(result.d_diagnostics);
+    return result;
 }
 
 template<TpetraTypePack Pack, class MeshType>

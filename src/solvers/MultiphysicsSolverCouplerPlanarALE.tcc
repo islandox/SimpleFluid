@@ -25,6 +25,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         std::optional<face_flux_field_type> carrier_material_volume_flux;
         std::optional<typename volume_continuity_model_type::Trial> volume_trial;
         scalar_type material_state_residual{}, gas_state_residual{}, gas_inventory_residual{};
+        std::array<scalar_type, ALEConvergenceObservation::gas_field_count> gas_field_residual{};
         scalar_type boundary_energy{}, energy_residual{}, energy_scale{};
         scalar_type level_residual{}, level_tolerance{}, target_tolerance{};
         continuity_residual_type final_continuity;
@@ -143,7 +144,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 preview_surface(trial);
                 preview_volume_balance(trial);
                 validate_energy_balance(trial);
-                evaluate_convergence(trial);
+                evaluate_convergence(trial, corrector);
                 if (trial.converged)
                 {
                     commit_trial(trial, corrector);
@@ -546,12 +547,14 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     {
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEResidual);
         trial.current_gas_state = capture_gas_state();
-        scalar_type local_gas_state_residual{};
+        // Entry zero retains the original aggregate comparison. The remaining
+        // entries attribute that same arithmetic to each authoritative field.
+        std::array<scalar_type, 1 + ALEConvergenceObservation::gas_field_count> local{}, global{};
         if (coupler.d_radiolytic_gas_model && coupler.d_radiolytic_gas_model->enabled())
         {
             if (previous_gas_state.size() != trial.current_gas_state.size())
             {
-                local_gas_state_residual = scalar_type{1};
+                local.fill(scalar_type{1});
             }
             else
             {
@@ -559,27 +562,28 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 {
                     const auto scale = std::max({scalar_type{1}, std::abs(previous_gas_state[entry]),
                         std::abs(trial.current_gas_state[entry])});
-                    local_gas_state_residual = std::max(local_gas_state_residual,
-                        std::abs(trial.current_gas_state[entry] - previous_gas_state[entry]) / scale);
+                    const auto residual = std::abs(trial.current_gas_state[entry] - previous_gas_state[entry]) / scale;
+                    local[0] = std::max(local[0], residual);
+                    const auto field = entry / d_solver.d_mesh->num_owned_cells();
+                    local[1 + field] = std::max(local[1 + field], residual);
                 }
             }
         }
-        trial.gas_state_residual = {};
-        Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1,
-            &local_gas_state_residual, &trial.gas_state_residual);
+        Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
+            static_cast<int>(local.size()), local.data(), global.data());
+        trial.gas_state_residual = global[0];
+        std::copy(global.begin() + 1, global.end(), trial.gas_field_residual.begin());
     }
 
     /** @brief Preview liquid and surface ledgers after validating hydrogen closure. */
     void preview_surface(TrialState& trial)
     {
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALESurfacePreview);
-        coupler.d_liquid_mass_inventory->updatePureLiquidDensity(
-            [this](local_ordinal_type cell) { return coupler.pure_liquid_density(cell); });
         {
-            const auto mass_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMassPreview);
+            const auto mass_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMassVolumeRefresh);
             trial.liquid_preview.emplace(
-                coupler.d_liquid_mass_inventory->previewCellwiseAdvance(time_step, *coupler.d_mesh_relative_face_flux,
-                    nullptr, nullptr, d_solver.d_problem.linear_options(), &*coupler.d_active_ale));
+                coupler.d_liquid_mass_inventory->refreshCellwiseDensity(*trial.temperature_mass_preview,
+                    [this](local_ordinal_type cell) { return coupler.pure_liquid_density(cell); }));
         }
         FreeSurfaceAccountingPreview accounting;
         accounting.liquid = trial.liquid_preview->diagnostics();
@@ -781,7 +785,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     }
 
     /** @brief Record residual histories and apply all physical acceptance gates. */
-    void evaluate_convergence(TrialState& trial)
+    void evaluate_convergence(TrialState& trial, int corrector)
     {
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEResidual);
         trial.level_residual =
@@ -855,6 +859,25 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
              !(last_target_change <= trial.target_tolerance), !(trial.final_continuity.maximum <= continuity_tolerance),
              !(std::abs(trial.pool_volume_mismatch) <= trial.pool_volume_tolerance),
              !(trial.material_state_residual <= state_relative_tolerance), !(trial.gas_state_residual <= state_relative_tolerance)});
+        ALEConvergenceObservation observation;
+        observation.check = coupler.d_ale_convergence_statistics.checks;
+        observation.step = d_solver.d_step_index;
+        observation.corrector = corrector;
+        observation.time = static_cast<double>(d_solver.d_time);
+        observation.time_step = static_cast<double>(time_step);
+        observation.gas_tolerance = static_cast<double>(state_relative_tolerance);
+        const std::array<bool, ALEConvergenceStatistics::criterion_count> failed{
+            !(trial.thermal_residual <= scalar_type{1}), !(std::abs(trial.level_residual) <= trial.level_tolerance),
+            !(last_target_change <= trial.target_tolerance), !(trial.final_continuity.maximum <= continuity_tolerance),
+            !(std::abs(trial.pool_volume_mismatch) <= trial.pool_volume_tolerance),
+            !(trial.material_state_residual <= state_relative_tolerance), !(trial.gas_state_residual <= state_relative_tolerance)};
+        for (size_t i = 0; i < failed.size(); ++i)
+            if (failed[i]) observation.blocking_mask |= size_t{1} << i;
+        for (size_t i = 0; i < trial.gas_field_residual.size(); ++i)
+            observation.gas_relative_change[i] = static_cast<double>(trial.gas_field_residual[i]);
+        collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE convergence observer", [&] {
+            if (coupler.d_ale_convergence_observer) coupler.d_ale_convergence_observer(observation);
+        });
     }
 
     /** @brief Publish one accepted diagnostic record with its corrector histories. */

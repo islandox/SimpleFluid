@@ -642,6 +642,8 @@ public:
         bool d_cellwise;
         size_t d_trial_nonce;
         std::optional<LinearSolveStatistics> d_transport_statistics;
+        std::uint64_t d_geometry_epoch = 0;
+        std::optional<FVM::ALEControlVolumeState> d_ale;
     };
 
     LiquidMassInventory(SP<const mesh_type> mesh, LiquidMassInventoryOptions options = {})
@@ -698,6 +700,20 @@ public:
         const face_flux_field_type& liquid_face_flux, const field_type* evaporation_mass_rate = nullptr,
         const field_type* condensation_mass_rate = nullptr, const LinearSolverOptions& linear_options = {},
         const FVM::ALEControlVolumeState* ale = nullptr);
+
+    /** Refresh pure density and a live cellwise preview's derived volume,
+     * retaining its already validated transported mass and phase ledger.
+     * No transport inputs can change through this operation. The original
+     * token is invalidated; the new token reports no additional linear solve.
+     * Geometry and any originating ALE trial must remain unchanged and live.
+     */
+    template<class DensityEvaluator>
+    [[nodiscard]] PhaseChangePreview refreshCellwiseDensity(
+        const PhaseChangePreview& preview, DensityEvaluator&& pure_liquid_density)
+    {
+        return refresh_cellwise_density_impl(preview,
+            [&](local_ordinal_type cell) { return pure_liquid_density(cell); });
+    }
 
     /** Commit a diagnostics value returned by previewPhaseChange(). */
     void commitPhaseChange(const PhaseChangePreview& preview);
@@ -758,6 +774,8 @@ private:
     void initialize_impl(scalar_type initial_liquid_volume,
         const std::function<scalar_type(local_ordinal_type)>& pure_liquid_density);
     void update_pure_liquid_density_impl(
+        const std::function<scalar_type(local_ordinal_type)>& pure_liquid_density);
+    PhaseChangePreview refresh_cellwise_density_impl(const PhaseChangePreview& preview,
         const std::function<scalar_type(local_ordinal_type)>& pure_liquid_density);
 
     [[nodiscard]] static size_t invalidatedCounter(size_t current, size_t saved, std::string_view name)
