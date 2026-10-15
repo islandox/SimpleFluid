@@ -3407,6 +3407,12 @@ void MultiphysicsSolverCoupler<Pack>::append_solution_fields(
 
 /** @brief Retain the solver and acquire one external-controller lease. */
 template<TpetraTypePack Pack>
+ALEConvergenceStatistics MultiphysicsSolverCoupler<Pack>::ale_convergence_statistics() const noexcept
+{
+    return d_ale_convergence_statistics;
+}
+
+template<TpetraTypePack Pack>
 MultiphysicsSolverCoupler<Pack>::MultiphysicsSolverCoupler(solver_pointer solver) : d_solver(std::move(solver))
 {
     if (!d_solver)
