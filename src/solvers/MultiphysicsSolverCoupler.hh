@@ -14,6 +14,7 @@
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "solvers/BoussinesqSolver.hh"
+#include "solvers/ALEConvergenceStatistics.hh"
 #include "solvers/PlanarALEBoundary.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
 #include "solvers/ThermalStepParticipant.hh"
@@ -480,6 +481,9 @@ public:
     }
     /** Diagnostics from the latest accepted ALE step (plus rejection count). */
     const PlanarALEStepDiagnostics& planar_ale_diagnostics() const noexcept { return d_planar_ale_diagnostics; }
+    /** Cumulative completed gate checks since construction, including replayed work.
+     * Performs no MPI and is deliberately outside physical checkpoint state. */
+    ALEConvergenceStatistics ale_convergence_statistics() const noexcept;
     /** Accepted absolute-minus-mesh carrier flux; throws when ALE is inactive. */
     const face_flux_field_type& mesh_relative_face_fluxes() const;
     /** Accepted initialization and per-step global free-surface history. */
@@ -649,6 +653,7 @@ private:
     const field_type* d_ale_temperature_density = nullptr;
     std::uint64_t d_ale_target_generation = 0;
     PlanarALEStepDiagnostics d_planar_ale_diagnostics;
+    ALEConvergenceStatistics d_ale_convergence_statistics;
     FreeSurfaceOptions d_free_surface_options;
     scalar_type d_pool_occupancy_volume_error = {};
     std::vector<FreeSurfaceHistoryRecord> d_free_surface_history;

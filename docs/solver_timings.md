@@ -53,6 +53,25 @@ The API deliberately reports inclusive time only. Aggregate across ranks in the
 caller at a safe synchronization point if required; the timer scope destructor
 never performs a collective.
 
+Planar ALE also exposes `sf.ale_prepare`, `sf.ale_mass_preview`,
+`sf.ale_surface_preview`, `sf.ale_volume_balance`, `sf.ale_volume_preview`,
+`sf.ale_material`, `sf.ale_residual`, `sf.ale_energy_balance`, `sf.ale_replay`
+and `sf.ale_commit`. Preparation includes trial geometry refresh; surface
+preview includes its mass preview; volume balance includes the core volume
+preview. Material covers property/void refresh and gas-state evaluation.
+Residual includes gas scans and convergence checks. These rows measure their
+named operations wherever invoked and retain the same inclusive semantics.
+
+`MultiphysicsSolverCoupler::ale_convergence_statistics()` returns cumulative
+checks, converged checks, maximum normalized residuals, and a histogram of
+joint blocking criteria. Bit positions follow `ALEConvergenceStatistics::criterion_names`:
+thermal, level, target change, continuity, pool volume, material and gas.
+A zero mask denotes a converged check; a single set bit identifies a sole
+blocker. Masks use the original acceptance comparisons directly, including
+zero tolerances, without changing the gate. These diagnostics survive physical
+checkpoint restore and replay. Their counters are independent of timer reset.
+The caller must serialize snapshot access with solver advancement.
+
 ```cpp
 for (const auto& phase : solver.solver_phase_timings())
     if (phase.calls != 0)

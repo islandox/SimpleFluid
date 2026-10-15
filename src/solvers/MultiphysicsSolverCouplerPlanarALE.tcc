@@ -379,6 +379,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Move to a candidate geometry and publish its Picard coefficients. */
     void prepare_trial()
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEPrepare);
         scalar_type local_target_integral{};
         for (const auto value : target_guess)
             local_target_integral += value;
@@ -451,9 +452,12 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         // not in the bubble-displaced mixture volume.  Build the
         // conservative trial liquid-mass density on the candidate mesh
         // before assembling rho*cp*T at the new time level.
-        trial.temperature_mass_preview.emplace(
-            coupler.d_liquid_mass_inventory->previewCellwiseAdvance(time_step, *coupler.d_mesh_relative_face_flux,
-                nullptr, nullptr, d_solver.d_problem.linear_options(), &*coupler.d_active_ale));
+        {
+            const auto mass_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMassPreview);
+            trial.temperature_mass_preview.emplace(
+                coupler.d_liquid_mass_inventory->previewCellwiseAdvance(time_step, *coupler.d_mesh_relative_face_flux,
+                    nullptr, nullptr, d_solver.d_problem.linear_options(), &*coupler.d_active_ale));
+        }
         coupler.d_ale_temperature_density =
             &coupler.d_liquid_mass_inventory->trialCellMassInventory(*trial.temperature_mass_preview);
         if (trial.temperature_mass_preview->transportStatistics())
@@ -497,13 +501,17 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                     coupler.d_prescribed_heat_source ? &coupler.d_prescribed_heat_source->field() : nullptr,
                     &*coupler.d_active_ale, coupler.d_free_surface_options.gravity_axis);
             }
-            coupler.update_void_fraction_models(time_step);
+            {
+                const auto material_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMaterial);
+                coupler.update_void_fraction_models(time_step);
+            }
         }
     }
 
     /** @brief Capture next material coefficients and their normalized Picard residual. */
     void evaluate_material_state(TrialState& trial)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMaterial);
         coupler.refresh_material_feedback(d_solver.d_time + time_step);
         trial.next_density_guess.resize(d_solver.d_mesh->num_owned_cells());
         trial.next_heat_capacity_guess.resize(d_solver.d_mesh->num_owned_cells());
@@ -536,6 +544,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Capture next gas state and its normalized Picard residual. */
     void evaluate_gas_state(TrialState& trial)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEResidual);
         trial.current_gas_state = capture_gas_state();
         scalar_type local_gas_state_residual{};
         if (coupler.d_reacting_gas_model && coupler.d_reacting_gas_model->enabled())
@@ -563,11 +572,15 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Preview liquid and surface ledgers after validating hydrogen closure. */
     void preview_surface(TrialState& trial)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALESurfacePreview);
         coupler.d_liquid_mass_inventory->updatePureLiquidDensity(
             [this](local_ordinal_type cell) { return coupler.pure_liquid_density(cell); });
-        trial.liquid_preview.emplace(
-            coupler.d_liquid_mass_inventory->previewCellwiseAdvance(time_step, *coupler.d_mesh_relative_face_flux,
-                nullptr, nullptr, d_solver.d_problem.linear_options(), &*coupler.d_active_ale));
+        {
+            const auto mass_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMassPreview);
+            trial.liquid_preview.emplace(
+                coupler.d_liquid_mass_inventory->previewCellwiseAdvance(time_step, *coupler.d_mesh_relative_face_flux,
+                    nullptr, nullptr, d_solver.d_problem.linear_options(), &*coupler.d_active_ale));
+        }
         FreeSurfaceAccountingPreview accounting;
         accounting.liquid = trial.liquid_preview->diagnostics();
 
@@ -631,6 +644,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Build the material carrier flux and preview volume continuity. */
     void preview_volume_balance(TrialState& trial)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEVolumeBalance);
         trial.trial_mass = &coupler.d_liquid_mass_inventory->trialCellMassInventory(*trial.liquid_preview);
         const auto escape_volume_rate = update_bubble_slip_flux();
 
@@ -675,12 +689,16 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
             .other_outflow_volume_rate = scalar_type{},
             .previous_target = target_guess,
             .mesh_volume_correction_rate = mesh_volume_correction_rate};
-        trial.volume_trial.emplace(coupler.d_volume_continuity_model->preview(volume_inputs, ledger_generation));
+        {
+            const auto volume_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEVolumePreview);
+            trial.volume_trial.emplace(coupler.d_volume_continuity_model->preview(volume_inputs, ledger_generation));
+        }
     }
 
     /** @brief Check extensive sensible energy against prescribed source and boundary work. */
     void validate_energy_balance(TrialState& trial)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEEnergyBalance);
         const auto new_energy = coupler.total_sensible_energy(*trial.trial_mass,
             d_solver.stored_material_properties().specific_heat_capacity, coupler.d_active_ale->new_cell_volumes());
         scalar_type local_added_energy{};
@@ -765,6 +783,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Record residual histories and apply all physical acceptance gates. */
     void evaluate_convergence(TrialState& trial)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEResidual);
         trial.level_residual =
             static_cast<scalar_type>(trial.surface_preview->diagnostics().pool_level) - candidate_level;
         last_level_residual = trial.level_residual;
@@ -822,6 +841,20 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                           std::abs(trial.pool_volume_mismatch) <= trial.pool_volume_tolerance &&
                           trial.material_state_residual <= state_relative_tolerance &&
                           trial.gas_state_residual <= state_relative_tolerance;
+        const auto normalized = [](scalar_type residual, scalar_type tolerance) {
+            return tolerance > scalar_type{} ? static_cast<double>(std::abs(residual) / tolerance)
+                : residual == scalar_type{} ? 0. : std::numeric_limits<double>::infinity();
+        };
+        // Diagnostic division never replaces the original comparisons at a tolerance boundary.
+        coupler.d_ale_convergence_statistics.record(
+            {static_cast<double>(trial.thermal_residual), normalized(trial.level_residual,trial.level_tolerance),
+             normalized(last_target_change,trial.target_tolerance), normalized(trial.final_continuity.maximum,continuity_tolerance),
+             normalized(trial.pool_volume_mismatch,trial.pool_volume_tolerance),
+             normalized(trial.material_state_residual,state_relative_tolerance), normalized(trial.gas_state_residual,state_relative_tolerance)},
+            {!(trial.thermal_residual <= scalar_type{1}), !(std::abs(trial.level_residual) <= trial.level_tolerance),
+             !(last_target_change <= trial.target_tolerance), !(trial.final_continuity.maximum <= continuity_tolerance),
+             !(std::abs(trial.pool_volume_mismatch) <= trial.pool_volume_tolerance),
+             !(trial.material_state_residual <= state_relative_tolerance), !(trial.gas_state_residual <= state_relative_tolerance)});
     }
 
     /** @brief Publish one accepted diagnostic record with its corrector histories. */
@@ -863,6 +896,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Commit ledgers and publication before releasing the active geometry trial. */
     void commit_trial(const TrialState& trial, int corrector)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALECommit);
         if (coupler.d_thermal_participant)
             coupler.d_thermal_participant->validate_commit();
         const auto motion_diagnostics = coupler.d_ale_motion->diagnostics();
@@ -907,6 +941,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Preserve next guesses across accepted-state restoration. */
     void replay_trial(TrialState& trial)
     {
+        const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEReplay);
         std::vector<scalar_type> next_target(target_guess.size());
         const auto relaxation = static_cast<scalar_type>(coupler.d_free_surface_options.ale.relaxation);
         for (size_t owned = 0; owned < next_target.size(); ++owned)

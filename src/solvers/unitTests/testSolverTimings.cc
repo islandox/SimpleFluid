@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "solvers/SolverTimings.hh"
+#include "solvers/ALEConvergenceStatistics.hh"
 #include "utils/testing_environment.hh"
 
 namespace
@@ -59,4 +60,29 @@ TEST(SolverTimingsTest, ExceptionUnwindingCountsAttemptAndBalancesReset)
     EXPECT_EQ(timings.query(Phase::Temperature).calls, 1u);
     EXPECT_GE(timings.query(Phase::Step).seconds, timings.query(Phase::Temperature).seconds);
     EXPECT_NO_THROW(timings.reset());
+}
+
+TEST(ALEConvergenceStatisticsTest, RecordsJointAndSoleBlockersWithoutChangingGateComparisons)
+{
+    SimpleFluid::ALEConvergenceStatistics statistics;
+    std::array<double,7> ratios{};
+    std::array<bool,7> failed{};
+    ratios[0] = 3.; ratios[6] = 2.; failed[0] = failed[6] = true;
+    statistics.record(ratios,failed);
+    ratios.fill(0.); failed.fill(false);
+    // A rounded ratio of one must not erase the caller's exact failed comparison.
+    ratios[6] = 1.; failed[6] = true;
+    statistics.record(ratios,failed);
+    failed.fill(false);
+    statistics.record(ratios,failed);
+    const auto snapshot = statistics;
+    EXPECT_EQ(snapshot.checks,3u);
+    EXPECT_EQ(snapshot.converged_checks,1u);
+    EXPECT_EQ(snapshot.blocking_counts()[0],1u);
+    EXPECT_EQ(snapshot.blocking_counts()[6],2u);
+    EXPECT_EQ(snapshot.blocking_combinations[(1u << 0) | (1u << 6)],1u);
+    EXPECT_EQ(snapshot.blocking_combinations[1u << 6],1u);
+    EXPECT_EQ(snapshot.blocking_combinations[0],1u);
+    EXPECT_DOUBLE_EQ(snapshot.maximum_normalized_residual[0],3.);
+    EXPECT_DOUBLE_EQ(snapshot.maximum_normalized_residual[6],2.);
 }
