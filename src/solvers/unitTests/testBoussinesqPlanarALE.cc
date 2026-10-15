@@ -827,6 +827,58 @@ TEST(BoussinesqPlanarALETest, RepeatedWeakHeatingKeepsMeshPoolDefectBounded)
     }
 }
 
+TEST(BoussinesqPlanarALETest, AitkenHeatingClosesBalancesAndRestartsHistoryAfterCheckpointReplay)
+{
+    auto state = make_case(Coupling::PISO, 1.0e-3, 40);
+    auto options = free_surface_options(40);
+    options.ale.relaxation = 0.5;
+    options.ale.aitken = true;
+    state.coupling->configure_free_surface(options);
+    auto checkpoint = state.coupling->create_coupling_checkpoint();
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
+    const auto geometry = capture_geometry(*state.mesh);
+    state.coupling->set_ale_convergence_observer([](const auto& row) {
+        if (row.corrector == 2) throw std::runtime_error("Reject an accelerated trial before commit.");
+    });
+    EXPECT_THROW(state.coupling->step(), std::runtime_error);
+    EXPECT_DOUBLE_EQ(state.solver->time(), 0.0);
+    expect_geometry_restored(*state.mesh, geometry);
+    state.coupling->set_ale_convergence_observer({});
+    std::vector<double> first_history;
+    double first_top = 0.0;
+    for (int replay = 0; replay < 2; ++replay)
+    {
+        SCOPED_TRACE(replay);
+        if (replay) state.coupling->restore_coupling_checkpoint(checkpoint);
+        ASSERT_NO_THROW(state.coupling->step());
+        const auto& diagnostics = state.coupling->planar_ale_diagnostics();
+        EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+        EXPECT_NEAR(diagnostics.mesh_vessel_mismatch, 0.0, 2.0e-12);
+        EXPECT_NEAR(diagnostics.maximum_gcl_residual, 0.0, 1.0e-12);
+        EXPECT_NEAR(diagnostics.volume_source.source_pool_closure_residual, 0.0, 1.0e-10);
+        EXPECT_LE(diagnostics.continuity.maximum, 3.0e-10);
+        EXPECT_LE(std::abs(diagnostics.liquid_mass_residual), 1.0e-12);
+        EXPECT_LE(std::abs(diagnostics.energy_residual), 6.1e-6);
+        expect_zero_relative_top_flux(state);
+        if (!replay)
+        {
+            first_history = diagnostics.target_change_history;
+            first_top = top_elevation(*state.mesh);
+        }
+        else
+        {
+            EXPECT_EQ(diagnostics.target_change_history, first_history);
+            EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), first_top);
+        }
+    }
+    state.coupling->accept_coupling_checkpoint(checkpoint);
+    // A subsequent accepted substep also starts with a fresh accelerator.
+    ASSERT_NO_THROW(state.coupling->step());
+    EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), initial_mass, 1.0e-12);
+    EXPECT_LE(state.coupling->planar_ale_diagnostics().continuity.maximum, 3.0e-10);
+    expect_zero_relative_top_flux(state);
+}
+
 TEST(BoussinesqPlanarALETest, CompositeCoupledHeatingAndRollback)
 {
     for (const auto selection : SimpleFluid::test::coupled_backend_selections)
@@ -1131,6 +1183,40 @@ TEST(BoussinesqPlanarALETest, StationaryGasCanConvergeOnTheFirstAleTrial)
 TEST(BoussinesqPlanarALETest, GasProductionStillRequiresAConvergedTrialComparison)
 {
     auto state = make_case(Coupling::PISO, 0.0, 40, true);
+    std::vector<SimpleFluid::ALEConvergenceObservation> observations;
+    state.coupling->set_ale_convergence_observer([&](const auto& row) { observations.push_back(row); });
+    state.coupling->find_prescribed_heat_source()->initialize_constant(2000.0);
+    ASSERT_NO_THROW(state.coupling->step());
+    const auto& diagnostics = state.coupling->planar_ale_diagnostics();
+    ASSERT_GE(diagnostics.gas_state_residual_history.size(), 2u);
+    // New bubble populations start from zero; their normalized physical
+    // increment is one, even though the artificial first-pass sentinel is gone.
+    EXPECT_DOUBLE_EQ(diagnostics.gas_state_residual_history.front(), 1.0);
+    EXPECT_LE(diagnostics.gas_state_residual_history.back(), 1.e-10);
+    ASSERT_EQ(observations.size(), diagnostics.gas_state_residual_history.size());
+    for (size_t i = 0; i < observations.size(); ++i)
+    {
+        const auto& row = observations[i];
+        EXPECT_EQ(row.corrector, i + 1);
+        EXPECT_DOUBLE_EQ(*std::max_element(row.gas_relative_change.begin(), row.gas_relative_change.end()),
+                         diagnostics.gas_state_residual_history[i]);
+        EXPECT_EQ((row.blocking_mask & (size_t{1} << 6)) != 0,
+                  diagnostics.gas_state_residual_history[i] > row.gas_tolerance);
+    }
+    const auto* gas = state.coupling->find_reacting_gas_model();
+    const double produced = gas->cumulative_hydrogen_produced();
+    EXPECT_NEAR(produced, 2000.0 * 0.01 * 2.e-7 * global_mesh_volume(*state.mesh), 1.e-15);
+    EXPECT_NEAR(gas->global_submerged_hydrogen_moles() +
+        gas->cumulative_submerged_bubble_hydrogen_escaped(), 1.0 + produced, 1.e-12);
+}
+
+TEST(BoussinesqPlanarALETest, AitkenGasProductionKeepsUnrelaxedDiagnosticsAndInventoryGates)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 40, true);
+    auto options = free_surface_options(40);
+    options.ale.aitken = true;
+    options.ale.relaxation = 0.5;
+    state.coupling->configure_free_surface(options);
     std::vector<SimpleFluid::ALEConvergenceObservation> observations;
     state.coupling->set_ale_convergence_observer([&](const auto& row) { observations.push_back(row); });
     state.coupling->find_prescribed_heat_source()->initialize_constant(2000.0);
@@ -2233,6 +2319,25 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsRankDivergentLevelTolerancePol
     options.ale.level_tolerance_from_volume = comm->getRank() == 1;
     EXPECT_THROW(static_cast<void>(solver_coupling.configure_free_surface(options)), std::invalid_argument);
     EXPECT_FALSE(solver_coupling.planar_ale_enabled());
+}
+
+TEST(BoussinesqPlanarALESupportMatrixTest, RejectsRankDivergentAitkenOptionsBeforeMotion)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two ranks.";
+    auto state = make_case(Coupling::PISO, 0.0, 4);
+    for (int choice = 0; choice < 4; ++choice)
+    {
+        auto options = free_surface_options(4);
+        if (comm->getRank() == 1)
+        {
+            if (choice == 0) options.ale.aitken = true;
+            if (choice == 1) options.ale.initial_relaxation = 0.8;
+            if (choice == 2) options.ale.minimum_relaxation = 0.2;
+            if (choice == 3) { options.ale.maximum_relaxation = 0.9; options.ale.initial_relaxation = 0.9; }
+        }
+        EXPECT_THROW(state.coupling->configure_free_surface(options), std::invalid_argument);
+    }
 }
 
 TEST(BoussinesqPlanarALESupportMatrixTest, RejectsDivergentMomentumPolicyBeforeMotion)

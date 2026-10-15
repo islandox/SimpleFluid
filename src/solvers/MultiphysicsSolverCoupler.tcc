@@ -5,6 +5,7 @@
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/FieldStateTransaction.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
+#include "solvers/SafeguardedAitken.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -108,6 +109,10 @@ namespace
     scalar(options.ale.level_absolute_tolerance);
     scalar(options.ale.level_relative_tolerance);
     scalar(options.ale.relaxation);
+    scalar(options.ale.aitken);
+    scalar(options.ale.initial_relaxation);
+    scalar(options.ale.minimum_relaxation);
+    scalar(options.ale.maximum_relaxation);
     optional_scalar(options.ale.quality_limits.maximum_growth_ratio);
     optional_scalar(options.ale.quality_limits.maximum_non_orthogonality_degrees);
     optional_scalar(options.ale.quality_limits.maximum_skewness);

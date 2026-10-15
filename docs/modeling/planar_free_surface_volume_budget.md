@@ -17,6 +17,32 @@ conservation- and solver-contract-focused rather than physical validation of
 pool dynamics. Composition-resolved liquid transport, conservative steam
 transport/escape, and conservative cross-mesh or cut-cell mapping remain open.
 
+## Optional ALE relaxation acceleration
+
+`PlanarALEOptions::aitken` defaults to `false`. The fixed `relaxation` factor
+(default 0.5) also supplies the fallback when acceleration is enabled.
+`initial_relaxation` defaults to 1.0, `minimum_relaxation` to 0.1 and
+`maximum_relaxation` to 1.0. Factors must be finite and in `(0,1]`, bounds must
+be ordered, and enabled initial/fallback factors must lie within those bounds.
+
+The accelerated iterate is the owned-cell continuity-target vector. Residuals
+use the fixed scale `dt/accepted_cell_volume` and accepted-cell-volume weights;
+collective dot products count each owned cell once. The global integral of the
+relaxed target determines the free-surface geometry. Valid vector-secant factors
+are bounded; invalid or degenerate estimates or residual-norm growth above two
+use the fallback and retain the current observation as the new secant baseline.
+History persists across a substep's internal correctors and starts afresh for
+each new substep or outer replay. Unrelaxed convergence checks,
+volume continuity and physical acceptance retain their existing definitions.
+
+The parameter-reader keys are `free_surface_ale_aitken`,
+`free_surface_ale_relaxation`, `free_surface_ale_initial_relaxation`,
+`free_surface_ale_minimum_relaxation` and `free_surface_ale_maximum_relaxation`.
+
+external host exposes these settings as `Coupling/ALEAitken`, `ALERelaxation`,
+`ALEInitialRelaxation`, `ALEMinimumRelaxation` and `ALEMaximumRelaxation`.
+Its outer `Coupling/Aitken` and inner radiation acceleration are independent.
+
 ## Applicability and State Ownership
 
 The model is intended for a single planar pool surface whose vessel geometry
