@@ -1103,6 +1103,8 @@ TEST(BoussinesqPlanarALETest, AcceptedMotionWritesCurrentParallelPiecesAndPvtuDi
 TEST(BoussinesqPlanarALETest, StationaryGasCanConvergeOnTheFirstAleTrial)
 {
     auto state = make_case(Coupling::PISO, 0.0, 4, true);
+    std::vector<SimpleFluid::ALEConvergenceObservation> observations;
+    state.coupling->set_ale_convergence_observer([&](const auto& row) { observations.push_back(row); });
     auto checkpoint = state.coupling->create_coupling_checkpoint();
     for (double dt : {0.01, 0.004})
     {
@@ -1113,15 +1115,24 @@ TEST(BoussinesqPlanarALETest, StationaryGasCanConvergeOnTheFirstAleTrial)
         EXPECT_EQ(diagnostics.outer_correctors, 1);
         ASSERT_EQ(diagnostics.gas_state_residual_history.size(), 1u);
         EXPECT_LE(diagnostics.gas_state_residual_history.front(), 8 * std::numeric_limits<double>::epsilon());
+        ASSERT_FALSE(observations.empty());
+        EXPECT_EQ(observations.back().corrector, 1);
+        EXPECT_EQ(observations.back().blocking_mask, 0u);
+        for (const auto value : observations.back().gas_relative_change)
+            EXPECT_LE(value, 8 * std::numeric_limits<double>::epsilon());
         EXPECT_NEAR(state.coupling->find_radiolytic_gas_model()->global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
         expect_zero_relative_top_flux(state);
     }
     state.coupling->accept_coupling_checkpoint(checkpoint);
+    ASSERT_EQ(observations.size(), 2u);
+    EXPECT_EQ(observations[1].check, observations[0].check + 1);
 }
 
 TEST(BoussinesqPlanarALETest, GasProductionStillRequiresAConvergedTrialComparison)
 {
     auto state = make_case(Coupling::PISO, 0.0, 40, true);
+    std::vector<SimpleFluid::ALEConvergenceObservation> observations;
+    state.coupling->set_ale_convergence_observer([&](const auto& row) { observations.push_back(row); });
     state.coupling->find_fission_power_source()->initialize_constant(2000.0);
     ASSERT_NO_THROW(state.coupling->step());
     const auto& diagnostics = state.coupling->planar_ale_diagnostics();
@@ -1130,11 +1141,40 @@ TEST(BoussinesqPlanarALETest, GasProductionStillRequiresAConvergedTrialCompariso
     // increment is one, even though the artificial first-pass sentinel is gone.
     EXPECT_DOUBLE_EQ(diagnostics.gas_state_residual_history.front(), 1.0);
     EXPECT_LE(diagnostics.gas_state_residual_history.back(), 1.e-10);
+    ASSERT_EQ(observations.size(), diagnostics.gas_state_residual_history.size());
+    for (size_t i = 0; i < observations.size(); ++i)
+    {
+        const auto& row = observations[i];
+        EXPECT_EQ(row.corrector, i + 1);
+        EXPECT_DOUBLE_EQ(*std::max_element(row.gas_relative_change.begin(), row.gas_relative_change.end()),
+                         diagnostics.gas_state_residual_history[i]);
+        EXPECT_EQ((row.blocking_mask & (size_t{1} << 6)) != 0,
+                  diagnostics.gas_state_residual_history[i] > row.gas_tolerance);
+    }
     const auto* gas = state.coupling->find_radiolytic_gas_model();
     const double produced = gas->cumulative_hydrogen_produced();
     EXPECT_NEAR(produced, 2000.0 * 0.01 * 2.e-7 * global_mesh_volume(*state.mesh), 1.e-15);
     EXPECT_NEAR(gas->global_submerged_hydrogen_moles() +
         gas->cumulative_submerged_bubble_hydrogen_escaped(), 1.0 + produced, 1.e-12);
+}
+
+TEST(BoussinesqPlanarALETest, ConvergenceObserverFailureRejectsTheStepCollectively)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 4, true);
+    const auto history_size = state.coupling->free_surface_history().size();
+    const auto rank = state.mesh->owned_cell_map()->getComm()->getRank();
+    state.coupling->set_ale_convergence_observer([rank](const auto&) {
+        if (rank == 0) throw std::runtime_error("diagnostic output failed");
+    });
+    EXPECT_THROW(state.coupling->step(), std::runtime_error);
+    EXPECT_DOUBLE_EQ(state.solver->time(), 0.);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), history_size);
+    const auto checks = state.coupling->ale_convergence_statistics().checks;
+    EXPECT_GT(checks, 0u);
+    state.coupling->set_ale_convergence_observer({});
+    EXPECT_NO_THROW(state.coupling->step());
+    EXPECT_GT(state.coupling->ale_convergence_statistics().checks, checks);
+    EXPECT_DOUBLE_EQ(state.solver->time(), .01);
 }
 
 TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeometryAndClosesInventory)

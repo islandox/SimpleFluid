@@ -9,6 +9,7 @@
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include "utils/testing_environment.hh"
 
 #include <cmath>
@@ -1091,6 +1092,78 @@ TEST(LiquidMassInventoryTest, DensityChangeInvalidatesCellwiseTransportPreview)
     const auto current = inventory.previewCellwiseAdvance(0.1, flux);
     EXPECT_NO_THROW(inventory.commitPhaseChange(current));
     EXPECT_NEAR(inventory.liquidVolume(), 4.0, 1.0e-12);
+}
+
+TEST(LiquidMassInventoryTest, DensityRefreshMatchesARepeatedTransportSolveWithSources)
+{
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack>;
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory cached(mesh, options), reference(mesh, options);
+    const auto initial = [](Pack::local_ordinal_type cell) { return cell == 0 ? 200.0 : 100.0; };
+    const auto updated = [](Pack::local_ordinal_type cell) { return cell == 0 ? 75.0 : 125.0; };
+    cached.initialize(2.0, initial);
+    reference.initialize(2.0, initial);
+    const auto snapshot = cached.snapshot();
+    Inventory::face_flux_field_type flux(mesh, 0.0, "densityRefreshFlux");
+    for (const auto face : flux.owned_face_ids())
+        if (mesh->is_interior_face(face)) flux.set_value(face, .2);
+    Inventory::field_type evaporation(mesh, 2.0, "densityRefreshEvaporation");
+    Inventory::field_type condensation(mesh, .5, "densityRefreshCondensation");
+    const auto first = cached.previewCellwiseAdvance(.1, flux, &evaporation, &condensation);
+    static_cast<void>(reference.previewCellwiseAdvance(.1, flux, &evaporation, &condensation));
+    reference.updatePureLiquidDensity(updated);
+    const auto full = reference.previewCellwiseAdvance(.1, flux, &evaporation, &condensation);
+    const auto refreshed = cached.refreshCellwiseDensity(first, updated);
+    EXPECT_FALSE(refreshed.transportStatistics().has_value());
+    EXPECT_DOUBLE_EQ(cached.totalMass(), 300.0);
+    EXPECT_NEAR(refreshed.diagnostics().total_mass, full.diagnostics().total_mass, 1.e-12);
+    EXPECT_NEAR(refreshed.diagnostics().liquid_volume, full.diagnostics().liquid_volume, 1.e-12);
+    EXPECT_DOUBLE_EQ(refreshed.diagnostics().cumulative_evaporated_mass, full.diagnostics().cumulative_evaporated_mass);
+    EXPECT_DOUBLE_EQ(refreshed.diagnostics().cumulative_condensed_mass, full.diagnostics().cumulative_condensed_mass);
+    for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
+        EXPECT_NEAR(cached.trialCellMassInventory(refreshed).value(i), reference.trialCellMassInventory(full).value(i), 1.e-12);
+    EXPECT_THROW(cached.commitPhaseChange(first), std::logic_error);
+    EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(first, updated)), std::logic_error);
+    EXPECT_THROW(static_cast<void>(reference.refreshCellwiseDensity(refreshed, updated)), std::logic_error);
+    cached.commitPhaseChange(refreshed);
+    EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(refreshed, updated)), std::logic_error);
+    cached.restore(snapshot);
+    EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(refreshed, updated)), std::logic_error);
+    const auto next = cached.previewCellwiseAdvance(.1, flux);
+    cached.updatePureLiquidDensity(updated);
+    EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(next, updated)), std::logic_error);
+}
+
+TEST(LiquidMassInventoryTest, DensityRefreshPreservesAleVolumesAndRejectsEndedOrChangedGeometry)
+{
+    using Handle = SimpleFluid::MeshHandle<Pack>;
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack, Handle>;
+    auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., 1.}, {0., 1.}, {0., .5, 1.}}});
+    auto mesh = std::make_shared<Handle>(std::move(geometry));
+    SimpleFluid::LiquidMassInventoryOptions options;
+    options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+    Inventory cached(mesh, options), reference(mesh, options);
+    const auto rho = [](Pack::local_ordinal_type) { return 1000.; };
+    cached.initialize(1., rho);
+    reference.initialize(1., rho);
+    Inventory::face_flux_field_type flux(mesh, 0., "aleDensityRefreshFlux");
+    const auto fixed = cached.previewCellwiseAdvance(.1, flux);
+    SimpleFluid::PlanarALEMeshMotion<Pack> motion(mesh);
+    motion.begin_trial(1.2, .1);
+    EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(fixed, rho)), std::logic_error);
+    const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+    const auto first = cached.previewCellwiseAdvance(.1, flux, nullptr, nullptr, {}, &ale);
+    const auto updated = [](Pack::local_ordinal_type) { return 800.; };
+    reference.updatePureLiquidDensity(updated);
+    const auto full = reference.previewCellwiseAdvance(.1, flux, nullptr, nullptr, {}, &ale);
+    const auto refreshed = cached.refreshCellwiseDensity(first, updated);
+    EXPECT_NEAR(refreshed.diagnostics().liquid_volume, 1.25, 1.e-12);
+    EXPECT_NEAR(refreshed.diagnostics().liquid_volume, full.diagnostics().liquid_volume, 1.e-12);
+    motion.accept_trial();
+    EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(refreshed, updated)), std::exception);
 }
 
 TEST(LiquidMassInventoryTest, LooseLinearToleranceCannotRelaxPhysicalMassClosure)

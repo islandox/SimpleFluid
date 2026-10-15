@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <memory>
+#include <limits>
 
 namespace
 {
@@ -285,6 +286,63 @@ TEST(LiquidMassInventoryMultiRankTest, DensityChangeCollectivelyInvalidatesCellw
     const auto current = inventory.previewCellwiseAdvance(0.1, flux);
     EXPECT_NO_THROW(inventory.commitPhaseChange(current));
     EXPECT_NEAR(inventory.liquidVolume(), 5.0, 1.0e-10);
+}
+
+TEST(LiquidMassInventoryMultiRankTest, DensityRefreshMatchesTransportAndRejectsRankLocalStaleTokens)
+{
+    using Native = SimpleFluid::MeshHandle<Pack>;
+    using Inventory = SimpleFluid::LiquidMassInventory<Pack, Native>;
+    auto comm = Tpetra::getDefaultComm();
+    ASSERT_EQ(comm->getSize(), 2);
+    for (int cells : {1, 4})
+    {
+        SCOPED_TRACE(cells);
+        SimpleFluid::ArrReal edges;
+        for (int i = 0; i <= cells; ++i) edges.push_back(i);
+        auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{edges, {0., 1.}, {0., 1.}}});
+        Native::DistributionOptions distribution;
+        distribution.allow_empty_partitions = true;
+        auto mesh = std::make_shared<Native>(std::move(geometry), distribution);
+        const int local_empty = mesh->num_owned_cells() == 0;
+        int empty_ranks = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty_ranks);
+        EXPECT_EQ(empty_ranks, cells == 1 ? 1 : 0);
+        SimpleFluid::LiquidMassInventoryOptions options;
+        options.mode = SimpleFluid::LiquidVolumeMode::CellMassInventory;
+        Inventory cached(mesh, options), reference(mesh, options);
+        const auto initial = [](Pack::local_ordinal_type) { return 1000.; };
+        const auto updated = [&](Pack::local_ordinal_type cell) {
+            return mesh->cell_centroid(cell).x < 1. ? 500. : 900.;
+        };
+        cached.initialize(cells, initial);
+        reference.initialize(cells, initial);
+        Inventory::face_flux_field_type flux(mesh, 0., "densityRefreshFlux");
+        for (const auto face : flux.owned_face_ids())
+            if (mesh->is_interior_face(face)) flux.set_owned_value(face, .05);
+        flux.sync_ghosts();
+        const auto first = cached.previewCellwiseAdvance(.1, flux);
+        static_cast<void>(reference.previewCellwiseAdvance(.1, flux));
+        reference.updatePureLiquidDensity(updated);
+        const auto full = reference.previewCellwiseAdvance(.1, flux);
+        const auto refreshed = cached.refreshCellwiseDensity(first, updated);
+        EXPECT_FALSE(refreshed.transportStatistics());
+        EXPECT_NEAR(refreshed.diagnostics().liquid_volume, full.diagnostics().liquid_volume, 1.e-11);
+        EXPECT_NEAR(refreshed.diagnostics().total_mass, full.diagnostics().total_mass, 1.e-10);
+        const auto& actual = cached.trialCellMassInventory(refreshed);
+        const auto& expected = reference.trialCellMassInventory(full);
+        for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
+            EXPECT_NEAR(actual.value(i), expected.value(i), 1.e-10);
+        const auto& selected = comm->getRank() == 0 ? first : refreshed;
+        EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(selected, updated)), std::logic_error);
+        EXPECT_NO_THROW(cached.commitPhaseChange(refreshed));
+        EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(refreshed, updated)), std::logic_error);
+        const auto retry = cached.previewCellwiseAdvance(.1, flux);
+        const auto invalid_density = [&](Pack::local_ordinal_type) {
+            return comm->getRank() == 0 ? std::numeric_limits<double>::quiet_NaN() : 1000.;
+        };
+        EXPECT_THROW(static_cast<void>(cached.refreshCellwiseDensity(retry, invalid_density)), std::invalid_argument);
+    }
 }
 
 TEST(PlanarFreeSurfaceModelMultiRankTest, ReducedInputsProduceReplicatedDiagnostics)

@@ -3413,6 +3413,12 @@ ALEConvergenceStatistics MultiphysicsSolverCoupler<Pack>::ale_convergence_statis
 }
 
 template<TpetraTypePack Pack>
+void MultiphysicsSolverCoupler<Pack>::set_ale_convergence_observer(ALEConvergenceObserver observer)
+{
+    d_ale_convergence_observer = std::move(observer);
+}
+
+template<TpetraTypePack Pack>
 MultiphysicsSolverCoupler<Pack>::MultiphysicsSolverCoupler(solver_pointer solver) : d_solver(std::move(solver))
 {
     if (!d_solver)
