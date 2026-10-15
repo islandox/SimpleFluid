@@ -270,6 +270,17 @@ void validate_ale_options(const FreeSurfaceALEOptions& ale, bool enabled)
     {
         throw std::invalid_argument("free_surface_ale_relaxation must be in (0, 1].");
     }
+    if (!std::isfinite(ale.minimum_relaxation) || !std::isfinite(ale.maximum_relaxation) ||
+        !std::isfinite(ale.initial_relaxation) || ale.minimum_relaxation <= 0.0 ||
+        ale.maximum_relaxation > 1.0 || ale.minimum_relaxation > ale.maximum_relaxation ||
+        ale.initial_relaxation <= 0.0 || ale.initial_relaxation > 1.0 ||
+        (ale.aitken && (ale.initial_relaxation < ale.minimum_relaxation ||
+            ale.initial_relaxation > ale.maximum_relaxation || ale.relaxation < ale.minimum_relaxation ||
+            ale.relaxation > ale.maximum_relaxation)))
+    {
+        throw std::invalid_argument("Planar ALE Aitken factors must be finite in (0, 1], with minimum <= maximum; "
+            "enabled initial and fallback relaxation must lie within these bounds.");
+    }
     static_cast<void>(MeshQualityGate(ale.quality_limits));
 }
 
@@ -806,6 +817,13 @@ FreeSurfaceOptions free_surface_options_from_database(const Database& database)
     options.ale.level_relative_tolerance =
         reader.value_or<real_t>("free_surface_ale_level_relative_tolerance", options.ale.level_relative_tolerance);
     options.ale.relaxation = reader.value_or<real_t>("free_surface_ale_relaxation", options.ale.relaxation);
+    options.ale.aitken = reader.value_or<bool>("free_surface_ale_aitken", options.ale.aitken);
+    options.ale.initial_relaxation =
+        reader.value_or<real_t>("free_surface_ale_initial_relaxation", options.ale.initial_relaxation);
+    options.ale.minimum_relaxation =
+        reader.value_or<real_t>("free_surface_ale_minimum_relaxation", options.ale.minimum_relaxation);
+    options.ale.maximum_relaxation =
+        reader.value_or<real_t>("free_surface_ale_maximum_relaxation", options.ale.maximum_relaxation);
     options.ale.quality_limits.maximum_growth_ratio = reader.value_or<real_t>(
         "free_surface_ale_maximum_growth_ratio", *options.ale.quality_limits.maximum_growth_ratio);
     options.ale.quality_limits.maximum_non_orthogonality_degrees =

@@ -68,6 +68,8 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     const PlanarALEStepDiagnostics accepted_ale_diagnostics;
     const scalar_type accepted_occupancy_volume_error;
 
+    // Iteration history belongs to this accepted substep and survives only internal replay.
+    std::optional<SafeguardedAitken> target_aitken;
     std::vector<real_t> accepted_cell_volumes;
     scalar_type accepted_mesh_volume{}, old_energy{}, time_step{};
     std::vector<scalar_type> old_material_volume;
@@ -120,6 +122,14 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
           accepted_ale_diagnostics(coupler.d_planar_ale_diagnostics),
           accepted_occupancy_volume_error(coupler.d_pool_occupancy_volume_error)
     {
+        if (owner.d_free_surface_options.ale.aitken)
+            collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE Aitken initialization", [&] {
+                target_aitken.emplace(SafeguardedAitkenOptions{
+                    .initial_relaxation = owner.d_free_surface_options.ale.initial_relaxation,
+                    .fallback_relaxation = owner.d_free_surface_options.ale.relaxation,
+                    .minimum_relaxation = owner.d_free_surface_options.ale.minimum_relaxation,
+                    .maximum_relaxation = owner.d_free_surface_options.ale.maximum_relaxation});
+            });
         capture_geometry_and_energy();
         capture_thermal_state();
         initialize_iteration();
@@ -965,8 +975,35 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     void replay_trial(TrialState& trial)
     {
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEReplay);
-        std::vector<scalar_type> next_target(target_guess.size());
-        const auto relaxation = static_cast<scalar_type>(coupler.d_free_surface_options.ale.relaxation);
+        std::vector<scalar_type> next_target;
+        auto relaxation = static_cast<scalar_type>(coupler.d_free_surface_options.ale.relaxation);
+        if (coupler.d_free_surface_options.ale.aitken)
+        {
+            SafeguardedAitken::Products local_products{}, global_products{};
+            collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE Aitken target residual", [&] {
+                next_target.resize(target_guess.size());
+                std::vector<double> residual(target_guess.size()), weights(target_guess.size());
+                if (!std::isfinite(accepted_mesh_volume) || accepted_mesh_volume <= 0.0 ||
+                    !std::isfinite(time_step) || time_step <= 0.0)
+                    throw std::invalid_argument("ALE Aitken scaling requires positive finite accepted volume and time step.");
+                for (size_t owned = 0; owned < target_guess.size(); ++owned)
+                {
+                    const auto volume = static_cast<double>(accepted_cell_volumes[owned]);
+                    if (!std::isfinite(volume) || volume <= 0.0)
+                        throw std::invalid_argument("ALE Aitken scaling requires positive finite accepted cell volumes.");
+                    residual[owned] = static_cast<double>(trial.volume_trial->target().integrated_rate(
+                        static_cast<local_ordinal_type>(owned)) - target_guess[owned]) *
+                        static_cast<double>(time_step) / volume;
+                    weights[owned] = volume / static_cast<double>(accepted_mesh_volume);
+                }
+                local_products = target_aitken->prepare(residual, weights);
+            });
+            Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+                static_cast<int>(local_products.size()), local_products.data(), global_products.data());
+            relaxation = static_cast<scalar_type>(target_aitken->finish(global_products));
+        }
+        else
+            next_target.resize(target_guess.size());
         for (size_t owned = 0; owned < next_target.size(); ++owned)
         {
             next_target[owned] = target_guess[owned] + relaxation * (trial.volume_trial->target().integrated_rate(

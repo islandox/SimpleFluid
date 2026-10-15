@@ -255,7 +255,11 @@ struct FreeSurfaceALEOptions
     bool level_tolerance_from_volume = false;
     real_t level_absolute_tolerance = 1.0e-10; ///< [m]
     real_t level_relative_tolerance = 1.0e-10;
-    real_t relaxation = 0.5;
+    real_t relaxation = 0.5; ///< Fixed relaxation, also used for safeguarded Aitken fallback.
+    bool aitken = false; ///< Accelerate only the continuity-target iteration.
+    real_t initial_relaxation = 1.0;
+    real_t minimum_relaxation = 0.1;
+    real_t maximum_relaxation = 1.0;
     MeshQualityLimits quality_limits;
 };
 
