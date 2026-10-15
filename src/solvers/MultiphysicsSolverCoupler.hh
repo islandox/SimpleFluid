@@ -484,6 +484,13 @@ public:
     /** Cumulative completed gate checks since construction, including replayed work.
      * Performs no MPI and is deliberately outside physical checkpoint state. */
     ALEConvergenceStatistics ale_convergence_statistics() const noexcept;
+    /** Serialized diagnostic callback after each globally reduced ALE check.
+     * The callback must not mutate the solver, reenter it, or perform MPI work.
+     * Exceptions are aggregated collectively and reject the physical step.
+     * Observation lifetime ends when the callback returns; no history is retained.
+     */
+    using ALEConvergenceObserver = std::function<void(const ALEConvergenceObservation&)>;
+    void set_ale_convergence_observer(ALEConvergenceObserver observer);
     /** Accepted absolute-minus-mesh carrier flux; throws when ALE is inactive. */
     const face_flux_field_type& mesh_relative_face_fluxes() const;
     /** Accepted initialization and per-step global free-surface history. */
@@ -654,6 +661,7 @@ private:
     std::uint64_t d_ale_target_generation = 0;
     PlanarALEStepDiagnostics d_planar_ale_diagnostics;
     ALEConvergenceStatistics d_ale_convergence_statistics;
+    ALEConvergenceObserver d_ale_convergence_observer;
     FreeSurfaceOptions d_free_surface_options;
     scalar_type d_pool_occupancy_volume_error = {};
     std::vector<FreeSurfaceHistoryRecord> d_free_surface_history;

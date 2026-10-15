@@ -221,6 +221,19 @@ published. Reported iterations include the corrections; the reported relative
 residual uses the original right-hand side. Failure diagnostics print masses,
 residuals, and tolerances in scientific notation.
 
+Within a planar ALE corrector, temperature first consumes a conservative mass
+preview. Subsequent material feedback changes pure-liquid density, which affects
+derived liquid volume but does not enter that mass transport equation.
+`LiquidMassInventory::refreshCellwiseDensity()` takes a currently valid cellwise
+preview, updates pure density and recomputes its trial volume from the same
+transported mass. It returns a new token without another solve. The original
+token becomes stale even when density is unchanged; an ordinary density update
+cannot revive an older token through this API. Owner, generation, nonce,
+geometry epoch and any live ALE descriptor are checked before reuse. Mass and
+phase ledgers retain the first solve's unchanged conservation gates, while the
+derived volume uses the new density and trial-new control volumes. Accepted
+mass is still published only by `commitPhaseChange()`.
+
 The initial field is distributed without a cell-centre pool mask:
 
 $$

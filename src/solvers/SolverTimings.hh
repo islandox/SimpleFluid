@@ -39,6 +39,7 @@ enum class SolverPhase : std::size_t
     ALEEnergyBalance,
     ALEReplay,
     ALECommit,
+    ALEMassVolumeRefresh,
     Count
 };
 
@@ -121,6 +122,7 @@ private:
         {"sf.ale_energy_balance", 0, 0, 3},
         {"sf.ale_replay", 0, 0, 3},
         {"sf.ale_commit", 0, 0, 3},
+        {"sf.ale_mass_volume_refresh", 0, 0, 3},
     }};
     unsigned d_active = 0;
 };

@@ -72,6 +72,21 @@ zero tolerances, without changing the gate. These diagnostics survive physical
 checkpoint restore and replay. Their counters are independent of timer reset.
 The caller must serialize snapshot access with solver advancement.
 
+`sf.ale_mass_preview` covers actual conservative mass transport previews.
+`sf.ale_mass_volume_refresh` updates pure-liquid density and recomputes the
+transported mass's derived volume after temperature/material updates. It reuses
+the same solved trial mass under the same live geometry and ALE descriptor;
+it does not reuse the earlier density-dependent volume or report another solve.
+
+`set_ale_convergence_observer()` installs an optional callback receiving one
+`ALEConvergenceObservation` after each globally reduced check, including checks
+that lead to replay. Its five gas-field changes use exactly the aggregate gas
+gate's normalization. The cumulative check ID survives checkpoint restore.
+Observers do not participate in physical snapshots and no trace is retained
+by the solver. Callbacks must serialize access, avoid solver mutation/reentry
+and perform no MPI operations. A callback exception is propagated collectively
+and rejects the physical step through normal rollback.
+
 ```cpp
 for (const auto& phase : solver.solver_phase_timings())
     if (phase.calls != 0)
