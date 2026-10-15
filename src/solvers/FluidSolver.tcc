@@ -791,6 +791,15 @@ auto FluidSolver<Pack>::old_face_fluxes() -> face_flux_field_type&
  * @return Problem-owned projected face-flux field.
  */
 template<TpetraTypePack Pack>
+auto FluidSolver<Pack>::pressure_corrected_face_fluxes() const -> const face_flux_field_type&
+{
+    // Compare stored-field RTTI where the registry was populated. Hidden type
+    // names in a client image need not share libc++'s type-info identity.
+    return d_problem.template object<face_flux_field_type>(
+        "projected_face_flux");
+}
+
+template<TpetraTypePack Pack>
 auto FluidSolver<Pack>::projected_face_fluxes() -> face_flux_field_type&
 {
     return d_problem.template object<face_flux_field_type>(
