@@ -200,6 +200,10 @@ TEST(FreeSurfaceOptionsTest, ParsesAndValidatesPlanarAleControls)
     database.set("free_surface_ale_level_absolute_tolerance", 4.0e-10);
     database.set("free_surface_ale_level_relative_tolerance", 5.0e-10);
     database.set("free_surface_ale_relaxation", 0.4);
+    database.set("free_surface_ale_aitken", true);
+    database.set("free_surface_ale_initial_relaxation", 0.8);
+    database.set("free_surface_ale_minimum_relaxation", 0.2);
+    database.set("free_surface_ale_maximum_relaxation", 0.9);
 
     const auto options = SimpleFluid::free_surface_options_from_database(database);
     EXPECT_EQ(options.ale.top_boundary, "zmax");
@@ -213,6 +217,12 @@ TEST(FreeSurfaceOptionsTest, ParsesAndValidatesPlanarAleControls)
     EXPECT_DOUBLE_EQ(options.ale.level_absolute_tolerance, 4.0e-10);
     EXPECT_DOUBLE_EQ(options.ale.level_relative_tolerance, 5.0e-10);
     EXPECT_DOUBLE_EQ(options.ale.relaxation, 0.4);
+    EXPECT_TRUE(options.ale.aitken);
+    EXPECT_DOUBLE_EQ(options.ale.initial_relaxation, 0.8);
+    EXPECT_DOUBLE_EQ(options.ale.minimum_relaxation, 0.2);
+    EXPECT_DOUBLE_EQ(options.ale.maximum_relaxation, 0.9);
+    EXPECT_FALSE(SimpleFluid::FreeSurfaceALEOptions{}.aitken);
+    EXPECT_DOUBLE_EQ(SimpleFluid::FreeSurfaceALEOptions{}.relaxation, 0.5);
     EXPECT_NE(SimpleFluid::make_planar_free_surface_model(options), nullptr);
 
     auto invalid = options;
@@ -222,6 +232,18 @@ TEST(FreeSurfaceOptionsTest, ParsesAndValidatesPlanarAleControls)
     EXPECT_THROW(SimpleFluid::validate_free_surface_options(invalid), std::invalid_argument);
     invalid = options;
     invalid.ale.relaxation = 0.0;
+    EXPECT_THROW(SimpleFluid::validate_free_surface_options(invalid), std::invalid_argument);
+    for (double minimum : {0.0, 0.85, std::numeric_limits<double>::infinity()})
+    {
+        invalid = options;
+        invalid.ale.minimum_relaxation = minimum;
+        EXPECT_THROW(SimpleFluid::validate_free_surface_options(invalid), std::invalid_argument);
+    }
+    invalid = options;
+    invalid.ale.maximum_relaxation = 1.1;
+    EXPECT_THROW(SimpleFluid::validate_free_surface_options(invalid), std::invalid_argument);
+    invalid = options;
+    invalid.ale.initial_relaxation = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(SimpleFluid::validate_free_surface_options(invalid), std::invalid_argument);
 }
 
