@@ -21,6 +21,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -630,3 +631,42 @@ TEST(VTUWriter, EdgeCases)
 }
 
 } // namespace
+
+TEST(VTUWriter, RationalBezierGeometryMetadata)
+{
+    VTUWriter::Int64Data connectivity{0,1,2,3,4,5,6,7,8,9,10,11};
+    const auto topology = VTUWriter::make_topology(VTUWriter::VectorData(12), connectivity, {12}, {79});
+    VTUWriter writer(topology);
+    const VTUWriter::HigherOrderGeometry geometry{VTUWriter::ScalarData(12, 1.), {1,2,1}};
+    for (const auto encoding : {VTUWriter::Encoding::Ascii, VTUWriter::Encoding::AppendedBinary})
+    {
+        const std::string path = "test_bezier_metadata.vtu";
+        writer.write(path, encoding, geometry);
+        const auto text = read_file(path);
+        EXPECT_NE(text.find("<PointData RationalWeights=\"RationalWeights\">"), std::string::npos);
+        EXPECT_NE(text.find("<CellData HigherOrderDegrees=\"HigherOrderDegrees\">"), std::string::npos);
+        EXPECT_NE(text.find("type=\"Int32\" Name=\"HigherOrderDegrees\" NumberOfComponents=\"3\""), std::string::npos);
+        std::filesystem::remove(path);
+    }
+    const std::string rejected = "test_bezier_rejected.vtu";
+    EXPECT_THROW(writer.write(rejected), std::invalid_argument);
+    auto bad = geometry;
+    bad.rational_weights.pop_back();
+    EXPECT_THROW(writer.write(rejected, VTUWriter::Encoding::Ascii, bad), std::invalid_argument);
+    for (const auto weight : {0., -1., std::numeric_limits<double>::quiet_NaN()})
+    {
+        bad = geometry;
+        bad.rational_weights[0] = weight;
+        EXPECT_THROW(writer.write(rejected, VTUWriter::Encoding::Ascii, bad), std::invalid_argument);
+    }
+    for (const auto degree : {0, 3, std::numeric_limits<int>::max()})
+    {
+        bad = geometry;
+        bad.degrees[0] = degree;
+        EXPECT_THROW(writer.write(rejected, VTUWriter::Encoding::Ascii, bad), std::invalid_argument);
+    }
+    bad = geometry;
+    bad.degrees.push_back(1);
+    EXPECT_THROW(writer.write(rejected, VTUWriter::Encoding::Ascii, bad), std::invalid_argument);
+    EXPECT_FALSE(std::filesystem::exists(rejected));
+}

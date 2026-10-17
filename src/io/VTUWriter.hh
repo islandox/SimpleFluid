@@ -63,6 +63,14 @@ public:
     };
     using TopologyHandle = std::shared_ptr<const Topology>;
 
+    /** Rational Bezier geometry attributes, reusable with a stationary topology. */
+    struct HigherOrderGeometry
+    {
+        ScalarData rational_weights;
+        /** Three Int32 degrees per cell; zero for ordinary cells. */
+        IntData degrees;
+    };
+
     VTUWriter() = default;
     explicit VTUWriter(TopologyHandle topology);
 
@@ -118,6 +126,8 @@ public:
     void write(
         const std::string& filename,
         Encoding encoding = Encoding::Ascii) const;
+    void write(const std::string& filename, Encoding encoding,
+               const HigherOrderGeometry& geometry) const;
     void write_parallel_index(
         const std::string& filename,
         const std::vector<std::string>& piece_filenames) const;
@@ -138,8 +148,9 @@ private:
     static void write_cell_data_array(std::ostream& out,
                                       const DataArray& data_array,
                                       const std::string& indent);
-    void write_ascii(std::ostream& out) const;
-    void write_appended_binary(std::ostream& out) const;
+    void validate_higher_order_geometry(const HigherOrderGeometry& geometry) const;
+    void write_ascii(std::ostream& out, const HigherOrderGeometry& geometry) const;
+    void write_appended_binary(std::ostream& out, const HigherOrderGeometry& geometry) const;
     const Topology& topology() const noexcept;
     Topology& mutable_topology();
 
