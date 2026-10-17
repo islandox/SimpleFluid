@@ -6,6 +6,7 @@
 #pragma once
 
 #include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/GeometryExecutionGuard.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 
@@ -360,6 +361,7 @@ std::array<ArrReal, 3> PlanarALEMeshMotion<Pack>::candidate_geometry_edges(real_
 
 template<TpetraTypePack Pack> std::vector<real_t> PlanarALEMeshMotion<Pack>::capture_cell_volumes() const
 {
+    const auto execution = acquire_mesh_execution(*d_mesh);
     std::vector<real_t> result(d_mesh->num_local_cells());
     for (size_t local = 0; local < result.size(); ++local)
     {
@@ -372,6 +374,7 @@ template<TpetraTypePack Pack>
 std::vector<typename PlanarALEMeshMotion<Pack>::mesh_type::Vec3>
 PlanarALEMeshMotion<Pack>::capture_face_centroids() const
 {
+    const auto execution = acquire_mesh_execution(*d_mesh);
     std::vector<typename mesh_type::Vec3> result(d_mesh->num_faces());
     for (size_t local = 0; local < result.size(); ++local)
     {
@@ -600,44 +603,50 @@ template<TpetraTypePack Pack>
 void PlanarALEMeshMotion<Pack>::compute_trial_state(
     const std::vector<typename mesh_type::Vec3>& old_face_centroids, real_t time_step)
 {
-    d_new_cell_volumes = capture_cell_volumes();
-    d_face_mesh_fluxes.assign(d_mesh->num_faces(), 0.0);
-    int local_invalid =
-        old_face_centroids.size() != d_face_mesh_fluxes.size() || d_old_cell_volumes.size() != d_new_cell_volumes.size()
-            ? 1
-            : 0;
-    for (size_t face = 0; face < d_face_mesh_fluxes.size(); ++face)
-    {
-        const auto face_lid = static_cast<local_ordinal_type>(face);
-        const auto displacement = d_mesh->face_centroid(face_lid) - old_face_centroids[face];
-        const auto swept_volume = displacement.dot(d_mesh->face_area_vector(face_lid));
-        const auto flux = swept_volume / time_step;
-        d_face_mesh_fluxes[face] = flux;
-        local_invalid = local_invalid || !std::isfinite(flux);
-    }
-
+    int local_invalid = 0;
     real_t local_maximum_absolute_residual = {};
     real_t local_maximum_normalized_residual = {};
     int local_tolerance_failure = 0;
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        real_t mesh_flux_balance = {};
-        for (const auto face_lid : d_mesh->faces(cell_lid))
+        // Validate once for the trial geometry, then release before reductions
+        // or any rollback. Nested volume capture reuses this execution view.
+        const auto execution = acquire_mesh_execution(*d_mesh);
+        d_new_cell_volumes = capture_cell_volumes();
+        d_face_mesh_fluxes.assign(d_mesh->num_faces(), 0.0);
+        local_invalid =
+            old_face_centroids.size() != d_face_mesh_fluxes.size() || d_old_cell_volumes.size() != d_new_cell_volumes.size()
+                ? 1
+                : 0;
+        for (size_t face = 0; face < d_face_mesh_fluxes.size(); ++face)
         {
-            const auto flux = d_face_mesh_fluxes.at(static_cast<size_t>(face_lid));
-            mesh_flux_balance += d_mesh->owner_cell(face_lid) == cell_lid ? flux : -flux;
+            const auto face_lid = static_cast<local_ordinal_type>(face);
+            const auto displacement = d_mesh->face_centroid(face_lid) - old_face_centroids[face];
+            const auto swept_volume = displacement.dot(d_mesh->face_area_vector(face_lid));
+            const auto flux = swept_volume / time_step;
+            d_face_mesh_fluxes[face] = flux;
+            local_invalid = local_invalid || !std::isfinite(flux);
         }
-        const auto volume_rate = (d_new_cell_volumes[owned] - d_old_cell_volumes[owned]) / time_step;
-        const auto residual = volume_rate - mesh_flux_balance;
-        const auto scale = std::max(std::abs(volume_rate), std::abs(mesh_flux_balance));
-        const auto tolerance = d_options.gcl_absolute_tolerance + d_options.gcl_relative_tolerance * scale;
-        const auto normalized = scale > 0.0 ? std::abs(residual) / scale : std::abs(residual);
-        local_invalid = local_invalid || !std::isfinite(volume_rate) || !std::isfinite(mesh_flux_balance) ||
-                        !std::isfinite(residual);
-        local_tolerance_failure = local_tolerance_failure || std::abs(residual) > tolerance;
-        local_maximum_absolute_residual = std::max(local_maximum_absolute_residual, std::abs(residual));
-        local_maximum_normalized_residual = std::max(local_maximum_normalized_residual, normalized);
+
+        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+        {
+            const auto cell_lid = static_cast<local_ordinal_type>(owned);
+            real_t mesh_flux_balance = {};
+            for (const auto face_lid : d_mesh->faces(cell_lid))
+            {
+                const auto flux = d_face_mesh_fluxes.at(static_cast<size_t>(face_lid));
+                mesh_flux_balance += d_mesh->owner_cell(face_lid) == cell_lid ? flux : -flux;
+            }
+            const auto volume_rate = (d_new_cell_volumes[owned] - d_old_cell_volumes[owned]) / time_step;
+            const auto residual = volume_rate - mesh_flux_balance;
+            const auto scale = std::max(std::abs(volume_rate), std::abs(mesh_flux_balance));
+            const auto tolerance = d_options.gcl_absolute_tolerance + d_options.gcl_relative_tolerance * scale;
+            const auto normalized = scale > 0.0 ? std::abs(residual) / scale : std::abs(residual);
+            local_invalid = local_invalid || !std::isfinite(volume_rate) || !std::isfinite(mesh_flux_balance) ||
+                            !std::isfinite(residual);
+            local_tolerance_failure = local_tolerance_failure || std::abs(residual) > tolerance;
+            local_maximum_absolute_residual = std::max(local_maximum_absolute_residual, std::abs(residual));
+            local_maximum_normalized_residual = std::max(local_maximum_normalized_residual, normalized);
+        }
     }
 
     const auto communicator = d_mesh->owned_cell_map()->getComm();

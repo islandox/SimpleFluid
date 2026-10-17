@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/unitTests/region_mesh_helpers.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
@@ -290,6 +291,48 @@ TEST(PlanarALEMeshMotionTest, SemiStructuredAxialMotionPreservesXYTopologyAndSat
     EXPECT_EQ(geometry->z_edges(), (SimpleFluid::ArrReal{0.0, 1.5, 3.0}));
     EXPECT_LE(maximum_local_gcl_residual(*mesh, motion), 1.0e-14);
     motion.accept_trial();
+}
+
+TEST(PlanarALEMeshMotionTest, CompositeTraversalsReleaseGeometryAcrossTrialsAndFailure)
+{
+    auto geometry = SimpleFluid::test::two_regions();
+    auto mesh = std::make_shared<Handle>(geometry);
+    SimpleFluid::PlanarALEMeshMotionOptions options;
+    options.quality_limits.maximum_aspect_ratio = 10.0;
+    Motion motion(mesh, options);
+    const auto cells = cell_geometry_ids(*mesh);
+    const auto faces = face_ids(*mesh);
+    const std::vector<double> reference_volumes(motion.old_cell_volumes().begin(), motion.old_cell_volumes().end());
+
+    for (const double level : {1.2, 0.8})
+    {
+        ASSERT_NO_THROW(motion.begin_trial(level, 0.5));
+        EXPECT_NO_THROW(geometry->require_geometry_writable());
+        EXPECT_LE(maximum_local_gcl_residual(*mesh, motion), 1.0e-14);
+        for (size_t local = 0; local < reference_volumes.size(); ++local)
+            EXPECT_NEAR(motion.new_cell_volumes()[local], level * reference_volumes[local], 1.0e-14);
+        {
+            const auto execution = mesh->acquire_execution_view();
+            EXPECT_THROW(motion.rollback_trial(), std::logic_error);
+        }
+        ASSERT_NO_THROW(motion.rollback_trial());
+        EXPECT_NO_THROW(geometry->require_geometry_writable());
+        EXPECT_TRUE(std::ranges::equal(motion.new_cell_volumes(), reference_volumes));
+        EXPECT_EQ(cell_geometry_ids(*mesh), cells);
+        EXPECT_EQ(face_ids(*mesh), faces);
+    }
+
+    // Failure after the trial traversal must release every nested lease before
+    // the controller restores geometry, so the same topology can be retried.
+    EXPECT_THROW(motion.begin_trial(100.0, 0.5), std::runtime_error);
+    EXPECT_FALSE(motion.has_active_trial());
+    EXPECT_NO_THROW(geometry->require_geometry_writable());
+    EXPECT_TRUE(std::ranges::equal(motion.new_cell_volumes(), reference_volumes));
+    ASSERT_NO_THROW(motion.begin_trial(1.1, 0.5));
+    ASSERT_NO_THROW(motion.accept_trial());
+    EXPECT_NO_THROW(geometry->require_geometry_writable());
+    EXPECT_EQ(cell_geometry_ids(*mesh), cells);
+    EXPECT_EQ(face_ids(*mesh), faces);
 }
 
 TEST(PlanarALEMeshMotionTest, QualityFailureRollsBackBeforeReturningTheError)

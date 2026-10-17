@@ -746,16 +746,21 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         scalar_type local_final_l2_squared{};
         scalar_type local_final_normalization_squared{};
         scalar_type local_final_maximum{};
-        for (size_t owned = 0; owned < d_solver.d_mesh->num_owned_cells(); ++owned)
         {
-            const auto cell = static_cast<local_ordinal_type>(owned);
-            const auto balance = FVM::cell_flux_balance<Pack>(*d_solver.d_mesh, d_solver.projected_face_fluxes(), cell);
-            const auto target = trial.volume_trial->target().integrated_rate(cell);
-            const auto residual = balance - target;
-            coupler.d_continuity_residual->set_owned_value(cell, residual);
-            local_final_l2_squared += residual * residual;
-            local_final_normalization_squared += std::max(balance * balance, target * target);
-            local_final_maximum = std::max(local_final_maximum, std::abs(residual));
+            // Keep one checked geometry view for the whole local traversal.
+            // Release it before ghost synchronization and collective reduction.
+            const auto execution = acquire_mesh_execution(*d_solver.d_mesh);
+            for (size_t owned = 0; owned < d_solver.d_mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto balance = FVM::cell_flux_balance<Pack>(*d_solver.d_mesh, d_solver.projected_face_fluxes(), cell);
+                const auto target = trial.volume_trial->target().integrated_rate(cell);
+                const auto residual = balance - target;
+                coupler.d_continuity_residual->set_owned_value(cell, residual);
+                local_final_l2_squared += residual * residual;
+                local_final_normalization_squared += std::max(balance * balance, target * target);
+                local_final_maximum = std::max(local_final_maximum, std::abs(residual));
+            }
         }
         coupler.d_continuity_residual->sync_ghosts();
         const std::array<scalar_type, 2> local_continuity_squared{
