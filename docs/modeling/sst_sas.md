@@ -23,27 +23,31 @@ the published expressions independently with 60-digit Decimal arithmetic.
 For the existing positive, bounded transported k and omega, and the **active
 parent** beta_star, kappa, and F1-blended beta and gamma:
 
-\[
+$$
 S_{ij}=\tfrac12(\partial_j U_i+\partial_i U_j),\quad
 S^2=2\sum_{ij}S_{ij}^2,\quad H_U=|\nabla^2\mathbf U|_2,
-\]
-\[
+$$
+
+$$
 L=\frac{\sqrt{k}}{\beta_*^{1/4}\omega},\quad
 B=\beta/\beta_*-\gamma>0,\quad
 \Delta=C_\Delta V^{1/3},
-\]
-\[
-L_{vK,flow}=\frac{\kappa\sqrt{S^2}}{H_U},\quad
-L_{vK,grid}=C_s\Delta\sqrt{\frac{\kappa\zeta_2}{B}},\quad
-L_{vK}=\max(L_{vK,flow},L_{vK,grid}),
-\]
-\[
-P=\zeta_2\kappa S^2(L/L_{vK})^2,\quad
+$$
+
+$$
+L_{\mathrm{vK},\mathrm{flow}}=\frac{\kappa\sqrt{S^2}}{H_U},\quad
+L_{\mathrm{vK},\mathrm{grid}}=C_s\Delta\sqrt{\frac{\kappa\zeta_2}{B}},\quad
+L_{\mathrm{vK}}=\max(L_{\mathrm{vK},\mathrm{flow}},L_{\mathrm{vK},\mathrm{grid}}),
+$$
+
+$$
+P=\zeta_2\kappa S^2(L/L_{\mathrm{vK}})^2,\quad
 D=\frac{2C}{\sigma_\Phi}k\max(|\nabla\omega|^2/\omega^2,|\nabla k|^2/k^2),
-\]
-\[
-Q_{raw}=\max(P-D,0),\qquad Q_{applied}=\min(Q_{raw},\omega/(f_t\Delta t)).
-\]
+$$
+
+$$
+Q_{\mathrm{raw}}=\max(P-D,0),\qquad Q_{\mathrm{applied}}=\min(Q_{\mathrm{raw}},\omega/(f_t\Delta t)).
+$$
 
 SAS uses **strain**, although the parent viscosity limiter uses vorticity.
 P, D, Qraw and Qapplied have units s^-2. L and the three von Karman lengths

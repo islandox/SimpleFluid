@@ -36,7 +36,7 @@ vapor per kg of dry air, and differs from relative humidity. The dry-air mass
 $m_d$ and gas volume $V$ remain fixed. With ideal gases,
 
 $$
-p_v=m_vR_vT/V,\quad p=(m_dR_d+m_vR_v)T/V,\quad RH=p_v/p_{sat}(T).
+p_v=m_vR_vT/V,\quad p=(m_dR_d+m_vR_v)T/V,\quad RH=p_v/p_{\mathrm{sat}}(T).
 $$
 
 Pressure evolves with temperature and evaporation; this is not an isobaric,
@@ -80,8 +80,8 @@ allowing an untracked wall-film inventory to evaporate. `Impermeable` disables
 moisture transfer. For supplied gas-film coefficient $k_m$ in m/s,
 
 $$
-\dot m_i=\frac{A_i k_{m,i}}{R_vT_{film,i}}
-              [p_{sat}(T_i)-p_v],\qquad T_{film,i}=(T_i+T_{old})/2.
+\dot m_i=\frac{A_i k_{m,i}}{R_vT_{\mathrm{film},i}}
+              [p_{\mathrm{sat}}(T_i)-p_v],\qquad T_{\mathrm{film},i}=(T_i+T_{\mathrm{old}})/2.
 $$
 
 For condensation-only walls this expression is restricted to nonpositive
@@ -114,7 +114,7 @@ Pass a row-major $N \times N$ view-factor matrix in the same order as the surfac
 
 $$
 J_i=\epsilon_i\sigma T_i^4+(1-\epsilon_i)\sum_jF_{ij}J_j,
-\qquad Q_{rad,i}=\sum_j A_iF_{ij}(J_i-J_j).
+\qquad Q_{\mathrm{rad},i}=\sum_j A_iF_{ij}(J_i-J_j).
 $$
 
 View factors must be finite, in $[0,1]$, sum to one in each row, and obey

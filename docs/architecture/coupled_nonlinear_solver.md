@@ -132,9 +132,9 @@ matrix, Schur products, or preconditioner.
 
 Physical continuity is evaluated from the same reconstructed face flux:
 
-\[
+$$
 R_{c,c}=\sum_f s_{cf}\phi_f(u,p)-Q_{V,c}.
-\]
+$$
 
 The algebraic pressure-gauge row remains `q_g = 0`. The physical continuity
 check includes the gauge cell independently of that row replacement.
@@ -142,9 +142,9 @@ check includes the gauge cell independently of that row replacement.
 `Picard` uses the native frozen-flux block operator as an approximate
 Jacobian. `AnalyticNewton` adds the flux derivative to that operator:
 
-\[
-\delta(\phi u_{up})=\phi\,\delta u_{up}+u_{up}\,\delta\phi.
-\]
+$$
+\delta(\phi u_{\mathrm{up}})=\phi\,\delta u_{\mathrm{up}}+u_{\mathrm{up}}\,\delta\phi.
+$$
 
 Directional Rhie-Chow flux uses homogeneous directional boundary values.
 There are no finite-difference residual calls in production Jacobian actions.

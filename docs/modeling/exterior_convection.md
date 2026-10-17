@@ -45,15 +45,16 @@ independently; there is no automatic mixed-convection combination.
 With exterior properties, `Pr = nu/alpha`, `Ra = g beta |Ts-Tinf| L^3/(nu alpha)`,
 `Re = U L/nu`, and `h = Nu k_ext/L`, the implemented equations are
 
-\[
-Nu_{natural}=\left[0.825+
+$$
+Nu_{\mathrm{natural}}=\left[0.825+
 \frac{0.387 Ra^{1/6}}{[1+(0.492/Pr)^{9/16}]^{8/27}}\right]^2,
-\]
-\[
-Nu_{forced}=0.3+
+$$
+
+$$
+Nu_{\mathrm{forced}}=0.3+
 \frac{0.62 Re^{1/2}Pr^{1/3}}{[1+(0.4/Pr)^{2/3}]^{1/4}}
 \left[1+(Re/282000)^{5/8}\right]^{4/5}.
-\]
+$$
 
 The primary papers were checked in their scanned text editions:
 [vertical plate](https://www.scribd.com/document/273008782/Correlating-Equations-for-Laminar-and-Turbulent-Free-Conve)
@@ -75,10 +76,10 @@ values, `heat_transfer_coefficient` is not a gradient in K/m.
 
 For an orthogonal face, eliminating its surface temperature gives
 
-\[
-H = \frac{1}{d/k_{wall}+1/h},\qquad
-q_{out}=H(T_P-T_\infty).
-\]
+$$
+H = \frac{1}{d/k_{\mathrm{wall}}+1/h},\qquad
+q_{\mathrm{out}}=H(T_P-T_\infty).
+$$
 
 The matrix diagonal receives `A H` and the right-hand side receives
 `A H Tinf`. The conductivity is the same local or boundary-override value as
