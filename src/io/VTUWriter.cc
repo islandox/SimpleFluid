@@ -16,6 +16,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -643,8 +644,52 @@ void VTUWriter::validate() const
     }
 }
 
+void VTUWriter::validate_higher_order_geometry(const HigherOrderGeometry& geometry) const
+{
+    const auto& mesh = topology();
+    const bool active = !geometry.rational_weights.empty() || !geometry.degrees.empty();
+    if (active)
+    {
+        if (geometry.rational_weights.size() != num_points() || geometry.degrees.size() / 3 != num_cells() ||
+            geometry.degrees.size() % 3 != 0)
+            throw std::invalid_argument("VTUWriter rational geometry attribute counts do not match the mesh.");
+        for (const auto weight : geometry.rational_weights)
+            if (!std::isfinite(weight) || weight <= 0)
+                throw std::invalid_argument("VTUWriter rational weights must be finite and positive.");
+        for (const auto& array : d_cell_data)
+            if (array.name == "HigherOrderDegrees")
+                throw std::invalid_argument("VTUWriter reserves HigherOrderDegrees for geometry metadata.");
+    }
+    for (size_t cell = 0; cell < num_cells(); ++cell)
+    {
+        const auto type = mesh.cell_types[cell];
+        if (type != 79 && type != 80)
+        {
+            if (active && (geometry.degrees[3*cell] || geometry.degrees[3*cell+1] || geometry.degrees[3*cell+2]))
+                throw std::invalid_argument("VTUWriter ordinary cells require zero Bezier degrees.");
+            continue;
+        }
+        if (!active)
+            throw std::invalid_argument("VTUWriter Bezier cells require rational geometry attributes.");
+        const auto p = geometry.degrees[3*cell], q = geometry.degrees[3*cell+1], r = geometry.degrees[3*cell+2];
+        if (p < 1 || q < 1 || r < 1 || (type == 80 && p != q))
+            throw std::invalid_argument("VTUWriter invalid Bezier cell degrees.");
+        const auto count = mesh.cell_offsets[cell] - (cell ? mesh.cell_offsets[cell-1] : 0);
+        const auto multiply = [count](std::uint64_t a, std::uint64_t b) {
+            if (a > static_cast<std::uint64_t>(count) / b)
+                throw std::invalid_argument("VTUWriter Bezier degrees exceed the cell point count.");
+            return a * b;
+        };
+        const auto a = static_cast<std::uint64_t>(p) + 1;
+        const auto b = static_cast<std::uint64_t>(type == 80 ? p : q) + (type == 80 ? 2 : 1);
+        const auto base = type == 80 ? multiply(a % 2 == 0 ? a / 2 : a, a % 2 == 0 ? b : b / 2) : multiply(a, b);
+        if (multiply(base, static_cast<std::uint64_t>(r) + 1) != static_cast<std::uint64_t>(count))
+            throw std::invalid_argument("VTUWriter Bezier degrees do not match the cell point count.");
+    }
+}
+
 /** @brief Write the legacy human-readable ASCII representation. */
-void VTUWriter::write_ascii(std::ostream& out) const
+void VTUWriter::write_ascii(std::ostream& out, const HigherOrderGeometry& geometry) const
 {
     const auto& topology_data = topology();
     out << "<?xml version=\"1.0\"?>\n";
@@ -653,8 +698,17 @@ void VTUWriter::write_ascii(std::ostream& out) const
     out << "    <Piece NumberOfPoints=\"" << topology_data.points.size()
         << "\" NumberOfCells=\"" << num_cells() << "\">\n";
 
-    out << "      <PointData/>\n";
-    out << "      <CellData>\n";
+    if (geometry.rational_weights.empty())
+        out << "      <PointData/>\n      <CellData>\n";
+    else
+    {
+        out << "      <PointData RationalWeights=\"RationalWeights\">\n";
+        write_cell_data_array(out, DataArray{"RationalWeights", "Float64", 1, geometry.rational_weights}, "        ");
+        out << "      </PointData>\n      <CellData HigherOrderDegrees=\"HigherOrderDegrees\">\n";
+        out << "        <DataArray type=\"Int32\" Name=\"HigherOrderDegrees\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+        for (const auto degree : geometry.degrees) out << degree << ' ';
+        out << "\n        </DataArray>\n";
+    }
     for (const auto& data_array : d_cell_data)
     {
         write_cell_data_array(out, data_array, "        ");
@@ -723,7 +777,7 @@ void VTUWriter::write_ascii(std::ostream& out) const
 }
 
 /** @brief Write VTK XML metadata followed by raw appended numeric blocks. */
-void VTUWriter::write_appended_binary(std::ostream& out) const
+void VTUWriter::write_appended_binary(std::ostream& out, const HigherOrderGeometry& geometry) const
 {
     const auto& topology_data = topology();
     constexpr std::uint64_t header_bytes = sizeof(std::uint64_t);
@@ -783,6 +837,11 @@ void VTUWriter::write_appended_binary(std::ostream& out) const
         cell_data_offsets.push_back(
             reserve_block(data_array_bytes(data_array)));
     }
+    const bool rational = !geometry.rational_weights.empty();
+    const auto weights_bytes = checked_bytes(geometry.rational_weights.size(), sizeof(real_t));
+    const auto degrees_bytes = checked_bytes(geometry.degrees.size(), sizeof(int));
+    const auto weights_offset = rational ? reserve_block(weights_bytes) : 0;
+    const auto degrees_offset = rational ? reserve_block(degrees_bytes) : 0;
     const auto points_bytes = checked_bytes(
         topology_data.points.size(), 3 * sizeof(real_t));
     const auto connectivity_bytes = checked_bytes(
@@ -807,8 +866,17 @@ void VTUWriter::write_appended_binary(std::ostream& out) const
     out << "  <UnstructuredGrid>\n";
     out << "    <Piece NumberOfPoints=\"" << topology_data.points.size()
         << "\" NumberOfCells=\"" << num_cells() << "\">\n";
-    out << "      <PointData/>\n";
-    out << "      <CellData>\n";
+    if (!rational)
+        out << "      <PointData/>\n      <CellData>\n";
+    else
+    {
+        out << "      <PointData RationalWeights=\"RationalWeights\">\n"
+               "        <DataArray type=\"Float64\" Name=\"RationalWeights\" format=\"appended\" offset=\""
+            << weights_offset << "\"/>\n      </PointData>\n"
+               "      <CellData HigherOrderDegrees=\"HigherOrderDegrees\">\n"
+               "        <DataArray type=\"Int32\" Name=\"HigherOrderDegrees\" NumberOfComponents=\"3\" format=\"appended\" offset=\""
+            << degrees_offset << "\"/>\n";
+    }
     for (size_t array_index = 0;
          array_index < d_cell_data.size();
          ++array_index)
@@ -869,6 +937,11 @@ void VTUWriter::write_appended_binary(std::ostream& out) const
             },
             data_array.values);
     }
+    if (rational)
+    {
+        write_block(weights_bytes, geometry.rational_weights);
+        write_block(degrees_bytes, geometry.degrees);
+    }
     write_block(points_bytes, topology_data.points);
     write_block(connectivity_bytes, topology_data.connectivity);
     write_block(offsets_bytes, topology_data.cell_offsets);
@@ -893,7 +966,13 @@ void VTUWriter::write(
     const std::string& filename,
     Encoding encoding) const
 {
+    write(filename, encoding, HigherOrderGeometry{});
+}
+
+void VTUWriter::write(const std::string& filename, Encoding encoding, const HigherOrderGeometry& geometry) const
+{
     validate();
+    validate_higher_order_geometry(geometry);
 
     std::ofstream out(filename, std::ios::binary);
     if (!out)
@@ -905,11 +984,11 @@ void VTUWriter::write(
     out << std::setprecision(std::numeric_limits<real_t>::max_digits10);
     if (encoding == Encoding::AppendedBinary)
     {
-        write_appended_binary(out);
+        write_appended_binary(out, geometry);
     }
     else
     {
-        write_ascii(out);
+        write_ascii(out, geometry);
     }
 
     out.close();
