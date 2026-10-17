@@ -226,7 +226,7 @@ it.
 face reconstruction retains the owner-cell tangential velocity while momentum
 diffusion adds no boundary constraint. The fixed-flux pressure boundary
 independently enforces
-$\phi_{abs,f}=\phi_{m,f}$, leaving zero normal carrier flux relative to the
+$\phi_{\mathrm{abs},f}=\phi_{m,f}$, leaving zero normal carrier flux relative to the
 mesh. Accepted `PlanarALEStepDiagnostics` retain the
 per-outer level, target, continuity, material-state, and gas-state histories, and
 each accepted free-surface history record copies that diagnostic snapshot.

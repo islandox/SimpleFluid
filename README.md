@@ -71,7 +71,7 @@ equations with the Boussinesq approximation for buoyancy-driven flows:
 
 $$
 \frac{\partial \mathbf{u}}{\partial t} + \nabla\cdot(\mathbf{u}\mathbf{u})
-= -\nabla p + \nu\nabla^2\mathbf{u} + \rho\beta g(T - T_\text{ref})
+= -\nabla p + \nu\nabla^2\mathbf{u} + \rho\beta g(T - T_{\mathrm{ref}})
 $$
 
 $$
@@ -84,8 +84,8 @@ $$
 
 The constrained planar-ALE path instead advances conservative old/new-volume
 storage with the mesh-relative flux
-$\phi_{rel}=\phi_{abs}-\phi_m$ and enforces the integrated low-Mach target
-$\sum_f\phi_{abs,f}=Q_{V,c}$. Its supported model matrix and discrete
+$\phi_{\mathrm{rel}}=\phi_{\mathrm{abs}}-\phi_m$ and enforces the integrated low-Mach target
+$\sum_f\phi_{\mathrm{abs},f}=Q_{V,c}$. Its supported model matrix and discrete
 equations are documented in
 [`docs/modeling/planar_free_surface_volume_budget.md`](docs/modeling/planar_free_surface_volume_budget.md).
 
