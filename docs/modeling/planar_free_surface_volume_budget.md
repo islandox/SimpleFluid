@@ -222,12 +222,12 @@ the mesh-relative carrier flux:
 
 $$
 \frac{V_c^{n+1}m_{l,c}^{*,n+1}-V_c^nm_{l,c}^{*,n}}{\Delta t}
-+\sum_{f\in c}\phi_{rel,f}m_{l,f}^{*,\mathrm{upwind},n+1}
++\sum_{f\in c}\phi_{\mathrm{rel},f}m_{l,f}^{*,\mathrm{upwind},n+1}
 =V_c^{n+1}\left(\dot m_{\mathrm{cond},c}
 -\dot m_{\mathrm{evap},c}\right),
 $$
 
-where $\phi_{rel,f}=\phi_{abs,f}-\phi_{m,f}$. The first ALE support matrix
+where $\phi_{\mathrm{rel},f}=\phi_{\mathrm{abs},f}-\phi_{m,f}$. The first ALE support matrix
 rejects boiling, so the right-hand side is zero there; retaining the source form
 states the contract that boiling must satisfy before that rejection can be
 relaxed. A constant intensive inventory is preserved under pure mesh motion by
@@ -324,7 +324,7 @@ accepted state instead. The constrained ALE path instead snapshots its complete
 supported state and restores it together with the geometry on rejection.
 
 With ALE, bubble populations are transported by the liquid carrier flux
-$\phi_{rel}$ plus the configured category slip flux. Escape is evaluated on the
+$\phi_{\mathrm{rel}}$ plus the configured category slip flux. Escape is evaluated on the
 named moving top patch from that relative bubble flux, so the mesh motion is not
 counted as gas leaving the liquid domain. The accepted before/after decrement
 remains the authoritative H2 transfer and is committed exactly once; the
@@ -436,27 +436,27 @@ All face-volume fluxes use m3/s and the mesh owner normal. The existing
 projected field remains the absolute liquid flux
 
 $$
-\phi_{abs,f}=\int_f\mathbf u\cdot\mathbf n_o\,dA.
+\phi_{\mathrm{abs},f}=\int_f\mathbf u\cdot\mathbf n_o\,dA.
 $$
 
 `PlanarALEMeshMotion` supplies the exact swept-volume rate $\phi_{m,f}$ for the
 same face and timestep. ALE convection uses a separate synchronized field
 
 $$
-\phi_{rel,f}=\phi_{abs,f}-\phi_{m,f}.
+\phi_{\mathrm{rel},f}=\phi_{\mathrm{abs},f}-\phi_{m,f}.
 $$
 
 The absolute field is never overwritten with relative values. Pressure,
 kinematic-boundary enforcement, and continuity diagnostics consume
-$\phi_{abs}$; momentum, temperature, liquid inventory, enabled H2 transports,
-and the ALE Courant diagnostic consume $\phi_{rel}$. Specifically,
+$\phi_{\mathrm{abs}}$; momentum, temperature, liquid inventory, enabled H2 transports,
+and the ALE Courant diagnostic consume $\phi_{\mathrm{rel}}$. Specifically,
 
 $$
-Co_c=\frac{\Delta t}{2V_c}\sum_{f\in c}|\phi_{transport,f}|,
+Co_c=\frac{\Delta t}{2V_c}\sum_{f\in c}|\phi_{\mathrm{transport},f}|,
 \qquad
-\phi_{transport}=\begin{cases}
-\phi_{abs},&\text{fixed mesh},\\
-\phi_{rel},&\text{planar ALE}.
+\phi_{\mathrm{transport}}=\begin{cases}
+\phi_{\mathrm{abs}},&\text{fixed mesh},\\
+\phi_{\mathrm{rel}},&\text{planar ALE}.
 \end{cases}
 $$
 
@@ -502,7 +502,7 @@ weight $b$, and volumetric source $S$, the Backward-Euler assembly is
 $$
 \frac{V_c^{n+1}a_c^{n+1}q_c^{n+1}
       -V_c^na_c^nq_c^n}{\Delta t}
-+\sum_{f\in c}\phi_{rel,f}(bq)_f^{\mathrm{upwind},n+1}
++\sum_{f\in c}\phi_{\mathrm{rel},f}(bq)_f^{\mathrm{upwind},n+1}
 =\mathcal D_c^{n+1}+V_c^{n+1}S_c^{n+1}.
 $$
 
@@ -536,7 +536,7 @@ m3/s for each owned cell. Every segregated SIMPLE, PISO, and PIMPLE pressure
 correction and the coupled Krylov path uses the same constraint and residual:
 
 $$
-\sum_{f\in c}\phi_{abs,f}-Q_{V,c}=0.
+\sum_{f\in c}\phi_{\mathrm{abs},f}-Q_{V,c}=0.
 $$
 
 It is an integrated cell rate, not a volumetric source in 1/s, so pressure
@@ -554,19 +554,19 @@ $$
 
 Liquid mass uses its implicit trial-new upwind value. Each bubble population
 retains a post-transport/pre-kinetics raw volume fraction, with the upwind cell
-selected by the same combined $\phi_{rel}+\phi_{slip,k}$ sign used by its
+selected by the same combined $\phi_{\mathrm{rel}}+\phi_{\mathrm{slip},k}$ sign used by its
 number/mole transport. The resulting carrier and slip material-volume face
 fluxes are
 
 $$
-\Phi_{carrier,f}=\phi_{rel,f}
-  \left(\frac{m_l^*}{\rho_l}\right)_f^{n+1,up(\phi_{rel})}
-  +\sum_k\phi_{rel,f}\alpha_{b,k,f}^{tr,up(\phi_{rel}+\phi_{slip,k})},
+\Phi_{\mathrm{carrier},f}=\phi_{\mathrm{rel},f}
+  \left(\frac{m_l^*}{\rho_l}\right)_f^{n+1,\mathrm{up}(\phi_{\mathrm{rel}})}
+  +\sum_k\phi_{\mathrm{rel},f}\alpha_{b,k,f}^{\mathrm{tr},\mathrm{up}(\phi_{\mathrm{rel}}+\phi_{\mathrm{slip},k})},
 $$
 
 $$
-\Phi_{slip,f}=\sum_k\phi_{slip,k,f}
-  \alpha_{b,k,f}^{tr,up(\phi_{rel}+\phi_{slip,k})}.
+\Phi_{\mathrm{slip},f}=\sum_k\phi_{\mathrm{slip},k,f}
+  \alpha_{b,k,f}^{\mathrm{tr},\mathrm{up}(\phi_{\mathrm{rel}}+\phi_{\mathrm{slip},k})}.
 $$
 
 The final $W^{n+1}$ is evaluated after local gas kinetics/EOS reconstruction,
@@ -576,18 +576,18 @@ material source rather than advecting them retroactively. The per-cell
 material-volume rate and liquid-carrier target are
 
 $$
-Q_{mat,c}=\frac{W_c^{n+1}-W_c^n}{\Delta t}
-+\sum_{f\in c}\Phi_{carrier,f}
-+\sum_{f\in c}\Phi_{slip,f},
+Q_{\mathrm{mat},c}=\frac{W_c^{n+1}-W_c^n}{\Delta t}
++\sum_{f\in c}\Phi_{\mathrm{carrier},f}
++\sum_{f\in c}\Phi_{\mathrm{slip},f},
 $$
 
 $$
-Q_{V,c}=Q_{mat,c}-\sum_{f\in c}\Phi_{slip,f}+Q_{mesh,c},
+Q_{V,c}=Q_{\mathrm{mat},c}-\sum_{f\in c}\Phi_{\mathrm{slip},f}+Q_{\mathrm{mesh},c},
 $$
 
 $$
-Q_{mesh,c}=\frac{V_c^n}{V_{mesh}^n}
-\frac{V_{pool}^n-V_{mesh}^n}{\Delta t}.
+Q_{\mathrm{mesh},c}=\frac{V_c^n}{V_{\mathrm{mesh}}^n}
+\frac{V_{\mathrm{pool}}^n-V_{\mathrm{mesh}}^n}{\Delta t}.
 $$
 
 The mesh correction removes the accepted global pool/mesh volume defect over
@@ -604,9 +604,9 @@ liquid-carrier divergence. Internal owner/neighbour face terms cancel
 pairwise. The global acceptance check is
 
 $$
-\sum_cQ_{mat,c}=
-\frac{V_{pool}^{n+1}-V_{pool}^n}{\Delta t}
-+\dot V_{b,escape}+\dot V_{other,out},
+\sum_cQ_{\mathrm{mat},c}=
+\frac{V_{\mathrm{pool}}^{n+1}-V_{\mathrm{pool}}^n}{\Delta t}
++\dot V_{b,\mathrm{escape}}+\dot V_{\mathrm{other},\mathrm{out}},
 $$
 
 within the configured physical volume tolerances. `volumeSourceRate`,
@@ -621,7 +621,7 @@ with the constant-area vessel map. Its liquid kinematic condition is imposed
 exactly as
 
 $$
-\phi_{abs,f}=\phi_{m,f},\qquad \phi_{rel,f}=0,
+\phi_{\mathrm{abs},f}=\phi_{m,f},\qquad \phi_{\mathrm{rel},f}=0,
 $$
 
 The trial velocity cache marks this patch as `Slip`, so its face value retains
@@ -645,7 +645,7 @@ One accepted ALE step proceeds as a single logical transaction:
    numeric cache, preconditioner, and VTU point cache for the trial epoch.
 4. Restore the accepted physical snapshot at each outer corrector, solve the
    selected pressure--velocity algorithm, and apply the bounded pressure-only
-   refinements needed by the strict continuity gate. Then derive $\phi_{rel}$,
+   refinements needed by the strict continuity gate. Then derive $\phi_{\mathrm{rel}}$,
    solve the enabled equations, and preview the liquid, H2 escape,
    level/headspace, and $Q_V$ ledgers without publishing them.
 5. Repeat until level, continuity-target, material-property, and gas-primary
@@ -1028,7 +1028,7 @@ integrated targets, PISO reuse, bounded pressure-only refinement,
 fixed-boundary flux ownership, coupled/segregated residual agreement, and
 generation/epoch cache invalidation. Moving-boundary and material-volume tests
 check planar/area/vessel validation,
-$\phi_{abs}=\phi_m$, zero carrier-relative top flux, thermal expansion, bubble
+$\phi_{\mathrm{abs}}=\phi_m$, zero carrier-relative top flux, thermal expansion, bubble
 slip/escape subtraction, moving-top tangential-flow preservation,
 mesh-relative Courant evaluation, and strict pool/source closure. Solver-level
 tests retain the disabled-path baseline and

@@ -26,23 +26,23 @@ connectivity, or an intervening wall. A nearby donor across such a boundary is
 eligible; callers must choose source and target domains appropriate for the
 coupled quantity.
 
-For inverse-distance interpolation at target centroid \(x_j\), the weights are
+For inverse-distance interpolation at target centroid $x_j$, the weights are
 
-\[
+$$
 w_{ji}=\frac{\|x_j-x_i\|^{-2}}
               {\sum_{k\in N_j}\|x_j-x_k\|^{-2}},
 \qquad q_j=\sum_{i\in N_j}w_{ji}q_i,
-\]
+$$
 
-where \(N_j\) contains up to `neighbors` source cells. Exact centroid matches
+where $N_j$ contains up to `neighbors` source cells. Exact centroid matches
 are handled separately, without dividing by zero.
 
-For conservative cell averages, with source cell \(S_i\) and target cell
-\(T_j\),
+For conservative cell averages, with source cell $S_i$ and target cell
+$T_j$,
 
-\[
+$$
 q_j=\frac{1}{|T_j|}\sum_i |S_i\cap T_j|q_i.
-\]
+$$
 
 Construction requires complete coverage of both source and target cells by
 default. `coverage_mode = MeshToMeshCoverageMode::AllowPartial` explicitly
@@ -115,10 +115,10 @@ rejection; CMake also registers `MeshToMeshTransferRZ_2procs`.
 
 For coaxial annular sectors, each overlap volume is exactly
 
-\[
-V_{ji}=\tfrac12(r_{hi}-r_{lo})(r_{hi}+r_{lo})
+$$
+V_{ji}=\tfrac12(r_{\mathrm{hi}}-r_{\mathrm{lo}})(r_{\mathrm{hi}}+r_{\mathrm{lo}})
        \,\Delta\theta_{ji}\,\Delta z_{ji}.
-\]
+$$
 
 Radii and axial intervals are intersected directly; azimuthal intervals are
 intersected modulo `2*pi`, including different seam locations, negative angles,

@@ -497,7 +497,7 @@ $$
 $$
 
 $$
-S_{\alpha,rad} = \alpha_l \dot V_g
+S_{\alpha,\mathrm{rad}} = \alpha_l \dot V_g
 $$
 
 where:
@@ -505,7 +505,7 @@ where:
 - $G_g$ is the configurable gas yield in mol/J
 - $\eta_g$ is a release efficiency
 - $\mathrm R$ is the ideal-gas constant
-- $S_{\alpha,rad}$ has units 1/s
+- $S_{\alpha,\mathrm{rad}}$ has units 1/s
 
 #### Tasks
 
@@ -551,31 +551,31 @@ interface remains open.
 For cells with:
 
 $$
-T > T_{sat} + \Delta T_{act}
+T > T_{\mathrm{sat}} + \Delta T_{\mathrm{act}}
 $$
 
 compute a requested energy rate, capped so one explicit step cannot remove
 more than the cell's sensible superheat:
 
 $$
-\dot e_{avail} = \rho_l c_{p,l}
-\frac{\max(T - T_{sat},0)}{\max(\tau_b,\Delta t)}
+\dot e_{\mathrm{avail}} = \rho_l c_{p,l}
+\frac{\max(T - T_{\mathrm{sat}},0)}{\max(\tau_b,\Delta t)}
 $$
 
 then:
 
 $$
-\dot m_b = \frac{\dot e_{avail}}{h_{fg}}
+\dot m_b = \frac{\dot e_{\mathrm{avail}}}{h_{\mathrm{fg}}}
 $$
 
 $$
-S_{\alpha,boil} = \frac{\dot m_b}{\rho_g}
+S_{\alpha,\mathrm{boil}} = \frac{\dot m_b}{\rho_g}
 $$
 
 and latent heat sink:
 
 $$
-Q_{latent} = \dot m_b h_{fg}
+Q_{\mathrm{latent}} = \dot m_b h_{\mathrm{fg}}
 $$
 
 Before the temperature update, limit aggregate bulk and wall boiling to the
@@ -589,13 +589,13 @@ latent energy is removed only for vapor admitted into the authoritative scalar
 For heated boundary faces:
 
 $$
-\dot m''_w = f_{evap}\frac{q''_w}{h_{fg}}
+\dot m''_w = f_{\mathrm{evap}}\frac{q''_w}{h_{\mathrm{fg}}}
 $$
 
 Distribute to owner cells:
 
 $$
-\dot m_{w,vol} = \dot m''_w \frac{A_f}{V_P}
+\dot m_{w,\mathrm{vol}} = \dot m''_w \frac{A_f}{V_P}
 $$
 
 #### Tasks
@@ -651,20 +651,20 @@ the operational slip setting belongs only to Phase 14.1 today.
 #### Minimum required update
 
 $$
-\alpha_g^{n+1} = \operatorname{clamp}\left(\alpha_g^n + \Delta t\,S_{\alpha,total},\alpha_{min},\alpha_{max}\right)
+\alpha_g^{n+1} = \operatorname{clamp}\left(\alpha_g^n + \Delta t\,S_{\alpha,\mathrm{total}},\alpha_{\mathrm{min}},\alpha_{\mathrm{max}}\right)
 $$
 
 where:
 
 $$
-S_{\alpha,total} = S_{\alpha,rad} + S_{\alpha,boil} + S_{\alpha,wall} - S_{\alpha,collapse}
+S_{\alpha,\mathrm{total}} = S_{\alpha,\mathrm{rad}} + S_{\alpha,\mathrm{boil}} + S_{\alpha,\mathrm{wall}} - S_{\alpha,\mathrm{collapse}}
 $$
 
 with collapse bounded over the explicit step:
 
 $$
-S_{\alpha,collapse} = \min\left(\frac{\alpha_g}{\tau_c},
-\frac{\alpha_g-\alpha_{min}}{\Delta t}\right).
+S_{\alpha,\mathrm{collapse}} = \min\left(\frac{\alpha_g}{\tau_c},
+\frac{\alpha_g-\alpha_{\mathrm{min}}}{\Delta t}\right).
 $$
 
 #### Optional transport upgrade
@@ -674,10 +674,10 @@ If the existing scalar transport API allows it cleanly, add:
 $$
 \frac{\partial \alpha_g}{\partial t}
 + \nabla\cdot(U_l \alpha_g)
-+ \nabla\cdot(U_{slip}\alpha_g)
++ \nabla\cdot(U_{\mathrm{slip}}\alpha_g)
 =
 \nabla\cdot(D_\alpha\nabla\alpha_g)
-+ S_{\alpha,total}
++ S_{\alpha,\mathrm{total}}
 $$
 
 #### Tasks
@@ -761,11 +761,11 @@ Add cell fields with documented SI units:
 Use:
 
 $$
-C_{eq}(p_l,r_b)=H_{H_2}\left(p_l+\frac{2\sigma}{r_b}\right)
+C_{\mathrm{eq}}(p_l,r_b)=H_{\mathrm{H_2}}\left(p_l+\frac{2\sigma}{r_b}\right)
 $$
 
 $$
-C_{crit}(p_l,r_0)=H_{H_2}\left(p_l+\frac{2\sigma}{r_0}\right).
+C_{\mathrm{crit}}(p_l,r_0)=H_{\mathrm{H_2}}\left(p_l+\frac{2\sigma}{r_0}\right).
 $$
 
 - [x] Add configurable/property-model inputs for `H_H2`, surface tension, and absolute pressure.
@@ -781,16 +781,16 @@ Implement Eqs. (11)–(15) of the article in a dedicated property class.
 - [x] Apply:
 
 $$
-f^P_{corr}
-=5.165\times10^{-5}\left(\frac{p_l}{p_{atm}}\right)^4
--1.732\times10^{-3}\left(\frac{p_l}{p_{atm}}\right)^3
-+0.02245\left(\frac{p_l}{p_{atm}}\right)^2
--0.1554\left(\frac{p_l}{p_{atm}}\right)
+f^P_{\mathrm{corr}}
+=5.165\times10^{-5}\left(\frac{p_l}{p_{\mathrm{atm}}}\right)^4
+-1.732\times10^{-3}\left(\frac{p_l}{p_{\mathrm{atm}}}\right)^3
++0.02245\left(\frac{p_l}{p_{\mathrm{atm}}}\right)^2
+-0.1554\left(\frac{p_l}{p_{\mathrm{atm}}}\right)
 +1.134
 $$
 
 $$
-r_0=f^P_{corr}r_0^*.
+r_0=f^P_{\mathrm{corr}}r_0^*.
 $$
 
 - [x] Require explicit concentration and temperature units at the API boundary.
@@ -839,13 +839,13 @@ The article uses axial transport; use the general finite-volume divergence form 
 
 - [x] Implement:
 
-  \[
+  $$
   P_{M1}=G\dot q_f,
   \qquad
   P_{N1}=\frac{P_{M1}}{\zeta_0},
   \qquad
   P_{M2}=P_{N2}=0.
-  \]
+  $$
 
 - [x] Convert H₂ yield to mol/J consistently.
 - [x] Compute nucleation-bubble molar content `zeta_0` from the bubble equation of state.
@@ -854,11 +854,11 @@ The article uses axial transport; use the general finite-volume divergence form 
 
 - [x] Implement:
 
-  \[
+  $$
   Q_{N1}=\frac{N_1}{\tau_1},
   \qquad
   Q_{M1}=\frac{M_1}{\tau_1}.
-  \]
+  $$
 
 - [x] Make `tauMicro` configurable; document approximately 10 μs as the article default rather than a universal constant.
 
@@ -868,8 +868,8 @@ For `C>C_critical`, implement:
 
 $$
 S_{N1}
-=-FN_1p_l\left(\frac{C}{C_{crit}}-1\right)
-\Theta(C-C_{crit})
+=-FN_1p_l\left(\frac{C}{C_\mathrm{crit}}-1\right)
+\Theta(C-C_\mathrm{crit})
 $$
 
 $$
@@ -887,13 +887,13 @@ $$
 Implement the article's sign convention:
 
 $$
-Q_{N2}=\frac{N_2}{\tau_2}\Theta(C_{eq}-C)
+Q_{N2}=\frac{N_2}{\tau_2}\Theta(C_\mathrm{eq}-C)
 $$
 
 $$
 Q_{M2}
-=-K_LA_2(C-C_{eq})\Theta(C-C_{eq})
-+\frac{M_2}{\tau_2}\Theta(C_{eq}-C)
+=-K_LA_2(C-C_\mathrm{eq})\Theta(C-C_\mathrm{eq})
++\frac{M_2}{\tau_2}\Theta(C_\mathrm{eq}-C)
 $$
 
 $$
@@ -909,18 +909,18 @@ $$
 Implement the Hughmark correlation used in the article:
 
 $$
-K_L=\frac{ShD}{2r_2},
+K_L=\frac{\mathrm{Sh}D}{2r_2},
 \qquad
-Sc=\frac{\mu_l}{\rho_lD},
+\mathrm{Sc}=\frac{\mu_l}{\rho_lD},
 \qquad
-Re=\frac{2\rho_l|U_l-U_g|r_2}{\mu_l}.
+\mathrm{Re}=\frac{2\rho_l|U_l-U_g|r_2}{\mu_l}.
 $$
 
 $$
-Sh=
+\mathrm{Sh}=
 \begin{cases}
-2+0.6Re^{1/2}Sc^{1/3}, & 0\le Re<776.06,\\
-2+0.27Re^{0.63}Sc^{1/3}, & Re\ge776.06.
+2+0.6\mathrm{Re}^{1/2}\mathrm{Sc}^{1/3}, & 0\le \mathrm{Re}\lt 776.06,\\
+2+0.27\mathrm{Re}^{0.63}\mathrm{Sc}^{1/3}, & \mathrm{Re}\ge776.06.
 \end{cases}
 $$
 
@@ -969,9 +969,9 @@ $$
 - [x] Record clipped inventory if a safety bound is reached.
 - [x] Integrate total void volume:
 
-  \[
-  \Delta V_{void}=\int_V\alpha_g\,dV.
-  \]
+  $$
+  \Delta V_{\mathrm{void}}=\int_V\alpha_g\,dV.
+  $$
 
 #### Bubble transport and free-surface escape
 
@@ -1132,16 +1132,16 @@ natural-convection stability acceptance case remain open.
 Support a conservative default:
 
 $$
-\rho_{mix}(T,\alpha_g)
-= (1 - \alpha_g)\rho_l(T) + \alpha_g\rho_g
+\rho_{\mathrm{mix}}(T,\alpha_{\mathrm{g}})
+= (1 - \alpha_{\mathrm{g}})\rho_{\mathrm{l}}(T) + \alpha_{\mathrm{g}}\rho_{\mathrm{g}}
 $$
 
 and a Boussinesq-compatible form:
 
 $$
-\rho_{fb}(T,\alpha_g)
-= \rho_{ref}\left[1 - \beta(T - T_{ref})\right](1-\alpha_g)
-+ \rho_g\alpha_g
+\rho_{\mathrm{fb}}(T,\alpha_{\mathrm{g}})
+= \rho_{\mathrm{ref}}\left[1 - \beta(T - T_\mathrm{ref})\right](1-\alpha_{\mathrm{g}})
++ \rho_{\mathrm{g}}\alpha_{\mathrm{g}}
 $$
 
 #### Viscosity feedback
@@ -1149,7 +1149,7 @@ $$
 Start with:
 
 $$
-\mu_{eff}(T,\alpha_g) = \mu_l(T) f_\mu(\alpha_g)
+\mu_\mathrm{eff}(T,\alpha_g) = \mu_l(T) f_\mu(\alpha_g)
 $$
 
 where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
@@ -1314,7 +1314,7 @@ $$
 \frac{\partial (\alpha_l C_i)}{\partial t}
 + \nabla\cdot(\alpha_l U_l C_i)
 =
-\nabla\cdot(\alpha_l D_i^{eff}\nabla C_i)
+\nabla\cdot(\alpha_l D_i^\mathrm{eff}\nabla C_i)
 + S_i
 - \lambda_i \alpha_l C_i
 $$

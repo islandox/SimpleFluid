@@ -11,10 +11,10 @@ artificial conforming region decomposition.
 
 The manufactured field is
 
-\[
+$$
 \phi(x,y)=1+\sin(\pi x)\sin(\pi y),\qquad
 (5-\nabla^2)\phi=5\phi+2\pi^2(\phi-1).
-\]
+$$
 
 The unit square is extruded through one unit-thickness cell. Analytic Dirichlet
 conditions apply on the X/Y boundaries; the Z boundaries have zero normal
@@ -75,10 +75,10 @@ volume-weighted scalar sum checks conservation of the nonzero mean. An independe
 discrete Fourier symbol supplies the amplitude and phase expected from the
 selected discretization:
 
-\[
+$$
 G=\frac{1}{1+C(1-e^{-i\theta})},\qquad
-\theta=2\pi/N,\quad C=0.5,\quad \widehat\phi_{\rm final}=G^{4N}.
-\]
+\theta=2\pi/N,\quad C=0.5,\quad \widehat\phi_{\mathrm{final}}=G^{4N}.
+$$
 
 The measured complex coefficient must agree within `2e-9`, inventory within
 `2e-10`, and amplitude, phase and global L2 errors must decrease on refinement.
