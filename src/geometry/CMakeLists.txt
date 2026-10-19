@@ -1,6 +1,7 @@
 set(SIMPLEFLUID_MESH_SOURCES
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
+    CartesianAMR.cc
     explicit_instantiation/Mesh.cc
     explicit_instantiation/MeshHandle.cc
     explicit_instantiation/MeshTraverse.cc
@@ -63,6 +64,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     details/SemiStructuredPartition.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
+    CartesianAMR.cc
     explicit_instantiation/MeshReorderingFactory.cc
     explicit_instantiation/PlanarALEMeshMotion.cc
     explicit_instantiation/SolidSubdomain.cc

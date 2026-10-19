@@ -22,10 +22,21 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME}
         TEST_FILTER "QualityAccessTest.*"
         PROPERTIES TIMEOUT 30)
+  elseif(TEST_NAME STREQUAL "testCartesianAMR")
+    simplefluid_discover_tests(${TEST_NAME}
+        PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME CartesianAMR_2procs
+    TARGET testCartesianAMR
+    PROCS 2
+    ARGS "--gtest_filter=CartesianAMRTest.*:CartesianAMRMultiRankTest.*"
+    LABELS "mpi;geometry;amr;multi_region"
+    TIMEOUT 120)
 
 simplefluid_add_mpi_test(
     NAME MeshTraverse_2procs
