@@ -164,6 +164,8 @@ public:
     [[nodiscard]] std::vector<InterfacePatch> interface_patches(const std::vector<double>& fraction) const;
     /** Collective overlap-face carrier aperture: intersection of both incident PLIC traces; walls are closed. */
     [[nodiscard]] std::vector<double> carrier_face_aperture(const std::vector<double>& fraction) const;
+    /** Shared gas traces; physical boundary faces return their incident gas trace for attachment detection. */
+    [[nodiscard]] std::vector<double> gas_face_aperture(const std::vector<double>& fraction) const;
     /**
      * Local carrier-volume average of min(normal distance to interface, delta),
      * in metres. Integrates the actual cut-cell geometry; delta must be positive.
@@ -185,6 +187,8 @@ public:
         const std::vector<double>& face_velocity, RefinementOptions options = {}, RefinementHints hints = {}) const;
 
 private:
+    [[nodiscard]] SIMPLEFLUID_FVM_LOCAL std::vector<double> phase_face_aperture(
+        const std::vector<double>& fraction, bool gas) const;
     [[nodiscard]] SIMPLEFLUID_FVM_LOCAL AdaptiveAdvection advect_with_sources(const std::vector<double>& fraction,
         const std::vector<double>& face_velocity, double dt, const PhaseVolumeIncrement* source,
         std::size_t first_axis) const;

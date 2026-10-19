@@ -165,7 +165,7 @@ LowTotals low_totals(const VoF::LowMachState& s) const
 struct ThermoEvaluation
 {
     std::vector<double> temperature, rho_l, rho_r, p_l, p_r, partial, gas, liquid, dispersed;
-    std::vector<std::vector<double>> bubble_volume, bubble_radius;
+    std::vector<std::vector<double>> bubble_volume, bubble_radius, bubble_pressure;
     double material_volume = 0;
 };
 
@@ -178,6 +178,7 @@ std::optional<ThermoEvaluation> evaluate_low(const VoF::LowMachState& s, const s
         values->resize(owned());
     result.bubble_volume.resize(s.dispersed.size(), std::vector<double>(owned()));
     result.bubble_radius = result.bubble_volume;
+    result.bubble_pressure = result.bubble_volume;
     bool valid = true;
     detail::CompensatedSum<> total;
     const auto& o = *low_options;
@@ -240,6 +241,7 @@ std::optional<ThermoEvaluation> evaluate_low(const VoF::LowMachState& s, const s
             for (std::size_t q = 0; q < s.dispersed.size(); ++q)
             {
                 const auto& population = s.dispersed[q];
+                result.bubble_pressure[q][c] = pl;
                 if (population.number[c] == 0)
                     continue;
                 const auto radius = RadiolyticGasPhysics::solve_bubble_radius(
@@ -249,6 +251,7 @@ std::optional<ThermoEvaluation> evaluate_low(const VoF::LowMachState& s, const s
                 if (!radius.converged)
                     throw std::runtime_error("Dispersed Laplace/EOS radius did not converge.");
                 result.bubble_radius[q][c] = radius.radius;
+                result.bubble_pressure[q][c] = pl + 2 * material.surface_tension / radius.radius;
                 result.bubble_volume[q][c] =
                     population.number[c] * 4 * std::numbers::pi / 3 * radius.radius * radius.radius * radius.radius;
                 vd += result.bubble_volume[q][c];
@@ -283,6 +286,7 @@ std::optional<ThermoEvaluation> evaluate_low(const VoF::LowMachState& s, const s
 
 void assign_thermo(VoF::LowMachState& s, ThermoEvaluation evaluation, double p0) const
 {
+    s.pending_representation_relaxation = false;
     s.thermodynamic_pressure = p0;
     s.temperature = std::move(evaluation.temperature);
     s.liquid_density = std::move(evaluation.rho_l);
@@ -303,6 +307,7 @@ void assign_thermo(VoF::LowMachState& s, ThermoEvaluation evaluation, double p0)
     {
         s.dispersed[q].volume = std::move(evaluation.bubble_volume[q]);
         s.dispersed[q].radius = std::move(evaluation.bubble_radius[q]);
+        s.dispersed[q].absolute_pressure = std::move(evaluation.bubble_pressure[q]);
     }
 }
 
@@ -1548,12 +1553,9 @@ State advance_low(const State& old, double dt, const VoF::LowMachSources& input,
                     for (std::size_t q = 0; q < qd.size(); ++q)
                     {
                         qc[c] += qd[q];
-                        const double radius = thermo.dispersed[q].radius[c], previous = old.low->dispersed[q].radius[c];
-                        const double pb = thermo.liquid_absolute_pressure[c] +
-                                          (radius > 0 ? 2 * material.surface_tension / radius : 0);
-                        const double old_pb = previous > 0 ? old.low->liquid_absolute_pressure[c] +
-                                                                 2 * material.surface_tension / previous
-                                                           : pb;
+                        const double pb = thermo.dispersed[q].absolute_pressure[c];
+                        const double old_pb =
+                            old.low->dispersed[q].volume[c] > 0 ? old.low->dispersed[q].absolute_pressure[c] : pb;
                         new_work[c] -= 0.5 * (pb + old_pb) * qd[q];
                     }
                     raw_target[c] = qg[c] + qc[c];

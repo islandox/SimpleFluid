@@ -74,6 +74,9 @@ public:
         [[nodiscard]] const std::vector<double>& face_velocity() const;
         [[nodiscard]] const std::vector<VoF::Vector>& velocity() const;
         [[nodiscard]] const std::vector<double>& mechanical_pressure() const;
+        [[nodiscard]] const std::vector<double>& gas_fraction() const;
+        [[nodiscard]] bool is_representation_change() const;
+        [[nodiscard]] const VoF::RepresentationDiagnostics& representation_diagnostics() const;
 
     private:
         friend class AdaptiveVoFSolver;
@@ -86,6 +89,16 @@ public:
         double dt, const VoF::LowMachSources& sources, const VoF::LowMachState* thermodynamic_guess = nullptr);
     /** Commit only a trial from the unchanged accepted state and current hierarchy. */
     void commit_low_mach_trial(const LowMachTrial& trial);
+
+    /** Fixed-clock conservative conversion; commit with commit_low_mach_trial.
+     * Carries phase pressure/volume/energy histories and defers physical relaxation.
+     * Nonempty changes reject generic registered passives and unrelaxed prior
+     * conversions. Regrid/reinitialization require physical relaxation first.
+     * An empty parcel request is an exact fixed-clock identity trial.
+     */
+    [[nodiscard]] LowMachTrial preview_representation_change(const VoF::RepresentationChangeRequest& request);
+    [[nodiscard]] std::uint64_t state_revision() const noexcept;
+    [[nodiscard]] bool pending_representation_relaxation() const noexcept;
 
     /** Conservative adaptation; supplied stencil/motion/wake/promotion guards constrain coarsening. */
     void regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen = {},

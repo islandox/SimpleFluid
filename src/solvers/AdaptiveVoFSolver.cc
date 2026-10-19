@@ -20,6 +20,7 @@
 #include <map>
 #include <numbers>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -1061,6 +1062,7 @@ struct AdaptiveVoFSolver::Impl
         }
 
 #include "solvers/AdaptiveVoFLowMach.inc"
+#include "solvers/AdaptiveVoFRepresentation.inc"
 
         State advance(const State& old, double dt)
         {
@@ -1173,6 +1175,8 @@ struct AdaptiveVoFSolver::Impl
         std::shared_ptr<Context> context;
         std::shared_ptr<const Published> accepted;
         std::uint64_t nonce = 0;
+        bool representation = false;
+        VoF::RepresentationDiagnostics representation_diagnostics;
         State candidate;
     };
 
@@ -1201,6 +1205,8 @@ struct AdaptiveVoFSolver::Impl
         Context::BoundaryProjection boundary)
     {
         require_all(!saved, "AdaptiveVoFSolver cannot reinitialize while a checkpoint is active.");
+        require_all(!published->state.low || !published->state.low->pending_representation_relaxation,
+            "AdaptiveVoFSolver cannot erase pending representation pressure histories by reinitializing.");
         context->validate_fraction(f);
         State next;
         next.f = f;
@@ -1220,6 +1226,8 @@ struct AdaptiveVoFSolver::Impl
         VoF::RefinementOptions protection, VoF::RefinementHints hints)
     {
         require_all(!saved, "AdaptiveVoFSolver topology is frozen while a checkpoint is active.");
+        require_all(!published->state.low || !published->state.low->pending_representation_relaxation,
+            "AdaptiveVoFSolver requires physical representation relaxation before regridding.");
         identical(
             static_cast<double>(coarsen.size()), "AdaptiveVoFSolver coarsening request counts disagree across ranks.");
         if (!coarsen.empty())
@@ -1367,6 +1375,8 @@ double AdaptiveVoFSolver::stable_timestep() const
 void AdaptiveVoFSolver::initialize_low_mach(VoF::LowMachOptions options, const VoF::LowMachInitialState& initial)
 {
     require_all(!impl_->saved, "AdaptiveVoFSolver cannot reinitialize while a checkpoint is active.");
+    require_all(!impl_->published->state.low || !impl_->published->state.low->pending_representation_relaxation,
+        "AdaptiveVoFSolver cannot erase pending representation pressure histories by reinitializing.");
     impl_->context->validate_low_options(options);
     const auto previous = impl_->context->low_options;
     impl_->context->low_options = std::make_shared<const VoF::LowMachOptions>(std::move(options));
@@ -1447,6 +1457,55 @@ const std::vector<double>& AdaptiveVoFSolver::LowMachTrial::mechanical_pressure(
     if (!candidate_)
         throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
     return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.p;
+}
+
+const std::vector<double>& AdaptiveVoFSolver::LowMachTrial::gas_fraction() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.f;
+}
+
+bool AdaptiveVoFSolver::LowMachTrial::is_representation_change() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->representation;
+}
+
+const VoF::RepresentationDiagnostics& AdaptiveVoFSolver::LowMachTrial::representation_diagnostics() const
+{
+    if (!candidate_ || !is_representation_change())
+        throw std::logic_error("AdaptiveVoFSolver trial is not a representation conversion.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->representation_diagnostics;
+}
+
+std::uint64_t AdaptiveVoFSolver::state_revision() const noexcept
+{
+    return impl_->low_trial_nonce;
+}
+
+bool AdaptiveVoFSolver::pending_representation_relaxation() const noexcept
+{
+    return impl_->published->state.low && impl_->published->state.low->pending_representation_relaxation;
+}
+
+AdaptiveVoFSolver::LowMachTrial AdaptiveVoFSolver::preview_representation_change(
+    const VoF::RepresentationChangeRequest& request)
+{
+    require_all(low_mach_enabled(), "AdaptiveVoFSolver representation changes require initialized low-Mach state.");
+    require_all(request.source_hierarchy && request.source_hierarchy.get() == hierarchy().get() &&
+                    request.accepted_state_revision == impl_->low_trial_nonce,
+        "AdaptiveVoFSolver representation request has stale state revision or hierarchy.");
+    auto candidate = std::make_shared<Impl::LowTrialData>();
+    candidate->owner = impl_.get();
+    candidate->context = impl_->context;
+    candidate->accepted = impl_->published;
+    candidate->nonce = impl_->low_trial_nonce;
+    candidate->representation = true;
+    candidate->candidate =
+        impl_->context->change_representation(impl_->published->state, request, candidate->representation_diagnostics);
+    return LowMachTrial(std::move(candidate));
 }
 
 AdaptiveVoFSolver::LowMachTrial AdaptiveVoFSolver::preview_low_mach_step(

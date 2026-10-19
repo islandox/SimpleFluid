@@ -2,6 +2,7 @@
  * @brief Conservative reactions, interface exchange and accepted-only gas ledgers.
  */
 #include "solvers/ReactingVoFCoupler.hh"
+#include "solvers/BubbleRepresentationInternal.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -143,11 +144,19 @@ struct ReactionLedger
 
 struct ReactingVoFCoupler::Impl
 {
+    using Registry = detail::BubbleRepresentationEngine;
     SP<AdaptiveVoFSolver> flow;
     ReactingVoFOptions options;
     std::shared_ptr<VoF::AdaptiveVoF> geometry;
     ReactingVoFStatistics accepted;
-    std::optional<std::pair<Checkpoint, ReactingVoFStatistics>> saved;
+    std::unique_ptr<Registry> representation;
+    struct Saved
+    {
+        Checkpoint token;
+        ReactingVoFStatistics statistics;
+        std::shared_ptr<const Registry::Snapshot> registry;
+    };
+    std::optional<Saved> saved;
     std::uint64_t revision = 0;
     std::size_t micro = 0;
     std::vector<std::size_t> upper;
@@ -158,6 +167,8 @@ struct ReactingVoFCoupler::Impl
         std::uint64_t revision;
         AdaptiveVoFSolver::LowMachTrial fluid;
         ReactingVoFStatistics stats;
+        std::shared_ptr<const Registry::Snapshot> registry;
+        BubbleRepresentationInspection representation;
     };
 
     Impl(SP<AdaptiveVoFSolver> solver, ReactingVoFOptions configuration)
@@ -197,10 +208,14 @@ struct ReactingVoFCoupler::Impl
             },
             "Reacting population registration failed on another rank.");
         accepted.time = flow->time();
+        if (options.representation.enabled)
+            representation =
+                std::make_unique<Registry>(options.representation, options.upper_pivots, options.upper_populations);
     }
 
     void validate_options()
     {
+        identical(options.representation.enabled ? 1.0 : 0.0, "Representation selections differ across ranks.");
         const auto& r = options.radiolysis;
         for (double value : {double(r.mode), r.hydrogen_yield_mol_per_j, r.gas_release_efficiency, r.henry_coefficient,
                  r.microbubble_lifetime, r.micro_to_large_conversion_coefficient, double(r.max_subcycles),
@@ -1186,6 +1201,18 @@ const ReactingVoFStatistics& ReactingVoFCoupler::Trial::statistics() const
         throw std::logic_error("Reacting VoF trial is empty.");
     return std::static_pointer_cast<const Impl::Candidate>(candidate_)->stats;
 }
+const BubbleRepresentationInspection& ReactingVoFCoupler::Trial::representation() const
+{
+    if (!candidate_)
+        throw std::logic_error("Reacting VoF trial is empty.");
+    return std::static_pointer_cast<const Impl::Candidate>(candidate_)->representation;
+}
+const VoF::RepresentationDiagnostics& ReactingVoFCoupler::Trial::representation_diagnostics() const
+{
+    if (!candidate_)
+        throw std::logic_error("Reacting VoF trial is empty.");
+    return std::static_pointer_cast<const Impl::Candidate>(candidate_)->fluid.representation_diagnostics();
+}
 
 ReactingVoFCoupler::Trial ReactingVoFCoupler::preview(double dt, const ReactingVoFInput& input)
 {
@@ -1205,6 +1232,14 @@ ReactingVoFCoupler::Trial ReactingVoFCoupler::preview(double dt, const ReactingV
     const double before = hydrogen_total(base), donor_before = total(base.donor_hydrogen_moles);
     State guess = base;
     auto velocity = impl_->flow->velocity();
+    if (impl_->flow->pending_representation_relaxation())
+    {
+        Sources predictor_sources;
+        predictor_sources.net_thermal_energy = input.net_thermal_energy;
+        const auto predictor = impl_->flow->preview_low_mach_step(dt, predictor_sources);
+        guess = predictor.state();
+        velocity = predictor.velocity();
+    }
     std::optional<Sources> previous;
     double last_thermodynamic_change = 0, last_source_change = 0;
     std::string source_failure_detail;
@@ -1252,8 +1287,9 @@ ReactingVoFCoupler::Trial ReactingVoFCoupler::preview(double dt, const ReactingV
             stats.cumulative_produced = impl_->accepted.cumulative_produced + stats.hydrogen_produced;
             stats.cumulative_captured = impl_->accepted.cumulative_captured + stats.hydrogen_captured;
             stats.cumulative_escaped = impl_->accepted.cumulative_escaped + stats.hydrogen_escaped;
+            auto registry = impl_->representation ? impl_->representation->invalidated_snapshot() : nullptr;
             auto candidate = std::make_shared<const Impl::Candidate>(
-                Impl::Candidate{impl_.get(), impl_->revision, std::move(fluid), stats});
+                Impl::Candidate{impl_.get(), impl_->revision, std::move(fluid), stats, std::move(registry), {}});
             return Trial(std::move(candidate));
         }
         guess = fluid.state();
@@ -1268,6 +1304,119 @@ ReactingVoFCoupler::Trial ReactingVoFCoupler::preview(double dt, const ReactingV
     throw std::runtime_error(message.str());
 }
 
+void ReactingVoFCoupler::request_births(const std::vector<BubbleBirthSeed>& seeds)
+{
+    require_all(bool(impl_->representation), "Birth requests require opt-in representation changes.");
+    require_all(
+        impl_->revision < std::numeric_limits<std::uint64_t>::max(), "Reacting VoF revision counter is exhausted.");
+    impl_->representation->request_births(seeds);
+    ++impl_->revision;
+}
+const std::vector<BubbleBirthRecord>& ReactingVoFCoupler::birth_registry() const noexcept
+{
+    static const std::vector<BubbleBirthRecord> empty;
+    return impl_->representation ? impl_->representation->snapshot().births : empty;
+}
+const std::vector<BubbleConversionEvent>& ReactingVoFCoupler::conversion_history() const noexcept
+{
+    static const std::vector<BubbleConversionEvent> empty;
+    return impl_->representation ? impl_->representation->snapshot().history : empty;
+}
+BubbleRepresentationInspection ReactingVoFCoupler::inspect_representation() const
+{
+    require_all(bool(impl_->representation), "Representation inspection requires explicit opt-in.");
+    return impl_->representation->prepare(*impl_->flow, impl_->options.headspace.regions).inspection;
+}
+ReactingVoFCoupler::Trial ReactingVoFCoupler::preview_representation()
+{
+    require_all(bool(impl_->representation), "Representation preview requires explicit opt-in.");
+    auto prepared = impl_->representation->prepare(*impl_->flow, impl_->options.headspace.regions);
+    auto fluid = impl_->flow->preview_representation_change(prepared.request);
+    // Measure complete before/after surface areas on the disjoint material
+    // supports, including all displaced and mixed representative populations.
+    if (!prepared.inspection.events.empty())
+    {
+        auto registry = std::make_shared<Impl::Registry::Snapshot>(*prepared.next);
+        impl_->refresh_geometry();
+        const auto& before = impl_->flow->low_mach_state();
+        const auto& after = fluid.state();
+        std::vector<detail::CompensatedSum<double>> measured(prepared.inspection.events.size());
+        detail::CompensatedSum<double> area_scale;
+        const auto support = [&](std::uint64_t gid) -> std::optional<std::size_t>
+        {
+            const auto cell = impl_->flow->hierarchy()->cell_box(gid);
+            for (std::size_t e = 0; e < prepared.supports.size(); ++e)
+                for (const auto& box : prepared.supports[e])
+                {
+                    bool overlap = true;
+                    for (std::size_t a = 0; a < 3; ++a)
+                        overlap = overlap && cell.upper[a] > box.lower[a] && box.upper[a] > cell.lower[a];
+                    if (overlap)
+                        return e;
+                }
+            return std::nullopt;
+        };
+        for (std::size_t c = 0; c < before.liquid_mass.size(); ++c)
+        {
+            double old_area = 0, new_area = 0;
+            for (std::size_t p = 0; p < before.dispersed.size(); ++p)
+            {
+                old_area += 4 * std::numbers::pi * before.dispersed[p].number[c] * before.dispersed[p].radius[c] *
+                            before.dispersed[p].radius[c];
+                new_area += 4 * std::numbers::pi * after.dispersed[p].number[c] * after.dispersed[p].radius[c] *
+                            after.dispersed[p].radius[c];
+            }
+            area_scale += old_area;
+            area_scale += new_area;
+            if (const auto event = support(impl_->flow->mesh()->cell_global_id(static_cast<LO>(c))))
+            {
+                measured[*event] += new_area;
+                measured[*event] += -old_area;
+            }
+        }
+        const auto old_patches = impl_->geometry->interface_patches(impl_->flow->gas_fraction());
+        const auto new_patches = impl_->geometry->interface_patches(fluid.gas_fraction());
+        for (const auto& patch : old_patches)
+        {
+            area_scale += patch.area;
+            if (const auto event = support(patch.gas_cell))
+                measured[*event] += -patch.area;
+        }
+        for (const auto& patch : new_patches)
+        {
+            area_scale += patch.area;
+            if (const auto event = support(patch.gas_cell))
+                measured[*event] += patch.area;
+        }
+        detail::CompensatedSum<double> assigned;
+        for (std::size_t e = 0; e < measured.size(); ++e)
+        {
+            auto& event = prepared.inspection.events[e];
+            event.surface_area_change = reduce(measured[e].value(), Teuchos::REDUCE_SUM);
+            assigned += event.surface_area_change;
+        }
+        const auto& diagnostics = fluid.representation_diagnostics();
+        const double remainder =
+            diagnostics.resolved_area_change + diagnostics.dispersed_area_change - assigned.value();
+        const double scale = reduce(area_scale.value(), Teuchos::REDUCE_SUM);
+        require_all(std::abs(remainder) <= 512 * std::numeric_limits<double>::epsilon() *
+                                               std::max(scale, std::numeric_limits<double>::min()),
+            "Representation surface change escaped the disjoint event supports.");
+        prepared.inspection.events.back().surface_area_change += remainder;
+        const auto first = registry->history.size() - prepared.inspection.events.size();
+        for (std::size_t e = 0; e < measured.size(); ++e)
+        {
+            auto& event = prepared.inspection.events[e];
+            event.surface_energy_change = impl_->flow->material().surface_tension * event.surface_area_change;
+            registry->history[first + e] = event;
+        }
+        prepared.next = std::move(registry);
+    }
+    auto candidate = std::make_shared<const Impl::Candidate>(Impl::Candidate{impl_.get(), impl_->revision,
+        std::move(fluid), impl_->accepted, std::move(prepared.next), std::move(prepared.inspection)});
+    return Trial(std::move(candidate));
+}
+
 void ReactingVoFCoupler::commit(const Trial& trial)
 {
     const auto candidate = std::static_pointer_cast<const Impl::Candidate>(trial.candidate_);
@@ -1275,6 +1424,8 @@ void ReactingVoFCoupler::commit(const Trial& trial)
                     impl_->revision < std::numeric_limits<std::uint64_t>::max(),
         "Reacting VoF trial is foreign, stale or already committed.");
     impl_->flow->commit_low_mach_trial(candidate->fluid);
+    if (impl_->representation)
+        impl_->representation->publish(candidate->registry, impl_->flow->state_revision());
     impl_->accepted = candidate->stats;
     ++impl_->revision;
 }
@@ -1288,22 +1439,25 @@ ReactingVoFCoupler::Checkpoint ReactingVoFCoupler::checkpoint()
 {
     require_all(!impl_->saved, "Reacting VoF already has an active checkpoint.");
     const auto token = impl_->flow->checkpoint();
-    impl_->saved = std::pair{token, impl_->accepted};
+    impl_->saved =
+        Impl::Saved{token, impl_->accepted, impl_->representation ? impl_->representation->snapshot_handle() : nullptr};
     return token;
 }
 void ReactingVoFCoupler::restore(Checkpoint token)
 {
     require_all(
-        impl_->saved && impl_->saved->first == token && impl_->revision < std::numeric_limits<std::uint64_t>::max(),
+        impl_->saved && impl_->saved->token == token && impl_->revision < std::numeric_limits<std::uint64_t>::max(),
         "Reacting VoF checkpoint token is not active or its revision counter is exhausted.");
     impl_->flow->restore(token);
-    impl_->accepted = impl_->saved->second;
+    impl_->accepted = impl_->saved->statistics;
+    if (impl_->representation)
+        impl_->representation->publish(impl_->saved->registry, impl_->flow->state_revision());
     ++impl_->revision;
     impl_->geometry.reset();
 }
 void ReactingVoFCoupler::release_checkpoint(Checkpoint token)
 {
-    require_all(impl_->saved && impl_->saved->first == token, "Reacting VoF checkpoint token is not active.");
+    require_all(impl_->saved && impl_->saved->token == token, "Reacting VoF checkpoint token is not active.");
     impl_->flow->release_checkpoint(token);
     impl_->saved.reset();
 }
@@ -1311,7 +1465,10 @@ void ReactingVoFCoupler::regrid(const VoF::RefinementPlan& plan)
 {
     require_all(
         impl_->revision < std::numeric_limits<std::uint64_t>::max(), "Reacting VoF revision counter is exhausted.");
+    auto registry = impl_->representation ? impl_->representation->invalidated_snapshot() : nullptr;
     impl_->flow->regrid(plan);
+    if (impl_->representation)
+        impl_->representation->publish(std::move(registry), impl_->flow->state_revision());
     impl_->geometry.reset();
     ++impl_->revision;
 }
