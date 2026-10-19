@@ -679,4 +679,34 @@ TEST(GeometricVoFTest, RequestedStencilResultsMatchFullKernelIncludingBoundaryCe
         EXPECT_THROW((void) geometry.curvature(fraction, invalid), std::out_of_range);
     }
 }
+
+TEST(GeometricVoF, MicroscopicPhaseOutflowCannotOverdrawItsDonor)
+{
+    UniformGrid grid;
+    grid.cells = {4, 4, 2};
+    grid.spacing = {1.0, 1.0, 100.0};
+    grid.periodic = {true, true, true};
+    GeometricVoF geometry(grid);
+    for (const double trace : {6.0e-17, 1.0e-22})
+        for (std::size_t first = 0; first < 3; ++first)
+        {
+            std::vector<double> fraction(grid.cell_count());
+            for (std::size_t c = 0; c < fraction.size(); ++c)
+                if (grid.cell_coordinates(c)[0] == 1)
+                    fraction[c] = trace;
+            const auto result = geometry.advect(fraction, face_constant(grid, {-1.0, 0.0, 0.0}), 0.1, first);
+            long double before = 0.0, after = 0.0;
+            for (std::size_t c = 0; c < fraction.size(); ++c)
+            {
+                EXPECT_GE(result.fraction[c], 0.0);
+                const auto p = grid.cell_coordinates(c);
+                const auto face = grid.face_index(0, p[0], p[1], p[2]);
+                EXPECT_LE(-result.gas_volume[0][face], static_cast<long double>(fraction[c]) * grid.cell_volume());
+                before += static_cast<long double>(fraction[c]) * grid.cell_volume();
+                after += static_cast<long double>(result.fraction[c]) * grid.cell_volume();
+            }
+            EXPECT_NEAR(static_cast<double>(after), static_cast<double>(before), static_cast<double>(before) * 2e-15);
+            EXPECT_GT(after, 0.0);
+        }
+}
 } // namespace

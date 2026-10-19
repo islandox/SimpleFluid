@@ -206,3 +206,11 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;fvm;transport;traverse"
     TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoFPhaseBudget_EmptyRank_9procs
+    TARGET testAdaptiveVoF
+    PROCS 9
+    ARGS "--gtest_filter=AdaptiveVoFTest.MicroscopicPhaseOutflowCannotOverdrawCanonicalSubfaceDonors"
+    LABELS "vof;amr;geometry;conservation;collective;empty_rank"
+    TIMEOUT 120)
