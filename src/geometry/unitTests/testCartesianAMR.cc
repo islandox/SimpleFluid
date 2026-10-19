@@ -375,4 +375,47 @@ TEST(CartesianAMRMultiRankTest, DivergentConfigurationRequestsAndPartialPatchFla
     EXPECT_THROW((MultiRegionMesh(geometry->regions(), interfaces)), std::invalid_argument);
     EXPECT_EQ(hierarchy.topology_generation(), 0U);
 }
+
+TEST(CartesianAMRTest, DirectoryClosedBlockQueriesMatchExhaustiveIntersections)
+{
+    AMRGrid config;
+    config.root_blocks = {3, 2, 1};
+    config.block_cells = {2, 2, 2};
+    config.max_level = 2;
+    const auto root = std::make_shared<CartesianAMR>(config);
+    const auto hierarchy = root->adapt({1, 4});
+    std::vector<AMRBox> queries{{{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, {{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}},
+        {{-1.0, -1.0, -1.0}, {0.0, 0.0, 0.0}}, {{1.1, 0.0, 0.0}, {2.0, 1.0, 1.0}},
+        {{-2.0, -2.0, -2.0}, {2.0, 2.0, 2.0}}};
+    for (std::size_t b = 0; b < hierarchy->blocks().size(); ++b)
+    {
+        const auto box = hierarchy->block_box(b);
+        queries.push_back(box);
+        queries.push_back({box.lower, box.lower});
+        queries.push_back({box.upper, box.upper});
+        auto expanded = box;
+        for (std::size_t a = 0; a < 3; ++a)
+        {
+            expanded.lower[a] -= 0.013;
+            expanded.upper[a] += 0.037;
+        }
+        queries.push_back(expanded);
+    }
+    for (const auto& query : queries)
+    {
+        std::vector<std::size_t> expected;
+        for (std::size_t b = 0; b < hierarchy->blocks().size(); ++b)
+        {
+            const auto box = hierarchy->block_box(b);
+            bool intersects = true;
+            for (std::size_t a = 0; a < 3; ++a)
+                intersects = intersects && !(query.upper[a] < box.lower[a] || box.upper[a] < query.lower[a]);
+            if (intersects)
+                expected.push_back(b);
+        }
+        EXPECT_EQ(hierarchy->intersecting_blocks(query), expected);
+    }
+    EXPECT_THROW((void) hierarchy->intersecting_blocks({{NAN, 0.0, 0.0}, {1.0, 1.0, 1.0}}), std::invalid_argument);
+    EXPECT_THROW((void) hierarchy->intersecting_blocks({{1.0, 0.0, 0.0}, {0.0, 1.0, 1.0}}), std::invalid_argument);
+}
 } // namespace

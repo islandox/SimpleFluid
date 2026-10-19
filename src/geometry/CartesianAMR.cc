@@ -449,6 +449,58 @@ std::vector<AMROverlap> CartesianAMR::overlaps(const AMRBox& request) const
     return result;
 }
 
+std::vector<std::size_t> CartesianAMR::intersecting_blocks(const AMRBox& request) const
+{
+    auto query = request;
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        if (!std::isfinite(query.lower[a]) || !std::isfinite(query.upper[a]) || query.lower[a] > query.upper[a])
+            throw std::invalid_argument("Cartesian AMR block query must be finite and ordered.");
+    }
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        const double end = config_.origin[a] + config_.extent[a];
+        if (query.upper[a] < config_.origin[a] || query.lower[a] > end)
+            return {};
+        query.lower[a] = std::max(query.lower[a], config_.origin[a]);
+        query.upper[a] = std::min(query.upper[a], end);
+    }
+    std::vector<std::size_t> result;
+    const auto visit = [&](auto&& self, const AMRBlock& key) -> void
+    {
+        const auto box = key_box(key);
+        for (std::size_t a = 0; a < 3; ++a)
+            if (query.upper[a] < box.lower[a] || box.upper[a] < query.lower[a])
+                return;
+        const auto found = leaf_directory_->ordinals.find(key);
+        if (found != leaf_directory_->ordinals.end())
+        {
+            result.push_back(found->second);
+            return;
+        }
+        if (key.level >= config_.max_level)
+            throw std::logic_error("Cartesian AMR block query reached an uncovered finest block.");
+        for (const auto& child : children(key))
+            self(self, child);
+    };
+    std::array<std::size_t, 3> lo{}, hi{};
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        const long double scale = static_cast<long double>(config_.root_blocks[a]) / config_.extent[a];
+        const auto first = static_cast<std::size_t>(
+            std::max(0.0L, std::floor((static_cast<long double>(query.lower[a]) - config_.origin[a]) * scale)));
+        lo[a] = first == 0 ? 0 : first - 1;
+        hi[a] = static_cast<std::size_t>(std::min(static_cast<long double>(config_.root_blocks[a]),
+            std::ceil((static_cast<long double>(query.upper[a]) - config_.origin[a]) * scale) + 1.0L));
+    }
+    for (std::size_t k = lo[2]; k < hi[2]; ++k)
+        for (std::size_t j = lo[1]; j < hi[1]; ++j)
+            for (std::size_t i = lo[0]; i < hi[0]; ++i)
+                visit(visit, AMRBlock{0, {i, j, k}});
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
 std::shared_ptr<const CartesianAMR> CartesianAMR::adapt(
     const std::vector<std::size_t>& refine, const std::vector<AMRBlock>& coarsen) const
 {

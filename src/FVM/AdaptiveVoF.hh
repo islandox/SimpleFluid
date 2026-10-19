@@ -118,6 +118,16 @@ struct RefinementPlan
     bool resolution_limited = false; ///< A protected interface is at max_level above the diameter target.
 };
 
+/** Rank-local reconstruction metadata payload, excluding allocator/map/importer overhead.
+ * Payload bytes are capacity-based estimates, not process RSS; shared instances
+ * report the same shared payload rather than additive ownership.
+ */
+struct AdaptiveGeometryStorage
+{
+    std::size_t patches = 0, virtual_cells = 0, direct_cells = 0, explicit_intersections = 0;
+    std::size_t sample_payload_bytes = 0;
+};
+
 /**
  * Distributed leaf-cell geometry, with native canonical coarse/fine subfaces.
  *
@@ -128,6 +138,9 @@ struct RefinementPlan
  * hierarchy metadata is replicated. Temporary reconstruction halos use sparse
  * Tpetra imports. No finest-level volume mesh or global solution copy is made.
  * The topology is immutable; construct a new instance and remap to regrid.
+ * Instances constructed from the same hierarchy share immutable reconstruction
+ * metadata and import plans collectively, while each retains private exchange
+ * workspaces. Fraction-dependent reconstruction results remain call-local.
  */
 class SIMPLEFLUID_FVM_EXPORT AdaptiveVoF
 {
@@ -143,7 +156,11 @@ public:
 
     [[nodiscard]] const std::shared_ptr<const Hierarchy>& hierarchy() const noexcept;
     [[nodiscard]] const SP<const Handle>& mesh() const noexcept;
+    [[nodiscard]] AdaptiveGeometryStorage geometry_storage() const noexcept;
     [[nodiscard]] std::vector<double> exchange_cells(const std::vector<double>& owned) const;
+    /** Batched native import with instance-private mutable work vectors. */
+    [[nodiscard]] std::vector<Vector> exchange_cell_vectors(const std::vector<Vector>& owned) const;
+    [[nodiscard]] std::vector<Vector> exchange_face_vectors(const std::vector<Vector>& overlap) const;
     [[nodiscard]] std::vector<double> exchange_faces(const std::vector<double>& overlap) const;
     [[nodiscard]] std::vector<InterfacePlane> reconstruct(const std::vector<double>& fraction) const;
     [[nodiscard]] std::vector<double> curvature(const std::vector<double>& fraction) const;
