@@ -151,6 +151,8 @@ public:
     {
     public:
         [[nodiscard]] const VoF::LowMachState& state() const;
+        /** Immutable integrated face ledgers of the candidate transport. */
+        [[nodiscard]] const VoF::LowMachTransport& transport() const;
         [[nodiscard]] const RadiolyticVoFStatistics& statistics() const;
         [[nodiscard]] const BubbleRepresentationInspection& representation() const;
         [[nodiscard]] const VoF::RepresentationDiagnostics& representation_diagnostics() const;

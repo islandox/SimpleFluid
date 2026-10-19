@@ -601,6 +601,25 @@ double low_thermal_iteration_error(const State& candidate, const State& guess) c
     return maximum(error);
 }
 
+/** No fictitious radius is assigned to an empty cell. At a particle front
+ * extend the populated-side evaluated closure; otherwise distance interpolate.
+ * Constant-slip cell closures extend throughout the available liquid carrier.
+ */
+Vector population_face_drift(const Face& face, const std::vector<Vector>& drift,
+    const std::vector<double>& number) const
+{
+    if (face.boundary)
+        return drift[face.owner];
+    const bool left = number[face.owner] > 0, right = number[face.neighbor] > 0;
+    if (left != right)
+        return drift[left ? face.owner : face.neighbor];
+    Vector value{};
+    for (std::size_t a = 0; a < 3; ++a)
+        value[a] = (face.neighbor_distance * drift[face.owner][a] +
+                       face.owner_distance * drift[face.neighbor][a]) / face.distance;
+    return value;
+}
+
 double stable_low_timestep(const State& s) const
 {
     const auto& q = *s.low;
@@ -611,15 +630,11 @@ double stable_low_timestep(const State& s) const
     for (const auto& population : q.dispersed)
     {
         const auto drift = exchange_vectors(population.drift_velocity);
+        const auto number = geometry->exchange_cells(population.number);
         for (std::size_t id = 0; id < mesh->num_owned_faces(); ++id)
         {
             const auto& face = faces[id];
-            Vector velocity = drift[face.owner];
-            if (!face.boundary)
-                for (std::size_t a = 0; a < 3; ++a)
-                    velocity[a] = (face.neighbor_distance * drift[face.owner][a] +
-                                      face.owner_distance * drift[face.neighbor][a]) /
-                                  face.distance;
+            const auto velocity = population_face_drift(face, drift, number);
             face_drift_speed[id] = std::max(face_drift_speed[id], std::abs(dot(velocity, face.normal)));
         }
     }
@@ -1087,15 +1102,17 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
     {
         next.dispersed[q].drift_velocity = source.dispersed[q].drift_velocity;
         const auto drift = exchange_vectors(source.dispersed[q].drift_velocity);
+        auto supported_number = accepted.dispersed[q].number;
+        for (std::size_t c = 0; c < owned(); ++c)
+            supported_number[c] += std::max(0.0, source.dispersed[q].number_change[c]);
+        const auto number_halo = geometry->exchange_cells(supported_number);
         std::vector<double> slip(faces.size()), carrier = out.carrier_volume;
         for (std::size_t id = 0; id < mesh->num_owned_faces(); ++id)
         {
             const auto& f = faces[id];
             if (f.boundary)
                 continue;
-            Vector w{};
-            for (std::size_t a = 0; a < 3; ++a)
-                w[a] = (f.neighbor_distance * drift[f.owner][a] + f.owner_distance * drift[f.neighbor][a]) / f.distance;
+            const auto w = population_face_drift(f, drift, number_halo);
             slip[id] = dt * f.area * aperture[id] * dot(w, f.normal);
         }
         slip = geometry->exchange_faces(slip);
@@ -1440,7 +1457,12 @@ State advance_low(const State& old, double dt, const VoF::LowMachSources& input,
     const auto source = normalize_low_sources(old, input);
     State transport_reference = old;
     for (std::size_t population = 0; population < source.dispersed.size(); ++population)
-        transport_reference.low->dispersed[population].drift_velocity = source.dispersed[population].drift_velocity;
+    {
+        auto& reference = transport_reference.low->dispersed[population];
+        reference.drift_velocity = source.dispersed[population].drift_velocity;
+        for (std::size_t c = 0; c < owned(); ++c)
+            reference.number[c] += std::max(0.0, source.dispersed[population].number_change[c]);
+    }
     require_all(dt <= stable_low_timestep(transport_reference) * (1 + 8 * std::numeric_limits<double>::epsilon()),
         "Low-Mach timestep exceeds the advective bound for the supplied population drift.");
     const auto initial_totals = low_totals(*old.low);
