@@ -348,11 +348,71 @@ TEST(AdaptiveVoFSolverTest, UniformVelocityAndPhaseInventoriesCrossCoarseFineAnd
     const auto initial_norms = inventory_norms(solver);
     EXPECT_NEAR(initial_inventories.back(), 0.0, 1e-15);
     const double initial_volume = gas_volume(solver);
+    VoF::AdaptiveVoF transport_diagnostics(solver.hierarchy());
     for (int step = 0; step < 24; ++step)
     {
+        SCOPED_TRACE(::testing::Message() << "accepted step=" << step + 1);
+        if (step == 19)
+        {
+            // The moving slab develops microscopic phase tails through native
+            // reconstruction roundoff. Diagnose the physical gas-carrier rows
+            // before the historically failing twentieth inventory solve.
+            const auto transported =
+                transport_diagnostics.advect(solver.gas_fraction(), solver.face_velocity(), 0.03125, step % 3);
+            double minimum_diagonal = std::numeric_limits<double>::infinity(), maximum_diagonal = 0.0;
+            double subnormal_rows = 0.0, inverse_overflow_rows = 0.0;
+            for (std::size_t c = 0; c < solver.gas_fraction().size(); ++c)
+            {
+                const auto lid = static_cast<LO>(c);
+                double diagonal = transported.fraction[c] * solver.mesh()->cell_volume(lid);
+                solver.mesh()->visit_cell_faces(lid,
+                    [&](LO face)
+                    {
+                        if (!solver.mesh()->is_geometry_exterior_face(face))
+                        {
+                            const double outgoing =
+                                transported.gas_volume[face] * (solver.mesh()->owner_cell(face) == lid ? 1.0 : -1.0);
+                            diagonal += std::max(0.0, outgoing);
+                        }
+                    });
+                if (diagonal > 0.0)
+                {
+                    minimum_diagonal = std::min(minimum_diagonal, diagonal);
+                    maximum_diagonal = std::max(maximum_diagonal, diagonal);
+                    subnormal_rows += diagonal < std::numeric_limits<double>::min();
+                    inverse_overflow_rows += diagonal < 1.0 / std::numeric_limits<double>::max();
+                }
+            }
+            minimum_diagonal = reduce(minimum_diagonal, Teuchos::REDUCE_MIN);
+            maximum_diagonal = reduce(maximum_diagonal, Teuchos::REDUCE_MAX);
+            subnormal_rows = reduce(subnormal_rows, Teuchos::REDUCE_SUM);
+            inverse_overflow_rows = reduce(inverse_overflow_rows, Teuchos::REDUCE_SUM);
+            if (Tpetra::getDefaultComm()->getRank() == 0)
+                std::cout << std::setprecision(17)
+                          << "adaptive_passive_carrier,step=20,minimum_positive_diagonal=" << minimum_diagonal
+                          << ",maximum_diagonal=" << maximum_diagonal << ",subnormal_rows=" << subnormal_rows
+                          << ",inverse_overflow_rows=" << inverse_overflow_rows << '\n'
+                          << std::flush;
+        }
         (void) solver.step(0.03125);
         EXPECT_LT(maximum_divergence(solver), 1e-8);
         EXPECT_NEAR(gas_volume(solver), initial_volume, 2e-12);
+        double tracer_error = 0.0;
+        for (std::size_t c = 0; c < solver.gas_fraction().size(); ++c)
+        {
+            const double gas = solver.gas_fraction()[c] * solver.mesh()->cell_volume(static_cast<LO>(c));
+            const double moles = solver.inventory("gas_moles").amount[c];
+            tracer_error = std::max(tracer_error, std::abs(moles - 7.0 * gas));
+            EXPECT_NEAR(moles, 7.0 * gas, 2e-12);
+            EXPECT_GE(moles, 0.0);
+            if (gas > 0.0)
+                EXPECT_TRUE(std::isfinite(moles / gas));
+        }
+        tracer_error = reduce(tracer_error, Teuchos::REDUCE_MAX);
+        if (step == 19 && Tpetra::getDefaultComm()->getRank() == 0)
+            std::cout << std::setprecision(17)
+                      << "adaptive_passive_carrier,step=20,maximum_constant_tracer_error=" << tracer_error << '\n'
+                      << std::flush;
     }
     const auto final_momentum = momentum(solver);
     const auto final_inventories = inventory_totals(solver);
