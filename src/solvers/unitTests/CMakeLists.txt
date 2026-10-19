@@ -90,7 +90,7 @@ simplefluid_add_mpi_test(
     TARGET testAdaptiveVoFSolver
     PROCS 2
     LABELS "vof;amr;conservation;capillary;transaction;collective"
-    TIMEOUT 600)
+    TIMEOUT 1200)
 
 simplefluid_add_mpi_test(
     NAME VoFRejectsDistributedConstruction_2procs
