@@ -20,9 +20,11 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 
 ### Current priorities
 
-Phase 22 has uniform and distributed Cartesian AMR VoF backends with focused
-verification. Physical gas coupling, representation changes, and application
-resolution qualification remain separate acceptance gates.
+Phase 22 has uniform and distributed Cartesian AMR VoF backends, numerical
+radiolytic coupling, and conservative representation changes with focused
+verification. Physical calibration and application resolution qualification
+remain open. Phase 23 proposes native XY/Z, polyhedral, and mixed-region AMR;
+its mesh and solver extensions are not implemented.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -60,7 +62,8 @@ resolution qualification remain separate acceptance gates.
 | Phase 20, TH/neutronics map | In-memory scaffold and reusable conservative cell transfer implemented | Production external-neutronics protocol and validation |
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
-| Phase 22, resolved/dispersed bubbles | Uniform and synchronous Cartesian AMR backends implemented and focused-tested | Physical gas coupling, representation changes, application resolution studies, and optional AMR extensions |
+| Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
+| Phase 23, general native AMR | Design proposed; implementation open | XY/Z products, polyhedral refinement, mixed-region closure, distributed migration, and general VoF qualification |
 
 ### Checklist conventions
 
@@ -1723,7 +1726,9 @@ the later physical coupling controller.
 - [x] Verify refinement/coarsening and three-dimensional interface passage
       across coarse/fine and MPI boundaries, capillary startup against a uniform
       fine reference, viscous stress, pressure balance, rejection, and replay.
-- [ ] Qualify prism subdivision and vessel-boundary geometry separately.
+- [ ] Qualify prism subdivision and vessel-boundary geometry through the
+      separate [Phase 23](#phase-23--amr-for-native-extruded-polyhedral-and-mixed-region-meshes)
+      geometry and solver gates.
 - [ ] Perform finer centimetric-bubble resolution studies. Interface resolution
       alone is not wake DNS or mass-transfer resolution; the startup pressure
       comparison does not qualify rise speed, shape dynamics, or long-time
@@ -1839,6 +1844,138 @@ localization/calibration and application convergence remain open.**
 See the [representation guide](docs/modeling/bubble_representation.md) and the
 separate [Stage 4 verification record](docs/verification/vof_stage4_20261019.md)
 for the implemented API, exact focused evidence and qualification limits.
+
+---
+
+## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
+
+**Status: design proposed; all implementation stages remain open.** See the
+[general AMR design](docs/architecture/general_amr.md) for the algorithms,
+ownership/API contracts, admission rules, and focused acceptance matrix.
+Geometry refinement and VoF/physical-coupling qualification are separate gates.
+The existing Cartesian backend retains its support contract throughout.
+
+### Stage 1 — Common hierarchy contracts and Cartesian adapter
+
+- [ ] Introduce immutable provider-specific ancestry behind an
+      `AdaptiveHierarchy` seam, preserving the `CartesianAMR` API and optimized
+      backend. Keep physical region/material identity separate from fragments,
+      canonical GIDs, and MPI/local field order.
+- [ ] Track topology, partition, geometry, and accepted-state/control revisions
+      independently. Pin plans and trials to exact source observations and
+      preserve collective preflight, atomic publication, and stale-plan rejection.
+- [ ] Verify unchanged Cartesian geometry/numerics, native fields/traversal,
+      independent repartition stamps, and rollback without compatibility CSR.
+
+### Stage 2 — Geometric kernels and ancestry-based overlap
+
+- [ ] Add certified actual-cell halfspace clips, sections, moments, face
+      apertures, and nested ancestry overlap records. Preserve positive tiny
+      pieces; reject invalid/sliver geometry instead of dropping volume.
+- [ ] Factor reusable sparse transfer semantics while retaining physical
+      carrier geometry. Use polygon-area times Z-overlap for bulk products and
+      actual 3D clipped intersections for tilted PLIC phase volumes.
+- [ ] Verify analytic cube/tetrahedron/prism/skew cuts, tangencies, complements,
+      scale/translation invariance, coverage, first moments, and signed and
+      nonnegative extensive conservation. Do not normalize coverage errors.
+
+### Stage 3 — Whole-product XY/Z refinement
+
+- [ ] Add separate base-cell/edge and axial-interval ancestry, deterministic
+      triangular base refinement with conformity closure, and common Z
+      bisection. XY refinement initially covers whole columns.
+- [ ] Add quality-checked convex quadrilateral/polygon templates with complete
+      inverse families. Preserve original polygonal walls and patch labels.
+- [ ] Verify XY-then-Z/Z-then-XY key and geometry identity, factor-specific
+      sibling coarsening, exact parent recovery, compact O(base + layers)
+      storage, and the native composite serial/MPI route. Initial extrusions
+      are nonperiodic; new periodic descriptors need separate qualification.
+
+### Stage 4 — Convex polyhedral refinement
+
+- [ ] Clip the actual convex parent with its AABB midpoint planes; record a
+      variable set of nonempty octant children. Certify convexity, closed
+      topology, representability, child quality, containment, and disjoint union.
+- [ ] Construct canonical parent-face subdivisions from both incident split
+      patterns and propagate new edge vertices through every incident loop.
+      Restore saved parent geometry on complete-family coarsening while
+      retaining finer-neighbor face tiles.
+- [ ] Verify variable child counts, unrelated neighboring cuts, face/edge
+      closure, signed incidence, volume/first moments, sliver rejection,
+      transactional failure, and exact parent-shell recovery.
+
+### Stage 5 — Mixed-region closure and local XY/Z products
+
+- [ ] Represent local extrusion refinement as shared base patches times Z
+      runs, with immutable shared base topology/metrics and compact seam
+      descriptors. Account for unique templates and local-product overhead.
+- [ ] Close refinement across region joins using physical scales and common
+      interface ancestry; preserve same-fluid pressure connectivity and
+      distinct material/contact laws. Keep unsupported providers static.
+- [ ] Initially require nested supported joins. Add validated multi-provider
+      subface descriptors for local products after qualifying coverage and
+      ownership; crossed anisotropic tilings must close compatibly or reject.
+- [ ] Verify one canonical integrated flux per tile, complete unique coverage,
+      patch inheritance, periodic support limits, contact isolation, bounded
+      closure, and compact repeated seam storage.
+
+### Stage 6 — Distributed planning and migration
+
+- [ ] Replace root-assembled AMR planning with distributed closure, ancestry
+      lookup, canonical face/edge decisions, and owner-to-owner geometry/state
+      migration. Use the present root assembly only as an explicitly bounded
+      bootstrap for preceding stages.
+- [ ] Balance measured reconstruction/interface/population work and migration
+      cost; retain sparse native fragments and reconstruction halos.
+- [ ] Verify partition-equivalent keys and budgets, split sibling families,
+      empty ranks, unique ownership, collective failures without deadlock, and
+      per-rank memory bounds without a global explicit mesh or solution copy.
+
+### Stage 7 — General VoF and flow qualification
+
+- [ ] Add polyhedral PLIC reconstruction and canonical unsplit swept-volume
+      transport with complementary gas/carrier fluxes matching projected face
+      volume. Retain the Cartesian implementation as a specialized backend.
+- [ ] Add physical-coordinate curvature, nonorthogonal pressure/capillary
+      balance, viscous transport, and geometry-based timestep/resolution
+      criteria. Use physical spans, not cube-root volume, for bubble resolution.
+- [ ] Verify inferred oblique planes, transport/deformation across skew,
+      coarse/fine and MPI faces, phase bounds and conservation, hydrostatics,
+      capillary convergence, viscous modes, and regrid momentum. Qualify
+      source-free flow before nonzero material-volume sources.
+
+### Stage 8 — Radiolytic and representation integration
+
+- [ ] Extend Phase 22 source/thermodynamic ledgers, film/aperture integration,
+      birth supports, donor selection, component inspection, and coupled maps
+      to actual native cell geometry. Retain external controller ownership.
+- [ ] Preserve birth IDs/events and accepted inventories while invalidating
+      geometry-dependent reservations and labels. Continue blocking topology
+      change during active checkpoints or pending representation relaxation;
+      exact history-preserving repartition and mesh-inclusive replay are
+      separate later gates.
+- [ ] Verify source-divergence/occupancy closure, all phase mass/species/energy
+      and physical momentum budgets, tiny carriers, remote deposition, donor
+      competition, stale trials, rejection, and checkpoint replay. Application
+      calibration and centimetric-bubble convergence remain required.
+
+### Stage 9 — Certified nonconvex cells
+
+- [ ] Admit star-shaped cells through certified kernel points and canonical
+      constrained face triangulations; then add boundary-conforming constrained
+      tetrahedral/convex decomposition for non-star-shaped cells.
+- [ ] Preserve the original shell, shared boundary subdivisions, disconnected
+      clipped components, and multiple phase patches. Do not infer a kernel
+      from a centroid or replace a nonconvex parent with its convex hull.
+- [ ] Certify shell/union/first-moment recovery and disjoint positive pieces,
+      reject self-intersections, and repeat geometry, VoF, and physical-coupling
+      gates for every admitted class before extending support claims.
+
+Every stage requires focused affected checks; serial/MPI correctness evidence
+does not establish scaling or physical application accuracy. Keep dated
+commands/results in separate validation records. Level subcycling, simultaneous
+ALE/regridding, curved-cell refinement, and rotated periodic transformations
+remain outside this design.
 
 ---
 

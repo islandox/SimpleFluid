@@ -27,7 +27,13 @@ through layers. `ExtrudedGeometry` retains that template but owns independent
 XY coordinates and axial edges. It caches base-cell and base-edge metrics once;
 it never expands them through layers. Both geometry types can share one topology
 with other independently located/scaled regions. Composite extrusion cells are
-currently triangles or strictly convex quadrilaterals in the base plane (WEDGE_6/HEX_8).
+triangles, strictly convex quadrilaterals, or larger strictly convex polygons in
+the base plane (WEDGE_6, HEX_8, or POLYHEDRON respectively).
+
+Adaptive native XY/Z, polyhedral, and mixed-region meshes are proposed in the
+[general AMR design](architecture/general_amr.md). That design adds ancestry,
+refinement/transfer, and solver qualification gates; the existing native
+providers do not by themselves implement these adaptive extensions.
 
 `SweptRZGeometry` shares `ExtrudedTopology` but interprets its layers as angular
 intervals. It retains a clockwise, strictly convex radius-height triangle or

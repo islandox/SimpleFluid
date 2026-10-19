@@ -857,6 +857,10 @@ whole-bubble promotion, complete-component demotion, a checkpointed birth
 registry, and conservative carrier displacement. Physical calibration and
 centimetric-bubble qualification remain open in
 [Phase 22](TODO.md#phase-22--resolved-and-dispersed-radiolytic-bubbles).
+The [general AMR design](docs/architecture/general_amr.md) proposes native
+XY/Z extrusion, polyhedral, and mixed-region extensions with separate mesh,
+distributed-migration, and VoF qualification stages; those extensions are
+not implemented.
 
 ## Dependencies
 
@@ -907,6 +911,7 @@ example and storage accounting](docs/region_meshes.md).
 | Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
 | Uniform-mesh geometric VoF | [Solver and numerical verification](docs/modeling/vof.md) |
 | Adaptive Cartesian VoF | [Conservative refinement and distributed flow](docs/modeling/adaptive_vof.md) |
+| Proposed general native AMR | [XY/Z, polyhedral, and mixed-region design](docs/architecture/general_amr.md) |
 | Radiolytic resolved/dispersed coupling | [Low-Mach inventories, interface transfer, and capture](docs/modeling/radiolytic_vof.md) |
 | Bubble representation changes | [Birth registry, promotion, demotion, and pressure history](docs/modeling/bubble_representation.md) |
 | SST-SAS configuration and supported paths | [Model contract](docs/modeling/sst_sas.md) and [extensions](docs/modeling/sst_sas_extensions.md) |
