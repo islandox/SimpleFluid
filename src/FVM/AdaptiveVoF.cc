@@ -151,6 +151,34 @@ double carrier_volume(InventoryCarrier carrier, double total, double gas, double
     }
     throw std::invalid_argument("Unknown adaptive inventory carrier.");
 }
+
+using FacePoint = std::array<double, 2>;
+
+std::vector<FacePoint> clip_face_polygon(const std::vector<FacePoint>& polygon, double a, double b, double threshold)
+{
+    const double scale = std::max({std::abs(a), std::abs(b), std::abs(threshold)});
+    if (polygon.empty() || scale == 0.0)
+        return polygon;
+    a /= scale;
+    b /= scale;
+    threshold /= scale;
+    std::vector<FacePoint> result;
+    for (std::size_t i = 0; i < polygon.size(); ++i)
+    {
+        const auto& start = polygon[i];
+        const auto& end = polygon[(i + 1) % polygon.size()];
+        const double first = a * start[0] + b * start[1] - threshold;
+        const double second = a * end[0] + b * end[1] - threshold;
+        if ((first >= 0.0) != (second >= 0.0))
+        {
+            const double fraction = first / (first - second);
+            result.push_back({start[0] + fraction * (end[0] - start[0]), start[1] + fraction * (end[1] - start[1])});
+        }
+        if (second >= 0.0)
+            result.push_back(end);
+    }
+    return result;
+}
 } // namespace
 
 struct AdaptiveVoF::Impl
@@ -367,14 +395,322 @@ std::vector<double> AdaptiveVoF::curvature(const std::vector<double>& fraction) 
     return result;
 }
 
+std::vector<InterfacePatch> AdaptiveVoF::interface_patches(const std::vector<double>& fraction) const
+{
+    const auto planes = reconstruct(fraction);
+    const auto halo = exchange_cells(fraction);
+    std::vector<InterfacePatch> patches;
+    bool valid = true;
+    try
+    {
+        const auto execution = mesh()->acquire_execution_view();
+        const int rank = mesh()->owned_cell_map()->getComm()->getRank();
+        const auto prepare = [&](InterfacePatch& patch)
+        {
+            const auto box = hierarchy()->cell_box(patch.carrier_cell);
+            const auto origin = center(box);
+            patch.source_hierarchy_ = hierarchy();
+            patch.owner_rank_ = rank;
+            for (std::size_t a = 0; a < 3; ++a)
+            {
+                patch.lower_[a] = box.lower[a] - origin[a];
+                patch.upper_[a] = box.upper[a] - origin[a];
+            }
+            return origin;
+        };
+        for (std::size_t c = 0; c < fraction.size(); ++c)
+        {
+            if (!(fraction[c] > 0.0 && fraction[c] < 1.0))
+                continue;
+            InterfacePatch patch;
+            patch.gas_cell = patch.carrier_cell =
+                static_cast<std::uint64_t>(mesh()->cell_global_id(static_cast<LO>(c)));
+            patch.source_entity_ = patch.gas_cell;
+            const auto origin = prepare(patch);
+            const auto section =
+                GeometricVoF::plane_section(patch.lower_, patch.upper_, planes[c].normal, planes[c].offset);
+            if (!(section.area > 0.0))
+                continue;
+            patch.normal = patch.plane_normal_ = section.normal;
+            const double magnitude = std::hypot(planes[c].normal[0], planes[c].normal[1], planes[c].normal[2]);
+            patch.plane_offset_ = planes[c].offset / magnitude;
+            patch.area = section.area;
+            for (std::size_t a = 0; a < 3; ++a)
+                patch.centroid[a] = origin[a] + section.centroid[a];
+            patches.push_back(std::move(patch));
+        }
+        for (std::size_t face = 0; face < mesh()->num_owned_faces(); ++face)
+        {
+            const auto fid = static_cast<LO>(face);
+            if (mesh()->is_geometry_exterior_face(fid))
+                continue;
+            const auto owner = mesh()->owner_cell(fid), neighbor = mesh()->neighbor_cell(fid);
+            const bool owner_gas = halo[owner] >= 1.0 && halo[neighbor] <= 0.0;
+            const bool neighbor_gas = halo[neighbor] >= 1.0 && halo[owner] <= 0.0;
+            if (!owner_gas && !neighbor_gas)
+                continue;
+            InterfacePatch patch;
+            patch.kind = InterfacePatch::Kind::MeshFace;
+            const auto gas = owner_gas ? owner : neighbor;
+            const auto carrier = owner_gas ? neighbor : owner;
+            patch.gas_cell = static_cast<std::uint64_t>(mesh()->cell_global_id(gas));
+            patch.carrier_cell = static_cast<std::uint64_t>(mesh()->cell_global_id(carrier));
+            patch.source_entity_ = static_cast<std::uint64_t>(mesh()->face_global_id(fid));
+            (void) prepare(patch);
+            const auto normal = mesh()->face_normal(fid);
+            const auto centroid = mesh()->face_centroid(fid);
+            const auto from_carrier = mesh()->face_center_vector(fid, carrier);
+            for (std::size_t a = 0; a < 3; ++a)
+            {
+                patch.normal[a] = patch.plane_normal_[a] = (owner_gas ? 1.0 : -1.0) * normal.component(a);
+                patch.centroid[a] = centroid.component(a);
+                patch.plane_offset_ += patch.normal[a] * from_carrier.component(a);
+            }
+            patch.area = mesh()->face_area(fid);
+            patches.push_back(std::move(patch));
+        }
+    }
+    catch (const std::exception&)
+    {
+        valid = false;
+    }
+    require_collective(valid, "AdaptiveVoF could not construct its interface geometry.");
+    return patches;
+}
+
+std::vector<double> AdaptiveVoF::carrier_face_aperture(const std::vector<double>& fraction) const
+{
+    const auto owned_planes = reconstruct(fraction);
+    const auto planes = impl_->exchange_planes(owned_planes, *impl_->cells);
+    const auto halo = exchange_cells(fraction);
+    std::vector<double> aperture(mesh()->num_faces(), 0.0);
+    bool valid = true;
+    try
+    {
+        const auto execution = mesh()->acquire_execution_view();
+        for (std::size_t face = 0; face < mesh()->num_owned_faces(); ++face)
+        {
+            const auto fid = static_cast<LO>(face);
+            if (mesh()->is_geometry_exterior_face(fid))
+                continue;
+            const auto owner = mesh()->owner_cell(fid), neighbor = mesh()->neighbor_cell(fid);
+            if (halo[owner] >= 1.0 || halo[neighbor] >= 1.0)
+                continue;
+            const auto normal = mesh()->face_normal(fid);
+            std::size_t axis = 0;
+            while (axis < 2 && std::abs(normal.component(axis)) < 0.5)
+                ++axis;
+            const auto b = (axis + 1) % 3, c = (axis + 2) % 3;
+            Vector lower{}, upper{};
+            lower.fill(std::numeric_limits<double>::infinity());
+            upper.fill(-std::numeric_limits<double>::infinity());
+            const auto gid = static_cast<std::uint64_t>(mesh()->face_global_id(fid));
+            for (const auto node : hierarchy()->geometry()->face_nodes(gid))
+            {
+                const auto point = hierarchy()->geometry()->node_coordinates(node);
+                for (std::size_t a = 0; a < 3; ++a)
+                {
+                    lower[a] = std::min(lower[a], point.component(a));
+                    upper[a] = std::max(upper[a], point.component(a));
+                }
+            }
+            const double width_b = upper[b] - lower[b], width_c = upper[c] - lower[c];
+            if (!(width_b > 0.0 && width_c > 0.0))
+                throw std::runtime_error("Carrier aperture requires a positive Cartesian subface.");
+            std::vector<FacePoint> polygon{{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}};
+            for (const auto cell : {owner, neighbor})
+            {
+                if (halo[cell] <= 0.0)
+                    continue;
+                const auto displacement = mesh()->face_center_vector(fid, cell);
+                Vector origin{};
+                for (std::size_t a = 0; a < 3; ++a)
+                    origin[a] = displacement.component(a);
+                origin[b] -= 0.5 * width_b;
+                origin[c] -= 0.5 * width_c;
+                const auto& plane = planes[cell];
+                const double threshold =
+                    plane.offset - std::inner_product(plane.normal.begin(), plane.normal.end(), origin.begin(), 0.0);
+                polygon = clip_face_polygon(polygon, plane.normal[b] * width_b, plane.normal[c] * width_c, threshold);
+            }
+            double area = 0.0;
+            for (std::size_t i = 0; i < polygon.size(); ++i)
+            {
+                const auto& a = polygon[i];
+                const auto& z = polygon[(i + 1) % polygon.size()];
+                area += a[0] * z[1] - a[1] * z[0];
+            }
+            area = 0.5 * std::abs(area);
+            if (!std::isfinite(area) || area > 1.0 + 2.0e-12)
+                throw std::runtime_error("Carrier aperture clipping produced an invalid fractional area.");
+            aperture[face] = std::min(1.0, area);
+        }
+    }
+    catch (const std::exception&)
+    {
+        valid = false;
+    }
+    require_collective(valid, "AdaptiveVoF could not construct shared carrier face apertures.");
+    return exchange_faces(aperture);
+}
+
+double AdaptiveVoF::film_length(const InterfacePatch& patch, double delta) const
+{
+    if (patch.source_hierarchy_.get() != hierarchy().get() || !(patch.area > 0.0) || !std::isfinite(delta) ||
+        !(delta > 0.0))
+        throw std::invalid_argument(
+            "Interface film integration requires a current patch and positive finite thickness.");
+    Vector reversed{};
+    for (std::size_t a = 0; a < 3; ++a)
+        reversed[a] = -patch.plane_normal_[a];
+    const auto carrier_volume = [&](double distance)
+    { return GeometricVoF::box_plane_volume(patch.lower_, patch.upper_, reversed, -(patch.plane_offset_ + distance)); };
+    const double carrier = carrier_volume(0.0);
+    if (!(carrier > 0.0) || !std::isfinite(carrier))
+        throw std::invalid_argument("Interface patch has no finite reconstructed carrier volume.");
+    std::array<double, 8> vertex_distances{};
+    double maximum_distance = 0.0;
+    for (std::size_t corner = 0; corner < 8; ++corner)
+    {
+        double distance = -patch.plane_offset_;
+        for (std::size_t a = 0; a < 3; ++a)
+            distance += patch.plane_normal_[a] * ((corner >> a) & 1U ? patch.upper_[a] : patch.lower_[a]);
+        vertex_distances[corner] = distance;
+        maximum_distance = std::max(maximum_distance, distance);
+    }
+    const double end = std::min(delta, maximum_distance);
+    if (!(end > 0.0))
+        throw std::invalid_argument("Interface patch has no positive carrier-side depth.");
+    std::vector<double> knots{0.0, end};
+    for (const double distance : vertex_distances)
+        if (distance > 0.0 && distance < end)
+            knots.push_back(distance);
+    std::sort(knots.begin(), knots.end());
+    knots.erase(std::unique(knots.begin(), knots.end()), knots.end());
+    detail::CompensatedSum<> integral;
+    // Layer-cake identity: integral min(s,delta)dV = integral_0^delta V(s>t)dt.
+    // Plane/box volume is piecewise cubic, with knots at vertex distances, so
+    // two-point Gauss integration is exact on each piece up to roundoff.
+    constexpr double abscissa = 0.57735026918962576451;
+    for (std::size_t i = 1; i < knots.size(); ++i)
+    {
+        const double middle = std::midpoint(knots[i - 1], knots[i]);
+        const double half = 0.5 * (knots[i] - knots[i - 1]);
+        const double average = 0.5 * (carrier_volume(middle - abscissa * half) / carrier +
+                                         carrier_volume(middle + abscissa * half) / carrier);
+        integral += (static_cast<long double>(knots[i]) - knots[i - 1]) * average;
+    }
+    const double result = static_cast<double>(integral.value());
+    if (!std::isfinite(result) || !(result > 0.0) || result > delta * (1.0 + 2.0e-12))
+        throw std::runtime_error("Interface film integration produced an invalid geometric length.");
+    return result;
+}
+
+void AdaptiveVoF::validate_patches(const std::vector<InterfacePatch>& patches, InterfaceSide side) const
+{
+    identical(static_cast<double>(side), "Interface side selection differs between ranks.");
+    bool valid = side == InterfaceSide::Gas || side == InterfaceSide::Carrier;
+    const int rank = mesh()->owned_cell_map()->getComm()->getRank();
+    const auto cells = hierarchy()->geometry()->num_cells();
+    std::set<std::pair<InterfacePatch::Kind, std::uint64_t>> identities;
+    for (const auto& patch : patches)
+        valid = valid && patch.source_hierarchy_.get() == hierarchy().get() && patch.owner_rank_ == rank &&
+                patch.gas_cell < cells && patch.carrier_cell < cells && std::isfinite(patch.area) && patch.area > 0.0 &&
+                (patch.kind == InterfacePatch::Kind::Plic || patch.kind == InterfacePatch::Kind::MeshFace) &&
+                identities.emplace(patch.kind, patch.source_entity_).second;
+    require_collective(
+        valid, "Interface operations require unique, locally owned patches from the exact source hierarchy.");
+}
+
+std::vector<double> AdaptiveVoF::scatter_patch_amounts(
+    const std::vector<InterfacePatch>& patches, const std::vector<double>& amounts, InterfaceSide side) const
+{
+    validate_patches(patches, side);
+    require_collective(amounts.size() == patches.size() && std::all_of(amounts.begin(), amounts.end(),
+                                                               [](double value) { return std::isfinite(value); }),
+        "Interface deposition requires one finite signed amount per local patch.");
+    std::set<GO> ids;
+    for (const auto& patch : patches)
+        ids.insert(static_cast<GO>(side == InterfaceSide::Gas ? patch.gas_cell : patch.carrier_cell));
+    const Exchange exchange(mesh()->owned_cell_map(), ids);
+    std::vector<detail::CompensatedSum<double>> sums(ids.size());
+    for (std::size_t i = 0; i < patches.size(); ++i)
+    {
+        const auto cell = side == InterfaceSide::Gas ? patches[i].gas_cell : patches[i].carrier_cell;
+        sums[exchange.target->getLocalElement(static_cast<GO>(cell))] += amounts[i];
+    }
+    std::vector<double> local(sums.size());
+    for (std::size_t i = 0; i < sums.size(); ++i)
+        local[i] = sums[i].value();
+    require_collective(std::all_of(local.begin(), local.end(), [](double value) { return std::isfinite(value); }),
+        "Interface patch amounts overflowed their destination inventory.");
+    auto result = exchange.sum_to_source(local);
+    require_collective(std::all_of(result.begin(), result.end(), [](double value) { return std::isfinite(value); }),
+        "Interface deposition overflowed after collective accumulation.");
+    return result;
+}
+
+std::vector<double> AdaptiveVoF::sample_patch_values(
+    const std::vector<InterfacePatch>& patches, const std::vector<double>& owned_values, InterfaceSide side) const
+{
+    validate_patches(patches, side);
+    require_collective(
+        owned_values.size() == mesh()->num_owned_cells() &&
+            std::all_of(owned_values.begin(), owned_values.end(), [](double value) { return std::isfinite(value); }),
+        "Interface sampling requires a finite owned-cell scalar.");
+    std::set<GO> ids;
+    for (const auto& patch : patches)
+        ids.insert(static_cast<GO>(side == InterfaceSide::Gas ? patch.gas_cell : patch.carrier_cell));
+    const Exchange exchange(mesh()->owned_cell_map(), ids);
+    const auto imported = exchange(owned_values);
+    std::vector<double> result(patches.size());
+    for (std::size_t i = 0; i < patches.size(); ++i)
+    {
+        const auto cell = side == InterfaceSide::Gas ? patches[i].gas_cell : patches[i].carrier_cell;
+        result[i] = imported[exchange.target->getLocalElement(static_cast<GO>(cell))];
+    }
+    return result;
+}
+
 AdaptiveAdvection AdaptiveVoF::advect(const std::vector<double>& fraction, const std::vector<double>& face_velocity,
     double dt, std::size_t first_axis) const
+{
+    return advect_with_sources(fraction, face_velocity, dt, nullptr, first_axis);
+}
+
+AdaptiveAdvection AdaptiveVoF::advect(const std::vector<double>& fraction, const std::vector<double>& face_velocity,
+    double dt, const PhaseVolumeIncrement& source, std::size_t first_axis) const
+{
+    return advect_with_sources(fraction, face_velocity, dt, &source, first_axis);
+}
+
+AdaptiveAdvection AdaptiveVoF::advect_with_sources(const std::vector<double>& fraction,
+    const std::vector<double>& face_velocity, double dt, const PhaseVolumeIncrement* source,
+    std::size_t first_axis) const
 {
     validate_f(fraction, mesh()->num_owned_cells());
     identical(dt, "AdaptiveVoF timestep must be identical and finite on every rank.");
     identical(static_cast<double>(first_axis), "AdaptiveVoF sweep order differs between ranks.");
+    identical(source ? 1.0 : 0.0, "AdaptiveVoF physical-source selection differs between ranks.");
     require_collective(dt >= 0.0 && first_axis < 3 && face_velocity.size() == mesh()->num_faces(),
         "AdaptiveVoF requires a nonnegative timestep, sweep axis and overlap face velocity.");
+    std::vector<double> total_source;
+    if (source)
+    {
+        require_collective(source->gas.size() == fraction.size() && source->carrier.size() == fraction.size(),
+            "AdaptiveVoF phase-volume increments require owned-cell ordering.");
+        bool valid_source = true;
+        total_source.resize(fraction.size());
+        for (std::size_t c = 0; c < fraction.size(); ++c)
+        {
+            total_source[c] = source->gas[c] + source->carrier[c];
+            valid_source = valid_source && std::isfinite(source->gas[c]) && std::isfinite(source->carrier[c]) &&
+                           std::isfinite(total_source[c]) &&
+                           (dt > 0.0 || (source->gas[c] == 0.0 && source->carrier[c] == 0.0));
+        }
+        require_collective(valid_source,
+            "AdaptiveVoF phase-volume increments must be finite; nonzero increments require positive dt.");
+    }
     auto u = exchange_faces(face_velocity);
     bool valid = true;
     {
@@ -385,7 +721,8 @@ AdaptiveAdvection AdaptiveVoF::advect(const std::vector<double>& fraction, const
     }
     require_collective(valid, "AdaptiveVoF requires finite velocities and impermeable wall flux.");
     AdaptiveAdvection result{fraction, std::vector<double>(u.size()), std::vector<double>(u.size()), 0.0};
-    double maxdiv = 0.0, maxcfl = 0.0;
+    double maxdiv = 0.0, maxresidual = 0.0, maxcfl = 0.0;
+    detail::CompensatedSum<double> local_source, local_volume;
     {
         const auto execution = mesh()->acquire_execution_view();
         for (std::size_t c = 0; c < fraction.size(); ++c)
@@ -410,13 +747,30 @@ AdaptiveAdvection AdaptiveVoF::advect(const std::vector<double>& fraction, const
                         valid = false;
                 });
             maxdiv = std::max(maxdiv, std::abs(sum) / mesh()->cell_volume(static_cast<LO>(c)));
+            maxresidual = std::max(maxresidual,
+                std::abs(sum - (source ? total_source[c] : 0.0)) / mesh()->cell_volume(static_cast<LO>(c)));
+            if (source)
+            {
+                local_source += total_source[c];
+                local_volume += mesh()->cell_volume(static_cast<LO>(c));
+            }
             maxcfl = std::max(maxcfl, std::accumulate(axis_cfl.begin(), axis_cfl.end(), 0.0));
         }
     }
     require_collective(valid, "AdaptiveVoF subface swept width exceeds half its donor cell.");
     result.maximum_volume_divergence = maximum(maxdiv);
-    require_collective(maximum(maxcfl) <= 0.5 + 1e-14 && result.maximum_volume_divergence <= 1e-10,
-        "AdaptiveVoF requires multidimensional CFL <= 0.5 and |dt div u| <= 1e-10.");
+    result.maximum_volume_source_residual = maximum(maxresidual);
+    if (source)
+    {
+        const std::array<double, 2> local{local_source.value(), local_volume.value()};
+        std::array<double, 2> global{};
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 2, local.data(), global.data());
+        require_collective(std::isfinite(global[0]) && std::isfinite(global[1]) && global[1] > 0.0 &&
+                               std::abs(global[0]) <= 1.0e-10 * global[1],
+            "AdaptiveVoF phase-volume sources are incompatible with its closed fixed domain.");
+    }
+    require_collective(maximum(maxcfl) <= 0.5 + 1e-14 && result.maximum_volume_source_residual <= 1e-10,
+        "AdaptiveVoF requires CFL <= 0.5 and phase-source/face-volume continuity residual <= 1e-10.");
     const auto frozen = fraction;
     for (std::size_t sweep = 0; sweep < 3; ++sweep)
     {
@@ -448,7 +802,11 @@ AdaptiveAdvection AdaptiveVoF::advect(const std::vector<double>& fraction, const
                 total[face] = u[face] * dt * mesh()->face_area(fid);
                 if (fhalo[donor] <= 0.0 || fhalo[donor] >= 1.0)
                 {
-                    gas[face] = fhalo[donor] * total[face];
+                    // Retain accepted inventory roundoff in f, but keep the
+                    // physical face partition one-sided at a pure endpoint.
+                    // Multiplying a retained f=1+ulp creates a negative carrier
+                    // flux into a cell with exactly zero carrier capacity.
+                    gas[face] = fhalo[donor] >= 1.0 ? total[face] : 0.0;
                     continue;
                 }
                 const auto gid = mesh()->cell_global_id(donor);
@@ -509,6 +867,17 @@ AdaptiveAdvection AdaptiveVoF::advect(const std::vector<double>& fraction, const
             result.liquid_volume[face] += total[face] - gas[face];
         }
     }
+    if (source)
+    {
+        const auto execution = mesh()->acquire_execution_view();
+        for (std::size_t c = 0; c < fraction.size(); ++c)
+        {
+            const double correction = source->gas[c] - (frozen[c] >= 0.5 ? total_source[c] : 0.0);
+            if (correction != 0.0)
+                result.fraction[c] += correction / mesh()->cell_volume(static_cast<LO>(c));
+        }
+    }
+    validate_f(result.fraction, fraction.size());
     return result;
 }
 

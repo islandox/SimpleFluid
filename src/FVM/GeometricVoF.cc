@@ -666,6 +666,44 @@ double GeometricVoF::box_plane_volume(const Vector& lower, const Vector& upper, 
     return result;
 }
 
+PlaneSection GeometricVoF::plane_section(const Vector& lower, const Vector& upper, const Vector& normal, double offset)
+{
+    if (!std::isfinite(offset))
+        throw std::invalid_argument("PLIC section offset must be finite.");
+    UniformGrid local;
+    Vector center{};
+    double scale = 0.0;
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        local.spacing[a] = upper[a] - lower[a];
+        if (!std::isfinite(lower[a]) || !std::isfinite(upper[a]) || !std::isfinite(normal[a]) ||
+            !std::isfinite(local.spacing[a]) || !(local.spacing[a] > 0.0))
+            throw std::invalid_argument("PLIC section requires finite normal and positive box widths.");
+        center[a] = std::midpoint(lower[a], upper[a]);
+        scale = std::max(scale, std::abs(normal[a]));
+    }
+    PlaneSection section;
+    section.centroid = center;
+    if (scale == 0.0)
+        return section;
+    Vector unit{};
+    for (std::size_t a = 0; a < 3; ++a)
+        unit[a] = normal[a] / scale;
+    const double magnitude = std::hypot(unit[0], unit[1], unit[2]);
+    for (auto& component : unit)
+        component /= magnitude;
+    const double local_offset = (offset / scale) / magnitude - dot(unit, center);
+    if (!std::isfinite(local_offset))
+        throw std::invalid_argument("PLIC section offset is not representable in local coordinates.");
+    const auto cut = interface_centroid(local, InterfacePlane{unit, local_offset});
+    section.normal = unit;
+    section.area = cut.area;
+    if (cut.area > 0.0)
+        for (std::size_t a = 0; a < 3; ++a)
+            section.centroid[a] += cut.point[a];
+    return section;
+}
+
 std::vector<InterfacePlane> GeometricVoF::reconstruct(const std::vector<double>& fraction) const
 {
     check_fraction(grid_, fraction);

@@ -119,12 +119,13 @@ endforeach()
 
 # These functions have declarations in public headers and definitions in the
 # compiled FVM library. A hidden instantiation breaks downstream linking.
-foreach(method IN ITEMS box_plane_volume reconstruct curvature advect)
+foreach(method IN ITEMS box_plane_volume plane_section reconstruct curvature advect)
     if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::GeometricVoF::${method}[(]")
         message(FATAL_ERROR "Missing compiled geometric VoF ${method} in FVM")
     endif()
 endforeach()
-foreach(method IN ITEMS reconstruct curvature advect remap refinement_plan exchange_cells exchange_faces)
+foreach(method IN ITEMS reconstruct curvature advect remap refinement_plan exchange_cells exchange_faces
+        interface_patches film_length sample_patch_values scatter_patch_amounts carrier_face_aperture)
     if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::AdaptiveVoF::${method}[(]")
         message(FATAL_ERROR "Missing compiled adaptive VoF ${method} in FVM")
     endif()

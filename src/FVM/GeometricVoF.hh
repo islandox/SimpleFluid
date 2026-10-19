@@ -57,6 +57,14 @@ struct InterfacePlane
     double offset = -1.0;
 };
 
+/** @brief Area and area centroid of a planar interface cutting a Cartesian box. */
+struct PlaneSection
+{
+    Vector centroid{};
+    Vector normal{};   ///< Unit normal of the supplied gas-side half-space.
+    double area = 0.0; ///< Square metres; zero when no two-dimensional cut exists.
+};
+
 /** @brief Geometric transport result and the phase fluxes used in its update. */
 struct AdvectionResult
 {
@@ -125,6 +133,13 @@ public:
      * @return Gas-side volume in m3; zero normal selects empty/full by offset.
      */
     [[nodiscard]] static double box_plane_volume(
+        const Vector& lower, const Vector& upper, const Vector& normal, double offset);
+
+    /**
+     * @brief Geometric cut for normal dot x = offset in a positive-volume box.
+     * @return Physical area, centroid, and unit normal; a zero normal has no cut.
+     */
+    [[nodiscard]] static PlaneSection plane_section(
         const Vector& lower, const Vector& upper, const Vector& normal, double offset);
 
 private:

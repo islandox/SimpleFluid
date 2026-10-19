@@ -4,6 +4,7 @@
 #pragma once
 
 #include "FVM/AdaptiveVoF.hh"
+#include "solvers/VoFLowMach.hh"
 #include "solvers/VoFSolver.hh"
 
 #include <cstdint>
@@ -57,6 +58,35 @@ public:
     [[nodiscard]] VoFStepDiagnostics step(double dt);
     [[nodiscard]] double stable_timestep() const;
 
+    /** Opt into EOS/energy/phase-inventory evolution; existing constructors remain source-free. */
+    void initialize_low_mach(VoF::LowMachOptions options, const VoF::LowMachInitialState& initial);
+    [[nodiscard]] bool low_mach_enabled() const noexcept;
+    [[nodiscard]] const VoF::LowMachState& low_mach_state() const;
+    [[nodiscard]] const VoF::LowMachDiagnostics& low_mach_diagnostics() const;
+    [[nodiscard]] const VoF::LowMachOptions& low_mach_options() const;
+
+    class SIMPLEFLUID_SOLVERS_EXPORT LowMachTrial
+    {
+    public:
+        [[nodiscard]] const VoF::LowMachState& state() const;
+        [[nodiscard]] const VoF::LowMachDiagnostics& diagnostics() const;
+        [[nodiscard]] const VoF::LowMachTransport& transport() const;
+        [[nodiscard]] const std::vector<double>& face_velocity() const;
+        [[nodiscard]] const std::vector<VoF::Vector>& velocity() const;
+        [[nodiscard]] const std::vector<double>& mechanical_pressure() const;
+
+    private:
+        friend class AdaptiveVoFSolver;
+        explicit LowMachTrial(std::shared_ptr<const void> candidate);
+        std::shared_ptr<const void> candidate_;
+    };
+
+    /** Replays from accepted state; no fields, clock, or ledgers are published. */
+    [[nodiscard]] LowMachTrial preview_low_mach_step(
+        double dt, const VoF::LowMachSources& sources, const VoF::LowMachState* thermodynamic_guess = nullptr);
+    /** Commit only a trial from the unchanged accepted state and current hierarchy. */
+    void commit_low_mach_trial(const LowMachTrial& trial);
+
     /** Conservative adaptation; supplied stencil/motion/wake/promotion guards constrain coarsening. */
     void regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen = {},
         VoF::RefinementOptions protection = {}, VoF::RefinementHints hints = {});
@@ -65,7 +95,10 @@ public:
     [[nodiscard]] VoF::RefinementPlan refinement_plan(
         VoF::RefinementOptions options = {}, VoF::RefinementHints hints = {}) const;
 
-    /** Register an owned-cell extensive scalar; it is transported and remapped with its carrier. */
+    /** Register an owned-cell extensive scalar; it is transported and remapped with its carrier.
+     * Low-Mach mode accepts geometric carriers; legacy constant-density MixtureMass is rejected.
+     * LiquidVolume denotes the unresolved carrier, including its dispersed gas.
+     */
     void register_inventory(VoF::ConservedQuantity inventory);
     [[nodiscard]] const VoF::ConservedQuantity& inventory(const std::string& name) const;
     [[nodiscard]] const std::vector<VoF::ConservedQuantity>& inventories() const noexcept;

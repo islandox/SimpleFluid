@@ -66,7 +66,7 @@ a source-presence entry is not a tested or supported execution claim.
 | Phase 20, external reaction/source maps | Typed in-memory source/receipt callbacks and reusable conservative cell transfer implemented | External-provider protocol and phase-aware mapping |
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
-| Phase 22, resolved/dispersed bubbles | Retained source: uniform VoF, Cartesian adaptive VoF | Generic reacting integration and physical qualification remain open |
+| Phase 22, resolved/dispersed bubbles | Retained source: uniform VoF, Cartesian adaptive VoF, resolved/dispersed coupling | Generic reacting integration and physical qualification remain open |
 | Phase 23, general native AMR | General hierarchy and flow are not yet present | Source presence does not establish full physical or scaling qualification |
 
 ### Checklist conventions
