@@ -28,10 +28,14 @@ public:
         std::vector<double> amount, flux, trace;
     };
     explicit ConservativeVoFTransport(SP<const MeshHandle<>> mesh);
-    /** Extensive Q_old/S/M_new; overlap-face F in canonical owner orientation. */
+    /** Extensive Q_old/S/M_new; overlap-face F in canonical owner orientation.
+     * Optional row equilibration preserves microscopic carrier rows without a
+     * reciprocal diagonal overflow; the original physical residual still must
+     * meet tolerance. It changes conditioning, not the transport equation.
+     */
     [[nodiscard]] Result solve(const std::vector<double>& old, const std::vector<double>& source,
         const std::vector<double>& capacity, const std::vector<double>& flux, bool nonnegative,
-        int maximum_iterations, double tolerance = 1e-12);
+        int maximum_iterations, double tolerance = 1e-12, bool equilibrate_rows = false);
 
 private:
     using Pack = DefaultTpetraTypes;
@@ -42,7 +46,8 @@ private:
     Pack::vector_type rhs_, solution_;
     mutable Pack::vector_type cell_owned_, cell_overlap_, face_owned_, face_overlap_;
     std::vector<double> capacity_, flux_;
-    bool numeric_valid_ = false;
+    bool numeric_valid_ = false, equilibrated_ = false;
+    std::vector<double> diagonal_;
     std::size_t row_capacity_ = 1;
     [[nodiscard]] std::vector<double> cells(const std::vector<double>& owned) const;
     [[nodiscard]] std::vector<double> faces(const std::vector<double>& overlap) const;

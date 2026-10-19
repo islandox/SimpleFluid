@@ -465,3 +465,11 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "vof;conservation;collective"
 )
+
+simplefluid_add_mpi_test(
+    NAME ConservativeVoFTransport_EmptyRank_9procs
+    TARGET testConservativeVoFTransport
+    PROCS 9
+    ARGS "--gtest_filter=ConservativeVoFTransportTest.EquilibratedMicroscopicCarrierPreservesConstantConcentration"
+    LABELS "vof;conservation;collective;empty_rank"
+    TIMEOUT 120)
