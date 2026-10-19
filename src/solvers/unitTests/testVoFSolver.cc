@@ -285,6 +285,49 @@ BubbleMeasurement static_bubble(std::size_t n)
         std::abs(gas_volume(grid, solver.gas_fraction()) / volume - 1.0)};
 }
 
+// The original 4x4x2 split-transport counterexample is divergence-free:
+// transverse velocity varies in x/y only, so projection cannot bound it for us.
+TEST_F(VoFSolverTest, SplitPhaseMassPreservesPassiveMomentumBounds)
+{
+    UniformGrid grid;
+    grid.cells = {4, 4, 2};
+    grid.spacing = {1, 1, 100};
+    grid.periodic = {true, true, true};
+    auto material = inviscid();
+    material.liquid_density = 1000;
+    material.gas_density = 1;
+    VoFSolver flow(grid, material);
+    std::vector<double> fraction(grid.cell_count());
+    std::vector<Vector> velocity(grid.cell_count(), Vector{1, 1, 0});
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        const auto ijk = grid.cell_coordinates(c);
+        fraction[c] = ijk[0] == 0 ? 0 : 1;
+        velocity[c][2] = ijk[0] == 1 && ijk[1] == 1 ? 1 : 0;
+    }
+    flow.initialize(fraction, velocity);
+    const auto before = flow.diagnostics();
+    // Three accepted steps exercise each cyclic first-sweep order.
+    for (int step = 0; step < 3; ++step)
+    {
+        const auto after = flow.step(0.1);
+        double lo = 1, hi = 0;
+        for (const auto& u : flow.velocity())
+        {
+            lo = std::min(lo, u[2]);
+            hi = std::max(hi, u[2]);
+            EXPECT_NEAR(u[0], 1, 2e-11);
+            EXPECT_NEAR(u[1], 1, 2e-11);
+        }
+        RecordProperty("minimum_passive_velocity_" + std::to_string(step), lo);
+        EXPECT_GE(lo, -2e-11);
+        EXPECT_LE(hi, 1 + 2e-11);
+        EXPECT_NEAR(after.gas_volume, before.gas_volume, 2e-9);
+        for (std::size_t a = 0; a < 3; ++a)
+            EXPECT_NEAR(after.momentum[a], before.momentum[a], 2e-11 * std::max(1.0, std::abs(before.momentum[a])));
+    }
+}
+
 } // namespace
 
 TEST(VoFSolverParallelTest, RejectsDistributedConstruction)

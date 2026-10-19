@@ -5,6 +5,7 @@
 #include "solvers/VoFSolver.hh"
 
 #include "solvers/BelosLinearSolver.hh"
+#include "solvers/details/ConservativeVoFTransport.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <Teuchos_Array.hpp>
@@ -230,6 +231,7 @@ struct VoFSolver::Impl
     SP<const Handle> mesh;
     std::unique_ptr<Published> published;
     BelosLinearSolver<> pressure_solver;
+    std::unique_ptr<detail::ConservativeVoFTransport> momentum_transport;
 
     Impl(Grid g, VoFMaterial m, VoFSolverOptions o) : grid(g), material(m), options(o), geometry(g)
     {
@@ -251,6 +253,7 @@ struct VoFSolver::Impl
         SP<const Meshes::OrthogonalCartesian3D> cartesian = std::make_shared<const Meshes::OrthogonalCartesian3D>(
             edges, Vec3D<bool>{grid.periodic[0], grid.periodic[1], grid.periodic[2]});
         mesh = std::make_shared<Handle>(std::move(cartesian));
+        momentum_transport = std::make_unique<detail::ConservativeVoFTransport>(mesh);
         State initial;
         initial.f.resize(grid.cell_count(), 0.0);
         initial.p.resize(grid.cell_count(), 0.0);
@@ -692,35 +695,47 @@ struct VoFSolver::Impl
         if (!std::isfinite(next.diagnostics.time) || next.diagnostics.time <= old.diagnostics.time)
             throw std::invalid_argument("VoFSolver timestep cannot produce a finite advancing time.");
         const auto new_rho = density(next);
-        std::vector<Vector> momentum(old.u.size());
-        for (std::size_t c = 0; c < momentum.size(); ++c)
-            for (std::size_t b = 0; b < 3; ++b)
-                momentum[c][b] = old_rho[c] * old.u[c][b];
-        for (std::size_t a = 0; a < 3; ++a)
-            for (std::size_t id = 0; id < grid.face_count(a); ++id)
+        // The phase sweeps supply final storage and signed integrated mass.
+        // Solve their compatible implicit tracer equation for each velocity.
+        std::vector<double> mass_flux(mesh->num_faces()), capacity(old.u.size()), zero(old.u.size());
+        {
+            const auto execution = mesh->acquire_execution_view();
+            for (std::size_t id = 0; id < mass_flux.size(); ++id)
             {
-                const auto xyz = face_coordinates(grid, a, id);
-                if (grid.periodic[a] && xyz[a] == grid.cells[a])
+                const auto fid = static_cast<Pack::local_ordinal_type>(id);
+                if (mesh->is_geometry_exterior_face(fid))
                     continue;
-                const auto [l, r] = adjacent(grid, a, xyz);
-                if (l == missing || r == missing)
-                    continue;
-                const double mass = material.gas_density * transported.gas_volume[a][id] +
-                                    material.liquid_density * transported.liquid_volume[a][id];
-                const auto donor = mass >= 0.0 ? l : r;
-                for (std::size_t b = 0; b < 3; ++b)
-                {
-                    const double flux = mass * old.u[donor][b] / grid.cell_volume();
-                    momentum[l][b] -= flux;
-                    momentum[r][b] += flux;
-                }
+                const auto normal = mesh->face_normal(fid);
+                std::size_t a = 0;
+                while (std::abs(normal.component(a)) < 0.5)
+                    ++a;
+                auto xyz = grid.cell_coordinates(mesh->cell_global_id(mesh->owner_cell(fid)));
+                if (normal.component(a) > 0)
+                    ++xyz[a];
+                const auto face_id = face(grid, a, xyz);
+                mass_flux[id] = normal.component(a) *
+                    (material.gas_density * transported.gas_volume[a][face_id] +
+                     material.liquid_density * transported.liquid_volume[a][face_id]);
             }
+        }
+        for (std::size_t c = 0; c < capacity.size(); ++c)
+            capacity[c] = new_rho[c] * grid.cell_volume();
+        for (std::size_t b = 0; b < 3; ++b)
+        {
+            std::vector<double> old_momentum(old.u.size());
+            for (std::size_t c = 0; c < old_momentum.size(); ++c)
+                old_momentum[c] = old_rho[c] * grid.cell_volume() * old.u[c][b];
+            const auto transport = momentum_transport->solve(old_momentum, zero, capacity, mass_flux, false,
+                options.max_pressure_iterations, 1e-14);
+            for (std::size_t c = 0; c < old.u.size(); ++c)
+                next.u[c][b] = transport.amount[c] / capacity[c];
+        }
         const auto viscous = viscous_force(old);
         std::vector<Vector> change(old.u.size());
         for (std::size_t c = 0; c < old.u.size(); ++c)
             for (std::size_t b = 0; b < 3; ++b)
             {
-                next.u[c][b] = momentum[c][b] / new_rho[c] + dt * (viscous[c][b] / new_rho[c] + options.gravity[b]);
+                next.u[c][b] += dt * (viscous[c][b] / new_rho[c] + options.gravity[b]);
                 change[c][b] = next.u[c][b] - old.u[c][b];
             }
         const auto face_change = interpolate_cells(grid, change);
