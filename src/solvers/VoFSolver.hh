@@ -62,7 +62,10 @@ struct VoFStepDiagnostics
  *
  * Native MeshHandle/FieldStored snapshots expose accepted output. Geometric
  * face velocities supply the authoritative divergence-free transport flux.
- * Cell momentum is transported with exactly the same gas/liquid face masses.
+ * Cell momentum uses conservative implicit upwind transport with final mixture
+ * mass storage and exactly the geometric gas/liquid face masses. This preserves
+ * passive velocity bounds in the force-free divergence-free limit without a
+ * stale accepted-old donor state; it adds first-order implicit diffusion.
  * Pressure and surface tension share one face gradient and mobility stencil.
  * Native fields and read-only array views are published together only after
  * all final physical residual and finite-value gates pass. Exceptions leave the accepted

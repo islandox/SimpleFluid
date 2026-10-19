@@ -1,0 +1,167 @@
+/** @file ConservativeVoFTransport.cc
+ * @brief Native conservative implicit upwind assembly and per-inventory validation.
+ */
+#include "solvers/details/ConservativeVoFTransport.hh"
+
+#include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <cmath>
+#include <map>
+#include <stdexcept>
+
+namespace SimpleFluid::detail
+{
+namespace
+{
+using Pack = DefaultTpetraTypes;
+using LO = Pack::local_ordinal_type;
+using GO = Pack::global_ordinal_type;
+void require(const Pack::map_type& map, bool valid, const char* message)
+{
+    int local = valid, global = 0;
+    Teuchos::reduceAll(*map.getComm(), Teuchos::REDUCE_MIN, 1, &local, &global);
+    if (!global)
+        throw std::runtime_error(message);
+}
+std::vector<double> import(const std::vector<double>& values, const Pack::import_type& plan)
+{
+    Pack::vector_type from(plan.getSourceMap(), true), to(plan.getTargetMap(), true);
+    {
+        auto data = from.getDataNonConst();
+        std::copy_n(values.begin(), data.size(), data.begin());
+    }
+    to.doImport(from, plan, Tpetra::INSERT);
+    const auto data = to.getData();
+    return {data.begin(), data.end()};
+}
+} // namespace
+
+ConservativeVoFTransport::ConservativeVoFTransport(SP<const MeshHandle<>> mesh)
+    : mesh_(std::move(mesh)), cell_import_(mesh_->owned_cell_map(), mesh_->overlap_cell_map()),
+      face_import_(mesh_->owned_face_map(), mesh_->overlap_face_map())
+{
+    const auto execution = mesh_->acquire_execution_view();
+    for (std::size_t c = 0; c < mesh_->num_owned_cells(); ++c)
+        row_capacity_ = std::max(row_capacity_, mesh_->faces(static_cast<LO>(c)).size() + 1);
+}
+
+std::vector<double> ConservativeVoFTransport::cells(const std::vector<double>& owned) const
+{
+    return import(owned, cell_import_);
+}
+std::vector<double> ConservativeVoFTransport::faces(const std::vector<double>& overlap) const
+{
+    return import(overlap, face_import_);
+}
+
+ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vector<double>& old,
+    const std::vector<double>& source, const std::vector<double>& capacity, const std::vector<double>& flux,
+    bool nonnegative, int maximum_iterations, double tolerance)
+{
+    const auto map = mesh_->owned_cell_map();
+    const auto n = mesh_->num_owned_cells();
+    require(*map, old.size() == n && source.size() == n && capacity.size() == n && flux.size() == mesh_->num_faces(),
+        "Conservative VoF transport has inconsistent storage/flux dimensions.");
+    bool valid = true;
+    double local_max_flux = 0, global_max_flux = 0;
+    for (double f : flux)
+    {
+        valid = valid && std::isfinite(f);
+        local_max_flux = std::max(local_max_flux, std::abs(f));
+    }
+    for (std::size_t c = 0; c < n; ++c)
+        valid = valid && std::isfinite(capacity[c]) && capacity[c] >= 0 && std::isfinite(old[c] + source[c]);
+    require(*map, valid, "Conservative VoF transport requires finite nonnegative storage and finite flux/RHS.");
+    Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 1, &local_max_flux, &global_max_flux);
+    Result result{std::vector<double>(n), std::vector<double>(flux.size()), std::vector<double>(flux.size())};
+    std::vector<double> concentration(n);
+    if (global_max_flux == 0)
+    {
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            result.amount[c] = old[c] + source[c];
+            valid = valid && (capacity[c] > 0 || result.amount[c] == 0) && (!nonnegative || result.amount[c] >= 0);
+            concentration[c] = capacity[c] > 0 ? result.amount[c] / capacity[c] : 0;
+        }
+        require(*map, valid, "A conservative VoF source exhausts inventory or has no carrier.");
+    }
+    else
+    {
+        auto matrix = Teuchos::rcp(new Pack::matrix_type(map, row_capacity_));
+        Pack::vector_type rhs(map, true), solution(map, true);
+        {
+            const auto execution = mesh_->acquire_execution_view();
+            for (std::size_t c = 0; c < n; ++c)
+            {
+                const auto lid = static_cast<LO>(c);
+                const auto gid = mesh_->cell_global_id(lid);
+                double diagonal = capacity[c];
+                std::map<GO, double> row;
+                for (const auto face : mesh_->faces(lid))
+                {
+                    if (mesh_->is_geometry_exterior_face(face))
+                        continue;
+                    const bool owner = mesh_->owner_cell(face) == lid;
+                    const double outgoing = flux[face] * (owner ? 1 : -1);
+                    if (outgoing >= 0)
+                        diagonal += outgoing;
+                    else
+                        row[mesh_->cell_global_id(mesh_->opposite_cell(face, lid))] += outgoing;
+                }
+                if (diagonal == 0 && row.empty())
+                {
+                    valid = valid && old[c] + source[c] == 0;
+                    diagonal = 1;
+                }
+                valid = valid && diagonal > 0;
+                row[gid] += diagonal;
+                Teuchos::Array<GO> columns;
+                Teuchos::Array<double> coefficients;
+                for (const auto& [column, value] : row)
+                {
+                    columns.push_back(column);
+                    coefficients.push_back(value);
+                }
+                matrix->insertGlobalValues(gid, columns(), coefficients());
+                rhs.replaceLocalValue(lid, old[c] + source[c]);
+            }
+        }
+        require(*map, valid, "Conservative VoF transport has inventory without storage or a zero-storage incoming-only row.");
+        matrix->fillComplete();
+        LinearSolverOptions linear;
+        linear.backend = LinearSolverBackend::Gmres;
+        linear.preconditioner = LinearPreconditioner::Jacobi;
+        linear.tolerance = tolerance;
+        linear.max_iterations = maximum_iterations;
+        linear.verbosity = 0;
+        const auto stats = solver_.solve_from_zero_with_statistics(
+            Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix), rhs, solution, linear);
+        require(*map, stats.converged, "Conservative VoF implicit transport did not converge to its true residual.");
+        const auto values = solution.getData();
+        std::copy(values.begin(), values.end(), concentration.begin());
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            result.amount[c] = capacity[c] * concentration[c];
+            valid = valid && std::isfinite(result.amount[c]) && (!nonnegative || result.amount[c] >= 0);
+        }
+        require(*map, valid, "Conservative VoF transport lost inventory positivity or finiteness.");
+    }
+    const auto halo = cells(concentration);
+    {
+        const auto execution = mesh_->acquire_execution_view();
+        for (std::size_t id = 0; id < mesh_->num_owned_faces(); ++id)
+        {
+            const auto face = static_cast<LO>(id);
+            if (mesh_->is_geometry_exterior_face(face))
+                continue;
+            const auto owner = mesh_->owner_cell(face), neighbor = mesh_->neighbor_cell(face);
+            result.trace[id] = flux[id] == 0 ? 0.5 * (halo[owner] + halo[neighbor])
+                                            : halo[flux[id] > 0 ? owner : neighbor];
+            result.flux[id] = flux[id] * result.trace[id];
+        }
+    }
+    result.flux = faces(result.flux);
+    result.trace = faces(result.trace);
+    return result;
+}
+} // namespace SimpleFluid::detail
