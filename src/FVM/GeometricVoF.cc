@@ -706,8 +706,16 @@ PlaneSection GeometricVoF::plane_section(const Vector& lower, const Vector& uppe
 
 std::vector<InterfacePlane> GeometricVoF::reconstruct(const std::vector<double>& fraction) const
 {
+    std::vector<std::size_t> cells(fraction.size());
+    std::iota(cells.begin(), cells.end(), 0);
+    return reconstruct(fraction, cells);
+}
+
+std::vector<InterfacePlane> GeometricVoF::reconstruct(
+    const std::vector<double>& fraction, std::span<const std::size_t> cells) const
+{
     check_fraction(grid_, fraction);
-    std::vector<InterfacePlane> planes(fraction.size());
+    std::vector<InterfacePlane> planes(cells.size());
     Vector lower{};
     Vector upper{};
     for (std::size_t a = 0; a < 3; ++a)
@@ -715,12 +723,15 @@ std::vector<InterfacePlane> GeometricVoF::reconstruct(const std::vector<double>&
         lower[a] = -0.5 * grid_.spacing[a];
         upper[a] = 0.5 * grid_.spacing[a];
     }
-    for (std::size_t cell = 0; cell < fraction.size(); ++cell)
+    for (std::size_t index = 0; index < cells.size(); ++index)
     {
+        const auto cell = cells[index];
+        if (cell >= fraction.size())
+            throw std::out_of_range("Requested PLIC cell is outside the grid.");
         const double f = fraction[cell];
         if (f <= 0.0 || f >= 1.0)
         {
-            planes[cell].offset = f <= 0.0 ? -1.0 : 1.0;
+            planes[index].offset = f <= 0.0 ? -1.0 : 1.0;
             continue;
         }
         Vector normal = normal_from_gradient(physical_gradient(grid_, fraction, cell));
@@ -746,39 +757,78 @@ std::vector<InterfacePlane> GeometricVoF::reconstruct(const std::vector<double>&
             else
                 hi = middle;
         }
-        planes[cell] = {normal, std::midpoint(lo, hi)};
+        planes[index] = {normal, std::midpoint(lo, hi)};
     }
     return planes;
 }
 
 std::vector<double> GeometricVoF::curvature(const std::vector<double>& fraction) const
 {
+    std::vector<std::size_t> cells(fraction.size());
+    std::iota(cells.begin(), cells.end(), 0);
+    return curvature(fraction, cells);
+}
+
+std::vector<double> GeometricVoF::curvature(
+    const std::vector<double>& fraction, std::span<const std::size_t> cells) const
+{
     check_fraction(grid_, fraction);
     std::vector<Vector> normals(fraction.size());
     for (std::size_t cell = 0; cell < fraction.size(); ++cell)
         normals[cell] = normal_from_gradient(physical_gradient(grid_, fraction, cell));
-    std::vector<double> result(fraction.size(), 0.0);
+    std::vector<double> result(cells.size(), 0.0);
     std::vector<std::size_t> incomplete;
-    for (std::size_t cell = 0; cell < fraction.size(); ++cell)
+    for (std::size_t index = 0; index < cells.size(); ++index)
     {
+        const auto cell = cells[index];
+        if (cell >= fraction.size())
+            throw std::out_of_range("Requested curvature cell is outside the grid.");
         if (fraction[cell] <= fraction_roundoff || fraction[cell] >= 1.0 - fraction_roundoff)
             continue;
-        if (height_curvature(grid_, fraction, cell, normals[cell], result[cell]))
+        if (height_curvature(grid_, fraction, cell, normals[cell], result[index]))
             continue;
-        incomplete.push_back(cell);
+        incomplete.push_back(index);
     }
     if (incomplete.empty())
         return result;
-    const auto planes = reconstruct(fraction);
-    std::vector<InterfaceCentroid> centroids(fraction.size());
-    for (std::size_t cell = 0; cell < fraction.size(); ++cell)
-        if (fraction[cell] > fraction_roundoff && fraction[cell] < 1.0 - fraction_roundoff)
-            centroids[cell] = interface_centroid(grid_, planes[cell]);
-    for (const auto cell : incomplete)
+    // Only the radius-two surface-fit neighborhoods can consume reconstructed
+    // centroids. Their PLIC gradients add one fraction layer, giving radius three.
+    std::vector<unsigned char> needed(fraction.size());
+    for (const auto index : incomplete)
     {
-        if (surface_fit_curvature(grid_, planes, centroids, cell, normals[cell], result[cell]))
+        const auto p = grid_.cell_coordinates(cells[index]);
+        for (int k = -2; k <= 2; ++k)
+            for (int j = -2; j <= 2; ++j)
+                for (int i = -2; i <= 2; ++i)
+                {
+                    const std::array<int, 3> shift{i, j, k};
+                    std::array<std::size_t, 3> q{};
+                    for (std::size_t a = 0; a < 3; ++a)
+                        q[a] = image_index(
+                            static_cast<std::ptrdiff_t>(p[a]) + shift[a], grid_.cells[a], grid_.periodic[a]);
+                    const auto neighbor = grid_.cell_index(q[0], q[1], q[2]);
+                    if (fraction[neighbor] > fraction_roundoff && fraction[neighbor] < 1.0 - fraction_roundoff)
+                        needed[neighbor] = 1;
+                }
+    }
+    std::vector<std::size_t> requested;
+    for (std::size_t cell = 0; cell < needed.size(); ++cell)
+        if (needed[cell])
+            requested.push_back(cell);
+    const auto selected_planes = reconstruct(fraction, requested);
+    std::vector<InterfacePlane> planes(fraction.size());
+    std::vector<InterfaceCentroid> centroids(fraction.size());
+    for (std::size_t i = 0; i < requested.size(); ++i)
+    {
+        planes[requested[i]] = selected_planes[i];
+        centroids[requested[i]] = interface_centroid(grid_, selected_planes[i]);
+    }
+    for (const auto index : incomplete)
+    {
+        const auto cell = cells[index];
+        if (surface_fit_curvature(grid_, planes, centroids, cell, normals[cell], result[index]))
             continue;
-        result[cell] = 0.0;
+        result[index] = 0.0;
         const auto p = grid_.cell_coordinates(cell);
         for (std::size_t a = 0; a < 3; ++a)
         {
@@ -788,9 +838,9 @@ std::vector<double> GeometricVoF::curvature(const std::vector<double>& fraction)
             auto hi = p;
             lo[a] = image_index(static_cast<std::ptrdiff_t>(p[a]) - 1, grid_.cells[a], grid_.periodic[a]);
             hi[a] = image_index(static_cast<std::ptrdiff_t>(p[a]) + 1, grid_.cells[a], grid_.periodic[a]);
-            result[cell] += (normals[grid_.cell_index(hi[0], hi[1], hi[2])][a] -
-                                normals[grid_.cell_index(lo[0], lo[1], lo[2])][a]) /
-                            (2.0 * grid_.spacing[a]);
+            result[index] += (normals[grid_.cell_index(hi[0], hi[1], hi[2])][a] -
+                                 normals[grid_.cell_index(lo[0], lo[1], lo[2])][a]) /
+                             (2.0 * grid_.spacing[a]);
         }
     }
     return result;

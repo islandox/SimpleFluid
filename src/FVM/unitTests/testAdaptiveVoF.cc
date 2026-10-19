@@ -375,3 +375,145 @@ TEST(AdaptiveVoFTest, InvalidRankLocalFractionsFacesAndPhaseAmountsRejectCollect
     }
     EXPECT_DOUBLE_EQ(gas_volume(source, fraction), 0.0);
 }
+
+TEST(AdaptiveVoFTest, SharedGeometryRetainsPrivateFieldResultsAndInvalidatesAfterRegrid)
+{
+    auto tree = std::make_shared<Hierarchy>(column(2, 1.0));
+    AdaptiveVoF first(tree), second(tree);
+    EXPECT_EQ(first.mesh().get(), second.mesh().get());
+    const auto f = slab(first, 0.14, 0.63);
+    const auto original = first.reconstruct(f);
+    const auto original_curvature = first.curvature(f);
+    const std::vector<double> pure(f.size(), 1.0);
+    (void) second.curvature(pure);
+    const auto replayed = first.reconstruct(f);
+    const auto replayed_curvature = first.curvature(f);
+    EXPECT_EQ(original_curvature, replayed_curvature);
+    for (std::size_t c = 0; c < f.size(); ++c)
+    {
+        EXPECT_EQ(original[c].normal, replayed[c].normal);
+        EXPECT_DOUBLE_EQ(original[c].offset, replayed[c].offset);
+    }
+    AdaptiveVoF changed(tree->adapt({0}));
+    EXPECT_NE(first.mesh().get(), changed.mesh().get());
+    EXPECT_EQ(first.hierarchy().get(), tree.get());
+}
+
+TEST(AdaptiveVoFTest, BatchedVectorImportsMatchScalarImportsIncludingEmptyOwners)
+{
+    Grid grid;
+    grid.block_cells = {2, 2, 2};
+    AdaptiveVoF geometry(std::make_shared<Hierarchy>(grid));
+    const auto& mesh = *geometry.mesh();
+    std::vector<Vector> cells(mesh.num_owned_cells());
+    for (std::size_t c = 0; c < cells.size(); ++c)
+    {
+        const auto gid = static_cast<double>(mesh.cell_global_id(static_cast<LO>(c)));
+        cells[c] = {gid + 1.0, -2.0 * gid, 0.125 * gid};
+    }
+    const auto imported = geometry.exchange_cell_vectors(cells);
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        std::vector<double> scalar(cells.size());
+        for (std::size_t c = 0; c < cells.size(); ++c)
+            scalar[c] = cells[c][a];
+        const auto expected = geometry.exchange_cells(scalar);
+        ASSERT_EQ(imported.size(), expected.size());
+        for (std::size_t c = 0; c < expected.size(); ++c)
+            EXPECT_DOUBLE_EQ(imported[c][a], expected[c]);
+    }
+    std::vector<Vector> faces(mesh.num_faces(), Vector{NAN, NAN, NAN});
+    for (std::size_t f = 0; f < mesh.num_owned_faces(); ++f)
+    {
+        const auto gid = static_cast<double>(mesh.face_global_id(static_cast<LO>(f)));
+        faces[f] = {gid, gid + 0.25, -gid};
+    }
+    const auto imported_faces = geometry.exchange_face_vectors(faces);
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        std::vector<double> scalar(faces.size());
+        for (std::size_t f = 0; f < faces.size(); ++f)
+            scalar[f] = faces[f][a];
+        const auto expected = geometry.exchange_faces(scalar);
+        for (std::size_t f = 0; f < expected.size(); ++f)
+            EXPECT_DOUBLE_EQ(imported_faces[f][a], expected[f]);
+    }
+}
+
+TEST(AdaptiveVoFTest, RefinementDirectoryMatchesExhaustivePeriodicGuardSelection)
+{
+    Grid config;
+    config.root_blocks = {8, 4, 1};
+    config.block_cells = {2, 2, 2};
+    config.extent = {8.0, 4.0, 1.0};
+    config.periodic = {true, true, false};
+    config.max_level = 1;
+    auto root = std::make_shared<Hierarchy>(config);
+    auto hierarchy = root->adapt({10});
+    AdaptiveVoF geometry(hierarchy);
+    const auto& mesh = *geometry.mesh();
+    std::vector<double> fraction(mesh.num_owned_cells(), 0.0);
+    RefinementHints hints;
+    hints.wake_indicator.assign(fraction.size(), 0.0);
+    hints.promotion_regions = {{{6.0, 3.0, 0.5}, {6.0, 3.0, 0.5}}};
+    std::vector<int> expected(hierarchy->blocks().size());
+    const auto closed_intersection = [](const Meshes::AMRBox& a, const Meshes::AMRBox& b)
+    {
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            if (a.upper[axis] < b.lower[axis] || b.upper[axis] < a.lower[axis])
+                return false;
+        return true;
+    };
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        const auto gid = mesh.cell_global_id(static_cast<LO>(c));
+        const auto box = hierarchy->cell_box(gid);
+        // Every mixed cell already qualifies as an interface. Its neighboring
+        // pure cells have the same >=0.5 phase marker, so introduce no extra guards.
+        if ((box.lower[0] == 0.0 && box.lower[1] == 0.0) || (box.lower[0] == 2.0 && box.lower[1] == 1.0))
+            fraction[c] = 0.25;
+        if (box.lower[0] == 7.5 && box.lower[1] == 3.5)
+            hints.wake_indicator[c] = 2.0;
+        if (fraction[c] == 0.0 && hints.wake_indicator[c] == 0.0)
+            continue;
+        const auto spacing = hierarchy->block_spacing(hierarchy->cell_block(gid));
+        const auto radius = 4.0 * *std::max_element(spacing.begin(), spacing.end());
+        auto guard = box;
+        for (std::size_t a = 0; a < 3; ++a)
+        {
+            guard.lower[a] -= radius;
+            guard.upper[a] += radius;
+        }
+        for (std::size_t b = 0; b < hierarchy->blocks().size(); ++b)
+            for (int z = -1; z <= 1; ++z)
+                for (int y = -1; y <= 1; ++y)
+                    for (int x = -1; x <= 1; ++x)
+                    {
+                        const std::array<int, 3> shift{x, y, z};
+                        auto image = hierarchy->block_box(b);
+                        bool allowed = true;
+                        for (std::size_t a = 0; a < 3; ++a)
+                        {
+                            allowed = allowed && (shift[a] == 0 || config.periodic[a]);
+                            image.lower[a] += shift[a] * config.extent[a];
+                            image.upper[a] += shift[a] * config.extent[a];
+                        }
+                        if (allowed && closed_intersection(guard, image))
+                            expected[b] = 1;
+                    }
+    }
+    for (std::size_t b = 0; b < hierarchy->blocks().size(); ++b)
+        if (closed_intersection(hierarchy->block_box(b), hints.promotion_regions.front()))
+            expected[b] = 1;
+    std::vector<int> global(expected.size());
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, static_cast<int>(expected.size()),
+        expected.data(), global.data());
+    std::vector<std::size_t> refined;
+    for (std::size_t b = 0; b < global.size(); ++b)
+        if (global[b] && hierarchy->blocks()[b].level < config.max_level)
+            refined.push_back(b);
+    RefinementOptions options;
+    options.curvature_resolution = 0.0;
+    const auto actual = geometry.refinement_plan(fraction, owned_faces(geometry), options, hints);
+    EXPECT_EQ(actual.refine, refined);
+}
