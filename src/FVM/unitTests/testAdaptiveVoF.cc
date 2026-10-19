@@ -517,3 +517,43 @@ TEST(AdaptiveVoFTest, RefinementDirectoryMatchesExhaustivePeriodicGuardSelection
     const auto actual = geometry.refinement_plan(fraction, owned_faces(geometry), options, hints);
     EXPECT_EQ(actual.refine, refined);
 }
+
+TEST(AdaptiveVoFTest, MicroscopicPhaseOutflowCannotOverdrawCanonicalSubfaceDonors)
+{
+    auto config = column(4, 4.0);
+    config.periodic[0] = true;
+    const auto root = std::make_shared<Hierarchy>(config);
+    for (const bool refined : {false, true})
+    {
+        AdaptiveVoF geometry(refined ? root->adapt({1}) : root);
+        for (const double trace : {6.0e-17, 1.0e-22})
+            for (std::size_t first = 0; first < 3; ++first)
+            {
+                std::vector<double> fraction(geometry.mesh()->num_owned_cells());
+                for (std::size_t c = 0; c < fraction.size(); ++c)
+                {
+                    const auto box =
+                        geometry.hierarchy()->cell_box(geometry.mesh()->cell_global_id(static_cast<LO>(c)));
+                    if (box.lower[0] >= 1.0 && box.upper[0] <= 1.25)
+                        fraction[c] = trace;
+                }
+                const auto before = gas_volume(geometry, fraction);
+                const auto result = geometry.advect(fraction, owned_faces(geometry, {-0.2, 0.0, 0.0}), 0.1, first);
+                for (std::size_t c = 0; c < fraction.size(); ++c)
+                {
+                    EXPECT_GE(result.fraction[c], 0.0);
+                    long double outgoing = 0.0;
+                    geometry.mesh()->visit_cell_faces(static_cast<LO>(c),
+                        [&](LO face)
+                        {
+                            const double sign = geometry.mesh()->owner_cell(face) == static_cast<LO>(c) ? 1.0 : -1.0;
+                            outgoing += std::max(0.0, sign * result.gas_volume[face]);
+                        });
+                    EXPECT_LE(outgoing,
+                        static_cast<long double>(fraction[c]) * geometry.mesh()->cell_volume(static_cast<LO>(c)));
+                }
+                EXPECT_NEAR(gas_volume(geometry, result.fraction), before, before * 3e-15);
+                EXPECT_GT(before, 0.0);
+            }
+    }
+}

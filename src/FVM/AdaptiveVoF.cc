@@ -2,6 +2,7 @@
  * @brief Sparse geometric reconstruction, subface transport and conservative AMR remapping.
  */
 #include "FVM/AdaptiveVoF.hh"
+#include "FVM/details/VoFPhaseBudget.hh"
 
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -1077,19 +1078,85 @@ AdaptiveAdvection AdaptiveVoF::advect_with_sources(const std::vector<double>& fr
         require_collective(valid, "AdaptiveVoF failed to integrate a swept subface volume.");
         gas = exchange_faces(gas);
         total = exchange_faces(total);
+        // A quantized microscopic PLIC plane can export more phase than its
+        // exact donor inventory. Correct only roundoff-sized excess, on the
+        // canonical faces; never discard a positive cell inventory or clip f.
+        for (unsigned correction = 0; correction < 4; ++correction)
+        {
+            std::vector<Vector> factors(fraction.size(), Vector{1.0, 1.0, 0.0});
+            bool needs_correction = false;
+            valid = true;
+            try
+            {
+                const auto execution = mesh()->acquire_execution_view();
+                for (std::size_t c = 0; c < fraction.size(); ++c)
+                {
+                    long double gas_out = 0.0L, carrier_out = 0.0L;
+                    mesh()->visit_cell_faces(static_cast<LO>(c),
+                        [&](LO face)
+                        {
+                            const double sign = mesh()->owner_cell(face) == static_cast<LO>(c) ? 1.0 : -1.0;
+                            if (sign * total[face] > 0.0)
+                            {
+                                gas_out += sign * static_cast<long double>(gas[face]);
+                                carrier_out += sign * static_cast<long double>(total[face] - gas[face]);
+                            }
+                        });
+                    const auto factor = transport_detail::phase_budget(
+                        gas_out, carrier_out, result.fraction[c], mesh()->cell_volume(static_cast<LO>(c)), roundoff);
+                    factors[c] = {factor.gas, factor.carrier, 0.0};
+                    needs_correction = needs_correction || factor.changes_flux();
+                }
+            }
+            catch (const std::exception&)
+            {
+                valid = false;
+            }
+            require_collective(valid, "AdaptiveVoF directional outflow exceeds its donor phase budget.");
+            if (maximum(needs_correction ? 1.0 : 0.0) == 0.0)
+                break;
+            require_collective(correction < 3, "AdaptiveVoF could not resolve a roundoff-only phase budget.");
+            const auto halo_factors = exchange_cell_vectors(factors);
+            {
+                const auto execution = mesh()->acquire_execution_view();
+                for (std::size_t face = 0; face < mesh()->num_owned_faces(); ++face)
+                {
+                    if (total[face] == 0.0)
+                        continue;
+                    const auto fid = static_cast<LO>(face);
+                    const auto donor = total[face] > 0.0 ? mesh()->owner_cell(fid) : mesh()->neighbor_cell(fid);
+                    gas[face] = transport_detail::budgeted_gas(
+                        total[face], gas[face], {halo_factors[donor][0], halo_factors[donor][1]});
+                }
+            }
+            gas = exchange_faces(gas);
+        }
         {
             const auto execution = mesh()->acquire_execution_view();
             for (std::size_t c = 0; c < fraction.size(); ++c)
             {
-                double dg = 0.0, dv = 0.0;
+                long double gas_in = 0.0L, gas_out = 0.0L, carrier_in = 0.0L, carrier_out = 0.0L;
                 mesh()->visit_cell_faces(static_cast<LO>(c),
                     [&](LO face)
                     {
                         const double sign = mesh()->owner_cell(face) == static_cast<LO>(c) ? 1.0 : -1.0;
-                        dg -= sign * gas[face];
-                        dv += sign * total[face];
+                        const long double g = sign * static_cast<long double>(gas[face]);
+                        const long double carrier = sign * static_cast<long double>(total[face] - gas[face]);
+                        gas_out += std::max(0.0L, g);
+                        gas_in += std::max(0.0L, -g);
+                        carrier_out += std::max(0.0L, carrier);
+                        carrier_in += std::max(0.0L, -carrier);
                     });
-                result.fraction[c] += (dg + (frozen[c] >= 0.5 ? dv : 0.0)) / mesh()->cell_volume(static_cast<LO>(c));
+                const double v = mesh()->cell_volume(static_cast<LO>(c));
+                // These minority-phase forms are the frozen-WY update:
+                // G'=G-netG+chi*netV, C'=C-netC+(1-chi)*netV.
+                // Keeping (old-out)+in avoids cancellation of a positive tail.
+                if (frozen[c] < 0.5)
+                    result.fraction[c] = static_cast<double>(
+                        ((static_cast<long double>(result.fraction[c]) * v - gas_out) + gas_in) / v);
+                else
+                    result.fraction[c] =
+                        static_cast<double>(1.0L - (((1.0L - result.fraction[c]) * v - carrier_out) + carrier_in) / v);
             }
         }
         validate_f(result.fraction, fraction.size());

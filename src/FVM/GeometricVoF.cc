@@ -4,6 +4,7 @@
  */
 
 #include "FVM/GeometricVoF.hh"
+#include "FVM/details/VoFPhaseBudget.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -948,6 +949,47 @@ AdvectionResult GeometricVoF::advect(
                     result.gas_volume[a][id] = gas_flux;
                     result.liquid_volume[a][id] = total_flux - gas_flux;
                 }
+        for (unsigned correction = 0; correction < 4; ++correction)
+        {
+            std::vector<transport_detail::PhaseBudget> factors(fraction.size());
+            bool changes = false;
+            for (std::size_t cell = 0; cell < fraction.size(); ++cell)
+            {
+                const auto p = grid_.cell_coordinates(cell);
+                auto q = p;
+                ++q[a];
+                const auto lo = grid_.face_index(a, p[0], p[1], p[2]);
+                const auto hi = grid_.face_index(a, q[0], q[1], q[2]);
+                const long double gas_out = std::max(0.0, -result.gas_volume[a][lo]) +
+                                            static_cast<long double>(std::max(0.0, result.gas_volume[a][hi]));
+                const long double carrier_out = std::max(0.0, -result.liquid_volume[a][lo]) +
+                                                static_cast<long double>(std::max(0.0, result.liquid_volume[a][hi]));
+                factors[cell] = transport_detail::phase_budget(
+                    gas_out, carrier_out, result.fraction[cell], volume, fraction_roundoff);
+                changes = changes || factors[cell].changes_flux();
+            }
+            if (!changes)
+                break;
+            if (correction == 3)
+                throw std::runtime_error("VoF could not resolve a roundoff-only phase budget.");
+            for (std::size_t k = 0; k < size[2]; ++k)
+                for (std::size_t j = 0; j < size[1]; ++j)
+                    for (std::size_t i = 0; i < size[0]; ++i)
+                    {
+                        std::array<std::size_t, 3> donor{i, j, k};
+                        const auto id = grid_.face_index(a, i, j, k);
+                        const double u = velocity[a][id];
+                        if (u == 0.0)
+                            continue;
+                        donor[a] = image_index(static_cast<std::ptrdiff_t>(donor[a]) - (u > 0.0 ? 1 : 0),
+                            grid_.cells[a], grid_.periodic[a]);
+                        const auto cell = grid_.cell_index(donor[0], donor[1], donor[2]);
+                        const double total = u * dt * grid_.face_area(a);
+                        result.gas_volume[a][id] =
+                            transport_detail::budgeted_gas(total, result.gas_volume[a][id], factors[cell]);
+                        result.liquid_volume[a][id] = total - result.gas_volume[a][id];
+                    }
+        }
         std::vector<double> next = result.fraction;
         for (std::size_t cell = 0; cell < fraction.size(); ++cell)
         {
@@ -956,11 +998,20 @@ AdvectionResult GeometricVoF::advect(
             ++q[a];
             const auto lo = grid_.face_index(a, p[0], p[1], p[2]);
             const auto hi = grid_.face_index(a, q[0], q[1], q[2]);
-            const long double transported =
-                (static_cast<long double>(result.gas_volume[a][lo]) - result.gas_volume[a][hi]) / volume;
-            const long double correction = static_cast<long double>(compression[cell]) *
-                                           (velocity[a][hi] - velocity[a][lo]) * dt / grid_.spacing[a];
-            next[cell] = static_cast<double>(result.fraction[cell] + transported + correction);
+            const long double gas_out = std::max(0.0, -result.gas_volume[a][lo]) +
+                                        static_cast<long double>(std::max(0.0, result.gas_volume[a][hi]));
+            const long double gas_in = std::max(0.0, result.gas_volume[a][lo]) +
+                                       static_cast<long double>(std::max(0.0, -result.gas_volume[a][hi]));
+            const long double carrier_out = std::max(0.0, -result.liquid_volume[a][lo]) +
+                                            static_cast<long double>(std::max(0.0, result.liquid_volume[a][hi]));
+            const long double carrier_in = std::max(0.0, result.liquid_volume[a][lo]) +
+                                           static_cast<long double>(std::max(0.0, -result.liquid_volume[a][hi]));
+            if (compression[cell] == 0.0)
+                next[cell] = static_cast<double>(
+                    ((static_cast<long double>(result.fraction[cell]) * volume - gas_out) + gas_in) / volume);
+            else
+                next[cell] = static_cast<double>(
+                    1.0L - (((1.0L - result.fraction[cell]) * volume - carrier_out) + carrier_in) / volume);
             if (!std::isfinite(next[cell]) || next[cell] < -fraction_roundoff || next[cell] > 1.0 + fraction_roundoff)
                 throw std::runtime_error("VoF directional transport lost boundedness; reduce the timestep.");
         }
