@@ -178,7 +178,20 @@ struct ReactingVoFCoupler::Impl
         require_all(flow->low_mach_enabled(), "Reacting VoF coupler requires initialized low-Mach state.");
         validate_options();
         refresh_geometry();
+        bind_populations();
+        accepted.time = flow->time();
+        if (options.representation.enabled)
+            representation =
+                std::make_unique<Registry>(options.representation, options.upper_pivots, options.upper_populations);
+    }
+
+    // Population order belongs to the current solver state, not the hierarchy.
+    // Reinitialization may replace this schema without changing the mesh.
+    void bind_populations()
+    {
         const auto& state = flow->low_mach_state();
+        std::size_t next_micro = 0;
+        std::vector<std::size_t> next_upper;
         const auto find_population = [&](const std::string& name)
         {
             const auto it = std::find_if(
@@ -195,22 +208,20 @@ struct ReactingVoFCoupler::Impl
                     (!options.upper_populations.empty() &&
                         options.population_step.underflow == Physics::BubbleUnderflowPolicy::ReturnToMicro);
                 if (needs_micro)
-                    micro = find_population(options.micro_population);
+                    next_micro = find_population(options.micro_population);
                 for (const auto& name : options.upper_populations)
-                    upper.push_back(find_population(name));
-                if (upper.size() != options.upper_pivots.mol_per_bubble.size())
+                    next_upper.push_back(find_population(name));
+                if (next_upper.size() != options.upper_pivots.mol_per_bubble.size())
                     throw std::invalid_argument("Upper population names and molar pivots must match.");
-                auto sorted = upper;
+                auto sorted = next_upper;
                 std::sort(sorted.begin(), sorted.end());
                 if (std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end() ||
-                    (needs_micro && std::find(upper.begin(), upper.end(), micro) != upper.end()))
+                    (needs_micro && std::find(next_upper.begin(), next_upper.end(), next_micro) != next_upper.end()))
                     throw std::invalid_argument("Micro and upper population identities must be distinct.");
             },
             "Reacting population registration failed on another rank.");
-        accepted.time = flow->time();
-        if (options.representation.enabled)
-            representation =
-                std::make_unique<Registry>(options.representation, options.upper_pivots, options.upper_populations);
+        micro = next_micro;
+        upper.swap(next_upper);
     }
 
     void validate_options()
@@ -1218,6 +1229,7 @@ ReactingVoFCoupler::Trial ReactingVoFCoupler::preview(double dt, const ReactingV
 {
     identical(dt, "Reacting VoF timesteps must be finite and identical across ranks.");
     require_all(dt > 0, "Reacting VoF requires a positive timestep.");
+    impl_->bind_populations();
     impl_->refresh_geometry();
     const State base = impl_->flow->low_mach_state();
     const auto n = base.liquid_mass.size();
