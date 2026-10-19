@@ -209,7 +209,7 @@ struct VoFSolver::Impl
         VectorField u;
 
         Published(State candidate, const SP<const Handle>& mesh)
-            : state(std::move(candidate)), f(mesh, "resolvedGasFraction"), p(mesh, "pressure"), u(mesh, "velocity")
+            : state(std::move(candidate)), f(mesh, "resolvedGasFraction", false), p(mesh, "pressure", false), u(mesh, "velocity", false)
         {
             for (std::size_t c = 0; c < state.f.size(); ++c)
             {

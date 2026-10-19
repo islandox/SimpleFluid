@@ -6,6 +6,7 @@
 #include "equations/RadiolyticGasProperties.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/details/ConservativeVoFTransport.hh"
+#include "solvers/details/VoFProjectionWorkspace.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <Teuchos_Array.hpp>
@@ -183,13 +184,14 @@ struct AdaptiveVoFSolver::Impl
         std::vector<Face> faces;
         std::size_t row_capacity = 1;
         GO gauge = 0;
-        BelosLinearSolver<> pressure_solver, inventory_solver;
+        BelosLinearSolver<> inventory_solver;
+        detail::VoFProjectionWorkspace projection;
         detail::ConservativeVoFTransport conservative_transport;
         std::shared_ptr<const VoF::LowMachOptions> low_options;
 
         Context(std::shared_ptr<const Hierarchy> h, VoFMaterial m, VoFSolverOptions o)
             : geometry(std::make_shared<VoF::AdaptiveVoF>(std::move(h))), mesh(geometry->mesh()), material(m),
-              options(o), conservative_transport(mesh)
+              options(o), projection(mesh), conservative_transport(mesh)
         {
             bool valid = true;
             with_geometry(
@@ -291,17 +293,7 @@ struct AdaptiveVoFSolver::Impl
         std::vector<Vector> exchange_vectors(const std::vector<Vector>& values) const
         {
             require_all(values.size() == owned(), "AdaptiveVoFSolver vector shape does not match owned cells.");
-            std::vector<Vector> result(volume.size());
-            for (std::size_t a = 0; a < 3; ++a)
-            {
-                std::vector<double> component(owned());
-                for (std::size_t c = 0; c < owned(); ++c)
-                    component[c] = values[c][a];
-                const auto overlap = geometry->exchange_cells(component);
-                for (std::size_t c = 0; c < overlap.size(); ++c)
-                    result[c][a] = overlap[c];
-            }
-            return result;
+            return geometry->exchange_cell_vectors(values);
         }
 
         /** Weighted least squares with physical periodic-image displacement. */
@@ -587,45 +579,10 @@ struct AdaptiveVoFSolver::Impl
             s.diagnostics.pressure_iterations = 0;
             if (max_abs(div) > limit)
             {
-                auto matrix = Teuchos::rcp(new Pack::matrix_type(mesh->owned_cell_map(), row_capacity));
-                with_geometry(
-                    [&]
-                    {
-                        for (std::size_t c = 0; c < owned(); ++c)
-                        {
-                            const auto gid = mesh->cell_global_id(static_cast<LO>(c));
-                            std::map<GO, double> row;
-                            if (gid == gauge && !compressible)
-                                row[gid] = 1;
-                            else
-                            {
-                                double diagonal = compressible ? (*volume_susceptibility)[c] / (dt * dt) : 0;
-                                for (const auto id : mesh->faces(static_cast<LO>(c)))
-                                {
-                                    const auto& f = faces[id];
-                                    if (f.boundary)
-                                        continue;
-                                    const auto n = f.owner == static_cast<LO>(c) ? f.neighbor : f.owner;
-                                    const auto ngid = mesh->cell_global_id(n);
-                                    const double coefficient = beta[id] * f.area / f.distance;
-                                    diagonal += coefficient;
-                                    if (ngid != gauge || compressible)
-                                        row[ngid] -= coefficient;
-                                }
-                                row[gid] += diagonal;
-                            }
-                            Teuchos::Array<GO> columns;
-                            Teuchos::Array<double> values;
-                            for (const auto& [column, value] : row)
-                            {
-                                columns.push_back(column);
-                                values.push_back(value);
-                            }
-                            matrix->insertGlobalValues(gid, columns(), values());
-                        }
-                    });
-                matrix->fillComplete();
-                Pack::vector_type rhs(mesh->owned_cell_map(), true), solution(mesh->owned_cell_map(), true);
+                projection.refresh(beta, compressible ? volume_susceptibility : nullptr, dt, gauge);
+                const auto& matrix = projection.matrix;
+                auto& rhs = projection.rhs;
+                auto& solution = projection.solution;
                 LinearSolverOptions linear;
                 linear.backend = LinearSolverBackend::Cg;
                 linear.preconditioner = LinearPreconditioner::Jacobi;
@@ -645,7 +602,7 @@ struct AdaptiveVoFSolver::Impl
                             static_cast<LO>(c), mesh->cell_global_id(static_cast<LO>(c)) == gauge && !compressible
                                                     ? 0
                                                     : -div[c] * volume[c] / dt);
-                    const auto stats = pressure_solver.solve_from_zero_with_statistics(
+                    const auto stats = projection.solver.solve_from_zero_with_statistics(
                         Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix), rhs, solution, linear);
                     require_all(std::isfinite(stats.achieved_tolerance) && std::isfinite(stats.rhs_norm),
                         "AdaptiveVoFSolver pressure algebra returned nonfinite diagnostics.");
@@ -804,8 +761,14 @@ struct AdaptiveVoFSolver::Impl
                     traction[b][i] = mu * (normal_derivative + transpose);
                 }
             }
-            for (auto& values : traction)
-                values = geometry->exchange_faces(values);
+            std::vector<Vector> packed_traction(faces.size());
+            for (std::size_t id = 0; id < faces.size(); ++id)
+                for (std::size_t a = 0; a < 3; ++a)
+                    packed_traction[id][a] = traction[a][id];
+            packed_traction = geometry->exchange_face_vectors(packed_traction);
+            for (std::size_t id = 0; id < faces.size(); ++id)
+                for (std::size_t a = 0; a < 3; ++a)
+                    traction[a][id] = packed_traction[id][a];
             if (traction_scale)
             {
                 std::array<detail::CompensatedSum<>, 3> local;
@@ -1144,7 +1107,7 @@ struct AdaptiveVoFSolver::Impl
         ScalarField f, p;
         VectorField u;
         Published(State candidate, const SP<const Handle>& mesh)
-            : state(std::move(candidate)), f(mesh, "resolvedGasFraction"), p(mesh, "pressure"), u(mesh, "velocity")
+            : state(std::move(candidate)), f(mesh, "resolvedGasFraction", false), p(mesh, "pressure", false), u(mesh, "velocity", false)
         {
             for (std::size_t c = 0; c < state.f.size(); ++c)
             {

@@ -80,4 +80,54 @@ TEST(ConservativeVoFTransportTest, SplitCounterexampleHasBoundedConservativeImpl
             EXPECT_NEAR(global[1], global[0], 2e-11 * std::max(1.0, global[0]));
         }
 }
+TEST(ConservativeVoFTransportTest, ChangedDirectionAndStorageRefreshTheReusableOperator)
+{
+    Meshes::AMRGrid grid;
+    grid.root_blocks = {2, 1, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {4, 2, 2};
+    grid.periodic = {true, true, true};
+    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    const auto mesh = geometry.mesh();
+    const auto n = mesh->num_owned_cells();
+    detail::ConservativeVoFTransport tracer(mesh);
+    std::vector<double> rhs(n), zero(n), capacity(n), flux(mesh->num_faces());
+    for (std::size_t c = 0; c < n; ++c)
+        rhs[c] = mesh->cell_centroid(static_cast<LO>(c)).x < 1 ? 1 : 0;
+    // Alternating RHS groups reuse A; reversal, zero flow, then new capacity
+    // force distinct numerical operators on the same graph, including replay.
+    for (int stage : {1, 1, -1, 0, 2, -2, 1})
+    {
+        const double mass = std::abs(stage) == 2 ? 3 : 2;
+        std::fill(capacity.begin(), capacity.end(), mass);
+        for (std::size_t face = 0; face < flux.size(); ++face)
+            flux[face] = stage == 0 ? 0 : (stage > 0 ? 0.25 : -0.25) * mesh->face_normal(static_cast<LO>(face)).x;
+        const auto result = tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-14);
+        const double r = 0.25 / (mass + 0.25);
+        const double x0 = 1 / ((mass + 0.25) * (1 - std::pow(r, 4)));
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            const auto x = static_cast<unsigned>(mesh->cell_centroid(static_cast<LO>(c)).x);
+            const unsigned distance = stage > 0 ? x : (4 - x) % 4;
+            const double expected = stage == 0 ? rhs[c] : mass * x0 * std::pow(r, distance);
+            EXPECT_NEAR(result.amount[c], expected, 2e-13);
+        }
+    }
+    // An unrelated failed zero-storage refresh must not make the old key
+    // eligible for reuse while the matrix contains failed candidate values.
+    std::fill(capacity.begin(), capacity.end(), 0);
+    for (std::size_t face = 0; face < flux.size(); ++face)
+    {
+        const auto id = static_cast<LO>(face);
+        const auto owner = mesh->owner_cell(id);
+        const double x = mesh->cell_centroid(owner).x + mesh->face_center_vector(id, owner).x;
+        flux[face] = std::abs(x - 1) < 1e-12 ? 0.25 * mesh->face_normal(id).x : 0;
+    }
+    EXPECT_THROW((void)tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-14), std::exception);
+    std::fill(capacity.begin(), capacity.end(), 2);
+    for (std::size_t face = 0; face < flux.size(); ++face)
+        flux[face] = 0.25 * mesh->face_normal(static_cast<LO>(face)).x;
+    EXPECT_NO_THROW((void)tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-14));
+}
+
 } // namespace

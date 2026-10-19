@@ -38,6 +38,11 @@ private:
     SP<const MeshHandle<>> mesh_;
     Pack::import_type cell_import_, face_import_;
     BelosLinearSolver<> solver_;
+    Teuchos::RCP<Pack::matrix_type> matrix_;
+    Pack::vector_type rhs_, solution_;
+    mutable Pack::vector_type cell_owned_, cell_overlap_, face_owned_, face_overlap_;
+    std::vector<double> capacity_, flux_;
+    bool numeric_valid_ = false;
     std::size_t row_capacity_ = 1;
     [[nodiscard]] std::vector<double> cells(const std::vector<double>& owned) const;
     [[nodiscard]] std::vector<double> faces(const std::vector<double>& overlap) const;
