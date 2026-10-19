@@ -39,9 +39,57 @@ struct AdaptiveRemapResult
 
 struct AdaptiveAdvection
 {
-    std::vector<double> fraction;                  ///< Owned cells.
-    std::vector<double> gas_volume, liquid_volume; ///< Overlap faces, owner-outward signed m3.
-    double maximum_volume_divergence = 0.0;        ///< Global max |dt div u|.
+    std::vector<double> fraction; ///< Owned cells.
+    /** Overlap faces, owner-outward signed m3; historical liquid_volume denotes the nonresolved 1-f carrier. */
+    std::vector<double> gas_volume, liquid_volume;
+    double maximum_volume_divergence = 0.0;      ///< Global max |dt div u|.
+    double maximum_volume_source_residual = 0.0; ///< Global max |dt div u-(DeltaG+DeltaC)/V|.
+};
+
+/** Signed physical phase-volume changes over this step, in m3 per owned cell. */
+struct PhaseVolumeIncrement
+{
+    std::vector<double> gas;
+    std::vector<double> carrier; ///< The entire nonresolved 1-f volume, including dispersed void.
+};
+
+/** @brief Side of a resolved interface used for cell sampling and source deposition. */
+enum class InterfaceSide
+{
+    Gas,
+    Carrier
+};
+
+/**
+ * @brief Uniquely owned resolved-interface geometry and its adjacent global cells.
+ *
+ * A PLIC patch belongs to its owned mixed cell and uses that GID on both sides.
+ * A pure gas/carrier mesh-face patch belongs to the canonical face owner; the
+ * carrier cell can therefore be remote. Centroids use the native geometry's
+ * physical coordinates; film geometry retains the correct periodic image.
+ * Records must originate from this exact immutable hierarchy and remain intact.
+ */
+struct InterfacePatch
+{
+    enum class Kind
+    {
+        Plic,
+        MeshFace
+    };
+    Kind kind = Kind::Plic;
+    std::uint64_t gas_cell = 0;
+    std::uint64_t carrier_cell = 0;
+    Vector centroid{};
+    Vector normal{}; ///< Unit normal directed from resolved gas into carrier.
+    double area = 0.0;
+
+private:
+    friend class AdaptiveVoF;
+    std::shared_ptr<const Meshes::CartesianAMR> source_hierarchy_;
+    std::uint64_t source_entity_ = 0;
+    int owner_rank_ = -1;
+    Vector lower_{}, upper_{}, plane_normal_{}; ///< Carrier-cell local box and gas-side plane.
+    double plane_offset_ = 0.0;
 };
 
 struct RefinementOptions
@@ -75,7 +123,8 @@ struct RefinementPlan
  *
  * Inputs and returned cell arrays contain owned cells in native map order.
  * Face arrays contain native overlap faces in canonical owner orientation.
- * All operations are collective on the native mesh communicator. Only compact
+ * Numerical field operations are collective on the native mesh communicator;
+ * film_length is explicitly a local geometric query. Only compact
  * hierarchy metadata is replicated. Temporary reconstruction halos use sparse
  * Tpetra imports. No finest-level volume mesh or global solution copy is made.
  * The topology is immutable; construct a new instance and remap to regrid.
@@ -101,6 +150,32 @@ public:
     /** Shared timestep, CFL <= 0.5 and |dt div u| <= 1e-10; no level subcycling. */
     [[nodiscard]] AdaptiveAdvection advect(const std::vector<double>& fraction,
         const std::vector<double>& face_velocity, double dt, std::size_t first_axis = 0) const;
+    /**
+     * Physical-source counterpart: retain the frozen-WY directional correction,
+     * then apply DeltaG-chi*(DeltaG+DeltaC). Projected face-volume divergence
+     * must match the supplied total source, and closed global compatibility and
+     * every intermediate/final phase bound remain mandatory. No source clipping
+     * or mean subtraction is performed. Nonzero increments require dt>0.
+     */
+    [[nodiscard]] AdaptiveAdvection advect(const std::vector<double>& fraction,
+        const std::vector<double>& face_velocity, double dt, const PhaseVolumeIncrement& source,
+        std::size_t first_axis = 0) const;
+    /** Collective PLIC and exact pure gas/carrier face patches, owned exactly once. */
+    [[nodiscard]] std::vector<InterfacePatch> interface_patches(const std::vector<double>& fraction) const;
+    /** Collective overlap-face carrier aperture: intersection of both incident PLIC traces; walls are closed. */
+    [[nodiscard]] std::vector<double> carrier_face_aperture(const std::vector<double>& fraction) const;
+    /**
+     * Local carrier-volume average of min(normal distance to interface, delta),
+     * in metres. Integrates the actual cut-cell geometry; delta must be positive.
+     * The normalized geometric factor does not include dispersed/aqueous fractions.
+     */
+    [[nodiscard]] double film_length(const InterfacePatch& patch, double delta) const;
+    /** Collective sparse deposition of signed patch amounts onto the selected cell side. */
+    [[nodiscard]] std::vector<double> scatter_patch_amounts(
+        const std::vector<InterfacePatch>& patches, const std::vector<double>& amounts, InterfaceSide side) const;
+    /** Collective sparse sampling of an owned-cell scalar at each patch's selected cell side. */
+    [[nodiscard]] std::vector<double> sample_patch_values(
+        const std::vector<InterfacePatch>& patches, const std::vector<double>& owned_values, InterfaceSide side) const;
     /** PLIC intersection for phase volumes; carrier-weighted conservative extensives. */
     [[nodiscard]] AdaptiveRemapResult remap(const AdaptiveVoF& target, const std::vector<double>& fraction,
         const std::vector<ConservedQuantity>& inventories = {}, double liquid_density = 1.0,
@@ -110,6 +185,10 @@ public:
         const std::vector<double>& face_velocity, RefinementOptions options = {}, RefinementHints hints = {}) const;
 
 private:
+    [[nodiscard]] SIMPLEFLUID_FVM_LOCAL AdaptiveAdvection advect_with_sources(const std::vector<double>& fraction,
+        const std::vector<double>& face_velocity, double dt, const PhaseVolumeIncrement* source,
+        std::size_t first_axis) const;
+    SIMPLEFLUID_FVM_LOCAL void validate_patches(const std::vector<InterfacePatch>& patches, InterfaceSide side) const;
     struct SIMPLEFLUID_FVM_LOCAL Impl;
     std::unique_ptr<Impl> impl_;
 };
