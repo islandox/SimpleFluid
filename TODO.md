@@ -20,6 +20,10 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 
 ### Current priorities
 
+Phase 22, Stage 1 is implemented with focused uniform-mesh VoF verification.
+Its later AMR and hybrid radiolytic-bubble stages remain separate acceptance
+gates.
+
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
 2. Decide whether Phase 14's optional scalar-void transport/slip path is still
@@ -56,6 +60,7 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 | Phase 20, TH/neutronics map | In-memory scaffold and reusable conservative cell transfer implemented | Production external-neutronics protocol and validation |
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
+| Phase 22, resolved/dispersed bubbles | Stage 1 implemented and focused-tested | Conservative AMR, physical gas coupling, and bidirectional representation changes |
 
 ### Checklist conventions
 
@@ -1576,9 +1581,9 @@ physical closure; generic cell transfer alone does not complete them.
 - [ ] Validate pool-volume and extensive-inventory closure across supported MPI
       partition counts.
 
-Full VOF interface capturing, macroscopic surface breakup, and Euler–Euler gas
-momentum remain separate deferred programs; completing this planar phase must
-not imply those capabilities.
+Full VoF interface capturing and macroscopic surface breakup belong to the
+separate Phase 22 program below; Euler–Euler gas momentum remains Phase 21.
+Completing this planar phase must not imply those capabilities.
 
 ---
 
@@ -1625,6 +1630,126 @@ not liquid-volume-fraction weighted.
 - [ ] Bubble-induced-turbulence and interphase-transfer closures reproduce
       selected reference limits.
 - [ ] Full model is validated against at least one non-neutronic bubbly-flow benchmark.
+
+---
+
+## Phase 22 — Resolved and dispersed radiolytic bubbles
+
+**Status:** Stage 1 implemented and focused-tested in its declared serial,
+uniform-grid, source-free isothermal scope. The target is centimetric
+resolved gas in the existing aqueous radiolytic system. Later stages add
+adaptive refinement and physical/representational exchanges; the uniform-mesh
+baseline alone does not qualify coupled radiolysis or reactor transients.
+
+### Physical and ownership contracts
+
+- [ ] Keep resolved gas `f`, dispersed fractions `alpha_d,k`, and liquid
+      `alpha_l = 1 - f - sum(alpha_d,k)` distinct. All population number/molar
+      inventories are per bulk volume; dissolved storage remains `alpha_l*C_H2`.
+- [ ] Add resolved-gas molar inventory and a single hydrogen ledger covering
+      dissolved, dispersed, resolved, produced, and escaped gas. Every molecule
+      belongs to one inventory; representation changes create no hydrogen.
+- [ ] Extend conservative phase mass/momentum/thermal transport to low-Mach
+      gas EOS and material-volume sources, keeping absolute thermodynamic and
+      gauge pressures distinct and counting capillary pressure once.
+- [ ] Keep supplied aqueous properties and radiolytic material correlations
+      external. Use validated domains for all selected transfer/slip laws.
+- [ ] Retain external shared ownership of the flow solver. Checkpoints include
+      phase inventories, bubble identities, pending conversion reservations,
+      transfer events, and cumulative ledgers; publish accepted states only.
+
+### Stage 1 — Uniform-mesh geometric VoF
+
+The first executable baseline is fixed, uniform Cartesian, isothermal,
+source-free flow with two incompressible phases of different densities. It
+establishes the geometric/conservative flow core before gas EOS, thermal and
+radiolytic sources are introduced. Supported boundary and parallel contracts
+must be explicit and unsupported modes rejected.
+
+- [x] Add compiled geometric PLIC reconstruction and conservative swept-volume
+      advection with bounded fractions and shared phase face fluxes.
+- [x] Add a variable-density VoF flow solver with consistent mass/momentum
+      transport, variable-coefficient pressure projection, balanced surface
+      tension, and computed interface curvature.
+- [x] Bound the timestep by advection, explicit capillarity, and applicable
+      viscous limits; reject invalid input or a failed step without publishing
+      partially advanced fields/time.
+- [x] Expose native mesh/field results and focused reproducible verification
+      cases without changing the existing Boussinesq path.
+- [x] Verify geometric plane volumes, translation/deformation transport,
+      boundedness, and phase-mass conservation.
+- [x] Verify static Laplace pressure, spurious-current behavior, capillary
+      oscillation, and transport/projection at the intended density ratios.
+- [x] Document algorithms, units, boundary/parallel scope, and numerical
+      qualification separately from future physical validation.
+
+See the [solver guide](docs/modeling/vof.md) and the dedicated
+[Stage 1 verification record](docs/verification/vof_stage1_20261019.md).
+The evidence includes density ratio 10,000, a complete capillary-wave period,
+and matched-time static bubbles. Short inviscid tests do not establish
+long-time parasitic-current limits, viscous rising-bubble accuracy, or coupled
+reactor qualification.
+
+### Stage 2 — Conservative three-dimensional AMR
+
+- [ ] Add a dyadic block hierarchy with 2:1 neighboring refinement and
+      canonical conservative coarse/fine subfaces. Begin with Cartesian blocks;
+      qualify prism subdivision and vessel-boundary geometry separately.
+- [ ] Refine interface/curvature stencils, predicted motion buffers, thin necks,
+      nearby interfaces/walls, wakes, and imminent promotion sites. Protect
+      distinct components and interface neighborhoods during coarsening.
+- [ ] Use 24–32 cells across the smallest resolved diameter as an initial target
+      (0.31–0.42 mm for 10 mm bubbles), then perform finer convergence studies.
+      Interface resolution alone is not wake DNS or mass-transfer resolution.
+- [ ] Prolong PLIC geometry geometrically and transfer phase masses, dissolved
+      and population inventories, momentum, and thermal energy conservatively.
+- [ ] Publish mesh/state changes atomically at accepted coupling boundaries;
+      freeze topology while a replay checkpoint is active. Rebuild maps, halos,
+      graphs, and external transfers using topology/partition generations.
+- [ ] Verify refinement/coarsening and interface passage across coarse/fine
+      and MPI boundaries, including capillary equilibrium and replay.
+- [ ] Add level subcycling only with conservative flux-register corrections.
+
+### Stage 3 — Physical radiolytic and interface coupling
+
+- [ ] Retain microbubble kinetics and introduce size-aware upper populations
+      with calibrated growth, breakup, and coalescence closures.
+- [ ] Add resolved-interface dissolved-H2 flux using reconstructed area and
+      Henry equilibrium, with a qualified subgrid concentration-boundary-layer
+      model when the hydrodynamic grid cannot resolve species transport.
+- [ ] Couple gas EOS, thermal transport, donor/liquid accounting, and bubble
+      slip to one conservative material-volume/pressure constraint.
+- [ ] Extend geometric phase transport and its source splitting consistently
+      to nonzero material-volume sources; preserve boundedness and matching
+      phase/momentum fluxes rather than bypassing the Stage 1 divergence guard.
+- [ ] Capture dispersed gas from interface-relative collision flux and an
+      explicit coalescence efficiency; retain uncaptured inventory in liquid.
+- [ ] Define film-drainage/rupture and resolved-bubble coalescence assumptions.
+- [ ] Define free-surface/headspace ownership and exact accepted escape
+      accounting; qualify any planar-ALE extension separately.
+- [ ] Verify coupled production, dissolution/growth, capture, and escape with
+      hydrogen, liquid, momentum, and thermal budgets.
+
+### Stage 4 — Bidirectional representation changes
+
+- [ ] Add a checkpointed birth registry: local eligible size-bin donors,
+      whole-bubble inventory, persistent spatial seed identities, and a
+      sufficiently refined insertion neighborhood. Void fraction alone is not
+      a promotion criterion; birth localization is an explicit model closure.
+- [ ] Use physical-size/resolution hysteresis for promotion and demotion.
+      Initial candidate thresholds are 10 mm and 4 mm for a 0.31 mm finest mesh;
+      qualify threshold sensitivity rather than treating these as universal.
+- [ ] Identify complete gas components across ranks; demote detached small
+      components while retaining attached ligaments and headspace-connected gas.
+- [ ] Transfer gas inventories, momentum, and thermal state atomically and
+      conservatively redistribute displaced liquid and dissolved species.
+- [ ] Separate representation conversion from physical EOS/capillary
+      relaxation; account for physical changes in bubble number/surface energy.
+- [ ] Verify round-trip budgets, donor exhaustion, partition-independent event
+      ownership, rejection/replay, and promotion/demotion threshold sensitivity.
+- [ ] Use Hysing-style algorithm checks followed by three-dimensional
+      centimetric-bubble convergence of rise speed, shape, wake, and gas
+      transfer. Coupled reactor qualification is an additional application gate.
 
 ---
 

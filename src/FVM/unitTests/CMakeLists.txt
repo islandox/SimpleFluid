@@ -12,14 +12,19 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testFvmLibrary")
+  if(TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF")
     # Catch dependencies from FVM back into the higher-level solver DSO.
     target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
   else()
     target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  simplefluid_discover_tests(${TEST_NAME})
+  if(TEST_NAME STREQUAL "testGeometricVoF")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;geometry\\;conservation")
+  else()
+    simplefluid_discover_tests(${TEST_NAME})
+  endif()
 endforeach()
 
 simplefluid_add_mpi_test(

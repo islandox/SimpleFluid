@@ -838,6 +838,14 @@ boiling and steam transport/escape are deferred. Removing or replacing the
 fixed-grid free-surface model is rejected while boiling still owns nonzero
 submerged steam; the inventory is never silently discarded.
 
+The independent `VoFSolver` provides a serial, fixed uniform Cartesian baseline
+for source-free, isothermal flow of two incompressible phases. It combines
+geometric PLIC transport, variable-density momentum/projection, and balanced
+capillarity, with native mesh/field output and transactional steps. See the
+[VoF guide](docs/modeling/vof.md) for its supported boundaries and numerical
+verification. AMR and resolved/dispersed radiolytic exchange remain later
+stages in [Phase 22](TODO.md#phase-22--resolved-and-dispersed-radiolytic-bubbles).
+
 ## Dependencies
 
 | Dependency | Role | Version | Requirement |
@@ -885,6 +893,7 @@ example and storage accounting](docs/region_meshes.md).
 | Region composition, MPI, and ALE | [Region meshes](docs/region_meshes.md) |
 | Conservative cell-field projection | [Mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md) |
 | Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
+| Uniform-mesh geometric VoF | [Solver and numerical verification](docs/modeling/vof.md) |
 | SST-SAS configuration and supported paths | [Model contract](docs/modeling/sst_sas.md) and [extensions](docs/modeling/sst_sas_extensions.md) |
 | Radiolysis, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/radiolytic_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
 | External reference comparisons | [OpenFOAM workflows](verification/openfoam/README.md) |

@@ -2,6 +2,9 @@ add_executable(verification_boundary_layer_mesh verification_boundary_layer_mesh
 target_link_libraries(verification_boundary_layer_mesh PRIVATE SimpleFluid::Mesh)
 simplefluid_exclude_from_pgo_sources(verification_boundary_layer_mesh.cc)
 
+simplefluid_add_example(vof_verification vof_verification.cc)
+simplefluid_exclude_from_pgo_sources(vof_verification.cc)
+
 simplefluid_add_example(planar_free_surface_verification planar_free_surface_verification.cc)
 
 # This analytic verification driver is not part of the production PGO training

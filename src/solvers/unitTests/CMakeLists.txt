@@ -26,10 +26,21 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME STREQUAL "testVoFSolver")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;conservation\\;capillary\\;transaction")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME VoFRejectsDistributedConstruction_2procs
+    TARGET testVoFSolver
+    PROCS 2
+    ARGS "--gtest_filter=VoFSolverParallelTest.RejectsDistributedConstruction"
+    LABELS "vof;collective"
+    TIMEOUT 60)
 
 simplefluid_add_mpi_test(
     NAME CoupledPreconditionerValidation_2procs

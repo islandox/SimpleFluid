@@ -1198,10 +1198,11 @@ liquid/fissile mass, gas species, precursor inventory, and energy and report
 mapping residuals across supported MPI partitions. Same-topology ALE
 conservation does not satisfy that requirement.
 
-Full VOF/interface capturing and Euler--Euler gas momentum remain separate
-deferred model families. The present conservation tests establish the discrete
-contract for a flat moving boundary; they do not constitute quantitative
-physical validation.
+Resolved interfaces belong to the separate [uniform-mesh VoF workstream](vof.md);
+its initial serial Cartesian solver is independent of this planar-ALE path.
+Coupled radiolytic VoF and Euler--Euler gas momentum remain later model work.
+The present conservation tests establish the discrete contract for a flat
+moving boundary; they do not constitute quantitative physical validation.
 
 
 ## External coupling intervals

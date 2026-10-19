@@ -113,6 +113,15 @@ endforeach()
 
 # These functions have declarations in public headers and definitions in the
 # compiled FVM library. A hidden instantiation breaks downstream linking.
+foreach(method IN ITEMS box_plane_volume reconstruct curvature advect)
+    if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::GeometricVoF::${method}[(]")
+        message(FATAL_ERROR "Missing compiled geometric VoF ${method} in FVM")
+    endif()
+endforeach()
+if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::UniformGrid::validate[(]")
+    message(FATAL_ERROR "Missing compiled VoF grid validation in FVM")
+endif()
+
 foreach(api IN ITEMS
         add_explicit_non_orthogonal_correction
         add_variable_explicit_non_orthogonal_correction

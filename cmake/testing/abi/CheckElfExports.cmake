@@ -217,6 +217,7 @@ string(REPLACE "\n" ";"
        simplefluid_demangled_symbols "${simplefluid_demangled_symbols}")
 
 set(simplefluid_forbidden_api_patterns
+    "SimpleFluid::VoFSolver::Impl::"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(].*BoussinesqSolver<.*>&[)]$"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::PlanarALEStep::"
     "SimpleFluid::BoilingSourceModel<.*>[ ]*::(validate_void_inputs|limit_to_available_void|add_bulk_boiling|add_wall_boiling)[(]"
@@ -261,6 +262,11 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
 endforeach()
 
 set(simplefluid_required_api_patterns
+    "^SimpleFluid::VoFSolver::VoFSolver[(]"
+    "^SimpleFluid::VoFSolver::initialize[(]"
+    "^SimpleFluid::VoFSolver::step[(]double[)]$"
+    "^SimpleFluid::VoFSolver::stable_timestep[(][)] const$"
+    "^SimpleFluid::VoFSolver::fraction_field[(][)] const$"
     "^SimpleFluid::BoilingSourceModel<.*>[ ]*::update[(]"
     "^SimpleFluid::DelayedNeutronPrecursorModel<.*>[ ]*::advance[(]"
     "^SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::update_explicit[(]"
@@ -747,7 +753,11 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # API; model forwarding APIs no longer belong to BoussinesqSolver. GCC Debug
 # exports 1453 API symbols (2026-10-15). Keep modest toolchain headroom while
 # exact API anchors and private-family exclusions remain authoritative.
-set(simplefluid_api_symbol_upper_bound 1480)
+# The uniform VoF backend adds 25 reviewed public lifecycle/initialization/
+# stepping/query symbols. GCC Debug now exports 1483 SimpleFluid symbols;
+# extend the previous ceiling by that API contribution, retaining the same
+# toolchain headroom. The private Impl family stays forbidden above.
+set(simplefluid_api_symbol_upper_bound 1505)
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR
