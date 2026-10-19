@@ -701,4 +701,52 @@ TEST(ReactingVoFCouplerTest, NormalGalileanTranslationLeavesTheIncidentCaptureRa
         expect_budgets(before, coupler);
     }
 }
+TEST(ReactingVoFCouplerTest, ReinitializationRebindsRequiredPopulationNames)
+{
+    auto flow = make_flow();
+    auto initial = planar_state(*flow, 0);
+    initial.resolved_fraction.assign(initial.temperature.size(), 0.2);
+    VoF::DispersedPopulation micro, spectator;
+    micro.name = "micro";
+    spectator.name = "spectator";
+    micro.number.assign(initial.temperature.size(), 0);
+    micro.hydrogen_moles = micro.number;
+    spectator.number = spectator.hydrogen_moles = micro.number;
+    initial.dispersed = {micro, spectator};
+    ReactingVoFInput input;
+    for (std::size_t c = 0; c < initial.temperature.size(); ++c)
+    {
+        const double volume = flow->mesh()->cell_volume(static_cast<LO>(c));
+        initial.donor_hydrogen_moles.push_back(0.01 * volume);
+        input.absorbed_radiation_energy.push_back(100 * volume);
+    }
+    flow->initialize_low_mach(thermodynamics(), initial);
+    auto options = disabled_options();
+    options.radiolysis.mode = ReactingGasMode::Sheng2024TwoPopulation;
+    options.radiolysis.hydrogen_yield_mol_per_j = 2e-7;
+    options.radiolysis.gas_release_efficiency = 0.5;
+    options.radiolysis.microbubble_lifetime = 1e100;
+    ReactingVoFCoupler coupler(flow, options);
+    const auto old_trial = coupler.preview(1e-4, input);
+    initial.dispersed = {spectator, micro};
+    flow->initialize_low_mach(thermodynamics(), initial);
+    EXPECT_THROW(coupler.commit(old_trial), std::exception);
+    const auto before = flow->low_mach_state();
+    const auto trial = coupler.preview(1e-4, input);
+    const double expected = 1e-7 * total(input.absorbed_radiation_energy);
+    EXPECT_EQ(trial.state().dispersed[0].name, "spectator");
+    EXPECT_DOUBLE_EQ(total(trial.state().dispersed[0].hydrogen_moles), 0);
+    EXPECT_NEAR(total(trial.state().dispersed[1].hydrogen_moles), expected, 2e-9 * expected);
+    RecordProperty("micro_source_moles", total(trial.state().dispersed[1].hydrogen_moles));
+    expect_primary_equal(flow->low_mach_state(), before);
+    coupler.commit(trial);
+    EXPECT_DOUBLE_EQ(total(flow->low_mach_state().dispersed[0].hydrogen_moles), 0);
+    EXPECT_NEAR(total(flow->low_mach_state().dispersed[1].hydrogen_moles), expected, 2e-9 * expected);
+    initial.dispersed = {spectator};
+    flow->initialize_low_mach(thermodynamics(), initial);
+    const auto missing = flow->low_mach_state();
+    EXPECT_THROW((void) coupler.preview(1e-4, input), std::exception);
+    expect_primary_equal(flow->low_mach_state(), missing);
+}
+
 } // namespace
