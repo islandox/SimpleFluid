@@ -1,7 +1,9 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Branch scope:** supplied reacting species, Boussinesq and native low-Mach flow.
-VoF, AMR and their geometry/remap work are maintained separately on `refactor/vof`.
+**Workstream scope:** staged VoF source development on the generic
+reacting-flow foundation. The roadmap records which interface and AMR
+components are present in this snapshot. Retained source does not establish
+supported generic reacting-VoF execution or physical qualification.
 
 **Documentation review date:** October 24, 2026
 
@@ -22,8 +24,9 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 
 ### Current priorities
 
-VoF, AMR and their geometry/remap qualification are maintained on the separate
-`refactor/vof` branch. This roadmap covers the reacting-flow workstream.
+The retained VoF and AMR source extent is recorded in the status map below.
+Generic reacting-VoF integration and physical qualification remain open;
+a source-presence entry is not a tested or supported execution claim.
 
 1. Qualify supplied reaction/property laws and physical cases against the
    implemented Phases 12/14.1 species, donor, phase and thermal contracts.
@@ -63,8 +66,8 @@ VoF, AMR and their geometry/remap qualification are maintained on the separate
 | Phase 20, external reaction/source maps | Typed in-memory source/receipt callbacks and reusable conservative cell transfer implemented | External-provider protocol and phase-aware mapping |
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
-| Phase 22, resolved/dispersed bubbles | Excluded from this snapshot | Separate implementation and physical qualification required |
-| Phase 23, general native AMR | Excluded from this snapshot | Separate geometry, migration, and flow qualification required |
+| Phase 22, resolved/dispersed bubbles | Retained source: uniform VoF | Generic reacting integration and physical qualification remain open |
+| Phase 23, general native AMR | General hierarchy and flow are not yet present | Source presence does not establish full physical or scaling qualification |
 
 ### Checklist conventions
 
@@ -1138,8 +1141,9 @@ physical closure; generic cell transfer alone does not complete them.
 - [ ] Validate pool-volume and extensive-inventory closure across supported MPI
       partition counts.
 
-Full VoF interface capturing and macroscopic surface breakup are deferred
-beyond this snapshot; Euler–Euler gas momentum remains Phase 21.
+Full VoF interface capturing and macroscopic surface breakup are outside
+this planar budget. Retained VoF sources have separate contracts;
+Euler–Euler gas momentum remains Phase 21.
 Completing this planar phase must not imply those capabilities.
 
 ---

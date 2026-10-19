@@ -68,11 +68,11 @@ The field adapter's general bulk-mixture diffusion remains gated. Native ordered
 face transport and local interphase thermal stages have their own conservative
 owners and support limits; component kernels do not enable every combination.
 
-VoF solvers and reacting-VoF coupling are disabled and excluded from this
-refactor's supported execution scope. No experimental-enable path supplies
-those absent sources in this snapshot. Bounded
-floating-point and exact-rational VoF/general-AMR paths are deferred. Shared
-geometric and finite-volume utilities remain available independently.
+Retained VoF sources do not establish a supported generic reacting-VoF
+execution path. This snapshot has no explicit experimental-enable rejection
+guard. Bounded floating-point and exact-rational VoF/general-AMR execution
+require their own integration and qualification. Shared geometric and
+finite-volume utilities retain their independent contracts.
 
 ## Distributed and numerical acceptance
 

@@ -1,7 +1,9 @@
 # SimpleFluid
 
-**Branch scope:** supplied reacting species, Boussinesq and native low-Mach flow.
-VoF, AMR and their geometry/remap work are maintained separately on `refactor/vof`.
+**Workstream scope:** staged VoF source development on the generic
+reacting-flow foundation. The roadmap records which interface and AMR
+components are present in this snapshot. Retained source does not establish
+supported generic reacting-VoF execution or physical qualification.
 
 A finite-volume computational fluid dynamics code for incompressible Boussinesq
 natural convection, built on [Trilinos](https://trilinos.github.io) for distributed-memory,
@@ -800,8 +802,8 @@ laws. Its closed, orthogonal, inviscid/slip-wall and nonperiodic limits do not
 establish a Boussinesq boiling/free-surface combination.
 
 Neither planar path is a general moving-interface or cross-mesh phase-occupancy
-model. VoF and general AMR are maintained on the separate `refactor/vof`
-branch and are outside this reacting-flow support matrix.
+model. The retained VoF and AMR sources do not extend this reacting-flow
+support matrix or establish generic reacting-VoF coupling.
 
 ## Dependencies
 
