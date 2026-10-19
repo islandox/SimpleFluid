@@ -11,6 +11,8 @@
 #include <array>
 #include <cmath>
 #include <exception>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <numbers>
@@ -680,6 +682,88 @@ TEST(AdaptiveVoFLowMachTest, PeriodicMixtureAdvectionPreservesTheFixedPivotAndPh
     EXPECT_NEAR(trial.diagnostics().pressure_work, 0.0, 1e-6);
     expect_conservation(trial.diagnostics());
     s->commit_low_mach_trial(trial);
+}
+
+TEST(AdaptiveVoFLowMachTest, SourceFreeConstantDensityLimitPreservesPassiveTransverseMomentumBounds)
+{
+    Meshes::AMRGrid grid;
+    grid.root_blocks = {2, 2, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {4.0, 4.0, 200.0};
+    grid.periodic = {true, true, true};
+    VoFMaterial material;
+    material.liquid_density = 1000.0;
+    material.gas_density = 1.0;
+    material.liquid_viscosity = material.gas_viscosity = material.surface_tension = 0.0;
+    Solver flow(std::make_shared<const Meshes::CartesianAMR>(grid), material);
+    auto options = thermodynamics();
+    options.liquid =
+        std::make_shared<const VoF::LiquidThermodynamics>(VoF::ThermodynamicBounds{250.0, 400.0, 10000.0, 1000000.0},
+            [](double temperature, double pressure)
+            {
+                constexpr double rho = 1000.0, cv = 4000.0;
+                const double energy = 100000.0 + cv * (temperature - initial_temperature);
+                return VoF::LiquidThermodynamicPoint{rho, energy, energy + pressure / rho, cv, 0.0, 0.0};
+            });
+    // Equal gas species masses give rho_g=1 at the fixed isothermal state.
+    options.hydrogen.molar_mass = options.inert.molar_mass =
+        options.gas_constant * initial_temperature / initial_pressure;
+    auto state = initial(flow, 1.0);
+    state.velocity.assign(state.temperature.size(), {1.0, 1.0, 0.0});
+    for (std::size_t c = 0; c < state.temperature.size(); ++c)
+    {
+        const auto x = flow.mesh()->cell_centroid(static_cast<LO>(c));
+        state.resolved_fraction[c] = x.x < 1.0 ? 0.0 : 1.0;
+        state.velocity[c][2] = x.x >= 1.0 && x.x < 2.0 && x.y >= 1.0 && x.y < 2.0 ? 1.0 : 0.0;
+    }
+    flow.initialize_low_mach(options, state);
+    const auto old = flow.low_mach_state();
+    const auto before = physical_momentum(old);
+    const double before_mass =
+        total(old.liquid_mass) + options.hydrogen.molar_mass * total(old.resolved_hydrogen_moles);
+    const auto trial = flow.preview_low_mach_step(0.1, {});
+    double minimum = 1.0, maximum = 0.0;
+    for (std::size_t c = 0; c < state.temperature.size(); ++c)
+    {
+        minimum = std::min(minimum, trial.velocity()[c][2]);
+        maximum = std::max(maximum, trial.velocity()[c][2]);
+        // Inspect the transport ledger independently of pressure projection.
+        double transported_momentum = old.momentum[c][2];
+        flow.mesh()->visit_cell_faces(static_cast<LO>(c),
+            [&](LO face)
+            {
+                transported_momentum -= (flow.mesh()->owner_cell(face) == static_cast<LO>(c) ? 1.0 : -1.0) *
+                                        trial.transport().momentum[face][2];
+            });
+        const double transported_mass =
+            trial.state().liquid_mass[c] + options.hydrogen.molar_mass * trial.state().resolved_hydrogen_moles[c];
+        EXPECT_GE(transported_momentum / transported_mass, -2e-10);
+        EXPECT_LE(transported_momentum / transported_mass, 1.0 + 2e-10);
+        EXPECT_NEAR(trial.state().temperature[c], initial_temperature, 2e-7);
+        EXPECT_NEAR(trial.state().liquid_density[c], 1000.0, 1e-10);
+        EXPECT_NEAR(trial.state().resolved_density[c], 1.0, 2e-9);
+    }
+    double global_minimum = 0.0, global_maximum = 0.0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MIN, 1, &minimum, &global_minimum);
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, 1, &maximum, &global_maximum);
+    EXPECT_GE(global_minimum, -2e-10);
+    EXPECT_LE(global_maximum, 1.0 + 2e-10);
+    const auto after = physical_momentum(trial.state());
+    for (std::size_t a = 0; a < 3; ++a)
+        EXPECT_NEAR(after[a], before[a], 2e-10 * std::max(1.0, std::abs(before[a])));
+    const double mass_error = total(trial.state().liquid_mass) +
+                              options.hydrogen.molar_mass * total(trial.state().resolved_hydrogen_moles) - before_mass;
+    EXPECT_NEAR(mass_error, 0.0, 2e-10 * before_mass);
+    expect_conservation(trial.diagnostics());
+    flow.commit_low_mach_trial(trial);
+    EXPECT_EQ(flow.velocity(), trial.velocity());
+    EXPECT_DOUBLE_EQ(flow.time(), 0.1);
+    for (std::size_t c = 0; c < flow.velocity().size(); ++c)
+        EXPECT_DOUBLE_EQ(flow.velocity_field().value(static_cast<LO>(c)).z, trial.velocity()[c][2]);
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        std::cout << std::setprecision(17) << "low_mach_passive_momentum,minimum=" << global_minimum
+                  << ",maximum=" << global_maximum << ",mass_error=" << mass_error
+                  << ",transverse_momentum_error=" << after[2] - before[2] << '\n';
 }
 
 TEST(AdaptiveVoFLowMachTest, EmptyOwnedRankParticipatesInInitializationPopulationSourcesAndHintGuards)

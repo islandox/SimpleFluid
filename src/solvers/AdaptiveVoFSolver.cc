@@ -5,6 +5,7 @@
 
 #include "equations/RadiolyticGasProperties.hh"
 #include "solvers/BelosLinearSolver.hh"
+#include "solvers/details/ConservativeVoFTransport.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <Teuchos_Array.hpp>
@@ -183,11 +184,12 @@ struct AdaptiveVoFSolver::Impl
         std::size_t row_capacity = 1;
         GO gauge = 0;
         BelosLinearSolver<> pressure_solver, inventory_solver;
+        detail::ConservativeVoFTransport conservative_transport;
         std::shared_ptr<const VoF::LowMachOptions> low_options;
 
         Context(std::shared_ptr<const Hierarchy> h, VoFMaterial m, VoFSolverOptions o)
             : geometry(std::make_shared<VoF::AdaptiveVoF>(std::move(h))), mesh(geometry->mesh()), material(m),
-              options(o)
+              options(o), conservative_transport(mesh)
         {
             bool valid = true;
             with_geometry(
@@ -1084,37 +1086,30 @@ struct AdaptiveVoFSolver::Impl
             require_all(std::isfinite(next.diagnostics.time) && next.diagnostics.time > old.diagnostics.time,
                 "AdaptiveVoFSolver timestep does not produce finite advancing time.");
             const auto new_rho = density(next);
-            const auto u = exchange_vectors(old.u);
+            std::vector<double> mass_flux(faces.size()), capacity(owned()), zero(owned());
+            for (std::size_t id = 0; id < faces.size(); ++id)
+                mass_flux[id] = material.gas_density * transport.gas_volume[id] +
+                                material.liquid_density * transport.liquid_volume[id];
+            for (std::size_t c = 0; c < owned(); ++c)
+                capacity[c] = new_rho[c] * volume[c];
+            for (std::size_t a = 0; a < 3; ++a)
+            {
+                std::vector<double> momentum(owned());
+                for (std::size_t c = 0; c < owned(); ++c)
+                    momentum[c] = old_rho[c] * volume[c] * old.u[c][a];
+                const auto carried = conservative_transport.solve(momentum, zero, capacity, mass_flux, false,
+                    options.max_pressure_iterations, 1e-14);
+                for (std::size_t c = 0; c < owned(); ++c)
+                    next.u[c][a] = carried.amount[c] / capacity[c];
+            }
             const auto viscous = viscous_force(old);
             std::vector<Vector> change(owned());
-            with_geometry(
-                [&]
+            for (std::size_t c = 0; c < owned(); ++c)
+                for (std::size_t a = 0; a < 3; ++a)
                 {
-                    for (std::size_t c = 0; c < owned(); ++c)
-                    {
-                        Vector momentum{};
-                        for (std::size_t a = 0; a < 3; ++a)
-                            momentum[a] = old_rho[c] * volume[c] * old.u[c][a];
-                        for (const auto id : mesh->faces(static_cast<LO>(c)))
-                        {
-                            const auto& f = faces[id];
-                            if (f.boundary)
-                                continue;
-                            const double mass = material.gas_density * transport.gas_volume[id] +
-                                                material.liquid_density * transport.liquid_volume[id];
-                            const auto donor = mass >= 0 ? f.owner : f.neighbor;
-                            const double sign = f.owner == static_cast<LO>(c) ? 1 : -1;
-                            for (std::size_t a = 0; a < 3; ++a)
-                                momentum[a] -= sign * mass * u[donor][a];
-                        }
-                        for (std::size_t a = 0; a < 3; ++a)
-                        {
-                            next.u[c][a] = momentum[a] / (new_rho[c] * volume[c]) +
-                                           dt * (viscous[c][a] / (new_rho[c] * volume[c]) + options.gravity[a]);
-                            change[c][a] = next.u[c][a] - old.u[c][a];
-                        }
-                    }
-                });
+                    next.u[c][a] += dt * (viscous[c][a] / capacity[c] + options.gravity[a]);
+                    change[c][a] = next.u[c][a] - old.u[c][a];
+                }
             const auto face_change = interpolate(change);
             for (std::size_t i = 0; i < next.face_u.size(); ++i)
                 next.face_u[i] += face_change[i];

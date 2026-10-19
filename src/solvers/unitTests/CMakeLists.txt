@@ -15,6 +15,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   target_link_libraries(${TEST_NAME} SimpleFluid::Solvers GTest::gtest_main)
+  if(TEST_NAME STREQUAL "testConservativeVoFTransport")
+    # Compile the private numerical boundary directly; it is not a DSO export.
+    target_sources(${TEST_NAME} PRIVATE ../details/ConservativeVoFTransport.cc)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
@@ -450,3 +454,11 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;ale;continuity;validation"
     TIMEOUT 60)
+
+# Direct transport update, before pressure or accepted-state publication.
+simplefluid_add_mpi_test(
+    NAME ConservativeVoFTransport_2procs
+    TARGET testConservativeVoFTransport
+    PROCS 2
+    LABELS "vof;conservation;collective"
+)

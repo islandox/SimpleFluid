@@ -22,7 +22,9 @@ namespace SimpleFluid
  * canonical owner-outward normal velocity in m/s. All state-changing methods,
  * timestep queries, checkpoint operations, and construction are collective.
  * Levels advance synchronously with one timestep. No global solution array
- * or finest-level background grid is constructed.
+ * or finest-level background grid is constructed. Momentum uses final mixture
+ * mass and the integrated phase/species mass ledger in a conservative implicit
+ * upwind equation, shared by incompressible and low-Mach transport.
  *
  * Regridding replaces the immutable hierarchy and every dependent field/map
  * together after conservative remapping and projection succeed. Checkpoints

@@ -377,6 +377,102 @@ TEST(AdaptiveVoFSolverTest, UniformVelocityAndPhaseInventoriesCrossCoarseFineAnd
         EXPECT_LT(solver.mesh()->num_owned_cells(), solver.mesh()->owned_cell_map()->getGlobalNumElements());
 }
 
+TEST(AdaptiveVoFSolverTest, PassiveTransverseMomentumRemainsBoundedAcrossSplitPhaseTransport)
+{
+    // The 4x4x2 case is the reviewed x-first counterexample. The extended
+    // hierarchy places the dense/passive patch beside an actual coarse/fine seam.
+    for (const bool refined : {false, true})
+        for (int fixture = 0; fixture < 5; ++fixture)
+        {
+            SCOPED_TRACE(::testing::Message() << "refined=" << refined << ", fixture=" << fixture);
+            Grid config;
+            config.root_blocks = {refined ? 4u : 2u, 2, 1};
+            config.block_cells = {2, 2, 2};
+            config.extent = {refined ? 8.0 : 4.0, 4.0, 200.0};
+            config.periodic = {true, true, true};
+            config.max_level = 1;
+            auto hierarchy = std::make_shared<const Hierarchy>(config);
+            if (refined)
+                hierarchy = hierarchy->adapt({1});
+            auto material = inviscid(0.0, 1000.0);
+            material.liquid_density = 1000.0;
+            material.gas_density = 1.0;
+            VoFSolverOptions options;
+            // Refined cells halve dx and dy: the unchanged dt has CFL=0.402.
+            if (refined)
+                options.max_courant = 0.5;
+            Solver solver(hierarchy, material, options);
+            std::vector<double> fraction(solver.mesh()->num_owned_cells());
+            std::vector<Vector> velocity(fraction.size(), {1.0, 1.0, 0.0});
+            const double shift = refined ? 2.0 : 0.0;
+            for (std::size_t c = 0; c < fraction.size(); ++c)
+            {
+                const auto x = solver.mesh()->cell_centroid(static_cast<LO>(c));
+                fraction[c] = x.x >= shift && x.x < shift + 1.0 ? 0.0 : 1.0;
+                if (fixture == 1)
+                    fraction[c] = 0.0;
+                if (fixture == 2)
+                    fraction[c] = 1.0;
+                if (fixture == 3)
+                    fraction[c] = fraction[c] == 0.0 ? 1e-12 : 1.0 - 1e-12;
+                velocity[c][2] =
+                    fixture == 4 || (x.x >= shift + 1.0 && x.x < shift + 2.0 && x.y >= 1.0 && x.y < 2.0) ? 1.0 : 0.0;
+            }
+            solver.initialize(fraction, velocity);
+            if (Tpetra::getDefaultComm()->getSize() > 1)
+            {
+                double crossing = 0.0;
+                for (std::size_t c = 0; c < fraction.size(); ++c)
+                    solver.mesh()->visit_cell_faces(static_cast<LO>(c),
+                        [&](LO face)
+                        {
+                            const auto other = solver.mesh()->owner_cell(face) == static_cast<LO>(c)
+                                                   ? solver.mesh()->neighbor_cell(face)
+                                                   : solver.mesh()->owner_cell(face);
+                            if (other >= static_cast<LO>(fraction.size()) &&
+                                std::abs(solver.face_velocity()[face]) > 0.5)
+                                crossing += 1.0;
+                        });
+                EXPECT_GT(reduce(crossing, Teuchos::REDUCE_SUM), 0.0);
+            }
+            const auto before = momentum(solver);
+            const double volume = gas_volume(solver);
+            double minimum = 1.0, maximum = 0.0;
+            // Successive accepted steps exercise each available rotating first axis.
+            for (int step = 0; step < 3; ++step)
+            {
+                const auto diagnostics = solver.step(0.1);
+                minimum = 1.0;
+                maximum = 0.0;
+                for (const auto& u : solver.velocity())
+                {
+                    minimum = std::min(minimum, u[2]);
+                    maximum = std::max(maximum, u[2]);
+                    if (fixture == 4)
+                        for (const auto component : u)
+                            EXPECT_NEAR(component, 1.0, 2e-9);
+                }
+                minimum = reduce(minimum, Teuchos::REDUCE_MIN);
+                maximum = reduce(maximum, Teuchos::REDUCE_MAX);
+                EXPECT_GE(minimum, -2e-10);
+                EXPECT_LE(maximum, 1.0 + 2e-10);
+                const double volume_error = gas_volume(solver) - volume;
+                EXPECT_NEAR(volume_error, 0.0, 2e-9);
+                const auto after = momentum(solver);
+                for (std::size_t a = 0; a < 3; ++a)
+                    EXPECT_NEAR(after[a], before[a], 2e-10 * std::max(1.0, std::abs(before[a])));
+                EXPECT_LT(diagnostics.maximum_divergence, 1e-8);
+                expect_native_publication(solver);
+                if (Tpetra::getDefaultComm()->getRank() == 0)
+                    std::cout << std::setprecision(17) << "adaptive_passive_momentum,refined=" << refined
+                              << ",fixture=" << fixture << ",step=" << step << ",minimum=" << minimum
+                              << ",maximum=" << maximum << ",volume_error=" << volume_error
+                              << ",transverse_momentum_error=" << after[2] - before[2]
+                              << ",maximum_divergence=" << diagnostics.maximum_divergence << '\n';
+            }
+        }
+}
+
 TEST(AdaptiveVoFSolverTest, AffineHydrostaticPressureBalancesTangentiallyOffsetCoarseFineCenters)
 {
     auto config = transport_grid();

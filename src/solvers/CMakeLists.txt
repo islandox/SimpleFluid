@@ -1,5 +1,6 @@
 set(SIMPLEFLUID_SOLVER_SOURCES
     VoFSolver.cc
+    details/ConservativeVoFTransport.cc
     AdaptiveVoFSolver.cc
     VoFLowMach.cc
     RadiolyticVoFCoupler.cc

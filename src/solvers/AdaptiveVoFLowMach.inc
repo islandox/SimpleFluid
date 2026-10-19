@@ -846,133 +846,12 @@ VoF::LowMachSources normalize_low_sources(const State& old, const VoF::LowMachSo
     return result;
 }
 
-struct LowTransportScalar
-{
-    std::vector<double> amount, flux, trace;
-};
+using LowTransportScalar = detail::ConservativeVoFTransport::Result;
 
 LowTransportScalar transport_low_scalar(const std::vector<double>& old, const std::vector<double>& source,
     const std::vector<double>& capacity, const std::vector<double>& carrier_flux, bool positive)
 {
-    if (max_abs(carrier_flux) == 0)
-    {
-        LowTransportScalar result{old, std::vector<double>(faces.size()), std::vector<double>(faces.size())};
-        bool valid = true;
-        std::vector<double> concentration(owned());
-        for (std::size_t c = 0; c < owned(); ++c)
-        {
-            result.amount[c] += source[c];
-            valid = valid && std::isfinite(result.amount[c]) && (!positive || result.amount[c] >= 0) &&
-                    (capacity[c] > 0 || result.amount[c] == 0);
-            concentration[c] = capacity[c] > 0 ? result.amount[c] / capacity[c] : 0;
-        }
-        require_all(valid, "A low-Mach local source exhausts its inventory or has no geometric carrier.");
-        concentration = geometry->exchange_cells(concentration);
-        for (std::size_t id = 0; id < mesh->num_owned_faces(); ++id)
-            if (!faces[id].boundary)
-                result.trace[id] = 0.5 * (concentration[faces[id].owner] + concentration[faces[id].neighbor]);
-        result.trace = geometry->exchange_faces(result.trace);
-        return result;
-    }
-    auto matrix = Teuchos::rcp(new Pack::matrix_type(mesh->owned_cell_map(), row_capacity));
-    Pack::vector_type rhs(mesh->owned_cell_map(), true), solution(mesh->owned_cell_map(), true);
-    bool valid = true;
-    double local_diagonal_min = std::numeric_limits<double>::infinity(), local_diagonal_max = 0;
-    std::string absent_carrier_detail;
-    with_geometry(
-        [&]
-        {
-            for (std::size_t c = 0; c < owned(); ++c)
-            {
-                const auto gid = mesh->cell_global_id(static_cast<LO>(c));
-                double diagonal = capacity[c];
-                std::map<GO, double> row;
-                for (const auto id : mesh->faces(static_cast<LO>(c)))
-                {
-                    const auto& f = faces[id];
-                    if (f.boundary)
-                        continue;
-                    const double outgoing = carrier_flux[id] * (f.owner == static_cast<LO>(c) ? 1 : -1);
-                    if (outgoing >= 0)
-                        diagonal += outgoing;
-                    else
-                        row[mesh->cell_global_id(f.owner == static_cast<LO>(c) ? f.neighbor : f.owner)] += outgoing;
-                }
-                if (diagonal == 0 && row.empty())
-                {
-                    valid = valid && old[c] + source[c] == 0;
-                    diagonal = 1;
-                }
-                if (diagonal == 0 && absent_carrier_detail.empty())
-                {
-                    std::ostringstream message;
-                    message << std::setprecision(17) << " gid=" << gid << " capacity=" << capacity[c]
-                            << " accepted=" << old[c] << " source=" << source[c] << " incident phase volumes=";
-                    for (const auto id : mesh->faces(static_cast<LO>(c)))
-                        message << (faces[id].owner == static_cast<LO>(c) ? 1 : -1) * carrier_flux[id] << ',';
-                    absent_carrier_detail = message.str();
-                }
-                row[gid] += diagonal;
-                local_diagonal_min = std::min(local_diagonal_min, diagonal);
-                local_diagonal_max = std::max(local_diagonal_max, diagonal);
-                rhs.replaceLocalValue(static_cast<LO>(c), old[c] + source[c]);
-                Teuchos::Array<GO> columns;
-                Teuchos::Array<double> values;
-                for (const auto& [column, value] : row)
-                {
-                    columns.push_back(column);
-                    values.push_back(value);
-                }
-                matrix->insertGlobalValues(gid, columns(), values());
-            }
-        });
-    require_all(valid, "A low-Mach source creates inventory without a geometric carrier or transport path.");
-    if (maximum(absent_carrier_detail.empty() ? 0.0 : 1.0) > 0)
-        throw std::runtime_error(
-            "Low-Mach phase transport has a zero-storage incoming-only row:" + absent_carrier_detail);
-    matrix->fillComplete();
-    LinearSolverOptions linear;
-    linear.backend = LinearSolverBackend::Gmres;
-    linear.preconditioner = LinearPreconditioner::Jacobi;
-    linear.tolerance = 1e-12;
-    linear.max_iterations = options.max_pressure_iterations;
-    linear.verbosity = 0;
-    const auto statistics = inventory_solver.solve_from_zero_with_statistics(
-        Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix), rhs, solution, linear);
-    if (!statistics.converged)
-    {
-        const double minimum_diagonal = -maximum(-local_diagonal_min), maximum_diagonal = maximum(local_diagonal_max);
-        std::ostringstream message;
-        message << std::setprecision(17) << "Low-Mach conservative phase transport did not converge: diagonal=["
-                << minimum_diagonal << ',' << maximum_diagonal << "] max capacity=" << max_abs(capacity)
-                << " max integrated carrier flux=" << max_abs(carrier_flux)
-                << " relative residual=" << statistics.achieved_tolerance << '.';
-        throw std::runtime_error(message.str());
-    }
-    const auto values = solution.getData();
-    std::vector<double> concentration(values.begin(), values.end());
-    LowTransportScalar result{
-        std::vector<double>(owned()), std::vector<double>(faces.size()), std::vector<double>(faces.size())};
-    for (std::size_t c = 0; c < owned(); ++c)
-    {
-        result.amount[c] = capacity[c] * concentration[c];
-        valid = valid && std::isfinite(result.amount[c]) && (!positive || result.amount[c] >= 0);
-    }
-    require_all(valid, "Low-Mach phase transport lost inventory positivity or finiteness.");
-    concentration = geometry->exchange_cells(concentration);
-    for (std::size_t id = 0; id < mesh->num_owned_faces(); ++id)
-    {
-        const auto& f = faces[id];
-        if (f.boundary)
-            continue;
-        const auto donor = carrier_flux[id] >= 0 ? f.owner : f.neighbor;
-        result.trace[id] =
-            carrier_flux[id] == 0 ? 0.5 * (concentration[f.owner] + concentration[f.neighbor]) : concentration[donor];
-        result.flux[id] = carrier_flux[id] * result.trace[id];
-    }
-    result.flux = geometry->exchange_faces(result.flux);
-    result.trace = geometry->exchange_faces(result.trace);
-    return result;
+    return conservative_transport.solve(old, source, capacity, carrier_flux, positive, options.max_pressure_iterations);
 }
 
 struct LowFluxWork
@@ -1133,7 +1012,6 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
         work.population_molar_trace[q] = std::move(moles.trace);
     }
     const auto temperature = geometry->exchange_cells(thermo.temperature);
-    const auto velocity = exchange_vectors(old.u);
     std::vector<double> liquid_e(owned()), conductivity(owned());
     bool valid = true;
     try
@@ -1171,17 +1049,13 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
         out.internal_energy[id] = out.liquid_mass[id] * liquid_e[cl] +
                                   out.resolved_hydrogen[id] * gas_e(low_options->hydrogen, temperature[ch]) +
                                   out.resolved_inert[id] * gas_e(low_options->inert, temperature[ci]);
-        for (std::size_t a = 0; a < 3; ++a)
-            out.momentum[id][a] = out.liquid_mass[id] * velocity[cl][a] +
-                                  low_options->hydrogen.molar_mass * out.resolved_hydrogen[id] * velocity[ch][a] +
-                                  low_options->inert.molar_mass * out.resolved_inert[id] * velocity[ci][a];
         for (std::size_t q = 0; q < next.dispersed.size(); ++q)
         {
             const auto cd = out.dispersed_hydrogen[q][id] >= 0 ? f.owner : f.neighbor;
             out.internal_energy[id] += out.dispersed_hydrogen[q][id] * gas_e(low_options->hydrogen, temperature[cd]);
             for (std::size_t a = 0; a < 3; ++a)
                 out.momentum[id][a] += low_options->hydrogen.molar_mass * out.dispersed_hydrogen[q][id] *
-                                       (velocity[cd][a] + drift[q][cd][a]);
+                                       drift[q][cd][a];
         }
         const double ko = conductivity[f.owner], kn = conductivity[f.neighbor];
         const double kface = ko > 0 && kn > 0 ? f.distance / (f.owner_distance / ko + f.neighbor_distance / kn) : 0;
@@ -1210,8 +1084,9 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
             {
                 work.energy_rhs[c] +=
                     source.net_thermal_energy[c] + source.enthalpy_transfer[c] - source.vent_enthalpy[c];
+                const auto relative = drift_momentum(next, c);
                 for (std::size_t a = 0; a < 3; ++a)
-                    work.momentum_rhs[c][a] += source.momentum_transfer[c][a] - source.vent_momentum[c][a];
+                    work.momentum_rhs[c][a] += source.momentum_transfer[c][a] - source.vent_momentum[c][a] - relative[a];
                 for (const auto id : mesh->faces(static_cast<LO>(c)))
                 {
                     const double sign = faces[id].owner == static_cast<LO>(c) ? 1 : -1;
@@ -1221,6 +1096,47 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
                 }
             }
         });
+    // Species equations define the mass ledger. Transport the common velocity
+    // implicitly on that exact ledger, then restore the physical drift momentum.
+    // In the constant-density source-free limit this is the same M-matrix
+    // transport as the incompressible solver, independent of sweep order.
+    std::vector<double> mass_flux(faces.size()), capacity(owned()), zero(owned());
+    for (std::size_t c = 0; c < owned(); ++c)
+        capacity[c] = low_mass(next, c);
+    for (std::size_t id = 0; id < faces.size(); ++id)
+    {
+        mass_flux[id] = out.liquid_mass[id] + low_options->hydrogen.molar_mass * out.resolved_hydrogen[id] +
+                        low_options->inert.molar_mass * out.resolved_inert[id];
+        for (const auto& population_flux : out.dispersed_hydrogen)
+            mass_flux[id] += low_options->hydrogen.molar_mass * population_flux[id];
+    }
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        std::vector<double> rhs(owned());
+        for (std::size_t c = 0; c < owned(); ++c)
+            rhs[c] = work.momentum_rhs[c][a];
+        const auto carried = conservative_transport.solve(rhs, zero, capacity, mass_flux, false,
+            options.max_pressure_iterations, 1e-14);
+        for (std::size_t id = 0; id < faces.size(); ++id)
+            out.momentum[id][a] += carried.flux[id];
+    }
+    // Publish the conservative face-ledger update; iterative residuals never
+    // become a nonconservative inventory correction.
+    work.momentum_rhs = accepted.momentum;
+    with_geometry([&]
+    {
+        for (std::size_t c = 0; c < owned(); ++c)
+        {
+            for (std::size_t a = 0; a < 3; ++a)
+                work.momentum_rhs[c][a] += source.momentum_transfer[c][a] - source.vent_momentum[c][a];
+            for (const auto id : mesh->faces(static_cast<LO>(c)))
+            {
+                const double sign = faces[id].owner == static_cast<LO>(c) ? 1 : -1;
+                for (std::size_t a = 0; a < 3; ++a)
+                    work.momentum_rhs[c][a] -= sign * out.momentum[id][a];
+            }
+        }
+    });
     return work;
 }
 
