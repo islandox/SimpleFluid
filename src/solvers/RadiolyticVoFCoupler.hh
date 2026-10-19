@@ -116,6 +116,9 @@ struct RadiolyticVoFStatistics
  * calls the legacy full RadiolyticGasModel::advance and cannot double-transport
  * the same inventory. Callers must not mutate the retained solver during a
  * prepared trial; its accepted-state identity rejects stale commits.
+ * Population names are resolved collectively for each source preview, so valid
+ * solver reinitialization may reorder populations or fail for missing names
+ * before any accepted inventory changes.
  *
  * Constant resolved surface tension is the declared Stage 3 scope. Unresolved
  * drainage/rupture is represented only by supplied capture/coalescence kernels;
