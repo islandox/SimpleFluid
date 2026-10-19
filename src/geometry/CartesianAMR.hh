@@ -89,6 +89,11 @@ public:
      * is clamped to the exact domain boundary; larger excursions are rejected.
      */
     [[nodiscard]] std::vector<AMROverlap> overlaps(const AMRBox& query) const;
+    /** Leaf ordinals touching a finite ordered closed box, including edges/corners.
+     * Queries may extend outside the domain; periodic images belong to the caller.
+     * Uses the hierarchy directory and returns ascending leaf ordinals.
+     */
+    [[nodiscard]] std::vector<std::size_t> intersecting_blocks(const AMRBox& query) const;
 
     /**
      * @brief Return a candidate hierarchy after requested changes and balance closure.

@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstddef>
+#include <span>
 #include <vector>
 
 namespace SimpleFluid::VoF
@@ -91,6 +92,9 @@ public:
 
     /** @brief Reconstruct one conservative plane per cell from gas fractions. */
     [[nodiscard]] std::vector<InterfacePlane> reconstruct(const std::vector<double>& fraction) const;
+    /** Requested cells only, in request order; uses the identical full-stencil kernel. */
+    [[nodiscard]] std::vector<InterfacePlane> reconstruct(
+        const std::vector<double>& fraction, std::span<const std::size_t> cells) const;
 
     /**
      * @brief Curvature in 1/m, positive for convex gas; pure cells return zero.
@@ -106,6 +110,9 @@ public:
      * voxelizations provide no mixed-cell curvature and are not a substitute.
      */
     [[nodiscard]] std::vector<double> curvature(const std::vector<double>& fraction) const;
+    /** Requested cells only. Radius-three fraction support is required at each cell. */
+    [[nodiscard]] std::vector<double> curvature(
+        const std::vector<double>& fraction, std::span<const std::size_t> cells) const;
 
     /**
      * @brief Advance gas fractions with signed positive-axis velocity in m/s.

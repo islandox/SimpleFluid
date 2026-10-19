@@ -646,4 +646,37 @@ TEST(GeometricVoF, UnsupportedVelocityAndInvalidStepsRejectBeforeMutation)
     velocity[2][0] = 0.01;
     EXPECT_THROW((void) geometry.advect(fraction, velocity, 0.001), std::invalid_argument);
 }
+
+TEST(GeometricVoFTest, RequestedStencilResultsMatchFullKernelIncludingBoundaryCells)
+{
+    UniformGrid grid;
+    grid.cells = {8, 8, 8};
+    grid.spacing = {0.1, 0.15, 0.2};
+    for (const bool periodic : {false, true})
+    {
+        grid.periodic = {periodic, periodic, periodic};
+        GeometricVoF geometry(grid);
+        std::vector<double> fraction(grid.cell_count());
+        for (std::size_t c = 0; c < fraction.size(); ++c)
+        {
+            const auto p = grid.cell_center(c);
+            fraction[c] =
+                std::clamp(0.5 + 0.7 * std::sin(7.0 * p[0]) * std::cos(6.0 * p[1]) * std::sin(5.0 * p[2]), 0.0, 1.0);
+        }
+        const std::vector<std::size_t> requested{0, 7, 63, 511, 291, 291, 230};
+        const auto all_planes = geometry.reconstruct(fraction), planes = geometry.reconstruct(fraction, requested);
+        const auto all_curvature = geometry.curvature(fraction), curvature = geometry.curvature(fraction, requested);
+        ASSERT_EQ(planes.size(), requested.size());
+        ASSERT_EQ(curvature.size(), requested.size());
+        for (std::size_t n = 0; n < requested.size(); ++n)
+        {
+            EXPECT_EQ(planes[n].normal, all_planes[requested[n]].normal);
+            EXPECT_DOUBLE_EQ(planes[n].offset, all_planes[requested[n]].offset);
+            EXPECT_DOUBLE_EQ(curvature[n], all_curvature[requested[n]]);
+        }
+        const std::vector<std::size_t> invalid{fraction.size()};
+        EXPECT_THROW((void) geometry.reconstruct(fraction, invalid), std::out_of_range);
+        EXPECT_THROW((void) geometry.curvature(fraction, invalid), std::out_of_range);
+    }
+}
 } // namespace

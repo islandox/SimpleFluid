@@ -11,6 +11,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <set>
 #include <stdexcept>
@@ -25,7 +26,10 @@ using GO = Pack::global_ordinal_type;
 using LO = Pack::local_ordinal_type;
 using Box = Meshes::AMRBox;
 constexpr double roundoff = 2.0e-12;
-constexpr std::size_t padding = 4;
+// Youngs gradients need one layer. Height functions need three axial layers;
+// the radius-two surface fit needs one further layer for its PLIC gradients.
+constexpr std::size_t padding = 3;
+constexpr std::size_t protected_stencil = 4;
 
 void require_collective(bool valid, const char* message)
 {
@@ -79,43 +83,90 @@ void validate_f(const std::vector<double>& f, std::size_t n)
 /** Only requested donor cells are imported; source maps remain one-to-one. */
 struct Exchange
 {
+    struct Plan
+    {
+        Teuchos::RCP<const Pack::map_type> source, target;
+        Pack::import_type importer;
+        Plan(Teuchos::RCP<const Pack::map_type> from, Teuchos::RCP<const Pack::map_type> to)
+            : source(std::move(from)), target(std::move(to)), importer(source, target)
+        {
+        }
+    };
+    std::shared_ptr<const Plan> plan;
     Teuchos::RCP<const Pack::map_type> source, target;
-    std::unique_ptr<Pack::import_type> importer;
+    // Workspaces belong to this AdaptiveVoF instance. Only the immutable Plan is shared.
+    using Vectors = std::pair<std::unique_ptr<Pack::multi_vector_type>, std::unique_ptr<Pack::multi_vector_type>>;
+    mutable std::map<std::size_t, Vectors> workspaces;
+    mutable Pack::multi_vector_type *from = nullptr, *to = nullptr;
+    mutable std::size_t columns = 0;
 
-    Exchange(Teuchos::RCP<const Pack::map_type> from, Teuchos::RCP<const Pack::map_type> to)
-        : source(std::move(from)), target(std::move(to)), importer(std::make_unique<Pack::import_type>(source, target))
+    explicit Exchange(std::shared_ptr<const Plan> p) : plan(std::move(p)), source(plan->source), target(plan->target) {}
+    Exchange(Teuchos::RCP<const Pack::map_type> source, Teuchos::RCP<const Pack::map_type> target)
+        : Exchange(std::make_shared<Plan>(std::move(source), std::move(target)))
+    {
+    }
+    Exchange(Teuchos::RCP<const Pack::map_type> source, const std::set<GO>& ids)
+        : Exchange(source,
+              Teuchos::rcp(new Pack::map_type(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+                  Teuchos::arrayViewFromVector(std::vector<GO>(ids.begin(), ids.end())), GO{}, source->getComm())))
     {
     }
 
-    Exchange(Teuchos::RCP<const Pack::map_type> from, const std::set<GO>& ids) : source(std::move(from))
+    void workspace(std::size_t count) const
     {
-        const std::vector<GO> list(ids.begin(), ids.end());
-        target = Teuchos::rcp(new Pack::map_type(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
-            Teuchos::arrayViewFromVector(list), GO{}, source->getComm()));
-        importer = std::make_unique<Pack::import_type>(source, target);
+        if (columns == count)
+            return;
+        auto& pair = workspaces[count];
+        if (!pair.first)
+        {
+            pair.first = std::make_unique<Pack::multi_vector_type>(source, count, false);
+            pair.second = std::make_unique<Pack::multi_vector_type>(target, count, false);
+        }
+        from = pair.first.get();
+        to = pair.second.get();
+        columns = count;
+    }
+
+    std::vector<std::vector<double>> batch(const std::vector<std::vector<double>>& owned) const
+    {
+        workspace(owned.size());
+        for (std::size_t a = 0; a < columns; ++a)
+        {
+            auto values = from->getDataNonConst(a);
+            std::copy(owned[a].begin(), owned[a].end(), values.begin());
+        }
+        to->doImport(*from, plan->importer, Tpetra::INSERT);
+        std::vector<std::vector<double>> result(columns);
+        for (std::size_t a = 0; a < columns; ++a)
+        {
+            const auto values = to->getData(a);
+            result[a].assign(values.begin(), values.end());
+        }
+        return result;
     }
 
     std::vector<double> operator()(const std::vector<double>& owned) const
     {
-        Pack::vector_type from(source, true), to(target, true);
+        workspace(1);
         {
-            auto values = from.getDataNonConst();
+            auto values = from->getDataNonConst(0);
             std::copy(owned.begin(), owned.end(), values.begin());
         }
-        to.doImport(from, *importer, Tpetra::INSERT);
-        const auto values = to.getData();
+        to->doImport(*from, plan->importer, Tpetra::INSERT);
+        const auto values = to->getData(0);
         return {values.begin(), values.end()};
     }
 
     std::vector<double> sum_to_source(const std::vector<double>& partial) const
     {
-        Pack::vector_type from(target, true), to(source, true);
+        workspace(1);
         {
-            auto values = from.getDataNonConst();
+            auto values = to->getDataNonConst(0);
             std::copy(partial.begin(), partial.end(), values.begin());
         }
-        to.doExport(from, *importer, Tpetra::ADD);
-        const auto values = to.getData();
+        from->putScalar(0.0);
+        from->doExport(*to, plan->importer, Tpetra::ADD);
+        const auto values = from->getData(0);
         return {values.begin(), values.end()};
     }
 };
@@ -189,106 +240,213 @@ struct AdaptiveVoF::Impl
         Box box;
         LO halo = -1;
     };
+    struct Range
+    {
+        GO direct = -1; ///< Full same-level donor; converted from GID to halo ordinal at construction.
+        std::size_t begin = 0, end = 0;
+    };
     struct Patch
     {
         std::size_t block;
         UniformGrid grid;
-        std::vector<std::vector<Sample>> samples;
+        std::vector<Range> ranges;
+        std::vector<Sample> samples; ///< Geometric intersections only for nonregular donors.
+        std::vector<std::size_t> owned;
     };
-    std::shared_ptr<const Hierarchy> hierarchy;
-    SP<const Handle> mesh;
-    std::unique_ptr<Exchange> cells, faces, stencil;
-    std::vector<Patch> patches;
-    std::vector<std::pair<std::size_t, std::size_t>> owned_patch_cell;
+    struct Geometry
+    {
+        std::shared_ptr<const Hierarchy> hierarchy;
+        SP<const Handle> mesh;
+        std::shared_ptr<const Exchange::Plan> cells, faces, stencil;
+        std::vector<Patch> patches;
+        std::vector<std::pair<std::size_t, std::size_t>> owned_patch_cell;
 
-    explicit Impl(std::shared_ptr<const Hierarchy> h) : hierarchy(std::move(h))
+        explicit Geometry(std::shared_ptr<const Hierarchy> h) : hierarchy(std::move(h))
+        {
+            require_collective(bool(hierarchy), "AdaptiveVoF requires a hierarchy on every rank.");
+            mesh = std::make_shared<Handle>(hierarchy->geometry());
+            cells = std::make_shared<Exchange::Plan>(mesh->owned_cell_map(), mesh->overlap_cell_map());
+            faces = std::make_shared<Exchange::Plan>(mesh->owned_face_map(), mesh->overlap_face_map());
+            std::set<std::size_t> blocks;
+            for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
+                blocks.insert(hierarchy->cell_block(mesh->cell_global_id(static_cast<LO>(c))));
+            std::set<GO> ids;
+            std::map<std::size_t, std::size_t> patch_index;
+            const auto& config = hierarchy->config();
+            bool valid = true;
+            try
+            {
+                for (const auto block : blocks)
+                {
+                    Patch patch;
+                    patch.block = block;
+                    patch.grid.spacing = hierarchy->block_spacing(block);
+                    const auto bounds = hierarchy->block_box(block);
+                    for (std::size_t a = 0; a < 3; ++a)
+                    {
+                        patch.grid.cells[a] = config.block_cells[a] + 2 * padding;
+                        patch.grid.origin[a] = bounds.lower[a] - padding * patch.grid.spacing[a];
+                    }
+                    patch.ranges.resize(patch.grid.cell_count());
+                    for (std::size_t c = 0; c < patch.ranges.size(); ++c)
+                    {
+                        Box box;
+                        auto p = patch.grid.cell_center(c);
+                        for (std::size_t a = 0; a < 3; ++a)
+                        {
+                            const double width = patch.grid.spacing[a], start = config.origin[a],
+                                         length = config.extent[a];
+                            if (config.periodic[a])
+                                p[a] = start + (p[a] - start - std::floor((p[a] - start) / length) * length);
+                            else
+                            {
+                                // Even scalar extension across slip walls, including
+                                // deeper ghost layers and domains narrower than a halo.
+                                const double period = 2.0 * length;
+                                const double r = p[a] - start - std::floor((p[a] - start) / period) * period;
+                                p[a] = start + (r > length ? period - r : r);
+                                p[a] = std::clamp(p[a], start + 0.5 * width, start + length - 0.5 * width);
+                            }
+                            box.lower[a] = p[a] - 0.5 * width;
+                            box.upper[a] = p[a] + 0.5 * width;
+                        }
+                        const auto overlaps = hierarchy->overlaps(box);
+                        auto& range = patch.ranges[c];
+                        double covered = 0.0;
+                        range.begin = patch.samples.size();
+                        for (const auto& overlap : overlaps)
+                        {
+                            ids.insert(static_cast<GO>(overlap.cell));
+                            covered += volume(overlap.box);
+                            const auto donor = hierarchy->cell_box(overlap.cell);
+                            if (overlaps.size() == 1 && overlap.box.lower == donor.lower &&
+                                overlap.box.upper == donor.upper)
+                                range.direct = static_cast<GO>(overlap.cell);
+                            else
+                                patch.samples.push_back({static_cast<GO>(overlap.cell), overlap.box});
+                        }
+                        range.end = patch.samples.size();
+                        if (!(covered > 0.0) ||
+                            std::abs(covered - patch.grid.cell_volume()) > 1e-9 * patch.grid.cell_volume())
+                            throw std::runtime_error(
+                                "AdaptiveVoF reconstruction stencil has incomplete geometric coverage.");
+                    }
+                    patch_index[block] = patches.size();
+                    patches.push_back(std::move(patch));
+                }
+            }
+            catch (const std::exception&)
+            {
+                valid = false;
+            }
+            require_collective(valid, "AdaptiveVoF could not construct complete local reconstruction stencils.");
+            stencil = Exchange(mesh->owned_cell_map(), ids).plan;
+            for (auto& patch : patches)
+            {
+                for (auto& s : patch.samples)
+                    s.halo = stencil->target->getLocalElement(s.cell);
+                for (auto& range : patch.ranges)
+                    if (range.direct >= 0)
+                        range.direct = stencil->target->getLocalElement(range.direct);
+            }
+            const auto n = config.block_cells[0] * config.block_cells[1] * config.block_cells[2];
+            owned_patch_cell.resize(mesh->num_owned_cells());
+            for (std::size_t c = 0; c < owned_patch_cell.size(); ++c)
+            {
+                const auto gid = static_cast<std::size_t>(mesh->cell_global_id(static_cast<LO>(c)));
+                const auto pi = patch_index.at(hierarchy->cell_block(gid));
+                const auto local = gid % n;
+                const auto i = local % config.block_cells[0],
+                           j = (local / config.block_cells[0]) % config.block_cells[1],
+                           k = local / (config.block_cells[0] * config.block_cells[1]);
+                owned_patch_cell[c] = {pi, patches[pi].owned.size()};
+                patches[pi].owned.push_back(patches[pi].grid.cell_index(i + padding, j + padding, k + padding));
+            }
+        }
+
+    }; // Immutable hierarchy-derived geometry and communication plans.
+    std::shared_ptr<const Geometry> geometry;
+    const std::shared_ptr<const Hierarchy>& hierarchy;
+    const SP<const Handle>& mesh;
+    const std::vector<Patch>& patches;
+    const std::vector<std::pair<std::size_t, std::size_t>>& owned_patch_cell;
+    std::unique_ptr<Exchange> cells, faces, stencil;
+
+    static std::shared_ptr<const Geometry> acquire(std::shared_ptr<const Hierarchy> hierarchy)
     {
         require_collective(bool(hierarchy), "AdaptiveVoF requires a hierarchy on every rank.");
-        mesh = std::make_shared<Handle>(hierarchy->geometry());
-        cells = std::make_unique<Exchange>(mesh->owned_cell_map(), mesh->overlap_cell_map());
-        faces = std::make_unique<Exchange>(mesh->owned_face_map(), mesh->overlap_face_map());
-        std::set<std::size_t> blocks;
-        for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
-            blocks.insert(hierarchy->cell_block(mesh->cell_global_id(static_cast<LO>(c))));
-        std::set<GO> ids;
-        std::map<std::size_t, std::size_t> patch_index;
-        const auto& config = hierarchy->config();
-        for (const auto block : blocks)
+        // Hierarchies are immutable, including their communicator ownership layout.
+        // A hit must occur on every rank before any rank skips collective construction.
+        static std::map<const Hierarchy*, std::weak_ptr<const Geometry>> cache;
+        static std::mutex mutex;
+        std::shared_ptr<const Geometry> cached;
         {
-            Patch patch;
-            patch.block = block;
-            patch.grid.spacing = hierarchy->block_spacing(block);
-            const auto bounds = hierarchy->block_box(block);
-            for (std::size_t a = 0; a < 3; ++a)
-            {
-                patch.grid.cells[a] = config.block_cells[a] + 2 * padding;
-                patch.grid.origin[a] = bounds.lower[a] - padding * patch.grid.spacing[a];
-            }
-            patch.samples.resize(patch.grid.cell_count());
-            for (std::size_t c = 0; c < patch.samples.size(); ++c)
-            {
-                Box box;
-                auto p = patch.grid.cell_center(c);
-                for (std::size_t a = 0; a < 3; ++a)
-                {
-                    const double width = patch.grid.spacing[a], start = config.origin[a], length = config.extent[a];
-                    if (config.periodic[a])
-                        p[a] = start + (p[a] - start - std::floor((p[a] - start) / length) * length);
-                    else
-                    {
-                        // Even scalar extension across slip walls, including
-                        // deeper ghost layers and domains narrower than a halo.
-                        const double period = 2.0 * length;
-                        const double r = p[a] - start - std::floor((p[a] - start) / period) * period;
-                        p[a] = start + (r > length ? period - r : r);
-                        p[a] = std::clamp(p[a], start + 0.5 * width, start + length - 0.5 * width);
-                    }
-                    box.lower[a] = p[a] - 0.5 * width;
-                    box.upper[a] = p[a] + 0.5 * width;
-                }
-                for (const auto& overlap : hierarchy->overlaps(box))
-                {
-                    patch.samples[c].push_back({static_cast<GO>(overlap.cell), overlap.box});
-                    ids.insert(static_cast<GO>(overlap.cell));
-                }
-            }
-            patch_index[block] = patches.size();
-            patches.push_back(std::move(patch));
+            const std::lock_guard lock(mutex);
+            for (auto it = cache.begin(); it != cache.end();)
+                if (it->second.expired())
+                    it = cache.erase(it);
+                else
+                    ++it;
+            const auto found = cache.find(hierarchy.get());
+            if (found != cache.end())
+                cached = found->second.lock();
         }
-        stencil = std::make_unique<Exchange>(mesh->owned_cell_map(), ids);
-        for (auto& patch : patches)
-            for (auto& samples : patch.samples)
-                for (auto& s : samples)
-                    s.halo = stencil->target->getLocalElement(s.cell);
-        const auto n = config.block_cells[0] * config.block_cells[1] * config.block_cells[2];
-        owned_patch_cell.resize(mesh->num_owned_cells());
-        for (std::size_t c = 0; c < owned_patch_cell.size(); ++c)
+        int hit = bool(cached), all_hit = 0;
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MIN, 1, &hit, &all_hit);
+        if (all_hit)
+            return cached;
+        auto result = std::make_shared<const Geometry>(std::move(hierarchy));
         {
-            const auto gid = static_cast<std::size_t>(mesh->cell_global_id(static_cast<LO>(c)));
-            const auto pi = patch_index.at(hierarchy->cell_block(gid));
-            const auto local = gid % n;
-            const auto i = local % config.block_cells[0], j = (local / config.block_cells[0]) % config.block_cells[1],
-                       k = local / (config.block_cells[0] * config.block_cells[1]);
-            owned_patch_cell[c] = {pi, patches[pi].grid.cell_index(i + padding, j + padding, k + padding)};
+            const std::lock_guard lock(mutex);
+            cache[result->hierarchy.get()] = result;
         }
+        return result;
     }
 
-    std::vector<double> sample(
-        const Patch& patch, const std::vector<double>& halo, const std::vector<InterfacePlane>* planes = nullptr) const
+    explicit Impl(std::shared_ptr<const Hierarchy> h)
+        : geometry(acquire(std::move(h))), hierarchy(geometry->hierarchy), mesh(geometry->mesh),
+          patches(geometry->patches), owned_patch_cell(geometry->owned_patch_cell),
+          cells(std::make_unique<Exchange>(geometry->cells)), faces(std::make_unique<Exchange>(geometry->faces)),
+          stencil(std::make_unique<Exchange>(geometry->stencil))
     {
-        std::vector<double> f(patch.samples.size());
+    }
+
+    UniformGrid operator_grid(const Patch& patch, std::size_t width) const
+    {
+        auto grid = patch.grid;
+        for (std::size_t a = 0; a < 3; ++a)
+        {
+            grid.cells[a] -= 2 * (padding - width);
+            grid.origin[a] += (padding - width) * grid.spacing[a];
+        }
+        return grid;
+    }
+
+    std::vector<double> sample(const Patch& patch, const std::vector<double>& halo,
+        const std::vector<InterfacePlane>* planes = nullptr, std::size_t width = padding) const
+    {
+        const auto grid = operator_grid(patch, width);
+        std::vector<double> f(grid.cell_count());
         for (std::size_t c = 0; c < f.size(); ++c)
         {
-            double gas = 0.0, covered = 0.0;
-            for (const auto& s : patch.samples[c])
+            auto p = grid.cell_coordinates(c);
+            for (auto& x : p)
+                x += padding - width;
+            const auto& range = patch.ranges[patch.grid.cell_index(p[0], p[1], p[2])];
+            if (range.direct >= 0)
             {
+                f[c] = halo[range.direct];
+                continue;
+            }
+            double gas = 0.0, covered = 0.0;
+            for (std::size_t i = range.begin; i < range.end; ++i)
+            {
+                const auto& s = patch.samples[i];
                 const double v = volume(s.box);
                 gas += planes ? gas_intersection(hierarchy->cell_box(s.cell), s.box, halo[s.halo], (*planes)[s.halo])
                               : v * halo[s.halo];
                 covered += v;
             }
-            if (!(covered > 0.0) || std::abs(covered - patch.grid.cell_volume()) > 1e-9 * patch.grid.cell_volume())
-                throw std::runtime_error("AdaptiveVoF reconstruction stencil has incomplete geometric coverage.");
             f[c] = gas / covered;
         }
         return f;
@@ -302,7 +460,19 @@ struct AdaptiveVoF::Impl
         try
         {
             for (const auto& patch : patches)
-                values.push_back(GeometricVoF(patch.grid).reconstruct(sample(patch, halo)));
+            {
+                const auto grid = operator_grid(patch, 1);
+                std::vector<std::size_t> requested;
+                requested.reserve(patch.owned.size());
+                for (const auto index : patch.owned)
+                {
+                    auto p = patch.grid.cell_coordinates(index);
+                    for (auto& x : p)
+                        x -= padding - 1;
+                    requested.push_back(grid.cell_index(p[0], p[1], p[2]));
+                }
+                values.push_back(GeometricVoF(grid).reconstruct(sample(patch, halo, nullptr, 1), requested));
+            }
         }
         catch (const std::exception&)
         {
@@ -322,17 +492,19 @@ struct AdaptiveVoF::Impl
         const std::vector<InterfacePlane>& owned, const Exchange& exchange) const
     {
         std::vector<InterfacePlane> result(exchange.target->getLocalNumElements());
-        std::vector<double> component(owned.size());
-        for (std::size_t a = 0; a < 4; ++a)
+        std::vector<std::vector<double>> components(4, std::vector<double>(owned.size()));
+        for (std::size_t c = 0; c < owned.size(); ++c)
         {
-            for (std::size_t c = 0; c < owned.size(); ++c)
-                component[c] = a == 3 ? owned[c].offset : owned[c].normal[a];
-            const auto halo = exchange(component);
-            for (std::size_t c = 0; c < result.size(); ++c)
-                if (a == 3)
-                    result[c].offset = halo[c];
-                else
-                    result[c].normal[a] = halo[c];
+            for (std::size_t a = 0; a < 3; ++a)
+                components[a][c] = owned[c].normal[a];
+            components[3][c] = owned[c].offset;
+        }
+        const auto halo = exchange.batch(components);
+        for (std::size_t c = 0; c < result.size(); ++c)
+        {
+            for (std::size_t a = 0; a < 3; ++a)
+                result[c].normal[a] = halo[a][c];
+            result[c].offset = halo[3][c];
         }
         return result;
     }
@@ -351,16 +523,63 @@ const SP<const AdaptiveVoF::Handle>& AdaptiveVoF::mesh() const noexcept
     return impl_->mesh;
 }
 
+AdaptiveGeometryStorage AdaptiveVoF::geometry_storage() const noexcept
+{
+    AdaptiveGeometryStorage result;
+    result.patches = impl_->patches.size();
+    for (const auto& patch : impl_->patches)
+    {
+        result.virtual_cells += patch.ranges.size();
+        result.explicit_intersections += patch.samples.size();
+        result.sample_payload_bytes +=
+            patch.ranges.capacity() * sizeof(Impl::Range) + patch.samples.capacity() * sizeof(Impl::Sample);
+        for (const auto& range : patch.ranges)
+            result.direct_cells += range.direct >= 0;
+    }
+    return result;
+}
+
 std::vector<double> AdaptiveVoF::exchange_cells(const std::vector<double>& owned) const
 {
     require_collective(owned.size() == mesh()->num_owned_cells(), "AdaptiveVoF cell exchange requires owned values.");
     return (*impl_->cells)(owned);
 }
 
+std::vector<Vector> AdaptiveVoF::exchange_cell_vectors(const std::vector<Vector>& owned) const
+{
+    require_collective(owned.size() == mesh()->num_owned_cells(), "AdaptiveVoF vector exchange requires owned values.");
+    std::vector<std::vector<double>> components(3, std::vector<double>(owned.size()));
+    for (std::size_t c = 0; c < owned.size(); ++c)
+        for (std::size_t a = 0; a < 3; ++a)
+            components[a][c] = owned[c][a];
+    const auto halo = impl_->cells->batch(components);
+    std::vector<Vector> result(mesh()->num_cells());
+    for (std::size_t c = 0; c < result.size(); ++c)
+        for (std::size_t a = 0; a < 3; ++a)
+            result[c][a] = halo[a][c];
+    return result;
+}
+
 std::vector<double> AdaptiveVoF::exchange_faces(const std::vector<double>& overlap) const
 {
     require_collective(overlap.size() == mesh()->num_faces(), "AdaptiveVoF face exchange requires overlap values.");
     return (*impl_->faces)(std::vector<double>(overlap.begin(), overlap.begin() + mesh()->num_owned_faces()));
+}
+
+std::vector<Vector> AdaptiveVoF::exchange_face_vectors(const std::vector<Vector>& overlap) const
+{
+    require_collective(
+        overlap.size() == mesh()->num_faces(), "AdaptiveVoF vector exchange requires overlap face values.");
+    std::vector<std::vector<double>> components(3, std::vector<double>(mesh()->num_owned_faces()));
+    for (std::size_t c = 0; c < mesh()->num_owned_faces(); ++c)
+        for (std::size_t a = 0; a < 3; ++a)
+            components[a][c] = overlap[c][a];
+    const auto halo = impl_->faces->batch(components);
+    std::vector<Vector> result(mesh()->num_faces());
+    for (std::size_t c = 0; c < result.size(); ++c)
+        for (std::size_t a = 0; a < 3; ++a)
+            result[c][a] = halo[a][c];
+    return result;
 }
 
 std::vector<InterfacePlane> AdaptiveVoF::reconstruct(const std::vector<double>& fraction) const
@@ -379,7 +598,7 @@ std::vector<double> AdaptiveVoF::curvature(const std::vector<double>& fraction) 
     try
     {
         for (const auto& patch : impl_->patches)
-            values.push_back(GeometricVoF(patch.grid).curvature(impl_->sample(patch, halo, &planes)));
+            values.push_back(GeometricVoF(patch.grid).curvature(impl_->sample(patch, halo, &planes), patch.owned));
     }
     catch (const std::exception&)
     {
@@ -914,8 +1133,14 @@ AdaptiveRemapResult AdaptiveVoF::remap(const AdaptiveVoF& target, const std::vec
         identical(inventory.nonnegative ? 1.0 : 0.0, "Adaptive inventory sign policies differ between ranks.");
         // An exact byte comparison avoids implementation-dependent string hashes.
         identical(static_cast<double>(inventory.name.size()), "Adaptive inventory names differ between ranks.");
-        for (unsigned char c : inventory.name)
-            identical(c, "Adaptive inventory names differ between ranks.");
+        require_collective(inventory.name.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max()),
+            "Adaptive inventory names exceed the collective byte-count limit.");
+        std::vector<unsigned char> reference(inventory.name.begin(), inventory.name.end());
+        Teuchos::broadcast(
+            *mesh()->owned_cell_map()->getComm(), 0, static_cast<int>(reference.size()), reference.data());
+        require_collective(std::equal(reference.begin(), reference.end(), inventory.name.begin(),
+                               [](unsigned char a, char b) { return a == static_cast<unsigned char>(b); }),
+            "Adaptive inventory names differ between ranks.");
         valid = valid && !inventory.name.empty() && names.insert(inventory.name).second &&
                 static_cast<unsigned>(inventory.carrier) <= static_cast<unsigned>(InventoryCarrier::MixtureMass) &&
                 inventory.amount.size() == fraction.size() &&
@@ -1055,7 +1280,7 @@ RefinementPlan AdaptiveVoF::refinement_plan(const std::vector<double>& fraction,
     identical(options.curvature_resolution, "Refinement curvature threshold differs between ranks.");
     identical(options.wake_threshold, "Refinement wake threshold differs between ranks.");
     require_collective(options.minimum_resolved_diameter > 0 && options.cells_per_diameter >= 4 &&
-                           options.stencil_cells >= padding && options.forecast_time >= 0 &&
+                           options.stencil_cells >= protected_stencil && options.forecast_time >= 0 &&
                            options.curvature_resolution >= 0 && options.wake_threshold > 0 &&
                            (hints.wake_indicator.empty() || hints.wake_indicator.size() == fraction.size()) &&
                            std::all_of(hints.wake_indicator.begin(), hints.wake_indicator.end(),
@@ -1084,6 +1309,12 @@ RefinementPlan AdaptiveVoF::refinement_plan(const std::vector<double>& fraction,
     std::vector<int> protected_blocks(blocks.size()), tagged(blocks.size()), phase_min(blocks.size(), 2),
         phase_max(blocks.size(), -1);
     const double target = options.minimum_resolved_diameter / options.cells_per_diameter;
+    struct Guard
+    {
+        Box box;
+        bool force_refinement;
+    };
+    std::vector<Guard> guards;
     for (std::size_t c = 0; c < fraction.size(); ++c)
     {
         const auto gid = mesh()->cell_global_id(static_cast<LO>(c));
@@ -1113,42 +1344,97 @@ RefinementPlan AdaptiveVoF::refinement_plan(const std::vector<double>& fraction,
             guard.lower[a] -= r;
             guard.upper[a] += r;
         }
-        for (std::size_t b = 0; b < blocks.size(); ++b)
+        guards.push_back({guard,
+            wake || (options.curvature_resolution > 0.0 && std::abs(k[c]) * maxh > options.curvature_resolution)});
+    }
+    // Merge only exact rectangular unions: the other two axes and refinement
+    // criterion must coincide. This preserves the original protected/tagged sets.
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        const auto same_strip = [&](const Guard& a, const Guard& b)
         {
-            bool near = false;
-            // Mirror the protection band through periodic seams without ghost components.
-            for (int z = -1; z <= 1; ++z)
-                for (int y = -1; y <= 1; ++y)
-                    for (int x = -1; x <= 1; ++x)
+            if (a.force_refinement != b.force_refinement)
+                return false;
+            for (std::size_t d = 0; d < 3; ++d)
+                if (d != axis && (a.box.lower[d] != b.box.lower[d] || a.box.upper[d] != b.box.upper[d]))
+                    return false;
+            return true;
+        };
+        std::sort(guards.begin(), guards.end(),
+            [&](const Guard& a, const Guard& b)
+            {
+                if (a.force_refinement != b.force_refinement)
+                    return a.force_refinement < b.force_refinement;
+                for (std::size_t d = 0; d < 3; ++d)
+                    if (d != axis)
                     {
-                        const std::array<int, 3> shift{x, y, z};
-                        Box image = hierarchy()->block_box(b);
-                        bool allowed = true;
+                        if (a.box.lower[d] != b.box.lower[d])
+                            return a.box.lower[d] < b.box.lower[d];
+                        if (a.box.upper[d] != b.box.upper[d])
+                            return a.box.upper[d] < b.box.upper[d];
+                    }
+                return a.box.lower[axis] < b.box.lower[axis];
+            });
+        std::size_t count = 0;
+        for (const auto& guard : guards)
+            if (count && same_strip(guards[count - 1], guard) &&
+                guards[count - 1].box.upper[axis] >= guard.box.lower[axis])
+                guards[count - 1].box.upper[axis] = std::max(guards[count - 1].box.upper[axis], guard.box.upper[axis]);
+            else
+                guards[count++] = guard;
+        guards.resize(count);
+    }
+    for (const auto& entry : guards)
+    {
+        const auto& guard = entry.box;
+        // Query only permitted periodic images. Translating the query instead of
+        // every leaf retains the exact closed-box/corner predicate.
+        const int xmin = config.periodic[0] ? -1 : 0, xmax = config.periodic[0] ? 1 : 0;
+        const int ymin = config.periodic[1] ? -1 : 0, ymax = config.periodic[1] ? 1 : 0;
+        const int zmin = config.periodic[2] ? -1 : 0, zmax = config.periodic[2] ? 1 : 0;
+        for (int z = zmin; z <= zmax; ++z)
+            for (int y = ymin; y <= ymax; ++y)
+                for (int x = xmin; x <= xmax; ++x)
+                {
+                    auto query = guard;
+                    const std::array<int, 3> shift{x, y, z};
+                    for (std::size_t a = 0; a < 3; ++a)
+                    {
+                        query.lower[a] -= shift[a] * config.extent[a];
+                        query.upper[a] -= shift[a] * config.extent[a];
+                        // Candidate padding only: translating floating coordinates
+                        // must not exclude a leaf accepted by the original image test.
+                        const double margin = 16.0 * std::numeric_limits<double>::epsilon() *
+                                              std::max({std::abs(query.lower[a]), std::abs(query.upper[a]),
+                                                  std::abs(config.origin[a]), config.extent[a]});
+                        query.lower[a] -= margin;
+                        query.upper[a] += margin;
+                    }
+                    for (const auto b : hierarchy()->intersecting_blocks(query))
+                    {
+                        auto image = hierarchy()->block_box(b);
                         for (std::size_t a = 0; a < 3; ++a)
                         {
-                            if (shift[a] != 0 && !config.periodic[a])
-                                allowed = false;
                             image.lower[a] += shift[a] * config.extent[a];
                             image.upper[a] += shift[a] * config.extent[a];
                         }
-                        near = near || (allowed && intersects(guard, image));
+                        if (intersects(guard, image))
+                        {
+                            protected_blocks[b] = 1;
+                            const auto hb = hierarchy()->block_spacing(b);
+                            if (entry.force_refinement ||
+                                *std::max_element(hb.begin(), hb.end()) > target * (1.0 + 1e-12))
+                                tagged[b] = 1;
+                        }
                     }
-            if (!near)
-                continue;
-            protected_blocks[b] = 1;
-            const auto hb = hierarchy()->block_spacing(b);
-            if (wake || *std::max_element(hb.begin(), hb.end()) > target * (1.0 + 1e-12) ||
-                (options.curvature_resolution > 0.0 && std::abs(k[c]) * maxh > options.curvature_resolution))
-                tagged[b] = 1;
-        }
+                }
     }
-    for (std::size_t b = 0; b < blocks.size(); ++b)
-        for (const auto& region : hints.promotion_regions)
-            if (intersects(hierarchy()->block_box(b), region))
-            {
-                tagged[b] = 1;
-                protected_blocks[b] = 1;
-            }
+    for (const auto& region : hints.promotion_regions)
+        for (const auto b : hierarchy()->intersecting_blocks(region))
+        {
+            tagged[b] = 1;
+            protected_blocks[b] = 1;
+        }
     const auto reduce = [&](std::vector<int>& v, Teuchos::EReductionType operation)
     {
         std::vector<int> global(v.size());
