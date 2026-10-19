@@ -5,6 +5,7 @@
 
 #include "equations/RadiolyticBubbleKinetics.hh"
 #include "solvers/AdaptiveVoFSolver.hh"
+#include "solvers/BubbleRepresentation.hh"
 
 #include <functional>
 #include <memory>
@@ -65,6 +66,7 @@ struct RadiolyticVoFOptions
     ResolvedHydrogenFilm resolved_transfer;
     DispersedCaptureModel capture;
     ResolvedHeadspaceVent headspace;
+    BubbleRepresentationOptions representation;
     bool dissolved_diffusion = true;
     int maximum_correctors = 20; ///< At least two evaluations are needed to check the source fixed point.
     double relative_tolerance = 1e-7;
@@ -117,8 +119,9 @@ struct RadiolyticVoFStatistics
  *
  * Constant resolved surface tension is the declared Stage 3 scope. Unresolved
  * drainage/rupture is represented only by supplied capture/coalescence kernels;
- * grid-scale resolved contact retains geometric VoF coalescence. No promotion,
- * demotion, automatic headspace detection or empirical calibration is implied.
+ * grid-scale resolved contact retains geometric VoF coalescence. Representation
+ * changes are a separate opt-in fixed-clock transaction with explicit birth
+ * identities. Headspace ownership and empirical calibrations remain supplied.
  * The first-order reaction/transport split freezes accepted interface patches,
  * carrier apertures and designated headspace ownership throughout the source
  * correctors. Material coefficients and true aqueous capacity use the trial
@@ -146,6 +149,8 @@ public:
     public:
         [[nodiscard]] const VoF::LowMachState& state() const;
         [[nodiscard]] const RadiolyticVoFStatistics& statistics() const;
+        [[nodiscard]] const BubbleRepresentationInspection& representation() const;
+        [[nodiscard]] const VoF::RepresentationDiagnostics& representation_diagnostics() const;
 
     private:
         friend class RadiolyticVoFCoupler;
@@ -154,6 +159,14 @@ public:
     };
 
     [[nodiscard]] Trial preview(double dt, const RadiolyticVoFInput& input);
+    /** Register deterministic persistent birth requests; no physical inventory changes. */
+    void request_births(const std::vector<BubbleBirthSeed>& seeds);
+    [[nodiscard]] const std::vector<BubbleBirthRecord>& birth_registry() const noexcept;
+    [[nodiscard]] const std::vector<BubbleConversionEvent>& conversion_history() const noexcept;
+    /** Collective read-only component/eligibility inspection, including refinement requirements. */
+    [[nodiscard]] BubbleRepresentationInspection inspect_representation() const;
+    /** Fixed-clock conservative conversion; existing commit/checkpoint owns flow and registry together. */
+    [[nodiscard]] Trial preview_representation();
     void commit(const Trial& trial);
     [[nodiscard]] RadiolyticVoFStatistics step(double dt, const RadiolyticVoFInput& input);
     [[nodiscard]] Checkpoint checkpoint();

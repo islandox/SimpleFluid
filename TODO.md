@@ -1637,11 +1637,12 @@ not liquid-volume-fraction weighted.
 
 **Status:** Stage 1's serial uniform backend and Stage 2's distributed Cartesian
 AMR backend are implemented and focused-tested. Stage 3 adds numerical
-low-Mach radiolytic and resolved/dispersed interface coupling. Adaptive levels
-share one timestep. The target is centimetric resolved gas in the existing
-aqueous radiolytic system; physical calibration, application resolution
-studies, bidirectional representation changes, and the extensions listed
-below remain open. These numerical tests do not qualify reactor transients.
+low-Mach radiolytic and resolved/dispersed interface coupling. Stage 4 adds
+opt-in conservative representation trials with a persistent birth registry.
+Adaptive levels share one timestep. The target is centimetric resolved gas in
+the existing aqueous radiolytic system; physical calibration, application
+resolution studies, and the extensions listed below remain open. These
+numerical tests do not qualify reactor transients.
 
 ### Physical and ownership contracts
 
@@ -1659,8 +1660,10 @@ below remain open. These numerical tests do not qualify reactor transients.
 - [x] Retain external shared ownership of the flow solver. Checkpoint phase
       inventories and cumulative physical-transfer ledgers; publish accepted
       states only.
-- [ ] Extend checkpoints to persistent bubble identities, pending conversion
-      reservations, and representation-change events in Stage 4.
+- [x] Extend checkpoints to persistent birth identities, pending conversion
+      reservations, and accepted representation-change events. Instantaneous
+      component labels are not a material-lineage tracker through advection,
+      breakup or coalescence.
 
 ### Stage 1 — Uniform-mesh geometric VoF
 
@@ -1790,24 +1793,52 @@ implemented contracts, supplied inputs and measured verification scope.
 
 ### Stage 4 — Bidirectional representation changes
 
-- [ ] Add a checkpointed birth registry: local eligible size-bin donors,
-      whole-bubble inventory, persistent spatial seed identities, and a
-      sufficiently refined insertion neighborhood. Void fraction alone is not
-      a promotion criterion; birth localization is an explicit model closure.
-- [ ] Use physical-size/resolution hysteresis for promotion and demotion.
-      Initial candidate thresholds are 10 mm and 4 mm for a 0.31 mm finest mesh;
-      qualify threshold sensitivity rather than treating these as universal.
-- [ ] Identify complete gas components across ranks; demote detached small
-      components while retaining attached ligaments and headspace-connected gas.
-- [ ] Transfer gas inventories, momentum, and thermal state atomically and
-      conservatively redistribute displaced liquid and dissolved species.
-- [ ] Separate representation conversion from physical EOS/capillary
-      relaxation; account for physical changes in bubble number/surface energy.
-- [ ] Verify round-trip budgets, donor exhaustion, partition-independent event
-      ownership, rejection/replay, and promotion/demotion threshold sensitivity.
+**Numerical implementation and focused verification are present; physical
+localization/calibration and application convergence remain open.**
+
+- [x] Add a checkpointed birth registry with caller-supplied persistent spatial
+      IDs, eligible fixed-molar-bin donors, and one whole bubble per promotion.
+      Bind reservations to state/topology revisions and require the insertion
+      and guard region to be sufficiently resolved at `max_level`. Void
+      fraction alone is not a birth criterion.
+- [x] Use configurable physical-size and resolution hysteresis. Initial
+      diameter defaults are 10 mm and 4 mm, with 24 cells across promotion and
+      a 16-cell demotion resolution threshold. Demotion inspects actual cell
+      widths, not an unused finer configured level.
+- [x] Identify complete gas components through shared PLIC traces across
+      coarse/fine, periodic and MPI faces. Retain attached ligaments,
+      wall/headspace-connected components, and inert-containing gas. Current
+      conversion stencils must fit the domain coordinate box; wrapped events
+      are explicitly deferred.
+- [x] Transfer typed gas inventories, internal energy and physical momentum
+      atomically. Redistribute the complete remaining carrier, including
+      liquid, dissolved/donor stock and other dispersed populations, within
+      disjoint event supports. Preserve fixed-pivot number/molar moments,
+      including tiny nonzero bins; reject undefined generic passive transfers.
+- [x] Keep conversion at fixed physical time with retained phase-volume,
+      pressure and energy histories. The next requested physical step performs
+      EOS/capillary relaxation; a private predictor initializes coupled source
+      correctors without duplicate time, heat or production. Report actual
+      surface-area/energy and represented-number changes separately.
+- [x] Verify whole-bubble and round-trip budgets, local displacement, donor
+      exhaustion, hysteresis/refinement guards, distributed component/event
+      ownership, rejection, stale plans and checkpoint replay. Cover serial,
+      two-rank and active sparse conversion with an empty-owned rank.
+- [ ] Qualify birth localization, demotion host-volume assumptions and physical
+      threshold sensitivity for the intended aqueous bubble population.
+- [ ] Extend wrapped conversion stencils, dispersed inert species and
+      incompatible carried-temperature mixtures beyond the current defer/
+      reject policies. General advected material-lineage tracking remains
+      separate from the persistent birth registry.
 - [ ] Use Hysing-style algorithm checks followed by three-dimensional
       centimetric-bubble convergence of rise speed, shape, wake, and gas
       transfer. Coupled reactor qualification is an additional application gate.
+      The original Hysing no-slip horizontal walls are outside the present
+      adaptive slip-wall contract.
+
+See the [representation guide](docs/modeling/bubble_representation.md) and the
+separate [Stage 4 verification record](docs/verification/vof_stage4_20261019.md)
+for the implemented API, exact focused evidence and qualification limits.
 
 ---
 

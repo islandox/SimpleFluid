@@ -3,6 +3,7 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     AdaptiveVoFSolver.cc
     VoFLowMach.cc
     RadiolyticVoFCoupler.cc
+    BubbleRepresentation.cc
     explicit_instantiation/LiquidMassInventory.cc
     explicit_instantiation/VolumeContinuityModel.cc
     explicit_instantiation/PlanarALEBoundary.cc
@@ -36,6 +37,7 @@ simplefluid_exclude_from_pgo_sources(VoFSolver.cc)
 simplefluid_exclude_from_pgo_sources(AdaptiveVoFSolver.cc)
 simplefluid_exclude_from_pgo_sources(VoFLowMach.cc)
 simplefluid_exclude_from_pgo_sources(RadiolyticVoFCoupler.cc)
+simplefluid_exclude_from_pgo_sources(BubbleRepresentation.cc)
 if(SIMPLEFLUID_ENABLE_NOX)
     target_compile_definitions(SimpleFluidSolvers PUBLIC SIMPLEFLUID_ENABLE_NOX=1)
 endif()

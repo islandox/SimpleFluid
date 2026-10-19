@@ -27,7 +27,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
   elseif(TEST_NAME STREQUAL "testAdaptiveVoFLowMach" OR TEST_NAME STREQUAL "testVoFLowMach"
-         OR TEST_NAME STREQUAL "testRadiolyticVoFCoupler")
+         OR TEST_NAME STREQUAL "testRadiolyticVoFCoupler" OR TEST_NAME STREQUAL "testBubbleRepresentation")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;radiolysis\\;thermodynamics\\;conservation\\;transaction\\;collective")
   elseif(TEST_NAME STREQUAL "testAdaptiveVoFSolver")
@@ -40,6 +40,21 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME BubbleRepresentation_2procs
+    TARGET testBubbleRepresentation
+    PROCS 2
+    LABELS "vof;radiolysis;representation;conservation;transaction;collective"
+    TIMEOUT 300)
+
+simplefluid_add_mpi_test(
+    NAME BubbleRepresentation_EmptyRank_9procs
+    TARGET testBubbleRepresentation
+    PROCS 9
+    ARGS "--gtest_filter=BubbleRepresentationTest.EmptyOwnedRankParticipatesInRegistryPreviewAndReplay"
+    LABELS "vof;radiolysis;representation;conservation;transaction;collective;empty_rank"
+    TIMEOUT 120)
 
 simplefluid_add_mpi_test(
     NAME AdaptiveVoFLowMach_2procs

@@ -852,7 +852,10 @@ and `RadiolyticVoFCoupler` add conservative thermodynamic inventories,
 reactions, prescribed-film H2 transfer, dispersed capture, and designated
 headspace venting. The [radiolytic VoF guide](docs/modeling/radiolytic_vof.md)
 states the supplied material/closure contracts and qualification limits.
-Automatic resolved/dispersed representation changes remain in Stage 4 of
+Opt-in [representation trials](docs/modeling/bubble_representation.md) add
+whole-bubble promotion, complete-component demotion, a checkpointed birth
+registry, and conservative carrier displacement. Physical calibration and
+centimetric-bubble qualification remain open in
 [Phase 22](TODO.md#phase-22--resolved-and-dispersed-radiolytic-bubbles).
 
 ## Dependencies
@@ -905,6 +908,7 @@ example and storage accounting](docs/region_meshes.md).
 | Uniform-mesh geometric VoF | [Solver and numerical verification](docs/modeling/vof.md) |
 | Adaptive Cartesian VoF | [Conservative refinement and distributed flow](docs/modeling/adaptive_vof.md) |
 | Radiolytic resolved/dispersed coupling | [Low-Mach inventories, interface transfer, and capture](docs/modeling/radiolytic_vof.md) |
+| Bubble representation changes | [Birth registry, promotion, demotion, and pressure history](docs/modeling/bubble_representation.md) |
 | SST-SAS configuration and supported paths | [Model contract](docs/modeling/sst_sas.md) and [extensions](docs/modeling/sst_sas_extensions.md) |
 | Radiolysis, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/radiolytic_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
 | External reference comparisons | [OpenFOAM workflows](verification/openfoam/README.md) |

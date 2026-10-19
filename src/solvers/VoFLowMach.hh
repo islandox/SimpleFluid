@@ -6,10 +6,16 @@
 #include "FVM/GeometricVoF.hh"
 #include "SimpleFluidExport.hh"
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace SimpleFluid::Meshes
+{
+class CartesianAMR;
+}
 
 namespace SimpleFluid::VoF
 {
@@ -96,9 +102,10 @@ struct DispersedPopulation
     std::string name;
     std::vector<double> number;
     std::vector<double> hydrogen_moles;
-    std::vector<Vector> drift_velocity; ///< Relative to the liquid/continuous velocity, m/s.
-    std::vector<double> volume;         ///< Derived true gas volume, m3.
-    std::vector<double> radius;         ///< Derived from N,n,T,p_l and Laplace pressure, m.
+    std::vector<Vector> drift_velocity;    ///< Relative to the liquid/continuous velocity, m/s.
+    std::vector<double> volume;            ///< Derived true gas volume, m3.
+    std::vector<double> radius;            ///< Derived from N,n,T,p_l and Laplace pressure, m.
+    std::vector<double> absolute_pressure; ///< Pa; retained phase history while representation relaxation is pending.
 };
 
 struct LowMachInitialState
@@ -115,6 +122,7 @@ struct LowMachInitialState
 
 struct LowMachState
 {
+    bool pending_representation_relaxation = false;
     double thermodynamic_pressure = 0;
     std::vector<double> liquid_mass;
     std::vector<double> resolved_hydrogen_moles;
@@ -133,6 +141,46 @@ struct LowMachState
     std::vector<double> liquid_absolute_pressure;
     std::vector<double> resolved_absolute_pressure;
     std::vector<double> resolved_hydrogen_partial_pressure;
+};
+
+/** A phase parcel is measured against the accepted source phase volume. */
+struct RepresentationGasParcel
+{
+    std::uint64_t source_cell = 0, target_cell = 0;
+    int source_population = -1, target_population = -1; ///< -1 is resolved gas; otherwise an existing population index.
+    double volume = 0;                                  ///< Source-state gas volume, m3.
+    double target_number = 0; ///< Required for resolved-to-dispersed conversion; no implicit number creation.
+};
+
+/** Entire remaining carrier, sampled after gas withdrawals and before gas deposits. */
+struct RepresentationCarrierParcel
+{
+    std::uint64_t source_cell = 0, target_cell = 0;
+    double volume = 0; ///< Liquid plus all remaining dispersed gas, m3.
+};
+
+/** Sparse parcels occur once on their event owner; referenced cells may be remote. */
+struct RepresentationChangeRequest
+{
+    std::shared_ptr<const Meshes::CartesianAMR> source_hierarchy;
+    std::uint64_t accepted_state_revision = 0;
+    std::vector<RepresentationGasParcel> gas_parcels;
+    std::vector<RepresentationCarrierParcel> carrier_parcels;
+};
+
+struct RepresentationDiagnostics
+{
+    double gas_volume_promoted = 0, gas_volume_demoted = 0;
+    double hydrogen_promoted = 0, hydrogen_demoted = 0;
+    double dispersed_number_removed = 0, dispersed_number_added = 0;
+    double carrier_volume_moved = 0;
+    double mass_error = 0, hydrogen_error = 0, inert_error = 0, internal_energy_error = 0;
+    double internal_energy_roundoff_bound = 0; ///< Packet-operand forward-error allowance, J.
+    Vector momentum_error{}, momentum_roundoff_bound{};
+    double maximum_volume_error = 0;
+    double maximum_face_divergence = 0;
+    double resolved_area_change = 0, dispersed_area_change = 0;
+    double surface_energy_change = 0; ///< Diagnostic sigma*delta(area); never an automatic heat source.
 };
 
 struct PopulationSource
