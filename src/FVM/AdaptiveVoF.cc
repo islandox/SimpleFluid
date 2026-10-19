@@ -1,0 +1,815 @@
+/** @file AdaptiveVoF.cc
+ * @brief Sparse geometric reconstruction, subface transport and conservative AMR remapping.
+ */
+#include "FVM/AdaptiveVoF.hh"
+
+#include "utils/CompensatedSum.hh"
+#include <Teuchos_CommHelpers.hpp>
+#include <Tpetra_Core.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <map>
+#include <numeric>
+#include <set>
+#include <stdexcept>
+#include <utility>
+
+namespace SimpleFluid::VoF
+{
+namespace
+{
+using Pack = DefaultTpetraTypes;
+using GO = Pack::global_ordinal_type;
+using LO = Pack::local_ordinal_type;
+using Box = Meshes::AMRBox;
+constexpr double roundoff = 2.0e-12;
+constexpr std::size_t padding = 4;
+
+void require_collective(bool valid, const char* message)
+{
+    int local = valid ? 1 : 0, global = 0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MIN, 1, &local, &global);
+    if (!global)
+        throw std::invalid_argument(message);
+}
+
+double maximum(double local)
+{
+    double result = 0.0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, 1, &local, &result);
+    return result;
+}
+
+void identical(double value, const char* message)
+{
+    require_collective(std::isfinite(value), message);
+    double lo = 0.0, hi = 0.0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MIN, 1, &value, &lo);
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, 1, &value, &hi);
+    require_collective(lo == hi, message);
+}
+
+double volume(const Box& b)
+{
+    return (b.upper[0] - b.lower[0]) * (b.upper[1] - b.lower[1]) * (b.upper[2] - b.lower[2]);
+}
+
+Vector center(const Box& b)
+{
+    return {0.5 * (b.lower[0] + b.upper[0]), 0.5 * (b.lower[1] + b.upper[1]), 0.5 * (b.lower[2] + b.upper[2])};
+}
+
+bool intersects(const Box& a, const Box& b)
+{
+    for (std::size_t d = 0; d < 3; ++d)
+        if (a.upper[d] < b.lower[d] || b.upper[d] < a.lower[d])
+            return false;
+    return true;
+}
+
+void validate_f(const std::vector<double>& f, std::size_t n)
+{
+    require_collective(f.size() == n && std::all_of(f.begin(), f.end(), [](double v)
+                                            { return std::isfinite(v) && v >= -roundoff && v <= 1.0 + roundoff; }),
+        "AdaptiveVoF requires owned-cell finite fractions in [0,1] within retained roundoff.");
+}
+
+/** Only requested donor cells are imported; source maps remain one-to-one. */
+struct Exchange
+{
+    Teuchos::RCP<const Pack::map_type> source, target;
+    std::unique_ptr<Pack::import_type> importer;
+
+    Exchange(Teuchos::RCP<const Pack::map_type> from, Teuchos::RCP<const Pack::map_type> to)
+        : source(std::move(from)), target(std::move(to)), importer(std::make_unique<Pack::import_type>(source, target))
+    {
+    }
+
+    Exchange(Teuchos::RCP<const Pack::map_type> from, const std::set<GO>& ids) : source(std::move(from))
+    {
+        const std::vector<GO> list(ids.begin(), ids.end());
+        target = Teuchos::rcp(new Pack::map_type(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+            Teuchos::arrayViewFromVector(list), GO{}, source->getComm()));
+        importer = std::make_unique<Pack::import_type>(source, target);
+    }
+
+    std::vector<double> operator()(const std::vector<double>& owned) const
+    {
+        Pack::vector_type from(source, true), to(target, true);
+        {
+            auto values = from.getDataNonConst();
+            std::copy(owned.begin(), owned.end(), values.begin());
+        }
+        to.doImport(from, *importer, Tpetra::INSERT);
+        const auto values = to.getData();
+        return {values.begin(), values.end()};
+    }
+
+    std::vector<double> sum_to_source(const std::vector<double>& partial) const
+    {
+        Pack::vector_type from(target, true), to(source, true);
+        {
+            auto values = from.getDataNonConst();
+            std::copy(partial.begin(), partial.end(), values.begin());
+        }
+        to.doExport(from, *importer, Tpetra::ADD);
+        const auto values = to.getData();
+        return {values.begin(), values.end()};
+    }
+};
+
+double gas_intersection(const Box& donor, const Box& intersection, double f, const InterfacePlane& plane)
+{
+    const double v = volume(intersection), full = volume(donor);
+    // Keep raw pure-cell roundoff and exact identity restriction visible.
+    if (f <= 0.0 || f >= 1.0 || std::abs(v - full) <= 8.0 * std::numeric_limits<double>::epsilon() * full)
+        return f * v;
+    auto lo = intersection.lower, hi = intersection.upper;
+    const auto c = center(donor);
+    for (std::size_t a = 0; a < 3; ++a)
+    {
+        lo[a] -= c[a];
+        hi[a] -= c[a];
+    }
+    return GeometricVoF::box_plane_volume(lo, hi, plane.normal, plane.offset);
+}
+
+double carrier_volume(InventoryCarrier carrier, double total, double gas, double rl, double rg)
+{
+    switch (carrier)
+    {
+        case InventoryCarrier::BulkVolume:
+            return total;
+        case InventoryCarrier::GasVolume:
+            return gas;
+        case InventoryCarrier::LiquidVolume:
+            return total - gas;
+        case InventoryCarrier::MixtureMass:
+            return rl * (total - gas) + rg * gas;
+    }
+    throw std::invalid_argument("Unknown adaptive inventory carrier.");
+}
+} // namespace
+
+struct AdaptiveVoF::Impl
+{
+    struct Sample
+    {
+        GO cell;
+        Box box;
+        LO halo = -1;
+    };
+    struct Patch
+    {
+        std::size_t block;
+        UniformGrid grid;
+        std::vector<std::vector<Sample>> samples;
+    };
+    std::shared_ptr<const Hierarchy> hierarchy;
+    SP<const Handle> mesh;
+    std::unique_ptr<Exchange> cells, faces, stencil;
+    std::vector<Patch> patches;
+    std::vector<std::pair<std::size_t, std::size_t>> owned_patch_cell;
+
+    explicit Impl(std::shared_ptr<const Hierarchy> h) : hierarchy(std::move(h))
+    {
+        require_collective(bool(hierarchy), "AdaptiveVoF requires a hierarchy on every rank.");
+        mesh = std::make_shared<Handle>(hierarchy->geometry());
+        cells = std::make_unique<Exchange>(mesh->owned_cell_map(), mesh->overlap_cell_map());
+        faces = std::make_unique<Exchange>(mesh->owned_face_map(), mesh->overlap_face_map());
+        std::set<std::size_t> blocks;
+        for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
+            blocks.insert(hierarchy->cell_block(mesh->cell_global_id(static_cast<LO>(c))));
+        std::set<GO> ids;
+        std::map<std::size_t, std::size_t> patch_index;
+        const auto& config = hierarchy->config();
+        for (const auto block : blocks)
+        {
+            Patch patch;
+            patch.block = block;
+            patch.grid.spacing = hierarchy->block_spacing(block);
+            const auto bounds = hierarchy->block_box(block);
+            for (std::size_t a = 0; a < 3; ++a)
+            {
+                patch.grid.cells[a] = config.block_cells[a] + 2 * padding;
+                patch.grid.origin[a] = bounds.lower[a] - padding * patch.grid.spacing[a];
+            }
+            patch.samples.resize(patch.grid.cell_count());
+            for (std::size_t c = 0; c < patch.samples.size(); ++c)
+            {
+                Box box;
+                auto p = patch.grid.cell_center(c);
+                for (std::size_t a = 0; a < 3; ++a)
+                {
+                    const double width = patch.grid.spacing[a], start = config.origin[a], length = config.extent[a];
+                    if (config.periodic[a])
+                        p[a] = start + (p[a] - start - std::floor((p[a] - start) / length) * length);
+                    else
+                    {
+                        // Even scalar extension across slip walls, including
+                        // deeper ghost layers and domains narrower than a halo.
+                        const double period = 2.0 * length;
+                        const double r = p[a] - start - std::floor((p[a] - start) / period) * period;
+                        p[a] = start + (r > length ? period - r : r);
+                        p[a] = std::clamp(p[a], start + 0.5 * width, start + length - 0.5 * width);
+                    }
+                    box.lower[a] = p[a] - 0.5 * width;
+                    box.upper[a] = p[a] + 0.5 * width;
+                }
+                for (const auto& overlap : hierarchy->overlaps(box))
+                {
+                    patch.samples[c].push_back({static_cast<GO>(overlap.cell), overlap.box});
+                    ids.insert(static_cast<GO>(overlap.cell));
+                }
+            }
+            patch_index[block] = patches.size();
+            patches.push_back(std::move(patch));
+        }
+        stencil = std::make_unique<Exchange>(mesh->owned_cell_map(), ids);
+        for (auto& patch : patches)
+            for (auto& samples : patch.samples)
+                for (auto& s : samples)
+                    s.halo = stencil->target->getLocalElement(s.cell);
+        const auto n = config.block_cells[0] * config.block_cells[1] * config.block_cells[2];
+        owned_patch_cell.resize(mesh->num_owned_cells());
+        for (std::size_t c = 0; c < owned_patch_cell.size(); ++c)
+        {
+            const auto gid = static_cast<std::size_t>(mesh->cell_global_id(static_cast<LO>(c)));
+            const auto pi = patch_index.at(hierarchy->cell_block(gid));
+            const auto local = gid % n;
+            const auto i = local % config.block_cells[0], j = (local / config.block_cells[0]) % config.block_cells[1],
+                       k = local / (config.block_cells[0] * config.block_cells[1]);
+            owned_patch_cell[c] = {pi, patches[pi].grid.cell_index(i + padding, j + padding, k + padding)};
+        }
+    }
+
+    std::vector<double> sample(
+        const Patch& patch, const std::vector<double>& halo, const std::vector<InterfacePlane>* planes = nullptr) const
+    {
+        std::vector<double> f(patch.samples.size());
+        for (std::size_t c = 0; c < f.size(); ++c)
+        {
+            double gas = 0.0, covered = 0.0;
+            for (const auto& s : patch.samples[c])
+            {
+                const double v = volume(s.box);
+                gas += planes ? gas_intersection(hierarchy->cell_box(s.cell), s.box, halo[s.halo], (*planes)[s.halo])
+                              : v * halo[s.halo];
+                covered += v;
+            }
+            if (!(covered > 0.0) || std::abs(covered - patch.grid.cell_volume()) > 1e-9 * patch.grid.cell_volume())
+                throw std::runtime_error("AdaptiveVoF reconstruction stencil has incomplete geometric coverage.");
+            f[c] = gas / covered;
+        }
+        return f;
+    }
+
+    std::vector<InterfacePlane> reconstruct(const std::vector<double>& f) const
+    {
+        const auto halo = (*stencil)(f);
+        std::vector<std::vector<InterfacePlane>> values;
+        bool valid = true;
+        try
+        {
+            for (const auto& patch : patches)
+                values.push_back(GeometricVoF(patch.grid).reconstruct(sample(patch, halo)));
+        }
+        catch (const std::exception&)
+        {
+            valid = false;
+        }
+        require_collective(valid, "AdaptiveVoF could not reconstruct its local geometric stencils.");
+        std::vector<InterfacePlane> result(f.size());
+        for (std::size_t c = 0; c < result.size(); ++c)
+        {
+            const auto [p, i] = owned_patch_cell[c];
+            result[c] = values[p][i];
+        }
+        return result;
+    }
+
+    std::vector<InterfacePlane> exchange_planes(
+        const std::vector<InterfacePlane>& owned, const Exchange& exchange) const
+    {
+        std::vector<InterfacePlane> result(exchange.target->getLocalNumElements());
+        std::vector<double> component(owned.size());
+        for (std::size_t a = 0; a < 4; ++a)
+        {
+            for (std::size_t c = 0; c < owned.size(); ++c)
+                component[c] = a == 3 ? owned[c].offset : owned[c].normal[a];
+            const auto halo = exchange(component);
+            for (std::size_t c = 0; c < result.size(); ++c)
+                if (a == 3)
+                    result[c].offset = halo[c];
+                else
+                    result[c].normal[a] = halo[c];
+        }
+        return result;
+    }
+};
+
+AdaptiveVoF::AdaptiveVoF(std::shared_ptr<const Hierarchy> h) : impl_(std::make_unique<Impl>(std::move(h))) {}
+AdaptiveVoF::~AdaptiveVoF() = default;
+AdaptiveVoF::AdaptiveVoF(AdaptiveVoF&&) noexcept = default;
+AdaptiveVoF& AdaptiveVoF::operator=(AdaptiveVoF&&) noexcept = default;
+const std::shared_ptr<const AdaptiveVoF::Hierarchy>& AdaptiveVoF::hierarchy() const noexcept
+{
+    return impl_->hierarchy;
+}
+const SP<const AdaptiveVoF::Handle>& AdaptiveVoF::mesh() const noexcept
+{
+    return impl_->mesh;
+}
+
+std::vector<double> AdaptiveVoF::exchange_cells(const std::vector<double>& owned) const
+{
+    require_collective(owned.size() == mesh()->num_owned_cells(), "AdaptiveVoF cell exchange requires owned values.");
+    return (*impl_->cells)(owned);
+}
+
+std::vector<double> AdaptiveVoF::exchange_faces(const std::vector<double>& overlap) const
+{
+    require_collective(overlap.size() == mesh()->num_faces(), "AdaptiveVoF face exchange requires overlap values.");
+    return (*impl_->faces)(std::vector<double>(overlap.begin(), overlap.begin() + mesh()->num_owned_faces()));
+}
+
+std::vector<InterfacePlane> AdaptiveVoF::reconstruct(const std::vector<double>& fraction) const
+{
+    validate_f(fraction, mesh()->num_owned_cells());
+    return impl_->reconstruct(fraction);
+}
+
+std::vector<double> AdaptiveVoF::curvature(const std::vector<double>& fraction) const
+{
+    const auto owned_planes = reconstruct(fraction);
+    const auto planes = impl_->exchange_planes(owned_planes, *impl_->stencil);
+    const auto halo = (*impl_->stencil)(fraction);
+    std::vector<std::vector<double>> values;
+    bool valid = true;
+    try
+    {
+        for (const auto& patch : impl_->patches)
+            values.push_back(GeometricVoF(patch.grid).curvature(impl_->sample(patch, halo, &planes)));
+    }
+    catch (const std::exception&)
+    {
+        valid = false;
+    }
+    require_collective(valid, "AdaptiveVoF could not compute local curvature stencils.");
+    std::vector<double> result(fraction.size());
+    for (std::size_t c = 0; c < result.size(); ++c)
+    {
+        const auto [p, i] = impl_->owned_patch_cell[c];
+        result[c] = values[p][i];
+    }
+    return result;
+}
+
+AdaptiveAdvection AdaptiveVoF::advect(const std::vector<double>& fraction, const std::vector<double>& face_velocity,
+    double dt, std::size_t first_axis) const
+{
+    validate_f(fraction, mesh()->num_owned_cells());
+    identical(dt, "AdaptiveVoF timestep must be identical and finite on every rank.");
+    identical(static_cast<double>(first_axis), "AdaptiveVoF sweep order differs between ranks.");
+    require_collective(dt >= 0.0 && first_axis < 3 && face_velocity.size() == mesh()->num_faces(),
+        "AdaptiveVoF requires a nonnegative timestep, sweep axis and overlap face velocity.");
+    auto u = exchange_faces(face_velocity);
+    bool valid = true;
+    {
+        const auto execution = mesh()->acquire_execution_view();
+        for (std::size_t face = 0; face < u.size(); ++face)
+            valid = valid && std::isfinite(u[face]) &&
+                    (!mesh()->is_geometry_exterior_face(static_cast<LO>(face)) || u[face] == 0.0);
+    }
+    require_collective(valid, "AdaptiveVoF requires finite velocities and impermeable wall flux.");
+    AdaptiveAdvection result{fraction, std::vector<double>(u.size()), std::vector<double>(u.size()), 0.0};
+    double maxdiv = 0.0, maxcfl = 0.0;
+    {
+        const auto execution = mesh()->acquire_execution_view();
+        for (std::size_t c = 0; c < fraction.size(); ++c)
+        {
+            double sum = 0.0;
+            std::array<double, 3> axis_cfl{};
+            mesh()->visit_cell_faces(static_cast<LO>(c),
+                [&](LO f)
+                {
+                    const double sign = mesh()->owner_cell(f) == static_cast<LO>(c) ? 1.0 : -1.0;
+                    const auto n = mesh()->face_normal(f);
+                    std::size_t a = 0;
+                    while (a < 2 && std::abs(n.component(a)) < 0.5)
+                        ++a;
+                    const double flux = dt * u[f] * mesh()->face_area(f);
+                    sum += sign * flux;
+                    // Half the absolute two-sided throughput; independently bound each subface width below.
+                    axis_cfl[a] += 0.5 * std::abs(flux) / mesh()->cell_volume(static_cast<LO>(c));
+                    const auto h =
+                        hierarchy()->block_spacing(hierarchy()->cell_block(mesh()->cell_global_id(static_cast<LO>(c))));
+                    if (std::abs(dt * u[f]) / h[a] > 0.5 + 1e-14)
+                        valid = false;
+                });
+            maxdiv = std::max(maxdiv, std::abs(sum) / mesh()->cell_volume(static_cast<LO>(c)));
+            maxcfl = std::max(maxcfl, std::accumulate(axis_cfl.begin(), axis_cfl.end(), 0.0));
+        }
+    }
+    require_collective(valid, "AdaptiveVoF subface swept width exceeds half its donor cell.");
+    result.maximum_volume_divergence = maximum(maxdiv);
+    require_collective(maximum(maxcfl) <= 0.5 + 1e-14 && result.maximum_volume_divergence <= 1e-10,
+        "AdaptiveVoF requires multidimensional CFL <= 0.5 and |dt div u| <= 1e-10.");
+    const auto frozen = fraction;
+    for (std::size_t sweep = 0; sweep < 3; ++sweep)
+    {
+        const auto a = (first_axis + sweep) % 3;
+        double active = 0.0;
+        {
+            const auto execution = mesh()->acquire_execution_view();
+            for (std::size_t face = 0; face < mesh()->num_owned_faces(); ++face)
+                if (std::abs(mesh()->face_normal(static_cast<LO>(face)).component(a)) > 0.5)
+                    active = std::max(active, std::abs(u[face]));
+        }
+        if (dt == 0.0 || maximum(active) == 0.0)
+            continue;
+        const auto owned_planes = reconstruct(result.fraction);
+        const auto planes = impl_->exchange_planes(owned_planes, *impl_->cells);
+        const auto fhalo = exchange_cells(result.fraction);
+        std::vector<double> gas(u.size(), 0.0), total(u.size(), 0.0);
+        valid = true;
+        try
+        {
+            const auto execution = mesh()->acquire_execution_view();
+            for (std::size_t face = 0; face < mesh()->num_owned_faces(); ++face)
+            {
+                const auto fid = static_cast<LO>(face);
+                if (mesh()->is_geometry_exterior_face(fid) || std::abs(mesh()->face_normal(fid).component(a)) < 0.5 ||
+                    u[face] == 0.0)
+                    continue;
+                const auto donor = u[face] > 0.0 ? mesh()->owner_cell(fid) : mesh()->neighbor_cell(fid);
+                total[face] = u[face] * dt * mesh()->face_area(fid);
+                if (fhalo[donor] <= 0.0 || fhalo[donor] >= 1.0)
+                {
+                    gas[face] = fhalo[donor] * total[face];
+                    continue;
+                }
+                const auto gid = mesh()->cell_global_id(donor);
+                const auto h = hierarchy()->block_spacing(hierarchy()->cell_block(gid));
+                const auto other = mesh()->opposite_cell(fid, donor);
+                const auto ho = hierarchy()->block_spacing(hierarchy()->cell_block(mesh()->cell_global_id(other)));
+                const auto dc = mesh()->face_center_vector(fid, donor);
+                // Scale the swept prism to a unit box. Subtracting a tiny
+                // displacement from a global coordinate could otherwise
+                // collapse its width, or relabel pure gas flux as liquid.
+                Vector lower{}, widths{}, normal{};
+                for (std::size_t b = 0; b < 3; ++b)
+                {
+                    const double w = std::min(h[b], ho[b]);
+                    lower[b] = dc.component(b) - 0.5 * w;
+                    widths[b] = w;
+                }
+                const double width = std::abs(u[face]) * dt;
+                widths[a] = width;
+                lower[a] = dc.component(a) > 0.0 ? 0.5 * h[a] : -0.5 * h[a];
+                double offset = planes[donor].offset;
+                for (std::size_t b = 0; b < 3; ++b)
+                {
+                    normal[b] = planes[donor].normal[b] * widths[b];
+                    offset -= planes[donor].normal[b] * lower[b];
+                }
+                if (dc.component(a) > 0.0)
+                    offset += planes[donor].normal[a] * width;
+                gas[face] = total[face] * GeometricVoF::box_plane_volume({0, 0, 0}, {1, 1, 1}, normal, offset);
+            }
+        }
+        catch (const std::exception&)
+        {
+            valid = false;
+        }
+        require_collective(valid, "AdaptiveVoF failed to integrate a swept subface volume.");
+        gas = exchange_faces(gas);
+        total = exchange_faces(total);
+        {
+            const auto execution = mesh()->acquire_execution_view();
+            for (std::size_t c = 0; c < fraction.size(); ++c)
+            {
+                double dg = 0.0, dv = 0.0;
+                mesh()->visit_cell_faces(static_cast<LO>(c),
+                    [&](LO face)
+                    {
+                        const double sign = mesh()->owner_cell(face) == static_cast<LO>(c) ? 1.0 : -1.0;
+                        dg -= sign * gas[face];
+                        dv += sign * total[face];
+                    });
+                result.fraction[c] += (dg + (frozen[c] >= 0.5 ? dv : 0.0)) / mesh()->cell_volume(static_cast<LO>(c));
+            }
+        }
+        validate_f(result.fraction, fraction.size());
+        for (std::size_t face = 0; face < u.size(); ++face)
+        {
+            result.gas_volume[face] += gas[face];
+            result.liquid_volume[face] += total[face] - gas[face];
+        }
+    }
+    return result;
+}
+
+AdaptiveRemapResult AdaptiveVoF::remap(const AdaptiveVoF& target, const std::vector<double>& fraction,
+    const std::vector<ConservedQuantity>& inventories, double rl, double rg) const
+{
+    validate_f(fraction, mesh()->num_owned_cells());
+    identical(rl, "Adaptive remap liquid density must agree on all ranks.");
+    identical(rg, "Adaptive remap gas density must agree on all ranks.");
+    identical(static_cast<double>(inventories.size()), "Adaptive remap inventory counts differ between ranks.");
+    const auto& old = hierarchy()->config();
+    const auto& next = target.hierarchy()->config();
+    require_collective(
+        rl > 0.0 && rg > 0.0 && old.origin == next.origin && old.extent == next.extent && old.periodic == next.periodic,
+        "Adaptive remap requires positive densities and the same physical domain and boundaries.");
+    bool valid = true;
+    std::set<std::string> names;
+    for (const auto& inventory : inventories)
+    {
+        identical(static_cast<double>(inventory.carrier), "Adaptive inventory carriers differ between ranks.");
+        identical(inventory.nonnegative ? 1.0 : 0.0, "Adaptive inventory sign policies differ between ranks.");
+        // An exact byte comparison avoids implementation-dependent string hashes.
+        identical(static_cast<double>(inventory.name.size()), "Adaptive inventory names differ between ranks.");
+        for (unsigned char c : inventory.name)
+            identical(c, "Adaptive inventory names differ between ranks.");
+        valid = valid && !inventory.name.empty() && names.insert(inventory.name).second &&
+                static_cast<unsigned>(inventory.carrier) <= static_cast<unsigned>(InventoryCarrier::MixtureMass) &&
+                inventory.amount.size() == fraction.size() &&
+                std::all_of(inventory.amount.begin(), inventory.amount.end(),
+                    [&](double x) { return std::isfinite(x) && (!inventory.nonnegative || x >= 0.0); });
+    }
+    require_collective(valid, "Adaptive remap requires unique named finite extensive inventories.");
+    std::vector<std::vector<Meshes::AMROverlap>> overlaps(target.mesh()->num_owned_cells());
+    std::set<GO> ids;
+    for (std::size_t c = 0; c < overlaps.size(); ++c)
+    {
+        overlaps[c] =
+            hierarchy()->overlaps(target.hierarchy()->cell_box(target.mesh()->cell_global_id(static_cast<LO>(c))));
+        for (const auto& item : overlaps[c])
+            ids.insert(static_cast<GO>(item.cell));
+    }
+    Exchange donors(mesh()->owned_cell_map(), ids);
+    const auto f = donors(fraction);
+    const auto planes = impl_->exchange_planes(reconstruct(fraction), donors);
+    // Close each donor's PLIC roundoff once, across all receiving ranks.
+    // This preserves tiny gas inventories whose subcell plane offset is near
+    // floating-point resolution; it is not a post-remap fraction clipping.
+    std::vector<std::vector<double>> raw_gas(overlaps.size());
+    std::vector<double> local_gas(f.size()), local_volume(f.size());
+    for (std::size_t c = 0; c < overlaps.size(); ++c)
+        for (const auto& overlap : overlaps[c])
+        {
+            const auto lid = donors.target->getLocalElement(overlap.cell);
+            const auto gas = gas_intersection(hierarchy()->cell_box(overlap.cell), overlap.box, f[lid], planes[lid]);
+            raw_gas[c].push_back(gas);
+            local_gas[lid] += gas;
+            local_volume[lid] += volume(overlap.box);
+        }
+    const auto donor_gas = donors.sum_to_source(local_gas), donor_volume = donors.sum_to_source(local_volume);
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        const double full = mesh()->cell_volume(static_cast<LO>(c));
+        valid = valid && std::abs(donor_volume[c] - full) <= 2e-12 * full &&
+                std::abs(donor_gas[c] - fraction[c] * full) <= 2e-12 * full;
+    }
+    require_collective(valid, "Adaptive remap geometric donor coverage or PLIC closure exceeds roundoff tolerance.");
+    const auto total_gas = donors(donor_gas);
+    std::vector<std::vector<double>> amounts;
+    for (const auto& inventory : inventories)
+        amounts.push_back(donors(inventory.amount));
+    AdaptiveRemapResult result;
+    result.fraction.resize(overlaps.size());
+    result.inventories = inventories;
+    for (auto& inventory : result.inventories)
+        inventory.amount.assign(overlaps.size(), 0.0);
+    valid = true;
+    try
+    {
+        for (std::size_t c = 0; c < overlaps.size(); ++c)
+        {
+            double gas = 0.0, covered = 0.0;
+            std::size_t index = 0;
+            for (const auto& overlap : overlaps[c])
+            {
+                const auto lid = donors.target->getLocalElement(overlap.cell);
+                const auto box = hierarchy()->cell_box(overlap.cell);
+                const double v = volume(overlap.box), full = volume(box);
+                const double raw = raw_gas[c][index++], desired = f[lid] * full;
+                double gv = raw;
+                if (total_gas[lid] > desired && total_gas[lid] > 0.0)
+                    gv = raw * (desired / total_gas[lid]);
+                else if (total_gas[lid] < desired && full > total_gas[lid])
+                    gv = raw + (v - raw) * ((desired - total_gas[lid]) / (full - total_gas[lid]));
+                gas += gv;
+                covered += v;
+                for (std::size_t q = 0; q < inventories.size(); ++q)
+                {
+                    const double denominator = carrier_volume(inventories[q].carrier, full, f[lid] * full, rl, rg);
+                    const double numerator = carrier_volume(inventories[q].carrier, v, gv, rl, rg);
+                    if (denominator <= 0.0)
+                    {
+                        if (amounts[q][lid] != 0.0)
+                            valid = false;
+                    }
+                    else
+                        result.inventories[q].amount[c] += amounts[q][lid] * (numerator / denominator);
+                }
+            }
+            const double v = target.mesh()->cell_volume(static_cast<LO>(c));
+            if (std::abs(covered - v) > 1e-9 * v)
+                valid = false;
+            result.fraction[c] = gas / v;
+            for (const auto& inventory : result.inventories)
+                if (!std::isfinite(inventory.amount[c]) || (inventory.nonnegative && inventory.amount[c] < -roundoff))
+                    valid = false;
+        }
+    }
+    catch (const std::exception&)
+    {
+        valid = false;
+    }
+    require_collective(valid, "Adaptive remap has missing coverage, exhausted carrier or a nonfinite inventory.");
+    validate_f(result.fraction, result.fraction.size());
+    // Inventory checks use extensive norms, including signed momentum whose
+    // net sum can vanish. They are independent of pressure-solver tolerances.
+    for (std::size_t q = 0; q <= inventories.size(); ++q)
+    {
+        detail::CompensatedSum<double> before, after, norm_before, norm_after;
+        for (std::size_t c = 0; c < fraction.size(); ++c)
+        {
+            const double x =
+                q == 0 ? fraction[c] * mesh()->cell_volume(static_cast<LO>(c)) : inventories[q - 1].amount[c];
+            before += x;
+            norm_before += std::abs(x);
+        }
+        for (std::size_t c = 0; c < result.fraction.size(); ++c)
+        {
+            const double x = q == 0 ? result.fraction[c] * target.mesh()->cell_volume(static_cast<LO>(c))
+                                    : result.inventories[q - 1].amount[c];
+            after += x;
+            norm_after += std::abs(x);
+        }
+        const std::array<double, 4> local{before.value(), after.value(), norm_before.value(), norm_after.value()};
+        std::array<double, 4> global{};
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 4, local.data(), global.data());
+        require_collective(std::isfinite(global[0]) && std::isfinite(global[1]) &&
+                               std::abs(global[1] - global[0]) <=
+                                   2e-11 * std::max({global[2], global[3], std::numeric_limits<double>::min()}),
+            "Adaptive remap failed its global extensive conservation gate.");
+    }
+    return result;
+}
+
+RefinementPlan AdaptiveVoF::refinement_plan(const std::vector<double>& fraction,
+    const std::vector<double>& face_velocity, RefinementOptions options, RefinementHints hints) const
+{
+    validate_f(fraction, mesh()->num_owned_cells());
+    identical(options.minimum_resolved_diameter, "Refinement diameter differs between ranks.");
+    identical(options.cells_per_diameter, "Refinement resolution differs between ranks.");
+    identical(options.stencil_cells, "Refinement stencil differs between ranks.");
+    identical(options.forecast_time, "Refinement forecast differs between ranks.");
+    identical(options.curvature_resolution, "Refinement curvature threshold differs between ranks.");
+    identical(options.wake_threshold, "Refinement wake threshold differs between ranks.");
+    require_collective(options.minimum_resolved_diameter > 0 && options.cells_per_diameter >= 4 &&
+                           options.stencil_cells >= padding && options.forecast_time >= 0 &&
+                           options.curvature_resolution >= 0 && options.wake_threshold > 0 &&
+                           (hints.wake_indicator.empty() || hints.wake_indicator.size() == fraction.size()) &&
+                           std::all_of(hints.wake_indicator.begin(), hints.wake_indicator.end(),
+                               [](double x) { return std::isfinite(x) && x >= 0; }),
+        "Invalid adaptive refinement controls or wake field.");
+    identical(static_cast<double>(hints.promotion_regions.size()), "Promotion region counts differ between ranks.");
+    for (const auto& b : hints.promotion_regions)
+        for (std::size_t a = 0; a < 3; ++a)
+        {
+            identical(b.lower[a], "Promotion region bounds differ between ranks.");
+            identical(b.upper[a], "Promotion region bounds differ between ranks.");
+            require_collective(b.upper[a] >= b.lower[a], "Promotion region bounds must be ordered.");
+        }
+    const auto u = exchange_faces(face_velocity);
+    require_collective(
+        std::all_of(u.begin(), u.end(), [](double x) { return std::isfinite(x); }), "Nonfinite refinement velocity.");
+    double speed = 0.0;
+    for (const double x : u)
+        speed = std::max(speed, std::abs(x));
+    const double travel = maximum(speed) * options.forecast_time;
+    require_collective(std::isfinite(travel), "Adaptive motion buffer overflows physical coordinates.");
+    const auto f = exchange_cells(fraction);
+    const auto k = options.curvature_resolution > 0.0 ? curvature(fraction) : std::vector<double>(fraction.size(), 0.0);
+    const auto& blocks = hierarchy()->blocks();
+    const auto& config = hierarchy()->config();
+    std::vector<int> protected_blocks(blocks.size()), tagged(blocks.size()), phase_min(blocks.size(), 2),
+        phase_max(blocks.size(), -1);
+    const double target = options.minimum_resolved_diameter / options.cells_per_diameter;
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        const auto gid = mesh()->cell_global_id(static_cast<LO>(c));
+        const auto block = hierarchy()->cell_block(gid);
+        // Positive trace gas is still an inventory: never classify it as an
+        // empty cell merely to make coarsening easier.
+        const int phase = fraction[c] <= 0.0 ? 0 : (fraction[c] >= 1.0 ? 1 : 2);
+        phase_min[block] = std::min(phase_min[block], phase);
+        phase_max[block] = std::max(phase_max[block], phase);
+        bool interface = phase == 2;
+        mesh()->visit_cell_faces(static_cast<LO>(c),
+            [&](LO face)
+            {
+                const auto other = mesh()->opposite_cell(face, static_cast<LO>(c));
+                if (other != Handle::invalid_local_id() && ((fraction[c] >= 0.5) != (f[other] >= 0.5)))
+                    interface = true;
+            });
+        const bool wake = !hints.wake_indicator.empty() && hints.wake_indicator[c] > options.wake_threshold;
+        if (!interface && !wake)
+            continue;
+        auto guard = hierarchy()->cell_box(gid);
+        const auto h = hierarchy()->block_spacing(block);
+        const double maxh = *std::max_element(h.begin(), h.end());
+        for (std::size_t a = 0; a < 3; ++a)
+        {
+            const double r = options.stencil_cells * maxh + travel;
+            guard.lower[a] -= r;
+            guard.upper[a] += r;
+        }
+        for (std::size_t b = 0; b < blocks.size(); ++b)
+        {
+            bool near = false;
+            // Mirror the protection band through periodic seams without ghost components.
+            for (int z = -1; z <= 1; ++z)
+                for (int y = -1; y <= 1; ++y)
+                    for (int x = -1; x <= 1; ++x)
+                    {
+                        const std::array<int, 3> shift{x, y, z};
+                        Box image = hierarchy()->block_box(b);
+                        bool allowed = true;
+                        for (std::size_t a = 0; a < 3; ++a)
+                        {
+                            if (shift[a] != 0 && !config.periodic[a])
+                                allowed = false;
+                            image.lower[a] += shift[a] * config.extent[a];
+                            image.upper[a] += shift[a] * config.extent[a];
+                        }
+                        near = near || (allowed && intersects(guard, image));
+                    }
+            if (!near)
+                continue;
+            protected_blocks[b] = 1;
+            const auto hb = hierarchy()->block_spacing(b);
+            if (wake || *std::max_element(hb.begin(), hb.end()) > target * (1.0 + 1e-12) ||
+                (options.curvature_resolution > 0.0 && std::abs(k[c]) * maxh > options.curvature_resolution))
+                tagged[b] = 1;
+        }
+    }
+    for (std::size_t b = 0; b < blocks.size(); ++b)
+        for (const auto& region : hints.promotion_regions)
+            if (intersects(hierarchy()->block_box(b), region))
+            {
+                tagged[b] = 1;
+                protected_blocks[b] = 1;
+            }
+    const auto reduce = [&](std::vector<int>& v, Teuchos::EReductionType operation)
+    {
+        std::vector<int> global(v.size());
+        Teuchos::reduceAll(
+            *mesh()->owned_cell_map()->getComm(), operation, static_cast<int>(v.size()), v.data(), global.data());
+        v = std::move(global);
+    };
+    reduce(protected_blocks, Teuchos::REDUCE_MAX);
+    reduce(tagged, Teuchos::REDUCE_MAX);
+    reduce(phase_min, Teuchos::REDUCE_MIN);
+    reduce(phase_max, Teuchos::REDUCE_MAX);
+    RefinementPlan plan;
+    plan.source_hierarchy = hierarchy();
+    std::map<Meshes::AMRBlock, std::vector<std::size_t>> siblings;
+    for (std::size_t b = 0; b < blocks.size(); ++b)
+    {
+        if (tagged[b] && blocks[b].level < config.max_level)
+            plan.refine.push_back(b);
+        const auto h = hierarchy()->block_spacing(b);
+        if (protected_blocks[b] && blocks[b].level == config.max_level &&
+            *std::max_element(h.begin(), h.end()) > target * (1.0 + 1e-12))
+            plan.resolution_limited = true;
+        if (blocks[b].level)
+        {
+            auto parent = blocks[b];
+            --parent.level;
+            for (auto& i : parent.index)
+                i /= 2;
+            siblings[parent].push_back(b);
+        }
+    }
+    for (const auto& [parent, children] : siblings)
+    {
+        if (children.size() != 8)
+            continue;
+        const int phase = phase_min[children.front()];
+        bool coarsen = phase < 2;
+        for (auto b : children)
+            coarsen = coarsen && !protected_blocks[b] && !tagged[b] && phase_min[b] == phase && phase_max[b] == phase;
+        if (coarsen)
+            plan.coarsen.push_back(parent);
+    }
+    return plan;
+}
+
+} // namespace SimpleFluid::VoF

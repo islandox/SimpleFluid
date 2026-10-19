@@ -1,5 +1,6 @@
 add_library(SimpleFluidFVM SHARED
     GeometricVoF.cc
+    AdaptiveVoF.cc
     # Assembly-only providers; iterative solves live in SimpleFluidSolvers.
     explicit_instantiation/ALEControlVolumeState.cc
     explicit_instantiation/CellGradientCache.cc
@@ -43,4 +44,4 @@ target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS simplefluid_fvm_compile=1)
 set_property(TARGET SimpleFluidFVM PROPERTY JOB_POOL_COMPILE simplefluid_fvm_compile)
 # The independent VoF workstream is outside the existing Shiri PGO workload.
-simplefluid_exclude_from_pgo_sources(GeometricVoF.cc)
+simplefluid_exclude_from_pgo_sources(GeometricVoF.cc AdaptiveVoF.cc)
