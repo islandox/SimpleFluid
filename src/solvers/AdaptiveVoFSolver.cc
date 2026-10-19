@@ -184,7 +184,6 @@ struct AdaptiveVoFSolver::Impl
         std::vector<Face> faces;
         std::size_t row_capacity = 1;
         GO gauge = 0;
-        BelosLinearSolver<> inventory_solver;
         detail::VoFProjectionWorkspace projection;
         detail::ConservativeVoFTransport conservative_transport;
         std::shared_ptr<const VoF::LowMachOptions> low_options;
@@ -850,69 +849,25 @@ struct AdaptiveVoFSolver::Impl
             auto result = old.inventories;
             for (auto& q : result)
             {
-                // Implicit donor concentration mixing uses the final carrier
-                // amount plus outgoing carrier flux on the diagonal. It stays
-                // positive even when a directional phase flux passes through
-                // a cell with little accepted-old carrier volume.
-                auto matrix = Teuchos::rcp(new Pack::matrix_type(mesh->owned_cell_map(), row_capacity));
-                Pack::vector_type rhs(mesh->owned_cell_map(), true), solution(mesh->owned_cell_map(), true);
-                std::vector<double> capacity(owned());
-                with_geometry(
-                    [&]
-                    {
-                        for (std::size_t c = 0; c < owned(); ++c)
-                        {
-                            const auto gid = mesh->cell_global_id(static_cast<LO>(c));
-                            capacity[c] = std::max(0.0, carrier_amount(q.carrier, volume[c], next.f[c], material));
-                            double diagonal = capacity[c];
-                            std::map<GO, double> row;
-                            for (const auto id : mesh->faces(static_cast<LO>(c)))
-                            {
-                                const auto& f = faces[id];
-                                if (f.boundary)
-                                    continue;
-                                const double flux = carrier_flux(q.carrier, transport.gas_volume[id],
-                                                        transport.liquid_volume[id], material) *
-                                                    (f.owner == static_cast<LO>(c) ? 1 : -1);
-                                if (flux >= 0)
-                                    diagonal += flux;
-                                else
-                                {
-                                    const auto neighbor = f.owner == static_cast<LO>(c) ? f.neighbor : f.owner;
-                                    row[mesh->cell_global_id(neighbor)] += flux;
-                                }
-                            }
-                            const bool empty = diagonal == 0 && row.empty();
-                            row[gid] += empty ? 1 : diagonal;
-                            rhs.replaceLocalValue(static_cast<LO>(c), q.amount[c]);
-                            Teuchos::Array<GO> columns;
-                            Teuchos::Array<double> values;
-                            for (const auto& [column, value] : row)
-                            {
-                                columns.push_back(column);
-                                values.push_back(value);
-                            }
-                            matrix->insertGlobalValues(gid, columns(), values());
-                        }
-                    });
-                matrix->fillComplete();
-                LinearSolverOptions linear;
-                linear.backend = LinearSolverBackend::Gmres;
-                linear.preconditioner = LinearPreconditioner::Jacobi;
-                linear.max_iterations = options.max_pressure_iterations;
-                linear.tolerance = 1e-12;
-                linear.verbosity = 0;
-                const auto stats = inventory_solver.solve_from_zero_with_statistics(
-                    Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix), rhs, solution, linear);
-                require_all(stats.converged, "AdaptiveVoFSolver passive carrier transport did not converge.");
-                const auto concentration = solution.getData();
-                bool valid = true;
+                std::vector<double> capacity(owned()), flux(faces.size()), zero(owned());
                 for (std::size_t c = 0; c < owned(); ++c)
+                    capacity[c] = std::max(0.0, carrier_amount(q.carrier, volume[c], next.f[c], material));
+                for (std::size_t id = 0; id < faces.size(); ++id)
+                    flux[id] = carrier_flux(q.carrier, transport.gas_volume[id], transport.liquid_volume[id], material);
+                // Geometric phase tails can have subnormal positive storage.
+                // Equilibrate rows without discarding any inventory; retain
+                // the original physical residual and global amount gates.
+                try
                 {
-                    q.amount[c] = capacity[c] * concentration[c];
-                    valid = valid && std::isfinite(q.amount[c]) && (!q.nonnegative || q.amount[c] >= 0);
+                    auto carried = conservative_transport.solve(q.amount, zero, capacity, flux, q.nonnegative,
+                        options.max_pressure_iterations, 1e-12, true);
+                    q.amount = std::move(carried.amount);
                 }
-                require_all(valid, "AdaptiveVoFSolver passive transport lost positivity or finite inventory.");
+                catch (const std::exception& error)
+                {
+                    throw std::runtime_error("AdaptiveVoFSolver passive inventory " + q.name +
+                        " step=" + std::to_string(next.steps) + ": " + error.what());
+                }
                 const auto original = std::find_if(
                     old.inventories.begin(), old.inventories.end(), [&](const auto& x) { return x.name == q.name; });
                 const double before = inventory_total(*original), after = inventory_total(q);

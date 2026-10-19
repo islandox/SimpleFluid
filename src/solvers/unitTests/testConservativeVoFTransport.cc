@@ -43,7 +43,7 @@ TEST(ConservativeVoFTransportTest, SplitCounterexampleHasBoundedConservativeImpl
                 const double passive = x.x >= 1 && x.x < 2 && x.y >= 1 && x.y < 2 ? 1 : 0;
                 rhs[c] = mesh->cell_volume(static_cast<LO>(c)) * (1000*(1-f[c]) + f[c]) * passive;
             }
-            for (std::size_t id = 0; id < velocity.size(); ++id)
+            for (std::size_t id = 0; id < mesh->num_owned_faces(); ++id)
             {
                 const auto fid = static_cast<LO>(id);
                 const auto normal = mesh->face_normal(fid);
@@ -100,8 +100,9 @@ TEST(ConservativeVoFTransportTest, ChangedDirectionAndStorageRefreshTheReusableO
     {
         const double mass = std::abs(stage) == 2 ? 3 : 2;
         std::fill(capacity.begin(), capacity.end(), mass);
-        for (std::size_t face = 0; face < flux.size(); ++face)
+        for (std::size_t face = 0; face < mesh->num_owned_faces(); ++face)
             flux[face] = stage == 0 ? 0 : (stage > 0 ? 0.25 : -0.25) * mesh->face_normal(static_cast<LO>(face)).x;
+        flux = geometry.exchange_faces(flux);
         const auto result = tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-14);
         const double r = 0.25 / (mass + 0.25);
         const double x0 = 1 / ((mass + 0.25) * (1 - std::pow(r, 4)));
@@ -116,18 +117,58 @@ TEST(ConservativeVoFTransportTest, ChangedDirectionAndStorageRefreshTheReusableO
     // An unrelated failed zero-storage refresh must not make the old key
     // eligible for reuse while the matrix contains failed candidate values.
     std::fill(capacity.begin(), capacity.end(), 0);
-    for (std::size_t face = 0; face < flux.size(); ++face)
+    for (std::size_t face = 0; face < mesh->num_owned_faces(); ++face)
     {
         const auto id = static_cast<LO>(face);
         const auto owner = mesh->owner_cell(id);
         const double x = mesh->cell_centroid(owner).x + mesh->face_center_vector(id, owner).x;
         flux[face] = std::abs(x - 1) < 1e-12 ? 0.25 * mesh->face_normal(id).x : 0;
     }
+    flux = geometry.exchange_faces(flux);
     EXPECT_THROW((void)tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-14), std::exception);
     std::fill(capacity.begin(), capacity.end(), 2);
-    for (std::size_t face = 0; face < flux.size(); ++face)
+    for (std::size_t face = 0; face < mesh->num_owned_faces(); ++face)
         flux[face] = 0.25 * mesh->face_normal(static_cast<LO>(face)).x;
+    flux = geometry.exchange_faces(flux);
     EXPECT_NO_THROW((void)tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-14));
+}
+
+TEST(ConservativeVoFTransportTest, EquilibratedMicroscopicCarrierPreservesConstantConcentration)
+{
+    Meshes::AMRGrid grid;
+    grid.root_blocks = {2, 1, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {4, 2, 2};
+    grid.periodic = {true, true, true};
+    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    const auto mesh = geometry.mesh();
+    const auto n = mesh->num_owned_cells();
+    detail::ConservativeVoFTransport tracer(mesh);
+    std::vector<double> zero(n), capacity(n), rhs(n), flux(mesh->num_faces());
+    // The reciprocal of 1e-310 overflows double; direct coefficient division
+    // still gives an ordinary finite M-matrix and concentration seven.
+    for (double storage : {1.0, 1e-30, 1e-310, 1.0})
+    {
+        std::fill(capacity.begin(), capacity.end(), storage);
+        std::fill(rhs.begin(), rhs.end(), 7 * storage);
+        for (std::size_t face = 0; face < mesh->num_owned_faces(); ++face)
+            flux[face] = 0.25 * storage * mesh->face_normal(static_cast<LO>(face)).x;
+        flux = geometry.exchange_faces(flux);
+        const auto result = tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-12, true);
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            EXPECT_NEAR(result.amount[c] / storage, 7, 3e-12);
+            EXPECT_GE(result.amount[c], 0);
+        }
+        // Changing the scaling policy on the same ordinary physical matrix
+        // must refresh the numerical cache as well as its acceptance checks.
+        if (storage == 1.0)
+        {
+            const auto unscaled = tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-12, false);
+            for (std::size_t c = 0; c < n; ++c)
+                EXPECT_NEAR(unscaled.amount[c], result.amount[c], 3e-12);
+        }
+    }
 }
 
 } // namespace
