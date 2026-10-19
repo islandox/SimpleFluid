@@ -814,6 +814,18 @@ struct ReactingVoFCoupler::Impl
                             ((number == 0) != (moles == 0)))
                             throw std::runtime_error(
                                 "A dispersed population must carry both positive number and moles, or neither.");
+                        // Constant slip is a carrier closure, including liquid
+                        // cells that may receive this population during transport.
+                        // Radius-dependent laws remain undefined for empty moments;
+                        // their face velocity uses the populated donor instead.
+                        if (r.rise_velocity_mode == BubbleRiseVelocityMode::ConstantSlip && p.carrier_volume[c] > 0 &&
+                            r.constant_slip_velocity != 0)
+                        {
+                            if (!(acceleration > 0))
+                                throw std::domain_error("A nonzero rise speed requires a physical gravity direction.");
+                            for (std::size_t a = 0; a < 3; ++a)
+                                population.drift_velocity[c][a] = -r.constant_slip_velocity * gravity[a] / acceleration;
+                        }
                         if (number == 0)
                             continue;
                         const double sigma = surface_tension(r, p.temperature[c]);
@@ -828,9 +840,7 @@ struct ReactingVoFCoupler::Impl
                         if (!std::isfinite(population.volume[c]) || population.volume[c] <= 0)
                             throw std::runtime_error("The updated dispersed volume is not representable.");
                         double speed = 0;
-                        if (r.rise_velocity_mode == BubbleRiseVelocityMode::ConstantSlip)
-                            speed = r.constant_slip_velocity;
-                        else if (r.rise_velocity_mode == BubbleRiseVelocityMode::Celata2007)
+                        if (r.rise_velocity_mode == BubbleRiseVelocityMode::Celata2007)
                         {
                             const double gas_density =
                                 (moles / number) * thermodynamics.hydrogen.molar_mass / bubble_volume;
@@ -1205,6 +1215,12 @@ const VoF::LowMachState& ReactingVoFCoupler::Trial::state() const
     if (!candidate_)
         throw std::logic_error("Reacting VoF trial is empty.");
     return std::static_pointer_cast<const Impl::Candidate>(candidate_)->fluid.state();
+}
+const VoF::LowMachTransport& ReactingVoFCoupler::Trial::transport() const
+{
+    if (!candidate_)
+        throw std::logic_error("Reacting VoF trial is empty.");
+    return std::static_pointer_cast<const Impl::Candidate>(candidate_)->fluid.transport();
 }
 const ReactingVoFStatistics& ReactingVoFCoupler::Trial::statistics() const
 {

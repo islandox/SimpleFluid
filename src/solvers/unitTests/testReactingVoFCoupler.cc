@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -747,6 +748,202 @@ TEST(ReactingVoFCouplerTest, ReinitializationRebindsRequiredPopulationNames)
     const auto missing = flow->low_mach_state();
     EXPECT_THROW((void) coupler.preview(1e-4, input), std::exception);
     expect_primary_equal(flow->low_mach_state(), missing);
+}
+
+TEST(ReactingVoFCouplerTest, ConstantSlipHasNoClosureOutsideTheLiquidCarrier)
+{
+    auto flow = make_flow(false, {-1e-12, 0, 0});
+    auto initial = planar_state(*flow, 0);
+    VoF::DispersedPopulation population;
+    population.name = "empty";
+    population.number.assign(initial.temperature.size(), 0);
+    population.hydrogen_moles = population.number;
+    initial.dispersed = {population};
+    flow->initialize_low_mach(thermodynamics(), initial);
+    auto options = disabled_options();
+    options.radiolysis.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+    options.radiolysis.constant_slip_velocity = 0.02;
+    ReactingVoFCoupler coupler(flow, options);
+    const auto trial = coupler.preview(0.01, {});
+    for (std::size_t c = 0; c < initial.temperature.size(); ++c)
+    {
+        const double speed = initial.resolved_fraction[c] == 1 ? 0 : 0.02;
+        EXPECT_DOUBLE_EQ(trial.state().dispersed[0].drift_velocity[c][0], speed);
+        EXPECT_DOUBLE_EQ(trial.state().dispersed[0].radius[c], 0);
+        EXPECT_DOUBLE_EQ(trial.state().dispersed[0].volume[c], 0);
+    }
+}
+
+TEST(ReactingVoFCouplerTest, ParticleSlipUsesThePopulatedSideAtAnEmptyFront)
+{
+    // A radius-based closure has no radius in an empty cell. Supply its
+    // evaluated drift only where moments exist and test the transport seam.
+    auto flow = make_flow();
+    auto initial = planar_state(*flow, 0);
+    initial.resolved_fraction.assign(initial.temperature.size(), 0);
+    constexpr double speed = 0.02, dt = 0.01;
+    const auto thermo = thermodynamics();
+    const double per_bubble = pressure * (4 * std::numbers::pi / 3) * 1e-12 / (thermo.gas_constant * temperature);
+    VoF::DispersedPopulation population;
+    population.name = "radius_closure";
+    for (std::size_t c = 0; c < initial.temperature.size(); ++c)
+    {
+        const double x = flow->mesh()->cell_centroid(static_cast<LO>(c)).x;
+        const double count = x > 0.25 && x < 0.5 ? 10 : 0;
+        population.number.push_back(count);
+        population.hydrogen_moles.push_back(count * per_bubble);
+        population.drift_velocity.push_back({count > 0 ? speed : 0, 0, 0});
+    }
+    initial.dispersed = {population};
+    flow->initialize_low_mach(thermo, initial);
+    for (std::size_t c = 0; c < initial.temperature.size(); ++c)
+        if (population.number[c] == 0)
+            EXPECT_DOUBLE_EQ(flow->low_mach_state().dispersed[0].radius[c], 0);
+    const auto trial = flow->preview_low_mach_step(dt, {});
+    VoF::AdaptiveVoF geometry(flow->hierarchy());
+    const auto moles = geometry.exchange_cells(trial.state().dispersed[0].hydrogen_moles);
+    const auto T = geometry.exchange_cells(trial.state().temperature);
+    const auto P = geometry.exchange_cells(trial.state().liquid_absolute_pressure);
+    const auto& mesh = *flow->mesh();
+    double front_faces = 0;
+    for (std::size_t id = 0; id < mesh.num_owned_faces(); ++id)
+    {
+        const auto face = static_cast<LO>(id);
+        const auto normal = mesh.face_normal(face);
+        if (mesh.face_centroid(face).x != 0.5 || std::abs(normal.x) < 0.5)
+            continue;
+        const auto donor = normal.x > 0 ? mesh.owner_cell(face) : mesh.neighbor_cell(face);
+        const double alpha = moles[donor] / mesh.cell_volume(donor) * thermo.gas_constant * T[donor] / P[donor];
+        EXPECT_NEAR(trial.transport().dispersed_slip_volume[0][id] / (dt * mesh.face_area(face) * normal.x * alpha),
+            speed, 2e-12);
+        front_faces += 1;
+    }
+    EXPECT_GT(sum(front_faces), 0);
+    EXPECT_NEAR(total(trial.state().dispersed[0].number), total(population.number), 2e-10);
+    EXPECT_NEAR(total(trial.state().dispersed[0].hydrogen_moles), total(population.hydrogen_moles),
+        2e-10 * total(population.hydrogen_moles));
+}
+
+TEST(ReactingVoFCouplerTest, ConstantSlipExtendsThroughEmptyLiquidAndReplay)
+{
+    // The x=0.5 front is also an MPI ownership boundary with two ranks.
+    auto flow = make_flow(false, {-1e-12, 0, 0});
+    auto initial = planar_state(*flow, 0);
+    initial.resolved_fraction.assign(initial.temperature.size(), 0);
+    VoF::DispersedPopulation population;
+    population.name = "front";
+    const auto thermo = thermodynamics();
+    const double radius = 1e-4;
+    const double per_bubble =
+        pressure * (4 * std::numbers::pi / 3) * std::pow(radius, 3) / (thermo.gas_constant * temperature);
+    for (std::size_t c = 0; c < initial.temperature.size(); ++c)
+    {
+        const auto box = flow->hierarchy()->cell_box(flow->mesh()->cell_global_id(static_cast<LO>(c)));
+        const double count = box.lower[0] == 0.25 ? 10.0 : 0;
+        population.number.push_back(count);
+        population.hydrogen_moles.push_back(count * per_bubble);
+    }
+    initial.dispersed = {population};
+    flow->initialize_low_mach(thermo, initial);
+    auto options = disabled_options();
+    options.radiolysis.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+    options.radiolysis.constant_slip_velocity = 0.02;
+    ReactingVoFCoupler coupler(flow, options);
+    const auto checkpoint = coupler.checkpoint();
+    const auto before = flow->low_mach_state();
+    const auto trial = coupler.preview(0.01, {});
+    // Independently reconstruct the implicit upwind profile using the published
+    // carrier flux plus the configured relative slip. This separates closure
+    // correctness from the carrier's (small, physical) response to bubble motion.
+    VoF::AdaptiveVoF geometry(flow->hierarchy());
+    const auto moles = geometry.exchange_cells(trial.state().dispersed[0].hydrogen_moles);
+    const auto T = geometry.exchange_cells(trial.state().temperature);
+    const auto P = geometry.exchange_cells(trial.state().liquid_absolute_pressure);
+    std::array<double, 3> plane_flux{}, plane_faces{};
+    double front_faces = 0;
+    const auto& mesh = *flow->mesh();
+    constexpr double dt = 0.01, speed = 0.02, cell_volume = 0.25 * 0.25 * 0.25;
+    for (std::size_t id = 0; id < mesh.num_owned_faces(); ++id)
+    {
+        const auto face = static_cast<LO>(id);
+        if (mesh.is_geometry_exterior_face(face))
+            continue;
+        const auto normal = mesh.face_normal(face);
+        if (std::abs(normal.x) < 0.5)
+            continue;
+        const auto x = mesh.face_centroid(face).x;
+        const auto plane = static_cast<std::size_t>(std::lround(4 * x)) - 1;
+        ASSERT_LT(plane, plane_flux.size());
+        const double relative = dt * mesh.face_area(face) * speed * normal.x;
+        const double combined = trial.transport().carrier_volume[id] + relative;
+        plane_flux[plane] += combined * normal.x;
+        plane_faces[plane] += 1;
+        if (x == 0.5)
+        {
+            const auto donor = combined >= 0 ? mesh.owner_cell(face) : mesh.neighbor_cell(face);
+            const double alpha = moles[donor] / cell_volume * thermo.gas_constant * T[donor] / P[donor];
+            ASSERT_GT(alpha, 0);
+            const double measured_speed =
+                trial.transport().dispersed_slip_volume[0][id] / (dt * mesh.face_area(face) * alpha * normal.x);
+            EXPECT_NEAR(measured_speed, speed, 2e-12);
+            RecordProperty("front_relative_slip", measured_speed);
+            front_faces += 1;
+        }
+    }
+    EXPECT_GT(sum(front_faces), 0);
+    std::array<std::array<double, 5>, 4> system{};
+    for (std::size_t i = 0; i < 4; ++i)
+    {
+        system[i][i] = 1;
+        system[i][4] = i == 1 ? 10 : 0;
+    }
+    for (std::size_t plane = 0; plane < 3; ++plane)
+    {
+        const double flux = sum(plane_flux[plane]) / sum(plane_faces[plane]) / cell_volume;
+        const auto donor = flux >= 0 ? plane : plane + 1;
+        system[plane][donor] += flux;
+        system[plane + 1][donor] -= flux;
+    }
+    for (std::size_t pivot = 0; pivot < 4; ++pivot)
+    {
+        const double diagonal = system[pivot][pivot];
+        for (std::size_t j = pivot; j < 5; ++j)
+            system[pivot][j] /= diagonal;
+        for (std::size_t i = 0; i < 4; ++i)
+            if (i != pivot)
+            {
+                const double factor = system[i][pivot];
+                for (std::size_t j = pivot; j < 5; ++j)
+                    system[i][j] -= factor * system[pivot][j];
+            }
+    }
+    double profile_error = 0;
+    for (std::size_t c = 0; c < initial.temperature.size(); ++c)
+    {
+        EXPECT_NEAR(trial.state().dispersed[0].drift_velocity[c][0], 0.02, 2e-15);
+        const auto i = static_cast<std::size_t>(4 * mesh.cell_centroid(static_cast<LO>(c)).x);
+        EXPECT_NEAR(trial.state().dispersed[0].number[c], system[i][4], 2e-10);
+        profile_error += std::abs(trial.state().dispersed[0].number[c] - system[i][4]);
+        if (i == 2)
+            EXPECT_GT(trial.state().dispersed[0].number[c], 0);
+        EXPECT_GE(trial.state().dispersed[0].number[c], 0);
+        EXPECT_GE(trial.state().dispersed[0].hydrogen_moles[c], 0);
+    }
+    EXPECT_NEAR(total(trial.state().dispersed[0].number), total(before.dispersed[0].number), 2e-10);
+    EXPECT_NEAR(total(trial.state().dispersed[0].hydrogen_moles), total(before.dispersed[0].hydrogen_moles),
+        2e-10 * total(before.dispersed[0].hydrogen_moles));
+    RecordProperty("number_profile_l1_error", sum(profile_error));
+    RecordProperty(
+        "number_conservation_error", total(trial.state().dispersed[0].number) - total(before.dispersed[0].number));
+    RecordProperty("mole_conservation_error",
+        total(trial.state().dispersed[0].hydrogen_moles) - total(before.dispersed[0].hydrogen_moles));
+    coupler.commit(trial);
+    const auto accepted = flow->low_mach_state();
+    coupler.restore(checkpoint);
+    const auto replay = coupler.preview(0.01, {});
+    expect_primary_equal(replay.state(), accepted);
+    EXPECT_EQ(replay.transport().dispersed_slip_volume, trial.transport().dispersed_slip_volume);
+    coupler.release_checkpoint(checkpoint);
 }
 
 } // namespace
