@@ -16,7 +16,7 @@ using ID = MultiRegionMesh::ID;
 using Vec3 = MeshUtils::Vec3;
 // Internal MPI wire format: one executable, native scalar representation.
 // No pointers, size_t container objects, or borrowed storage are transmitted.
-constexpr uint64_t partition_magic = 0x5346524547490002ULL;
+constexpr uint64_t partition_magic = 0x5346524547490003ULL;
 struct Writer
 {
     std::vector<char> data;
@@ -352,6 +352,7 @@ void write_interface(Writer& w, const MultiRegionMesh::Interface& interface)
         else
         {
             w.value(v.coarse_region); w.value(v.fine_region); w.value(v.coarse_boundary); w.value(v.fine_boundary);
+            w.boolean(v.partial_coarse_patch);
             w.value(uint64_t(v.faces.size()));
             for (const auto& f : v.faces) { w.value(f.coarse_face); w.array(f.fine_faces); }
         }
@@ -383,6 +384,7 @@ MultiRegionMesh::Interface read_interface(Reader& r)
     NonconformingInterface n;
     n.coarse_region = r.value<size_t>(); n.fine_region = r.value<size_t>();
     n.coarse_boundary = r.value<int>(); n.fine_boundary = r.value<int>();
+    n.partial_coarse_patch = r.boolean();
     n.faces.resize(r.count(sizeof(ID) + sizeof(uint64_t)));
     for (auto& f : n.faces) { f.coarse_face = r.value<ID>(); f.fine_faces = r.array<ID>(); }
     return n;
@@ -515,6 +517,19 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
             first = n.coarse_region; second = n.fine_region;
             boundary_exists(first, n.coarse_boundary); boundary_exists(second, n.fine_boundary);
             if (first == second || n.faces.empty()) throw std::invalid_argument("Invalid partition coarse/fine interface.");
+            if (const auto count = mesh->structured_boundary_size(first, n.coarse_boundary);
+                count && (n.faces.size() > *count || (!n.partial_coarse_patch && n.faces.size() != *count)))
+                throw std::invalid_argument("Partition coarse/fine mapping does not cover its declared coarse patch.");
+            const auto available_polygon = [&](size_t region, ID face)
+            {
+                return mesh->topology(region, [&](const auto& topology)
+                {
+                    if constexpr (std::same_as<std::remove_cvref_t<decltype(topology)>, ExplicitRegionProvider>)
+                        return topology.has_face(face);
+                    else
+                        return true;
+                });
+            };
             for (size_t group = 0; group < n.faces.size(); ++group)
             {
                 const auto& faces = n.faces[group];
@@ -526,7 +541,20 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
                     check_face(second, f, n.fine_boundary);
                     lookup.first_to_second.emplace_back(f, faces.coarse_face);
                 }
+                if (available_polygon(first, faces.coarse_face) &&
+                    std::all_of(faces.fine_faces.begin(), faces.fine_faces.end(),
+                        [&](ID face) { return available_polygon(second, face); }))
+                {
+                    std::vector<InterfaceFacePolygon> fine;
+                    for (const auto face : faces.fine_faces)
+                        fine.push_back(mesh->interface_polygon({second, face}));
+                    validate_planar_subdivision(mesh->interface_polygon({first, faces.coarse_face}), fine,
+                        mesh->d_tolerance.absolute_length, mesh->d_tolerance.relative);
+                }
             }
+            if (const auto count = mesh->structured_boundary_size(second, n.fine_boundary);
+                count && lookup.first_to_second.size() != *count)
+                throw std::invalid_argument("Partition coarse/fine mapping does not cover its complete fine patch.");
         }
         sort_unique(lookup.first_to_second); sort_unique(lookup.second_to_first);
         component[root(first)] = root(second);

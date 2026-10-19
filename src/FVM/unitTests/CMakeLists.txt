@@ -12,20 +12,38 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF")
+  if(TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
+      OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional")
     # Catch dependencies from FVM back into the higher-level solver DSO.
     target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
   else()
     target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  if(TEST_NAME STREQUAL "testGeometricVoF")
+  if(TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testGeometricVoF")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;geometry\\;conservation")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoF_2procs
+    TARGET testAdaptiveVoF
+    PROCS 2
+    LABELS "vof;amr;geometry;conservation;collective"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoFThreeDimensional_2procs
+    TARGET testAdaptiveVoFThreeDimensional
+    PROCS 2
+    LABELS "vof;amr;geometry;conservation;collective"
+    TIMEOUT 180)
 
 simplefluid_add_mpi_test(
     NAME CompositePartitionOperators_2procs

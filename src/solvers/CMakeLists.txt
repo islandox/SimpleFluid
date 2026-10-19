@@ -1,5 +1,6 @@
 set(SIMPLEFLUID_SOLVER_SOURCES
     VoFSolver.cc
+    AdaptiveVoFSolver.cc
     explicit_instantiation/LiquidMassInventory.cc
     explicit_instantiation/VolumeContinuityModel.cc
     explicit_instantiation/PlanarALEBoundary.cc
@@ -30,6 +31,7 @@ target_compile_definitions(SimpleFluidSolvers PRIVATE
     SimpleFluidEquations_EXPORTS)
 target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidFVM)
 simplefluid_exclude_from_pgo_sources(VoFSolver.cc)
+simplefluid_exclude_from_pgo_sources(AdaptiveVoFSolver.cc)
 if(SIMPLEFLUID_ENABLE_NOX)
     target_compile_definitions(SimpleFluidSolvers PUBLIC SIMPLEFLUID_ENABLE_NOX=1)
 endif()

@@ -26,6 +26,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME STREQUAL "testAdaptiveVoFSolver")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;amr\\;conservation\\;capillary\\;transaction\\;collective")
   elseif(TEST_NAME STREQUAL "testVoFSolver")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;conservation\\;capillary\\;transaction")
@@ -33,6 +36,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoFSolver_2procs
+    TARGET testAdaptiveVoFSolver
+    PROCS 2
+    LABELS "vof;amr;conservation;capillary;transaction;collective"
+    TIMEOUT 600)
 
 simplefluid_add_mpi_test(
     NAME VoFRejectsDistributedConstruction_2procs

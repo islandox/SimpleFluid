@@ -10,9 +10,10 @@ This stage supports serial execution, periodic coordinate directions, and
 impermeable slip walls. A periodic direction requires at least two cells;
 a nonperiodic one-cell direction can represent a two-dimensional verification
 case. The solver rejects multi-rank construction before creating distributed
-mesh or field state. AMR, gas compressibility, temperature, radiolysis,
-dispersed populations, contact angles, and phase change have separate roadmap
-acceptance gates.
+mesh or field state. The separate [adaptive Cartesian backend](adaptive_vof.md)
+provides distributed AMR while retaining native fields. Gas compressibility,
+temperature, radiolysis, dispersed populations, contact angles, and phase
+change have separate roadmap acceptance gates.
 
 ## State and units
 

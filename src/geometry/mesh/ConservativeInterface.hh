@@ -20,7 +20,7 @@ struct CoarseFineFaceMapping
     std::vector<uint64_t> fine_faces;
 };
 /**
- * @brief Complete planar coarse/fine patches with canonical fine-face fluxes.
+ * @brief Planar coarse/fine patches with canonical fine-face fluxes.
  *
  * Each fine face becomes an ordinary interior FVM face. The coarse cell visits
  * all covering subfaces. Convex, planar, gap-free and nonoverlapping coverage is
@@ -31,6 +31,12 @@ struct NonconformingInterface
     size_t coarse_region = 0, fine_region = 0;
     int coarse_boundary = 0, fine_boundary = 0;
     std::vector<CoarseFineFaceMapping> faces;
+    /**
+     * Permit a subset of the coarse boundary patch, tiled by the complete fine
+     * patch. Every selected coarse face still requires exact, unique coverage.
+     * This supports several child blocks covering disjoint coarse-face sets.
+     */
+    bool partial_coarse_patch = false;
 };
 /** @brief A native integrated flux contributes coefficient*Q to this canonical logical face. */
 struct FaceFluxWeight { uint64_t face; real_t coefficient; };

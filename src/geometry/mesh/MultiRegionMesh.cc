@@ -903,7 +903,9 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
         else
         {
             const auto& e=std::get<NonconformingInterface>(d_interfaces[i]); first=e.coarse_region; second=e.fine_region;
-            if(e.faces.empty() || patch_count(first,e.coarse_boundary)!=e.faces.size())
+            const auto coarse_count = patch_count(first,e.coarse_boundary);
+            if(e.faces.empty() || e.faces.size()>coarse_count
+                || (!e.partial_coarse_patch && coarse_count!=e.faces.size()))
                 throw std::invalid_argument("Nonconforming mapping is incomplete for the coarse patch.");
             for(size_t group=0;group<e.faces.size();++group)
             {
@@ -1228,7 +1230,7 @@ std::string MultiRegionMesh::configuration_signature() const
         }
         else if(const auto* n=std::get_if<NonconformingInterface>(&interface))
         {
-            out << n->coarse_region << ' ' << n->fine_region << ' ' << n->coarse_boundary << ' ' << n->fine_boundary << ' ' << n->faces.size() << ' ';
+            out << n->coarse_region << ' ' << n->fine_region << ' ' << n->coarse_boundary << ' ' << n->fine_boundary << ' ' << n->partial_coarse_patch << ' ' << n->faces.size() << ' ';
             for(const auto& group:n->faces) { out << group.coarse_face << ' '; values(group.fine_faces); }
         }
         else

@@ -20,9 +20,9 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 
 ### Current priorities
 
-Phase 22, Stage 1 is implemented with focused uniform-mesh VoF verification.
-Its later AMR and hybrid radiolytic-bubble stages remain separate acceptance
-gates.
+Phase 22 has uniform and distributed Cartesian AMR VoF backends with focused
+verification. Physical gas coupling, representation changes, and application
+resolution qualification remain separate acceptance gates.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -60,7 +60,7 @@ gates.
 | Phase 20, TH/neutronics map | In-memory scaffold and reusable conservative cell transfer implemented | Production external-neutronics protocol and validation |
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
-| Phase 22, resolved/dispersed bubbles | Stage 1 implemented and focused-tested | Conservative AMR, physical gas coupling, and bidirectional representation changes |
+| Phase 22, resolved/dispersed bubbles | Uniform and synchronous Cartesian AMR backends implemented and focused-tested | Physical gas coupling, representation changes, application resolution studies, and optional AMR extensions |
 
 ### Checklist conventions
 
@@ -1635,11 +1635,12 @@ not liquid-volume-fraction weighted.
 
 ## Phase 22 — Resolved and dispersed radiolytic bubbles
 
-**Status:** Stage 1 implemented and focused-tested in its declared serial,
-uniform-grid, source-free isothermal scope. The target is centimetric
-resolved gas in the existing aqueous radiolytic system. Later stages add
-adaptive refinement and physical/representational exchanges; the uniform-mesh
-baseline alone does not qualify coupled radiolysis or reactor transients.
+**Status:** Stage 1's serial uniform backend and Stage 2's distributed Cartesian
+AMR backend are implemented and focused-tested for source-free isothermal flow.
+Adaptive levels share one timestep. The target is centimetric resolved gas in
+the existing aqueous radiolytic system; physical/representational exchanges,
+application resolution studies, and the extensions listed below remain open.
+These numerical backends alone do not qualify coupled reactor transients.
 
 ### Physical and ownership contracts
 
@@ -1692,23 +1693,42 @@ reactor qualification.
 
 ### Stage 2 — Conservative three-dimensional AMR
 
-- [ ] Add a dyadic block hierarchy with 2:1 neighboring refinement and
-      canonical conservative coarse/fine subfaces. Begin with Cartesian blocks;
-      qualify prism subdivision and vessel-boundary geometry separately.
-- [ ] Refine interface/curvature stencils, predicted motion buffers, thin necks,
-      nearby interfaces/walls, wakes, and imminent promotion sites. Protect
-      distinct components and interface neighborhoods during coarsening.
-- [ ] Use 24–32 cells across the smallest resolved diameter as an initial target
-      (0.31–0.42 mm for 10 mm bubbles), then perform finer convergence studies.
-      Interface resolution alone is not wake DNS or mass-transfer resolution.
-- [ ] Prolong PLIC geometry geometrically and transfer phase masses, dissolved
-      and population inventories, momentum, and thermal energy conservatively.
-- [ ] Publish mesh/state changes atomically at accepted coupling boundaries;
-      freeze topology while a replay checkpoint is active. Rebuild maps, halos,
-      graphs, and external transfers using topology/partition generations.
-- [ ] Verify refinement/coarsening and interface passage across coarse/fine
-      and MPI boundaries, including capillary equilibrium and replay.
-- [ ] Add level subcycling only with conservative flux-register corrections.
+The implemented backend uses immutable Cartesian blocks and one shared
+timestep in serial and MPI. Its native mesh/field transaction is the seam for
+the later physical coupling controller.
+
+- [x] Add a dyadic block hierarchy with 2:1 neighboring refinement, including
+      edges/corners, and canonical conservative coarse/fine subfaces. Match
+      periodic face levels and retain exact partial coarse-patch coverage.
+- [x] Refine interface/curvature stencils, predicted motion buffers,
+      curvature-driven thin-neck indicators, nearby interfaces/walls, supplied
+      wake indicators, and imminent promotion regions. Restrict coarsening to
+      uniform pure-phase siblings outside protected neighborhoods.
+- [x] Expose a configurable 24–32-cell minimum-diameter target (0.31–0.42 mm
+      for 10 mm bubbles), with an explicit maximum-level resolution limitation.
+- [x] Prolong PLIC geometry geometrically and transfer phase masses, dissolved
+      and population amounts, signed momentum, and thermal amounts
+      conservatively. These quantities are passive extensives until Stage 3
+      supplies their physical equations and closures.
+- [x] Publish mesh/state changes atomically; freeze topology while a replay
+      checkpoint is active. Rebuild native maps, halos, graphs, and fields;
+      expose topology/partition generations and reject stale refinement plans
+      so external transfers can be invalidated at accepted coupling boundaries.
+- [x] Verify refinement/coarsening and three-dimensional interface passage
+      across coarse/fine and MPI boundaries, capillary startup against a uniform
+      fine reference, viscous stress, pressure balance, rejection, and replay.
+- [ ] Qualify prism subdivision and vessel-boundary geometry separately.
+- [ ] Perform finer centimetric-bubble resolution studies. Interface resolution
+      alone is not wake DNS or mass-transfer resolution; the startup pressure
+      comparison does not qualify rise speed, shape dynamics, or long-time
+      parasitic currents.
+- [ ] Add optional level subcycling only with conservative flux-register
+      corrections. Synchronous levels currently use the same canonical
+      subface flux directly and require no time-subcycling flux register.
+
+See the [adaptive solver guide](docs/modeling/adaptive_vof.md) and the dedicated
+[Stage 2 verification record](docs/verification/vof_stage2_20261019.md) for the
+supported contracts, exact focused evidence, and remaining qualification limits.
 
 ### Stage 3 — Physical radiolytic and interface coupling
 
