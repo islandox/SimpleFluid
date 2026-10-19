@@ -173,6 +173,11 @@ the next physical step; regridding waits until that relaxation succeeds.
 Cartesian blocks, periodic directions and impermeable slip walls are the
 supported geometry. Prism subdivision, curved vessel boundaries, contact angles,
 and moving mesh/ALE retain their own roadmap gates.
+
+The proposed [general AMR design](../architecture/general_amr.md) extends native
+XY/Z products, polyhedra, and mixed regions through separate geometry, migration,
+and VoF qualification stages. These extensions are unimplemented; native mesh
+support alone does not qualify the Cartesian transport algorithm on those cells.
 [Bidirectional representation trials](bubble_representation.md) have separate
 birth, resolution, component and thermodynamic-history guards.
 Physical gas growth and dissolved transfer use
