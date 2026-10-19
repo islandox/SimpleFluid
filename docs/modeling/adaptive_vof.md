@@ -165,13 +165,17 @@ the flow and passive inventories together and permits another trial. Coupled
 controllers should regrid only at accepted coupling boundaries, then acquire
 their next checkpoint. The opt-in [reacting low-Mach controller](reacting_vof.md)
 includes its physical inventories and cumulative ledgers in that transaction.
+An accepted representation conversion retains phase-pressure histories until
+the next physical step; regridding waits until that relaxation succeeds.
 
 ## Scope and verification
 
 Cartesian blocks, periodic directions and impermeable slip walls are the
 supported geometry. Prism subdivision, curved vessel boundaries, contact angles,
-moving mesh/ALE, and bidirectional dispersed/resolved representation changes
-retain their own roadmap gates. Physical gas growth and dissolved transfer use
+and moving mesh/ALE retain their own roadmap gates.
+[Bidirectional representation trials](bubble_representation.md) have separate
+birth, resolution, component and thermodynamic-history guards.
+Physical gas growth and dissolved transfer use
 the separate [reacting low-Mach mode](reacting_vof.md); the source-free path
 and its passive inventories do not enable those processes.
 

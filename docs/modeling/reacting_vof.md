@@ -9,8 +9,11 @@ trial and checkpoint operations include the controller's cumulative ledgers.
 
 The supported geometry is the fixed Cartesian AMR mesh described in
 [adaptive VoF](adaptive_vof.md). The original source-free solver remains a
-separate initialization path. This coupling does not enable moving boundaries,
-automatic bubble promotion or demotion, or automatic headspace detection.
+separate initialization path. This coupling does not enable moving boundaries
+or automatic headspace detection. Explicitly enabled
+[representation trials](bubble_representation.md) add whole-bubble promotion
+and complete-component demotion; their birth localization remains supplied
+by the application.
 
 ## State, pressure, and volume
 
@@ -318,8 +321,9 @@ The unit and distributed tests use synthetic declared materials and closure
 laws with independent solutions. Calibrated aqueous rates, predictive film
 thickness, centimetric-bubble rise/shape/wake and transfer convergence,
 resolved coalescence sensitivity, and coupled-reactor qualification remain
-application gates. Bidirectional resolved/dispersed representation changes
-belong to Stage 4.
+application gates. The separate [representation guide](bubble_representation.md)
+describes bidirectional conversion, its checkpointed registry, retained
+pressure histories, and additional eligibility limits.
 
 The molar-pivot discretization follows the two-moment principle of
 [Kumar and Ramkrishna's fixed-pivot method](https://engineering.purdue.edu/ramkiites/wp-content/uploads/2019/10/125_1996_Kumar_On-the-Solution-of-Population-Balance-Equations-by-Discretization-I..pdf).

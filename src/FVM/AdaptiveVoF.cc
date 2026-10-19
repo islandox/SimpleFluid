@@ -480,6 +480,16 @@ std::vector<InterfacePatch> AdaptiveVoF::interface_patches(const std::vector<dou
 
 std::vector<double> AdaptiveVoF::carrier_face_aperture(const std::vector<double>& fraction) const
 {
+    return phase_face_aperture(fraction, false);
+}
+
+std::vector<double> AdaptiveVoF::gas_face_aperture(const std::vector<double>& fraction) const
+{
+    return phase_face_aperture(fraction, true);
+}
+
+std::vector<double> AdaptiveVoF::phase_face_aperture(const std::vector<double>& fraction, bool gas) const
+{
     const auto owned_planes = reconstruct(fraction);
     const auto planes = impl_->exchange_planes(owned_planes, *impl_->cells);
     const auto halo = exchange_cells(fraction);
@@ -491,10 +501,11 @@ std::vector<double> AdaptiveVoF::carrier_face_aperture(const std::vector<double>
         for (std::size_t face = 0; face < mesh()->num_owned_faces(); ++face)
         {
             const auto fid = static_cast<LO>(face);
-            if (mesh()->is_geometry_exterior_face(fid))
+            const bool boundary = mesh()->is_geometry_exterior_face(fid);
+            if (boundary && !gas)
                 continue;
-            const auto owner = mesh()->owner_cell(fid), neighbor = mesh()->neighbor_cell(fid);
-            if (halo[owner] >= 1.0 || halo[neighbor] >= 1.0)
+            const auto owner = mesh()->owner_cell(fid), neighbor = boundary ? owner : mesh()->neighbor_cell(fid);
+            if (gas ? (halo[owner] <= 0.0 || halo[neighbor] <= 0.0) : (halo[owner] >= 1.0 || halo[neighbor] >= 1.0))
                 continue;
             const auto normal = mesh()->face_normal(fid);
             std::size_t axis = 0;
@@ -520,7 +531,7 @@ std::vector<double> AdaptiveVoF::carrier_face_aperture(const std::vector<double>
             std::vector<FacePoint> polygon{{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}};
             for (const auto cell : {owner, neighbor})
             {
-                if (halo[cell] <= 0.0)
+                if (gas ? halo[cell] >= 1.0 : halo[cell] <= 0.0)
                     continue;
                 const auto displacement = mesh()->face_center_vector(fid, cell);
                 Vector origin{};
@@ -531,7 +542,9 @@ std::vector<double> AdaptiveVoF::carrier_face_aperture(const std::vector<double>
                 const auto& plane = planes[cell];
                 const double threshold =
                     plane.offset - std::inner_product(plane.normal.begin(), plane.normal.end(), origin.begin(), 0.0);
-                polygon = clip_face_polygon(polygon, plane.normal[b] * width_b, plane.normal[c] * width_c, threshold);
+                const double sign = gas ? -1.0 : 1.0;
+                polygon = clip_face_polygon(
+                    polygon, sign * plane.normal[b] * width_b, sign * plane.normal[c] * width_c, sign * threshold);
             }
             double area = 0.0;
             for (std::size_t i = 0; i < polygon.size(); ++i)
