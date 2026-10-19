@@ -1694,7 +1694,7 @@ must be explicit and unsupported modes rejected.
       qualification separately from future physical validation.
 
 See the [solver guide](docs/modeling/vof.md) and the dedicated
-[Stage 1 verification record](docs/verification/vof_stage1_20261019.md).
+[VoF verification contracts](docs/verification/vof_solver_contracts.md).
 The evidence includes density ratio 10,000, a complete capillary-wave period,
 and matched-time static bubbles. Short inviscid tests do not establish
 long-time parasitic-current limits, viscous rising-bubble accuracy, or coupled
@@ -1726,6 +1726,15 @@ the later physical coupling controller.
 - [x] Verify refinement/coarsening and three-dimensional interface passage
       across coarse/fine and MPI boundaries, capillary startup against a uniform
       fine reference, viscous stress, pressure balance, rejection, and replay.
+- [x] Verify conservative implicit passive-momentum bounds, microscopic phase
+      donor budgets and passive-carrier conditioning without inventory clipping.
+- [x] Share immutable adaptive geometry and reuse compatible transport/projection
+      workspaces, while refreshing numerical coefficients and protecting replay.
+- [x] Add active curved-interface seam passage at density ratio ten and a stated
+      finite-duration static-bubble check with a uniformly fine interface band.
+- [ ] Qualify active curved interfaces at high density contrast directly on a
+      coarse/fine seam. The retained strict qualification probe remains disabled;
+      short fine-band static and lower-contrast moving cases do not close it.
 - [ ] Qualify prism subdivision and vessel-boundary geometry through the
       separate [Phase 23](#phase-23--amr-for-native-extruded-polyhedral-and-mixed-region-meshes)
       geometry and solver gates.
@@ -1738,8 +1747,8 @@ the later physical coupling controller.
       subface flux directly and require no time-subcycling flux register.
 
 See the [adaptive solver guide](docs/modeling/adaptive_vof.md) and the dedicated
-[Stage 2 verification record](docs/verification/vof_stage2_20261019.md) for the
-supported contracts, exact focused evidence, and remaining qualification limits.
+[VoF verification contracts](docs/verification/vof_solver_contracts.md) for the
+supported contracts, reproducible checks, and remaining qualification limits.
 
 ### Stage 3 — Physical radiolytic and interface coupling
 
@@ -1793,8 +1802,8 @@ qualification remain open.**
       implementation and qualification gates.
 
 See the [radiolytic VoF model](docs/modeling/radiolytic_vof.md) and the separate
-[Stage 3 verification record](docs/verification/vof_stage3_20261019.md) for the
-implemented contracts, supplied inputs and measured verification scope.
+[VoF verification contracts](docs/verification/vof_solver_contracts.md) for the
+implemented contracts, supplied inputs and reproducible verification scope.
 
 ### Stage 4 — Bidirectional representation changes
 
@@ -1842,8 +1851,8 @@ localization/calibration and application convergence remain open.**
       adaptive slip-wall contract.
 
 See the [representation guide](docs/modeling/bubble_representation.md) and the
-separate [Stage 4 verification record](docs/verification/vof_stage4_20261019.md)
-for the implemented API, exact focused evidence and qualification limits.
+separate [VoF verification contracts](docs/verification/vof_solver_contracts.md)
+for the implemented API, reproducible checks and qualification limits.
 
 ---
 

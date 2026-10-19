@@ -180,5 +180,10 @@ themselves establish centimetric-bubble rise/wake accuracy, realistic gas
 transfer, unresolved-film coalescence, or coupled reactor performance. Those
 remain explicit later-stage studies in the roadmap.
 
-Measured results and their exact scope are recorded separately in the
-[Stage 1 verification record](../verification/vof_stage1_20261019.md).
+The tracked [VoF verification contracts](../verification/vof_solver_contracts.md)
+identify reproducible assertions and local measurement workflows.
+
+The [transport and state-ownership contract](../architecture/vof_transport.md)
+defines compatible implicit momentum transport, canonical inventories and cache
+lifetimes. The verification index lists reproducible assertions; local dated
+measurements are not available as tracked qualification reports.

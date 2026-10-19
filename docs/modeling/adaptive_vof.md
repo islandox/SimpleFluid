@@ -186,6 +186,11 @@ and its passive inventories do not enable those processes.
 
 Focused verification covers hierarchy coverage, conservative transfer,
 coarse/fine interface passage, distributed ownership, pressure/capillary
-behavior and rejected/replayed transactions. Measured evidence belongs in the
-[Stage 2 verification record](../verification/vof_stage2_20261019.md), separately
-from this stable model and API description.
+behavior and rejected/replayed transactions. The tracked
+[VoF verification contracts](../verification/vof_solver_contracts.md) identify
+reproducible assertions; dated measurements remain local build artifacts.
+
+The [transport and state-ownership contract](../architecture/vof_transport.md)
+defines compatible implicit momentum transport, canonical inventories and cache
+lifetimes. The verification index lists reproducible assertions; local dated
+measurements are not available as tracked qualification reports.

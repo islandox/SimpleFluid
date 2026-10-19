@@ -841,7 +841,10 @@ submerged steam; the inventory is never silently discarded.
 The independent `VoFSolver` provides a serial, fixed uniform Cartesian baseline
 for source-free, isothermal flow of two incompressible phases. It combines
 geometric PLIC transport, variable-density momentum/projection, and balanced
-capillarity, with native mesh/field output and transactional steps. See the
+capillarity, with native mesh/field output and transactional steps. Momentum
+uses final transported mass and conservative implicit upwind donor velocities;
+its first-order diffusion and cache/ownership contracts are documented in the
+[transport design](docs/architecture/vof_transport.md). See the
 [VoF guide](docs/modeling/vof.md) for its supported boundaries and numerical
 verification. `AdaptiveVoFSolver` adds distributed dyadic Cartesian blocks,
 canonical coarse/fine fluxes, conservative remapping of phase-associated
