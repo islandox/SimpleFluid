@@ -163,16 +163,17 @@ One explicit checkpoint can retain the accepted snapshot for replay. Topology
 changes are forbidden until that checkpoint is released. Restoring it restores
 the flow and passive inventories together and permits another trial. Coupled
 controllers should regrid only at accepted coupling boundaries, then acquire
-their next checkpoint. This API supplies the transaction boundary; Stage 3 must
-include its physical participant state in the controller's transaction too.
+their next checkpoint. The opt-in [radiolytic low-Mach controller](radiolytic_vof.md)
+includes its physical inventories and cumulative ledgers in that transaction.
 
 ## Scope and verification
 
 Cartesian blocks, periodic directions and impermeable slip walls are the
 supported geometry. Prism subdivision, curved vessel boundaries, contact angles,
-moving mesh/ALE, physical gas growth, dissolved transfer, and dispersed/resolved
-conversion retain their own roadmap gates. Passive inventory conservation is
-not evidence that those physical models have been implemented.
+moving mesh/ALE, and bidirectional dispersed/resolved representation changes
+retain their own roadmap gates. Physical gas growth and dissolved transfer use
+the separate [radiolytic low-Mach mode](radiolytic_vof.md); the source-free path
+and its passive inventories do not enable those processes.
 
 Focused verification covers hierarchy coverage, conservative transfer,
 coarse/fine interface passage, distributed ownership, pressure/capillary

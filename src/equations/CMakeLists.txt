@@ -13,6 +13,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     explicit_instantiation/PressureProjectionEquation.cc
     RadiolyticGasPhysics.cc
     RadiolyticGasProperties.cc
+    RadiolyticBubbleKinetics.cc
     explicit_instantiation/SolidHeatConductionEquation.cc
     explicit_instantiation/TemperatureDiffusionEquation.cc
     turbulence/TurbulenceModel.cc

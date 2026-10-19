@@ -847,8 +847,12 @@ verification. `AdaptiveVoFSolver` adds distributed dyadic Cartesian blocks,
 canonical coarse/fine fluxes, conservative remapping of phase-associated
 inventories, and checkpointed regridding. Levels share one timestep. See the
 [adaptive VoF guide](docs/modeling/adaptive_vof.md) for refinement controls,
-native field ownership, and numerical qualification. Physical radiolytic
-coupling and resolved/dispersed exchange remain later stages in
+native field ownership, and numerical qualification. Its opt-in low-Mach mode
+and `RadiolyticVoFCoupler` add conservative thermodynamic inventories,
+reactions, prescribed-film H2 transfer, dispersed capture, and designated
+headspace venting. The [radiolytic VoF guide](docs/modeling/radiolytic_vof.md)
+states the supplied material/closure contracts and qualification limits.
+Automatic resolved/dispersed representation changes remain in Stage 4 of
 [Phase 22](TODO.md#phase-22--resolved-and-dispersed-radiolytic-bubbles).
 
 ## Dependencies
@@ -900,6 +904,7 @@ example and storage accounting](docs/region_meshes.md).
 | Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
 | Uniform-mesh geometric VoF | [Solver and numerical verification](docs/modeling/vof.md) |
 | Adaptive Cartesian VoF | [Conservative refinement and distributed flow](docs/modeling/adaptive_vof.md) |
+| Radiolytic resolved/dispersed coupling | [Low-Mach inventories, interface transfer, and capture](docs/modeling/radiolytic_vof.md) |
 | SST-SAS configuration and supported paths | [Model contract](docs/modeling/sst_sas.md) and [extensions](docs/modeling/sst_sas_extensions.md) |
 | Radiolysis, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/radiolytic_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
 | External reference comparisons | [OpenFOAM workflows](verification/openfoam/README.md) |

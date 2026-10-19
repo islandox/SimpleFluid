@@ -219,6 +219,7 @@ string(REPLACE "\n" ";"
 set(simplefluid_forbidden_api_patterns
     "SimpleFluid::VoFSolver::Impl::"
     "SimpleFluid::AdaptiveVoFSolver::Impl::"
+    "SimpleFluid::RadiolyticVoFCoupler::Impl::"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(].*BoussinesqSolver<.*>&[)]$"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::PlanarALEStep::"
     "SimpleFluid::BoilingSourceModel<.*>[ ]*::(validate_void_inputs|limit_to_available_void|add_bulk_boiling|add_wall_boiling)[(]"
@@ -273,6 +274,19 @@ set(simplefluid_required_api_patterns
     "^SimpleFluid::AdaptiveVoFSolver::regrid[(]"
     "^SimpleFluid::AdaptiveVoFSolver::checkpoint[(][)]$"
     "^SimpleFluid::AdaptiveVoFSolver::fraction_field[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::initialize_low_mach[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::preview_low_mach_step[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::commit_low_mach_trial[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::state[(][)] const$"
+    "^SimpleFluid::RadiolyticVoFCoupler::RadiolyticVoFCoupler[(]"
+    "^SimpleFluid::RadiolyticVoFCoupler::preview[(]"
+    "^SimpleFluid::RadiolyticVoFCoupler::commit[(]"
+    "^SimpleFluid::RadiolyticVoFCoupler::checkpoint[(][)]$"
+    "^SimpleFluid::RadiolyticVoFCoupler::Trial::state[(][)] const$"
+    "^SimpleFluid::VoF::LiquidThermodynamics::evaluate[(]double, double[)] const$"
+    "^SimpleFluid::VoF::make_linear_compressible_liquid[(]"
+    "^SimpleFluid::RadiolyticGasPhysics::advance_microbubble_substep[(]"
+    "^SimpleFluid::RadiolyticGasPhysics::advance_upper_bubble_population[(]"
     "^SimpleFluid::BoilingSourceModel<.*>[ ]*::update[(]"
     "^SimpleFluid::DelayedNeutronPrecursorModel<.*>[ ]*::advance[(]"
     "^SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::update_explicit[(]"
@@ -763,7 +777,12 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # stepping/query symbols. GCC Debug now exports 1483 SimpleFluid symbols;
 # extend the previous ceiling by that API contribution, retaining the same
 # toolchain headroom. The private Impl family stays forbidden above.
-set(simplefluid_api_symbol_upper_bound 1505)
+# Low-Mach trial/state APIs (15), the radiolytic controller (21), caloric EOS
+# wrappers (5), and reactions-only kernels (4) add 45 reviewed definitions.
+# GCC Debug has 1513 exports versus the Stage 2 record's 1468. Extend the
+# previous ceiling by those APIs, keeping the existing toolchain headroom.
+# Required anchors and forbidden implementation families remain unchanged.
+set(simplefluid_api_symbol_upper_bound 1550)
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

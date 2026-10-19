@@ -26,6 +26,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME STREQUAL "testAdaptiveVoFLowMach" OR TEST_NAME STREQUAL "testVoFLowMach"
+         OR TEST_NAME STREQUAL "testRadiolyticVoFCoupler")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;radiolysis\\;thermodynamics\\;conservation\\;transaction\\;collective")
   elseif(TEST_NAME STREQUAL "testAdaptiveVoFSolver")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;amr\\;conservation\\;capillary\\;transaction\\;collective")
@@ -36,6 +40,28 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoFLowMach_2procs
+    TARGET testAdaptiveVoFLowMach
+    PROCS 2
+    LABELS "vof;radiolysis;thermodynamics;conservation;transaction;collective"
+    TIMEOUT 240)
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoFLowMach_EmptyRank_9procs
+    TARGET testAdaptiveVoFLowMach
+    PROCS 9
+    ARGS "--gtest_filter=AdaptiveVoFLowMachTest.EmptyOwnedRankParticipatesInInitializationPopulationSourcesAndHintGuards"
+    LABELS "vof;radiolysis;thermodynamics;conservation;transaction;collective;empty_rank"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME RadiolyticVoFCoupler_2procs
+    TARGET testRadiolyticVoFCoupler
+    PROCS 2
+    LABELS "vof;radiolysis;thermodynamics;conservation;transaction;collective"
+    TIMEOUT 240)
 
 simplefluid_add_mpi_test(
     NAME AdaptiveVoFSolver_2procs

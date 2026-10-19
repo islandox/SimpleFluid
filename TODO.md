@@ -1636,28 +1636,31 @@ not liquid-volume-fraction weighted.
 ## Phase 22 — Resolved and dispersed radiolytic bubbles
 
 **Status:** Stage 1's serial uniform backend and Stage 2's distributed Cartesian
-AMR backend are implemented and focused-tested for source-free isothermal flow.
-Adaptive levels share one timestep. The target is centimetric resolved gas in
-the existing aqueous radiolytic system; physical/representational exchanges,
-application resolution studies, and the extensions listed below remain open.
-These numerical backends alone do not qualify coupled reactor transients.
+AMR backend are implemented and focused-tested. Stage 3 adds numerical
+low-Mach radiolytic and resolved/dispersed interface coupling. Adaptive levels
+share one timestep. The target is centimetric resolved gas in the existing
+aqueous radiolytic system; physical calibration, application resolution
+studies, bidirectional representation changes, and the extensions listed
+below remain open. These numerical tests do not qualify reactor transients.
 
 ### Physical and ownership contracts
 
-- [ ] Keep resolved gas `f`, dispersed fractions `alpha_d,k`, and liquid
+- [x] Keep resolved gas `f`, dispersed fractions `alpha_d,k`, and liquid
       `alpha_l = 1 - f - sum(alpha_d,k)` distinct. All population number/molar
       inventories are per bulk volume; dissolved storage remains `alpha_l*C_H2`.
-- [ ] Add resolved-gas molar inventory and a single hydrogen ledger covering
+- [x] Add resolved-gas molar inventory and a single hydrogen ledger covering
       dissolved, dispersed, resolved, produced, and escaped gas. Every molecule
       belongs to one inventory; representation changes create no hydrogen.
-- [ ] Extend conservative phase mass/momentum/thermal transport to low-Mach
+- [x] Extend conservative phase mass/momentum/thermal transport to low-Mach
       gas EOS and material-volume sources, keeping absolute thermodynamic and
       gauge pressures distinct and counting capillary pressure once.
-- [ ] Keep supplied aqueous properties and radiolytic material correlations
+- [x] Keep supplied aqueous properties and radiolytic material correlations
       external. Use validated domains for all selected transfer/slip laws.
-- [ ] Retain external shared ownership of the flow solver. Checkpoints include
-      phase inventories, bubble identities, pending conversion reservations,
-      transfer events, and cumulative ledgers; publish accepted states only.
+- [x] Retain external shared ownership of the flow solver. Checkpoint phase
+      inventories and cumulative physical-transfer ledgers; publish accepted
+      states only.
+- [ ] Extend checkpoints to persistent bubble identities, pending conversion
+      reservations, and representation-change events in Stage 4.
 
 ### Stage 1 — Uniform-mesh geometric VoF
 
@@ -1732,23 +1735,58 @@ supported contracts, exact focused evidence, and remaining qualification limits.
 
 ### Stage 3 — Physical radiolytic and interface coupling
 
-- [ ] Retain microbubble kinetics and introduce size-aware upper populations
-      with calibrated growth, breakup, and coalescence closures.
-- [ ] Add resolved-interface dissolved-H2 flux using reconstructed area and
-      Henry equilibrium, with a qualified subgrid concentration-boundary-layer
-      model when the hydrodynamic grid cannot resolve species transport.
-- [ ] Couple gas EOS, thermal transport, donor/liquid accounting, and bubble
-      slip to one conservative material-volume/pressure constraint.
-- [ ] Extend geometric phase transport and its source splitting consistently
+**Numerical implementation present; physical calibration and application
+qualification remain open.**
+
+- [x] Retain the legacy microbubble substep through shared reactions-only
+      kernels. Add fixed-molar-pivot upper populations, conservative birth/
+      growth/dissolution/breakup/coalescence event ledgers, explicit underflow
+      policy, and externally supplied rates with declared validity domains.
+      Physical collision kernels use the actual carrier volume, while stored
+      population densities remain bulk-based.
+- [x] Add resolved-interface dissolved-H2 flux using uniquely owned PLIC or
+      aligned-face area, one-sided H2 partial pressure and Henry equilibrium.
+      Implement a prescribed stagnant-film closure with exact carrier-geometry
+      averaging and analytic planar/oblique checks; thickness and its physical
+      validity remain supplied inputs.
+- [x] Couple liquid/gas caloric EOS, thermal transport, finite chemical-donor
+      and liquid-mass accounting, and dispersed slip to one material-volume
+      constraint. Close global volume with thermodynamic pressure and local
+      volume with a compressibility-aware pressure solve; retain actual mass,
+      physical momentum and internal-energy ledgers.
+- [x] Extend geometric phase transport and its source splitting consistently
       to nonzero material-volume sources; preserve boundedness and matching
       phase/momentum fluxes rather than bypassing the Stage 1 divergence guard.
-- [ ] Capture dispersed gas from interface-relative collision flux and an
+- [x] Capture dispersed gas from interface-relative collision flux and an
       explicit coalescence efficiency; retain uncaptured inventory in liquid.
-- [ ] Define film-drainage/rupture and resolved-bubble coalescence assumptions.
-- [ ] Define free-surface/headspace ownership and exact accepted escape
-      accounting; qualify any planar-ALE extension separately.
-- [ ] Verify coupled production, dissolution/growth, capture, and escape with
-      hydrogen, liquid, momentum, and thermal budgets.
+      Use actual molecular Stefan flux and relative slip; EOS-only motion
+      does not count as a collision flux.
+- [x] Define unresolved drainage/rupture through supplied efficiency/rate
+      laws and retain geometric VoF coalescence at resolved grid contact.
+- [x] Define fixed-domain headspace ownership by accepted fully gas cells in
+      supplied regions. Record only actual vented H2/inert, enthalpy and
+      momentum as escape, and publish cumulative ledgers only on commit.
+- [x] Verify production, dissolution/growth, capture and escape against
+      independent manufactured rates and hydrogen/liquid/thermal budgets.
+      Cover periodic momentum, source rejection, mixed-phase remap,
+      retained tiny-phase inventories, stale trials and checkpoint replay,
+      with serial, two-rank and empty-rank cases.
+- [ ] Supply and qualify aqueous growth, breakup, coalescence, capture and
+      film-thickness calibrations over the intended size/flow/temperature
+      range. A shared slip selector does not automatically qualify both
+      microbubbles and upper populations; per-population physical closure
+      selection remains application work.
+- [ ] Qualify high-Peclet centimetric-bubble transfer, source/time/mesh
+      convergence and grid-scale coalescence sensitivity. The prescribed
+      film is not the full reconstructed boundary-layer SGS algorithm.
+- [ ] Qualify application caloric/chemical-energy references and any required
+      surface-energy, drag or viscous-heating closures. Variable surface
+      tension/Marangoni stresses and a planar-ALE extension remain separate
+      implementation and qualification gates.
+
+See the [radiolytic VoF model](docs/modeling/radiolytic_vof.md) and the separate
+[Stage 3 verification record](docs/verification/vof_stage3_20261019.md) for the
+implemented contracts, supplied inputs and measured verification scope.
 
 ### Stage 4 — Bidirectional representation changes
 

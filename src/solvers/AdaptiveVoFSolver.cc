@@ -3,6 +3,7 @@
  */
 #include "solvers/AdaptiveVoFSolver.hh"
 
+#include "equations/RadiolyticGasProperties.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/CompensatedSum.hh"
 
@@ -13,10 +14,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <map>
 #include <numbers>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
@@ -152,6 +156,11 @@ struct AdaptiveVoFSolver::Impl
         std::vector<Inventory> inventories;
         VoFStepDiagnostics diagnostics;
         std::size_t steps = 0;
+        std::optional<VoF::LowMachState> low;
+        VoF::LowMachDiagnostics low_diagnostics;
+        VoF::LowMachTransport low_flux;
+        Vector low_pressure_impulse_scale{};
+        double low_momentum_operation_bound = 0;
     };
 
     struct Context
@@ -173,6 +182,7 @@ struct AdaptiveVoFSolver::Impl
         std::size_t row_capacity = 1;
         GO gauge = 0;
         BelosLinearSolver<> pressure_solver, inventory_solver;
+        std::shared_ptr<const VoF::LowMachOptions> low_options;
 
         Context(std::shared_ptr<const Hierarchy> h, VoFMaterial m, VoFSolverOptions o)
             : geometry(std::make_shared<VoF::AdaptiveVoF>(std::move(h))), mesh(geometry->mesh()), material(m),
@@ -267,7 +277,8 @@ struct AdaptiveVoFSolver::Impl
             bool valid = true;
             for (std::size_t c = 0; c < owned(); ++c)
             {
-                rho[c] = mixture(s.f[c], material.liquid_density, material.gas_density);
+                rho[c] = s.low ? low_mass(*s.low, c) / volume[c]
+                               : mixture(s.f[c], material.liquid_density, material.gas_density);
                 valid = valid && std::isfinite(rho[c]) && rho[c] > 0;
             }
             require_all(valid, "AdaptiveVoFSolver mixture density is nonpositive/nonfinite.");
@@ -484,8 +495,23 @@ struct AdaptiveVoFSolver::Impl
         };
 
         void project(State& s, const std::vector<double>& rho_owned, double dt,
-            const std::vector<Vector>& predictor_change, bool capillary, BoundaryProjection boundary)
+            const std::vector<Vector>& predictor_change, bool capillary, BoundaryProjection boundary,
+            const std::vector<double>* integrated_target = nullptr,
+            const std::vector<double>* volume_susceptibility = nullptr,
+            const std::vector<double>* pressure_reference = nullptr)
         {
+            require_all(bool(volume_susceptibility) == bool(pressure_reference),
+                "AdaptiveVoFSolver volume-pressure response requires a susceptibility and reference pressure.");
+            if (volume_susceptibility)
+                require_all(volume_susceptibility->size() == owned() && pressure_reference->size() == owned() &&
+                                std::all_of(volume_susceptibility->begin(), volume_susceptibility->end(),
+                                    [](double value) { return std::isfinite(value) && value >= 0; }) &&
+                                std::all_of(pressure_reference->begin(), pressure_reference->end(),
+                                    [](double value) { return std::isfinite(value); }),
+                    "AdaptiveVoFSolver volume-pressure response has invalid owned storage.");
+            const bool compressible = volume_susceptibility && max_abs(*volume_susceptibility) > 0;
+            std::array<detail::CompensatedSum<>, 3> pressure_impulse_scale;
+            std::vector<std::size_t> pressure_force_terms(s.low ? owned() : 0, 0);
             const auto rho = geometry->exchange_cells(rho_owned);
             const auto fraction = geometry->exchange_cells(s.f);
             const auto grad_f = gradients(fraction);
@@ -531,13 +557,30 @@ struct AdaptiveVoFSolver::Impl
             for (std::size_t i = 0; i < mesh->num_owned_faces(); ++i)
                 s.face_u[i] += dt * beta[i] * capillary_face[i];
             s.face_u = geometry->exchange_faces(s.face_u);
-            auto div = divergence(s.face_u);
+            s.p.assign(owned(), 0);
+            auto residual_divergence = [&]
+            {
+                auto result = divergence(s.face_u);
+                if (integrated_target)
+                    for (std::size_t c = 0; c < owned(); ++c)
+                        result[c] -= (*integrated_target)[c] / volume[c];
+                if (compressible)
+                    for (std::size_t c = 0; c < owned(); ++c)
+                        result[c] +=
+                            (*volume_susceptibility)[c] * (s.p[c] - (*pressure_reference)[c]) / (dt * volume[c]);
+                return result;
+            };
+            if (integrated_target)
+                require_all(integrated_target->size() == owned() &&
+                                std::all_of(integrated_target->begin(), integrated_target->end(),
+                                    [](double v) { return std::isfinite(v); }),
+                    "AdaptiveVoFSolver continuity target has invalid owned storage.");
+            auto div = residual_divergence();
             const double rhs_scale = max_abs(div) / dt;
             require_all(std::isfinite(rhs_scale), "AdaptiveVoFSolver pressure right-hand side is nonfinite.");
             const double tolerance =
                 options.pressure_absolute_tolerance + options.pressure_relative_tolerance * rhs_scale;
             const double limit = std::min({options.divergence_tolerance, tolerance * dt, 5e-11 / dt});
-            s.p.assign(owned(), 0);
             s.diagnostics.pressure_iterations = 0;
             if (max_abs(div) > limit)
             {
@@ -549,11 +592,11 @@ struct AdaptiveVoFSolver::Impl
                         {
                             const auto gid = mesh->cell_global_id(static_cast<LO>(c));
                             std::map<GO, double> row;
-                            if (gid == gauge)
+                            if (gid == gauge && !compressible)
                                 row[gid] = 1;
                             else
                             {
-                                double diagonal = 0;
+                                double diagonal = compressible ? (*volume_susceptibility)[c] / (dt * dt) : 0;
                                 for (const auto id : mesh->faces(static_cast<LO>(c)))
                                 {
                                     const auto& f = faces[id];
@@ -563,7 +606,7 @@ struct AdaptiveVoFSolver::Impl
                                     const auto ngid = mesh->cell_global_id(n);
                                     const double coefficient = beta[id] * f.area / f.distance;
                                     diagonal += coefficient;
-                                    if (ngid != gauge)
+                                    if (ngid != gauge || compressible)
                                         row[ngid] -= coefficient;
                                 }
                                 row[gid] += diagonal;
@@ -595,8 +638,10 @@ struct AdaptiveVoFSolver::Impl
                     if (linear.max_iterations <= 0)
                         break;
                     for (std::size_t c = 0; c < owned(); ++c)
-                        rhs.replaceLocalValue(static_cast<LO>(c),
-                            mesh->cell_global_id(static_cast<LO>(c)) == gauge ? 0 : -div[c] * volume[c] / dt);
+                        rhs.replaceLocalValue(
+                            static_cast<LO>(c), mesh->cell_global_id(static_cast<LO>(c)) == gauge && !compressible
+                                                    ? 0
+                                                    : -div[c] * volume[c] / dt);
                     const auto stats = pressure_solver.solve_from_zero_with_statistics(
                         Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix), rhs, solution, linear);
                     require_all(std::isfinite(stats.achieved_tolerance) && std::isfinite(stats.rhs_norm),
@@ -633,6 +678,8 @@ struct AdaptiveVoFSolver::Impl
                                 for (const auto id : mesh->faces(static_cast<LO>(c)))
                                 {
                                     const auto& f = faces[id];
+                                    if (s.low)
+                                        ++pressure_force_terms[c];
                                     double value = 0;
                                     if (f.boundary)
                                     {
@@ -647,21 +694,32 @@ struct AdaptiveVoFSolver::Impl
                                         value = -sign * (p_face[id] - owned_p[c]) * f.area;
                                     }
                                     for (std::size_t a = 0; a < 3; ++a)
+                                    {
                                         force[c][a] += value * f.normal[a];
+                                        if (s.low && !f.boundary)
+                                            pressure_impulse_scale[a] += dt * f.area * std::abs(f.normal[a]) *
+                                                                         (std::abs(p_face[id]) + std::abs(owned_p[c]));
+                                    }
                                 }
                             }
                         });
-                    div = divergence(s.face_u);
+                    div = residual_divergence();
                 }
             }
             const double residual = max_abs(div);
             require_all(std::isfinite(residual) && residual <= limit,
                 "AdaptiveVoFSolver corrected pressure/continuity residual exceeded its independent tolerance.");
+            double momentum_operation_bound = 0;
             with_geometry(
                 [&]
                 {
                     for (std::size_t c = 0; c < owned(); ++c)
                     {
+                        if (s.low)
+                            momentum_operation_bound = std::max(momentum_operation_bound,
+                                static_cast<double>(pressure_force_terms[c] +
+                                                    2 * mesh->faces(static_cast<LO>(c)).size() + 16 +
+                                                    4 * s.low->dispersed.size()));
                         if (boundary == BoundaryProjection::Step)
                             for (const auto id : mesh->faces(static_cast<LO>(c)))
                             {
@@ -677,17 +735,28 @@ struct AdaptiveVoFSolver::Impl
                             s.u[c][a] += dt * force[c][a] / (rho_owned[c] * volume[c]);
                     }
                 });
+            if (s.low)
+            {
+                for (std::size_t a = 0; a < 3; ++a)
+                    s.low_pressure_impulse_scale[a] = sum(static_cast<double>(pressure_impulse_scale[a].value()));
+                s.low_momentum_operation_bound = maximum(momentum_operation_bound);
+            }
             s.diagnostics.maximum_divergence = residual;
             s.diagnostics.pressure_residual = residual / dt;
         }
 
-        std::vector<Vector> viscous_force(const State& s) const
+        std::vector<Vector> viscous_force(const State& s, Vector* traction_scale = nullptr) const
         {
+            if (traction_scale)
+                *traction_scale = {};
             std::vector<Vector> force(owned());
-            if (material.liquid_viscosity == 0 && material.gas_viscosity == 0)
+            if (!s.low && material.liquid_viscosity == 0 && material.gas_viscosity == 0)
                 return force;
             const auto u = exchange_vectors(s.u);
             const auto f = geometry->exchange_cells(s.f);
+            std::vector<double> viscosity;
+            if (s.low)
+                viscosity = geometry->exchange_cells(low_viscosity(s));
             std::array<std::vector<Vector>, 3> gradient;
             for (std::size_t b = 0; b < 3; ++b)
             {
@@ -702,7 +771,8 @@ struct AdaptiveVoFSolver::Impl
             for (std::size_t i = 0; i < mesh->num_owned_faces(); ++i)
             {
                 const auto& face = faces[i];
-                const double mu_o = mixture(f[face.owner], material.liquid_viscosity, material.gas_viscosity);
+                const double mu_o = s.low ? viscosity[face.owner]
+                                          : mixture(f[face.owner], material.liquid_viscosity, material.gas_viscosity);
                 if (face.boundary)
                 {
                     const double normal = -2 * mu_o * dot(u[face.owner], face.normal) / face.owner_distance;
@@ -711,7 +781,9 @@ struct AdaptiveVoFSolver::Impl
                     continue;
                 }
                 const double mu =
-                    0.5 * (mu_o + mixture(f[face.neighbor], material.liquid_viscosity, material.gas_viscosity));
+                    0.5 *
+                    (mu_o + (s.low ? viscosity[face.neighbor]
+                                   : mixture(f[face.neighbor], material.liquid_viscosity, material.gas_viscosity)));
                 for (std::size_t b = 0; b < 3; ++b)
                 {
                     const double left = u[face.owner][b] + dot(gradient[b][face.owner], face.owner_tangent);
@@ -731,6 +803,15 @@ struct AdaptiveVoFSolver::Impl
             }
             for (auto& values : traction)
                 values = geometry->exchange_faces(values);
+            if (traction_scale)
+            {
+                std::array<detail::CompensatedSum<>, 3> local;
+                for (std::size_t id = 0; id < mesh->num_owned_faces(); ++id)
+                    for (std::size_t a = 0; a < 3; ++a)
+                        local[a] += 2 * faces[id].area * std::abs(traction[a][id]);
+                for (std::size_t a = 0; a < 3; ++a)
+                    (*traction_scale)[a] = sum(static_cast<double>(local[a].value()));
+            }
             with_geometry(
                 [&]
                 {
@@ -878,6 +959,11 @@ struct AdaptiveVoFSolver::Impl
 
         void budget(State& s) const
         {
+            if (s.low)
+            {
+                budget_low(s);
+                return;
+            }
             validate_fraction(s.f);
             bool valid = s.u.size() == owned() && s.p.size() == owned() && s.k.size() == owned();
             detail::CompensatedSum<> gas, liquid, kinetic;
@@ -921,6 +1007,8 @@ struct AdaptiveVoFSolver::Impl
 
         double stable_timestep(const State& s) const
         {
+            if (s.low)
+                return stable_low_timestep(s);
             double local_rate = 0, local_h_inverse = 0, viscous_rate = 0, local_gas = 0, local_liquid = 0,
                    subface_rate = 0;
             const double nu = std::max(material.liquid_viscosity, material.gas_viscosity) /
@@ -972,8 +1060,12 @@ struct AdaptiveVoFSolver::Impl
             return dt;
         }
 
+#include "solvers/AdaptiveVoFLowMach.inc"
+
         State advance(const State& old, double dt)
         {
+            if (old.low)
+                return advance_low(old, dt, {}, nullptr);
             identical(dt, "AdaptiveVoFSolver timestep must be finite and identical across ranks.");
             require_all(dt > 0 && dt <= stable_timestep(old) * (1 + 8 * std::numeric_limits<double>::epsilon()),
                 "AdaptiveVoFSolver timestep exceeds its explicit stability limit or is nonpositive.");
@@ -1073,6 +1165,23 @@ struct AdaptiveVoFSolver::Impl
     std::shared_ptr<Context> context;
     std::shared_ptr<Published> published, saved;
     Checkpoint active_checkpoint = 0, next_checkpoint = 1;
+    std::uint64_t low_trial_nonce = 0;
+
+    struct LowTrialData
+    {
+        const Impl* owner = nullptr;
+        std::shared_ptr<Context> context;
+        std::shared_ptr<const Published> accepted;
+        std::uint64_t nonce = 0;
+        State candidate;
+    };
+
+    void invalidate_low_trials()
+    {
+        require_all(
+            low_trial_nonce < std::numeric_limits<std::uint64_t>::max(), "Low-Mach trial generation exhausted.");
+        ++low_trial_nonce;
+    }
 
     Impl(std::shared_ptr<const Hierarchy> h, VoFMaterial material, VoFSolverOptions options)
     {
@@ -1102,7 +1211,9 @@ struct AdaptiveVoFSolver::Impl
         context->project(next, context->density(next), 1, std::vector<Vector>(f.size()), false, boundary);
         context->budget(next);
         auto candidate = std::make_shared<Published>(std::move(next), context->mesh);
+        invalidate_low_trials();
         published.swap(candidate);
+        context->low_options.reset();
     }
 
     void regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen,
@@ -1124,6 +1235,15 @@ struct AdaptiveVoFSolver::Impl
         if (hierarchy->topology_generation() == context->geometry->hierarchy()->topology_generation())
             return;
         auto candidate_context = std::make_shared<Context>(hierarchy, context->material, context->options);
+        if (published->state.low)
+        {
+            auto next = context->remap_low(published->state, *candidate_context);
+            auto candidate = std::make_shared<Published>(std::move(next), candidate_context->mesh);
+            invalidate_low_trials();
+            context.swap(candidate_context);
+            published.swap(candidate);
+            return;
+        }
         auto quantities = published->state.inventories;
         const auto rho = context->density(published->state);
         for (std::size_t a = 0; a < 3; ++a)
@@ -1193,6 +1313,7 @@ struct AdaptiveVoFSolver::Impl
                 "AdaptiveVoFSolver regrid failed a passive-inventory conservation gate.");
         }
         auto candidate = std::make_shared<Published>(std::move(next), candidate_context->mesh);
+        invalidate_low_trials();
         context.swap(candidate_context);
         published.swap(candidate);
     }
@@ -1233,6 +1354,7 @@ VoFStepDiagnostics AdaptiveVoFSolver::step(double dt)
     auto next = impl_->context->advance(impl_->published->state, dt);
     const auto diagnostics = next.diagnostics;
     auto candidate = std::make_shared<Impl::Published>(std::move(next), impl_->context->mesh);
+    impl_->invalidate_low_trials();
     impl_->published.swap(candidate);
     return diagnostics;
 }
@@ -1241,6 +1363,116 @@ double AdaptiveVoFSolver::stable_timestep() const
 {
     return impl_->context->stable_timestep(impl_->published->state);
 }
+
+void AdaptiveVoFSolver::initialize_low_mach(VoF::LowMachOptions options, const VoF::LowMachInitialState& initial)
+{
+    require_all(!impl_->saved, "AdaptiveVoFSolver cannot reinitialize while a checkpoint is active.");
+    impl_->context->validate_low_options(options);
+    const auto previous = impl_->context->low_options;
+    impl_->context->low_options = std::make_shared<const VoF::LowMachOptions>(std::move(options));
+    try
+    {
+        auto next = impl_->context->initialize_low(initial);
+        auto candidate = std::make_shared<Impl::Published>(std::move(next), impl_->context->mesh);
+        impl_->invalidate_low_trials();
+        impl_->published.swap(candidate);
+    }
+    catch (...)
+    {
+        impl_->context->low_options = previous;
+        throw;
+    }
+}
+
+bool AdaptiveVoFSolver::low_mach_enabled() const noexcept
+{
+    return impl_->published->state.low.has_value();
+}
+
+const VoF::LowMachState& AdaptiveVoFSolver::low_mach_state() const
+{
+    if (!low_mach_enabled())
+        throw std::logic_error("AdaptiveVoFSolver low-Mach mode is not initialized.");
+    return *impl_->published->state.low;
+}
+
+const VoF::LowMachDiagnostics& AdaptiveVoFSolver::low_mach_diagnostics() const
+{
+    (void) low_mach_state();
+    return impl_->published->state.low_diagnostics;
+}
+
+const VoF::LowMachOptions& AdaptiveVoFSolver::low_mach_options() const
+{
+    (void) low_mach_state();
+    return *impl_->context->low_options;
+}
+
+AdaptiveVoFSolver::LowMachTrial::LowMachTrial(std::shared_ptr<const void> candidate) : candidate_(std::move(candidate))
+{
+}
+
+const VoF::LowMachState& AdaptiveVoFSolver::LowMachTrial::state() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return *std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.low;
+}
+const VoF::LowMachDiagnostics& AdaptiveVoFSolver::LowMachTrial::diagnostics() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.low_diagnostics;
+}
+const VoF::LowMachTransport& AdaptiveVoFSolver::LowMachTrial::transport() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.low_flux;
+}
+const std::vector<double>& AdaptiveVoFSolver::LowMachTrial::face_velocity() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.face_u;
+}
+const std::vector<Vector>& AdaptiveVoFSolver::LowMachTrial::velocity() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.u;
+}
+const std::vector<double>& AdaptiveVoFSolver::LowMachTrial::mechanical_pressure() const
+{
+    if (!candidate_)
+        throw std::logic_error("AdaptiveVoFSolver low-Mach trial is empty.");
+    return std::static_pointer_cast<const Impl::LowTrialData>(candidate_)->candidate.p;
+}
+
+AdaptiveVoFSolver::LowMachTrial AdaptiveVoFSolver::preview_low_mach_step(
+    double dt, const VoF::LowMachSources& sources, const VoF::LowMachState* guess)
+{
+    require_all(low_mach_enabled(), "AdaptiveVoFSolver low-Mach mode is not initialized.");
+    auto candidate = std::make_shared<Impl::LowTrialData>();
+    candidate->owner = impl_.get();
+    candidate->context = impl_->context;
+    candidate->accepted = impl_->published;
+    candidate->nonce = impl_->low_trial_nonce;
+    candidate->candidate = impl_->context->advance_low(impl_->published->state, dt, sources, guess);
+    return LowMachTrial(std::move(candidate));
+}
+
+void AdaptiveVoFSolver::commit_low_mach_trial(const LowMachTrial& trial)
+{
+    const auto data = std::static_pointer_cast<const Impl::LowTrialData>(trial.candidate_);
+    require_all(data && data->owner == impl_.get() && data->context == impl_->context &&
+                    data->accepted == impl_->published && data->nonce == impl_->low_trial_nonce,
+        "AdaptiveVoFSolver low-Mach trial is stale or belongs to another solver.");
+    auto candidate = std::make_shared<Impl::Published>(data->candidate, impl_->context->mesh);
+    impl_->invalidate_low_trials();
+    impl_->published.swap(candidate);
+}
+
 void AdaptiveVoFSolver::regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen,
     VoF::RefinementOptions protection, VoF::RefinementHints hints)
 {
@@ -1259,6 +1491,9 @@ VoF::RefinementPlan AdaptiveVoFSolver::refinement_plan(VoF::RefinementOptions op
 
 void AdaptiveVoFSolver::register_inventory(Inventory inventory)
 {
+    require_all(!low_mach_enabled() || inventory.carrier != Carrier::MixtureMass,
+        "Low-Mach mode uses its typed EOS mass inventories; the legacy constant-density passive MixtureMass carrier "
+        "is unavailable.");
     identical(static_cast<double>(impl_->published->state.inventories.size()),
         "AdaptiveVoFSolver inventory registries disagree.");
     impl_->context->validate_inventory(inventory, impl_->published->state);
@@ -1269,6 +1504,7 @@ void AdaptiveVoFSolver::register_inventory(Inventory inventory)
     auto next = impl_->published->state;
     next.inventories.push_back(std::move(inventory));
     auto candidate = std::make_shared<Impl::Published>(std::move(next), impl_->context->mesh);
+    impl_->invalidate_low_trials();
     impl_->published.swap(candidate);
 }
 
@@ -1302,6 +1538,7 @@ void AdaptiveVoFSolver::restore(Checkpoint checkpoint)
 {
     require_all(
         impl_->saved && checkpoint == impl_->active_checkpoint, "AdaptiveVoFSolver checkpoint token is not active.");
+    impl_->invalidate_low_trials();
     impl_->published = impl_->saved;
 }
 void AdaptiveVoFSolver::release_checkpoint(Checkpoint checkpoint)
