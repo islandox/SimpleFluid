@@ -37,6 +37,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   elseif(TEST_NAME STREQUAL "testAdaptiveVoFSolver")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;amr\\;conservation\\;capillary\\;transaction\\;collective")
+  elseif(TEST_NAME STREQUAL "testConservativeVoFTransport")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testVoFSolver")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;conservation\\;capillary\\;transaction")

@@ -944,8 +944,15 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
         throw std::runtime_error("Low-Mach conservative phase capacities are negative or disagree with the geometric "
                                  "volume contract:" +
                                  capacity_failure);
+    // Adjacent RHS groups have exactly the same capacity and carrier flux.
+    // Reuse their numerical matrix/preconditioner; sources and acceptance are
+    // still evaluated separately for each physical quantity.
     auto liquid = transport_low_scalar(
         accepted.liquid_mass, source.liquid_mass_change, carrier_capacity, out.carrier_volume, true);
+    auto dissolved = transport_low_scalar(accepted.dissolved_hydrogen_moles, source.dissolved_hydrogen_change,
+        carrier_capacity, out.carrier_volume, true);
+    auto donor = transport_low_scalar(
+        accepted.donor_hydrogen_moles, source.donor_hydrogen_change, carrier_capacity, out.carrier_volume, true);
     auto h_source = source.resolved_hydrogen_change, i_source = source.resolved_inert_change;
     for (std::size_t c = 0; c < owned(); ++c)
     {
@@ -955,10 +962,6 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
     auto hydrogen =
         transport_low_scalar(accepted.resolved_hydrogen_moles, h_source, gas_capacity, out.resolved_volume, true);
     auto inert = transport_low_scalar(accepted.resolved_inert_moles, i_source, gas_capacity, out.resolved_volume, true);
-    auto dissolved = transport_low_scalar(accepted.dissolved_hydrogen_moles, source.dissolved_hydrogen_change,
-        carrier_capacity, out.carrier_volume, true);
-    auto donor = transport_low_scalar(
-        accepted.donor_hydrogen_moles, source.donor_hydrogen_change, carrier_capacity, out.carrier_volume, true);
     next.liquid_mass = std::move(liquid.amount);
     next.resolved_hydrogen_moles = std::move(hydrogen.amount);
     next.resolved_inert_moles = std::move(inert.amount);
@@ -1066,15 +1069,7 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
     out.internal_energy = geometry->exchange_faces(out.internal_energy);
     heat_flux = geometry->exchange_faces(heat_flux);
     out.conductive_energy = heat_flux;
-    for (std::size_t a = 0; a < 3; ++a)
-    {
-        std::vector<double> component(faces.size());
-        for (std::size_t id = 0; id < faces.size(); ++id)
-            component[id] = out.momentum[id][a];
-        component = geometry->exchange_faces(component);
-        for (std::size_t id = 0; id < faces.size(); ++id)
-            out.momentum[id][a] = component[id];
-    }
+    out.momentum = geometry->exchange_face_vectors(out.momentum);
     work.energy_rhs = accepted.internal_energy;
     work.momentum_rhs = accepted.momentum;
     with_geometry(

@@ -1,6 +1,7 @@
 set(SIMPLEFLUID_SOLVER_SOURCES
     VoFSolver.cc
     details/ConservativeVoFTransport.cc
+    details/VoFProjectionWorkspace.cc
     AdaptiveVoFSolver.cc
     VoFLowMach.cc
     RadiolyticVoFCoupler.cc
@@ -35,6 +36,8 @@ target_compile_definitions(SimpleFluidSolvers PRIVATE
     SimpleFluidEquations_EXPORTS)
 target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidFVM)
 simplefluid_exclude_from_pgo_sources(VoFSolver.cc)
+simplefluid_exclude_from_pgo_sources(details/ConservativeVoFTransport.cc)
+simplefluid_exclude_from_pgo_sources(details/VoFProjectionWorkspace.cc)
 simplefluid_exclude_from_pgo_sources(AdaptiveVoFSolver.cc)
 simplefluid_exclude_from_pgo_sources(VoFLowMach.cc)
 simplefluid_exclude_from_pgo_sources(RadiolyticVoFCoupler.cc)
