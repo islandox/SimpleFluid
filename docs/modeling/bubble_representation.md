@@ -198,5 +198,5 @@ translation or capillary test is not that benchmark. Matching its boundary
 conditions and completing centimetric rise, shape, wake, mass-transfer and
 threshold-convergence studies remain separate qualification work.
 
-See the dated [Stage 4 verification record](../verification/vof_stage4_20261019.md)
-for the implemented API, executed checks and outstanding limits.
+See the tracked [VoF verification contracts](../verification/vof_solver_contracts.md)
+for reproducible numerical assertions and outstanding qualification limits.

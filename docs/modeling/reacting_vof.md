@@ -327,5 +327,11 @@ pressure histories, and additional eligibility limits.
 
 The molar-pivot discretization follows the two-moment principle of
 [Kumar and Ramkrishna's fixed-pivot method](https://engineering.purdue.edu/ramkiites/wp-content/uploads/2019/10/125_1996_Kumar_On-the-Solution-of-Population-Balance-Equations-by-Discretization-I..pdf).
-Dated commands, measured errors, and limitations belong in the separate
-[Stage 3 verification record](../verification/vof_stage3_20261019.md).
+The tracked [VoF verification contracts](../verification/vof_solver_contracts.md)
+identify reproducible assertions and measurement workflows. Dated errors and
+source-specific results remain local build artifacts.
+
+The [transport and state-ownership contract](../architecture/vof_transport.md)
+defines compatible implicit momentum transport, canonical inventories and cache
+lifetimes. The verification index lists reproducible assertions; local dated
+measurements are not available as tracked qualification reports.
