@@ -105,12 +105,22 @@ preconditioners. A failed refresh cannot publish a valid cache key.
 
 Passive inventories use the same transport boundary with optional left row
 equilibration. Each positive physical row is divided directly by its diagonal;
-forming a reciprocal could overflow for a subnormal carrier. The scaled solve
-is tightened using the physical diagonal/RHS norm bound, with independently
-scaled norms so microscopic carriers cannot overflow a squared norm. A compensated
-residual on the original unscaled equation must still meet the original
-convergence tolerance. Positivity and the global extensive ledger remain
-independent. Changing scaling policy invalidates numerical cache reuse.
+forming a reciprocal could overflow for a subnormal carrier. The inner relative
+target is the larger of the requested physical tolerance and 64 binary64 epsilons.
+Belos must satisfy its ordinary true-residual contract for that scaled solve.
+A compensated residual of the actual amount and canonical face-flux ledger must
+then meet the original unscaled physical tolerance. A global maximum-diagonal
+bound is not a mandatory inner target: it can be unattainable despite an accurate
+physical solution, or underflow to zero for a subnormal carrier.
+
+If the physical gate fails, up to four zero-start corrections solve the same
+equilibrated operator with the original physical defect divided by each row
+diagonal. A collective power-of-two RHS normalization keeps correction norms in
+range; concentration additions retain compensation across corrections. The
+initial solve and corrections share one iteration budget, including any internal
+Belos refinement. Exhaustion rejects the candidate. The original physical gate,
+final positivity and global extensive ledger remain independent and no inventory
+is clipped. Changing scaling policy invalidates numerical cache reuse.
 
 The separate `VoFProjectionWorkspace` retains pressure graph, RHS, solution and
 linear-solver storage. It refreshes numerical mobility and susceptibility on
