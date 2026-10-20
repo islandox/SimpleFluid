@@ -13,11 +13,11 @@ velocity from the original cell.
 For each velocity component, the private `ConservativeVoFTransport` component
 solves
 
-```text
-M_new[c] u_new[c] + sum_f s[c,f] F[f] u_new[upwind(f)] = P_old[c] + S[c].
-```
+$$
+M^\mathrm{new}_c u^\mathrm{new}_c + \sum_f s_{c,f} F_f u^\mathrm{new}_{\mathrm{upwind}(f)} = P^\mathrm{old}_c + S_c.
+$$
 
-`M_new` is the final extensive mixture mass in kg. `F` is the signed integrated
+$M^\mathrm{new}$ is the final extensive mixture mass in kg. $F$ is the signed integrated
 mass flux in kg on one canonical face. Incidence signs account for coarse/fine
 subfaces exactly once. Incompressible transport forms these quantities from
 constant phase densities and the geometric phase-volume ledger. Low-Mach
@@ -25,9 +25,9 @@ transport forms them from the final liquid/species/population inventories and
 their actual mass fluxes. It never substitutes geometric gas volume for a
 species molar flux.
 
-With no physical sources, `M_new + div(F) = M_old`. The implicit upwind matrix
-has diagonal `M_new + outgoing(F)` and nonpositive incoming entries. Its row
-sum is positive `M_old`. The inverse is nonnegative, constants are preserved,
+With no physical sources, $M^\mathrm{new} + \nabla\cdot F = M^\mathrm{old}$. The implicit upwind matrix
+has diagonal $M^\mathrm{new} + \mathrm{outgoing}(F)$ and nonpositive incoming entries. Its row
+sum is positive $M^\mathrm{old}$. The inverse is nonnegative, constants are preserved,
 and the transported passive velocity lies within its old bounds up to the
 linear residual and floating-point accumulation. Summing rows cancels every
 internal momentum flux, preserving total momentum. No gas- or liquid-specific
@@ -35,14 +35,14 @@ velocity division is needed at vanishing phase fractions.
 
 The directional compression terms cancel in the divergence-free limit. For
 physical volume sources, low-Mach phase storage includes both the directional
-correction and `DeltaG - chi*(DeltaG+DeltaC)` before species and mass recovery.
+correction and $\Delta G - \chi(\Delta G+\Delta C)$ before species and mass recovery.
 Physical momentum sources remain integrated physical impulses. Neither a
 source momentum nor a geometric compression velocity is invented from a
 vanishing phase fraction. A general velocity maximum principle is not asserted
 when pressure, capillarity, gravity, phase sources, or drift impulses act.
 
 The low-Mach velocity is the continuous/liquid velocity. Dispersed drift adds
-physical momentum `sum_k W_H2 n_k w_k`. Its face impulse is included separately;
+physical momentum $\sum_k W_\mathrm{H_2} n_k w_k$. Its face impulse is included separately;
 the new cell drift momentum is removed from the velocity equation and restored
 to the conservative physical ledger. Viscosity, gravity, pressure and capillary
 impulses follow transport. The pressure/divergence and extensive physical gates
@@ -106,7 +106,8 @@ preconditioners. A failed refresh cannot publish a valid cache key.
 Passive inventories use the same transport boundary with optional left row
 equilibration. Each positive physical row is divided directly by its diagonal;
 forming a reciprocal could overflow for a subnormal carrier. The scaled solve
-is tightened using the physical diagonal/RHS norm bound, then a compensated
+is tightened using the physical diagonal/RHS norm bound, with independently
+scaled norms so microscopic carriers cannot overflow a squared norm. A compensated
 residual on the original unscaled equation must still meet the original
 convergence tolerance. Positivity and the global extensive ledger remain
 independent. Changing scaling policy invalidates numerical cache reuse.
@@ -143,7 +144,8 @@ only paired positive moments: an empty cell has zero radius and volume. At a
 front, the face uses the evaluated populated-side drift; both populated sides
 use distance interpolation. Newly produced or transported populations acquire
 their own evaluated closure on subsequent preparation. The timestep selector
-and transport use the same face rule, including newly sourced moments.
+and transport use the same face rule. Support uses the paired post-source
+number and mole moments, including both births and complete depletion.
 
 See the [durable verification contracts](../verification/vof_solver_contracts.md)
 for reproduction commands and the scope of numerical assertions.
