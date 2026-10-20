@@ -466,10 +466,10 @@ simplefluid_add_mpi_test(
     LABELS "vof;conservation;collective"
 )
 
+# The largest direct fixture has 32 cells; 33 ranks guarantee empty owners.
 simplefluid_add_mpi_test(
-    NAME ConservativeVoFTransport_EmptyRank_9procs
+    NAME ConservativeVoFTransport_EmptyRank_33procs
     TARGET testConservativeVoFTransport
-    PROCS 9
-    ARGS "--gtest_filter=ConservativeVoFTransportTest.EquilibratedMicroscopicCarrierPreservesConstantConcentration"
+    PROCS 33
     LABELS "vof;conservation;collective;empty_rank"
     TIMEOUT 120)
