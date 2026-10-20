@@ -562,6 +562,62 @@ TEST(AdaptiveVoFSolverTest, PassiveTransverseMomentumRemainsBoundedAcrossSplitPh
         }
 }
 
+TEST(AdaptiveVoFSolverTest, StationaryMicroscopicColumnPreservesItsPassiveConcentration)
+{
+    Grid config;
+    config.root_blocks = {2, 2, 1};
+    config.block_cells = {2, 2, 2};
+    config.extent = {4.0, 4.0, 2.0};
+    config.periodic = {true, true, true};
+    Solver solver(std::make_shared<const Hierarchy>(config), inviscid());
+    std::vector<double> fraction(solver.mesh()->num_owned_cells());
+    std::vector<Vector> velocity(fraction.size());
+    VoF::ConservedQuantity tracer{"stationary_gas", VoF::InventoryCarrier::GasVolume, {}, true};
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        const auto lid = static_cast<LO>(c);
+        const bool stationary = solver.mesh()->cell_centroid(lid).x < 1.0;
+        fraction[c] = stationary ? 1e-200 : 1.0;
+        velocity[c] = {0.0, stationary ? 0.0 : 1.0, 0.0};
+        tracer.amount.push_back(stationary ? fraction[c] * solver.mesh()->cell_volume(lid) : 0.0);
+    }
+    solver.initialize(fraction, velocity);
+    solver.register_inventory(tracer);
+    const auto before_momentum = momentum(solver);
+    const double before_volume = gas_volume(solver);
+    const double before_tracer =
+        reduce(std::accumulate(tracer.amount.begin(), tracer.amount.end(), 0.0), Teuchos::REDUCE_SUM);
+    const auto diagnostics = solver.step(0.1);
+    double maximum_relative_error = 0.0;
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        EXPECT_DOUBLE_EQ(solver.gas_fraction()[c], fraction[c]);
+        const double amount = solver.inventory("stationary_gas").amount[c];
+        EXPECT_TRUE(std::isfinite(amount));
+        EXPECT_GE(amount, 0.0);
+        if (tracer.amount[c] > 0.0)
+        {
+            maximum_relative_error = std::max(maximum_relative_error, std::abs(amount / tracer.amount[c] - 1.0));
+            EXPECT_NEAR(amount / tracer.amount[c], 1.0, 2e-12);
+        }
+        else
+            EXPECT_DOUBLE_EQ(amount, 0.0);
+    }
+    const double after_tracer = inventory_totals(solver)[0];
+    EXPECT_NEAR(after_tracer / before_tracer, 1.0, 2e-12);
+    EXPECT_NEAR(gas_volume(solver), before_volume, 2e-12);
+    const auto after_momentum = momentum(solver);
+    for (std::size_t a = 0; a < 3; ++a)
+        EXPECT_NEAR(after_momentum[a], before_momentum[a], 2e-12);
+    EXPECT_LT(diagnostics.maximum_divergence, 1e-8);
+    expect_native_publication(solver);
+    maximum_relative_error = reduce(maximum_relative_error, Teuchos::REDUCE_MAX);
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        std::cout << std::setprecision(17) << "stationary_microscopic_tracer,initial_amount=" << before_tracer
+                  << ",final_amount=" << after_tracer << ",maximum_relative_error=" << maximum_relative_error
+                  << ",maximum_divergence=" << diagnostics.maximum_divergence << '\n';
+}
+
 TEST(AdaptiveVoFSolverTest, AffineHydrostaticPressureBalancesTangentiallyOffsetCoarseFineCenters)
 {
     auto config = transport_grid();
