@@ -6,6 +6,7 @@
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <gtest/gtest.h>
+#include <array>
 #include <cmath>
 
 namespace
@@ -168,6 +169,53 @@ TEST(ConservativeVoFTransportTest, EquilibratedMicroscopicCarrierPreservesConsta
             for (std::size_t c = 0; c < n; ++c)
                 EXPECT_NEAR(unscaled.amount[c], result.amount[c], 3e-12);
         }
+    }
+}
+
+TEST(ConservativeVoFTransportTest, EquilibratedStationaryTracerHasAnOverflowSafePhysicalNormRatio)
+{
+    Meshes::AMRGrid grid;
+    grid.root_blocks = {2, 2, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {4, 4, 2};
+    grid.periodic = {true, true, true};
+    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    const auto mesh = geometry.mesh();
+    const auto n = mesh->num_owned_cells();
+    detail::ConservativeVoFTransport tracer(mesh);
+    // First reproduce overflow of the squared normalized norm. Then exercise
+    // overflow of max(D)*max(bhat), with representable input/output and target.
+    for (const auto scales : {std::array<double, 3>{1e-200, 1.0, 1.0},
+             std::array<double, 3>{std::ldexp(1.0, -100), std::ldexp(1.0, 900), std::ldexp(1.0, 150)}})
+    {
+        SCOPED_TRACE(::testing::Message() << scales[0] << ',' << scales[1] << ',' << scales[2]);
+        std::vector<double> zero(n), capacity(n), rhs(n), flux(mesh->num_faces());
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            const bool stationary = mesh->cell_centroid(static_cast<LO>(c)).x < 1.0;
+            capacity[c] = stationary ? scales[0] : scales[1];
+            rhs[c] = stationary ? capacity[c] * scales[2] : 0.0;
+        }
+        for (std::size_t face = 0; face < mesh->num_owned_faces(); ++face)
+        {
+            const auto id = static_cast<LO>(face);
+            const auto owner = mesh->owner_cell(id);
+            if (mesh->cell_centroid(owner).x >= 1.0)
+                flux[face] = 0.125 * scales[1] * mesh->face_normal(id).y;
+        }
+        flux = geometry.exchange_faces(flux);
+        const auto result = tracer.solve(rhs, zero, capacity, flux, true, 3000, 1e-12, true);
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            EXPECT_TRUE(std::isfinite(result.amount[c]));
+            EXPECT_GE(result.amount[c], 0.0);
+            if (rhs[c] > 0.0)
+                EXPECT_NEAR(result.amount[c] / rhs[c], 1.0, 2e-12);
+            else
+                EXPECT_DOUBLE_EQ(result.amount[c], 0.0);
+        }
+        for (const auto amount : result.flux)
+            EXPECT_DOUBLE_EQ(amount, 0.0);
     }
 }
 
