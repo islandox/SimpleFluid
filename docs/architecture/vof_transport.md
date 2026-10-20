@@ -152,9 +152,10 @@ liquid so interpolation does not halve its speed at a populated/empty front.
 Pure resolved-gas cells retain zero drift. Radius-dependent closures evaluate
 only paired positive moments: an empty cell has zero radius and volume. At a
 front, the face uses the evaluated populated-side drift; both populated sides
-use distance interpolation. Newly produced or transported populations acquire
-their own evaluated closure on subsequent preparation. The timestep selector
-and transport use the same face rule. Support uses the paired post-source
+use distance interpolation. Source-created populations acquire an evaluated
+closure during source preparation; populations received by transport acquire
+their own local closure on subsequent preparation. The timestep selector and
+transport use the same face rule. Support uses the paired post-source
 number and mole moments, including both births and complete depletion.
 
 See the [durable verification contracts](../verification/vof_solver_contracts.md)
