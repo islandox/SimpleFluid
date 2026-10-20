@@ -562,7 +562,9 @@ TEST(AdaptiveVoFSolverTest, PassiveTransverseMomentumRemainsBoundedAcrossSplitPh
         }
 }
 
-TEST(AdaptiveVoFSolverTest, StationaryMicroscopicColumnPreservesItsPassiveConcentration)
+namespace
+{
+void check_stationary_microscopic_column(double tiny_fraction)
 {
     Grid config;
     config.root_blocks = {2, 2, 1};
@@ -571,13 +573,17 @@ TEST(AdaptiveVoFSolverTest, StationaryMicroscopicColumnPreservesItsPassiveConcen
     config.periodic = {true, true, true};
     Solver solver(std::make_shared<const Hierarchy>(config), inviscid());
     std::vector<double> fraction(solver.mesh()->num_owned_cells());
+    const double empty_ranks = reduce(fraction.empty() ? 1.0 : 0.0, Teuchos::REDUCE_SUM);
+    if (static_cast<std::size_t>(Tpetra::getDefaultComm()->getSize()) >
+        solver.mesh()->owned_cell_map()->getGlobalNumElements())
+        EXPECT_GT(empty_ranks, 0);
     std::vector<Vector> velocity(fraction.size());
     VoF::ConservedQuantity tracer{"stationary_gas", VoF::InventoryCarrier::GasVolume, {}, true};
     for (std::size_t c = 0; c < fraction.size(); ++c)
     {
         const auto lid = static_cast<LO>(c);
         const bool stationary = solver.mesh()->cell_centroid(lid).x < 1.0;
-        fraction[c] = stationary ? 1e-200 : 1.0;
+        fraction[c] = stationary ? tiny_fraction : 1.0;
         velocity[c] = {0.0, stationary ? 0.0 : 1.0, 0.0};
         tracer.amount.push_back(stationary ? fraction[c] * solver.mesh()->cell_volume(lid) : 0.0);
     }
@@ -587,7 +593,17 @@ TEST(AdaptiveVoFSolverTest, StationaryMicroscopicColumnPreservesItsPassiveConcen
     const double before_volume = gas_volume(solver);
     const double before_tracer =
         reduce(std::accumulate(tracer.amount.begin(), tracer.amount.end(), 0.0), Teuchos::REDUCE_SUM);
-    const auto diagnostics = solver.step(0.1);
+    const Snapshot initial(solver);
+    VoFStepDiagnostics diagnostics;
+    try
+    {
+        diagnostics = solver.step(0.1);
+    }
+    catch (...)
+    {
+        initial.expect_equal(solver);
+        throw;
+    }
     double maximum_relative_error = 0.0;
     for (std::size_t c = 0; c < fraction.size(); ++c)
     {
@@ -613,8 +629,130 @@ TEST(AdaptiveVoFSolverTest, StationaryMicroscopicColumnPreservesItsPassiveConcen
     expect_native_publication(solver);
     maximum_relative_error = reduce(maximum_relative_error, Teuchos::REDUCE_MAX);
     if (Tpetra::getDefaultComm()->getRank() == 0)
-        std::cout << std::setprecision(17) << "stationary_microscopic_tracer,initial_amount=" << before_tracer
-                  << ",final_amount=" << after_tracer << ",maximum_relative_error=" << maximum_relative_error
+        std::cout << std::setprecision(17) << "stationary_microscopic_tracer,fraction=" << tiny_fraction
+                  << ",initial_amount=" << before_tracer << ",final_amount=" << after_tracer
+                  << ",maximum_relative_error=" << maximum_relative_error
+                  << ",empty_owner_ranks=" << empty_ranks
+                  << ",maximum_divergence=" << diagnostics.maximum_divergence << '\n';
+}
+} // namespace
+
+TEST(AdaptiveVoFSolverTest, StationaryMicroscopicColumnPreservesItsPassiveConcentration)
+{
+    check_stationary_microscopic_column(1e-200);
+}
+
+TEST(AdaptiveVoFSolverTest, StationarySubnormalColumnPreservesItsPassiveConcentration)
+{
+    check_stationary_microscopic_column(1e-311);
+}
+
+TEST(AdaptiveVoFSolverTest, MicroscopicColumnAdvectionUsesTheOriginalPhysicalResidualTarget)
+{
+    Grid config;
+    config.root_blocks = {2, 2, 1};
+    config.block_cells = {2, 2, 2};
+    config.extent = {4.0, 4.0, 2.0};
+    config.periodic = {true, true, true};
+    Solver solver(std::make_shared<const Hierarchy>(config), inviscid());
+    constexpr double dt = 1.0 / 7.0, amount_scale = 0x1p-21, gas_fraction = 7.0 * 0x1p-24;
+    constexpr std::array<double, 4> weights{0.7, 0.9, 0.6, 0.8};
+    std::vector<double> fraction(solver.mesh()->num_owned_cells());
+    const double empty_ranks = reduce(fraction.empty() ? 1.0 : 0.0, Teuchos::REDUCE_SUM);
+    if (static_cast<std::size_t>(Tpetra::getDefaultComm()->getSize()) >
+        solver.mesh()->owned_cell_map()->getGlobalNumElements())
+        EXPECT_GT(empty_ranks, 0);
+    std::vector<Vector> velocity(fraction.size(), {0.0, 1.0, 0.0});
+    VoF::ConservedQuantity tracer{"advected_microscopic_gas", VoF::InventoryCarrier::GasVolume, {}, true};
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        const auto x = solver.mesh()->cell_centroid(static_cast<LO>(c));
+        const bool microscopic = x.x < 1.0;
+        fraction[c] = microscopic ? gas_fraction : 1.0;
+        tracer.amount.push_back(microscopic ? amount_scale * weights[static_cast<std::size_t>(x.y)] : 0.0);
+    }
+    solver.initialize(fraction, velocity);
+    solver.register_inventory(tracer);
+    const auto before_momentum = momentum(solver);
+    const double before_volume = gas_volume(solver);
+    const double before_amount = inventory_totals(solver)[0];
+    const Snapshot initial(solver);
+    const auto checkpoint = solver.checkpoint();
+    VoFStepDiagnostics diagnostics;
+    try
+    {
+        diagnostics = solver.step(dt);
+    }
+    catch (...)
+    {
+        initial.expect_equal(solver);
+        solver.release_checkpoint(checkpoint);
+        throw;
+    }
+    const auto& amounts = solver.inventory("advected_microscopic_gas").amount;
+    std::array<double, 8> local{}, column{};
+    double maximum_oracle_error = 0.0;
+    for (std::size_t c = 0; c < fraction.size(); ++c)
+    {
+        const auto x = solver.mesh()->cell_centroid(static_cast<LO>(c));
+        EXPECT_DOUBLE_EQ(solver.gas_fraction()[c], fraction[c]);
+        EXPECT_GE(amounts[c], 0.0);
+        if (x.x < 1.0)
+        {
+            const auto j = static_cast<std::size_t>(x.y), k = static_cast<std::size_t>(x.z);
+            // Periodic implicit upwind: c_j - c_(j-1)/8 = weights_j.
+            // Sum the independent four-term geometric series around the ring.
+            double concentration = 0.0, factor = 1.0;
+            for (std::size_t distance = 0; distance < weights.size(); ++distance)
+            {
+                concentration += factor * weights[(j + weights.size() - distance) % weights.size()];
+                factor *= 0.125;
+            }
+            concentration /= 1.0 - factor;
+            const double expected = gas_fraction * concentration;
+            maximum_oracle_error = std::max(maximum_oracle_error, std::abs(amounts[c] - expected) / amount_scale);
+            EXPECT_NEAR(amounts[c], expected, 3e-12 * amount_scale);
+            local[j + 4 * k] = amounts[c];
+        }
+        else
+            EXPECT_DOUBLE_EQ(amounts[c], 0.0);
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            EXPECT_NEAR(solver.velocity()[c][axis], velocity[c][axis], 2e-12);
+    }
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 8, local.data(), column.data());
+    double residual_squared = 0.0, rhs_squared = 0.0;
+    for (std::size_t k = 0; k < 2; ++k)
+        for (std::size_t j = 0; j < 4; ++j)
+        {
+            const double old = amount_scale * weights[j];
+            const double now = column[j + 4 * k], upstream = column[(j + 3) % 4 + 4 * k];
+            const double residual = (now - old + dt * (now - upstream)) / amount_scale;
+            residual_squared += residual * residual;
+            rhs_squared += std::pow(old / amount_scale, 2);
+        }
+    const double physical_residual = std::sqrt(residual_squared / rhs_squared);
+    EXPECT_LE(physical_residual, 1e-12);
+    EXPECT_NEAR(inventory_totals(solver)[0] / before_amount, 1.0, 2e-12);
+    EXPECT_NEAR(gas_volume(solver), before_volume, 2e-12);
+    const auto after_momentum = momentum(solver);
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_NEAR(after_momentum[axis], before_momentum[axis], 2e-12);
+    EXPECT_LT(diagnostics.maximum_divergence, 1e-8);
+    expect_native_publication(solver);
+    const Snapshot accepted(solver);
+    solver.restore(checkpoint);
+    initial.expect_equal(solver);
+    (void) solver.step(dt);
+    accepted.expect_equal(solver);
+    solver.release_checkpoint(checkpoint);
+    EXPECT_THROW((void) solver.step(2.0 * solver.stable_timestep()), std::exception);
+    accepted.expect_equal(solver);
+    maximum_oracle_error = reduce(maximum_oracle_error, Teuchos::REDUCE_MAX);
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        std::cout << std::setprecision(17)
+                  << "advected_microscopic_tracer,physical_relative_residual=" << physical_residual
+                  << ",maximum_oracle_error=" << maximum_oracle_error << ",initial_amount=" << before_amount
+                  << ",empty_owner_ranks=" << empty_ranks
                   << ",maximum_divergence=" << diagnostics.maximum_divergence << '\n';
 }
 

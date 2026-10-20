@@ -8,6 +8,9 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <cmath>
+#include <iomanip>
+#include <iostream>
+#include <string>
 
 namespace
 {
@@ -219,4 +222,109 @@ TEST(ConservativeVoFTransportTest, EquilibratedStationaryTracerHasAnOverflowSafe
     }
 }
 
+TEST(ConservativeVoFTransportTest, PhysicalDefectCorrectionHonorsTheSharedIterationBudgetAndRecovers)
+{
+    Meshes::AMRGrid grid;
+    grid.root_blocks = {2, 2, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {4, 4, 2};
+    grid.periodic = {true, true, true};
+    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    const auto mesh = geometry.mesh();
+    const auto n = mesh->num_owned_cells();
+    double local_empty = n == 0 ? 1.0 : 0.0, empty_ranks = 0.0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_empty, &empty_ranks);
+    if (static_cast<std::size_t>(Tpetra::getDefaultComm()->getSize()) > mesh->owned_cell_map()->getGlobalNumElements())
+        EXPECT_GT(empty_ranks, 0);
+    detail::ConservativeVoFTransport tracer(mesh);
+    constexpr double dt = 1.0 / 7.0, heavy_amount = 0x1p-24, weak_capacity = 0x1p-80, weak_amount = 0x1p-60;
+    constexpr std::array<double, 4> weights{0.7, 0.9, 0.6, 0.8};
+    std::vector<double> zero(n), capacity(n), rhs(n), flux(mesh->num_faces());
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        const auto x = mesh->cell_centroid(static_cast<LO>(c));
+        const bool weak = x.x < 1.0;
+        capacity[c] = weak ? weak_capacity : 1.0;
+        rhs[c] = weak ? weak_amount : heavy_amount * weights[static_cast<std::size_t>(x.y)];
+    }
+    for (std::size_t face = 0; face < mesh->num_owned_faces(); ++face)
+    {
+        const auto id = static_cast<LO>(face);
+        if (mesh->cell_centroid(mesh->owner_cell(id)).x >= 1.0)
+            flux[face] = dt * mesh->face_normal(id).y;
+    }
+    flux = geometry.exchange_faces(flux);
+    const auto original_rhs = rhs;
+    // The weak identity block dominates the scaled RHS by about 14 orders of
+    // magnitude. A first scaled solve may converge while the physical defect
+    // in the flowing block is still large; one iteration cannot resolve both.
+    try
+    {
+        (void) tracer.solve(rhs, zero, capacity, flux, true, 1, 1e-12, true);
+        ADD_FAILURE() << "An exhausted physical residual budget must reject the transport.";
+    }
+    catch (const std::exception& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("original physical residual"), std::string::npos) << error.what();
+    }
+    EXPECT_EQ(rhs, original_rhs);
+    for (std::size_t shift : {0u, 1u})
+    {
+        SCOPED_TRACE(::testing::Message() << "RHS shift=" << shift);
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            const auto x = mesh->cell_centroid(static_cast<LO>(c));
+            rhs[c] = x.x < 1.0 ? weak_amount
+                               : heavy_amount * weights[(static_cast<std::size_t>(x.y) + shift) % weights.size()];
+        }
+        const auto result = tracer.solve(rhs, zero, capacity, flux, true, 20, 1e-12, true);
+        EXPECT_GE(result.physical_refinements, 1);
+        EXPECT_GT(result.iterations, 1);
+        EXPECT_LE(result.iterations, 20);
+        EXPECT_TRUE(std::isfinite(result.physical_relative_residual));
+        EXPECT_LE(result.physical_relative_residual, 1e-12);
+        double local_scale = 0.0, scale = 0.0;
+        for (const auto amount : rhs)
+            local_scale = std::max(local_scale, std::abs(amount));
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, 1, &local_scale, &scale);
+        double local[4]{};
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            const auto lid = static_cast<LO>(c);
+            const auto x = mesh->cell_centroid(lid);
+            EXPECT_GE(result.amount[c], 0.0);
+            EXPECT_TRUE(std::isfinite(result.amount[c]));
+            if (x.x < 1.0)
+                EXPECT_NEAR(result.amount[c] / weak_amount, 1.0, 2e-12);
+            else
+            {
+                const auto j = static_cast<std::size_t>(x.y);
+                double expected = 0.0, factor = 1.0;
+                for (std::size_t distance = 0; distance < weights.size(); ++distance)
+                {
+                    expected += factor * weights[(j + shift + weights.size() - distance) % weights.size()];
+                    factor *= 0.125;
+                }
+                expected *= heavy_amount / ((1.0 + dt) * (1.0 - factor));
+                EXPECT_NEAR(result.amount[c], expected, 3e-12 * heavy_amount);
+            }
+            double residual = result.amount[c] - rhs[c];
+            for (const auto face : mesh->faces(lid))
+                residual += (mesh->owner_cell(face) == lid ? 1.0 : -1.0) * result.flux[face];
+            local[0] += std::pow(residual / scale, 2);
+            local[1] += std::pow(rhs[c] / scale, 2);
+            local[2] += rhs[c];
+            local[3] += result.amount[c];
+        }
+        double global[4]{};
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 4, local, global);
+        const double physical_residual = std::sqrt(global[0] / global[1]);
+        EXPECT_LE(physical_residual, 1e-12);
+        EXPECT_NEAR(global[3] / global[2], 1.0, 2e-12);
+        if (Tpetra::getDefaultComm()->getRank() == 0)
+            std::cout << std::setprecision(17) << "physical_defect_correction,rhs_shift=" << shift
+                      << ",refinements=" << result.physical_refinements << ",total_iterations=" << result.iterations
+                      << ",physical_relative_residual=" << physical_residual << '\n';
+    }
+}
 } // namespace

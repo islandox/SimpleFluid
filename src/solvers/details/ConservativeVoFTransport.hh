@@ -26,12 +26,16 @@ public:
     struct Result
     {
         std::vector<double> amount, flux, trace;
+        int physical_refinements = 0, iterations = 0;
+        double physical_relative_residual = 0;
     };
     explicit ConservativeVoFTransport(SP<const MeshHandle<>> mesh);
     /** Extensive Q_old/S/M_new; overlap-face F in canonical owner orientation.
      * Optional row equilibration preserves microscopic carrier rows without a
      * reciprocal diagonal overflow; the original physical residual still must
-     * meet tolerance. It changes conditioning, not the transport equation.
+     * meet tolerance. Attainable scaled solves supply candidates and bounded
+     * physical-defect corrections within one iteration budget. Scaling changes
+     * conditioning, not the transport equation or its physical acceptance.
      */
     [[nodiscard]] Result solve(const std::vector<double>& old, const std::vector<double>& source,
         const std::vector<double>& capacity, const std::vector<double>& flux, bool nonnegative,
