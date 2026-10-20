@@ -2,6 +2,7 @@
  * @brief Independent geometric, carrier-inventory and MPI contracts for adaptive VoF.
  */
 #include "FVM/AdaptiveVoF.hh"
+#include "FVM/details/VoFReconstructionCoverage.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -556,4 +557,64 @@ TEST(AdaptiveVoFTest, MicroscopicPhaseOutflowCannotOverdrawCanonicalSubfaceDonor
                 EXPECT_GT(before, 0.0);
             }
     }
+}
+
+TEST(AdaptiveVoFTest, TranslatedNarrowDomainReconstructsConstantFractions)
+{
+    for (const double origin : {0.0, 1.0e6, -1.0e6})
+    {
+        Grid config;
+        config.origin = {origin, 0.0, 0.0};
+        config.extent = {0.004, 1.0, 1.0};
+        config.block_cells = {4, 2, 2};
+        config.max_level = 0;
+        const auto hierarchy = std::make_shared<Hierarchy>(config);
+        std::unique_ptr<AdaptiveVoF> geometry;
+        ASSERT_NO_THROW(geometry = std::make_unique<AdaptiveVoF>(hierarchy)) << "origin=" << origin;
+        const auto spacing = hierarchy->block_spacing(0);
+        Vector lower{}, upper{};
+        double nominal_volume = 1.0;
+        for (std::size_t a = 0; a < 3; ++a)
+        {
+            lower[a] = -0.5 * spacing[a];
+            upper[a] = 0.5 * spacing[a];
+            nominal_volume *= spacing[a];
+        }
+        for (const double value : {0.0, 0.25, 0.75, 1.0})
+        {
+            const std::vector<double> fraction(geometry->mesh()->num_owned_cells(), value);
+            const auto planes = geometry->reconstruct(fraction);
+            ASSERT_EQ(planes.size(), fraction.size());
+            for (const auto& plane : planes)
+            {
+                for (const double component : plane.normal)
+                    EXPECT_TRUE(std::isfinite(component));
+                EXPECT_TRUE(std::isfinite(plane.offset));
+                EXPECT_NEAR(GeometricVoF::box_plane_volume(lower, upper, plane.normal, plane.offset) / nominal_volume,
+                    value, 2.0e-14);
+            }
+        }
+    }
+}
+
+TEST(AdaptiveVoFTest, RepresentedCoverageRejectsMissingTranslatedQueryVolume)
+{
+    const Meshes::AMRBox query{{1.0e6, 0.0, 0.0}, {1.0e6 + 0.001, 1.0, 1.0}};
+    const double middle = std::midpoint(query.lower[0], query.upper[0]);
+    auto left = query, right = query;
+    left.upper[0] = middle;
+    right.lower[0] = middle;
+    std::vector<Meshes::AMROverlap> intersections{{0, left}, {1, right}};
+    EXPECT_TRUE(geometry_detail::has_complete_reconstruction_coverage(query, intersections));
+    // This represented width already differs from nominal 0.001 by more than
+    // the former 1e-9 relative gate, without any missing geometric coverage.
+    EXPECT_GT(std::abs(geometry_detail::represented_box_volume(query) - 0.001L) / 0.001L, 1.0e-9L);
+    // Remove only two coordinate ULPs at the shared seam. An origin-relative
+    // tolerance could hide this real hole; the arithmetic volume bound rejects it.
+    intersections[0].box.upper[0] = std::nextafter(middle, query.lower[0]);
+    intersections[1].box.lower[0] = std::nextafter(middle, query.upper[0]);
+    EXPECT_FALSE(geometry_detail::has_complete_reconstruction_coverage(query, intersections));
+    intersections = {{0, left}};
+    EXPECT_FALSE(geometry_detail::has_complete_reconstruction_coverage(query, intersections));
+    EXPECT_FALSE(geometry_detail::has_complete_reconstruction_coverage(query, {}));
 }
