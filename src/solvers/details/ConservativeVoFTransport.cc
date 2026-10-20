@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <limits>
 #include <stdexcept>
 #include <sstream>
 
@@ -80,6 +81,13 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
     Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 1, &local_max_flux, &global_max_flux);
     Result result{std::vector<double>(n), std::vector<double>(flux.size()), std::vector<double>(flux.size())};
     std::vector<double> concentration(n);
+    LinearSolverOptions linear;
+    linear.backend = LinearSolverBackend::Gmres;
+    linear.preconditioner = LinearPreconditioner::Jacobi;
+    linear.reuse_preconditioner = true;
+    linear.tolerance = tolerance;
+    linear.max_iterations = maximum_iterations;
+    linear.verbosity = 0;
     if (global_max_flux == 0)
     {
         for (std::size_t c = 0; c < n; ++c)
@@ -201,93 +209,47 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
             }
         }
         require(*map, valid, "Conservative VoF inventory has no storage or transport path.");
-        LinearSolverOptions linear;
-        linear.backend = LinearSolverBackend::Gmres;
-        linear.preconditioner = LinearPreconditioner::Jacobi;
-        linear.reuse_preconditioner = true;
-        linear.tolerance = tolerance;
         if (equilibrate_rows)
         {
-            double local_max[3]{}, global_max[3]{};
-            const auto normalized_rhs = rhs_.getData();
-            {
-                const auto execution = mesh_->acquire_execution_view();
-                for (std::size_t c = 0; c < n; ++c)
-                {
-                    bool connected = false;
-                    for (const auto face : mesh_->faces(static_cast<LO>(c)))
-                        connected = connected || flux[face] != 0;
-                    if (capacity[c] > 0 || connected)
-                        local_max[0] = std::max(local_max[0], diagonal_[c]);
-                    local_max[1] = std::max(local_max[1], std::abs(old[c] + source[c]));
-                    local_max[2] = std::max(local_max[2], std::abs(normalized_rhs[c]));
-                }
-            }
-            Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 3, local_max, global_max);
-            if (global_max[1] > 0)
-            {
-                require(*map, std::isfinite(global_max[0]) && global_max[0] > 0 && global_max[2] > 0,
-                    "Conservative VoF row scaling cannot represent its physical residual target.");
-                // Scale the two norms independently. Their relative magnitude
-                // may exceed sqrt(max_double), even for finite concentrations.
-                CompensatedSum<double> physical, normalized;
-                for (std::size_t c = 0; c < n; ++c)
-                {
-                    const double b = (old[c] + source[c]) / global_max[1];
-                    const double bhat = normalized_rhs[c] / global_max[2];
-                    physical += b * b;
-                    normalized += bhat * bhat;
-                }
-                double local[2] = {physical.value(), normalized.value()}, global[2]{};
-                Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_SUM, 2, local, global);
-                int physical_exponent = 0, normalized_exponent = 0, diagonal_exponent = 0;
-                const double physical_mantissa = std::frexp(global_max[1], &physical_exponent);
-                const double normalized_mantissa = std::frexp(global_max[2], &normalized_exponent);
-                const double diagonal_mantissa = std::frexp(global_max[0], &diagonal_exponent);
-                // Keep max(D)*max(bhat) and their ratio in exponent form:
-                // either intermediate could overflow or underflow although the
-                // final physical-to-scaled norm ratio is representable.
-                const double norm_ratio = std::scalbn((physical_mantissa / normalized_mantissa / diagonal_mantissa) *
-                                                          (std::sqrt(global[0]) / std::sqrt(global[1])),
-                    physical_exponent - normalized_exponent - diagonal_exponent);
-                // ||D*rhat|| <= max(D)*||rhat||. Tighten the scaled solve
-                // enough to retain the original unscaled residual target,
-                // with a factor four reserve for floating-point accumulation.
-                linear.tolerance = 0.25 * tolerance * std::min(1.0, norm_ratio);
-                require(*map, std::isfinite(linear.tolerance) && linear.tolerance > 0,
-                    "Conservative VoF row scaling cannot represent its physical residual target.");
-            }
+            require(*map, std::isfinite(tolerance) && tolerance > 0,
+                "Conservative VoF transport requires a positive finite physical tolerance.");
+            // A global diagonal bound is sufficient, but can demand a scaled
+            // residual below binary64 roundoff (or underflow to zero). Use an
+            // attainable inner target and let the original physical ledger
+            // accept or request a defect correction. Belos still checks the
+            // true scaled residual against every requested inner tolerance.
+            linear.tolerance = std::max(tolerance, 64 * std::numeric_limits<double>::epsilon());
         }
-        linear.max_iterations = maximum_iterations;
-        linear.verbosity = 0;
         const auto stats = solver_.solve_from_zero_with_statistics(
             Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix_), rhs_, solution_, linear);
         require(*map, stats.converged, "Conservative VoF implicit transport did not converge to its true residual.");
+        result.iterations = stats.iterations;
         const auto values = solution_.getData();
         std::copy(values.begin(), values.end(), concentration.begin());
-        for (std::size_t c = 0; c < n; ++c)
-        {
-            result.amount[c] = capacity[c] * concentration[c];
-            valid = valid && std::isfinite(result.amount[c]) && (!nonnegative || result.amount[c] >= 0);
-        }
-        require(*map, valid, "Conservative VoF transport lost inventory positivity or finiteness.");
     }
-    const auto halo = cells(concentration);
+    const auto publish = [&]
     {
-        const auto execution = mesh_->acquire_execution_view();
-        for (std::size_t id = 0; id < mesh_->num_owned_faces(); ++id)
+        if (global_max_flux > 0)
+            for (std::size_t c = 0; c < n; ++c)
+                result.amount[c] = capacity[c] * concentration[c];
+        const auto halo = cells(concentration);
         {
-            const auto face = static_cast<LO>(id);
-            if (mesh_->is_geometry_exterior_face(face))
-                continue;
-            const auto owner = mesh_->owner_cell(face), neighbor = mesh_->neighbor_cell(face);
-            result.trace[id] = flux[id] == 0 ? 0.5 * (halo[owner] + halo[neighbor])
-                                            : halo[flux[id] > 0 ? owner : neighbor];
-            result.flux[id] = flux[id] * result.trace[id];
+            const auto execution = mesh_->acquire_execution_view();
+            for (std::size_t id = 0; id < mesh_->num_owned_faces(); ++id)
+            {
+                const auto face = static_cast<LO>(id);
+                if (mesh_->is_geometry_exterior_face(face))
+                    continue;
+                const auto owner = mesh_->owner_cell(face), neighbor = mesh_->neighbor_cell(face);
+                result.trace[id] = flux[id] == 0 ? 0.5 * (halo[owner] + halo[neighbor])
+                                                : halo[flux[id] > 0 ? owner : neighbor];
+                result.flux[id] = flux[id] * result.trace[id];
+            }
         }
-    }
-    result.flux = faces(result.flux);
-    result.trace = faces(result.trace);
+        result.flux = faces(result.flux);
+        result.trace = faces(result.trace);
+    };
+    publish();
     if (equilibrate_rows)
     {
         // Scaling changes conditioning, never the original convergence test.
@@ -299,28 +261,89 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
         Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 1, &local_scale, &scale);
         if (scale == 0)
             scale = 1;
-        CompensatedSum<> residual_squared, rhs_squared;
+        std::vector<CompensatedSum<>> accumulated(n);
+        for (std::size_t c = 0; c < n; ++c)
+            accumulated[c] += concentration[c];
+        std::vector<long double> defect(n);
+        constexpr int maximum_refinements = 4;
+        for (;;)
         {
-            const auto execution = mesh_->acquire_execution_view();
+            CompensatedSum<> residual_squared, rhs_squared;
+            {
+                const auto execution = mesh_->acquire_execution_view();
+                for (std::size_t c = 0; c < n; ++c)
+                {
+                    CompensatedSum<> residual;
+                    residual += result.amount[c];
+                    residual += -(old[c] + source[c]);
+                    for (const auto face : mesh_->faces(static_cast<LO>(c)))
+                        residual += (mesh_->owner_cell(face) == static_cast<LO>(c) ? 1 : -1) * result.flux[face];
+                    defect[c] = -residual.value();
+                    const long double r = residual.value() / scale, b = (old[c] + source[c]) / scale;
+                    residual_squared += r * r;
+                    rhs_squared += b * b;
+                }
+            }
+            double local[2] = {static_cast<double>(residual_squared.value()), static_cast<double>(rhs_squared.value())},
+                   global[2]{};
+            Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_SUM, 2, local, global);
+            result.physical_relative_residual = std::sqrt(global[0] / (global[1] > 0 ? global[1] : 1));
+            const bool accepted = std::isfinite(global[0]) && std::isfinite(global[1]) &&
+                                  global[0] <= tolerance * tolerance * (global[1] > 0 ? global[1] : 1);
+            if (accepted)
+                break;
+            require(*map, global_max_flux > 0 && result.physical_refinements < maximum_refinements &&
+                              result.iterations < maximum_iterations,
+                "Equilibrated conservative VoF transport failed its original physical residual.");
+
+            // Solve D^-1*A*delta = D^-1*(b-A*c) using the actual physical
+            // ledger, not a residual of the rounded equilibrated matrix. A
+            // common RHS normalization keeps the generic inner norm in range;
+            // its own true-residual contract remains unchanged.
+            long double local_defect_scale = 0;
+            bool finite = true;
             for (std::size_t c = 0; c < n; ++c)
             {
-                CompensatedSum<> residual;
-                residual += result.amount[c];
-                residual += -(old[c] + source[c]);
-                for (const auto face : mesh_->faces(static_cast<LO>(c)))
-                    residual += (mesh_->owner_cell(face) == static_cast<LO>(c) ? 1 : -1) * result.flux[face];
-                const long double r = residual.value() / scale, b = (old[c] + source[c]) / scale;
-                residual_squared += r * r;
-                rhs_squared += b * b;
+                defect[c] /= diagonal_[c];
+                finite = finite && std::isfinite(defect[c]);
+                local_defect_scale = std::max(local_defect_scale, std::abs(defect[c]));
             }
+            require(*map, finite, "Conservative VoF physical defect is nonfinite.");
+            // Teuchos does not serialize long double on every supported
+            // backend. Exchange its exponent instead: a shared power of two
+            // bounds the normalized RHS by two without narrowing the defect.
+            int local_exponent = std::numeric_limits<int>::min(), global_exponent = 0;
+            if (local_defect_scale > 0)
+                (void)std::frexp(local_defect_scale, &local_exponent);
+            Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 1, &local_exponent, &global_exponent);
+            require(*map, global_exponent > std::numeric_limits<int>::min(),
+                "Conservative VoF physical defect cannot supply a finite correction.");
+            const long double defect_scale = std::scalbn(1.0L, global_exponent - 1);
+            require(*map, std::isfinite(defect_scale) && defect_scale > 0,
+                "Conservative VoF physical defect cannot supply a finite correction.");
+            for (std::size_t c = 0; c < n; ++c)
+                rhs_.replaceLocalValue(static_cast<LO>(c), static_cast<double>(defect[c] / defect_scale));
+            linear.max_iterations = maximum_iterations - result.iterations;
+            const auto stats = solver_.solve_from_zero_with_statistics(
+                Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix_), rhs_, solution_, linear);
+            require(*map, stats.converged,
+                "Conservative VoF physical defect solve did not converge to its true residual.");
+            result.iterations += stats.iterations;
+            ++result.physical_refinements;
+            {
+                const auto correction = solution_.getData();
+                for (std::size_t c = 0; c < n; ++c)
+                {
+                    accumulated[c] += static_cast<long double>(correction[c]) * defect_scale;
+                    concentration[c] = static_cast<double>(accumulated[c].value());
+                }
+            }
+            publish();
         }
-        double local[2] = {static_cast<double>(residual_squared.value()), static_cast<double>(rhs_squared.value())},
-               global[2]{};
-        Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_SUM, 2, local, global);
-        require(*map, std::isfinite(global[0]) && std::isfinite(global[1]) &&
-                          global[0] <= tolerance * tolerance * (global[1] > 0 ? global[1] : 1),
-            "Equilibrated conservative VoF transport failed its original physical residual.");
     }
+    for (double amount : result.amount)
+        valid = valid && std::isfinite(amount) && (!nonnegative || amount >= 0);
+    require(*map, valid, "Conservative VoF transport lost inventory positivity or finiteness.");
     return result;
 }
 } // namespace SimpleFluid::detail
