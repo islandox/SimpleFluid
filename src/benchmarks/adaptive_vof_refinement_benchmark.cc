@@ -2,12 +2,12 @@
  * @brief Opt-in sparse-interface refinement policy scaling, using the original public API.
  */
 #include "FVM/AdaptiveVoF.hh"
+#include "benchmarks/BenchmarkSupport.hh"
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
-#include <sys/resource.h>
 
 int main(int argc, char** argv)
 {
@@ -50,14 +50,13 @@ int main(int argc, char** argv)
     std::uint64_t checksum = 0;
     for (const auto b : selected)
         checksum = checksum * 1099511628211ULL + b + 1;
-    rusage usage{};
-    getrusage(RUSAGE_SELF, &usage);
+    const auto memory = Benchmark::sample_process_memory();
     std::cout << "block_axis,leaves,global_cells,ranks,repetitions,construct_s,refine_s,selected_count,selected_"
                  "checksum,peak_rss_kib\n"
               << std::setprecision(17) << "2," << hierarchy->blocks().size() << ',' << fraction.size() << ",1,"
               << repetitions << ',' << std::chrono::duration<double>(constructed - start).count() << ','
               << std::chrono::duration<double>(completed - constructed).count() << ',' << selected.size() << ','
-              << checksum << ',' << usage.ru_maxrss << '\n';
+              << checksum << ',' << memory.peak_resident_kib << '\n';
     if (argc > 3)
     {
         for (const auto b : selected)
