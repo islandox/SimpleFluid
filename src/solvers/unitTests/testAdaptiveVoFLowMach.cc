@@ -766,6 +766,113 @@ TEST(AdaptiveVoFLowMachTest, SourceFreeConstantDensityLimitPreservesPassiveTrans
                   << ",transverse_momentum_error=" << after[2] - before[2] << '\n';
 }
 
+TEST(AdaptiveVoFLowMachTest, DepletedPopulationUsesPostSourceSupportForSlipAndTimestep)
+{
+    // Each equal-width z pair begins with numbers [10,10]. The source removes
+    // the upper population completely and supplies evaluated drifts [0.02,0].
+    // Periodicity gives both incident faces the same populated/empty support;
+    // no wall-face drift can conceal the source timestep bound.
+    Meshes::AMRGrid grid;
+    grid.root_blocks = {1, 1, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {0.5, 0.5, 0.5};
+    grid.periodic = {true, true, true};
+    const auto hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    VoFMaterial material;
+    material.liquid_density = 1000;
+    material.gas_density = 0.1;
+    material.liquid_viscosity = material.gas_viscosity = material.surface_tension = 0;
+    Solver flow(hierarchy, material);
+    auto init = initial(flow, 0);
+    const auto options = thermodynamics();
+    constexpr double speed = 0.02, dt = 0.01;
+    const double per_bubble =
+        initial_pressure * (4 * std::numbers::pi / 3) * 1e-12 / (options.gas_constant * initial_temperature);
+    VoF::DispersedPopulation population;
+    population.name = "depleted";
+    VoF::PopulationSource particles;
+    particles.name = population.name;
+    VoF::LowMachSources source;
+    const auto& mesh = *flow.mesh();
+    for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
+    {
+        const bool depleted = mesh.cell_centroid(static_cast<LO>(c)).z > 0.25;
+        population.number.push_back(10);
+        population.hydrogen_moles.push_back(10 * per_bubble);
+        // The accepted drift is zero, isolating the supplied-closure guard.
+        population.drift_velocity.push_back({});
+        particles.number_change.push_back(depleted ? -10 : 0);
+        particles.hydrogen_change.push_back(depleted ? -10 * per_bubble : 0);
+        particles.drift_velocity.push_back({0, 0, depleted ? 0 : speed});
+        source.dissolved_hydrogen_change.push_back(depleted ? 10 * per_bubble : 0);
+        source.liquid_mass_change.push_back(depleted ? options.hydrogen.molar_mass * 10 * per_bubble : 0);
+    }
+    init.dispersed = {population};
+    source.dispersed = {particles};
+    flow.initialize_low_mach(options, init);
+    const Snapshot accepted(flow);
+    const auto trial = flow.preview_low_mach_step(dt, source);
+    accepted.expect_equal(flow);
+    VoF::AdaptiveVoF geometry(hierarchy);
+    const auto moles = geometry.exchange_cells(trial.state().dispersed[0].hydrogen_moles);
+    const auto temperature = geometry.exchange_cells(trial.state().temperature);
+    const auto pressure = geometry.exchange_cells(trial.state().liquid_absolute_pressure);
+    double measured_faces = 0, partition_faces = 0;
+    for (std::size_t id = 0; id < mesh.num_owned_faces(); ++id)
+    {
+        const auto face = static_cast<LO>(id);
+        const auto normal = mesh.face_normal(face);
+        if (std::abs(normal.z) < 0.5 || mesh.face_centroid(face).z != 0.25)
+            continue;
+        const double relative = dt * mesh.face_area(face) * speed * normal.z;
+        const double combined = trial.transport().carrier_volume[id] + relative;
+        const auto donor = combined >= 0 ? mesh.owner_cell(face) : mesh.neighbor_cell(face);
+        const double alpha =
+            moles[donor] / mesh.cell_volume(donor) * options.gas_constant * temperature[donor] / pressure[donor];
+        ASSERT_GT(alpha, 0);
+        const double measured =
+            trial.transport().dispersed_slip_volume[0][id] / (dt * mesh.face_area(face) * normal.z * alpha);
+        EXPECT_NEAR(measured, speed, 2e-12);
+        RecordProperty("depleted_front_relative_slip", measured);
+        measured_faces += 1;
+        if (static_cast<std::size_t>(mesh.owner_cell(face)) >= mesh.num_owned_cells() ||
+            static_cast<std::size_t>(mesh.neighbor_cell(face)) >= mesh.num_owned_cells())
+            partition_faces += 1;
+    }
+    EXPECT_GT(global_sum(measured_faces), 0);
+    if (Tpetra::getDefaultComm()->getSize() == 2)
+        EXPECT_GT(global_sum(partition_faces), 0);
+    EXPECT_NEAR(
+        total(trial.state().dispersed[0].number), total(population.number) + total(particles.number_change), 2e-10);
+    EXPECT_NEAR(total(trial.state().dispersed[0].hydrogen_moles) + total(trial.state().dissolved_hydrogen_moles),
+        total(population.hydrogen_moles), 2e-10 * total(population.hydrogen_moles));
+    for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
+    {
+        EXPECT_GE(trial.state().dispersed[0].number[c], 0);
+        EXPECT_GE(trial.state().dispersed[0].hydrogen_moles[c], 0);
+    }
+    expect_conservation(trial.diagnostics());
+    // The correct source-drift limit is max_courant*h/0.02. Half-speed
+    // interpolation incorrectly admits this timestep; test the guard's own
+    // error so an unrelated downstream failure cannot satisfy the regression.
+    const double limit = flow.options().max_courant * 0.25 / speed;
+    EXPECT_NO_THROW((void) flow.preview_low_mach_step(limit, source));
+    bool source_drift_rejected = false;
+    try
+    {
+        (void) flow.preview_low_mach_step(1.5 * limit, source);
+    }
+    catch (const std::exception& error)
+    {
+        source_drift_rejected = std::string(error.what()).find("supplied population drift") != std::string::npos;
+    }
+    EXPECT_TRUE(source_drift_rejected);
+    accepted.expect_equal(flow);
+    // A retained successful candidate is unaffected by the rejected attempt.
+    flow.commit_low_mach_trial(trial);
+    EXPECT_EQ(flow.low_mach_state().dispersed[0].number, trial.state().dispersed[0].number);
+}
+
 TEST(AdaptiveVoFLowMachTest, EmptyOwnedRankParticipatesInInitializationPopulationSourcesAndHintGuards)
 {
     Meshes::AMRGrid grid;
