@@ -5,6 +5,14 @@ defines an implementation sequence and acceptance contracts. It does not extend
 the supported-mesh claims of the existing solvers or record validation results.
 Geometry adaptation and numerical VoF qualification are separate deliverables.
 
+The existing [VoF transport and state-ownership contract](vof_transport.md) is
+the numerical baseline for these extensions. Its corrected mass-compatible
+momentum, microscopic carrier budgets, physical-residual acceptance, and
+population identity rules are requirements to preserve, not work deferred until
+the new geometry is available. The [durable verification contracts](../verification/vof_solver_contracts.md)
+identify the retained regressions; [review follow-up evidence](../verification/vof_review_followup.md)
+records measured results and qualification limits separately from this design.
+
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
 through native `MultiRegionMesh`, `CompositePartition`, `MeshHandle`, and
@@ -96,7 +104,10 @@ public:
 
 Plans pin the exact source identity, communicator, provider observations, and
 topology/partition/geometry stamps. Solver trials additionally pin accepted
-state and controller revisions. Ownership-only changes advance partition
+state and controller revisions. Population schema is an independent semantic
+identity: unchanged hierarchy and field dimensions do not validate population
+indices or a prepared source trial after solver reinitialization.
+Ownership-only changes advance partition
 generation independently of topology. Geometry epochs remain the numeric-cache
 revision described by [`MeshHandle::geometry_epoch`](../../src/geometry/MeshHandle.hh).
 Keys must have checked, collision-free equality; a hash alone is not identity.
@@ -201,6 +212,14 @@ from canonical ancestry; use adaptive predicates or a certified fallback for
 ambiguous signs. Inconclusive emptiness, intersection, or coverage rejects;
 tolerances must neither erase positive measures nor renormalize coverage.
 
+Coverage compares intersections with the actual represented, boundary-clipped
+query geometry. A nominal spacing product or AABB volume is not the volume of
+that query. Use local-coordinate differences and compensated positive summation.
+New kernels need bounds for their own clipping/predicate arithmetic, not the
+Cartesian box helper's bound transplanted unchanged or a tolerance proportional
+to global origin. Retain rejection of genuine missing, doubled, or empty
+coverage at large offsets.
+
 ## Mixed-region closure and boundaries
 
 Same-fluid joins retain one connected pressure problem and one canonical
@@ -273,6 +292,18 @@ variables only after conservative transfer and retain occupancy, energy,
 inventory, and physical continuity acceptance gates. New interior face fluxes
 require reconstruction/projection; retained integrated fluxes restrict by sign.
 
+Canonical phase inventories can remain positive when the published fraction
+rounds to zero or one. Compute low-Mach carrier storage from retained phase
+volumes and accepted source/flux increments, never solely from `(1-f)*V`.
+Preserve the existing bounded-remnant remap rule: when phase geometry cannot
+locate a phase because the published fraction is pure (`f<=0` or `f>=1`), but
+the corresponding retained phase volume is positive and within its consistency
+bound, distribute its paired inventories through the same bulk-cell overlap
+before recombination. Do not classify the
+carrier as absent, give number/moles inconsistent weights, or use this fallback
+for a material geometric mismatch. Each new provider must qualify that rule
+with its own represented-geometry error bound and retain rejection above it.
+
 Reuse sparse application, quantity semantics, coverage reporting, and stale-map
 checks from [`MeshToMeshTransfer`](../../src/fields/MeshToMeshTransfer.hh).
 Its present [setup](../../src/fields/MeshToMeshTransfer.tcc) supports neither
@@ -320,15 +351,87 @@ The carrier has the analogous update, so total occupancy remains the fixed
 cell volume. Qualify source-free transport first; the existing Phase 22 Stage 3
 nonzero physical volume sources need a verified geometric/source update satisfying
 this ledger. Do not assign skew faces to a dominant Cartesian axis or reuse
-the Cartesian Weymouth–Yue correction. Fractions and phase mass, momentum, and
-energy use the same accepted transport ledger. Material bounds or continuity
-failures reject a trial; cell-fraction clipping cannot repair conservation.
+the Cartesian Weymouth–Yue correction. The present directional backend retains
+its frozen indicator and source correction; the unsplit backend must derive
+its own source update. Fractions and phase inventories share the accepted
+ledger, but geometric and momentum time integration remain distinct.
+
+### Phase budgets and compatible momentum
+
+Every donor must cover outgoing gas and complementary carrier with its actual
+extensive inventory, including microscopic positive traces below PLIC offset
+resolution. The Cartesian sweeps repair only roundoff-sized excess on the
+shared canonical face partition, preserve total transported face volume,
+recompute the complement, and recheck owned donor budgets collectively.
+Cancellation-resistant minority-phase updates preserve the unexported tail;
+there is no cell-fraction or inventory clipping. The unsplit backend needs its
+own donor decomposition and capacity proof with an explicit arithmetic bound;
+the directional helper alone does not qualify it. A material excess rejects.
+Apply each corrected canonical subface once, with no second area weighting.
+
+Retain the implicit upwind momentum contract in
+[`ConservativeVoFTransport`](../../src/solvers/details/ConservativeVoFTransport.hh).
+For the source-free, nondrifting case each component solves
+
+$$
+M_c^{\mathrm{new}}u_c^{\mathrm{new}}
++\sum_f s_{cf}F_{m,f}u_{\mathrm{upwind}(f)}^{\mathrm{new}}
+=P_c^{\mathrm{old}}.
+$$
+
+`M_new` is final extensive mixture mass [kg] and `F_m` is signed integrated
+face mass [kg]. Their identity `M_new + sum(s*F_m) = M_old` gives the implicit
+equation its constant-velocity, passive-bound and conservation properties up to
+the physical residual and roundoff. Reusing
+phase swept volumes with explicit accepted-old donor velocity is incompatible
+with the existing split phase update and is not a permitted adapter shortcut.
+
+Incompressible flow derives mass from fixed phase densities and the corrected
+phase-volume ledger. Low-Mach flow instead uses final liquid/species/population
+inventories and their actual mass fluxes. Its velocity is the continuous/liquid
+velocity, with physical momentum `P = M*u + sum(W_H2*n_k*w_k)`. Account for
+drift face/cell impulses separately. Use physical source impulses, never species
+molar flux inferred from geometric volume or source velocity inferred from a
+tiny fraction. Passive velocity bounds apply to the source-free, force-free
+fixture, not general forced or drifting flow.
+
+This reuse retains first-order implicit upwind diffusion and the momentum solve
+cost. Geometric PLIC accuracy does not establish second-order momentum/species
+accuracy; qualify temporal and spatial convergence separately.
+
+### Microscopic carriers and numerical acceptance
+
+Passive quantities retain final carrier storage plus outgoing carrier flux in
+their implicit equation. For positive physical rows, optional left
+equilibration divides directly by the diagonal, without reciprocal formation,
+a carrier floor, or inventory deletion. An attainable inner relative tolerance
+and the unchanged Belos true-residual contract govern the scaled solve. Final
+acceptance still uses the compensated residual of the original unscaled amount
+and canonical face-flux equation at the requested physical tolerance. A global
+maximum-diagonal bound must not become an unattainable mandatory inner target.
+
+Retain bounded physical-defect corrections, overflow-safe norm/RHS scaling,
+compensated accumulation and one shared initial/correction iteration budget.
+Exhaustion or invalid data rejects. Positivity, global extensive budgets and
+pressure/divergence acceptance remain independent; signed quantities use
+absolute-amount conservation scales. Qualify subnormal carriers and forced
+correction/exhaustion, not just ordinary capacities or scaled Krylov convergence.
+
+### Curvature and flow qualification
 
 Use physical-coordinate surface fitting for curvature with explicit conditioning
 and stencil gates. Qualify nonorthogonal pressure correction, balanced surface
 tension, hydrostatic equilibrium, viscosity, and geometry-based timestep bounds
 before claiming flow support. Cartesian height columns cannot be manufactured
 from cell boxes. Initially retain one timestep for all active leaves.
+
+Use independently integrated mixed-cell fractions and finite-duration pressure,
+phase-volume and parasitic-velocity checks; binary cell-center masks can have
+zero curvature. Demonstrate actual phase passage across seams. Existing curved
+moving-seam coverage is at moderate density contrast; high-contrast static
+coverage protects a uniformly fine interface neighborhood. The high-contrast
+curved-seam gate remains open: retain the disabled strict Cartesian oracle and
+equivalent new-provider criteria without relaxing pressure or velocity gates.
 
 ## Transactions, radiolysis, and checkpoint boundaries
 
@@ -338,6 +441,17 @@ rank-local failures and reduce status before subsequent collectives. Publish
 only after all geometry, coverage, quality, conservation, EOS, and continuity
 gates pass, using preallocated nonthrowing swaps. A failed candidate leaves the
 accepted hierarchy, fields, time, ledgers, diagnostics, and output untouched.
+It also leaves any earlier valid retained trial and its immutable face ledger
+intact; later preview work must not overwrite that trial through scratch aliases.
+
+Incompressible fraction and velocity remain accepted physical state. Low-Mach
+extensive inventories and phase-pressure histories belong to private candidate
+or immutable accepted snapshots; its temperature, fractions, densities and
+population radius/volume are derived views. Retained phase volumes/pressures
+during representation relaxation remain physical history, not recomputable
+workspace. Native publication assigns every owned value before ghost
+synchronization. Mutable solver workspaces never own or alias retained
+snapshots, histories or immutable trial flux ledgers.
 
 Topology changes rebuild graphs/maps/importers, gauges, reconstruction/curvature,
 apertures, geometry caches, pressure operators/preconditioners, interface and
@@ -345,6 +459,21 @@ contact/transfer maps, and output topology. Ownership changes invalidate local
 map-dependent state; geometry-only changes retain their existing numeric-cache
 rules. Old immutable snapshots remain valid; stale plans/trials reject access
 to a replacement snapshot. No rejected regrid produces a physical step/history.
+
+Geometry metadata reuse requires the exact retained hierarchy identity, native
+maps/layout, and topology/partition/geometry observations, with a cache hit on
+every rank before skipping collective construction. Fraction-dependent geometry
+stays call-local; exchange vectors are instance owned. Preserve sparse queries
+and compute only consumed neighborhoods. New providers declare actual physical
+stencil support; Cartesian patch radii are not universal halo rules. Refinement
+guards cover those stencils plus motion across qualified seams/periodic joins.
+
+Reuse a transport numerical operator only after exact collective equality of
+final capacities, signed carrier fluxes and equilibration policy. A shared graph
+is insufficient. RHS/source/positivity checks remain per quantity, and failed
+refresh cannot leave a valid cache key. Projection may reuse graph/storage but
+refreshes mobility and susceptibility and invalidates its preconditioner on
+assembly. No workspace owns canonical inventories or phase-pressure history.
 
 [`RadiolyticVoFCoupler`](../../src/solvers/RadiolyticVoFCoupler.hh) remains the
 external shared owner of the solver and registry/kinetic ledgers. Geometry and
@@ -354,6 +483,27 @@ resolution measures with actual polyhedra. Interface patches retain unique
 ownership and sparse remote sampling/deposition. Regrid preserves birth/event
 IDs and accepted ledgers but invalidates reservations, topology-dependent
 component labels/origins, and cached geometry for fresh inspection.
+
+Resolve required population names against the current low-Mach schema
+collectively at each source-preparation boundary, including after same-mesh
+reinitialization or remap. Publish the complete binding only on success;
+reordered schemas retain semantic destinations, missing names reject before
+indexing, and reinitialization invalidates prior trials independently of mesh
+identity. Do not let a hierarchy cache retain stale population indices.
+
+Preserve closure-specific support on native faces. `ConstantSlip` is a liquid
+carrier closure, so empty-population liquid retains its specified drift and
+pure resolved gas has zero drift. Radius-dependent closures evaluate only
+paired positive number/mole moments; empty radius and volume remain zero.
+At a populated/empty front use the populated side's evaluated drift; when both
+sides are populated use the qualified distance interpolation. Compute post-source
+moments as accepted moments plus signed source increments, then require that
+result to be finite, nonnegative, and either both zero or both positive before
+deriving support. This includes birth and complete depletion. Transport and
+source-drift timestep selection use the same face rule and canonical geometry.
+Source-created populations receive an evaluated closure during source
+preparation; populations received by transport get their own local closure on
+subsequent preparation.
 
 Active checkpoints and pending Phase 22 Stage 4 representation relaxation continue to
 block topology change, as in [`AdaptiveVoFSolver::Impl::regrid`](../../src/solvers/AdaptiveVoFSolver.cc).
@@ -398,6 +548,10 @@ descriptors. Permit no global solution replication, whole-mesh flattening,
 expanded global explicit topology, or retained global cell-to-rank arrays.
 Account separately for maps, transient migration buffers, and shared objects;
 measure memory on empty and unevenly loaded ranks as well as mean storage.
+Separate metadata payload from process peak RSS, using the platform-normalized
+probe and declared units. Performance needs a numerically matched baseline with
+actual ownership, solver work and configuration recorded; Debug timings or cache
+reuse alone do not establish production scaling.
 
 ## Certified nonconvex extension
 
@@ -433,19 +587,24 @@ shell without boundary projection or domain renormalization.
 
 Every stage is proposed and has its own exit gate. Existing tests are starting
 points, not evidence that the extension works. Run focused Debug serial tests,
-then affected MPI cases at 2 and 4 ranks, including empty owned ranks and seams
-crossing ranks; use larger matrices only for a specific scaling question.
+then affected MPI cases at 2 and 4 ranks where they establish the intended seam
+and ownership conditions. Choose additional ranks or deliberately sparse
+partitions when needed for a specific ownership regime, and assert observed
+empty-owner counts; rank labels or root-block counts do not prove emptiness.
+The [durable MPI protocol](../verification/vof_solver_contracts.md#focused-debug-workflow)
+includes fixtures with more ranks than global cells. Broader performance
+matrices require a specific scaling question.
 
 | Stage | Deliverable | Required focused gates |
 | --- | --- | --- |
-| 1. Common contracts / Cartesian adapter | Immutable hierarchy/provider seam and distinct stamps | Existing Cartesian geometry/numerics unchanged; stable-key and stale-plan checks; independent partition generation; no implicit connectivity materialization |
-| 2. Geometry kernels / ancestry overlaps | Certified clips, sections, moments, and nested overlap records | Analytic cube/tetra/prism/skew cuts; tangency/complements; scale/translation tests; tiny positive volumes; bulk and tilted-PLIC conservation; invalid geometry rejection |
+| 1. Common contracts / Cartesian adapter | Immutable hierarchy/provider seam and distinct stamps | Preserve corrected Cartesian numerics; separate schema/state/geometry identity; stable-key and stale-plan checks; independent partition generation; cache/snapshot isolation; no implicit connectivity materialization |
+| 2. Geometry kernels / ancestry overlaps | Certified clips, sections, moments, and nested overlap records | Analytic cube/tetra/prism/skew cuts; tangency/complements; represented coverage at scale/translation extremes and rejection of real gaps; tiny positive remnants; bulk and tilted-PLIC conservation; invalid geometry rejection |
 | 3. Whole-product XY/Z AMR | Common Z, whole-column triangles, then convex polygon templates | Split-order key identity; complete factor siblings; exact refine/coarsen recovery; patch inheritance; convexity/quality gates; O(base + layers) storage; native composite MPI |
 | 4. Convex polyhedral AMR | AABB-plane cuts, canonical internal overlays, saved parents | Variable child counts; face/edge propagation; orientation and manifold closure; union/first moments; unrelated neighbor cuts; transactional sliver rejection; exact parent recovery |
 | 5. Mixed-region / layer-local closure | Product runs, independent ancestry, nested joins, then validated multi-provider tiles | Crossed-trace closure/rejection; one canonical subface flux; periodic matching; contact isolation; physical gradation; no duplicated/gapped tiles; compact repeated seams |
-| 6. Distributed migration | Distributed closure/planning and owner-to-owner topology/state migration | Serial/partition-equivalent keys and budgets; split siblings; empty ranks; unique ownership; stale/rank-divergent failures without deadlock; bounded per-rank memory; no root union |
-| 7. General VoF / flow | Polyhedral reconstruction, unsplit transport, curvature, pressure and momentum | Inferred oblique-plane normals; zero/uniform flow; reversible deformation and sphere transport across skew/coarse-fine/rank faces; bounds/complementary fluxes; hydrostatics; capillary/spurious-current convergence; viscous modes and regrid momentum |
-| 8. Radiolytic / representation integration | Nonzero physical volume sources, actual film/birth geometry, complete coupled transactions | Source-divergence/occupancy closure; phase mass/species/energy; tiny phase capacity; remote deposition; donor competition; failure rollback; pending-history rejection; checkpoint replay and stale trials |
+| 6. Distributed migration | Distributed closure/planning and owner-to-owner topology/state migration | Serial/partition-equivalent keys and budgets; split siblings; asserted empty ownership; unique ownership; stale/rank-divergent failures without deadlock; bounded per-rank memory; no root union |
+| 7. General VoF / flow | Polyhedral reconstruction, unsplit phase budgets, compatible implicit momentum and physical-residual solves | Oblique planes and skew/coarse-fine/rank transport; microscopic phase/complement budgets; constant velocity and passive momentum bounds; microscopic/subnormal carrier oracle and original residual; correction-budget rejection/reuse; hydrostatics and finite-duration capillarity with independent mixed fractions; retain open high-contrast curved-seam gate; viscous modes and regrid momentum |
+| 8. Radiolytic / representation integration | Nonzero volume sources, closure/schema support, actual film/birth geometry, complete coupled transactions | Phase mass/species/energy/physical momentum and source-divergence closure; tiny retained carriers; empty/depleted front speed and timestep parity; same-mesh schema reorder/removal; remote deposition and donor competition; immutable retained trials after failure; pending-history rejection and checkpoint replay |
 | 9. Certified nonconvex extension | Kernel-certified star cells, then constrained general decomposition | Invalid/self-intersecting shell rejection; disjoint union and shell/moment equality; canonical boundary splits; disconnected phase patches; saved-parent recovery; repeat geometry, VoF, and coupling gates on each admitted class |
 
 Use [`testCartesianAMR`](../../src/geometry/unitTests/testCartesianAMR.cc),
@@ -455,7 +614,10 @@ and [`testCompositePartitionOperators`](../../src/FVM/unitTests/testCompositePar
 for native topology and ownership contracts. Numerical references include
 [`testAdaptiveVoF`](../../src/FVM/unitTests/testAdaptiveVoF.cc),
 [`testAdaptiveVoFThreeDimensional`](../../src/FVM/unitTests/testAdaptiveVoFThreeDimensional.cc),
+[`testConservativeVoFTransport`](../../src/solvers/unitTests/testConservativeVoFTransport.cc),
+[`testAdaptiveVoFSolver`](../../src/solvers/unitTests/testAdaptiveVoFSolver.cc),
 [`testAdaptiveVoFLowMach`](../../src/solvers/unitTests/testAdaptiveVoFLowMach.cc),
+[`testRadiolyticVoFCoupler`](../../src/solvers/unitTests/testRadiolyticVoFCoupler.cc),
 and [`testBubbleRepresentation`](../../src/solvers/unitTests/testBubbleRepresentation.cc).
 Retain the Phase 22 Stage 4 positive-surface-tension pressure-history oracle
 when extending representation geometry. Keep dated results in validation records;

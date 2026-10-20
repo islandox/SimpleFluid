@@ -1862,7 +1862,9 @@ for the implemented API, reproducible checks and qualification limits.
 [general AMR design](docs/architecture/general_amr.md) for the algorithms,
 ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
-The existing Cartesian backend retains its support contract throughout.
+Preserve the corrected Cartesian [transport/state contracts](docs/architecture/vof_transport.md)
+and [numerical verification gates](docs/verification/vof_solver_contracts.md)
+throughout; they do not qualify the proposed non-Cartesian algorithms.
 
 ### Stage 1 — Common hierarchy contracts and Cartesian adapter
 
@@ -1873,8 +1875,13 @@ The existing Cartesian backend retains its support contract throughout.
 - [ ] Track topology, partition, geometry, and accepted-state/control revisions
       independently. Pin plans and trials to exact source observations and
       preserve collective preflight, atomic publication, and stale-plan rejection.
-- [ ] Verify unchanged Cartesian geometry/numerics, native fields/traversal,
-      independent repartition stamps, and rollback without compatibility CSR.
+- [ ] Separate canonical inventories/history and immutable trial ledgers from
+      derived fields and mutable workspaces. Require exact collective geometry
+      and numerical-operator cache compatibility; schema identity is independent
+      of mesh identity, and reinitialization invalidates old trials.
+- [ ] Verify unchanged corrected Cartesian geometry/numerics, native traversal,
+      independent repartition stamps, retained-trial isolation after failure,
+      cache refresh/reuse, and rollback without compatibility CSR.
 
 ### Stage 2 — Geometric kernels and ancestry-based overlap
 
@@ -1885,8 +1892,14 @@ The existing Cartesian backend retains its support contract throughout.
       carrier geometry. Use polygon-area times Z-overlap for bulk products and
       actual 3D clipped intersections for tilted PLIC phase volumes.
 - [ ] Verify analytic cube/tetrahedron/prism/skew cuts, tangencies, complements,
-      scale/translation invariance, coverage, first moments, and signed and
-      nonnegative extensive conservation. Do not normalize coverage errors.
+      represented coverage under scale/translation, first moments, and signed
+      and nonnegative extensive conservation. Use provider-specific arithmetic
+      bounds on actual clipped queries; retain real-gap rejection without
+      nominal-spacing/origin-scaled tolerances or coverage normalization.
+- [ ] Preserve positive phase remnants hidden by rounded pure fractions,
+      moving paired inventories by consistent overlap weights only when that
+      retained phase volume lies within its consistency bound; reject material
+      carrier mismatches.
 
 ### Stage 3 — Whole-product XY/Z refinement
 
@@ -1937,36 +1950,60 @@ The existing Cartesian backend retains its support contract throughout.
 - [ ] Balance measured reconstruction/interface/population work and migration
       cost; retain sparse native fragments and reconstruction halos.
 - [ ] Verify partition-equivalent keys and budgets, split sibling families,
-      empty ranks, unique ownership, collective failures without deadlock, and
-      per-rank memory bounds without a global explicit mesh or solution copy.
+      observed/asserted empty owners, unique ownership, collective failures
+      without deadlock, and per-rank memory bounds without global explicit
+      geometry or solution copies. Separate metadata payload from normalized
+      process RSS in correctness-matched performance measurements.
 
 ### Stage 7 — General VoF and flow qualification
 
 - [ ] Add polyhedral PLIC reconstruction and canonical unsplit swept-volume
       transport with complementary gas/carrier fluxes matching projected face
       volume. Retain the Cartesian implementation as a specialized backend.
+- [ ] Derive unsplit donor budgets that preserve microscopic gas/carrier tails;
+      allow only bounded canonical-face roundoff repair, with collective donor
+      rechecks and no cell clipping. Cartesian directional helpers alone do not
+      establish this contract for general polyhedra.
+- [ ] Reuse compatible implicit momentum with final mass storage and actual
+      phase/species/population mass fluxes. Preserve separate drift impulses,
+      first-order accuracy limits, and force-free passive-bound scope.
+- [ ] Retain attainable equilibrated solves plus the original physical residual,
+      positivity/conservation gates, bounded physical-defect corrections and
+      shared iteration budget. Verify microscopic/subnormal carrier oracles,
+      correction exhaustion/recovery and numerical-operator invalidation.
 - [ ] Add physical-coordinate curvature, nonorthogonal pressure/capillary
       balance, viscous transport, and geometry-based timestep/resolution
       criteria. Use physical spans, not cube-root volume, for bubble resolution.
 - [ ] Verify inferred oblique planes, transport/deformation across skew,
-      coarse/fine and MPI faces, phase bounds and conservation, hydrostatics,
-      capillary convergence, viscous modes, and regrid momentum. Qualify
-      source-free flow before nonzero material-volume sources.
+      coarse/fine and MPI faces, phase budgets and passive momentum bounds,
+      hydrostatics, finite-duration capillarity from independent mixed fractions,
+      viscous modes, and regrid momentum. Keep high-contrast curved interfaces
+      directly on refinement seams as an open strict qualification gate.
+      Qualify source-free flow before nonzero material-volume sources.
 
 ### Stage 8 — Radiolytic and representation integration
 
 - [ ] Extend Phase 22 source/thermodynamic ledgers, film/aperture integration,
       birth supports, donor selection, component inspection, and coupled maps
       to actual native cell geometry. Retain external controller ownership.
+- [ ] Rebind required population names collectively at source preparation,
+      including same-mesh reinitialization; verify reorder/removal and stale
+      trial rejection without misrouting sources or altering accepted state.
+- [ ] Preserve liquid-carrier ConstantSlip and populated-side radius-closure
+      drift at empty fronts. Use paired accepted-plus-signed-source moments
+      for support, requiring finite nonnegative paired results after sources,
+      including complete depletion; transport and source-drift timestep
+      estimation must share the canonical face rule.
 - [ ] Preserve birth IDs/events and accepted inventories while invalidating
       geometry-dependent reservations and labels. Continue blocking topology
       change during active checkpoints or pending representation relaxation;
       exact history-preserving repartition and mesh-inclusive replay are
       separate later gates.
 - [ ] Verify source-divergence/occupancy closure, all phase mass/species/energy
-      and physical momentum budgets, tiny carriers, remote deposition, donor
-      competition, stale trials, rejection, and checkpoint replay. Application
-      calibration and centimetric-bubble convergence remain required.
+      and physical momentum budgets, tiny retained carriers, front speed and
+      timestep parity, remote deposition, donor competition, retained-trial
+      isolation after rejection, and checkpoint replay. Application calibration
+      and centimetric-bubble convergence remain required.
 
 ### Stage 9 — Certified nonconvex cells
 
@@ -1981,7 +2018,9 @@ The existing Cartesian backend retains its support contract throughout.
       gates for every admitted class before extending support claims.
 
 Every stage requires focused affected checks; serial/MPI correctness evidence
-does not establish scaling or physical application accuracy. Keep dated
+does not establish scaling or physical application accuracy. Assert actual
+ownership in empty-rank fixtures; choose rank counts from global cell counts or
+deliberate sparse partitions, not root-block counts. Keep dated
 commands/results in separate validation records. Level subcycling, simultaneous
 ALE/regridding, curved-cell refinement, and rotated periodic transformations
 remain outside this design.
