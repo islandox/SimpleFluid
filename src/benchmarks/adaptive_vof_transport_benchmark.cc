@@ -2,6 +2,7 @@
  * @brief Opt-in full low-Mach transport timing with conservation diagnostics.
  */
 #include "solvers/AdaptiveVoFSolver.hh"
+#include "benchmarks/BenchmarkSupport.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <chrono>
@@ -9,7 +10,6 @@
 #include <iomanip>
 #include <iostream>
 #include <numbers>
-#include <sys/resource.h>
 
 int main(int argc, char** argv)
 {
@@ -84,9 +84,8 @@ int main(int argc, char** argv)
     const double local = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     double elapsed = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local, &elapsed);
-    rusage usage{};
-    getrusage(RUSAGE_SELF, &usage);
-    double rss = usage.ru_maxrss, peak = 0;
+    const auto memory = Benchmark::sample_process_memory();
+    double rss = static_cast<double>(memory.peak_resident_kib), peak = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &rss, &peak);
     const auto& d = flow.low_mach_diagnostics();
     if (comm->getRank() == 0)
