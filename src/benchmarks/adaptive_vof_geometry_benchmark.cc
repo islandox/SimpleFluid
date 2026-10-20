@@ -2,6 +2,7 @@
  * @brief Opt-in corrected-baseline geometry timings; no performance acceptance threshold.
  */
 #include "FVM/AdaptiveVoF.hh"
+#include "benchmarks/BenchmarkSupport.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -11,7 +12,6 @@
 #include <iomanip>
 #include <iostream>
 #include <numbers>
-#include <sys/resource.h>
 
 int main(int argc, char** argv)
 {
@@ -98,9 +98,8 @@ int main(int argc, char** argv)
                refine_s = seconds(curved, refined);
     double global_checksum = 0.0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &checksum, &global_checksum);
-    rusage usage{};
-    getrusage(RUSAGE_SELF, &usage);
-    const auto rss = global_max(static_cast<double>(usage.ru_maxrss));
+    const auto memory = Benchmark::sample_process_memory();
+    const auto rss = global_max(static_cast<double>(memory.peak_resident_kib));
     const auto storage = geometry.geometry_storage();
     const auto payload = global_max(static_cast<double>(storage.sample_payload_bytes));
     const auto virtual_cells = global_max(static_cast<double>(storage.virtual_cells));
