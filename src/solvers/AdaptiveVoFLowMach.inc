@@ -620,6 +620,26 @@ Vector population_face_drift(const Face& face, const std::vector<Vector>& drift,
     return value;
 }
 
+/** Support of the moments on which the supplied source closure was evaluated.
+ * Source depletion matters just as much as birth: retaining a depleted cell
+ * would interpolate its zero drift with a populated neighbor's evaluated law.
+ */
+std::vector<double> population_closure_number(const VoF::DispersedPopulation& accepted,
+    const VoF::PopulationSource& source) const
+{
+    std::vector<double> number(owned());
+    bool valid = true;
+    for (std::size_t c = 0; c < owned(); ++c)
+    {
+        number[c] = accepted.number[c] + source.number_change[c];
+        const double moles = accepted.hydrogen_moles[c] + source.hydrogen_change[c];
+        valid = valid && std::isfinite(number[c]) && std::isfinite(moles) && number[c] >= 0 && moles >= 0 &&
+                ((number[c] == 0) == (moles == 0));
+    }
+    require_all(valid, "Low-Mach population closure requires paired nonnegative post-source moments.");
+    return number;
+}
+
 double stable_low_timestep(const State& s) const
 {
     const auto& q = *s.low;
@@ -984,9 +1004,7 @@ LowFluxWork transport_low(const State& old, State& candidate, const State& guess
     {
         next.dispersed[q].drift_velocity = source.dispersed[q].drift_velocity;
         const auto drift = exchange_vectors(source.dispersed[q].drift_velocity);
-        auto supported_number = accepted.dispersed[q].number;
-        for (std::size_t c = 0; c < owned(); ++c)
-            supported_number[c] += std::max(0.0, source.dispersed[q].number_change[c]);
+        const auto supported_number = population_closure_number(accepted.dispersed[q], source.dispersed[q]);
         const auto number_halo = geometry->exchange_cells(supported_number);
         std::vector<double> slip(faces.size()), carrier = out.carrier_volume;
         for (std::size_t id = 0; id < mesh->num_owned_faces(); ++id)
@@ -1371,8 +1389,7 @@ State advance_low(const State& old, double dt, const VoF::LowMachSources& input,
     {
         auto& reference = transport_reference.low->dispersed[population];
         reference.drift_velocity = source.dispersed[population].drift_velocity;
-        for (std::size_t c = 0; c < owned(); ++c)
-            reference.number[c] += std::max(0.0, source.dispersed[population].number_change[c]);
+        reference.number = population_closure_number(old.low->dispersed[population], source.dispersed[population]);
     }
     require_all(dt <= stable_low_timestep(transport_reference) * (1 + 8 * std::numeric_limits<double>::epsilon()),
         "Low-Mach timestep exceeds the advective bound for the supplied population drift.");
