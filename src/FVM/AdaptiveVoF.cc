@@ -3,6 +3,7 @@
  */
 #include "FVM/AdaptiveVoF.hh"
 #include "FVM/details/VoFPhaseBudget.hh"
+#include "FVM/details/VoFReconstructionCoverage.hh"
 
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -313,12 +314,10 @@ struct AdaptiveVoF::Impl
                         }
                         const auto overlaps = hierarchy->overlaps(box);
                         auto& range = patch.ranges[c];
-                        double covered = 0.0;
                         range.begin = patch.samples.size();
                         for (const auto& overlap : overlaps)
                         {
                             ids.insert(static_cast<GO>(overlap.cell));
-                            covered += volume(overlap.box);
                             const auto donor = hierarchy->cell_box(overlap.cell);
                             if (overlaps.size() == 1 && overlap.box.lower == donor.lower &&
                                 overlap.box.upper == donor.upper)
@@ -327,8 +326,17 @@ struct AdaptiveVoF::Impl
                                 patch.samples.push_back({static_cast<GO>(overlap.cell), overlap.box});
                         }
                         range.end = patch.samples.size();
-                        if (!(covered > 0.0) ||
-                            std::abs(covered - patch.grid.cell_volume()) > 1e-9 * patch.grid.cell_volume())
+                        // overlaps() already validated any boundary excursion
+                        // and clamped it. Use that same represented query here:
+                        // large translations can round its width away from the
+                        // nominal spacing even though coverage is complete.
+                        for (std::size_t a = 0; a < 3; ++a)
+                        {
+                            const double end = config.origin[a] + config.extent[a];
+                            box.lower[a] = std::clamp(box.lower[a], config.origin[a], end);
+                            box.upper[a] = std::clamp(box.upper[a], config.origin[a], end);
+                        }
+                        if (!geometry_detail::has_complete_reconstruction_coverage(box, overlaps))
                             throw std::runtime_error(
                                 "AdaptiveVoF reconstruction stencil has incomplete geometric coverage.");
                     }
