@@ -208,7 +208,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
         linear.tolerance = tolerance;
         if (equilibrate_rows)
         {
-            double local_max[2]{}, global_max[2]{};
+            double local_max[3]{}, global_max[3]{};
+            const auto normalized_rhs = rhs_.getData();
             {
                 const auto execution = mesh_->acquire_execution_view();
                 for (std::size_t c = 0; c < n; ++c)
@@ -219,27 +220,40 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
                     if (capacity[c] > 0 || connected)
                         local_max[0] = std::max(local_max[0], diagonal_[c]);
                     local_max[1] = std::max(local_max[1], std::abs(old[c] + source[c]));
+                    local_max[2] = std::max(local_max[2], std::abs(normalized_rhs[c]));
                 }
             }
-            Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 2, local_max, global_max);
+            Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 3, local_max, global_max);
             if (global_max[1] > 0)
             {
-                CompensatedSum<> physical, normalized;
+                require(*map, std::isfinite(global_max[0]) && global_max[0] > 0 && global_max[2] > 0,
+                    "Conservative VoF row scaling cannot represent its physical residual target.");
+                // Scale the two norms independently. Their relative magnitude
+                // may exceed sqrt(max_double), even for finite concentrations.
+                CompensatedSum<double> physical, normalized;
                 for (std::size_t c = 0; c < n; ++c)
                 {
-                    const long double b = (old[c] + source[c]) / global_max[1];
-                    const long double bhat = static_cast<long double>((old[c] + source[c]) / diagonal_[c]) *
-                                              global_max[0] / global_max[1];
+                    const double b = (old[c] + source[c]) / global_max[1];
+                    const double bhat = normalized_rhs[c] / global_max[2];
                     physical += b * b;
                     normalized += bhat * bhat;
                 }
-                double local[2] = {static_cast<double>(physical.value()), static_cast<double>(normalized.value())},
-                       global[2]{};
+                double local[2] = {physical.value(), normalized.value()}, global[2]{};
                 Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_SUM, 2, local, global);
+                int physical_exponent = 0, normalized_exponent = 0, diagonal_exponent = 0;
+                const double physical_mantissa = std::frexp(global_max[1], &physical_exponent);
+                const double normalized_mantissa = std::frexp(global_max[2], &normalized_exponent);
+                const double diagonal_mantissa = std::frexp(global_max[0], &diagonal_exponent);
+                // Keep max(D)*max(bhat) and their ratio in exponent form:
+                // either intermediate could overflow or underflow although the
+                // final physical-to-scaled norm ratio is representable.
+                const double norm_ratio = std::scalbn((physical_mantissa / normalized_mantissa / diagonal_mantissa) *
+                                                          (std::sqrt(global[0]) / std::sqrt(global[1])),
+                    physical_exponent - normalized_exponent - diagonal_exponent);
                 // ||D*rhat|| <= max(D)*||rhat||. Tighten the scaled solve
                 // enough to retain the original unscaled residual target,
                 // with a factor four reserve for floating-point accumulation.
-                linear.tolerance = 0.25 * tolerance * std::min(1.0, std::sqrt(global[0] / global[1]));
+                linear.tolerance = 0.25 * tolerance * std::min(1.0, norm_ratio);
                 require(*map, std::isfinite(linear.tolerance) && linear.tolerance > 0,
                     "Conservative VoF row scaling cannot represent its physical residual target.");
             }
