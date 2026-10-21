@@ -3,11 +3,12 @@
  */
 #pragma once
 
+#include "geometry/ConvexCellGeometry.hh"
+#include "geometry/ExactPlanarFace.hh"
 #include "geometry/mesh/MeshRegion.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
-#include "geometry/ConvexCellGeometry.hh"
-#include <map>
 #include <cmath>
+#include <map>
 #include <set>
 
 namespace SimpleFluid::Meshes
@@ -155,6 +156,7 @@ public:
     const std::shared_ptr<const ExactPolyhedralComplex>& construction() const noexcept { return d_construction; }
     [[nodiscard]] ConvexGeometryPtr certified_cell_geometry(std::size_t cell) const;
     [[nodiscard]] ConvexGeometryPtr atomic_cell_geometry(std::size_t cell) const;
+    [[nodiscard]] ExactPlanarFacePtr certified_face_geometry(std::size_t face) const;
 
     RegionLayout layout() const { return d_layout; }
     const void* storage_identity() const { return this; }

@@ -7,29 +7,36 @@
  * @copyright Copyright (c) 2026
  */
 #pragma once
+#include "geometry/mesh/ExactExtrudedConstruction.hh"
 #include "geometry/mesh/MeshRegion.hh"
 #include "geometry/mesh/SemiStructMeshTopo.hh"
-#include "geometry/mesh/ExactExtrudedConstruction.hh"
 #include <map>
+#include <mutex>
 namespace SimpleFluid::Meshes
 {
 /** @brief A single immutable base template, factored through the existing axial indexer. */
 class ExtrudedTopology
 {
 public:
-    using index_type_pack=UnstructuredMeshIndexTypes;
-    using ID=uint64_t;
-    explicit ExtrudedTopology(SemiStructMeshTopo topology,
-        std::map<std::string,std::string> boundary_aliases={});
+    using index_type_pack = UnstructuredMeshIndexTypes;
+    using ID = uint64_t;
+    explicit ExtrudedTopology(SemiStructMeshTopo topology, std::map<std::string, std::string> boundary_aliases = {});
     ExtrudedTopology(unsigned nodes, const Arr<Arr<unsigned>>& cells, unsigned layers,
-        const Arr<SemiStructMeshTopo::BoundaryEdge>& boundaries={},
-        std::map<std::string,std::string> boundary_aliases={});
-    ExtrudedTopology& operator=(const ExtrudedTopology&)=delete;
-    ExtrudedTopology& operator=(ExtrudedTopology&&)=delete;
+        const Arr<SemiStructMeshTopo::BoundaryEdge>& boundaries = {},
+        std::map<std::string, std::string> boundary_aliases = {});
+    ExtrudedTopology& operator=(const ExtrudedTopology&) = delete;
+    ExtrudedTopology& operator=(ExtrudedTopology&&) = delete;
     RegionLayout layout() const;
     const SemiStructuredIndexer& indexer() const { return d_topology.indexer(); }
     const SemiStructMeshTopo& native_topology() const { return d_topology; }
     const void* storage_identity() const { return this; }
+    const void* base_storage_identity() const noexcept { return d_topology.base_storage_identity(); }
+    size_t base_storage_bytes() const noexcept { return d_topology.base_storage_bytes(); }
+    std::shared_ptr<const ExtrudedTopology> with_layers(
+        unsigned layers, std::map<std::string, std::string> aliases = {}) const;
+    std::map<std::string, std::string> boundary_aliases() const;
+    std::vector<char> encode_base() const;
+    static std::shared_ptr<const ExtrudedTopology> decode_base(std::span<const char>, unsigned layers = 1);
     MeshStorageReport storage_report() const;
     EntityRange<ID> base_cell_nodes(size_t c) const;
     EntityRange<ID> cell_faces(size_t c) const;
@@ -41,9 +48,10 @@ public:
     int boundary_id(size_t f) const { return d_topology.boundary_id(indexer().face_id(f)); }
     auto boundary_batch_ids() const { return d_topology.boundary_batch_ids(); }
     const std::string& boundary_batch_name(int b) const;
+
 private:
     SemiStructMeshTopo d_topology;
-    Arr<std::pair<int,std::string>> d_boundary_aliases;
+    Arr<std::pair<int, std::string>> d_boundary_aliases;
 };
 /**
  * @brief Independent straight-extruded geometry with O(base + layers) storage.
@@ -55,12 +63,12 @@ private:
 class ExtrudedGeometry
 {
 public:
-    using Vec3=MeshUtils::Vec3;
+    using Vec3 = MeshUtils::Vec3;
     ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology, Arr<Vec3> xy_nodes, ArrReal z_edges);
     ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology,
         std::shared_ptr<const ExactExtrudedConstruction> construction);
-    ExtrudedGeometry& operator=(const ExtrudedGeometry&)=delete;
-    ExtrudedGeometry& operator=(ExtrudedGeometry&&)=delete;
+    ExtrudedGeometry& operator=(const ExtrudedGeometry&) = delete;
+    ExtrudedGeometry& operator=(ExtrudedGeometry&&) = delete;
     RegionLayout layout() const { return d_topology->layout(); }
     const void* storage_identity() const { return this; }
     std::uint64_t geometry_epoch() const noexcept { return 0; }
@@ -71,22 +79,30 @@ public:
     Vec3 face_area_vector(size_t f) const;
     Vec3 node_coordinates(size_t n) const;
     MeshStorageReport storage_report() const;
-    const Arr<Vec3>& xy_nodes() const { return d_nodes; }
-    const ArrReal& z_edges() const { return d_z; }
+    const Arr<Vec3>& xy_nodes() const { return d_construction ? d_construction->display_points_ref() : d_nodes; }
+    const ArrReal& z_edges() const;
+    std::span<const double> z_view() const noexcept
+    {
+        return d_construction ? d_construction->z_view() : std::span<const double>(d_z);
+    }
     bool has_exact_construction() const noexcept { return bool(d_construction); }
     const std::shared_ptr<const ExactExtrudedConstruction>& construction() const noexcept { return d_construction; }
     ConvexGeometryPtr certified_cell_geometry(size_t cell) const;
     ConvexGeometryPtr atomic_cell_geometry(size_t cell) const;
+    ExactPlanarFacePtr certified_face_geometry(size_t face) const;
     EntityRange<EntityRange<uint64_t>> xy_cell_nodes() const;
+
 private:
     std::shared_ptr<const ExtrudedTopology> d_topology;
     Arr<Vec3> d_nodes, d_cell_centers, d_edge_centers, d_edge_normals;
-    ArrReal d_z, d_areas, d_lengths;
+    mutable ArrReal d_z;
+    ArrReal d_areas, d_lengths;
+    mutable std::once_flag d_z_once;
     std::shared_ptr<const ExactExtrudedConstruction> d_construction;
 };
-using ExtrudedRegion=IsoRegion<ExtrudedTopology,ExtrudedGeometry>;
-ExtrudedRegion extruded_region(std::string name, std::shared_ptr<const ExtrudedTopology> topology,
-    Arr<MeshUtils::Vec3> xy_nodes, ArrReal z_edges);
+using ExtrudedRegion = IsoRegion<ExtrudedTopology, ExtrudedGeometry>;
+ExtrudedRegion extruded_region(
+    std::string name, std::shared_ptr<const ExtrudedTopology> topology, Arr<MeshUtils::Vec3> xy_nodes, ArrReal z_edges);
 static_assert(TopologyProvider<ExtrudedTopology>);
 static_assert(GeometryProvider<ExtrudedGeometry>);
 } // namespace SimpleFluid::Meshes

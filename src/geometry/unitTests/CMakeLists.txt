@@ -195,3 +195,7 @@ foreach(_ortho_reorder_ranks IN ITEMS 4 8)
         ARGS "--gtest_filter=MeshReorderingFactoryMultiRankTest.*Orthogonal*"
         LABELS "mpi;geometry;orthogonal;mesh_reordering;empty_rank" TIMEOUT 120)
 endforeach()
+simplefluid_add_mpi_test(NAME MixedAMR_2procs TARGET testMixedAMR PROCS 2 LABELS "mpi;amr;mixed" TIMEOUT 180)
+
+simplefluid_add_mpi_test(NAME LocalProductAMR_2procs TARGET testLocalProductAMR PROCS 2
+    ARGS "--gtest_filter=LocalProductAMRTest.*" LABELS "mpi;amr;local_product" TIMEOUT 180)

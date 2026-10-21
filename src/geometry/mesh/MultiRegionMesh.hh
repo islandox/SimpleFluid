@@ -8,11 +8,12 @@
  */
 #pragma once
 
-#include "geometry/mesh/RegionProviders.hh"
+#include "geometry/ExactPlanarFace.hh"
 #include "geometry/mesh/ConservativeInterface.hh"
-#include "geometry/mesh/ExtrudedRegionProviders.hh"
-#include "geometry/mesh/SweptRZRegionProviders.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
+#include "geometry/mesh/ExtrudedRegionProviders.hh"
+#include "geometry/mesh/RegionProviders.hh"
+#include "geometry/mesh/SweptRZRegionProviders.hh"
 #include "io/VTUWriter.hh"
 #include <Teuchos_Comm.hpp>
 #include <optional>
@@ -20,6 +21,7 @@
 
 namespace SimpleFluid::Meshes
 {
+
 /**
  * @brief Rectangular subset of a structured exterior patch, parametrized by two logical axes.
  *
@@ -85,7 +87,8 @@ public:
     using ID = uint64_t;
     using Region = std::variant<CartesianRegion, NativeIsoRegion<OrthogonalCartesian3D>,
         NativeIsoRegion<SemiStructuredXY_Z>, NativeIsoRegion<UnstructuredMesh>, NativeIsoRegion<OrthogonalCylindrial3D>, ExtrudedRegion, SweptRZRegion, DistributedExplicitRegion>;
-    using Interface = std::variant<StructuredPatchInterface, ExplicitConformingInterface, NonconformingInterface>;
+    using Interface = std::variant<StructuredPatchInterface, ExplicitConformingInterface, NonconformingInterface,
+        MultiProviderNonconformingInterface>;
     enum class BoundaryNamePolicy { NamespaceRegions, MergeMatchingNames };
     static constexpr ID invalid_cell_id() noexcept { return UnstructuredMesh::invalid_ordinal; }
 
@@ -103,7 +106,7 @@ public:
         Vec3 area_vector{}, centroid{}, owner_centroid{}, neighbor_centroid{};
         Vec3 owner_to_neighbor{}, neighbor_to_owner{}, owner_to_face{}, neighbor_to_face{};
         bool interior() const noexcept { return neighbor != invalid_cell_id(); }
-        real_t area() const { return area_vector.norm(); }
+        real_t area() const { return MultiRegionMesh::area_magnitude(area_vector); }
         Vec3 normal() const { return area_vector / area(); }
         ID opposite_cell(ID cell) const
         {
@@ -167,8 +170,8 @@ public:
                 if (const auto refined = d_mesh.refinement(native))
                 {
                     // The retained fine faces are already known native identities.
-                    for (const auto fine : refined->faces)
-                        visitor(d_mesh.resolve_retained_face({refined->region, fine}));
+                    for (size_t i = 0; i < refined->size(); ++i)
+                        visitor(d_mesh.resolve_retained_face(refined->at(i)));
                 }
                 else if (const auto retained = d_mesh.partner(native, false))
                     visitor(d_mesh.resolve_retained_face(*retained));
@@ -318,12 +321,15 @@ public:
     const std::string& region_name(size_t r) const;
     ID canonical_face(RegionFace f) const;
     EntityRange<ID> logical_faces(RegionFace native) const;
+    /** Signed prolongation ratios; rejects a positive ratio outside binary64
+     * range. Restriction below depends only on discrete native orientation. */
     EntityRange<FaceFluxWeight> face_flux_weights(RegionFace native) const;
     /** @brief Sum canonical integrated fluxes in a native face's outward orientation. */
     template<class Values> real_t restrict_face_flux(RegionFace native, Values&& value) const
     {
         real_t sum=0;
-        for(const auto weight:face_flux_weights(native)) sum+=(weight.coefficient>0?1.0:-1.0)*value(weight.face);
+        for (const auto logical : logical_faces(native))
+            sum += (native_face(logical) == native ? 1.0 : -1.0) * value(logical);
         return sum;
     }
     RegionFace native_face(ID f) const;
@@ -335,6 +341,8 @@ public:
     const ArrReal& axial_edges() const noexcept { return d_axial_edges; }
     bool supports_axial_motion() const noexcept;
     bool has_exact_construction() const noexcept;
+    /** Constructed joins are qualified only through exact nested descriptors. */
+    bool has_qualified_exact_interfaces() const noexcept;
     Vec3 cell_center_vector(ID face,ID cell) const;
     Vec3 face_center_vector(ID face,ID cell) const;
     real_t cell_to_face_distance(ID face,ID cell) const { return face_center_vector(face,cell).norm(); }
@@ -370,6 +378,7 @@ private:
     struct ExplicitLookup
     {
         std::vector<std::pair<ID, ID>> first_to_second, second_to_first;
+        std::vector<std::pair<RegionFace, ID>> qualified_fine_to_coarse;
     };
     // Two side descriptors per interface. Structured sides are grouped by
     // native boundary 0..5; only irregular correspondence uses bucket 6.
@@ -441,11 +450,20 @@ private:
     PatchFaceIndex patch_face_index(const StructuredPatch& p) const;
     size_t removed_before(size_t r, ID face) const;
     std::optional<RegionFace> partner(RegionFace f, bool first) const;
-    struct RefinedFaceView { size_t region; std::span<const ID> faces; };
+    struct RefinedFaceView
+    {
+        size_t region = 0;
+        std::span<const ID> faces;
+        std::span<const RegionFace> qualified;
+        size_t size() const noexcept { return qualified.empty() ? faces.size() : qualified.size(); }
+        RegionFace at(size_t i) const { return qualified.empty() ? RegionFace{region, faces[i]} : qualified[i]; }
+    };
     std::optional<RefinedFaceView> refinement(RegionFace f) const;
     ID encode_native_face(RegionFace f) const;
     RegionFace decode_native_face(ID key) const;
     InterfaceFacePolygon interface_polygon(RegionFace f) const;
+    ExactPlanarFacePtr native_face_certificate(RegionFace face) const;
+    void validate_exact_nested_faces(RegionFace coarse, std::span<const RegionFace> fine) const;
     size_t interface_uses(RegionFace f) const;
     bool stitched(RegionFace f) const;
     void validate_pair(RegionFace a, RegionFace b, std::optional<Vec3> translation = {}) const;
@@ -487,6 +505,7 @@ private:
         }
         return resolved;
     }
+    static real_t area_magnitude(Vec3);
     void validate_regions() const;
     void initialize_regions(InterfaceTolerance tolerance, BoundaryNamePolicy names);
 
@@ -498,6 +517,9 @@ private:
     std::vector<PatchFaceIndex> d_removed_patch_index;
     std::vector<ID> d_cells, d_faces, d_nodes, d_native_faces;
     std::vector<Boundary> d_boundaries;
+    // Full-source patch cardinalities retained independently of sparse residency
+    // and interface declarations, including every multi-provider participant.
+    std::vector<std::map<int, ID>> d_native_patch_counts;
     InterfaceTolerance d_tolerance;
     Indexer d_indexer;
     ArrReal d_reference_axial_edges, d_axial_edges;
