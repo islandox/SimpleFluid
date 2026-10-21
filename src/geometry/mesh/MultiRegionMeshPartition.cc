@@ -3,6 +3,7 @@
  */
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
+#include "geometry/ExactPolyhedralComplex.hh"
 #include <cstring>
 #include <set>
 #include <numeric>
@@ -16,7 +17,7 @@ using ID = MultiRegionMesh::ID;
 using Vec3 = MeshUtils::Vec3;
 // Internal MPI wire format: one executable, native scalar representation.
 // No pointers, size_t container objects, or borrowed storage are transmitted.
-constexpr uint64_t partition_magic = 0x5346524547490004ULL;
+constexpr uint64_t partition_magic = 0x5346524547490005ULL;
 struct Writer
 {
     std::vector<char> data;
@@ -128,7 +129,7 @@ void write_explicit(Writer& w, const T& t, const G& g, const std::set<ID>& visib
     w.value(uint64_t(boundaries.size()));
     for (auto b : boundaries) { w.value(b); w.string(t.boundary_batch_name(b)); }
 }
-DistributedExplicitRegion read_explicit(Reader& r, std::string name, RegionLayout layout)
+DistributedExplicitRegion read_explicit(Reader& r, std::string name, RegionLayout layout, bool exact=false)
 {
     using Provider = ExplicitRegionProvider;
     std::vector<Provider::Cell> cells(r.count(sizeof(ID) + sizeof(MeshUtils::CellType) + sizeof(Vec3) + sizeof(real_t) + 2 * sizeof(uint64_t)));
@@ -154,20 +155,35 @@ DistributedExplicitRegion read_explicit(Reader& r, std::string name, RegionLayou
         if (!boundaries.emplace(id, std::move(name)).second)
             throw std::invalid_argument("Duplicate explicit boundary ID in partition packet.");
     }
-    auto provider = std::make_shared<const Provider>(layout, std::move(cells), std::move(faces),
-                                                   std::move(nodes), std::move(boundaries));
+    std::shared_ptr<const Provider> provider;
+    if (exact)
+    {
+        const auto construction=ExactPolyhedralComplex::decode(r.array<char>());
+        provider=std::make_shared<const Provider>(layout,std::move(cells),std::move(faces),std::move(nodes),
+            std::move(boundaries),construction);
+    }
+    else provider=std::make_shared<const Provider>(layout,std::move(cells),std::move(faces),
+        std::move(nodes),std::move(boundaries));
     return {std::move(name), provider, provider};
 }
 template<class Region>
 void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<ID>& visible)
 {
     if constexpr(requires{region.geometry().has_exact_construction();})
-        if(region.geometry().has_exact_construction())tag=8;
+        if(region.geometry().has_exact_construction())tag=region.layout().family==RegionLayout::Family::Explicit ? 9 : 8;
     w.value(tag); w.string(region.name()); write_layout(w, region.layout());
     const auto& t = region.topology(); const auto& g = region.geometry();
     if constexpr (std::same_as<Region, NativeIsoRegion<UnstructuredMesh>>
                   || std::same_as<Region, DistributedExplicitRegion>)
-        write_explicit(w, t, g, visible);
+    {
+        write_explicit(w,t,g,visible);
+        if constexpr (std::same_as<Region,DistributedExplicitRegion>)
+            if (g.has_exact_construction())
+            {
+                const std::vector<ID> selected(visible.begin(),visible.end());
+                w.array(g.construction()->encode(selected));
+            }
+    }
     else
     {
         const auto& native = [&]() -> const auto& {
@@ -237,7 +253,7 @@ MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
             throw std::invalid_argument("Reconstructed partition region differs from its declared layout.");
         return result;
     };
-    if (tag == 3 || tag == 7) return checked(read_explicit(r, std::move(name), layout));
+    if (tag==3 || tag==7 || tag==9) return checked(read_explicit(r,std::move(name),layout,tag==9));
     if (tag == 0 || tag == 1 || tag == 4)
     {
         Vec3D<ArrReal> edges;
@@ -706,9 +722,13 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::merge_partitions(
         std::map<ID, Provider::Face> faces;
         std::map<ID, Vec3> nodes;
         const auto& first = std::get<DistributedExplicitRegion>(reference.d_regions[region]).topology();
+        if (first.has_exact_construction())
+            throw std::invalid_argument("Distributed reassembly of exact explicit shards remains a Stage 6 migration gate.");
         for (const auto& shard : shards)
         {
             const auto& provider = std::get<DistributedExplicitRegion>(shard->d_regions[region]).topology();
+            if (provider.has_exact_construction())
+                throw std::invalid_argument("Cannot mix exact explicit and legacy shards during native assembly.");
             for (const auto& [id, record] : provider.cell_records())
             {
                 auto [it, inserted] = cells.emplace(id, record);
