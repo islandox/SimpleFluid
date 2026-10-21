@@ -20,14 +20,6 @@
 
 namespace SimpleFluid::Meshes
 {
-/** @brief A standalone native face ordinal qualified by topology-region ordinal. */
-struct RegionFace
-{
-    size_t region = 0;
-    uint64_t face = 0;
-    auto operator<=>(const RegionFace&) const = default;
-};
-
 /**
  * @brief Rectangular subset of a structured exterior patch, parametrized by two logical axes.
  *
