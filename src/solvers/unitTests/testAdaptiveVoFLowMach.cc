@@ -224,6 +224,41 @@ TEST(AdaptiveVoFLowMachTest, ClosedIdealGasHeatingMatchesTheExactMixtureAndDoesN
     s->release_checkpoint(checkpoint);
 }
 
+TEST(AdaptiveVoFLowMachTest, RetainedTrialSurvivesRejectedPreviewButNotReinitialization)
+{
+    auto s = solver(true);
+    const auto options = thermodynamics();
+    const auto init = initial(*s, 1.0, 0.25);
+    s->initialize_low_mach(options, init);
+    const auto observation = s->hierarchy()->observation();
+    const auto revision = s->state_revision();
+    const Snapshot accepted(*s);
+    const auto retained = s->preview_low_mach_step(0.001, {});
+    const auto retained_state = retained.state();
+    const auto retained_flux = retained.transport().resolved_volume;
+    EXPECT_THROW((void) s->preview_low_mach_step(-0.001, {}), std::exception);
+    VoF::LowMachSources impossible;
+    impossible.net_thermal_energy.assign(accepted.state.temperature.size(), -1e20);
+    EXPECT_THROW((void) s->preview_low_mach_step(0.001, impossible), std::exception);
+    accepted.expect_equal(*s);
+    EXPECT_EQ(s->state_revision(), revision);
+    EXPECT_EQ(s->hierarchy()->observation(), observation);
+    expect_same_state(retained.state(), retained_state);
+    EXPECT_EQ(retained.transport().resolved_volume, retained_flux);
+    EXPECT_NO_THROW(s->commit_low_mach_trial(retained));
+    EXPECT_GT(s->state_revision(), revision);
+    EXPECT_EQ(s->hierarchy()->observation(), observation);
+
+    const auto stale = s->preview_low_mach_step(0.001, {});
+    s->initialize_low_mach(options, init);
+    const Snapshot reset(*s);
+    EXPECT_EQ(s->hierarchy()->observation(), observation);
+    EXPECT_THROW(s->commit_low_mach_trial(stale), std::exception);
+    reset.expect_equal(*s);
+    expect_same_state(retained.state(), retained_state);
+    EXPECT_EQ(retained.transport().resolved_volume, retained_flux);
+}
+
 TEST(AdaptiveVoFLowMachTest, ClosedLiquidHeatingMatchesTheIntegratedIsochoricSolution)
 {
     auto s = solver(true);

@@ -1334,6 +1334,7 @@ BubbleRepresentationEngine::Prepared BubbleRepresentationEngine::prepare(
     }
     prepared.inspection.births = next->births;
     prepared.inspection.refinement.source_hierarchy = flow.hierarchy();
+    prepared.inspection.refinement.source_observation = flow.hierarchy()->observation();
     VoF::RefinementHints hints;
     for (const auto& birth : next->births)
     {

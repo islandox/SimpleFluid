@@ -99,13 +99,15 @@ public:
      * An empty parcel request is an exact fixed-clock identity trial.
      */
     [[nodiscard]] LowMachTrial preview_representation_change(const VoF::RepresentationChangeRequest& request);
+    /** Accepted-state/control revision, independent of hierarchy topology, partition and geometry. */
     [[nodiscard]] std::uint64_t state_revision() const noexcept;
     [[nodiscard]] bool pending_representation_relaxation() const noexcept;
 
     /** Conservative adaptation; supplied stencil/motion/wake/promotion guards constrain coarsening. */
     void regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen = {},
         VoF::RefinementOptions protection = {}, VoF::RefinementHints hints = {});
-    /** Apply a policy plan only to its exact source hierarchy; recheck current interface guards. */
+    /** Apply a plan only to its exact source observation and, for solver-issued plans, unchanged
+     * accepted state; recheck current interface guards before conservative adaptation. */
     void regrid(const VoF::RefinementPlan& plan);
     [[nodiscard]] VoF::RefinementPlan refinement_plan(
         VoF::RefinementOptions options = {}, VoF::RefinementHints hints = {}) const;
