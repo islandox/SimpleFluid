@@ -2,11 +2,15 @@
  * @brief Collective conforming factor adaptation with retained exact constructions.
  */
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include "geometry/mesh/AMR/LocalProductAMR.hh"
+#include "geometry/mesh/NativeFragmentRecipe.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <exception>
 #include <functional>
@@ -1860,4 +1864,773 @@ MeshStorageReport LocalProductAMR::storage_report() const
     return report;
 }
 
+namespace product_detail
+{
+using adaptive_detail::Reader;
+using adaptive_detail::Writer;
+using Pool = ExtrudedAMR::Data;
+void key(Writer& w, const BaseCellKey& k)
+{
+    w.bytes(encode_adaptive_key({0, ProductCellAncestry{k, {}}}));
+}
+BaseCellKey base(Reader& r)
+{
+    return std::get<ProductCellAncestry>(decode_adaptive_key(r.bytes()).ancestry).base;
+}
+void key(Writer& w, const AxialIntervalKey& k)
+{
+    w.bytes(encode_adaptive_key({0, ProductCellAncestry{{}, k}}));
+}
+AxialIntervalKey axial(Reader& r)
+{
+    return std::get<ProductCellAncestry>(decode_adaptive_key(r.bytes()).ancestry).axial;
+}
+void key(Writer& w, const BaseEdgeKey& k)
+{
+    key(w, k.creator);
+    w.word(k.ordinal);
+    w.word(std::uint64_t(k.kind));
+    w.word(k.path.size());
+    for (auto n : k.path)
+        w.word(n);
+}
+BaseEdgeKey edge(Reader& r)
+{
+    BaseEdgeKey k;
+    k.creator = base(r);
+    k.ordinal = r.word();
+    auto kind = r.word();
+    if (kind > 1)
+        throw std::invalid_argument("Invalid product edge creator.");
+    k.kind = BaseEdgeKey::Kind(kind);
+    auto n = r.word();
+    if (n > 48)
+        throw std::invalid_argument("Invalid product edge depth.");
+    for (std::uint64_t i = 0; i < n; ++i)
+    {
+        auto child = r.word();
+        if (child > 1)
+            throw std::invalid_argument("Invalid edge half.");
+        k.path.push_back(child);
+    }
+    return k;
+}
+std::size_t count(Reader& r)
+{
+    auto n = r.word();
+    if (n > (r.data.size() - r.offset) / 8)
+        throw std::invalid_argument("Invalid factor count.");
+    return n;
+}
+AdaptiveBytes root_packet(const ExtrudedAMRGrid& grid)
+{
+    Writer w;
+    w.word(0x534650524f4f5436ULL);
+    w.word(grid.region_id);
+    w.word(grid.material_id);
+    w.word(grid.max_depth);
+    w.word(std::bit_cast<std::uint64_t>(grid.minimum_scaled_area));
+    w.word(grid.z_edges.size());
+    for (double z : grid.z_edges)
+        w.word(std::bit_cast<std::uint64_t>(z));
+    w.word(grid.boundary_aliases.size());
+    for (const auto& [a, b] : grid.boundary_aliases)
+    {
+        w.bytes(std::span(a));
+        w.bytes(std::span(b));
+    }
+    return std::move(w.data);
+}
+std::shared_ptr<const ExtrudedAMRGrid> root_grid(std::span<const char> packet)
+{
+    Reader r{packet};
+    if (r.word() != 0x534650524f4f5436ULL)
+        throw std::invalid_argument("Invalid product root capsule.");
+    auto g = std::make_shared<ExtrudedAMRGrid>();
+    g->region_id = r.word();
+    g->material_id = r.word();
+    g->max_depth = r.word();
+    g->minimum_scaled_area = std::bit_cast<double>(r.word());
+    auto nz = count(r);
+    if (nz < 2 || nz > std::numeric_limits<unsigned>::max() || !g->max_depth || g->max_depth > 48 ||
+        !std::isfinite(g->minimum_scaled_area) || g->minimum_scaled_area < 0)
+        throw std::invalid_argument("Invalid product root admission.");
+    // Only root interval count is needed by cap provenance, not a replicated
+    // active axial recipe. Root coordinates live in pruned scalar capsules.
+    for (std::size_t i = 0; i < nz; ++i)
+    {
+        const auto z = std::bit_cast<double>(r.word());
+        if (!std::isfinite(z) || (!g->z_edges.empty() && z <= g->z_edges.back()))
+            throw std::invalid_argument("Invalid root axial coordinates.");
+        g->z_edges.push_back(z);
+    }
+    auto n = count(r);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        auto a = r.bytes(), b = r.bytes();
+        if (!g->boundary_aliases.emplace(std::string(a.begin(), a.end()), std::string(b.begin(), b.end())).second)
+            throw std::invalid_argument("Repeated product alias.");
+    }
+    r.done();
+    return g;
+}
+AdaptiveBytes base_packet(Pool pool, const BaseCellKey& selected)
+{
+    pool.leaves = {selected};
+    pool.intervals.clear();
+    compact(pool);
+    Writer w;
+    w.word(0x5346504241534536ULL);
+    w.word(pool.points.size());
+    for (const auto& recipe : pool.points)
+    {
+        for (double q : recipe.root)
+            w.word(std::bit_cast<std::uint64_t>(q));
+        w.word(recipe.parents.size());
+        for (auto p : recipe.parents)
+            w.word(p);
+    }
+    w.word(pool.base.size());
+    for (const auto& [k, node] : pool.base)
+    {
+        key(w, k);
+        w.word(node.vertices.size());
+        for (auto v : node.vertices)
+            w.word(v);
+        for (const auto& e : node.edges)
+            key(w, e);
+        w.word(node.reference);
+        w.word(node.children.size());
+        for (const auto& c : node.children)
+            key(w, c);
+    }
+    w.word(pool.edges.size());
+    for (const auto& [k, node] : pool.edges)
+    {
+        key(w, k);
+        w.word(node.a);
+        w.word(node.b);
+        w.word(node.physical);
+        w.bytes(std::span(node.boundary));
+    }
+    return std::move(w.data);
+}
+void read_base(Pool& pool, std::span<const char> packet)
+{
+    Reader r{packet};
+    if (r.word() != 0x5346504241534536ULL)
+        throw std::invalid_argument("Invalid product base capsule.");
+    auto n = count(r);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        ExactPointRecipe recipe;
+        for (auto& q : recipe.root)
+        {
+            q = std::bit_cast<double>(r.word());
+            if (!std::isfinite(q))
+                throw std::invalid_argument("Nonfinite product root point.");
+        }
+        auto np = count(r);
+        for (std::size_t j = 0; j < np; ++j)
+        {
+            auto parent = r.word();
+            if (parent >= i)
+                throw std::invalid_argument("Cyclic product point recipe.");
+            recipe.parents.push_back(parent);
+        }
+        pool.points.push_back(std::move(recipe));
+    }
+    n = count(r);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        auto k = base(r);
+        BaseNode node;
+        auto nv = count(r);
+        if (nv < 3)
+            throw std::invalid_argument("Invalid product polygon.");
+        for (std::size_t v = 0; v < nv; ++v)
+        {
+            auto id = r.word();
+            if (id >= pool.points.size())
+                throw std::invalid_argument("Invalid point reference.");
+            node.vertices.push_back(id);
+        }
+        for (std::size_t e = 0; e < nv; ++e)
+            node.edges.push_back(edge(r));
+        node.reference = r.word();
+        auto nc = count(r);
+        for (std::size_t c = 0; c < nc; ++c)
+            node.children.push_back(base(r));
+        if (!pool.base.emplace(k, std::move(node)).second)
+            throw std::invalid_argument("Repeated product base ancestry.");
+    }
+    n = count(r);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        auto k = edge(r);
+        EdgeNode node;
+        node.a = r.word();
+        node.b = r.word();
+        auto physical = r.word();
+        if (node.a >= pool.points.size() || node.b >= pool.points.size() || node.a == node.b || physical > 1)
+            throw std::invalid_argument("Invalid product edge endpoints.");
+        node.physical = physical;
+        auto name = r.bytes();
+        node.boundary.assign(name.begin(), name.end());
+        if (!pool.edges.emplace(k, std::move(node)).second)
+            throw std::invalid_argument("Repeated product edge identity.");
+    }
+    r.done();
+    for (const auto& [k, node] : pool.base)
+        for (const auto& edge : node.edges)
+            if (!pool.edges.contains(edge))
+                throw std::invalid_argument("Missing product edge ancestor.");
+}
+AdaptiveBytes axis_packet(Pool pool, const AxialIntervalKey& selected)
+{
+    pool.leaves.clear();
+    pool.intervals = {selected};
+    compact(pool);
+    Writer w;
+    w.word(0x5346504158495336ULL);
+    w.word(pool.z.size());
+    for (const auto& recipe : pool.z)
+    {
+        w.word(std::bit_cast<std::uint64_t>(recipe.root));
+        w.word(recipe.parents.size());
+        for (auto p : recipe.parents)
+            w.word(p);
+    }
+    w.word(pool.axial.size());
+    for (const auto& [k, node] : pool.axial)
+    {
+        key(w, k);
+        w.word(node.lower);
+        w.word(node.upper);
+        w.word(node.children.size());
+        for (const auto& c : node.children)
+            key(w, c);
+    }
+    return std::move(w.data);
+}
+void read_axis(Pool& pool, std::span<const char> packet)
+{
+    Reader r{packet};
+    if (r.word() != 0x5346504158495336ULL)
+        throw std::invalid_argument("Invalid product axial capsule.");
+    auto n = count(r);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        ExactScalarRecipe recipe;
+        recipe.root = std::bit_cast<double>(r.word());
+        if (!std::isfinite(recipe.root))
+            throw std::invalid_argument("Nonfinite product root Z.");
+        auto np = count(r);
+        for (std::size_t j = 0; j < np; ++j)
+        {
+            auto p = r.word();
+            if (p >= i)
+                throw std::invalid_argument("Cyclic scalar recipe.");
+            recipe.parents.push_back(p);
+        }
+        pool.z.push_back(std::move(recipe));
+    }
+    n = count(r);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        auto k = axial(r);
+        ZNode node;
+        node.lower = r.word();
+        node.upper = r.word();
+        if (node.lower >= pool.z.size() || node.upper >= pool.z.size() || node.lower == node.upper)
+            throw std::invalid_argument("Invalid axial endpoints.");
+        auto nc = count(r);
+        for (std::size_t c = 0; c < nc; ++c)
+            node.children.push_back(axial(r));
+        if (!pool.axial.emplace(k, std::move(node)).second)
+            throw std::invalid_argument("Repeated axial ancestry.");
+    }
+    r.done();
+}
+LocalData local_state(const AdaptiveLeaf& leaf)
+{
+    if (!leaf.factor_recipe || !leaf.factor_recipe->root || !leaf.factor_recipe->base || !leaf.factor_recipe->axis)
+        throw std::invalid_argument("Product leaf requires detached independent factor recipes.");
+    const auto* p = std::get_if<ProductCellAncestry>(&leaf.key.ancestry);
+    if (!p)
+        throw std::invalid_argument("Product kernel received another ancestry family.");
+    LocalData state;
+    state.pool.grid = root_grid(*leaf.factor_recipe->root);
+    read_base(state.pool, *leaf.factor_recipe->base);
+    read_axis(state.pool, *leaf.factor_recipe->axis);
+    if (leaf.key.region != state.pool.grid->region_id || leaf.material != state.pool.grid->material_id ||
+        !state.pool.base.contains(p->base) || !state.pool.axial.contains(p->axial))
+        throw std::invalid_argument("Product factor/key binding differs.");
+    state.columns.emplace(p->base, std::make_shared<const ZKeys>(ZKeys{p->axial}));
+    intern_columns(state);
+    return state;
+}
+std::vector<AdaptiveLeaf> export_state(LocalData& state, const AdaptiveBytes& domain)
+{
+    intern_columns(state);
+    build_local_runs(state);
+    auto root = std::make_shared<const AdaptiveBytes>(root_packet(*state.pool.grid));
+    std::map<BaseCellKey, std::shared_ptr<const AdaptiveBytes>> bases;
+    std::map<AxialIntervalKey, std::shared_ptr<const AdaptiveBytes>> axes;
+    for (const auto& [base, z] : state.columns)
+    {
+        bases.try_emplace(base, std::make_shared<const AdaptiveBytes>(base_packet(state.pool, base)));
+        for (const auto& interval : *z)
+            if (!axes.contains(interval))
+                axes.emplace(interval, std::make_shared<const AdaptiveBytes>(axis_packet(state.pool, interval)));
+    }
+    std::vector<AdaptiveLeaf> result;
+    NativeFragmentCache cache;
+    for (const auto& run : state.runs)
+    {
+        auto native = extract_native_fragment(run.region, cache);
+        for (std::size_t z = 0; z < run.intervals.size(); ++z)
+            for (std::size_t b = 0; b < run.base_keys.size(); ++b)
+            {
+                AdaptiveLeaf leaf;
+                leaf.domain = domain;
+                leaf.key = {state.pool.grid->region_id, ProductCellAncestry{run.base_keys[b], run.intervals[z]}};
+                leaf.material = state.pool.grid->material_id;
+                leaf.provider = AdaptiveProviderKind::Product;
+                leaf.native_recipe = native;
+                leaf.native_cell = z * run.base_keys.size() + b;
+                auto factor = std::make_shared<AdaptiveFactorRecipe>();
+                factor->root = root;
+                factor->base = bases.at(run.base_keys[b]);
+                factor->axis = axes.at(run.intervals[z]);
+                leaf.factor_recipe = std::move(factor);
+                result.push_back(std::move(leaf));
+            }
+    }
+    return result;
+}
+void merge_pool(Pool& target, const Pool& source)
+{
+    if (!target.grid)
+        target.grid = source.grid;
+    if (root_packet(*target.grid) != root_packet(*source.grid))
+        throw std::invalid_argument("Product root recipes differ.");
+    auto merge_recipes = [](auto& destination, const auto& incoming)
+    {
+        std::map<AdaptiveBytes, std::size_t> known;
+        auto signature = [](const auto& recipe)
+        {
+            Writer w;
+            if constexpr (std::is_same_v<std::decay_t<decltype(recipe.root)>, double>)
+                w.word(std::bit_cast<std::uint64_t>(recipe.root));
+            else
+                for (double x : recipe.root)
+                    w.word(std::bit_cast<std::uint64_t>(x));
+            auto parents = recipe.parents;
+            std::sort(parents.begin(), parents.end());
+            w.word(parents.size());
+            for (auto p : parents)
+                w.word(p);
+            return std::move(w.data);
+        };
+        for (std::size_t i = 0; i < destination.size(); ++i)
+            known.emplace(signature(destination[i]), i);
+        std::vector<std::size_t> remap;
+        for (const auto& source_recipe : incoming)
+        {
+            auto recipe = source_recipe;
+            for (auto& parent : recipe.parents)
+                parent = remap.at(parent);
+            auto bytes = signature(recipe);
+            auto [it, inserted] = known.emplace(bytes, destination.size());
+            if (inserted)
+                destination.push_back(std::move(recipe));
+            remap.push_back(it->second);
+        }
+        return remap;
+    };
+    const auto points = merge_recipes(target.points, source.points), z = merge_recipes(target.z, source.z);
+    for (const auto& [key, source_node] : source.base)
+    {
+        auto node = source_node;
+        for (auto& vertex : node.vertices)
+            vertex = points.at(vertex);
+        auto [it, inserted] = target.base.emplace(key, node);
+        if (!inserted)
+        {
+            if (it->second.vertices != node.vertices || it->second.edges != node.edges ||
+                it->second.reference != node.reference)
+                throw std::invalid_argument("Shared base ancestry has conflicting exact construction.");
+            if (it->second.children.empty())
+                it->second.children = node.children;
+            else if (!node.children.empty() && it->second.children != node.children)
+                throw std::invalid_argument("Conflicting base child family.");
+        }
+    }
+    for (const auto& [key, source_node] : source.edges)
+    {
+        auto node = source_node;
+        node.a = points.at(node.a);
+        node.b = points.at(node.b);
+        auto [it, inserted] = target.edges.emplace(key, node);
+        if (!inserted && (it->second.a != node.a || it->second.b != node.b || it->second.physical != node.physical ||
+                             it->second.boundary != node.boundary))
+            throw std::invalid_argument("Conflicting exact edge ancestry.");
+    }
+    for (const auto& [key, source_node] : source.axial)
+    {
+        auto node = source_node;
+        node.lower = z.at(node.lower);
+        node.upper = z.at(node.upper);
+        auto [it, inserted] = target.axial.emplace(key, node);
+        if (!inserted)
+        {
+            if (it->second.lower != node.lower || it->second.upper != node.upper)
+                throw std::invalid_argument("Shared axial ancestry has conflicting exact construction.");
+            if (it->second.children.empty())
+                it->second.children = node.children;
+            else if (!node.children.empty() && it->second.children != node.children)
+                throw std::invalid_argument("Conflicting axial children.");
+        }
+    }
+}
+class Kernel final : public AdaptiveProviderKernel
+{
+public:
+    AdaptiveBytes descriptor() const override { return AdaptiveBytes{'P', 'R', 'O', 'D', '6'}; }
+    AdaptiveSplit closure_split(const AdaptiveLeaf&, std::size_t axis) const override
+    {
+        if (axis >= 3)
+            throw std::invalid_argument("Invalid product closure axis.");
+        return axis == 2 ? AdaptiveSplit::Axial : AdaptiveSplit::Base;
+    }
+    AdaptiveTrace traces(const AdaptiveLeaf& leaf) const override
+    {
+        auto state = local_state(leaf);
+        const auto& product = std::get<ProductCellAncestry>(leaf.key.ancestry);
+        AdaptiveTrace result;
+        result.key = leaf.key;
+        auto ancestor = product.base;
+        for (;;)
+        {
+            Writer w;
+            w.word(0x5346504254524336ULL);
+            w.bytes(*leaf.factor_recipe->root);
+            product_detail::key(w, ancestor);
+            result.faces.push_back({std::move(w.data), unsigned(product.base.path.size()), AdaptiveSplit::Base, {},
+                ancestor == product.base});
+            if (ancestor.path.empty())
+                break;
+            ancestor.path.pop_back();
+        }
+        {
+            Writer w;
+            w.word(0x5346505a54524336ULL);
+            w.bytes(*leaf.factor_recipe->root);
+            w.word(product.axial.root);
+            result.faces.push_back(
+                {std::move(w.data), unsigned(product.axial.path.size()), AdaptiveSplit::Axial, {}, true});
+        }
+        const auto shape = geometry(leaf);
+        const auto& base = state.pool.base.at(product.base);
+        for (std::size_t i = 0; i < base.edges.size(); ++i)
+        {
+            auto stem = base.edges[i];
+            const auto depth = stem.path.size();
+            stem.path.clear();
+            Writer w;
+            w.word(0x5346504554524336ULL);
+            w.bytes(*leaf.factor_recipe->root);
+            product_detail::key(w, stem);
+            result.faces.push_back(
+                {std::move(w.data), unsigned(depth), AdaptiveSplit::Base, shape->face_geometry(i + 2), true});
+        }
+        return result;
+    }
+    void validate(const AdaptiveLeaf& leaf) const override
+    {
+        if (leaf.provider != AdaptiveProviderKind::Product ||
+            !std::holds_alternative<ProductCellAncestry>(leaf.key.ancestry))
+            throw std::invalid_argument("Product provider/typed ancestry binding differs.");
+        const auto state = local_state(leaf);
+        const auto& ancestry = std::get<ProductCellAncestry>(leaf.key.ancestry);
+        if (ancestry.base.path.size() > state.pool.grid->max_depth ||
+            ancestry.axial.path.size() > state.pool.grid->max_depth ||
+            std::any_of(ancestry.axial.path.begin(), ancestry.axial.path.end(), [](auto child) { return child > 1; }))
+            throw std::invalid_argument("Product factor ancestry exceeds admitted depth or axial child range.");
+        auto parent = ancestry.base;
+        parent.path.clear();
+        for (auto child : ancestry.base.path)
+        {
+            const auto vertices = state.pool.base.at(parent).vertices.size();
+            const auto children = vertices == 3 ? 2 : vertices == 4 ? 4 : vertices - 2;
+            if (child >= children)
+                throw std::invalid_argument("Product base child exceeds its actual parent template arity.");
+            parent.path.push_back(child);
+        }
+        AdaptiveProviderKernel::validate(leaf);
+    }
+    std::vector<AdaptiveLeaf> repack(std::span<const AdaptiveLeaf> leaves) const override
+    {
+        if (leaves.empty())
+            return {};
+        LocalData state;
+        std::map<BaseCellKey, ZKeys> columns;
+        std::map<AdaptiveCellKey, const AdaptiveLeaf*> original;
+        for (const auto& leaf : leaves)
+        {
+            auto one = local_state(leaf);
+            merge_pool(state.pool, one.pool);
+            const auto& p = std::get<ProductCellAncestry>(leaf.key.ancestry);
+            columns[p.base].push_back(p.axial);
+            if (!original.emplace(leaf.key, &leaf).second || leaf.domain != leaves[0].domain)
+                throw std::invalid_argument("Duplicate product leaf or mixed connected domain.");
+        }
+        for (auto& [base, z] : columns)
+        {
+            std::sort(z.begin(), z.end());
+            if (std::adjacent_find(z.begin(), z.end()) != z.end())
+                throw std::invalid_argument("Repeated product factor selection.");
+            state.columns.emplace(base, std::make_shared<const ZKeys>(std::move(z)));
+        }
+        auto packed = export_state(state, leaves[0].domain);
+        for (auto& leaf : packed)
+        {
+            const auto& old = *original.at(leaf.key);
+            leaf.revision = old.revision;
+            leaf.parent_family = old.parent_family;
+            leaf.work = old.work;
+        }
+        return packed;
+    }
+    std::vector<AdaptiveFamily> ancestry_families(const AdaptiveLeaf& leaf) const override
+    {
+        const auto original = std::get<ProductCellAncestry>(leaf.key.ancestry);
+        std::vector<AdaptiveFamily> families;
+        auto emit = [&](ProductCellAncestry p, AdaptiveSplit split)
+        {
+            auto state = local_state(leaf);
+            state.columns.clear();
+            state.columns.emplace(p.base, std::make_shared<const ZKeys>(ZKeys{p.axial}));
+            auto records = export_state(state, leaf.domain);
+            if (records.size() != 1)
+                throw std::logic_error("Product parent factor did not produce one cell.");
+            auto parent = std::move(records[0]);
+            parent.revision = leaf.revision;
+            auto result = this->split(parent, split);
+            result.family.anchor = encode_adaptive_key(leaf.key);
+            families.push_back(std::move(result.family));
+        };
+        auto p = original;
+        while (!p.base.path.empty())
+        {
+            p.base.path.pop_back();
+            emit(p, AdaptiveSplit::Base);
+        }
+        p = original;
+        while (!p.axial.path.empty())
+        {
+            p.axial.path.pop_back();
+            emit(p, AdaptiveSplit::Axial);
+        }
+        if (!original.base.path.empty() && !original.axial.path.empty())
+        {
+            p = original;
+            p.base.path.pop_back();
+            p.axial.path.pop_back();
+            emit(p, AdaptiveSplit::Isotropic);
+        }
+        return families;
+    }
+    ConvexGeometryPtr geometry(const AdaptiveLeaf& leaf) const override
+    {
+        if (!leaf.native_recipe)
+            throw std::invalid_argument("Missing native product descriptor.");
+        NativeFragmentCache cache;
+        auto region = materialize_native_fragment(*leaf.native_recipe, cache);
+        const auto* product = std::get_if<ExtrudedRegion>(&region);
+        if (!product || leaf.native_cell >= product->layout().cells)
+            throw std::invalid_argument("Product native descriptor/ordinal invalid.");
+        auto actual = product->geometry().certified_cell_geometry(leaf.native_cell);
+        auto state = local_state(leaf);
+        build_local_runs(state);
+        if (state.runs.size() != 1 || !actual->equivalent(*state.runs[0].region.geometry().certified_cell_geometry(0)))
+            throw std::invalid_argument("Native product recipe differs from exact factor ancestry.");
+        return actual;
+    }
+    std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf& leaf) const override
+    {
+        auto state = local_state(leaf);
+        build_local_runs(state);
+        if (state.runs.size() != 1)
+            throw std::invalid_argument("Single factor cell did not produce one native patch.");
+        const auto& run = state.runs[0];
+        const auto& key = std::get<ProductCellAncestry>(leaf.key.ancestry);
+        const auto& base_node = state.pool.base.at(key.base);
+        std::vector<AdaptiveSurface> result;
+        const auto shape = geometry(leaf);
+        // Exact construction emits side faces in base-loop order, followed by
+        // lower and upper caps; authoritative native atomic shape is checked.
+        for (std::size_t i = 0; i < base_node.edges.size(); ++i)
+        {
+            auto edge = base_node.edges[i];
+            auto stem = edge;
+            stem.path.clear();
+            const auto& node = state.pool.edges.at(edge);
+            AdaptiveSurface s;
+            Writer w;
+            w.word(0x5346505349444536ULL);
+            key_write(w, stem);
+            s.key = std::move(w.data);
+            s.orientation = base_node.vertices[i] == node.a ? 1 : -1;
+            s.exterior = node.physical;
+            if (s.exterior)
+            {
+                auto alias = state.pool.grid->boundary_aliases.find(node.boundary);
+                s.boundary = alias == state.pool.grid->boundary_aliases.end() ? node.boundary : alias->second;
+            }
+            result.push_back(std::move(s));
+        }
+        for (bool upper : {false, true})
+        {
+            auto plane = plane_key(key.axial, upper);
+            AdaptiveSurface s;
+            Writer w;
+            w.word(0x5346504341503631ULL);
+            w.word(std::uint64_t(plane.kind));
+            w.word(plane.root_point);
+            product_detail::key(w, plane.creator);
+            s.key = std::move(w.data);
+            s.orientation = upper ? 1 : -1;
+            s.exterior = plane.kind == LocalProductPlaneKey::Kind::RootPoint &&
+                         (upper ? plane.root_point + 1 == state.pool.grid->z_edges.size() : plane.root_point == 0);
+            if (s.exterior)
+            {
+                const std::string name = upper ? "zmax" : "zmin";
+                auto alias = state.pool.grid->boundary_aliases.find(name);
+                s.boundary = alias == state.pool.grid->boundary_aliases.end() ? name : alias->second;
+            }
+            result.push_back(std::move(s));
+        }
+        if (result.size() != shape->num_faces())
+            throw std::invalid_argument("Product authoritative face mapping differs.");
+        std::rotate(result.begin(), result.end() - 2, result.end());
+        NativeFragmentCache cache;
+        auto region = materialize_native_fragment(*leaf.native_recipe, cache);
+        const auto& native = std::get<ExtrudedRegion>(region);
+        std::set<std::uint64_t> matched;
+        for (std::size_t f = 0; f < result.size(); ++f)
+        {
+            result[f].geometry = shape->face_geometry(f);
+            result[f].require_native_whole_tile=true;result[f].native_whole_geometry=result[f].geometry;
+            for (auto face : native.topology().cell_faces(leaf.native_cell))
+                if (result[f].geometry->equivalent(*native.geometry().certified_face_geometry(face)))
+                {
+                    if (!matched.insert(face).second)
+                        throw std::invalid_argument("Repeated procedural native face binding.");
+                    result[f].native_face = face;
+                    break;
+                }
+            if (result[f].native_face == std::numeric_limits<std::uint64_t>::max())
+                throw std::invalid_argument("Exact product surface lacks native face binding.");
+        }
+        return result;
+    }
+    static void key_write(Writer& w, const BaseEdgeKey& edge) { product_detail::key(w, edge); }
+    AdaptiveSplitResult split(const AdaptiveLeaf& parent, AdaptiveSplit split) const override
+    {
+        auto state = local_state(parent);
+        const auto p = std::get<ProductCellAncestry>(parent.key.ancestry);
+        state.columns.clear();
+        const auto bases =
+            split == AdaptiveSplit::Axial ? std::vector<BaseCellKey>{p.base} : local_base_children(state.pool, p.base);
+        const auto z = split == AdaptiveSplit::Base ? ZKeys{p.axial} : local_z_children(state.pool, p.axial);
+        for (const auto& base : bases)
+            state.columns.emplace(base, std::make_shared<const ZKeys>(z));
+        AdaptiveSplitResult result;
+        result.children = export_state(state, parent.domain);
+        result.family.key = adaptive_family_key(parent.key, split);
+        result.family.parent = parent;
+        result.family.split = split;
+        result.family.revision = parent.revision;
+        if (parent.revision == std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Product leaf revision exhausted.");
+        for (auto& leaf : result.children)
+        {
+            leaf.revision = parent.revision + 1;
+            leaf.parent_family = result.family.key;
+            leaf.work = parent.work;
+            result.family.children.push_back(leaf.key);
+        }
+        result.family.anchor =
+            encode_adaptive_key(*std::min_element(result.family.children.begin(), result.family.children.end()));
+        return result;
+    }
+};
+} // namespace product_detail
+std::shared_ptr<const AdaptiveProviderKernel> product_adaptive_kernel()
+{
+    return std::make_shared<const product_detail::Kernel>();
+}
+AdaptiveLeaf product_support_root(const AdaptiveLeaf& leaf)
+{
+    auto state=product_detail::local_state(leaf);auto root=std::get<ProductCellAncestry>(leaf.key.ancestry);root.base.path.clear();root.axial.path.clear();
+    if(root==std::get<ProductCellAncestry>(leaf.key.ancestry))return leaf;
+    state.columns.clear();state.columns.emplace(root.base,std::make_shared<const ZKeys>(ZKeys{root.axial}));auto records=product_detail::export_state(state,leaf.domain);if(records.size()!=1)throw std::logic_error("Original product support root was not one cell.");return std::move(records[0]);
+}
+AdaptiveBytes LocalProductAMR::root_descriptor() const
+{const auto text=description(data_->pool,true);return {text.begin(),text.end()};}
+AdaptiveBytes ExtrudedAMR::root_descriptor() const
+{const auto text=description(*data_,true);return {text.begin(),text.end()};}
+AdaptiveBootstrap LocalProductAMR::detach_owned(
+    std::span<const ProductCellAncestry> selected, AdaptiveBytes domain) const
+{
+    LocalData state;
+    state.pool = data_->pool;
+    std::map<BaseCellKey, ZKeys> columns;
+    for (const auto& cell : selected)
+    {
+        auto it = data_->columns.find(cell.base);
+        if (it == data_->columns.end() || !std::binary_search(it->second->begin(), it->second->end(), cell.axial))
+            throw std::invalid_argument("Detached product selection is not active.");
+        columns[cell.base].push_back(cell.axial);
+    }
+    for (auto& [base, z] : columns)
+    {
+        std::sort(z.begin(), z.end());
+        if (std::adjacent_find(z.begin(), z.end()) != z.end())
+            throw std::invalid_argument("Repeated detached product selection.");
+        state.columns.emplace(base, std::make_shared<const ZKeys>(std::move(z)));
+    }
+    AdaptiveBootstrap result;
+    result.kernel = product_adaptive_kernel();
+    if (!columns.empty())
+        result.owned = product_detail::export_state(state, domain);
+    return result;
+}
+AdaptiveBootstrap ExtrudedAMR::detach_owned(std::span<const std::uint64_t> selected, AdaptiveBytes domain) const
+{
+    LocalData state;
+    state.pool = *data_;
+    std::map<BaseCellKey, ZKeys> columns;
+    for (auto id : selected)
+    {
+        const auto cell = std::get<ProductCellAncestry>(cell_key(id).ancestry);
+        columns[cell.base].push_back(cell.axial);
+    }
+    for (auto& [base, z] : columns)
+    {
+        std::sort(z.begin(), z.end());
+        if (std::adjacent_find(z.begin(), z.end()) != z.end())
+            throw std::invalid_argument("Repeated detached product selection.");
+        state.columns.emplace(base, std::make_shared<const ZKeys>(std::move(z)));
+    }
+    AdaptiveBootstrap result;
+    result.kernel = product_adaptive_kernel();
+    if (!columns.empty())
+        result.owned = product_detail::export_state(state, domain);
+    for (auto id : selected)
+        result.source_cells.push_back({cell_key(id), id});
+    return result;
+}
 } // namespace SimpleFluid::Meshes::AMR

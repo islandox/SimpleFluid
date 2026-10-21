@@ -58,9 +58,8 @@ struct AMRRemapReport
  * matched to their native owners, including nonactive remote siblings. Owner
  * region/material/typed ancestry bindings are authenticated by exact byte
  * exchange; this is not the future Stage 6 global ancestry directory. The
- * supplied geometry catalog is never searched all-pairs. Native shell bootstrap
- * exchange pads to the global maximum per-cell payload width; variable-length
- * packing for heterogeneous large shells remains a Stage 6 scalability gate.
+ * supplied geometry catalog is never searched all-pairs. Native certificates
+ * use bounded variable-length owner packets without global payload-width padding.
  * The existing optimized Cartesian remap is a separate numerical backend.
  * No solver fields, fractions, output ghosts or accepted states are published.
  */
@@ -70,6 +69,9 @@ public:
     using Handle = MeshHandle<>;
     ConservativeAMRRemap(SP<const Handle> source, SP<const Handle> target,
         std::shared_ptr<const SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> overlaps);
+    ConservativeAMRRemap(SP<const Handle> source, SP<const Handle> target,
+        std::shared_ptr<const SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> overlaps,
+        std::size_t certificate_byte_budget);
     ~ConservativeAMRRemap();
     ConservativeAMRRemap(ConservativeAMRRemap&&) noexcept;
     ConservativeAMRRemap& operator=(ConservativeAMRRemap&&) noexcept;

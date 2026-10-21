@@ -3,6 +3,8 @@
  */
 #include "FVM/ConservativeAMRRemap.hh"
 #include "FVM/details/AMRRemapBudget.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "parallel/SparseOwnerExchange.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Import.hpp>
@@ -52,66 +54,6 @@ void identical(double value, const char* message)
     Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, 1, &value, &hi);
     require(std::isfinite(value) && lo == hi, message);
 }
-std::vector<double> native_shell(const ConservativeAMRRemap::Handle& mesh, LO cell)
-{
-    const auto* concrete = std::get_if<ConservativeAMRRemap::Handle::MultiRegionPtr>(&mesh.variant());
-    if (!concrete || !*concrete)
-        throw std::invalid_argument("Certified AMR remap requires a native MultiRegionMesh endpoint.");
-    // Native node order is not necessarily outward. Share the exact provider
-    // admission, orientation and edge-vertex propagation used by the kernel.
-    const auto shell = Meshes::ConvexCellGeometry::native_cell_shell(**concrete, mesh.cell_global_id(cell));
-    const auto& vertices = shell.vertices;
-    const auto& faces = shell.outward_faces;
-    if (vertices.size() > 9007199254740992ULL || faces.size() > 9007199254740992ULL ||
-        std::any_of(faces.begin(), faces.end(), [](const auto& face) { return face.size() > 9007199254740992ULL; }))
-        throw std::invalid_argument("Native shell indexing exceeds exact binary64 integer capacity.");
-    std::vector<double> payload{static_cast<double>(vertices.size()), static_cast<double>(faces.size())};
-    for (const auto& point : vertices)
-        payload.insert(payload.end(), point.begin(), point.end());
-    for (const auto& loop : faces)
-    {
-        payload.push_back(static_cast<double>(loop.size()));
-        for (const auto index : loop)
-            payload.push_back(static_cast<double>(index));
-    }
-    return payload;
-}
-Meshes::ConvexGeometryPtr decode_shell(const std::vector<double>& payload)
-{
-    std::size_t position = 0;
-    auto count = [&]()
-    {
-        if (position >= payload.size())
-            throw std::invalid_argument("Truncated native shell payload.");
-        const auto value = payload[position++];
-        if (!std::isfinite(value) || value < 0 || value > payload.size() || value != std::floor(value))
-            throw std::invalid_argument("Invalid native shell payload count.");
-        return static_cast<std::size_t>(value);
-    };
-    const auto vertices = count(), faces = count();
-    std::vector<Meshes::GeometryPoint> points(vertices);
-    for (auto& point : points)
-        for (auto& coordinate : point)
-        {
-            if (position >= payload.size())
-                throw std::invalid_argument("Truncated native shell coordinates.");
-            coordinate = payload[position++];
-        }
-    std::vector<std::vector<std::size_t>> loops(faces);
-    for (auto& loop : loops)
-    {
-        const auto size = count();
-        loop.resize(size);
-        for (auto& index : loop)
-        {
-            index = count();
-            if (index >= vertices)
-                throw std::invalid_argument("Invalid native node.");
-        }
-    }
-    return Meshes::ConvexCellGeometry::from_native_shell(points, loops);
-}
-
 Meshes::ConvexGeometryPtr owner_geometry(const ConservativeAMRRemap::Handle& mesh, LO cell)
 {
     const auto* native = std::get_if<ConservativeAMRRemap::Handle::MultiRegionPtr>(&mesh.variant());
@@ -119,192 +61,114 @@ Meshes::ConvexGeometryPtr owner_geometry(const ConservativeAMRRemap::Handle& mes
         throw std::invalid_argument("AMR certificate requires native MultiRegion geometry.");
     return Meshes::ConvexCellGeometry::from_native_cell(**native, mesh.cell_global_id(cell));
 }
-std::vector<double> owner_certificate(const ConservativeAMRRemap::Handle& mesh, LO cell)
-{
-    const auto native = std::get<ConservativeAMRRemap::Handle::MultiRegionPtr>(mesh.variant());
-    if (!native->has_exact_construction())
-    {
-        auto payload = native_shell(mesh, cell);
-        payload.insert(payload.begin(), 0); // Represented binary64 native shell.
-        return payload;
-    }
-    const auto exact = owner_geometry(mesh, cell)->encode_exact_certificate();
-    if (exact.size() > 9007199254740992ULL)
-        throw std::invalid_argument("Exact certificate byte count exceeds binary64 capacity.");
-    std::vector<double> payload{1, static_cast<double>(exact.size())};
-    for (const auto byte : exact)
-        payload.push_back(static_cast<unsigned char>(byte));
-    return payload;
-}
-Meshes::ConvexGeometryPtr decode_certificate(const std::vector<double>& payload)
-{
-    if (payload.empty())
-        throw std::invalid_argument("Missing native certificate tag.");
-    if (payload[0] == 0)
-        return decode_shell(std::vector<double>(payload.begin() + 1, payload.end()));
-    if (payload[0] != 1 || payload.size() < 2)
-        throw std::invalid_argument("Unknown native certificate tag.");
-    const auto count = payload[1];
-    if (!std::isfinite(count) || count < 0 || count != std::floor(count) || count > payload.size() - 2)
-        throw std::invalid_argument("Invalid exact certificate byte count.");
-    std::vector<char> bytes(static_cast<std::size_t>(count));
-    for (std::size_t i = 0; i < bytes.size(); ++i)
-    {
-        const auto byte = payload[2 + i];
-        if (!std::isfinite(byte) || byte < 0 || byte > 255 || byte != std::floor(byte))
-            throw std::invalid_argument("Invalid exact native certificate byte.");
-        bytes[i] = static_cast<char>(static_cast<unsigned char>(byte));
-    }
-    return Meshes::ConvexCellGeometry::decode_exact_certificate(bytes);
-}
 
-std::vector<double> binding_bytes(const SimpleFluid::Meshes::AMR::AdaptiveCellBinding& cell)
+void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
+    const std::vector<SimpleFluid::Meshes::AMR::AdaptiveCellBinding>& catalog, std::size_t byte_budget)
 {
-    std::vector<double> bytes;
-    auto append = [&](std::uint64_t value)
-    {
-        for (unsigned shift = 0; shift < 64; shift += 8)
-            bytes.push_back(static_cast<unsigned>((value >> shift) & 255));
-    };
-    append(cell.key.region);
-    append(cell.material);
-    append(cell.key.ancestry.index());
-    if (const auto* cartesian = std::get_if<SimpleFluid::Meshes::AMR::CartesianCellAncestry>(&cell.key.ancestry))
-    {
-        append(cartesian->level);
-        for (const auto index : cartesian->index)
-            append(index);
-    }
-    else if (const auto* convex = std::get_if<SimpleFluid::Meshes::AMR::ConvexCellAncestry>(&cell.key.ancestry))
-    {
-        append(convex->root);
-        append(convex->path.size());
-        for (const auto child : convex->path)
-            append(child);
-    }
-    else if (const auto* stationary = std::get_if<SimpleFluid::Meshes::AMR::StaticCellAncestry>(&cell.key.ancestry))
-    {
-        append(stationary->provider_root);
-        append(stationary->native_cell);
-    }
-    else
-    {
-        const auto& product = std::get<SimpleFluid::Meshes::AMR::ProductCellAncestry>(cell.key.ancestry);
-        append(product.base.root);
-        append(product.base.root_template);
-        append(product.base.path.size());
-        for (const auto child : product.base.path)
-            append(child);
-        append(product.axial.root);
-        append(product.axial.path.size());
-        for (const auto child : product.axial.path)
-            append(child);
-    }
-    return bytes;
-}
-
-void validate_catalog_shells(
-    const ConservativeAMRRemap::Handle& mesh, const std::vector<SimpleFluid::Meshes::AMR::AdaptiveCellBinding>& catalog)
-{
+    namespace wire = SimpleFluid::Meshes::AMR::adaptive_detail;
     const auto comm = Tpetra::getDefaultComm();
     const auto owned_map = mesh.owned_cell_map();
     std::vector<GO> requested;
     std::map<GO, const SimpleFluid::Meshes::AMR::AdaptiveCellBinding*> owned_bindings;
-    bool valid = true;
-    for (const auto& cell : catalog)
-    {
-        valid = valid && cell.gid <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max());
-        requested.push_back(static_cast<GO>(cell.gid));
-        if (owned_map->isNodeGlobalElement(static_cast<GO>(cell.gid)))
-            owned_bindings.emplace(static_cast<GO>(cell.gid), &cell);
-    }
-    require(valid, "AMR catalog GID exceeds native map ordinal capacity.");
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{byte_budget};
+            for (const auto& cell : catalog)
+            {
+                if (cell.gid > static_cast<std::uint64_t>(std::numeric_limits<GO>::max()))
+                    throw std::invalid_argument("AMR catalog GID exceeds native map ordinal capacity.");
+                budget.add(sizeof(GO) + sizeof(int));
+                requested.push_back(static_cast<GO>(cell.gid));
+                if (owned_map->isNodeGlobalElement(static_cast<GO>(cell.gid)))
+                    owned_bindings.emplace(static_cast<GO>(cell.gid), &cell);
+            }
+        });
     std::vector<int> owners(requested.size(), -1);
     (void) owned_map->getRemoteIndexList(Teuchos::arrayViewFromVector(requested), Teuchos::arrayViewFromVector(owners));
     require(std::all_of(owners.begin(), owners.end(), [](int rank) { return rank >= 0; }),
         "AMR certificate catalog references a cell without a native owner.");
-    const auto requested_map = Teuchos::rcp(new Pack::map_type(
-        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), Teuchos::arrayViewFromVector(requested), GO{}, comm));
-    const Pack::import_type importer(owned_map, requested_map);
-    std::vector<std::vector<double>> shells(mesh.num_owned_cells());
-    std::uint64_t local_width = 0, width = 0;
-    std::string diagnostic;
-    valid = true;
-    try
-    {
-        for (std::size_t c = 0; c < shells.size(); ++c)
+    std::vector<OwnerPacket> requests;
+    wire::collective(*comm,
+        [&]
         {
-            const auto binding = owned_bindings.at(owned_map->getGlobalElement(static_cast<LO>(c)));
-            const auto bytes = binding_bytes(*binding);
-            if (bytes.size() > 9007199254740992ULL)
-                throw std::invalid_argument("AMR binding payload length exceeds exact binary64 integer capacity.");
-            const auto native = owner_certificate(mesh, static_cast<LO>(c));
-            shells[c].push_back(static_cast<double>(bytes.size()));
-            shells[c].insert(shells[c].end(), bytes.begin(), bytes.end());
-            shells[c].insert(shells[c].end(), native.begin(), native.end());
-            local_width = std::max(local_width, static_cast<std::uint64_t>(shells[c].size()));
-        }
-    }
-    catch (const std::exception& error)
-    {
-        valid = false;
-        diagnostic = error.what();
-    }
-    catch (...)
-    {
-        valid = false;
-        diagnostic = "Unknown native shell extraction failure.";
-    }
-    require_diagnostic(valid, diagnostic, "Native certificate shell extraction failed.");
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_width, &width);
-    require(width > 0, "AMR remap requires a nonempty native geometry domain.");
-    // Bootstrap packing is padded to the global maximum shell width. Only
-    // requested catalog shells are imported; variable-length packing is a
-    // Stage 6 scalability gate for highly heterogeneous polyhedral families.
-    Pack::multi_vector_type owned(owned_map, width, true), imported(requested_map, width, false);
-    for (std::size_t a = 0; a < width; ++a)
-    {
-        auto values = owned.getDataNonConst(a);
-        for (std::size_t c = 0; c < shells.size(); ++c)
-            if (a < shells[c].size())
-                values[c] = shells[c][a];
-    }
-    imported.doImport(owned, importer, Tpetra::INSERT);
-    valid = true;
-    try
-    {
-        for (const auto& cell : catalog)
+            wire::Budget budget{byte_budget};
+            for (std::size_t i = 0; i < requested.size(); ++i)
+            {
+                wire::Writer w;
+                w.word(i);
+                w.word(static_cast<std::uint64_t>(requested[i]));
+                budget.packet(w.data.size());
+                requests.push_back({owners[i], std::move(w.data)});
+            }
+        });
+    auto incoming = exchange_owner_packets(requests, comm, byte_budget);
+    requests.clear();
+    requests.shrink_to_fit();
+    std::vector<OwnerPacket> replies;
+    wire::collective(*comm,
+        [&]
         {
-            const auto local = requested_map->getLocalElement(static_cast<GO>(cell.gid));
-            std::vector<double> payload(width);
-            for (std::size_t a = 0; a < width; ++a)
-                payload[a] = imported.getData(a)[local];
-            const auto expected = binding_bytes(cell);
-            const auto length = payload.front();
-            if (!std::isfinite(length) || length < 0 || length != std::floor(length) || length > payload.size() - 1 ||
-                length != expected.size())
-                throw std::invalid_argument("Invalid owner ancestry/material payload length.");
-            for (std::size_t a = 0; a < expected.size(); ++a)
-                if (payload[1 + a] != expected[a])
-                    throw std::invalid_argument("Catalog GID " + std::to_string(cell.gid) +
-                                                " ancestry/material differs from its owner binding.");
-            const std::vector<double> native(payload.begin() + 1 + expected.size(), payload.end());
-            if (!cell.geometry->equivalent(*decode_certificate(native)))
-                throw std::invalid_argument(
-                    "Catalog GID " + std::to_string(cell.gid) + " differs from its native owner's shell.");
-        }
-    }
-    catch (const std::exception& error)
-    {
-        valid = false;
-        diagnostic = error.what();
-    }
-    catch (...)
-    {
-        valid = false;
-        diagnostic = "Unknown imported native shell validation failure.";
-    }
-    require_diagnostic(valid, diagnostic, "AMR certificate catalog does not match native geometry.");
+            wire::Budget budget{byte_budget};
+            // Only requested certificates are materialized; no global maximum width,
+            // global geometry catalog, or solution-field import is involved.
+            std::map<GO, std::shared_ptr<const std::vector<char>>> certificates;
+            for (const auto& packet : incoming.packets)
+            {
+                wire::Reader r{packet.bytes};
+                const auto ordinal = r.word(), gid = r.word();
+                r.done();
+                if (gid > static_cast<std::uint64_t>(std::numeric_limits<GO>::max()))
+                    throw std::invalid_argument("Invalid owner certificate GID.");
+                const auto binding = owned_bindings.at(static_cast<GO>(gid));
+                auto& certificate = certificates[static_cast<GO>(gid)];
+                if (!certificate)
+                {
+                    auto bytes = owner_geometry(mesh, owned_map->getLocalElement(static_cast<GO>(gid)))
+                                     ->encode_exact_certificate();
+                    budget.add(bytes.size());
+                    certificate = std::make_shared<const std::vector<char>>(std::move(bytes));
+                }
+                wire::Writer w;
+                w.word(ordinal);
+                w.word(gid);
+                w.bytes(SimpleFluid::Meshes::AMR::encode_adaptive_key(binding->key));
+                w.word(binding->material);
+                w.bytes(*certificate);
+                budget.packet(w.data.size());
+                replies.push_back({packet.peer, std::move(w.data)});
+            }
+        });
+    incoming.packets.clear();
+    incoming.packets.shrink_to_fit();
+    auto returned = exchange_owner_packets(replies, comm, byte_budget);
+    wire::collective(*comm,
+        [&]
+        {
+            std::vector<bool> seen(catalog.size());
+            for (const auto& packet : returned.packets)
+            {
+                wire::Reader r{packet.bytes};
+                const auto ordinal = r.word(), gid = r.word();
+                if (ordinal >= catalog.size() || seen[ordinal] || packet.peer != owners[ordinal] ||
+                    gid != catalog[ordinal].gid)
+                    throw std::invalid_argument("Unexpected or duplicate native owner certificate response.");
+                const auto& expected = catalog[ordinal];
+                const auto key = SimpleFluid::Meshes::AMR::decode_adaptive_key(r.bytes());
+                const auto material = r.word();
+                if (key != expected.key || material != expected.material)
+                    throw std::invalid_argument(
+                        "Catalog GID " + std::to_string(gid) + " ancestry/material differs from its owner binding.");
+                const auto geometry = Meshes::ConvexCellGeometry::decode_exact_certificate(r.bytes());
+                r.done();
+                if (!expected.geometry->equivalent(*geometry))
+                    throw std::invalid_argument(
+                        "Catalog GID " + std::to_string(gid) + " differs from its native owner's shell.");
+                seen[ordinal] = true;
+            }
+            if (!std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }))
+                throw std::invalid_argument("Missing native owner certificate response.");
+        });
 }
 
 Wide measure(const Meshes::ConvexGeometryPtr& geometry)
@@ -393,6 +257,12 @@ struct ConservativeAMRRemap::Impl
 
 ConservativeAMRRemap::ConservativeAMRRemap(SP<const Handle> source, SP<const Handle> target,
     std::shared_ptr<const SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> overlaps)
+    : ConservativeAMRRemap(std::move(source), std::move(target), std::move(overlaps), 64 * 1024 * 1024)
+{
+}
+
+ConservativeAMRRemap::ConservativeAMRRemap(SP<const Handle> source, SP<const Handle> target,
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> overlaps, std::size_t certificate_byte_budget)
     : impl_(std::make_unique<Impl>())
 {
     require(source && target && overlaps, "AMR remap requires native endpoints and a certified overlap plan.");
@@ -423,6 +293,8 @@ ConservativeAMRRemap::ConservativeAMRRemap(SP<const Handle> source, SP<const Han
     {
     }
     require(valid, "AMR remap plan observations do not match the exact native endpoints.");
+    require(p.source_map->getGlobalNumElements() > 0 && p.target_map->getGlobalNumElements() > 0,
+        "AMR remap requires nonempty global source and target domains.");
     require(p.source_map->isOneToOne() && p.target_map->isOneToOne(), "AMR remap requires unique owned cell maps.");
     p.source_cells.resize(p.source->num_owned_cells());
     p.target_volumes.resize(p.target->num_owned_cells());
@@ -484,8 +356,8 @@ ConservativeAMRRemap::ConservativeAMRRemap(SP<const Handle> source, SP<const Han
     require_diagnostic(valid, diagnostic, "AMR certified cells do not match native owned geometry.");
     // Exact certificate inputs include remote siblings beyond active solution
     // donors. Bind every supplied source AND target shell to its native owner.
-    validate_catalog_shells(*p.source, p.plan->source_cells());
-    validate_catalog_shells(*p.target, p.plan->target_cells());
+    validate_catalog_shells(*p.source, p.plan->source_cells(), certificate_byte_budget);
+    validate_catalog_shells(*p.target, p.plan->target_cells(), certificate_byte_budget);
     p.donors = Teuchos::rcp(new Pack::map_type(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
         Teuchos::arrayViewFromVector(std::vector<GO>(donor_ids.begin(), donor_ids.end())), GO{}, comm));
     p.importer = std::make_unique<Pack::import_type>(p.source_map, p.donors);

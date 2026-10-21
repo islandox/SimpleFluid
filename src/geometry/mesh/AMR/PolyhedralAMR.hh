@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/ExactPolyhedralComplex.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "parallel/CompositePartition.hh"
 
 namespace SimpleFluid::Meshes::AMR
@@ -40,6 +41,9 @@ public:
     [[nodiscard]] std::size_t cell_fragment(std::uint64_t cell) const override;
     [[nodiscard]] ConvexGeometryPtr cell_geometry(std::uint64_t cell) const;
     [[nodiscard]] const std::shared_ptr<const ExactPolyhedralComplex>& complex() const noexcept;
+
+    [[nodiscard]] AdaptiveBootstrap detach_owned(
+        std::span<const std::uint64_t> owned_cells, AdaptiveBytes domain) const;
 
     /** Collective source leaf ordinals; coarsening requires the complete
      * immediate recorded sibling family in the original source. Every face

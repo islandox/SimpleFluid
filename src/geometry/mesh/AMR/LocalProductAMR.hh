@@ -2,6 +2,7 @@
  * @brief Immutable connected base-patch times axial-run provider state.
  */
 #pragma once
+#include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include <stdexcept>
 namespace SimpleFluid::Meshes::AMR
@@ -99,6 +100,9 @@ public:
      * factor provenance; retains no expanded cell or certificate cache. */
     [[nodiscard]] std::vector<ContactViolation> contact_violations(
         double maximum_span_ratio, unsigned maximum_trace_jump = 1, std::size_t contact_budget = 65536) const;
+    [[nodiscard]] AdaptiveBootstrap detach_owned(
+        std::span<const ProductCellAncestry> owned_cells, AdaptiveBytes domain) const;
+    [[nodiscard]] AdaptiveBytes root_descriptor() const;
     struct StorageCounts
     {
         std::size_t cells, runs, base_templates, axis_templates, axial_values, base_vertices, point_recipes, z_recipes,

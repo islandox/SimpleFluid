@@ -12,6 +12,7 @@
 namespace SimpleFluid
 {
 template<TpetraTypePack Pack> class MeshPartitioner;
+template<TpetraTypePack Pack> class CompositePartition;
 
 /** @brief Partition policy changes ownership, never a region's topology family. */
 struct CompositePartitionOptions
@@ -140,6 +141,7 @@ public:
     uint64_t collective_identity() const noexcept { return d_collective_id; }
 private:
     friend class MeshPartitioner<Pack>;
+    friend class CompositePartition<Pack>;
     CompositePartitionPlan() = default;
     std::vector<ID> d_cells, d_faces, d_nodes;
     std::vector<int> d_cell_owners;
@@ -165,6 +167,10 @@ template<TpetraTypePack Pack = DefaultTpetraTypes>
 class CompositePartition
 {
 public:
+    /** Collective direct sparse route: no root gather, source merge or global
+     * owner array. IDs and full/metric residency are already authority-verified. */
+    static CompositePartition from_sparse_native(std::shared_ptr<Meshes::MultiRegionMesh> geometry,
+        std::span<const uint64_t> owned_cells, std::span<const uint64_t> ghost_cells);
     const std::shared_ptr<Meshes::MultiRegionMesh>& geometry() const noexcept { return d_geometry; }
     const CompositePartitionPlan<Pack>& plan() const noexcept { return d_plan; }
     /** Resident geometry still matches the immutable partition construction. */

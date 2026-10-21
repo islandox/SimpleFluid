@@ -780,6 +780,8 @@ ConvexGeometryPtr ConvexCellGeometry::extruded_polygon(
 
 NativeConvexShell ConvexCellGeometry::native_cell_shell(const MultiRegionMesh& mesh, std::uint64_t cell)
 {
+    if (mesh.sparse_native())
+        throw std::invalid_argument("Sparse authoritative cells cannot export display node hulls.");
     if (mesh.has_exact_construction())
         throw std::invalid_argument(
             "Constructed native geometry requires lossless exact cell certificates, not display-node shells.");
@@ -832,6 +834,8 @@ NativeConvexShell ConvexCellGeometry::native_cell_shell(const MultiRegionMesh& m
 
 ConvexGeometryPtr ConvexCellGeometry::from_native_cell(const MultiRegionMesh& mesh, std::uint64_t cell)
 {
+    if (mesh.sparse_native())
+        return mesh.certified_sparse_cell_geometry(cell);
     (void) mesh.geometry_epoch();
     if (mesh.has_exact_construction() && !mesh.interfaces().empty() && !mesh.has_qualified_exact_interfaces())
         throw std::invalid_argument(
@@ -1176,6 +1180,14 @@ MeshUtils::Vec3 rounded_point(const P& p)
     return {measured(p[0]).as_double(), measured(p[1]).as_double(), measured(p[2]).as_double()};
 }
 } // namespace
+
+GeometryPoint ConvexCellGeometry::centroid() const
+{
+    const auto origin = point(impl_->origin);
+    const auto moments = exact_moments(impl_->poly, origin);
+    const auto center = rounded_point(add(origin, mul(moments.first, Q(1) / moments.volume)));
+    return {center.x, center.y, center.z};
+}
 
 std::shared_ptr<const ExactExtrudedConstruction> ExactExtrudedConstruction::make(
     std::shared_ptr<const ExtrudedTopology> topology, std::vector<ExactPointRecipe> recipes,
@@ -2507,6 +2519,8 @@ std::size_t ConvexCellGeometry::storage_bytes() const
 }
 ConvexGeometryPtr ConvexCellGeometry::from_native_cell_atomic(const MultiRegionMesh& mesh, std::uint64_t cell)
 {
+    if (mesh.sparse_native())
+        return mesh.certified_sparse_cell_geometry(cell);
     (void) mesh.geometry_epoch();
     if (mesh.has_exact_construction() && !mesh.interfaces().empty() && !mesh.has_qualified_exact_interfaces())
         throw std::invalid_argument("Joined constructed atomic geometry needs qualified exact interfaces.");
@@ -3016,6 +3030,13 @@ struct ExactPlanarFace::Impl
 {
     Polygon polygon;
 };
+ExactPlanarFacePtr ConvexCellGeometry::face_geometry(std::size_t face) const
+{
+    auto result = std::make_shared<ExactPlanarFace::Impl>();
+    for (auto vertex : impl_->poly.faces.at(face))
+        result->polygon.push_back(impl_->poly.vertices.at(vertex));
+    return ExactPlanarFacePtr(new ExactPlanarFace(std::move(result)));
+}
 namespace
 {
 void validate_planar_polygon(const Polygon& polygon)
@@ -3096,6 +3117,266 @@ bool ExactPlanarFace::oppositely_oriented(const ExactPlanarFace& other) const
 {
     return dot(polygon_vector(impl_->polygon), polygon_vector(other.impl_->polygon)) < 0;
 }
+namespace
+{
+P authority_point(std::span<const char> packet)
+{
+    WireReader r{packet};
+    if (r.word() != 0x5346504f494e5431ULL)
+        throw std::invalid_argument("Invalid exact authority point.");
+    P p;
+    for (auto& q : p)
+        q = r.rational();
+    r.finish();
+    return p;
+}
+} // namespace
+namespace
+{
+P displacement_point(std::span<const char> packet)
+{
+    if (packet.empty())
+        return {};
+    WireReader r{packet};
+    if (r.word() != 0x5346444953503631ULL)
+        throw std::invalid_argument("Invalid exact displacement certificate.");
+    P p;
+    for (auto& q : p)
+        q = r.rational();
+    r.finish();
+    return p;
+}
+std::vector<char> displacement_packet(const P& p)
+{
+    if (zero(p))
+        return {};
+    WireWriter w;
+    w.word(0x5346444953503631ULL);
+    for (const auto& q : p)
+        w.rational(q);
+    return std::move(w.data);
+}
+std::vector<char> point_packet(const P& p)
+{
+    WireWriter w;
+    w.word(0x5346504f494e5431ULL);
+    for (const auto& q : p)
+        w.rational(q);
+    return std::move(w.data);
+}
+} // namespace
+std::vector<char> exact_displacement(GeometryPoint from, GeometryPoint to)
+{
+    for (unsigned a = 0; a < 3; ++a)
+        if (!std::isfinite(from[a]) || !std::isfinite(to[a]))
+            throw std::invalid_argument("Exact displacement needs finite represented endpoints.");
+    return displacement_packet(sub(point(to), point(from)));
+}
+std::vector<char> exact_displacement_difference(std::span<const char> first, std::span<const char> second)
+{
+    return displacement_packet(sub(displacement_point(first), displacement_point(second)));
+}
+GeometryPoint exact_displacement_display(std::span<const char> packet)
+{
+    const auto p = rounded_point(displacement_point(packet));
+    return {p.x, p.y, p.z};
+}
+std::vector<char> exact_point_translated(std::span<const char> identity, std::span<const char> displacement)
+{
+    return point_packet(add(authority_point(identity), displacement_point(displacement)));
+}
+std::vector<char> exact_periodic_point(
+    std::span<const char> identity, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic)
+{
+    auto p = authority_point(identity);
+    for (unsigned a = 0; a < 3; ++a)
+        if (periodic[a])
+        {
+            if (!std::isfinite(lower[a]) || !std::isfinite(upper[a]) || lower[a] >= upper[a])
+                throw std::invalid_argument("Invalid periodic root interval.");
+            if (p[a] == exact(upper[a]))
+                p[a] = exact(lower[a]);
+        }
+    return point_packet(p);
+}
+ExactPlanarFacePtr ExactPlanarFace::translated_exact(std::span<const char> displacement) const
+{
+    auto translated = std::make_shared<Impl>();
+    const auto shift = displacement_point(displacement);
+    for (const auto& p : impl_->polygon)
+        translated->polygon.push_back(add(p, shift));
+    return ExactPlanarFacePtr(new ExactPlanarFace(std::move(translated)));
+}
+GeometryPoint exact_point_display(std::span<const char> identity)
+{
+    const auto point = rounded_point(authority_point(identity));
+    return {point.x, point.y, point.z};
+}
+struct ExactEdgePointIndex::Impl
+{
+    P origin, direction;
+    std::size_t axis = 0;
+    std::map<Q, std::vector<char>> points;
+};
+ExactEdgePointIndex::ExactEdgePointIndex(std::span<const std::vector<char>> points)
+{
+    auto index = std::make_shared<Impl>();
+    std::set<P> unique;
+    for (const auto& point : points)
+        unique.insert(authority_point(point));
+    if (unique.size() < 2)
+        throw std::invalid_argument("Exact edge index needs distinct segment endpoints.");
+    index->origin = *unique.begin();
+    index->direction = sub(*unique.rbegin(), index->origin);
+    while (index->direction[index->axis] == 0)
+        ++index->axis;
+    for (const auto& packet : points)
+    {
+        const auto p = authority_point(packet);
+        if (!zero(cross(sub(p, index->origin), index->direction)))
+            throw std::invalid_argument("Edge authority point lies off its exact line.");
+        index->points.emplace(p[index->axis], packet);
+    }
+    impl_ = std::move(index);
+}
+std::vector<std::vector<char>> ExactEdgePointIndex::closed_segment(
+    std::span<const char> a, std::span<const char> b) const
+{
+    const auto first = authority_point(a), second = authority_point(b);
+    if (first == second || !zero(cross(sub(first, impl_->origin), impl_->direction)) ||
+        !zero(cross(sub(second, impl_->origin), impl_->direction)))
+        throw std::invalid_argument("Invalid authority segment query.");
+    const Q lo = std::min(first[impl_->axis], second[impl_->axis]),
+            hi = std::max(first[impl_->axis], second[impl_->axis]);
+    std::vector<std::vector<char>> result;
+    for (auto it = impl_->points.lower_bound(lo); it != impl_->points.end() && it->first <= hi; ++it)
+        result.push_back(it->second);
+    return result;
+}
+std::size_t ExactEdgePointIndex::storage_bytes() const
+{
+    std::size_t bytes = sizeof(*this) + sizeof(Impl);
+    for (const auto& [key, value] : impl_->points)
+        bytes += sizeof(key) + sizeof(value) + value.capacity() + 3 * sizeof(void*);
+    return bytes;
+}
+ExactPlanarFacePtr ExactPlanarFace::intersection(const ExactPlanarFace& other) const
+{
+    const auto normal = polygon_vector(impl_->polygon);
+    for (const auto& point : other.impl_->polygon)
+        if (dot(normal, sub(point, impl_->polygon[0])) != 0)
+            throw std::invalid_argument("Authority faces are not coplanar.");
+    auto clipper = other.impl_->polygon;
+    if (dot(polygon_vector(clipper), normal) < 0)
+        std::reverse(clipper.begin(), clipper.end());
+    auto polygon = polygon_intersection(impl_->polygon, clipper, normal);
+    if (polygon.empty())
+        return {};
+    auto result = std::make_shared<Impl>();
+    result->polygon = std::move(polygon);
+    return ExactPlanarFacePtr(new ExactPlanarFace(std::move(result)));
+}
+std::vector<std::vector<char>> ExactPlanarFace::vertex_identities() const
+{
+    std::vector<std::vector<char>> result;
+    for (const auto& p : impl_->polygon)
+    {
+        WireWriter w;
+        w.word(0x5346504f494e5431ULL);
+        for (const auto& q : p)
+            w.rational(q);
+        result.push_back(std::move(w.data));
+    }
+    return result;
+}
+std::vector<std::vector<char>> ExactPlanarFace::edge_support_identities() const
+{
+    std::vector<std::vector<char>> result;
+    for (std::size_t i = 0; i < impl_->polygon.size(); ++i)
+    {
+        const auto& p = impl_->polygon[i];
+        auto d = sub(impl_->polygon[(i + 1) % impl_->polygon.size()], p);
+        std::size_t axis = 0;
+        while (d[axis] == 0)
+            ++axis;
+        const Q factor = d[axis];
+        for (auto& q : d)
+            q /= factor;
+        const auto moment = cross(p, d);
+        WireWriter w;
+        w.word(0x53464c494e453631ULL);
+        for (const auto& q : d)
+            w.rational(q);
+        for (const auto& q : moment)
+            w.rational(q);
+        result.push_back(std::move(w.data));
+    }
+    return result;
+}
+ExactPlanarFacePtr ExactPlanarFace::with_edge_vertices(std::span<const std::vector<char>> points) const
+{
+    std::set<P> candidates;
+    for (const auto& packet : points)
+    {
+        WireReader r{packet};
+        if (r.word() != 0x5346504f494e5431ULL)
+            throw std::invalid_argument("Invalid exact authority point.");
+        P p;
+        for (auto& q : p)
+            q = r.rational();
+        r.finish();
+        candidates.insert(p);
+    }
+    auto result = std::make_shared<Impl>();
+    for (std::size_t i = 0; i < impl_->polygon.size(); ++i)
+    {
+        const auto& a = impl_->polygon[i];
+        const auto& b = impl_->polygon[(i + 1) % impl_->polygon.size()];
+        const auto d = sub(b, a);
+        const Q length = dot(d, d);
+        std::map<Q, P> interior;
+        for (const auto& p : candidates)
+        {
+            const auto offset = sub(p, a);
+            const Q along = dot(offset, d);
+            if (zero(cross(offset, d)) && along > 0 && along < length)
+                interior.emplace(along, p);
+        }
+        result->polygon.push_back(a);
+        for (const auto& [distance, p] : interior)
+            result->polygon.push_back(p);
+    }
+    return ExactPlanarFacePtr(new ExactPlanarFace(std::move(result)));
+}
+std::vector<char> exact_planar_support(const ExactPlanarFace& face)
+{
+    auto normal=polygon_vector(face.impl_->polygon);std::size_t axis=0;while(normal[axis]==0)++axis;const Q divisor=normal[axis];for(auto& q:normal)q/=divisor;
+    WireWriter w;w.word(0x53464a504c414e36ULL);for(const auto& q:normal)w.rational(q);w.rational(dot(normal,face.impl_->polygon[0]));return std::move(w.data);
+}
+int exact_planar_orientation(const ExactPlanarFace& face)
+{const auto normal=polygon_vector(face.impl_->polygon);for(const auto& q:normal)if(q!=0)return q>0?1:-1;throw std::invalid_argument("Degenerate mixed root support.");}
+std::vector<ExactPlanarFacePtr> subtract_planar_faces(const ExactPlanarFace& source,std::span<const ExactPlanarFacePtr> removed)
+{
+    const auto normal=polygon_vector(source.impl_->polygon);
+    auto half=[](const Polygon& polygon,const Plane& plane){Polygon output;auto append=[&](const P& p){if(output.empty()||output.back()!=p)output.push_back(p);};for(std::size_t i=0;i<polygon.size();++i){const auto& a=polygon[i];const auto& b=polygon[(i+1)%polygon.size()];const Q da=distance(plane,a),db=distance(plane,b);if(da<=0)append(a);if((da<0&&db>0)||(da>0&&db<0))append(add(a,mul(sub(b,a),Q(da/(da-db)))));}if(output.size()>1&&output.front()==output.back())output.pop_back();return minimal_polygon(std::move(output));};
+    std::vector<Polygon> pieces{source.impl_->polygon};
+    for(const auto& cutter:removed){if(!cutter||!source.contains(*cutter))throw std::invalid_argument("Mixed selected root face is not wholly contained.");auto boundary=cutter->impl_->polygon;if(dot(polygon_vector(boundary),normal)<0)std::reverse(boundary.begin(),boundary.end());std::vector<Polygon> next;
+        for(auto piece:pieces){for(std::size_t e=0;e<boundary.size()&&!piece.empty();++e){const Plane inside{cross(sub(boundary[(e+1)%boundary.size()],boundary[e]),normal),boundary[e]};Plane outside=inside;outside.normal=mul(outside.normal,Q(-1));auto remainder=half(piece,outside);if(!remainder.empty())next.push_back(std::move(remainder));piece=half(piece,inside);}}
+        pieces=std::move(next);
+    }
+    std::vector<ExactPlanarFacePtr> result,coverage(removed.begin(),removed.end());for(auto& polygon:pieces){auto impl=std::make_shared<ExactPlanarFace::Impl>();impl->polygon=std::move(polygon);auto face=ExactPlanarFacePtr(new ExactPlanarFace(std::move(impl)));coverage.push_back(face);result.push_back(std::move(face));}source.certify_partition(coverage);return result;
+}
+bool ExactPlanarFace::contains_exact_point(std::span<const char> identity) const
+{
+    const auto p = authority_point(identity), normal = polygon_vector(impl_->polygon);
+    if (dot(normal, sub(p, impl_->polygon[0])) != 0)
+        return false;
+    for (std::size_t e = 0; e < impl_->polygon.size(); ++e)
+        if (dot(normal, cross(sub(impl_->polygon[(e + 1) % impl_->polygon.size()], impl_->polygon[e]),
+                            sub(p, impl_->polygon[e]))) < 0)
+            return false;
+    return true;
+}
 bool ExactPlanarFace::cell_bounds_overlap(const ConvexCellGeometry& cell) const
 {
     if (cell.impl_->poly.vertices.empty())
@@ -3173,6 +3454,26 @@ std::vector<char> ExactPlanarFace::encode() const
     auto polygon = minimal_polygon(impl_->polygon);
     w.word(polygon.size());
     for (const auto& p : polygon)
+        for (const auto& q : p)
+            w.rational(q);
+    return std::move(w.data);
+}
+std::size_t ExactPlanarFace::storage_bytes() const
+{
+    std::size_t bytes = sizeof(*this) + sizeof(Impl) + impl_->polygon.capacity() * sizeof(P);
+    for (const auto& p : impl_->polygon)
+        for (const auto& q : p)
+            bytes += (q.backend().num().capacity() + q.backend().denom().capacity()) *
+                     sizeof(boost::multiprecision::limb_type);
+    return bytes;
+}
+std::vector<char> ExactPlanarFace::encode_incidence() const
+{
+    WireWriter w;
+    w.word(0x5346464143454331ULL);
+    w.word(1);
+    w.word(impl_->polygon.size());
+    for (const auto& p : impl_->polygon)
         for (const auto& q : p)
             w.rational(q);
     return std::move(w.data);
@@ -3275,6 +3576,8 @@ ExactPlanarFacePtr ExactPolyhedralComplex::face_geometry(std::uint64_t face) con
 }
 ExactPlanarFacePtr ExactPlanarFace::from_native_face(const MultiRegionMesh& mesh, std::uint64_t face)
 {
+    if (mesh.sparse_native())
+        return mesh.certified_sparse_face_geometry(face);
     (void) mesh.geometry_epoch();
     const auto native = mesh.native_face(face);
     const auto& region = mesh.regions().at(native.region);
