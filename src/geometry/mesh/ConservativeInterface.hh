@@ -7,7 +7,7 @@
  * @copyright Copyright (c) 2026
  */
 #pragma once
-#include "geometry/MeshUtils.hh"
+#include "geometry/mesh/MeshRegion.hh"
 #include <cstdint>
 #include <span>
 #include <vector>

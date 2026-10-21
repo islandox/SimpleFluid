@@ -3,7 +3,8 @@
  */
 #pragma once
 
-#include "geometry/mesh/RegionProviders.hh"
+#include "geometry/mesh/MeshRegion.hh"
+#include "geometry/mesh/UnstructuredMesh.hh"
 #include "geometry/ConvexCellGeometry.hh"
 #include <map>
 #include <cmath>

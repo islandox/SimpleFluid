@@ -337,3 +337,20 @@ The 64³ base mesh keeps at least 21,845 owned cells per rank at twelve ranks;
 40³ would violate the 10,000-cell floor. See the
 [hardware-thread scaling report](qualification/region_partition_hwthreads_20260919/report.md)
 for the measured six-versus-twelve-rank comparison.
+
+### Region implementation boundary
+
+`geometry/mesh/MeshRegion.hh` owns `RegionFace`, storage/layout records,
+provider concepts, `IsoRegion`, and the retained `NativeRegionProvider` adapter.
+Its `.ipp` keeps generic provider-pair validation and the deduced native factory
+visible, so caller-defined topology/geometry combinations require no library
+instantiation. This covers Cartesian, native Cartesian/cylindrical/XY-Z/
+unstructured, independent extruded, swept RZ, and explicit region pairs.
+Concrete providers and their factories remain in their family-specific headers.
+
+`MeshRegion.cc` includes the private `.tcc` and instantiates the native adapter
+for `OrthogonalCartesian3D`, `OrthogonalCylindrial3D`, `SemiStructuredXY_Z`, and
+`UnstructuredMesh`. A downstream native type using that adapter must include
+`MeshRegion.tcc` in one implementation unit and explicitly instantiate
+`SimpleFluid::Meshes::NativeRegionProvider<Native>` there. Public headers never
+include `.tcc` files. Custom `IsoRegion<T, G>` pairs need only `MeshRegion.hh`.
