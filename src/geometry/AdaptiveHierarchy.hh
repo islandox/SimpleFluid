@@ -40,10 +40,38 @@ struct ConvexCellAncestry
     auto operator<=>(const ConvexCellAncestry&) const = default;
 };
 
+struct BaseCellKey
+{
+    std::uint64_t root = 0, root_template = 0;
+    std::vector<std::uint64_t> path;
+    auto operator<=>(const BaseCellKey&) const = default;
+};
+struct AxialIntervalKey
+{
+    std::uint64_t root = 0;
+    std::vector<std::uint64_t> path;
+    auto operator<=>(const AxialIntervalKey&) const = default;
+};
+struct BaseEdgeKey
+{
+    enum class Kind { Root, TemplateInterior };
+    BaseCellKey creator;
+    std::uint64_t ordinal = 0;
+    std::vector<std::uint64_t> path;
+    Kind kind = Kind::Root;
+    auto operator<=>(const BaseEdgeKey&) const = default;
+};
+struct ProductCellAncestry
+{
+    BaseCellKey base;
+    AxialIntervalKey axial;
+    auto operator<=>(const ProductCellAncestry&) const = default;
+};
+
 struct AdaptiveCellKey
 {
     std::uint64_t region = 0;
-    std::variant<CartesianCellAncestry, ConvexCellAncestry> ancestry;
+    std::variant<CartesianCellAncestry, ConvexCellAncestry, ProductCellAncestry> ancestry;
     auto operator<=>(const AdaptiveCellKey&) const = default;
 };
 

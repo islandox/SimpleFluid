@@ -2,12 +2,14 @@
  * @brief Exact represented-input convex clipping and moment certificates.
  */
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/mesh/ExactExtrudedConstruction.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <algorithm>
 #include <bit>
 #include <boost/multiprecision/cpp_int.hpp>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -506,6 +508,89 @@ std::optional<Product> product_intersection(const Product& a, const Product& b)
         throw std::logic_error("Product clipping reversed polygon orientation.");
     return result;
 }
+struct WireWriter
+{
+    std::vector<char> data;
+    void word(std::uint64_t value)
+    {
+        for (unsigned b = 0; b < 8; ++b)
+            data.push_back(static_cast<char>(value >> (8 * b)));
+    }
+    void real(double value)
+    {
+        (void) exact(value);
+        word(std::bit_cast<std::uint64_t>(value));
+    }
+    void integer(I value)
+    {
+        word(value < 0);
+        if (value < 0)
+            value = -value;
+        std::vector<unsigned char> bytes;
+        export_bits(value, std::back_inserter(bytes), 8, false);
+        word(bytes.size());
+        for (auto byte : bytes)
+            data.push_back(static_cast<char>(byte));
+    }
+    void rational(const Q& value)
+    {
+        integer(boost::multiprecision::numerator(value));
+        integer(boost::multiprecision::denominator(value));
+    }
+};
+struct WireReader
+{
+    std::span<const char> data;
+    std::size_t position = 0;
+    std::uint64_t word()
+    {
+        if (data.size() - position < 8)
+            throw std::invalid_argument("Truncated exact geometry certificate.");
+        std::uint64_t v = 0;
+        for (unsigned b = 0; b < 8; ++b)
+            v |= std::uint64_t(static_cast<unsigned char>(data[position++])) << (8 * b);
+        return v;
+    }
+    std::size_t count()
+    {
+        auto n = word();
+        if (n > (data.size() - position) / 8 + 1)
+            throw std::invalid_argument("Invalid exact geometry count.");
+        return static_cast<std::size_t>(n);
+    }
+    double real()
+    {
+        auto v = std::bit_cast<double>(word());
+        (void) exact(v);
+        return v;
+    }
+    I integer()
+    {
+        auto sign = word(), n = word();
+        if (sign > 1 || n > data.size() - position)
+            throw std::invalid_argument("Invalid exact geometry integer.");
+        std::vector<unsigned char> bytes;
+        bytes.reserve(n);
+        for (std::size_t i = 0; i < n; ++i)
+            bytes.push_back(static_cast<unsigned char>(data[position++]));
+        I value;
+        import_bits(value, bytes.begin(), bytes.end(), 8, false);
+        return sign ? -value : value;
+    }
+    Q rational()
+    {
+        I n = integer(), d = integer();
+        if (d <= 0)
+            throw std::invalid_argument("Exact geometry denominator must be positive.");
+        return Q(n, d);
+    }
+    void finish()
+    {
+        if (position != data.size())
+            throw std::invalid_argument("Trailing exact geometry packet data.");
+    }
+};
+
 NativeConvexShell canonical_native_shell(
     std::span<const GeometryPoint> vertices, const std::vector<Face>& outward_faces)
 {
@@ -574,6 +659,60 @@ struct ConvexCellGeometry::Impl
     std::optional<Product> product;
 };
 
+std::vector<char> ConvexCellGeometry::encode_exact_certificate() const
+{
+    WireWriter w;
+    w.word(0x5346455841435431ULL);
+    w.word(1);
+    for (auto v : impl_->origin)
+        w.real(v);
+    w.word(impl_->poly.vertices.size());
+    const auto origin = point(impl_->origin);
+    for (const auto& p : impl_->poly.vertices)
+        for (const auto& q : sub(p, origin))
+            w.rational(q);
+    w.word(impl_->poly.faces.size());
+    for (const auto& face : impl_->poly.faces)
+    {
+        w.word(face.size());
+        for (auto id : face)
+            w.word(id);
+    }
+    return std::move(w.data);
+}
+
+ConvexGeometryPtr ConvexCellGeometry::decode_exact_certificate(std::span<const char> packet)
+{
+    WireReader r{packet};
+    if (r.word() != 0x5346455841435431ULL || r.word() != 1)
+        throw std::invalid_argument("Unknown exact geometry certificate version/tag.");
+    auto impl = std::make_shared<Impl>();
+    for (auto& v : impl->origin)
+        v = r.real();
+    const auto origin = point(impl->origin);
+    auto n = r.count();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        P p;
+        for (auto& q : p)
+            q = r.rational();
+        impl->poly.vertices.push_back(add(p, origin));
+    }
+    n = r.count();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        Face face;
+        auto m = r.count();
+        for (std::size_t j = 0; j < m; ++j)
+            face.push_back(r.word());
+        impl->poly.faces.push_back(std::move(face));
+    }
+    r.finish();
+    validate(impl->poly);
+    impl->product = product_description(impl->poly);
+    return ConvexGeometryPtr(new ConvexCellGeometry(std::move(impl)));
+}
+
 double CertifiedGeometryValue::as_double() const
 {
     const double result = static_cast<double>(value);
@@ -634,6 +773,9 @@ ConvexGeometryPtr ConvexCellGeometry::extruded_polygon(
 
 NativeConvexShell ConvexCellGeometry::native_cell_shell(const MultiRegionMesh& mesh, std::uint64_t cell)
 {
+    if (mesh.has_exact_construction())
+        throw std::invalid_argument(
+            "Constructed native geometry requires lossless exact cell certificates, not display-node shells.");
     const auto execution = mesh.acquire_execution_view();
     if (mesh.region_layout(mesh.native_cell(cell).first).family == RegionLayout::Family::Cylindrical)
         throw std::invalid_argument("Analytic cylindrical cells are not planar-faced convex shell providers.");
@@ -683,6 +825,22 @@ NativeConvexShell ConvexCellGeometry::native_cell_shell(const MultiRegionMesh& m
 
 ConvexGeometryPtr ConvexCellGeometry::from_native_cell(const MultiRegionMesh& mesh, std::uint64_t cell)
 {
+    (void) mesh.geometry_epoch();
+    if (mesh.has_exact_construction() && !mesh.interfaces().empty())
+        throw std::invalid_argument(
+            "Joined constructed providers require separately qualified exact interface geometry.");
+    const auto [region, local] = mesh.native_cell(cell);
+    auto exact_geometry = std::visit(
+        [&](const auto& r) -> ConvexGeometryPtr
+        {
+            if constexpr (requires { r.geometry().certified_cell_geometry(local); })
+                return r.geometry().certified_cell_geometry(local);
+            else
+                return {};
+        },
+        mesh.regions().at(region));
+    if (exact_geometry)
+        return exact_geometry;
     const auto shell = native_cell_shell(mesh, cell);
     return make(shell.vertices, shell.outward_faces);
 }
@@ -827,4 +985,478 @@ bool ConvexCellGeometry::equivalent(const ConvexCellGeometry& other) const
 {
     return contained(impl_->poly, other.impl_->poly) && contained(other.impl_->poly, impl_->poly);
 }
+struct ExactExtrudedConstruction::Impl
+{
+    std::shared_ptr<const ExtrudedTopology> topology;
+    std::vector<ExactPointRecipe> recipes;
+    std::vector<ExactScalarRecipe> zrecipes;
+    std::vector<std::size_t> active, zactive;
+    std::vector<P> points, centers, deltas, edge_centers;
+    std::vector<Q> z, areas;
+};
+
+namespace
+{
+std::vector<char> topology_descriptor(const ExtrudedTopology& topology)
+{
+    WireWriter w;
+    const auto& indexer = topology.indexer();
+    w.word(indexer.num_nodes_per_layer);
+    w.word(indexer.num_layers);
+    w.word(indexer.num_cells_per_layer);
+    for (std::size_t c = 0; c < indexer.num_cells_per_layer; ++c)
+    {
+        auto nodes = topology.base_cell_nodes(c);
+        w.word(nodes.size());
+        for (auto n : nodes)
+            w.word(n);
+    }
+    const auto ids = topology.boundary_batch_ids();
+    w.word(ids.size());
+    for (auto id : ids)
+    {
+        const auto& name = topology.boundary_batch_name(id);
+        w.word(name.size());
+        for (unsigned char ch : name)
+            w.word(ch);
+    }
+    for (const auto& e : topology.native_topology().side_faces())
+    {
+        w.word(e.nodes[0]);
+        w.word(e.nodes[1]);
+        w.word(e.owner);
+        w.word(e.neighbor);
+        w.word(e.boundary_id);
+    }
+    return std::move(w.data);
+}
+MeshUtils::Vec3 rounded_point(const P& p)
+{
+    return {measured(p[0]).as_double(), measured(p[1]).as_double(), measured(p[2]).as_double()};
+}
+} // namespace
+
+std::shared_ptr<const ExactExtrudedConstruction> ExactExtrudedConstruction::make(
+    std::shared_ptr<const ExtrudedTopology> topology, std::vector<ExactPointRecipe> recipes,
+    std::vector<std::size_t> active, std::vector<ExactScalarRecipe> zrecipes, std::vector<std::size_t> zactive)
+{
+    if (!topology || active.size() != topology->indexer().num_nodes_per_layer ||
+        zactive.size() != std::size_t(topology->indexer().num_layers) + 1)
+        throw std::invalid_argument("Exact extrusion construction and retained topology differ.");
+    auto impl = std::make_shared<Impl>();
+    impl->topology = std::move(topology);
+    impl->recipes = std::move(recipes);
+    impl->zrecipes = std::move(zrecipes);
+    impl->active = std::move(active);
+    impl->zactive = std::move(zactive);
+    for (std::size_t i = 0; i < impl->recipes.size(); ++i)
+    {
+        const auto& recipe = impl->recipes[i];
+        P p{};
+        (void) point(recipe.root);
+        if (recipe.parents.empty())
+            p = point(recipe.root);
+        else
+        {
+            for (auto parent : recipe.parents)
+            {
+                if (parent >= i)
+                    throw std::invalid_argument("Exact point construction is not an acyclic ancestry DAG.");
+                p = add(p, impl->points[parent]);
+            }
+            p = mul(p, Q(1, recipe.parents.size()));
+        }
+        if (p[2] != 0)
+            throw std::invalid_argument("Exact extrusion base must lie in XY.");
+        impl->points.push_back(std::move(p));
+    }
+    std::set<std::size_t> unique;
+    std::set<P> unique_points;
+    std::set<GeometryPoint> display;
+    for (auto id : impl->active)
+    {
+        if (id >= impl->points.size() || !unique.insert(id).second || !unique_points.insert(impl->points[id]).second)
+            throw std::invalid_argument("Exact extrusion has invalid/duplicate active points.");
+        const auto p = rounded_point(impl->points[id]);
+        if (!display.insert({p.x, p.y, p.z}).second)
+            throw std::invalid_argument("Exact extrusion display vertices are indistinguishable.");
+    }
+    for (std::size_t i = 0; i < impl->zrecipes.size(); ++i)
+    {
+        const auto& recipe = impl->zrecipes[i];
+        Q z = 0;
+        (void) exact(recipe.root);
+        if (recipe.parents.empty())
+            z = exact(recipe.root);
+        else
+        {
+            for (auto parent : recipe.parents)
+            {
+                if (parent >= i)
+                    throw std::invalid_argument("Exact axial construction is not acyclic.");
+                z += impl->z[parent];
+            }
+            z /= recipe.parents.size();
+        }
+        impl->z.push_back(z);
+    }
+    Q previous = 0;
+    double previous_display = 0;
+    for (std::size_t k = 0; k < impl->zactive.size(); ++k)
+    {
+        const auto id = impl->zactive[k];
+        if (id >= impl->z.size())
+            throw std::invalid_argument("Exact axial point index is invalid.");
+        const auto value = measured(impl->z[id]).as_double();
+        if (k && (!(impl->z[id] > previous) || !(value > previous_display)))
+            throw std::invalid_argument("Exact axial/display edges must be distinct and increasing.");
+        previous = impl->z[id];
+        previous_display = value;
+        if (k)
+        {
+            const auto lo = measured(impl->z[impl->zactive[k - 1]]).as_double();
+            const auto center = measured(Q((impl->z[id] + impl->z[impl->zactive[k - 1]]) / 2)).as_double();
+            if (!(center > lo && center < value))
+                throw std::invalid_argument("Exact extrusion has unrepresentable signed axial metric distances.");
+        }
+    }
+    for (std::size_t c = 0; c < impl->topology->indexer().num_cells_per_layer; ++c)
+    {
+        Product product;
+        product.lower = 0;
+        product.upper = 1;
+        for (auto n : impl->topology->base_cell_nodes(c))
+            product.base.push_back(impl->points[impl->active[n]]);
+        for (std::size_t i = 0; i < product.base.size(); ++i)
+            if (cross(sub(product.base[(i + 1) % product.base.size()], product.base[i]),
+                    sub(product.base[(i + 2) % product.base.size()], product.base[(i + 1) % product.base.size()]))[2] <=
+                0)
+                throw std::invalid_argument("Exact extrusion base must be strictly convex and counterclockwise.");
+        (void) product_poly(product);
+        std::vector<P> display_polygon;
+        for (const auto& p : product.base)
+        {
+            auto v = rounded_point(p);
+            display_polygon.push_back(point({v.x, v.y, 0}));
+        }
+        for (std::size_t i = 0; i < display_polygon.size(); ++i)
+        {
+            const auto a = display_polygon[i], b = display_polygon[(i + 1) % display_polygon.size()],
+                       c = display_polygon[(i + 2) % display_polygon.size()];
+            if (cross(sub(b, a), sub(c, b))[2] <= 0)
+                throw std::invalid_argument(
+                    "Exact extrusion display polygon is not a distinct strictly convex native loop.");
+            for (const auto& p : display_polygon)
+                if (cross(sub(b, a), sub(p, a))[2] < 0)
+                    throw std::invalid_argument("Exact extrusion display polygon is nonsimple.");
+        }
+        const auto m = product_moments(product, P{});
+        impl->areas.push_back(m.volume);
+        impl->centers.push_back({m.first[0] / m.volume, m.first[1] / m.volume, 0});
+    }
+    for (const auto& edge : impl->topology->native_topology().side_faces())
+    {
+        const auto a = impl->points[impl->active[edge.nodes[0]]], b = impl->points[impl->active[edge.nodes[1]]];
+        impl->deltas.push_back(sub(b, a));
+        impl->edge_centers.push_back(mul(add(a, b), Q(1, 2)));
+    }
+    for (std::size_t e = 0; e < impl->deltas.size(); ++e)
+    {
+        const auto& edge = impl->topology->native_topology().side_face(e);
+        const auto face = rounded_point(impl->edge_centers[e]);
+        const auto owner = rounded_point(impl->centers.at(edge.owner));
+        const auto& d = impl->deltas[e];
+        const auto normal = rounded_point({d[1], -d[0], 0});
+        if (!((face - owner).dot(normal) > 0))
+            throw std::invalid_argument("Exact extrusion has unrepresentable signed base metric distances.");
+        if (edge.neighbor != SemiStructMeshTopo::invalid_ordinal)
+        {
+            const auto neighbor = rounded_point(impl->centers.at(edge.neighbor));
+            if (!((face - neighbor).dot(normal) < 0))
+                throw std::invalid_argument("Exact extrusion neighbor metric distance is unresolved.");
+        }
+    }
+    return std::shared_ptr<const ExactExtrudedConstruction>(new ExactExtrudedConstruction(std::move(impl)));
+}
+
+bool ExactExtrudedConstruction::matches_topology(const std::shared_ptr<const ExtrudedTopology>& topology) const noexcept
+{
+    return impl_->topology == topology;
+}
+std::vector<MeshUtils::Vec3> ExactExtrudedConstruction::display_points() const
+{
+    std::vector<MeshUtils::Vec3> result;
+    for (auto id : impl_->active)
+        result.push_back(rounded_point(impl_->points[id]));
+    return result;
+}
+std::vector<double> ExactExtrudedConstruction::display_z() const
+{
+    std::vector<double> result;
+    for (auto id : impl_->zactive)
+        result.push_back(measured(impl_->z[id]).as_double());
+    return result;
+}
+double ExactExtrudedConstruction::cell_volume(std::size_t cell) const
+{
+    auto id = impl_->topology->indexer().cell_id(cell);
+    return measured(
+        Q(impl_->areas.at(id.ij) * (impl_->z[impl_->zactive.at(id.k + 1)] - impl_->z[impl_->zactive.at(id.k)])))
+        .as_double();
+}
+MeshUtils::Vec3 ExactExtrudedConstruction::cell_centroid(std::size_t cell) const
+{
+    auto id = impl_->topology->indexer().cell_id(cell);
+    auto p = impl_->centers.at(id.ij);
+    p[2] = (impl_->z[impl_->zactive.at(id.k)] + impl_->z[impl_->zactive.at(id.k + 1)]) / 2;
+    return rounded_point(p);
+}
+double ExactExtrudedConstruction::face_area(std::size_t face) const
+{
+    auto id = impl_->topology->indexer().face_id(face);
+    if (id.orientation == SemiStructuredIndexer::AXIAL)
+        return measured(impl_->areas.at(id.ij)).as_double();
+    const Q height = impl_->z[impl_->zactive.at(id.k + 1)] - impl_->z[impl_->zactive.at(id.k)];
+    return square_root(Q(dot(impl_->deltas.at(id.ij), impl_->deltas.at(id.ij)) * height * height)).as_double();
+}
+MeshUtils::Vec3 ExactExtrudedConstruction::face_centroid(std::size_t face) const
+{
+    auto id = impl_->topology->indexer().face_id(face);
+    auto p = id.orientation == SemiStructuredIndexer::AXIAL ? impl_->centers.at(id.ij) : impl_->edge_centers.at(id.ij);
+    p[2] = impl_->z[impl_->zactive.at(id.k)];
+    if (id.orientation != SemiStructuredIndexer::AXIAL)
+        p[2] = (p[2] + impl_->z[impl_->zactive.at(id.k + 1)]) / 2;
+    return rounded_point(p);
+}
+MeshUtils::Vec3 ExactExtrudedConstruction::face_area_vector(std::size_t face) const
+{
+    auto id = impl_->topology->indexer().face_id(face);
+    if (id.orientation == SemiStructuredIndexer::AXIAL)
+        return {0, 0, (id.k == 0 ? -1 : 1) * measured(impl_->areas.at(id.ij)).as_double()};
+    const auto& d = impl_->deltas.at(id.ij);
+    const Q h = impl_->z[impl_->zactive.at(id.k + 1)] - impl_->z[impl_->zactive.at(id.k)];
+    return rounded_point({d[1] * h, -d[0] * h, 0});
+}
+ConvexGeometryPtr ExactExtrudedConstruction::certified_cell_geometry(std::size_t cell) const
+{
+    auto id = impl_->topology->indexer().cell_id(cell);
+    Product product;
+    for (auto n : impl_->topology->base_cell_nodes(id.ij))
+        product.base.push_back(impl_->points[impl_->active[n]]);
+    product.lower = impl_->z[impl_->zactive.at(id.k)];
+    product.upper = impl_->z[impl_->zactive.at(id.k + 1)];
+    auto geometry = std::make_shared<ConvexCellGeometry::Impl>();
+    geometry->poly = product_poly(product);
+    geometry->product = std::move(product);
+    const auto first = rounded_point(geometry->poly.vertices[0]);
+    geometry->origin = {first.x, first.y, first.z};
+    return ConvexGeometryPtr(new ConvexCellGeometry(std::move(geometry)));
+}
+std::vector<char> ExactExtrudedConstruction::encode() const
+{
+    WireWriter w;
+    w.word(0x5346455854524331ULL);
+    w.word(1);
+    const auto signature = topology_descriptor(*impl_->topology);
+    w.word(signature.size());
+    for (auto byte : signature)
+        w.data.push_back(byte);
+    w.word(impl_->recipes.size());
+    for (const auto& p : impl_->recipes)
+    {
+        for (auto x : p.root)
+            w.real(x);
+        w.word(p.parents.size());
+        for (auto id : p.parents)
+            w.word(id);
+    }
+    w.word(impl_->active.size());
+    for (auto id : impl_->active)
+        w.word(id);
+    w.word(impl_->zrecipes.size());
+    for (const auto& p : impl_->zrecipes)
+    {
+        w.real(p.root);
+        w.word(p.parents.size());
+        for (auto id : p.parents)
+            w.word(id);
+    }
+    w.word(impl_->zactive.size());
+    for (auto id : impl_->zactive)
+        w.word(id);
+    return std::move(w.data);
+}
+std::shared_ptr<const ExactExtrudedConstruction> ExactExtrudedConstruction::decode(
+    std::shared_ptr<const ExtrudedTopology> topology, std::span<const char> packet)
+{
+    if (!topology)
+        throw std::invalid_argument("Exact extrusion decode needs retained topology.");
+    WireReader r{packet};
+    if (r.word() != 0x5346455854524331ULL || r.word() != 1)
+        throw std::invalid_argument("Unknown exact extrusion packet.");
+    auto n = r.word();
+    if (n > r.data.size() - r.position)
+        throw std::invalid_argument("Invalid exact extrusion topology descriptor.");
+    const auto expected = topology_descriptor(*topology);
+    if (n != expected.size() || !std::equal(expected.begin(), expected.end(), r.data.begin() + r.position))
+        throw std::invalid_argument("Exact extrusion packet belongs to different topology/order.");
+    r.position += n;
+    std::vector<ExactPointRecipe> points;
+    std::vector<ExactScalarRecipe> z;
+    std::vector<std::size_t> active, zactive;
+    n = r.count();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        ExactPointRecipe p;
+        for (auto& x : p.root)
+            x = r.real();
+        auto m = r.count();
+        for (std::size_t j = 0; j < m; ++j)
+            p.parents.push_back(r.word());
+        points.push_back(std::move(p));
+    }
+    n = r.count();
+    for (std::size_t i = 0; i < n; ++i)
+        active.push_back(r.word());
+    n = r.count();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        ExactScalarRecipe p;
+        p.root = r.real();
+        auto m = r.count();
+        for (std::size_t j = 0; j < m; ++j)
+            p.parents.push_back(r.word());
+        z.push_back(std::move(p));
+    }
+    n = r.count();
+    for (std::size_t i = 0; i < n; ++i)
+        zactive.push_back(r.word());
+    r.finish();
+    return make(std::move(topology), std::move(points), std::move(active), std::move(z), std::move(zactive));
+}
+std::size_t ExactExtrudedConstruction::storage_bytes() const
+{
+    std::size_t bytes = sizeof(Impl) + impl_->recipes.capacity() * sizeof(ExactPointRecipe) +
+                        impl_->zrecipes.capacity() * sizeof(ExactScalarRecipe) +
+                        (impl_->active.capacity() + impl_->zactive.capacity()) * sizeof(std::size_t);
+    for (const auto& r : impl_->recipes)
+        bytes += r.parents.capacity() * sizeof(std::size_t);
+    for (const auto& r : impl_->zrecipes)
+        bytes += r.parents.capacity() * sizeof(std::size_t);
+    auto scalar = [&](const Q& q)
+    {
+        return sizeof(Q) + (q.backend().num().capacity() + q.backend().denom().capacity()) *
+                               sizeof(boost::multiprecision::limb_type);
+    };
+    for (const auto* points : {&impl_->points, &impl_->centers, &impl_->deltas, &impl_->edge_centers})
+    {
+        bytes += points->capacity() * sizeof(P);
+        for (const auto& p : *points)
+            for (const auto& q : p)
+                bytes += scalar(q);
+    }
+    for (const auto* values : {&impl_->z, &impl_->areas})
+    {
+        bytes += values->capacity() * sizeof(Q);
+        for (const auto& q : *values)
+            bytes += scalar(q);
+    }
+    return bytes; // conservative allocated-storage bound, including inline limb capacity
+}
+double ExactExtrudedConstruction::scaled_base_area(std::size_t base_cell) const
+{
+    const auto loop = impl_->topology->base_cell_nodes(base_cell);
+    Q largest = 0;
+    for (std::size_t i = 0; i < loop.size(); ++i)
+    {
+        auto d = sub(impl_->points[impl_->active[loop[i]]], impl_->points[impl_->active[loop[(i + 1) % loop.size()]]]);
+        const Q length = dot(d, d);
+        largest = std::max(largest, length);
+    }
+    return measured(Q(impl_->areas.at(base_cell) / largest)).as_double();
+}
+bool ExactExtrudedConstruction::base_quality_above(std::size_t base_cell, double minimum) const
+{
+    const auto loop = impl_->topology->base_cell_nodes(base_cell);
+    Q largest = 0;
+    for (std::size_t i = 0; i < loop.size(); ++i)
+    {
+        auto d = sub(impl_->points[impl_->active[loop[i]]], impl_->points[impl_->active[loop[(i + 1) % loop.size()]]]);
+        const Q length = dot(d, d);
+        largest = std::max(largest, length);
+    }
+    return impl_->areas.at(base_cell) > exact(minimum) * largest;
+}
+void ExactExtrudedConstruction::certify_base_embedding() const
+{
+    struct Candidate
+    {
+        std::size_t cell;
+        Q xmin, xmax, ymin, ymax;
+    };
+    std::vector<Candidate> candidates;
+    auto polygon = [&](std::size_t cell)
+    {
+        Product product;
+        product.lower = 0;
+        product.upper = 1;
+        for (auto n : impl_->topology->base_cell_nodes(cell))
+            product.base.push_back(impl_->points[impl_->active[n]]);
+        return product;
+    };
+    for (std::size_t c = 0; c < impl_->areas.size(); ++c)
+    {
+        const auto p = polygon(c);
+        Candidate candidate{c, p.base[0][0], p.base[0][0], p.base[0][1], p.base[0][1]};
+        for (const auto& v : p.base)
+        {
+            candidate.xmin = std::min(candidate.xmin, v[0]);
+            candidate.xmax = std::max(candidate.xmax, v[0]);
+            candidate.ymin = std::min(candidate.ymin, v[1]);
+            candidate.ymax = std::max(candidate.ymax, v[1]);
+        }
+        candidates.push_back(std::move(candidate));
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) { return a.xmin < b.xmin; });
+    std::vector<std::size_t> active;
+    for (std::size_t i = 0; i < candidates.size(); ++i)
+    {
+        const auto& a = candidates[i];
+        std::erase_if(active, [&](auto j) { return candidates[j].xmax <= a.xmin; });
+        for (auto j : active)
+        {
+            const auto& b = candidates[j];
+            if (std::max(a.ymin, b.ymin) < std::min(a.ymax, b.ymax) &&
+                product_intersection(polygon(a.cell), polygon(b.cell)))
+                throw std::invalid_argument("Extruded root base cells have positive overlapping interiors.");
+        }
+        active.push_back(i);
+    }
+    // A vertex strictly inside another native whole edge is an unresolved
+    // T-junction/overlapping seam, even when all cell interiors are disjoint.
+    std::vector<std::size_t> vertices = impl_->active;
+    std::sort(
+        vertices.begin(), vertices.end(), [&](auto a, auto b) { return impl_->points[a][0] < impl_->points[b][0]; });
+    for (const auto& edge : impl_->topology->native_topology().side_faces())
+    {
+        const auto a = impl_->points[impl_->active[edge.nodes[0]]], b = impl_->points[impl_->active[edge.nodes[1]]],
+                   delta = sub(b, a);
+        const Q length = dot(delta, delta);
+        const Q xmin = std::min(a[0], b[0]), xmax = std::max(a[0], b[0]), ymin = std::min(a[1], b[1]),
+                ymax = std::max(a[1], b[1]);
+        auto it = std::lower_bound(
+            vertices.begin(), vertices.end(), xmin, [&](auto id, const Q& x) { return impl_->points[id][0] < x; });
+        for (; it != vertices.end() && impl_->points[*it][0] <= xmax; ++it)
+        {
+            const auto& p = impl_->points[*it];
+            if (p[1] < ymin || p[1] > ymax)
+                continue;
+            const auto offset = sub(p, a);
+            const Q along = dot(offset, delta);
+            if (zero(cross(delta, offset)) && along > 0 && along < length)
+                throw std::invalid_argument("Extruded root embedding has an unresolved whole-edge T-junction.");
+        }
+    }
+}
+
 } // namespace SimpleFluid::Meshes

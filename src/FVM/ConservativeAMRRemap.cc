@@ -112,6 +112,52 @@ Meshes::ConvexGeometryPtr decode_shell(const std::vector<double>& payload)
     return Meshes::ConvexCellGeometry::from_native_shell(points, loops);
 }
 
+Meshes::ConvexGeometryPtr owner_geometry(const ConservativeAMRRemap::Handle& mesh, LO cell)
+{
+    const auto* native = std::get_if<ConservativeAMRRemap::Handle::MultiRegionPtr>(&mesh.variant());
+    if (!native || !*native)
+        throw std::invalid_argument("AMR certificate requires native MultiRegion geometry.");
+    return Meshes::ConvexCellGeometry::from_native_cell(**native, mesh.cell_global_id(cell));
+}
+std::vector<double> owner_certificate(const ConservativeAMRRemap::Handle& mesh, LO cell)
+{
+    const auto native = std::get<ConservativeAMRRemap::Handle::MultiRegionPtr>(mesh.variant());
+    if (!native->has_exact_construction())
+    {
+        auto payload = native_shell(mesh, cell);
+        payload.insert(payload.begin(), 0); // Represented binary64 native shell.
+        return payload;
+    }
+    const auto exact = owner_geometry(mesh, cell)->encode_exact_certificate();
+    if (exact.size() > 9007199254740992ULL)
+        throw std::invalid_argument("Exact certificate byte count exceeds binary64 capacity.");
+    std::vector<double> payload{1, static_cast<double>(exact.size())};
+    for (const auto byte : exact)
+        payload.push_back(static_cast<unsigned char>(byte));
+    return payload;
+}
+Meshes::ConvexGeometryPtr decode_certificate(const std::vector<double>& payload)
+{
+    if (payload.empty())
+        throw std::invalid_argument("Missing native certificate tag.");
+    if (payload[0] == 0)
+        return decode_shell(std::vector<double>(payload.begin() + 1, payload.end()));
+    if (payload[0] != 1 || payload.size() < 2)
+        throw std::invalid_argument("Unknown native certificate tag.");
+    const auto count = payload[1];
+    if (!std::isfinite(count) || count < 0 || count != std::floor(count) || count > payload.size() - 2)
+        throw std::invalid_argument("Invalid exact certificate byte count.");
+    std::vector<char> bytes(static_cast<std::size_t>(count));
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+    {
+        const auto byte = payload[2 + i];
+        if (!std::isfinite(byte) || byte < 0 || byte > 255 || byte != std::floor(byte))
+            throw std::invalid_argument("Invalid exact native certificate byte.");
+        bytes[i] = static_cast<char>(static_cast<unsigned char>(byte));
+    }
+    return Meshes::ConvexCellGeometry::decode_exact_certificate(bytes);
+}
+
 std::vector<double> binding_bytes(const Meshes::AdaptiveCellBinding& cell)
 {
     std::vector<double> bytes;
@@ -129,12 +175,24 @@ std::vector<double> binding_bytes(const Meshes::AdaptiveCellBinding& cell)
         for (const auto index : cartesian->index)
             append(index);
     }
+    else if (const auto* convex = std::get_if<Meshes::ConvexCellAncestry>(&cell.key.ancestry))
+    {
+        append(convex->root);
+        append(convex->path.size());
+        for (const auto child : convex->path)
+            append(child);
+    }
     else
     {
-        const auto& convex = std::get<Meshes::ConvexCellAncestry>(cell.key.ancestry);
-        append(convex.root);
-        append(convex.path.size());
-        for (const auto child : convex.path)
+        const auto& product = std::get<Meshes::ProductCellAncestry>(cell.key.ancestry);
+        append(product.base.root);
+        append(product.base.root_template);
+        append(product.base.path.size());
+        for (const auto child : product.base.path)
+            append(child);
+        append(product.axial.root);
+        append(product.axial.path.size());
+        for (const auto child : product.axial.path)
             append(child);
     }
     return bytes;
@@ -175,7 +233,7 @@ void validate_catalog_shells(
             const auto bytes = binding_bytes(*binding);
             if (bytes.size() > 9007199254740992ULL)
                 throw std::invalid_argument("AMR binding payload length exceeds exact binary64 integer capacity.");
-            const auto native = native_shell(mesh, static_cast<LO>(c));
+            const auto native = owner_certificate(mesh, static_cast<LO>(c));
             shells[c].push_back(static_cast<double>(bytes.size()));
             shells[c].insert(shells[c].end(), bytes.begin(), bytes.end());
             shells[c].insert(shells[c].end(), native.begin(), native.end());
@@ -226,7 +284,7 @@ void validate_catalog_shells(
                     throw std::invalid_argument("Catalog GID " + std::to_string(cell.gid) +
                                                 " ancestry/material differs from its owner binding.");
             const std::vector<double> native(payload.begin() + 1 + expected.size(), payload.end());
-            if (!cell.geometry->equivalent(*decode_shell(native)))
+            if (!cell.geometry->equivalent(*decode_certificate(native)))
                 throw std::invalid_argument(
                     "Catalog GID " + std::to_string(cell.gid) + " differs from its native owner's shell.");
         }
@@ -379,7 +437,7 @@ ConservativeAMRRemap::ConservativeAMRRemap(
             if (!(full > 0) || std::abs(full - native) > 64 * epsilon * full)
                 throw std::invalid_argument(
                     "Source GID " + std::to_string(cell.gid) + " volume differs from its native cell.");
-            if (!cell.geometry->equivalent(*decode_shell(native_shell(*p.source, local))))
+            if (!cell.geometry->equivalent(*owner_geometry(*p.source, local)))
                 throw std::invalid_argument(
                     "Source GID " + std::to_string(cell.gid) + " shell differs from its native cell.");
         }
@@ -393,7 +451,7 @@ ConservativeAMRRemap::ConservativeAMRRemap(
             if (!(full > 0) || std::abs(full - native) > 64 * epsilon * full)
                 throw std::invalid_argument(
                     "Target GID " + std::to_string(cell.gid) + " volume differs from its native cell.");
-            if (!cell.geometry->equivalent(*decode_shell(native_shell(*p.target, local))))
+            if (!cell.geometry->equivalent(*owner_geometry(*p.target, local)))
                 throw std::invalid_argument(
                     "Target GID " + std::to_string(cell.gid) + " shell differs from its native cell.");
         }

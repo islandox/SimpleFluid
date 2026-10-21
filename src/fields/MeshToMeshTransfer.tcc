@@ -153,6 +153,16 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
         && same_communicator(*comm, *target_map->getComm()),
         "Mesh transfer requires source and target communicators congruent to the construction context.");
 
+    // Constructed provider metrics refer to authoritative exact geometry, while
+    // this transfer's geometry extraction still consumes displayed node hulls.
+    // Reject before setup instead of combining those incompatible definitions.
+    const auto constructed=[](const auto& mesh)
+    {
+        const auto* native=std::get_if<typename mesh_type::MultiRegionPtr>(&mesh.variant());
+        return native && *native && (*native)->has_exact_construction();
+    };
+    require_all(*comm,!constructed(*d_source) && !constructed(*d_target),
+        "MeshToMeshTransfer does not yet support authoritative constructed geometry.");
     const bool conservative = options.method == MeshToMeshTransferMethod::ConservativeCellAverage;
     const auto source_kind = geometry_kind(*d_source), target_kind = geometry_kind(*d_target);
     const bool partial = options.coverage_mode == MeshToMeshCoverageMode::AllowPartial;

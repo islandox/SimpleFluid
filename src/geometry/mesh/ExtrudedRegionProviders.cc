@@ -153,20 +153,24 @@ ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topol
 }
 real_t ExtrudedGeometry::cell_volume(size_t c) const
 {
+    if(d_construction)return d_construction->cell_volume(c);
     const auto id=d_topology->indexer().cell_id(c); return d_areas.at(id.ij)*(d_z.at(id.k+1)-d_z.at(id.k));
 }
 ExtrudedGeometry::Vec3 ExtrudedGeometry::cell_centroid(size_t c) const
 {
+    if(d_construction)return d_construction->cell_centroid(c);
     const auto id=d_topology->indexer().cell_id(c); auto center=d_cell_centers.at(id.ij);
     center.z=std::midpoint(d_z.at(id.k),d_z.at(id.k+1)); return center;
 }
 real_t ExtrudedGeometry::face_area(size_t f) const
 {
+    if(d_construction)return d_construction->face_area(f);
     const auto id=d_topology->indexer().face_id(f);
     return id.orientation==SemiStructuredIndexer::AXIAL?d_areas.at(id.ij):d_lengths.at(id.ij)*(d_z.at(id.k+1)-d_z.at(id.k));
 }
 ExtrudedGeometry::Vec3 ExtrudedGeometry::face_centroid(size_t f) const
 {
+    if(d_construction)return d_construction->face_centroid(f);
     const auto id=d_topology->indexer().face_id(f);
     auto center=id.orientation==SemiStructuredIndexer::AXIAL?d_cell_centers.at(id.ij):d_edge_centers.at(id.ij);
     center.z=id.orientation==SemiStructuredIndexer::AXIAL?d_z.at(id.k):std::midpoint(d_z.at(id.k),d_z.at(id.k+1));
@@ -174,6 +178,7 @@ ExtrudedGeometry::Vec3 ExtrudedGeometry::face_centroid(size_t f) const
 }
 ExtrudedGeometry::Vec3 ExtrudedGeometry::face_area_vector(size_t f) const
 {
+    if(d_construction)return d_construction->face_area_vector(f);
     const auto id=d_topology->indexer().face_id(f);
     if(id.orientation==SemiStructuredIndexer::AXIAL) return {0,0,(id.k==0?-1.0:1.0)*face_area(f)};
     return d_edge_normals.at(id.ij)*face_area(f);
@@ -185,8 +190,17 @@ ExtrudedGeometry::Vec3 ExtrudedGeometry::node_coordinates(size_t n) const
 MeshStorageReport ExtrudedGeometry::storage_report() const
 {
     return {.geometry=(d_nodes.capacity()+d_cell_centers.capacity()+d_edge_centers.capacity()+d_edge_normals.capacity())*sizeof(Vec3)
-        +(d_z.capacity()+d_areas.capacity()+d_lengths.capacity())*sizeof(real_t)};
+        +(d_z.capacity()+d_areas.capacity()+d_lengths.capacity())*sizeof(real_t)+(d_construction?d_construction->storage_bytes():0)};
 }
+ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology,
+    std::shared_ptr<const ExactExtrudedConstruction> construction)
+    :d_topology(std::move(topology)),d_construction(std::move(construction))
+{
+    if(!d_construction || !d_construction->matches_topology(d_topology))throw std::invalid_argument("Exact construction belongs to a different extrusion topology.");
+    d_nodes=d_construction->display_points();d_z=d_construction->display_z();
+}
+ConvexGeometryPtr ExtrudedGeometry::certified_cell_geometry(size_t cell) const
+{ return d_construction?d_construction->certified_cell_geometry(cell):ConvexGeometryPtr{}; }
 EntityRange<EntityRange<uint64_t>> ExtrudedGeometry::xy_cell_nodes() const
 {
     return {d_topology.get(),0,d_topology->indexer().num_cells_per_layer,[](const void* t,size_t,size_t c)

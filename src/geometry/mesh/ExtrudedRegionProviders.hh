@@ -8,6 +8,7 @@
  */
 #pragma once
 #include "geometry/mesh/RegionProviders.hh"
+#include "geometry/mesh/ExactExtrudedConstruction.hh"
 #include <map>
 namespace SimpleFluid::Meshes
 {
@@ -55,6 +56,8 @@ class ExtrudedGeometry
 public:
     using Vec3=MeshUtils::Vec3;
     ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology, Arr<Vec3> xy_nodes, ArrReal z_edges);
+    ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology,
+        std::shared_ptr<const ExactExtrudedConstruction> construction);
     ExtrudedGeometry& operator=(const ExtrudedGeometry&)=delete;
     ExtrudedGeometry& operator=(ExtrudedGeometry&&)=delete;
     RegionLayout layout() const { return d_topology->layout(); }
@@ -69,11 +72,15 @@ public:
     MeshStorageReport storage_report() const;
     const Arr<Vec3>& xy_nodes() const { return d_nodes; }
     const ArrReal& z_edges() const { return d_z; }
+    bool has_exact_construction() const noexcept { return bool(d_construction); }
+    const std::shared_ptr<const ExactExtrudedConstruction>& construction() const noexcept { return d_construction; }
+    ConvexGeometryPtr certified_cell_geometry(size_t cell) const;
     EntityRange<EntityRange<uint64_t>> xy_cell_nodes() const;
 private:
     std::shared_ptr<const ExtrudedTopology> d_topology;
     Arr<Vec3> d_nodes, d_cell_centers, d_edge_centers, d_edge_normals;
     ArrReal d_z, d_areas, d_lengths;
+    std::shared_ptr<const ExactExtrudedConstruction> d_construction;
 };
 using ExtrudedRegion=IsoRegion<ExtrudedTopology,ExtrudedGeometry>;
 ExtrudedRegion extruded_region(std::string name, std::shared_ptr<const ExtrudedTopology> topology,
