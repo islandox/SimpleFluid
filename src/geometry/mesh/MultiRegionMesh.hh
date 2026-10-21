@@ -342,6 +342,7 @@ public:
     std::uint64_t geometry_epoch() const { validate_query(); return d_geometry_state.epoch; }
     const ArrReal& axial_edges() const noexcept { return d_axial_edges; }
     bool supports_axial_motion() const noexcept;
+    bool has_exact_construction() const noexcept;
     Vec3 cell_center_vector(ID face,ID cell) const;
     Vec3 face_center_vector(ID face,ID cell) const;
     real_t cell_to_face_distance(ID face,ID cell) const { return face_center_vector(face,cell).norm(); }

@@ -1070,12 +1070,19 @@ size_t MultiRegionMesh::interface_uses(RegionFace f) const
 
 bool MultiRegionMesh::supports_axial_motion() const noexcept
 {
+    if(has_exact_construction())return false;
     for(size_t r=0;r<d_regions.size();++r)
         if(region_layout(r).family==RegionLayout::Family::Explicit) return false;
     for(const auto& interface:d_interfaces)
         if(const auto* s=std::get_if<StructuredPatchInterface>(&interface); s && s->periodic_translation && s->periodic_translation->z!=0)
             return false;
     return true;
+}
+bool MultiRegionMesh::has_exact_construction() const noexcept
+{
+    for(const auto& region:d_regions)
+        if(std::visit([](const auto& r){if constexpr(requires{r.geometry().has_exact_construction();})return r.geometry().has_exact_construction();else return false;},region))return true;
+    return false;
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(ID f) const
 {
@@ -1198,6 +1205,9 @@ std::string MultiRegionMesh::configuration_signature() const
                     for (size_t a = 0; a < 3; ++a) values(native.cell_edges()[a]);
                 else if constexpr (requires { native.xy_nodes(); native.z_edges(); })
                 {
+                    if constexpr(requires{native.has_exact_construction();})
+                        if(native.has_exact_construction())
+                        {out<<" exact-construction ";for(unsigned char byte:native.construction()->encode())out<<unsigned(byte)<<' ';}
                     for (const auto& p : native.xy_nodes()) out << p.x << ' ' << p.y << ' ';
                     for (const auto& row : native.xy_cell_nodes()) values(row);
                     values(native.z_edges());

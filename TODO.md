@@ -23,9 +23,10 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 Phase 22 has uniform and distributed Cartesian AMR VoF backends, numerical
 radiolytic coupling, and conservative representation changes with focused
 verification. Physical calibration and application resolution qualification
-remain open. Phase 23 Stages 1–2 implement the common hierarchy/Cartesian seam, certified
-convex geometry and sparse conservative remap with focused verification. Native
-XY/Z, polyhedral and mixed-region refinement remain proposed in Stages 3–9.
+remain open. Phase 23 Stages 1–3 implement the common hierarchy/Cartesian seam,
+certified convex geometry, sparse conservative remap and nonperiodic whole-product
+XY/Z refinement with focused verification. Polyhedral refinement, mixed-region
+closure and general flow qualification remain proposed in Stages 4–9.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -64,7 +65,7 @@ XY/Z, polyhedral and mixed-region refinement remain proposed in Stages 3–9.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
-| Phase 23, general native AMR | Stages 1–2 implemented and verified; Stages 3–9 proposed | Common hierarchy, certified convex kernels and sparse remap complete; XY/Z products, polyhedral refinement, mixed-region closure, live distributed migration, and general VoF qualification remain open |
+| Phase 23, general native AMR | Stages 1–3 implemented and verified; Stages 4–9 proposed | Common hierarchy, certified kernels, sparse remap and whole-product XY/Z refinement complete; polyhedral refinement, local/mixed products, live migration and general VoF qualification remain open |
 
 ### Checklist conventions
 
@@ -1859,7 +1860,7 @@ for the implemented API, reproducible checks and qualification limits.
 
 ## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
 
-**Status: Stages 1–2 implemented and verified; Stages 3–9 remain proposed.** See the
+**Status: Stages 1–3 implemented and verified; Stages 4–9 remain proposed.** See the
 [general AMR design](docs/architecture/general_amr.md) for the algorithms,
 ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
@@ -1913,15 +1914,21 @@ This utility stage does not enable general-mesh VoF or a new refinement provider
 
 ### Stage 3 — Whole-product XY/Z refinement
 
-- [ ] Add separate base-cell/edge and axial-interval ancestry, deterministic
+- [x] Add separate base-cell/edge and axial-interval ancestry, deterministic
       triangular base refinement with conformity closure, and common Z
       bisection. XY refinement initially covers whole columns.
-- [ ] Add quality-checked convex quadrilateral/polygon templates with complete
+- [x] Add quality-checked convex quadrilateral/polygon templates with complete
       inverse families. Preserve original polygonal walls and patch labels.
-- [ ] Verify XY-then-Z/Z-then-XY key and geometry identity, factor-specific
+- [x] Verify XY-then-Z/Z-then-XY key and geometry identity, factor-specific
       sibling coarsening, exact parent recovery, compact O(base + layers)
       storage, and the native composite serial/MPI route. Initial extrusions
       are nonperiodic; new periodic descriptors need separate qualification.
+
+Stage 3 evidence and limits are recorded in
+[whole-product construction and remap verification](docs/verification/general_amr_stage3.md).
+Compact provider/hierarchy storage does not imply scalable distributed remap
+catalog construction; bounded complete-family catalogs remain a bootstrap.
+General-mesh VoF/flow and local/mixed product adaptation remain later stages.
 
 ### Stage 4 — Convex polyhedral refinement
 

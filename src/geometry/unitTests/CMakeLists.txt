@@ -31,6 +31,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME ExtrudedAMR_2procs
+    TARGET testExtrudedAMR
+    PROCS 2
+    ARGS "--gtest_filter=ExtrudedAMRTest.*"
+    LABELS "mpi;geometry;amr;multi_region"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME CartesianAMR_2procs
     TARGET testCartesianAMR
     PROCS 2

@@ -6,11 +6,35 @@
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 
 namespace SimpleFluid::Meshes
 {
 namespace
 {
+bool prefix(const BaseCellKey& parent, const BaseCellKey& child)
+{
+    return parent.root == child.root && parent.root_template == child.root_template &&
+           parent.path.size() <= child.path.size() &&
+           std::equal(parent.path.begin(), parent.path.end(), child.path.begin());
+}
+bool prefix(const AxialIntervalKey& parent, const AxialIntervalKey& child)
+{
+    return parent.root == child.root && parent.path.size() <= child.path.size() &&
+           std::equal(parent.path.begin(), parent.path.end(), child.path.begin());
+}
+bool crossed_products(const AdaptiveCellKey& source, const AdaptiveCellKey& target)
+{
+    if (source.region != target.region)
+        return false;
+    const auto* a = std::get_if<ProductCellAncestry>(&source.ancestry);
+    const auto* b = std::get_if<ProductCellAncestry>(&target.ancestry);
+    if (!a || !b)
+        return false;
+    return (prefix(a->base, b->base) && a->base != b->base && prefix(b->axial, a->axial) && a->axial != b->axial) ||
+           (prefix(b->base, a->base) && a->base != b->base && prefix(a->axial, b->axial) && a->axial != b->axial);
+}
+
 bool descendant(const AdaptiveCellKey& parent, const AdaptiveCellKey& child)
 {
     if (parent.region != child.region || parent.ancestry.index() != child.ancestry.index())
@@ -25,10 +49,15 @@ bool descendant(const AdaptiveCellKey& parent, const AdaptiveCellKey& child)
                 return false;
         return true;
     }
-    const auto& p = std::get<ConvexCellAncestry>(parent.ancestry);
-    const auto& c = std::get<ConvexCellAncestry>(child.ancestry);
-    return p.root == c.root && p.path.size() < c.path.size() &&
-           std::equal(p.path.begin(), p.path.end(), c.path.begin());
+    if (const auto* p = std::get_if<ConvexCellAncestry>(&parent.ancestry))
+    {
+        const auto& c = std::get<ConvexCellAncestry>(child.ancestry);
+        return p->root == c.root && p->path.size() < c.path.size() &&
+               std::equal(p->path.begin(), p->path.end(), c.path.begin());
+    }
+    const auto& p = std::get<ProductCellAncestry>(parent.ancestry);
+    const auto& c = std::get<ProductCellAncestry>(child.ancestry);
+    return p != c && prefix(p.base, c.base) && prefix(p.axial, c.axial);
 }
 
 std::map<std::uint64_t, const AdaptiveCellBinding*> index(const std::vector<AdaptiveCellBinding>& cells)
@@ -55,9 +84,9 @@ std::map<std::uint64_t, const AdaptiveCellBinding*> index(const std::vector<Adap
                         "Adaptive overlap catalog contains both an ancestor and its active descendant.");
             }
         }
-        else
+        else if (auto* value = std::get_if<ConvexCellAncestry>(&ancestor.ancestry))
         {
-            auto& convex = std::get<ConvexCellAncestry>(ancestor.ancestry);
+            auto& convex = *value;
             while (!convex.path.empty())
             {
                 convex.path.pop_back();
@@ -67,6 +96,43 @@ std::map<std::uint64_t, const AdaptiveCellBinding*> index(const std::vector<Adap
             }
         }
     }
+    // Product leaves form a partial order, including crossed-factor overlap.
+    // Index bounded factor prefixes rather than comparing geometric cell pairs.
+    using Address = std::tuple<std::uint64_t, BaseCellKey, AxialIntervalKey>;
+    std::map<Address, std::size_t> descendants, terminals;
+    for (const auto& cell : cells)
+        if (const auto* product = std::get_if<ProductCellAncestry>(&cell.key.ancestry))
+        {
+            auto base = product->base;
+            for (;;)
+            {
+                ++terminals[{cell.key.region, base, product->axial}];
+                auto axial = product->axial;
+                for (;;)
+                {
+                    ++descendants[{cell.key.region, base, axial}];
+                    if (axial.path.empty())
+                        break;
+                    axial.path.pop_back();
+                }
+                if (base.path.empty())
+                    break;
+                base.path.pop_back();
+            }
+        }
+    for (const auto& cell : cells)
+        if (const auto* product = std::get_if<ProductCellAncestry>(&cell.key.ancestry))
+        {
+            if (descendants[{cell.key.region, product->base, product->axial}] > 1)
+                throw std::invalid_argument("Adaptive product catalog contains nested active leaves.");
+            auto axial = product->axial;
+            while (!axial.path.empty())
+            {
+                axial.path.pop_back();
+                if (terminals.contains({cell.key.region, product->base, axial}))
+                    throw std::invalid_argument("Adaptive product catalog contains crossed overlapping active leaves.");
+            }
+        }
     return result;
 }
 } // namespace
@@ -94,11 +160,12 @@ std::shared_ptr<const AdaptiveOverlapPlan> AdaptiveOverlapPlan::build(HierarchyO
             throw std::invalid_argument("Adaptive overlap relation has unknown or duplicate endpoints.");
         const auto& s = *sources.at(relation.source_gid);
         const auto& t = *targets.at(relation.target_gid);
-        const bool valid =
-            relation.kind == AdaptiveAncestryRelation::Kind::Unchanged ? s.key == t.key
-            : relation.kind == AdaptiveAncestryRelation::Kind::Refinement
-                ? descendant(s.key, t.key)
-                : relation.kind == AdaptiveAncestryRelation::Kind::Coarsening && descendant(t.key, s.key);
+        const bool valid = relation.kind == AdaptiveAncestryRelation::Kind::Unchanged    ? s.key == t.key
+                           : relation.kind == AdaptiveAncestryRelation::Kind::Refinement ? descendant(s.key, t.key)
+                           : relation.kind == AdaptiveAncestryRelation::Kind::Coarsening
+                               ? descendant(t.key, s.key)
+                               : relation.kind == AdaptiveAncestryRelation::Kind::ProductIntersection &&
+                                     crossed_products(s.key, t.key);
         if (!valid || s.material != t.material)
             throw std::invalid_argument("Adaptive overlap relation violates ancestry or material membership.");
         auto intersection = s.geometry->intersect(*t.geometry);
