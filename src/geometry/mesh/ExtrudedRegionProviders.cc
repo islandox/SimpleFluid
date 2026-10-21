@@ -201,6 +201,8 @@ ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topol
 }
 ConvexGeometryPtr ExtrudedGeometry::certified_cell_geometry(size_t cell) const
 { return d_construction?d_construction->certified_cell_geometry(cell):ConvexGeometryPtr{}; }
+ConvexGeometryPtr ExtrudedGeometry::atomic_cell_geometry(size_t cell) const
+{ return d_construction?d_construction->atomic_cell_geometry(cell):ConvexGeometryPtr{}; }
 EntityRange<EntityRange<uint64_t>> ExtrudedGeometry::xy_cell_nodes() const
 {
     return {d_topology.get(),0,d_topology->indexer().num_cells_per_layer,[](const void* t,size_t,size_t c)

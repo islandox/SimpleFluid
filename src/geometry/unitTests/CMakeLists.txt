@@ -31,6 +31,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
 endforeach()
 
 simplefluid_add_mpi_test(
+    NAME PolyhedralAMR_2procs
+    TARGET testPolyhedralAMR
+    PROCS 2
+    LABELS "amr;polyhedral;collective"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
     NAME ExtrudedAMR_2procs
     TARGET testExtrudedAMR
     PROCS 2

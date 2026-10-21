@@ -4,12 +4,14 @@
 #pragma once
 
 #include "geometry/mesh/RegionProviders.hh"
+#include "geometry/ConvexCellGeometry.hh"
 #include <map>
 #include <cmath>
 #include <set>
 
 namespace SimpleFluid::Meshes
 {
+class ExactPolyhedralComplex;
 /**
  * The layout describes the global region, while records contain only visible
  * entities. Face adjacency always contains native global cell IDs, including
@@ -134,6 +136,25 @@ public:
                     throw std::invalid_argument("Explicit face is missing from an incident cell.");
     }
 
+    /** Authoritative exact overload; legacy records/constructor remain unchanged.
+     * Exact state contains only these resident cells, faces/nodes and metric
+     * neighbors. Legacy native record range checks remain admission limits.
+     */
+    ExplicitRegionProvider(RegionLayout layout, std::vector<Cell> cells,
+        std::vector<Face> faces, std::vector<Node> nodes, std::map<int, std::string> boundaries,
+        std::shared_ptr<const ExactPolyhedralComplex> construction);
+    /** Derive the boundary schema only from a fully resident global complex. */
+    [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_exact_complex(
+        std::shared_ptr<const ExactPolyhedralComplex> construction);
+    /** Sparse factories require an explicit global schema, which may be empty. */
+    [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_exact_complex(
+        std::shared_ptr<const ExactPolyhedralComplex> construction,
+        std::map<int, std::string> boundaries);
+    bool has_exact_construction() const noexcept { return bool(d_construction); }
+    const std::shared_ptr<const ExactPolyhedralComplex>& construction() const noexcept { return d_construction; }
+    [[nodiscard]] ConvexGeometryPtr certified_cell_geometry(std::size_t cell) const;
+    [[nodiscard]] ConvexGeometryPtr atomic_cell_geometry(std::size_t cell) const;
+
     RegionLayout layout() const { return d_layout; }
     const void* storage_identity() const { return this; }
     std::uint64_t geometry_epoch() const noexcept { return 0; }
@@ -145,7 +166,7 @@ public:
     MeshUtils::CellType cell_type(size_t c) const { return d_cells.at(c).type; }
     real_t cell_volume(size_t c) const { return d_cells.at(c).volume; }
     Vec3 cell_centroid(size_t c) const { return d_cells.at(c).centroid; }
-    real_t face_area(size_t f) const { return d_faces.at(f).area_vector.norm(); }
+    real_t face_area(size_t f) const;
     Vec3 face_centroid(size_t f) const { return d_faces.at(f).centroid; }
     Vec3 face_area_vector(size_t f) const { return d_faces.at(f).area_vector; }
     Vec3 node_coordinates(size_t n) const { return d_nodes.at(n); }
@@ -187,6 +208,7 @@ public:
         // Ordered-map node overhead is an estimate, like existing index maps.
         report.indexing_estimate = (d_cells.size() + d_faces.size() + d_nodes.size()) * 3 * sizeof(void*);
         for (const auto& [id, name] : d_boundaries) report.boundaries += sizeof(id) + name.capacity();
+        report.geometry += exact_storage_bytes();
         return report;
     }
 private:
@@ -201,6 +223,8 @@ private:
         return {&values, 0, values.size(), [](const void* p, size_t, size_t i)
         { return (*static_cast<const std::vector<ID>*>(p))[i]; }};
     }
+    [[nodiscard]] std::size_t exact_storage_bytes() const;
+    std::shared_ptr<const ExactPolyhedralComplex> d_construction;
     RegionLayout d_layout;
     std::map<ID, Cell> d_cells;
     std::map<ID, Face> d_faces;
