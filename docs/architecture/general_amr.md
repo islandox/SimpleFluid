@@ -1,6 +1,6 @@
 # AMR for extruded, polyhedral, and mixed-region meshes
 
-**Status: Stages 1–2 are implemented; Stages 3–9 remain proposed.** This document
+**Status: Stages 1–3 are implemented and verified within the boundaries below; Stages 4–9 remain proposed.** This document
 defines the implemented hierarchy, certified geometry and sparse remap boundaries and the remaining
 implementation sequence and acceptance contracts. It does not extend the
 supported mesh families of the existing solvers or record dated validation results.
@@ -17,6 +17,8 @@ The [Stage 1 verification record](../verification/general_amr.md) covers hierarc
 observations, native partition bindings, cache isolation and solver transactions.
 The [Stage 2 verification record](../verification/general_amr_stage2.md) covers
 certified convex queries and sparse conservative amount transfer.
+The [Stage 3 verification record](../verification/general_amr_stage3.md) identifies
+the product-provider implementation, focused evidence and qualification limits.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -104,7 +106,8 @@ public:
 `HierarchyObservation` retains exact hierarchy, topology and partition identity
 tokens independently of generation values, effective resident geometry identity
 and epoch, and communicator identity. `AdaptiveCellKey` admits
-`CartesianCellAncestry` and explicit `ConvexCellAncestry` provenance; the latter
+`CartesianCellAncestry`, factor-specific `ProductCellAncestry` and explicit
+`ConvexCellAncestry` provenance; the latter
 identifies supplied convex cells without claiming a polyhedral refiner. Physical
 region identity, material membership and fragment
 ordinals remain separate. `CartesianAMR::plan_adaptation()` and
@@ -119,9 +122,9 @@ Both canonical and resident geometry must retain their captured epochs. Supporte
 resident ALE motion invalidates a binding; restoring coordinates does not revive
 an earlier observation. The Cartesian numerical backend remains unchanged.
 
-Product refinement ancestry, automatic geometry candidates and a general solver
-`RegridTrial` remain proposed for later stages. Stage 2 accepts caller-supplied
-convex provenance and explicit certified ancestry overlap relations. Their data must contain geometry/partition state separately from
+Product hierarchy candidates are implemented in Stage 3; general mixed-region
+refinement and a solver `RegridTrial` remain later stages. Stage 2 accepts
+caller-supplied convex provenance and explicit certified ancestry overlap relations. Their data must contain geometry/partition state separately from
 solver inventories and controller revisions.
 
 Plans pin the exact source identity, communicator, provider observations, and
@@ -190,9 +193,10 @@ physical double total. Physical tolerances remain independent of remap scaling.
 Native owner certificate exchange currently pads local/imported shells to the
 global maximum shell payload width. It exchanges no global solution array, but
 highly heterogeneous large shells can inflate storage. Variable-length packing
-and a global ancestry directory remain Stage 6 gates. These utilities do not add
-a general-mesh VoF solver, a new refinement provider or live accepted-state
-repartition; the optimized Cartesian numerical/remap path remains separate.
+and a global ancestry directory remain Stage 6 gates. The Stage 2 utilities alone add no new refinement provider; Stage 3 supplies the
+whole-product provider below. Neither stage adds a general-mesh VoF solver or
+live accepted-state repartition. The optimized Cartesian numerical/remap path
+remains separate.
 
 ## XY/Z products
 
@@ -203,31 +207,90 @@ interval; cap ancestry is base-cell leaf × axial plane. Shared coordinates come
 from the same ancestral construction. XY-then-Z and Z-then-XY refinement must
 produce identical final product keys and geometry.
 
-**Proposed Stage 3 authoritative construction geometry.** Extend the existing
-`ExtrudedGeometry` with optional compact construction state so the native region
-variant remains unchanged. Retain exact root binary64 base/Z data and independent
-factor construction paths, with shared exact midpoint/intersection constructions
-and O(base + layers) storage. An optional `certified_cell_geometry()` provider
-query should return the actual exact cell on demand. Native cell/face metrics
-must derive from that construction; rounded display/VTU nodes must not define
-overlap geometry or change the parent domain.
+The Stage 3 implementation is [`ExtrudedAMR`](../../src/geometry/ExtrudedAMR.hh).
+Its `ExtrudedAMRGrid` supplies represented root XY nodes/base loops, boundary edge
+labels, Z edges, optional compatible triangle reference edges, physical region and
+material IDs, depth and quality limits. `adapt(refine_base, refine_z, coarsen_base,
+coarsen_z)` and the plan/apply pair construct immutable candidates collectively.
+`base_keys()`, `base_edge_keys()` and `interval_keys()` expose independent ancestry;
+`BaseEdgeKey::Kind` separates `Root` edges from `TemplateInterior` edges, so
+identical creator/ordinal values cannot alias a boundary edge and an interior
+refinement seam. Child paths retain that namespace through further refinement.
+`cell_geometry(gid)` queries an authoritative exact cell on demand. Root embedding,
+conformity, complete immediate sibling families and stale source observations are
+checked before publication. Failed candidates preserve the source hierarchy.
 
-Constructed product partition packets must roundtrip the exact descriptor and
-include it in configuration identity. Sparse owner authentication needs a typed
-exact certificate format, such as lossless rational shell bytes, rather than the
-existing binary64 native-shell export. The same seam can serve future rational
-polyhedral children. Reject unsupported node-hull transfer consumers and ALE
-until their authoritative construction/transform contracts qualify. Restricting
-all midpoint results to exactly representable binary64 coordinates would reject
-ordinary decimal or circular boundary input and is not the proposed solution.
-None of these construction-provider extensions is implemented by Stage 2.
+The existing `ExtrudedGeometry` now optionally retains
+[`ExactExtrudedConstruction`](../../src/geometry/mesh/ExactExtrudedConstruction.hh).
+Represented roots and exact affine mean recipes define base points and common Z
+coordinates. Native cell/face volumes, areas and centroids derive from that exact
+construction. Display/VTU nodes may round independently and never define overlap
+geometry or change the parent domain. Admission still requires a valid distinct
+display layout, exact and displayed strict convexity, and representable signed
+native center-to-face/axial metric differences. These checks are explicit
+construction-provider requirements; the exact constructor does not delegate its
+geometry definition to the ordinary display-polygon constructor. Ordinary
+binary64 providers keep their existing path.
+
+`has_exact_construction()` identifies this capability, and
+`certified_cell_geometry()` returns a retained actual cell on demand.
+`ConvexCellGeometry::from_native_cell()` dispatches to that authoritative provider;
+`native_cell_shell()` rejects constructed geometry rather than exporting its
+rounded node hull. Versioned construction descriptors bind the full extrusion
+topology, recipes and active addresses. Native partition packets and configuration
+signatures retain those descriptors. The raw recipe API rejects invalid parents,
+nonfinite roots, incompatible active layouts, malformed packets and foreign
+retained topology. The raw `make()`/`decode()` contract certifies the DAG, layout,
+individual convex cells, metric viability and packet framing; it assumes an
+already valid, certified embedded base. It does not establish global embedding
+of arbitrary raw provider input. `ExtrudedAMR` certifies root embedding explicitly
+and preserves it through exact templates and conformity closure. Native packet
+decode preserves that descriptor rather than independently admitting an arbitrary
+mesh. These are direct provider contracts, separate from refinement.
+
+`ExtrudedAMR::with_partition()` binds an actual completed native partition after
+source/revision/communicator validation. Its observation identifies the effective
+resident geometry. Fields, traversal and remap use that resident handle; manually
+substituting a canonical geometry observation does not authenticate a partition.
+This is a construction binding, not live accepted-state migration.
+
+Owner authentication now tags represented native shells separately from exact
+constructed certificates. `encode_exact_certificate()` and
+`decode_exact_certificate()` losslessly carry retained rational shells without
+public Boost types or display-node conversion. Product keys encode both factors
+by exact bytes. Every supplied source/target certificate and inactive sibling
+still authenticates against its owner's geometry and ancestry/material binding.
+`MeshToMeshTransfer` and planar ALE reject constructed providers until their
+node-hull/geometry-transform paths gain an authoritative construction contract.
+
+The compact claim concerns provider, hierarchy and partition descriptor storage:
+base/edge/point recipes plus common axial data, with exact cell certificates
+created only on demand. `storage_counts()` and `storage_report()` separate those
+retained allocations from maps and temporary certificates. The Stage 3 remap
+bootstrap may explicitly assemble bounded complete-family catalogs for a query;
+it does not retain a global base×layers shell cache or weaken Stage 2's exact
+source/target coverage checks. Product-family distributed proofs, a global owner
+lookup and variable-length certificate packing remain Stage 6 work. Repeated
+refine/coarsen histories and layer-count changes have dedicated storage tests;
+the verification record identifies their observed outcomes and limits.
+
+Across two snapshots, product ancestry has a factor partial order: refinement
+requires each base/Z factor to remain equal or descend, with at least one strict
+change; coarsening reverses that relation. Explicit `ProductIntersection` handles
+opposite strict factor directions, such as refined base/coarsened Z. It never
+pretends those cells have a single scalar parent. Within one active catalog,
+comparable base paths and comparable Z paths imply positive product overlap even
+when their directions cross; those active combinations reject before geometric
+surrogate shells can hide the conflict. Explicit ancestry pairs are enumerated
+on demand. The target-selected overload treats an empty target list as zero
+records; the unfiltered overload enumerates all requested snapshot relations.
 
 Parents and sibling families are factor-specific. XY coarsening requires the
 complete base sibling family over compatible axial intervals; Z coarsening
 requires complete interval siblings over compatible base leaves. There is no
 single octree-style parent for every independently refined product cell.
 
-Stage 3 starts with one nonperiodic conforming triangular base repeated through
+Stage 3 is limited to nonperiodic whole products with a conforming base repeated through
 common Z layers. Deterministic triangle bisection uses compatible root refinement edges
 and conformity closure. XY changes affect whole columns; Z bisection affects a
 selected interval across the entire base. This directly retains the layout of
@@ -684,9 +747,9 @@ shell without boundary projection or domain renormalization.
 
 ## Implementation stages and focused acceptance
 
-Stages 1–2 are implemented and verified within their stated boundaries; Stages
-3–9 are proposed and each has its own exit gate. Existing tests are starting
-points, not evidence that the extension works. Run focused Debug serial tests,
+Stages 1–3 are verified within their stated boundaries; Stages 4–9 remain
+proposed. Existing tests are starting points for those later extensions, not
+evidence that they work. Run focused Debug serial tests,
 then affected MPI cases at 2 and 4 ranks where they establish the intended seam
 and ownership conditions. Choose additional ranks or deliberately sparse
 partitions when needed for a specific ownership regime, and assert observed

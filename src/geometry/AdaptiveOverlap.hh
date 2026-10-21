@@ -20,7 +20,8 @@ struct AdaptiveAncestryRelation
     {
         Unchanged,
         Refinement,
-        Coarsening
+        Coarsening,
+        ProductIntersection ///< Opposite strict base/Z ancestry directions.
     };
     Kind kind = Kind::Unchanged;
     std::uint64_t source_gid = 0, target_gid = 0;

@@ -1,6 +1,7 @@
 set(SIMPLEFLUID_MESH_SOURCES
     AdaptiveHierarchy.cc
     AdaptiveOverlap.cc
+    ExtrudedAMR.cc
     ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
@@ -71,6 +72,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     details/SemiStructuredPartition.cc
     AdaptiveHierarchy.cc
     AdaptiveOverlap.cc
+    ExtrudedAMR.cc
     ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc

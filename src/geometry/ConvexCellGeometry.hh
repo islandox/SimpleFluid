@@ -98,6 +98,8 @@ public:
     [[nodiscard]] static ConvexGeometryPtr from_native_shell(
         std::span<const GeometryPoint> vertices, const std::vector<std::vector<std::size_t>>& outward_faces);
     [[nodiscard]] GeometryMoments moments() const;
+    [[nodiscard]] std::vector<char> encode_exact_certificate() const;
+    [[nodiscard]] static ConvexGeometryPtr decode_exact_certificate(std::span<const char> packet);
     /** Binary64 value/interval output, also exercising platforms whose native
      * long double has binary64 range. First-moment overflow rejects even when
      * volume itself is representable; first-moment underflow uses an enclosure.
@@ -112,6 +114,7 @@ public:
     [[nodiscard]] bool equivalent(const ConvexCellGeometry& other) const;
 
 private:
+    friend class ExactExtrudedConstruction;
     explicit ConvexCellGeometry(std::shared_ptr<const Impl> implementation);
     std::shared_ptr<const Impl> impl_;
 };

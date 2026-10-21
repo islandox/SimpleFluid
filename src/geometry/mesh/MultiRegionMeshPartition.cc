@@ -16,7 +16,7 @@ using ID = MultiRegionMesh::ID;
 using Vec3 = MeshUtils::Vec3;
 // Internal MPI wire format: one executable, native scalar representation.
 // No pointers, size_t container objects, or borrowed storage are transmitted.
-constexpr uint64_t partition_magic = 0x5346524547490003ULL;
+constexpr uint64_t partition_magic = 0x5346524547490004ULL;
 struct Writer
 {
     std::vector<char> data;
@@ -161,6 +161,8 @@ DistributedExplicitRegion read_explicit(Reader& r, std::string name, RegionLayou
 template<class Region>
 void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<ID>& visible)
 {
+    if constexpr(requires{region.geometry().has_exact_construction();})
+        if(region.geometry().has_exact_construction())tag=8;
     w.value(tag); w.string(region.name()); write_layout(w, region.layout());
     const auto& t = region.topology(); const auto& g = region.geometry();
     if constexpr (std::same_as<Region, NativeIsoRegion<UnstructuredMesh>>
@@ -213,6 +215,8 @@ void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<
             const auto ids = topo.boundary_batch_ids();
             w.value(uint64_t(ids.size()));
             for (auto b : ids) { w.string(topo.boundary_batch_name(b)); w.string(t.boundary_batch_name(b)); }
+            if constexpr(requires{native.has_exact_construction();})
+                if(native.has_exact_construction())w.array(native.construction()->encode());
         }
     }
 }
@@ -264,7 +268,7 @@ MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
         }
         return checked(CartesianRegion(std::move(name), std::move(topology), std::make_shared<const RectilinearGeometry>(std::move(edges))));
     }
-    if (tag != 2 && tag != 5 && tag != 6) throw std::invalid_argument("Unknown partition region provider tag.");
+    if (tag != 2 && tag != 5 && tag != 6 && tag != 8) throw std::invalid_argument("Unknown partition region provider tag.");
     auto base = r.array<Vec3>(); auto layers = r.array<real_t>();
     if (base.empty() || base.size() > std::numeric_limits<unsigned>::max() || layers.size() < 2
         || layers.size() > std::numeric_limits<unsigned>::max())
@@ -306,6 +310,12 @@ MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
     {
         topology = std::make_shared<const ExtrudedTopology>(base.size(), loops, layers.size() - 1, boundaries, std::move(aliases));
         if (cache) cache->extruded.emplace(std::move(key.data), topology);
+    }
+    if(tag==8)
+    {
+        const auto packet=r.array<char>();auto construction=ExactExtrudedConstruction::decode(topology,packet);
+        if(construction->display_points()!=base || construction->display_z()!=layers)throw std::invalid_argument("Exact extrusion display descriptor mismatch.");
+        return checked(ExtrudedRegion(std::move(name),topology,std::make_shared<const ExtrudedGeometry>(topology,std::move(construction))));
     }
     if (tag == 5) return checked(ExtrudedRegion(std::move(name), topology,
         std::make_shared<const ExtrudedGeometry>(topology, std::move(base), std::move(layers))));
@@ -443,6 +453,8 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     { b.region = r.value<size_t>(); b.native_id = r.value<int>(); b.id = r.value<int>(); b.name = r.string(); }
     mesh->d_reference_axial_edges = r.array<real_t>(); mesh->d_axial_edges = r.array<real_t>();
     mesh->d_geometry_state.epoch = r.value<uint64_t>();
+    if(mesh->has_exact_construction() && mesh->d_reference_axial_edges!=mesh->d_axial_edges)
+        throw std::invalid_argument("Constructed extrusion partition packets require the identity composite affine transform.");
     if (!r.data.empty()) throw std::invalid_argument("Trailing composite partition bytes.");
     const auto regions = mesh->d_regions.size();
     if (!regions || !std::isfinite(mesh->d_tolerance.absolute_length) || !std::isfinite(mesh->d_tolerance.relative)

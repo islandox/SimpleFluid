@@ -1,0 +1,59 @@
+/** @file ExactExtrudedConstruction.hh
+ * @brief Compact authoritative affine constructions for native extrusions.
+ */
+#pragma once
+#include "geometry/ConvexCellGeometry.hh"
+#include "geometry/MeshUtils.hh"
+#include <span>
+
+namespace SimpleFluid::Meshes
+{
+class ExtrudedTopology;
+/** Empty parents identify represented roots; otherwise the point is the exact
+ * arithmetic mean of earlier recipe points. Display coordinates may round. */
+struct ExactPointRecipe
+{
+    GeometryPoint root{};
+    std::vector<std::size_t> parents;
+};
+struct ExactScalarRecipe
+{
+    double root = 0;
+    std::vector<std::size_t> parents;
+};
+class ExactExtrudedConstruction
+{
+public:
+    struct Impl;
+    /** make/decode require a valid embedded base supplied by the caller. They
+     * validate the DAG, layout, individual convex cells and native metrics;
+     * ExtrudedAMR certifies global root embedding, preserved by its exact templates.
+     */
+    [[nodiscard]] static std::shared_ptr<const ExactExtrudedConstruction> make(
+        std::shared_ptr<const ExtrudedTopology> topology, std::vector<ExactPointRecipe> points,
+        std::vector<std::size_t> active_points, std::vector<ExactScalarRecipe> axial,
+        std::vector<std::size_t> active_axial);
+    [[nodiscard]] static std::shared_ptr<const ExactExtrudedConstruction> decode(
+        std::shared_ptr<const ExtrudedTopology> topology, std::span<const char> packet);
+    [[nodiscard]] std::vector<char> encode() const;
+    [[nodiscard]] std::vector<MeshUtils::Vec3> display_points() const;
+    [[nodiscard]] std::vector<double> display_z() const;
+    [[nodiscard]] double cell_volume(std::size_t) const;
+    [[nodiscard]] MeshUtils::Vec3 cell_centroid(std::size_t) const;
+    [[nodiscard]] double face_area(std::size_t) const;
+    [[nodiscard]] MeshUtils::Vec3 face_centroid(std::size_t) const;
+    [[nodiscard]] MeshUtils::Vec3 face_area_vector(std::size_t) const;
+    [[nodiscard]] ConvexGeometryPtr certified_cell_geometry(std::size_t) const;
+    [[nodiscard]] std::size_t storage_bytes() const;
+    [[nodiscard]] double scaled_base_area(std::size_t base_cell) const;
+    [[nodiscard]] bool base_quality_above(std::size_t base_cell, double minimum) const;
+    /** Root-only planar embedding admission using a compact broad phase and
+     * exact intersections; retained descendants inherit this certificate. */
+    void certify_base_embedding() const;
+    [[nodiscard]] bool matches_topology(const std::shared_ptr<const ExtrudedTopology>& topology) const noexcept;
+
+private:
+    explicit ExactExtrudedConstruction(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
+    std::shared_ptr<const Impl> impl_;
+};
+} // namespace SimpleFluid::Meshes
