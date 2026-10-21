@@ -65,6 +65,22 @@ struct NativeConvexShell
 
 class ConvexCellGeometry;
 using ConvexGeometryPtr = std::shared_ptr<const ConvexCellGeometry>;
+struct ConvexFaceOrigin
+{
+    enum class Kind
+    {
+        ParentFace,
+        CutPlane
+    };
+    Kind kind = Kind::ParentFace;
+    std::size_t index = 0;
+};
+struct ConvexOctantPiece
+{
+    unsigned octant = 0;
+    ConvexGeometryPtr geometry;
+    std::vector<ConvexFaceOrigin> face_origins;
+};
 struct ConvexClipResult
 {
     ConvexGeometryPtr inside, outside; ///< null only when proven zero volume
@@ -90,6 +106,9 @@ public:
     /** Adapt resident native convex cell loops, propagating all exact collinear
      * edge vertices. Translated periodic joins currently reject explicitly. */
     [[nodiscard]] static ConvexGeometryPtr from_native_cell(const MultiRegionMesh& mesh, std::uint64_t cell);
+    /** Exact shell faces in native cell_faces order, including canonical atomic
+     * tiles. Use this when assigning native face ancestry to a new root. */
+    [[nodiscard]] static ConvexGeometryPtr from_native_cell_atomic(const MultiRegionMesh& mesh, std::uint64_t cell);
     /** Original binary64 vertices, exact outward orientation and propagated
      * incident edge vertices; suitable for sparse native-cell communication. */
     [[nodiscard]] static NativeConvexShell native_cell_shell(const MultiRegionMesh& mesh, std::uint64_t cell);
@@ -99,6 +118,9 @@ public:
         std::span<const GeometryPoint> vertices, const std::vector<std::vector<std::size_t>>& outward_faces);
     [[nodiscard]] GeometryMoments moments() const;
     [[nodiscard]] std::vector<char> encode_exact_certificate() const;
+    /** Capacity-based allocation estimate including exact arrays/limbs; excludes
+     * allocator headers and shared control blocks, and does not measure RSS. */
+    [[nodiscard]] std::size_t storage_bytes() const;
     [[nodiscard]] static ConvexGeometryPtr decode_exact_certificate(std::span<const char> packet);
     /** Binary64 value/interval output, also exercising platforms whose native
      * long double has binary64 range. First-moment overflow rejects even when
@@ -106,6 +128,11 @@ public:
      * Exact internal moments remain retained. */
     [[nodiscard]] GeometryMoments moments_binary64() const;
     [[nodiscard]] std::size_t num_faces() const noexcept;
+    /** Three exact AABB midpoint cuts, retaining every positive intersection.
+     * Quality compares exact child volume to its largest exact AABB span cubed.
+     * Any unsupported positive sliver rejects the entire split transaction. */
+    [[nodiscard]] std::vector<ConvexOctantPiece> split_aabb_midpoints(double minimum_scaled_volume = 0) const;
+    [[nodiscard]] bool quality_above(double minimum_scaled_volume) const;
     [[nodiscard]] ConvexClipResult clip(const GeometryHalfspace& halfspace) const;
     [[nodiscard]] ConvexGeometryPtr intersect(const ConvexCellGeometry& other) const;
     /** Exact coverage/disjointness/containment against the actual represented shell. */
@@ -115,6 +142,7 @@ public:
 
 private:
     friend class ExactExtrudedConstruction;
+    friend class ExactPolyhedralComplex;
     explicit ConvexCellGeometry(std::shared_ptr<const Impl> implementation);
     std::shared_ptr<const Impl> impl_;
 };

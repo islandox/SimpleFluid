@@ -23,10 +23,10 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 Phase 22 has uniform and distributed Cartesian AMR VoF backends, numerical
 radiolytic coupling, and conservative representation changes with focused
 verification. Physical calibration and application resolution qualification
-remain open. Phase 23 Stages 1–3 implement the common hierarchy/Cartesian seam,
-certified convex geometry, sparse conservative remap and nonperiodic whole-product
-XY/Z refinement with focused verification. Polyhedral refinement, mixed-region
-closure and general flow qualification remain proposed in Stages 4–9.
+remain open. Phase 23 Stages 1–4 implement the common hierarchy/Cartesian seam,
+certified geometry/remap, whole-product XY/Z refinement and single-region convex
+polyhedral adaptation with focused verification. Mixed-region closure, scalable
+migration and general flow qualification remain proposed in Stages 5–9.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -65,7 +65,7 @@ closure and general flow qualification remain proposed in Stages 4–9.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
-| Phase 23, general native AMR | Stages 1–3 implemented and verified; Stages 4–9 proposed | Common hierarchy, certified kernels, sparse remap and whole-product XY/Z refinement complete; polyhedral refinement, local/mixed products, live migration and general VoF qualification remain open |
+| Phase 23, general native AMR | Stages 1–4 implemented and verified; Stages 5–9 proposed | Hierarchy, certified remap, whole-product XY/Z and single-region convex polyhedral adaptation complete; local/mixed products, live migration and general VoF qualification remain open |
 
 ### Checklist conventions
 
@@ -1860,7 +1860,7 @@ for the implemented API, reproducible checks and qualification limits.
 
 ## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
 
-**Status: Stages 1–3 implemented and verified; Stages 4–9 remain proposed.** See the
+**Status: Stages 1–4 implemented and verified; Stages 5–9 remain proposed.** See the
 [general AMR design](docs/architecture/general_amr.md) for the algorithms,
 ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
@@ -1932,16 +1932,22 @@ General-mesh VoF/flow and local/mixed product adaptation remain later stages.
 
 ### Stage 4 — Convex polyhedral refinement
 
-- [ ] Clip the actual convex parent with its AABB midpoint planes; record a
+- [x] Clip the actual convex parent with its AABB midpoint planes; record a
       variable set of nonempty octant children. Certify convexity, closed
       topology, representability, child quality, containment, and disjoint union.
-- [ ] Construct canonical parent-face subdivisions from both incident split
+- [x] Construct canonical parent-face subdivisions from both incident split
       patterns and propagate new edge vertices through every incident loop.
       Restore saved parent geometry on complete-family coarsening while
       retaining finer-neighbor face tiles.
-- [ ] Verify variable child counts, unrelated neighboring cuts, face/edge
+- [x] Verify variable child counts, unrelated neighboring cuts, face/edge
       closure, signed incidence, volume/first moments, sliver rejection,
       transactional failure, and exact parent-shell recovery.
+
+Stage 4 evidence and limits are recorded in
+[convex hierarchy and exact explicit-provider verification](docs/verification/general_amr_stage4.md).
+This is bounded replicated canonical planning with sparse native resident
+providers, not scalable distributed hierarchy storage. Exact shard reassembly,
+mixed-region closure and general VoF/flow remain later gates.
 
 ### Stage 5 — Mixed-region closure and local XY/Z products
 

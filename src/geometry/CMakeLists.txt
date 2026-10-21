@@ -2,6 +2,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     AdaptiveHierarchy.cc
     AdaptiveOverlap.cc
     ExtrudedAMR.cc
+    PolyhedralAMR.cc
     ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
@@ -30,6 +31,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/RegionProviders.cc
     mesh/ConservativeInterface.cc
     mesh/ExtrudedRegionProviders.cc
+    mesh/ExplicitRegionProvider.cc
     mesh/SweptRZRegionProviders.cc
     mesh/MultiRegionMesh.cc
     mesh/MultiRegionMeshPartition.cc

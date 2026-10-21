@@ -1,6 +1,6 @@
 # AMR for extruded, polyhedral, and mixed-region meshes
 
-**Status: Stages 1–3 are implemented and verified within the boundaries below; Stages 4–9 remain proposed.** This document
+**Status: Stages 1–4 are implemented and verified within the stated scope; Stages 5–9 remain proposed.** This document
 defines the implemented hierarchy, certified geometry and sparse remap boundaries and the remaining
 implementation sequence and acceptance contracts. It does not extend the
 supported mesh families of the existing solvers or record dated validation results.
@@ -19,6 +19,8 @@ The [Stage 2 verification record](../verification/general_amr_stage2.md) covers
 certified convex queries and sparse conservative amount transfer.
 The [Stage 3 verification record](../verification/general_amr_stage3.md) identifies
 the product-provider implementation, focused evidence and qualification limits.
+The [Stage 4 verification record](../verification/general_amr_stage4.md) identifies
+the convex hierarchy/exact explicit-provider scope, focused evidence and limits.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -332,11 +334,44 @@ version, and parent/child ancestry; do not require eight children or replace
 the physical cell by its box. Each child's coordinate spans are bounded by
 half the corresponding parent box spans.
 
+[`PolyhedralAMR`](../../src/geometry/PolyhedralAMR.hh) implements this stage for
+one native region without joins and one physical region ID; per-root materials
+and physical patch labels are retained independently. Input must already be a
+valid embedded native planar-convex mesh with complete canonical root residency.
+Root import certifies each actual
+ordered atomic cell shell and declared shared-face incidence; it is not arbitrary
+global mesh admission. Mixed native regions/joins remain Stage 5 and reject.
+
+`PolyhedralAMRGrid` supplies the native snapshot, optional per-root physical
+region/material arrays, depth/quality limits and explicit `maximum_cells` and
+`maximum_face_tiles` bootstrap budgets. The cell budget checks conservative upper
+refinement growth with overflow protection. The face budget bounds overlay pairs
+within shared ancestral surfaces before large expansion. Exhaustion rejects the
+whole candidate before publication. A final lossless exact canonical descriptor
+comparison enforces collective root/candidate identity even when ordinary
+explicit meshes have equal layout and different coordinates.
+
+`adapt(refine, coarsen)` uses source leaf ordinals and persistent parent keys.
+Only the complete recorded immediate family in the original source is eligible
+for coarsening; grandchildren, chained eligibility and refine/coarsen conflicts
+reject. Plan/apply retain the exact source observation. No-op calls retain the
+snapshot, while successful changes publish the hierarchy and native geometry
+together after every check succeeds. `with_partition()` binds the actual native
+resident observation, separately advancing ownership without changing ancestry.
+
+Canonical planning constructs a bounded replicated explicit hierarchy using a
+local `SerialComm`. Distributed fields use `CompositeMeshSource`, native
+partitioning and a real retained partition binding. The ordinary direct MPI
+constructor's rejection of globally explicit regions remains intact. Sparse
+resident providers do not prove scalable per-rank hierarchy storage: canonical
+root/planning geometry is still replicated, under the explicit budgets above.
+
 Closed-volume halfspace clipping is the relevant geometric primitive; the
 [CGAL clipping contract](https://doc.cgal.org/6.1.1/Polygon_mesh_processing/group__PMP__corefinement__grp.html)
 distinguishes clipping a bounded volume from merely splitting its surface.
-The proposed implementation still requires repository-native topology,
-predicates, conservation checks, and a separately reviewed dependency decision.
+The implemented cutter uses the repository's exact rational predicates and
+constructions. That reference is algorithm background, not a new dependency or
+qualification claim.
 
 Construct one canonical subdivision of every parent face from both incident
 cells' cut patterns before assembling children. Both sides reference exactly
@@ -351,15 +386,53 @@ Certify positive finite child measures, planar simple faces, oriented closed
 manifolds, containment, pairwise interior disjointness, parent volume and first
 moment recovery, and complete parent-shell coverage. Discard only proven empty
 intersections. A positive sliver that violates quality or representability
-rejects the candidate; its volume cannot disappear. Midpoints that cannot be
-represented distinctly also reject. No unspecified retry changes the split.
+rejects the candidate; its volume cannot disappear. Exact rational midpoint
+planes need not be binary64 display coordinates. Native display/metric viability
+remains an explicit admission limit; no unspecified retry changes the split.
 
 Coarsening restores the saved parent geometry after its complete recorded
 immediate sibling set is present, without grandchildren or changed material
 membership. Retain boundary tiles still required by finer neighbors. Never
-recover a parent through a convex hull. Solver policy initially permits only
-uniform pure-phase families outside protected reconstruction, interface,
-motion-forecast, wake, and promotion neighborhoods.
+recover a parent through a convex hull. This geometry hierarchy has no solver
+refinement policy. A future solver integration must separately protect mixed
+interfaces, reconstruction neighborhoods, motion forecasts, wakes and promotions.
+
+[`ExactPolyhedralComplex`](../../src/geometry/ExactPolyhedralComplex.hh) groups
+faces by stable `Root` or `Cut` surface ancestry, with canonical orientation and
+physical patch declarations. A cut surface is identified by its creator parent
+and axis, not a rounded plane or coordinate tolerance. Opposite incident patterns
+contribute to one exact atomic overlay; same-side overlap, missing coverage or
+inconsistent surface/patch declarations reject. Canonical tile identities ignore
+loop start and redundant exact collinear edge segmentation. Every exact edge vertex
+is propagated to incident loops, and the reconstructed atomic cell shell must
+match its immutable canonical geometry. Coarsening therefore restores the saved
+parent shape while retaining covering tiles required by a surviving fine neighbor.
+
+`ConvexCellGeometry::from_native_cell_atomic()` imports authoritative atomic faces
+in native traversal order, including constructed cells. It does not assume that a
+canonical domain certificate's face count/order equals its tiled native topology.
+The ordinary domain certificate remains the geometry used by conservative remap.
+
+The optional exact `ExplicitRegionProvider` overload keeps the legacy constructor
+and record representation available. Exact cells use `POLYHEDRON` connectivity
+when atomic tiling changes face counts. The compiled adapter authenticates native
+records against the exact complex; native face area comes from the authoritative
+area conversion, not the norm of already rounded area-vector components. Legacy
+record range checks remain explicit admission requirements.
+
+Versioned native packets retain requested cells plus incident-owner geometric
+support, their faces/nodes, and only metric records for remaining outer neighbors.
+This geometric support closure does not enlarge field halos. Exact certificates are available only
+for fully resident cells. Empty/sparse providers keep the global catalog and
+boundary schema independently of residency; their public factory requires the
+complete schema explicitly, even when the global schema is empty. Unnamed
+exteriors retain invalid boundary IDs and empty names; topological exterior
+status is independent of labelling. Omitting a sparse factory schema rejects. Exact descriptor bytes participate in configuration
+identity. All supplied source/target remap catalog cells, including inactive
+siblings, still authenticate against their actual native owners without coverage
+normalization. Exact-shard distributed reassembly is explicitly rejected until
+Stage 6 can preserve its authoritative semantics; ordinary legacy shard merge
+continues through its existing path.
 
 [`UnstructuredMesh`](../../src/geometry/mesh/UnstructuredMesh.hh) supplies ordered
 face loops and manifold incidence, but its signed moments and face-loop checks
@@ -747,9 +820,9 @@ shell without boundary projection or domain renormalization.
 
 ## Implementation stages and focused acceptance
 
-Stages 1–3 are verified within their stated boundaries; Stages 4–9 remain
-proposed. Existing tests are starting points for those later extensions, not
-evidence that they work. Run focused Debug serial tests,
+Stages 1–4 are verified within their stated boundaries; Stages 5–9 remain
+proposed. Existing tests are starting points for later extensions, not evidence
+that they work. Run focused Debug serial tests,
 then affected MPI cases at 2 and 4 ranks where they establish the intended seam
 and ownership conditions. Choose additional ranks or deliberately sparse
 partitions when needed for a specific ownership regime, and assert observed

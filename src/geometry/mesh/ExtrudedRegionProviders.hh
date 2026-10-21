@@ -75,6 +75,7 @@ public:
     bool has_exact_construction() const noexcept { return bool(d_construction); }
     const std::shared_ptr<const ExactExtrudedConstruction>& construction() const noexcept { return d_construction; }
     ConvexGeometryPtr certified_cell_geometry(size_t cell) const;
+    ConvexGeometryPtr atomic_cell_geometry(size_t cell) const;
     EntityRange<EntityRange<uint64_t>> xy_cell_nodes() const;
 private:
     std::shared_ptr<const ExtrudedTopology> d_topology;

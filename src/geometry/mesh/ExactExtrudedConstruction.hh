@@ -44,6 +44,7 @@ public:
     [[nodiscard]] MeshUtils::Vec3 face_centroid(std::size_t) const;
     [[nodiscard]] MeshUtils::Vec3 face_area_vector(std::size_t) const;
     [[nodiscard]] ConvexGeometryPtr certified_cell_geometry(std::size_t) const;
+    [[nodiscard]] ConvexGeometryPtr atomic_cell_geometry(std::size_t) const;
     [[nodiscard]] std::size_t storage_bytes() const;
     [[nodiscard]] double scaled_base_area(std::size_t base_cell) const;
     [[nodiscard]] bool base_quality_above(std::size_t base_cell, double minimum) const;

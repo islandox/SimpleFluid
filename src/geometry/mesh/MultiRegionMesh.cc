@@ -7,6 +7,7 @@
  * @copyright Copyright (c) 2026
  */
 #include "geometry/mesh/MultiRegionMesh.hh"
+#include "geometry/ExactPolyhedralComplex.hh"
 #include <Tpetra_Core.hpp>
 #include <Teuchos_CommHelpers.hpp>
 #include <sstream>
@@ -1200,6 +1201,14 @@ std::string MultiRegionMesh::configuration_signature() const
                     for (const auto& p : native.rz_nodes()) out << p.x << ' ' << p.y << ' ';
                     for (const auto& row : native.rz_cell_nodes()) values(row);
                     values(native.theta_edges());
+                }
+                else if constexpr (requires { native.cell_records(); native.has_exact_construction(); })
+                {
+                    if (native.has_exact_construction())
+                    {
+                        out<<" exact-explicit ";
+                        for (unsigned char byte:native.construction()->encode()) out<<unsigned(byte)<<' ';
+                    }
                 }
                 else if constexpr (requires { native.cell_edges(); })
                     for (size_t a = 0; a < 3; ++a) values(native.cell_edges()[a]);
