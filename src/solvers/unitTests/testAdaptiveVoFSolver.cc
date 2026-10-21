@@ -22,8 +22,8 @@
 namespace
 {
 using namespace SimpleFluid;
-using Hierarchy = Meshes::CartesianAMR;
-using Grid = Meshes::AMRGrid;
+using Hierarchy = SimpleFluid::Meshes::AMR::CartesianAMR;
+using Grid = SimpleFluid::Meshes::AMR::AMRGrid;
 using Solver = AdaptiveVoFSolver;
 using Vector = VoF::Vector;
 using LO = DefaultTpetraTypes::local_ordinal_type;

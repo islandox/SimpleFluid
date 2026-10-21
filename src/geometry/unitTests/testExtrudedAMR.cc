@@ -1,9 +1,9 @@
 /** @file testExtrudedAMR.cc
  * @brief Whole-product ancestry, exact refinement, inverse families and native contracts.
  */
-#include "geometry/ExtrudedAMR.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -19,9 +19,9 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-ExtrudedAMRGrid quad()
+::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid quad()
 {
-    ExtrudedAMRGrid g;
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid g;
     g.xy_nodes = {{{.1, .1, 0}}, {{.2, .1, 0}}, {{.2, .2, 0}}, {{.1, .2, 0}}};
     g.base_cells = {{0, 1, 2, 3}};
     g.z_edges = {.1, .2};
@@ -29,22 +29,23 @@ ExtrudedAMRGrid quad()
     g.boundary_aliases = {{"zmin", "floor"}, {"zmax", "roof"}};
     return g;
 }
-ExtrudedAMRGrid triangles()
+::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid triangles()
 {
-    ExtrudedAMRGrid g;
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid g;
     g.xy_nodes = {{{0, 0, 0}}, {{1, 0, 0}}, {{1, 1, 0}}, {{0, 1, 0}}};
     g.base_cells = {{0, 1, 2}, {0, 2, 3}};
     g.z_edges = {0, 1};
     return g;
 }
-std::size_t base_ordinal(const ExtrudedAMR& h, const BaseCellKey& k)
+std::size_t base_ordinal(
+    const ::SimpleFluid::Meshes::AMR::ExtrudedAMR& h, const ::SimpleFluid::Meshes::AMR::BaseCellKey& k)
 {
     auto it = std::find(h.base_keys().begin(), h.base_keys().end(), k);
     if (it == h.base_keys().end())
         throw std::logic_error("Missing test base key.");
     return it - h.base_keys().begin();
 }
-void same_cells(const ExtrudedAMR& a, const ExtrudedAMR& b)
+void same_cells(const ::SimpleFluid::Meshes::AMR::ExtrudedAMR& a, const ::SimpleFluid::Meshes::AMR::ExtrudedAMR& b)
 {
     ASSERT_EQ(a.geometry()->num_cells(), b.geometry()->num_cells());
     EXPECT_EQ(a.base_keys(), b.base_keys());
@@ -57,18 +58,20 @@ void same_cells(const ExtrudedAMR& a, const ExtrudedAMR& b)
     for (std::size_t c = 0; c < a.base_keys().size(); ++c)
         EXPECT_EQ(a.base_edge_keys(c), b.base_edge_keys(c));
 }
-std::shared_ptr<const AdaptiveOverlapPlan> certificate(const ExtrudedAMR& a, const ExtrudedAMR& b)
+std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> certificate(
+    const ::SimpleFluid::Meshes::AMR::ExtrudedAMR& a, const ::SimpleFluid::Meshes::AMR::ExtrudedAMR& b)
 {
-    std::vector<AdaptiveCellBinding> source, target;
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> source, target;
     for (std::uint64_t c = 0; c < a.geometry()->num_cells(); ++c)
         source.push_back({a.cell_key(c), c, a.cell_material(c), a.cell_geometry(c)});
     for (std::uint64_t c = 0; c < b.geometry()->num_cells(); ++c)
         target.push_back({b.cell_key(c), c, b.cell_material(c), b.cell_geometry(c)});
-    return AdaptiveOverlapPlan::build(a.observation(), b.observation(), source, target, a.overlap_relations(b));
+    return ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
+        a.observation(), b.observation(), source, target, a.overlap_relations(b));
 }
 TEST(ExtrudedAMRTest, DecimalQuadFactorOrderAndExactInversePreservePatches)
 {
-    ExtrudedAMR parent(quad());
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(quad());
     auto xy = parent.adapt({0});
     auto z = parent.adapt({}, {0});
     auto xyz = xy->adapt({}, {0});
@@ -94,7 +97,7 @@ TEST(ExtrudedAMRTest, DecimalQuadFactorOrderAndExactInversePreservePatches)
 }
 TEST(ExtrudedAMRTest, TriangleNVBClosureAndCompleteFactorFamilies)
 {
-    ExtrudedAMR parent(triangles());
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(triangles());
     auto refined = parent.adapt({0});
     EXPECT_EQ(refined->base_keys().size(), 4U);
     EXPECT_NO_THROW((void) certificate(parent, *refined));
@@ -110,11 +113,11 @@ TEST(ExtrudedAMRTest, TriangleNVBClosureAndCompleteFactorFamilies)
     EXPECT_FALSE(native.has_materialized_indexer());
     auto bad = triangles();
     bad.triangle_reference_edges = {0, 0};
-    EXPECT_THROW((void) ExtrudedAMR(bad), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::ExtrudedAMR(bad), std::invalid_argument);
 }
 TEST(ExtrudedAMRTest, CircularStylePolygonFanAndSavedParentRecovery)
 {
-    ExtrudedAMRGrid g;
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid g;
     constexpr double pi = 3.14159265358979323846;
     for (unsigned i = 0; i < 7; ++i)
     {
@@ -123,7 +126,7 @@ TEST(ExtrudedAMRTest, CircularStylePolygonFanAndSavedParentRecovery)
     }
     g.base_cells = {{0, 1, 2, 3, 4, 5, 6}};
     g.z_edges = {-.1, .3};
-    ExtrudedAMR parent(g);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(g);
     auto fan = parent.adapt({0});
     EXPECT_EQ(fan->base_keys().size(), 5U);
     EXPECT_NO_THROW((void) certificate(parent, *fan));
@@ -140,7 +143,7 @@ TEST(ExtrudedAMRTest, StableEdgesAcrossDifferentIndependentXYHistories)
     // Independent outer-edge bisections preserve one connected constituent;
     // the next split then closes the shared diagonal from both histories.
     g.triangle_reference_edges = {0, 1};
-    ExtrudedAMR parent(g);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(g);
     auto first = parent.adapt({0});
     auto second = parent.adapt({1});
     auto ab = first->adapt({base_ordinal(*first, parent.base_keys()[1])});
@@ -151,15 +154,15 @@ TEST(ExtrudedAMRTest, StableEdgesAcrossDifferentIndependentXYHistories)
 }
 TEST(ExtrudedAMRTest, RootAndTemplateInteriorEdgesHaveDisjointPersistentNamespaces)
 {
-    ExtrudedAMR parent(quad());
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(quad());
     const auto root_edge = parent.base_edge_keys(0)[0];
-    EXPECT_EQ(root_edge.kind, BaseEdgeKey::Kind::Root);
+    EXPECT_EQ(root_edge.kind, ::SimpleFluid::Meshes::AMR::BaseEdgeKey::Kind::Root);
     auto refined = parent.adapt({0});
     bool matched_ordinal = false;
     for (std::size_t c = 0; c < refined->base_keys().size(); ++c)
         for (const auto& edge : refined->base_edge_keys(c))
-            if (edge.kind == BaseEdgeKey::Kind::TemplateInterior && edge.creator == root_edge.creator &&
-                edge.ordinal == root_edge.ordinal)
+            if (edge.kind == ::SimpleFluid::Meshes::AMR::BaseEdgeKey::Kind::TemplateInterior &&
+                edge.creator == root_edge.creator && edge.ordinal == root_edge.ordinal)
             {
                 matched_ordinal = true;
                 EXPECT_NE(edge, root_edge);
@@ -172,8 +175,8 @@ TEST(ExtrudedAMRTest, RepeatedCyclesAndLayerCountsKeepFactoredStorageBounded)
 {
     auto g = quad();
     g.z_edges = {0, 1};
-    ExtrudedAMR parent(g);
-    auto current = std::make_shared<const ExtrudedAMR>(parent);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(g);
+    auto current = std::make_shared<const ::SimpleFluid::Meshes::AMR::ExtrudedAMR>(parent);
     const auto initial = parent.storage_counts();
     const auto initial_bytes = parent.storage_report().measured_bytes();
     for (unsigned cycle = 0; cycle < 5; ++cycle)
@@ -190,7 +193,7 @@ TEST(ExtrudedAMRTest, RepeatedCyclesAndLayerCountsKeepFactoredStorageBounded)
     many.z_edges.clear();
     for (unsigned k = 0; k <= 64; ++k)
         many.z_edges.push_back(double(k) / 64);
-    ExtrudedAMR layers(many);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR layers(many);
     EXPECT_EQ(layers.storage_counts().base_vertices, initial.base_vertices);
     EXPECT_EQ(layers.storage_counts().point_recipes, initial.point_recipes);
     EXPECT_EQ(layers.storage_counts().z_edges, 65U);
@@ -221,29 +224,29 @@ TEST(ExtrudedAMRTest, RepeatedCyclesAndLayerCountsKeepFactoredStorageBounded)
 }
 TEST(ExtrudedAMRTest, CrossedFactorPairsAndEmptySelectionsAreExplicit)
 {
-    ExtrudedAMR parent(quad());
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(quad());
     auto xy = parent.adapt({0}), z = parent.adapt({}, {0});
     const auto pairs = z->overlap_relations(*xy);
     ASSERT_EQ(pairs.size(), 8U);
     for (const auto& pair : pairs)
-        EXPECT_EQ(pair.kind, AdaptiveAncestryRelation::Kind::ProductIntersection);
+        EXPECT_EQ(pair.kind, ::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::ProductIntersection);
     EXPECT_NO_THROW((void) certificate(*z, *xy));
     EXPECT_TRUE(z->overlap_relations(*xy, std::vector<std::uint64_t>{}).empty());
     auto altered = quad();
     altered.boundary_aliases["zmin"] = "different";
-    ExtrudedAMR foreign(altered);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR foreign(altered);
     EXPECT_THROW((void) parent.overlap_relations(foreign), std::invalid_argument);
 }
 TEST(ExtrudedAMRTest, FailedCandidatesAndStalePlansLeaveSourceUsable)
 {
     auto g = quad();
     g.max_depth = 1;
-    ExtrudedAMR source(g);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR source(g);
     const auto before = source.observation();
     auto plan = source.plan_adaptation({0});
     auto fine = source.apply_adaptation(plan);
     EXPECT_THROW((void) fine->apply_adaptation(plan), std::invalid_argument);
-    ExtrudedAMR foreign(g);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR foreign(g);
     EXPECT_THROW((void) foreign.apply_adaptation(plan), std::invalid_argument);
     EXPECT_THROW((void) fine->adapt({0}), std::invalid_argument);
     EXPECT_THROW((void) source.adapt({9}), std::out_of_range);
@@ -260,18 +263,18 @@ TEST(ExtrudedAMRTest, FailedCandidatesAndStalePlansLeaveSourceUsable)
     quality.base_cells = {{0, 1, 2, 3, 4}};
     quality.boundaries.clear();
     quality.minimum_scaled_area = .5;
-    ExtrudedAMR accepted(quality);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR accepted(quality);
     EXPECT_THROW((void) accepted.adapt({0}), std::invalid_argument);
     auto collapsed = quad();
     collapsed.xy_nodes = {{{1e16, 0, 0}}, {{1e16 + 2, 0, 0}}, {{1e16 + 2, 1, 0}}, {{1e16, 1, 0}}};
-    EXPECT_THROW((void) ExtrudedAMR(collapsed), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::ExtrudedAMR(collapsed), std::invalid_argument);
     auto near = quad();
     near.z_edges = {1e16, 1e16 + 2};
-    EXPECT_THROW((void) ExtrudedAMR(near), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::ExtrudedAMR(near), std::invalid_argument);
 }
 TEST(ExtrudedAMRTest, NativePartitionPinsResidentIdentityAndRejectsMixedPlans)
 {
-    ExtrudedAMR source(quad());
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR source(quad());
     auto comm = Tpetra::getDefaultComm();
     auto pending = source.plan_adaptation();
     auto partition = std::make_shared<const CompositePartition<>>(
@@ -298,12 +301,12 @@ TEST(ExtrudedAMRTest, NativePartitionPinsResidentIdentityAndRejectsMixedPlans)
         auto divergent = quad();
         if (comm->getRank())
             divergent.xy_nodes[1][0] = .21;
-        EXPECT_THROW((void) ExtrudedAMR(divergent), std::invalid_argument);
+        EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::ExtrudedAMR(divergent), std::invalid_argument);
     }
 }
 TEST(ExtrudedAMRTest, NestedCoarseningMarksCannotBecomeEligibleMidTransaction)
 {
-    ExtrudedAMR root(quad());
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR root(quad());
     auto first = root.adapt({0}, {0});
     auto deep = first->adapt({0}, {0});
     const auto observation = deep->observation();
@@ -318,7 +321,7 @@ TEST(ExtrudedAMRTest, NestedCoarseningMarksCannotBecomeEligibleMidTransaction)
 }
 TEST(ExtrudedAMRTest, RejectsConnectedRootOverlapAndUnresolvedRootTJunction)
 {
-    ExtrudedAMRGrid spiral;
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid spiral;
     spiral.xy_nodes.push_back({0, 0, 0});
     for (unsigned i = 0; i <= 4; ++i)
     {
@@ -328,12 +331,12 @@ TEST(ExtrudedAMRTest, RejectsConnectedRootOverlapAndUnresolvedRootTJunction)
     for (unsigned i = 0; i < 4; ++i)
         spiral.base_cells.push_back({0, i + 1, i + 2});
     spiral.z_edges = {0, 1};
-    EXPECT_THROW((void) ExtrudedAMR(spiral), std::invalid_argument);
-    ExtrudedAMRGrid hanging;
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::ExtrudedAMR(spiral), std::invalid_argument);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid hanging;
     hanging.xy_nodes = {
         {{0, 0, 0}}, {{1, 0, 0}}, {{1, 2, 0}}, {{0, 2, 0}}, {{1, 1, 0}}, {{2, 0, 0}}, {{2, 1, 0}}, {{2, 2, 0}}};
     hanging.base_cells = {{0, 1, 2, 3}, {1, 5, 6, 4}, {4, 6, 7, 2}};
     hanging.z_edges = {0, 1};
-    EXPECT_THROW((void) ExtrudedAMR(hanging), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::ExtrudedAMR(hanging), std::invalid_argument);
 }
 } // namespace

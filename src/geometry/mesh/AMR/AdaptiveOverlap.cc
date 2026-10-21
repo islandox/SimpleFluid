@@ -1,14 +1,14 @@
 /** @file AdaptiveOverlap.cc
  * @brief Sparse ancestry selection with exact represented-cell coverage.
  */
-#include "geometry/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include <algorithm>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <tuple>
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 namespace
 {
@@ -190,4 +190,4 @@ void AdaptiveOverlapPlan::validate_observations(
     if (!(source_ == source) || !(target_ == target))
         throw std::invalid_argument("Adaptive overlap plan source/target observation is stale or foreign.");
 }
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

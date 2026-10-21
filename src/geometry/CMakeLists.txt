@@ -1,13 +1,13 @@
 set(SIMPLEFLUID_MESH_SOURCES
-    AdaptiveHierarchy.cc
-    AdaptiveOverlap.cc
-    ExtrudedAMR.cc
-    PolyhedralAMR.cc
-    MixedAMR.cc
+    mesh/AMR/AdaptiveHierarchy.cc
+    mesh/AMR/AdaptiveOverlap.cc
+    mesh/AMR/ExtrudedAMR.cc
+    mesh/AMR/PolyhedralAMR.cc
+    mesh/AMR/MixedAMR.cc
     ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
-    CartesianAMR.cc
+    mesh/AMR/CartesianAMR.cc
     explicit_instantiation/Mesh.cc
     explicit_instantiation/MeshHandle.cc
     explicit_instantiation/MeshTraverse.cc
@@ -73,13 +73,13 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/DecomposedOrthogonalTopology.cc
     mesh/DecomposedSemiStructuredTopology.cc
     details/SemiStructuredPartition.cc
-    AdaptiveHierarchy.cc
-    AdaptiveOverlap.cc
-    ExtrudedAMR.cc
+    mesh/AMR/AdaptiveHierarchy.cc
+    mesh/AMR/AdaptiveOverlap.cc
+    mesh/AMR/ExtrudedAMR.cc
     ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
-    CartesianAMR.cc
+    mesh/AMR/CartesianAMR.cc
     explicit_instantiation/MeshReorderingFactory.cc
     explicit_instantiation/PlanarALEMeshMotion.cc
     explicit_instantiation/SolidSubdomain.cc

@@ -2,11 +2,11 @@
  * @file testCartesianAMR.cc
  * @brief Dyadic hierarchy, conservative native seams, and collective map checks.
  */
-#include "geometry/CartesianAMR.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
-#include "parallel/MeshPartitioner.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -30,12 +30,13 @@ using Handle = MeshHandle<>;
 using ID = std::uint64_t;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-double volume(const AMRBox& box)
+double volume(const ::SimpleFluid::Meshes::AMR::AMRBox& box)
 {
     return (box.upper[0] - box.lower[0]) * (box.upper[1] - box.lower[1]) * (box.upper[2] - box.lower[2]);
 }
 
-std::size_t leaf_ordinal(const CartesianAMR& hierarchy, const AMRBlock& key)
+std::size_t leaf_ordinal(
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR& hierarchy, const ::SimpleFluid::Meshes::AMR::AMRBlock& key)
 {
     const auto found = std::find(hierarchy.blocks().begin(), hierarchy.blocks().end(), key);
     if (found == hierarchy.blocks().end())
@@ -60,7 +61,7 @@ void check_native_closure(const MultiRegionMesh& mesh)
         EXPECT_EQ(incidence[face], mesh.is_exterior_face(face) ? 1U : 2U);
 }
 
-void check_physical_boundaries(const CartesianAMR& hierarchy)
+void check_physical_boundaries(const ::SimpleFluid::Meshes::AMR::CartesianAMR& hierarchy)
 {
     const auto& mesh = *hierarchy.geometry();
     const auto& config = hierarchy.config();
@@ -93,10 +94,11 @@ void check_physical_boundaries(const CartesianAMR& hierarchy)
     }
 }
 
-void check_overlap_lookup(const CartesianAMR& hierarchy, const AMRBox& query)
+void check_overlap_lookup(
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR& hierarchy, const ::SimpleFluid::Meshes::AMR::AMRBox& query)
 {
     const auto actual = hierarchy.overlaps(query);
-    std::vector<AMROverlap> reference;
+    std::vector<::SimpleFluid::Meshes::AMR::AMROverlap> reference;
     for (ID cell = 0; cell < hierarchy.geometry()->num_cells(); ++cell)
     {
         auto box = hierarchy.cell_box(cell);
@@ -121,12 +123,12 @@ void check_overlap_lookup(const CartesianAMR& hierarchy, const AMRBox& query)
 
 TEST(CartesianAMRTest, RootCellKeysAndOverlapBoxesAgreeWithNativeGeometry)
 {
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.root_blocks = {2, 1, 1};
     config.block_cells = {4, 2, 2};
     config.origin = {-1.0, 0.25, 2.0};
     config.extent = {2.0, 1.0, 0.5};
-    const CartesianAMR hierarchy(config);
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR hierarchy(config);
     ASSERT_EQ(hierarchy.blocks().size(), 2U);
     EXPECT_EQ(hierarchy.geometry()->num_cells(), 32U);
     EXPECT_EQ(hierarchy.topology_generation(), 0U);
@@ -142,7 +144,7 @@ TEST(CartesianAMRTest, RootCellKeysAndOverlapBoxesAgreeWithNativeGeometry)
         total += volume(box);
     }
     EXPECT_DOUBLE_EQ(total, 1.0);
-    const AMRBox query{{-0.1, 0.4, 2.1}, {0.65, 0.9, 2.4}};
+    const ::SimpleFluid::Meshes::AMR::AMRBox query{{-0.1, 0.4, 2.1}, {0.65, 0.9, 2.4}};
     const auto overlaps = hierarchy.overlaps(query);
     ASSERT_FALSE(overlaps.empty());
     total = 0.0;
@@ -158,7 +160,7 @@ TEST(CartesianAMRTest, RootCellKeysAndOverlapBoxesAgreeWithNativeGeometry)
         }
     }
     EXPECT_NEAR(total, volume(query), 2.0e-15);
-    auto domain = AMRBox{config.origin, {1.0, 1.25, 2.5}};
+    auto domain = ::SimpleFluid::Meshes::AMR::AMRBox{config.origin, {1.0, 1.25, 2.5}};
     for (std::size_t a = 0; a < 3; ++a)
     {
         domain.lower[a] = std::nextafter(domain.lower[a], -std::numeric_limits<double>::infinity());
@@ -173,9 +175,9 @@ TEST(CartesianAMRTest, RootCellKeysAndOverlapBoxesAgreeWithNativeGeometry)
 
 TEST(CartesianAMRTest, RefineCoarsenAndPartialSubfacesPreserveCanonicalArea)
 {
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.root_blocks = {2, 1, 1};
-    const CartesianAMR original(config);
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR original(config);
     const auto refined = original.adapt({0});
     ASSERT_EQ(refined->blocks().size(), 9U);
     EXPECT_EQ(original.geometry()->num_cells(), 128U);
@@ -224,11 +226,11 @@ TEST(CartesianAMRTest, RefineCoarsenAndPartialSubfacesPreserveCanonicalArea)
 
 TEST(CartesianAMRTest, BalanceIncludesCornerNeighborsAndPeriodicFacePartners)
 {
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.root_blocks = {2, 2, 2};
     config.block_cells = {2, 2, 2};
     config.max_level = 3;
-    const CartesianAMR root(config);
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR root(config);
     const auto once = root.adapt({leaf_ordinal(root, {0, {0, 0, 0}})});
     const auto twice = once->adapt({leaf_ordinal(*once, {1, {1, 1, 1}})});
     EXPECT_EQ(twice->blocks().size(), 71U);
@@ -240,7 +242,7 @@ TEST(CartesianAMRTest, BalanceIncludesCornerNeighborsAndPeriodicFacePartners)
 
     config.root_blocks = {2, 1, 1};
     config.periodic = {true, false, false};
-    const CartesianAMR periodic(config);
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR periodic(config);
     const auto first = periodic.adapt({0});
     ASSERT_EQ(first->blocks().size(), 16U);
     for (const auto& block : first->blocks())
@@ -266,16 +268,16 @@ TEST(CartesianAMRTest, BalanceIncludesCornerNeighborsAndPeriodicFacePartners)
 
 TEST(CartesianAMRTest, InvalidRequestsPreserveTheAcceptedHierarchy)
 {
-    AMRGrid invalid;
+    ::SimpleFluid::Meshes::AMR::AMRGrid invalid;
     invalid.block_cells[0] = 3;
-    EXPECT_THROW(CartesianAMR{invalid}, std::invalid_argument);
+    EXPECT_THROW(::SimpleFluid::Meshes::AMR::CartesianAMR{invalid}, std::invalid_argument);
     invalid = {};
     invalid.max_level = 63;
-    EXPECT_THROW(CartesianAMR{invalid}, std::invalid_argument);
+    EXPECT_THROW(::SimpleFluid::Meshes::AMR::CartesianAMR{invalid}, std::invalid_argument);
     invalid = {};
     invalid.extent[2] = 0.0;
-    EXPECT_THROW(CartesianAMR{invalid}, std::invalid_argument);
-    const CartesianAMR root(AMRGrid{});
+    EXPECT_THROW(::SimpleFluid::Meshes::AMR::CartesianAMR{invalid}, std::invalid_argument);
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR root(::SimpleFluid::Meshes::AMR::AMRGrid{});
     const auto first = root.adapt({0});
     const auto second = first->adapt({0});
     const auto accepted = second->geometry();
@@ -292,9 +294,9 @@ TEST(CartesianAMRTest, InvalidRequestsPreserveTheAcceptedHierarchy)
 
 TEST(CartesianAMRTest, PartialCoarsePatchCodecRetainsCoverageAndDefaultStrictness)
 {
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.root_blocks = {2, 1, 1};
-    const auto refined = CartesianAMR(config).adapt({0});
+    const auto refined = ::SimpleFluid::Meshes::AMR::CartesianAMR(config).adapt({0});
     const auto& mesh = *refined->geometry();
     auto interfaces = mesh.interfaces();
     const auto selected = std::find_if(interfaces.begin(), interfaces.end(),
@@ -321,9 +323,9 @@ TEST(CartesianAMRTest, PartialCoarsePatchCodecRetainsCoverageAndDefaultStrictnes
 
 TEST(CartesianAMRTest, NativeOwnedMapsAndHalosUseCanonicalGlobalCellsAndFaces)
 {
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.root_blocks = {2, 1, 1};
-    const auto refined = CartesianAMR(config).adapt({0});
+    const auto refined = ::SimpleFluid::Meshes::AMR::CartesianAMR(config).adapt({0});
     const auto& geometry = *refined->geometry();
     const Handle mesh(refined->geometry());
     EXPECT_EQ(mesh.owned_cell_map()->getGlobalNumElements(), geometry.num_cells());
@@ -361,14 +363,14 @@ TEST(CartesianAMRMultiRankTest, DivergentConfigurationRequestsAndPartialPatchFla
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() == 1)
         GTEST_SKIP() << "Requires multiple MPI ranks.";
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.max_level = comm->getRank() == 0 ? 2U : 3U;
-    EXPECT_THROW(CartesianAMR{config}, std::invalid_argument);
+    EXPECT_THROW(::SimpleFluid::Meshes::AMR::CartesianAMR{config}, std::invalid_argument);
     config = {};
     if (comm->getRank() == 0)
         config.block_cells[0] = 0;
-    EXPECT_THROW(CartesianAMR{config}, std::invalid_argument);
-    const CartesianAMR hierarchy(AMRGrid{});
+    EXPECT_THROW(::SimpleFluid::Meshes::AMR::CartesianAMR{config}, std::invalid_argument);
+    const ::SimpleFluid::Meshes::AMR::CartesianAMR hierarchy(::SimpleFluid::Meshes::AMR::AMRGrid{});
     const std::vector<std::size_t> request =
         comm->getRank() == 0 ? std::vector<std::size_t>{0} : std::vector<std::size_t>{};
     EXPECT_THROW((void) hierarchy.adapt(request), std::invalid_argument);
@@ -382,14 +384,14 @@ TEST(CartesianAMRMultiRankTest, DivergentConfigurationRequestsAndPartialPatchFla
 
 TEST(CartesianAMRTest, DirectoryClosedBlockQueriesMatchExhaustiveIntersections)
 {
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.root_blocks = {3, 2, 1};
     config.block_cells = {2, 2, 2};
     config.max_level = 2;
-    const auto root = std::make_shared<CartesianAMR>(config);
+    const auto root = std::make_shared<::SimpleFluid::Meshes::AMR::CartesianAMR>(config);
     const auto hierarchy = root->adapt({1, 4});
-    std::vector<AMRBox> queries{{{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, {{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}},
-        {{-1.0, -1.0, -1.0}, {0.0, 0.0, 0.0}}, {{1.1, 0.0, 0.0}, {2.0, 1.0, 1.0}},
+    std::vector<::SimpleFluid::Meshes::AMR::AMRBox> queries{{{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}},
+        {{1.0, 1.0, 1.0}, {1.0, 1.0, 1.0}}, {{-1.0, -1.0, -1.0}, {0.0, 0.0, 0.0}}, {{1.1, 0.0, 0.0}, {2.0, 1.0, 1.0}},
         {{-2.0, -2.0, -2.0}, {2.0, 2.0, 2.0}}};
     for (std::size_t b = 0; b < hierarchy->blocks().size(); ++b)
     {
@@ -424,13 +426,13 @@ TEST(CartesianAMRTest, DirectoryClosedBlockQueriesMatchExhaustiveIntersections)
 }
 TEST(CartesianAMRTest, StableCellAncestryAndExactSourcePlans)
 {
-    AMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.region_id = 41;
     grid.material_id = 73;
-    CartesianAMR source(grid), foreign(grid);
-    const AdaptiveHierarchy& provider = source;
+    ::SimpleFluid::Meshes::AMR::CartesianAMR source(grid), foreign(grid);
+    const ::SimpleFluid::Meshes::AMR::AdaptiveHierarchy& provider = source;
     EXPECT_EQ(provider.native_geometry(), source.geometry());
     const auto original_key = source.cell_key(8);
     const auto plan = source.plan_adaptation({0});
@@ -443,20 +445,21 @@ TEST(CartesianAMRTest, StableCellAncestryAndExactSourcePlans)
     EXPECT_EQ(refined->cell_material(0), 73U);
     EXPECT_EQ(refined->cell_key(0).region, 41U);
     EXPECT_EQ(refined->cell_fragment(0), 0U);
-    std::set<AdaptiveCellKey> keys;
-    std::map<CartesianCellAncestry, unsigned> parent_counts;
+    std::set<::SimpleFluid::Meshes::AMR::AdaptiveCellKey> keys;
+    std::map<::SimpleFluid::Meshes::AMR::CartesianCellAncestry, unsigned> parent_counts;
     for (ID cell = 0; cell < refined->geometry()->num_cells(); ++cell)
     {
         const auto key = refined->cell_key(cell);
         EXPECT_TRUE(keys.insert(key).second);
-        const auto ancestry = std::get<CartesianCellAncestry>(key.ancestry);
+        const auto ancestry = std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(key.ancestry);
         if (ancestry.level)
             ++parent_counts[ancestry.parent()];
     }
     EXPECT_EQ(parent_counts.size(), 8U);
     for (const auto& [parent, count] : parent_counts)
         EXPECT_EQ(count, 8U);
-    EXPECT_THROW((void)std::get<CartesianCellAncestry>(original_key.ancestry).parent(), std::invalid_argument);
+    EXPECT_THROW((void) std::get<::SimpleFluid::Meshes::AMR::CartesianCellAncestry>(original_key.ancestry).parent(),
+        std::invalid_argument);
     EXPECT_EQ(source.adapt({})->observation(), source.observation());
     const auto other_plan = source.plan_adaptation({});
     if (Tpetra::getDefaultComm()->getSize() > 1)
@@ -468,10 +471,10 @@ TEST(CartesianAMRTest, StableCellAncestryAndExactSourcePlans)
 
 TEST(CartesianAMRTest, NativePartitionChangesOnlyOwnershipObservation)
 {
-    AMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.block_cells = {8, 2, 2};
     grid.extent = {4.0, 1.0, 1.0};
-    CartesianAMR source(grid), foreign(grid);
+    ::SimpleFluid::Meshes::AMR::CartesianAMR source(grid), foreign(grid);
     const auto comm = Tpetra::getDefaultComm();
     const MeshHandle<> original(source.geometry());
     CompositePartitionOptions options;
@@ -544,7 +547,7 @@ TEST(CartesianAMRTest, NativePartitionChangesOnlyOwnershipObservation)
 }
 TEST(CartesianAMRTest, RejectsMovedResidentBeforePartitionBinding)
 {
-    CartesianAMR source(AMRGrid{});
+    ::SimpleFluid::Meshes::AMR::CartesianAMR source(::SimpleFluid::Meshes::AMR::AMRGrid{});
     const auto observation = source.observation();
     const auto box = source.cell_box(0);
     auto partition = std::make_shared<const CompositePartition<>>(MeshPartitioner<DefaultTpetraTypes>::partition(

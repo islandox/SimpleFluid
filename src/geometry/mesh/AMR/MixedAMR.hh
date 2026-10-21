@@ -2,12 +2,12 @@
  * @brief Bounded adaptive mixed-provider assembly with exact nested native joins.
  */
 #pragma once
-#include "geometry/AdaptiveOverlap.hh"
-#include "geometry/CartesianAMR.hh"
-#include "geometry/LocalProductAMR.hh"
-#include "geometry/PolyhedralAMR.hh"
+#include "geometry/mesh/AMR/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
+#include "geometry/mesh/AMR/LocalProductAMR.hh"
+#include "geometry/mesh/AMR/PolyhedralAMR.hh"
 #include "parallel/CompositePartition.hh"
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 struct MixedStaticParticipant
 {
@@ -133,4 +133,4 @@ struct MixedContactDomains
     std::vector<Contact> contacts;
     void validate() const;
 };
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

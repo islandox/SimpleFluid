@@ -1731,9 +1731,9 @@ PolyhedralSurfaceUse surface_read(WireReader& r)
     r.position += n;
     return surface;
 }
-void cell_key_write(WireWriter& w, const AdaptiveCellKey& key)
+void cell_key_write(WireWriter& w, const ::SimpleFluid::Meshes::AMR::AdaptiveCellKey& key)
 {
-    const auto* ancestry = std::get_if<ConvexCellAncestry>(&key.ancestry);
+    const auto* ancestry = std::get_if<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(&key.ancestry);
     if (!ancestry)
         throw std::invalid_argument("Exact polyhedral complex needs convex-cell ancestry.");
     w.word(key.region);
@@ -1742,11 +1742,11 @@ void cell_key_write(WireWriter& w, const AdaptiveCellKey& key)
     for (auto p : ancestry->path)
         w.word(p);
 }
-AdaptiveCellKey cell_key_read(WireReader& r)
+::SimpleFluid::Meshes::AMR::AdaptiveCellKey cell_key_read(WireReader& r)
 {
-    AdaptiveCellKey key;
+    ::SimpleFluid::Meshes::AMR::AdaptiveCellKey key;
     key.region = r.word();
-    ConvexCellAncestry ancestry;
+    ::SimpleFluid::Meshes::AMR::ConvexCellAncestry ancestry;
     ancestry.root = r.word();
     auto n = r.count();
     for (std::size_t i = 0; i < n; ++i)
@@ -1758,7 +1758,7 @@ using ComplexID = std::uint64_t;
 constexpr ComplexID absent_cell = std::numeric_limits<ComplexID>::max();
 struct ComplexCellRow
 {
-    AdaptiveCellKey key;
+    ::SimpleFluid::Meshes::AMR::AdaptiveCellKey key;
     ConvexGeometryPtr geometry;
     double volume = 0;
     MeshUtils::Vec3 center{};
@@ -1795,10 +1795,11 @@ void complex_validate(ExactPolyhedralComplex::Impl& impl)
     impl.resident_ids.clear();
     impl.face_ids.clear();
     impl.node_ids.clear();
-    std::set<AdaptiveCellKey> cell_keys;
+    std::set<::SimpleFluid::Meshes::AMR::AdaptiveCellKey> cell_keys;
     for (auto& [id, cell] : impl.cells)
     {
-        if (id >= impl.global_cells || !std::get_if<ConvexCellAncestry>(&cell.key.ancestry) ||
+        if (id >= impl.global_cells ||
+            !std::get_if<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(&cell.key.ancestry) ||
             !std::isfinite(cell.volume) || !(cell.volume > 0) || !std::isfinite(cell.center.x) ||
             !std::isfinite(cell.center.y) || !std::isfinite(cell.center.z))
             throw std::invalid_argument("Invalid exact complex cell metric/catalog record.");
@@ -1929,7 +1930,7 @@ std::shared_ptr<const ExactPolyhedralComplex> ExactPolyhedralComplex::make(std::
         PolyhedralSurfaceUse use;
     };
     std::map<PolyhedralSurfaceKey, std::vector<Incident>> surfaces;
-    std::set<AdaptiveCellKey> keys;
+    std::set<::SimpleFluid::Meshes::AMR::AdaptiveCellKey> keys;
     std::map<std::uint64_t, std::set<P>> candidate_vertices;
     struct Box
     {
@@ -1941,7 +1942,7 @@ std::shared_ptr<const ExactPolyhedralComplex> ExactPolyhedralComplex::make(std::
     {
         if (!cell.geometry || cell.gid >= input.size() || impl->cells.contains(cell.gid) ||
             !keys.insert(cell.key).second || cell.surfaces.size() != cell.geometry->impl_->poly.faces.size() ||
-            !std::get_if<ConvexCellAncestry>(&cell.key.ancestry))
+            !std::get_if<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(&cell.key.ancestry))
             throw std::invalid_argument("Exact complex cell binding/topology is invalid.");
         const auto& poly = cell.geometry->impl_->poly;
         const auto m = exact_moments(poly, point(cell.geometry->impl_->origin));
@@ -2218,7 +2219,7 @@ ComplexID ExactPolyhedralComplex::neighbor_cell(ComplexID id) const
 {
     return impl_->faces.at(id).neighbor;
 }
-const AdaptiveCellKey& ExactPolyhedralComplex::cell_key(ComplexID id) const
+const ::SimpleFluid::Meshes::AMR::AdaptiveCellKey& ExactPolyhedralComplex::cell_key(ComplexID id) const
 {
     return impl_->cells.at(id).key;
 }
@@ -2459,7 +2460,8 @@ std::size_t ExactPolyhedralComplex::storage_bytes() const
                  (cell.faces.capacity() + cell.nodes.capacity()) * sizeof(ComplexID);
         if (cell.geometry && certificates.insert(cell.geometry.get()).second)
             bytes += cell.geometry->storage_bytes();
-        bytes += std::get<ConvexCellAncestry>(cell.key.ancestry).path.capacity() * sizeof(ComplexID);
+        bytes += std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(cell.key.ancestry).path.capacity() *
+                 sizeof(ComplexID);
     }
     for (const auto& [id, face] : impl_->faces)
         bytes += sizeof(decltype(impl_->faces)::value_type) + 4 * sizeof(void*) +

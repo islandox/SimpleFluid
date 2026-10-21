@@ -2,13 +2,13 @@
  * @brief Connected mixed-product and polyhedral native test fixtures.
  */
 #pragma once
-#include "geometry/MixedAMR.hh"
+#include "geometry/mesh/AMR/MixedAMR.hh"
 #include <Teuchos_DefaultSerialComm.hpp>
 namespace SimpleFluid::test
 {
-inline Meshes::ExtrudedAMRGrid mixed_product_grid(bool four = false)
+inline SimpleFluid::Meshes::AMR::ExtrudedAMRGrid mixed_product_grid(bool four = false)
 {
-    Meshes::ExtrudedAMRGrid g;
+    SimpleFluid::Meshes::AMR::ExtrudedAMRGrid g;
     g.region_id = 7;
     g.material_id = 5;
     if (!four)
@@ -29,7 +29,8 @@ inline Meshes::ExtrudedAMRGrid mixed_product_grid(bool four = false)
     }
     return g;
 }
-inline std::shared_ptr<const Meshes::PolyhedralAMR> mixed_polyhedron(double upper = 2, double lower = 1)
+inline std::shared_ptr<const SimpleFluid::Meshes::AMR::PolyhedralAMR> mixed_polyhedron(
+    double upper = 2, double lower = 1)
 {
     using U = Meshes::UnstructuredMesh;
     Arr<MeshUtils::Vec3> nodes{{lower, 0, 0}, {upper, 0, 0}, {upper, 1, 0}, {lower, 1, 0}, {lower, 0, 1}, {upper, 0, 1},
@@ -46,25 +47,25 @@ inline std::shared_ptr<const Meshes::PolyhedralAMR> mixed_polyhedron(double uppe
         boundaries.push_back({unlabelled.face_nodes(f), join ? 0 : 1, join ? "join" : "wall"});
     }
     auto native = std::make_shared<U>(nodes, cells, boundaries);
-    Meshes::PolyhedralAMRGrid grid;
+    SimpleFluid::Meshes::AMR::PolyhedralAMRGrid grid;
     grid.mesh = std::make_shared<Meshes::MultiRegionMesh>(
         std::vector<Meshes::MultiRegionMesh::Region>{Meshes::native_region("polyhedral", native)},
         std::vector<Meshes::MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
     grid.physical_regions = {9};
     grid.materials = {5};
-    return std::make_shared<Meshes::PolyhedralAMR>(grid);
+    return std::make_shared<SimpleFluid::Meshes::AMR::PolyhedralAMR>(grid);
 }
-inline Meshes::MixedAMRGrid mixed_joined_grid(double upper = 2)
+inline SimpleFluid::Meshes::AMR::MixedAMRGrid mixed_joined_grid(double upper = 2)
 {
-    Meshes::MixedAMRGrid g;
-    g.product = std::make_shared<Meshes::LocalProductAMR>(mixed_product_grid());
+    SimpleFluid::Meshes::AMR::MixedAMRGrid g;
+    g.product = std::make_shared<SimpleFluid::Meshes::AMR::LocalProductAMR>(mixed_product_grid());
     g.physical_region = 7;
     g.adaptive = {mixed_polyhedron(upper)};
     g.joins = {{0, 1, "east", "polyhedral/join"}};
     return g;
 }
-inline Meshes::ProductCellAncestry first_product(const Meshes::MixedAMR& h)
+inline SimpleFluid::Meshes::AMR::ProductCellAncestry first_product(const SimpleFluid::Meshes::AMR::MixedAMR& h)
 {
-    return std::get<Meshes::ProductCellAncestry>(h.cell_key(0).ancestry);
+    return std::get<SimpleFluid::Meshes::AMR::ProductCellAncestry>(h.cell_key(0).ancestry);
 }
 } // namespace SimpleFluid::test

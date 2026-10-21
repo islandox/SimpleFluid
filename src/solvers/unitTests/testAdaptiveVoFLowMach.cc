@@ -67,7 +67,7 @@ VoF::LowMachOptions thermodynamics()
 
 std::unique_ptr<Solver> solver(bool refine = false, bool periodic = false, VoF::Vector gravity = {})
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {1.0, 0.5, 0.5};
@@ -78,7 +78,8 @@ std::unique_ptr<Solver> solver(bool refine = false, bool periodic = false, VoF::
         grid.periodic = {true, true, true};
     }
     grid.max_level = 1;
-    std::shared_ptr<const Meshes::CartesianAMR> hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::CartesianAMR> hierarchy =
+        std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     if (refine)
         hierarchy = hierarchy->adapt({1});
     VoFMaterial material;
@@ -297,13 +298,13 @@ TEST(AdaptiveVoFLowMachTest, PeriodicConductionMatchesImplicitFourierDecayIndepe
 {
     constexpr std::size_t nx = 8;
     constexpr double spacing = 0.001, amplitude = 10.0, dt = 0.2;
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {1, 1, 1};
     grid.block_cells = {nx, 2, 2};
     grid.extent = {nx * spacing, 2 * spacing, 2 * spacing};
     grid.periodic = {true, true, true};
     grid.max_level = 0;
-    const auto hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    const auto hierarchy = std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     VoFMaterial material;
     material.liquid_density = 1000.0;
     material.gas_density = 0.1;
@@ -721,7 +722,7 @@ TEST(AdaptiveVoFLowMachTest, PeriodicMixtureAdvectionPreservesTheFixedPivotAndPh
 
 TEST(AdaptiveVoFLowMachTest, SourceFreeConstantDensityLimitPreservesPassiveTransverseMomentumBounds)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 2, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {4.0, 4.0, 200.0};
@@ -730,7 +731,7 @@ TEST(AdaptiveVoFLowMachTest, SourceFreeConstantDensityLimitPreservesPassiveTrans
     material.liquid_density = 1000.0;
     material.gas_density = 1.0;
     material.liquid_viscosity = material.gas_viscosity = material.surface_tension = 0.0;
-    Solver flow(std::make_shared<const Meshes::CartesianAMR>(grid), material);
+    Solver flow(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid), material);
     auto options = thermodynamics();
     options.liquid =
         std::make_shared<const VoF::LiquidThermodynamics>(VoF::ThermodynamicBounds{250.0, 400.0, 10000.0, 1000000.0},
@@ -807,12 +808,12 @@ TEST(AdaptiveVoFLowMachTest, DepletedPopulationUsesPostSourceSupportForSlipAndTi
     // the upper population completely and supplies evaluated drifts [0.02,0].
     // Periodicity gives both incident faces the same populated/empty support;
     // no wall-face drift can conceal the source timestep bound.
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {1, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {0.5, 0.5, 0.5};
     grid.periodic = {true, true, true};
-    const auto hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    const auto hierarchy = std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     VoFMaterial material;
     material.liquid_density = 1000;
     material.gas_density = 0.1;
@@ -910,13 +911,13 @@ TEST(AdaptiveVoFLowMachTest, DepletedPopulationUsesPostSourceSupportForSlipAndTi
 
 TEST(AdaptiveVoFLowMachTest, EmptyOwnedRankParticipatesInInitializationPopulationSourcesAndHintGuards)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {1, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {0.5, 0.5, 0.5};
     grid.periodic = {true, true, true};
     grid.max_level = 0;
-    const auto hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    const auto hierarchy = std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     VoFMaterial material;
     material.liquid_density = 1000.0;
     material.gas_density = 0.1;
@@ -982,12 +983,12 @@ TEST(AdaptiveVoFLowMachTest, EmptyOwnedRankParticipatesInInitializationPopulatio
 
 TEST(AdaptiveVoFLowMachTest, CurvedInterfaceUsesOneSidedAbsolutePressuresWithoutADoubleLaplaceJump)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {1, 1, 1};
     grid.block_cells = {8, 8, 8};
     grid.extent = {1.0, 1.0, 1.0};
     grid.max_level = 0;
-    const auto hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    const auto hierarchy = std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     VoFMaterial material;
     material.liquid_density = 1000.0;
     material.gas_density = 0.1;
