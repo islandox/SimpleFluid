@@ -1,7 +1,7 @@
 # AMR for extruded, polyhedral, and mixed-region meshes
 
-**Status: Stage 1 is implemented; Stages 2–9 remain proposed.** This document
-defines the implemented common hierarchy/Cartesian boundary and the remaining
+**Status: Stages 1–2 are implemented; Stages 3–9 remain proposed.** This document
+defines the implemented hierarchy, certified geometry and sparse remap boundaries and the remaining
 implementation sequence and acceptance contracts. It does not extend the
 supported mesh families of the existing solvers or record dated validation results.
 Geometry adaptation and numerical VoF qualification are separate deliverables.
@@ -15,6 +15,8 @@ identify the retained regressions; [review follow-up evidence](../verification/v
 records measured results and qualification limits separately from this design.
 The [Stage 1 verification record](../verification/general_amr.md) covers hierarchy
 observations, native partition bindings, cache isolation and solver transactions.
+The [Stage 2 verification record](../verification/general_amr_stage2.md) covers
+certified convex queries and sparse conservative amount transfer.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -27,7 +29,7 @@ selected here; external algorithm references explain proposed approaches only.
 
 | Mesh or operation | Existing native capability | Adaptive capability and gate |
 | --- | --- | --- |
-| Dyadic Cartesian blocks | Immutable balanced `CartesianAMR`, canonical subfaces, adaptive VoF/flow; Stage 1 common hierarchy seam and source-validated native partition bindings | Existing Cartesian behavior retained; general clips/overlaps remain Stage 2 |
+| Dyadic Cartesian blocks | Immutable balanced `CartesianAMR`, canonical subfaces, adaptive VoF/flow; Stage 1 common hierarchy seam and source-validated native partition bindings | Existing Cartesian behavior retained; Stage 2 adds separate certified geometry/remap utilities |
 | Direct `SemiStructuredXY_Z` handle | Serial native execution; direct MPI construction rejects | Use the composite route for distributed adaptation, stage 3 |
 | Composite native/independent extrusion | MPI ownership; triangle, quadrilateral, and polygonal prisms | Common-Z whole-column refinement, then local products, stages 3 and 5 |
 | Explicit planar-faced polyhedra | Native incidence, variable face loops, partitioned FVM | Certified convex refinement/coarsening, stage 4 |
@@ -101,8 +103,10 @@ public:
 
 `HierarchyObservation` retains exact hierarchy, topology and partition identity
 tokens independently of generation values, effective resident geometry identity
-and epoch, and communicator identity. `AdaptiveCellKey` currently admits only
-`CartesianCellAncestry`; physical region identity, material membership and fragment
+and epoch, and communicator identity. `AdaptiveCellKey` admits
+`CartesianCellAncestry` and explicit `ConvexCellAncestry` provenance; the latter
+identifies supplied convex cells without claiming a polyhedral refiner. Physical
+region identity, material membership and fragment
 ordinals remain separate. `CartesianAMR::plan_adaptation()` and
 `apply_adaptation()` retain and validate the exact source observation.
 
@@ -115,9 +119,9 @@ Both canonical and resident geometry must retain their captured epochs. Supporte
 resident ALE motion invalidates a binding; restoring coordinates does not revive
 an earlier observation. The Cartesian numerical backend remains unchanged.
 
-Provider-specific product/polyhedral ancestry, geometric candidates with sparse
-ancestry overlap records, and a general solver `RegridTrial` remain proposed for
-later stages. Their data must contain geometry/partition state separately from
+Product refinement ancestry, automatic geometry candidates and a general solver
+`RegridTrial` remain proposed for later stages. Stage 2 accepts caller-supplied
+convex provenance and explicit certified ancestry overlap relations. Their data must contain geometry/partition state separately from
 solver inventories and controller revisions.
 
 Plans pin the exact source identity, communicator, provider observations, and
@@ -132,6 +136,64 @@ Keys must have checked, collision-free equality; a hash alone is not identity.
 Provider layout and revision checks retain the existing
 [`IsoRegion::validate_static`](../../src/geometry/mesh/RegionProviders.hh) contract.
 
+## Implemented certified geometry and sparse remap
+
+[`ConvexCellGeometry`](../../src/geometry/ConvexCellGeometry.hh) retains an
+immutable exact convex shell from represented binary64 inputs. It certifies
+outward planar faces, convexity and closed manifold topology before clipping.
+`GeometryHalfspace` means `normal dot (x-anchor) <= offset`; a local anchor and
+separate finite offset retain translated microscopic cuts that a rounded point
+on the plane cannot encode. Clips retain both exact sides, section geometry,
+per-parent-face apertures and local volume/first moments. Positive pieces never
+vanish through a geometric tolerance; invalid or unrepresentable geometry rejects.
+Bulk product overlap factors into actual XY polygon area times Z overlap; tilted
+phase cuts retain the full three-dimensional intersection.
+
+`CertifiedGeometryValue` gives a finite converted value and outward error bound.
+Positive volume must remain representable. A nonzero first moment below the output
+range may have a zero-straddling outward interval with `exact_nonzero` retained;
+the exact internal moment remains available for further geometry. Checked narrowing
+rejects disappearance of a known nonzero value. Binary64-format moment queries
+exercise this contract even when the host's `long double` has a wider range.
+
+[`AdaptiveOverlapPlan`](../../src/geometry/AdaptiveOverlap.hh) takes explicit
+source/target bindings and unchanged/refine/coarsen relations. It certifies actual
+intersection geometry, per-cell disjointness and complete coverage exactly.
+Catalogs may contain only the complete ancestry families needed locally. This is
+not a global key directory or distributed refinement planner.
+
+[`ConservativeAMRRemap`](../../src/FVM/ConservativeAMRRemap.hh) binds the exact
+native endpoint identities, maps, epochs and plan observations. Sparse owner
+exchange authenticates every supplied source and target certificate cell,
+including inactive remote siblings: actual native shell geometry must agree
+exactly, and region/material/typed ancestry metadata must match its owner's binding
+by lossless bytes. Native shell extraction uses certified outward orientation and
+exact edge-vertex propagation. Analytic curved providers and translated periodic
+joins reject instead of being approximated by a planar node hull.
+
+The caller supplies physical gas and carrier volumes independently, plus accepted
+geometry declarations. `Plic` requires a valid mixed-cell plane; `PureGas` and
+`PureCarrier` explicitly declare accepted rounded-pure geometry. Only an explicitly
+empty geometric minority with positive physical volume within the actual-cell
+consistency bound may use bulk-overlap weights. A missing mixed-cell plane rejects;
+a resolved positive tiny clip retains its spatial placement. Paired number/moles
+use identical carrier weights. Signed/nonnegative extensives, phase densities and
+zero-carrier consistency remain checked, with no clipping, carrier floor or
+coverage normalization. Output is replaced only after all collective gates pass.
+
+Dimensionless ratios and checked mantissa/exponent products avoid intermediate
+overflow and silent underflow. Global signed/L1 budgets use per-budget integer
+binary exponents, supported double communication and deterministic compensated
+scalar accumulation; diagnostics retain their scale instead of overflowing a
+physical double total. Physical tolerances remain independent of remap scaling.
+
+Native owner certificate exchange currently pads local/imported shells to the
+global maximum shell payload width. It exchanges no global solution array, but
+highly heterogeneous large shells can inflate storage. Variable-length packing
+and a global ancestry directory remain Stage 6 gates. These utilities do not add
+a general-mesh VoF solver, a new refinement provider or live accepted-state
+repartition; the optimized Cartesian numerical/remap path remains separate.
+
 ## XY/Z products
 
 An extruded cell key is `(BaseCellKey, AxialIntervalKey)`. The base key records
@@ -140,6 +202,25 @@ original Z interval and dyadic path. Side ancestry is base-edge segment × axial
 interval; cap ancestry is base-cell leaf × axial plane. Shared coordinates come
 from the same ancestral construction. XY-then-Z and Z-then-XY refinement must
 produce identical final product keys and geometry.
+
+**Proposed Stage 3 authoritative construction geometry.** Extend the existing
+`ExtrudedGeometry` with optional compact construction state so the native region
+variant remains unchanged. Retain exact root binary64 base/Z data and independent
+factor construction paths, with shared exact midpoint/intersection constructions
+and O(base + layers) storage. An optional `certified_cell_geometry()` provider
+query should return the actual exact cell on demand. Native cell/face metrics
+must derive from that construction; rounded display/VTU nodes must not define
+overlap geometry or change the parent domain.
+
+Constructed product partition packets must roundtrip the exact descriptor and
+include it in configuration identity. Sparse owner authentication needs a typed
+exact certificate format, such as lossless rational shell bytes, rather than the
+existing binary64 native-shell export. The same seam can serve future rational
+polyhedral children. Reject unsupported node-hull transfer consumers and ALE
+until their authoritative construction/transform contracts qualify. Restricting
+all midpoint results to exactly representable binary64 coordinates would reject
+ordinary decimal or circular boundary input and is not the proposed solution.
+None of these construction-provider extensions is implemented by Stage 2.
 
 Parents and sibling families are factor-specific. XY coarsening requires the
 complete base sibling family over compatible axial intervals; Z coarsening
@@ -603,8 +684,8 @@ shell without boundary projection or domain renormalization.
 
 ## Implementation stages and focused acceptance
 
-Stage 1 is implemented and verified within its Cartesian boundary; Stages 2–9
-are proposed and each has its own exit gate. Existing tests are starting
+Stages 1–2 are implemented and verified within their stated boundaries; Stages
+3–9 are proposed and each has its own exit gate. Existing tests are starting
 points, not evidence that the extension works. Run focused Debug serial tests,
 then affected MPI cases at 2 and 4 ranks where they establish the intended seam
 and ownership conditions. Choose additional ranks or deliberately sparse

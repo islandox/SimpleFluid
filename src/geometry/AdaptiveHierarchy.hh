@@ -7,6 +7,7 @@
 #include <compare>
 #include <memory>
 #include <variant>
+#include <vector>
 
 namespace SimpleFluid::Meshes
 {
@@ -31,14 +32,23 @@ struct CartesianCellAncestry
     [[nodiscard]] CartesianCellAncestry parent() const;
 };
 
+/** Explicit convex-cell provenance; no polyhedral refiner is implied. */
+struct ConvexCellAncestry
+{
+    std::uint64_t root = 0;
+    std::vector<std::uint64_t> path;
+    auto operator<=>(const ConvexCellAncestry&) const = default;
+};
+
 struct AdaptiveCellKey
 {
     std::uint64_t region = 0;
-    std::variant<CartesianCellAncestry> ancestry;
+    std::variant<CartesianCellAncestry, ConvexCellAncestry> ancestry;
     auto operator<=>(const AdaptiveCellKey&) const = default;
 };
 
-/** Immutable native-provider seam. Only Cartesian ancestry is admitted today.
+/** Immutable native-provider seam. The implemented adaptive provider is Cartesian;
+ * convex ancestry also identifies certified geometry without implying a refiner.
  * Material membership and native fragment ordinal are observations, not ancestry.
  * No connectivity or solution field is materialized by this interface. */
 class AdaptiveHierarchy
