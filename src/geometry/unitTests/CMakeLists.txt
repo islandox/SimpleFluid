@@ -206,3 +206,7 @@ endforeach()
 
 simplefluid_add_mpi_test(NAME NativeUnstructuredMapping_2procs
     TARGET testUnstructuredMeshMapping PROCS 2 LABELS "mpi;geometry;unstructured;mapping" TIMEOUT 120)
+simplefluid_add_mpi_test(NAME MixedAMR_2procs TARGET testMixedAMR PROCS 2 LABELS "mpi;amr;mixed" TIMEOUT 180)
+
+simplefluid_add_mpi_test(NAME LocalProductAMR_2procs TARGET testLocalProductAMR PROCS 2
+    ARGS "--gtest_filter=LocalProductAMRTest.*" LABELS "mpi;amr;local_product" TIMEOUT 180)

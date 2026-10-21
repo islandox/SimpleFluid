@@ -2,6 +2,7 @@
  * @brief Collective conforming factor adaptation with retained exact constructions.
  */
 #include "geometry/ExtrudedAMR.hh"
+#include "geometry/LocalProductAMR.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -33,6 +34,7 @@ struct EdgeNode
 {
     std::size_t a = 0, b = 0;
     std::string boundary;
+    bool physical = false;
 };
 struct ZNode
 {
@@ -233,8 +235,8 @@ std::size_t midpoint(Data& data, const BaseEdgeKey& key)
         return data.edges.at(left).b;
     const auto m = data.points.size();
     data.points.push_back({{}, {e.a, e.b}});
-    data.edges[left] = {e.a, m, e.boundary};
-    data.edges[right] = {m, e.b, e.boundary};
+    data.edges[left] = {e.a, m, e.boundary, e.physical};
+    data.edges[right] = {m, e.b, e.boundary, e.physical};
     return m;
 }
 BaseEdgeKey half_edge(const Data& data, BaseEdgeKey key, std::size_t endpoint)
@@ -556,9 +558,12 @@ void initialize(Data& data)
             incident[node.edges[e]].push_back({key, node.vertices.size() == 3 && node.reference == e});
     }
     for (const auto& [edge, cells] : incident)
+    {
+        data.edges[edge].physical = cells.size() == 1;
         if (cells.size() == 2 && data.base.at(cells[0].first).vertices.size() == 3 &&
             data.base.at(cells[1].first).vertices.size() == 3 && cells[0].second != cells[1].second)
             throw std::invalid_argument("Root triangle refinement edges are incompatible across a shared edge.");
+    }
     for (std::size_t k = 0; k + 1 < grid.z_edges.size(); ++k)
     {
         AxialIntervalKey key{k, {}};
@@ -958,4 +963,901 @@ std::vector<AdaptiveAncestryRelation> ExtrudedAMR::overlap_relations(
     }
     return records;
 }
+struct LocalProductAMR::Data
+{
+    ExtrudedAMR::Data pool;
+    std::map<BaseCellKey, std::shared_ptr<const std::vector<AxialIntervalKey>>> columns;
+    std::vector<LocalProductRun> runs;
+    std::shared_ptr<const void> token = std::make_shared<const char>(0);
+    std::uint64_t generation = 0;
+    std::uint64_t collective_id = 0;
+};
+namespace
+{
+using LocalData = LocalProductAMR::Data;
+using ZKeys = std::vector<AxialIntervalKey>;
+std::string edge_name(const BaseEdgeKey& key)
+{
+    std::ostringstream s;
+    s << "__amr_side_" << unsigned(key.kind) << '_' << key.creator.root << '_' << key.creator.root_template;
+    for (auto p : key.creator.path)
+        s << '_' << p;
+    s << "_e" << key.ordinal;
+    for (auto p : key.path)
+        s << '_' << p;
+    return s.str();
+}
+LocalProductPlaneKey plane_key(AxialIntervalKey key, bool upper)
+{
+    if (key.path.empty())
+        return {LocalProductPlaneKey::Kind::RootPoint, key.root + upper, {}};
+    const auto side = key.path.back();
+    key.path.pop_back();
+    if ((upper && side == 0) || (!upper && side == 1))
+        return {LocalProductPlaneKey::Kind::IntervalMidpoint, 0, key};
+    return plane_key(std::move(key), upper);
+}
+std::string cap_name(const LocalProductPlaneKey& key)
+{
+    std::ostringstream out;
+    out << "__amr_cap_" << unsigned(key.kind) << '_' << key.root_point << '_' << key.creator.root;
+    for (auto p : key.creator.path)
+        out << '_' << p;
+    return out.str();
+}
+std::string local_description(const LocalData& state)
+{
+    std::ostringstream s;
+    s << description(state.pool, true) << " columnsets ";
+    std::map<ZKeys, std::size_t> patterns;
+    for (const auto& [base, z] : state.columns)
+    {
+        key_text(s, base);
+        auto [it, inserted] = patterns.emplace(*z, patterns.size());
+        s << it->second << ' ';
+        if (inserted)
+        {
+            s << z->size() << ' ';
+            for (const auto& key : *z)
+                key_text(s, key);
+        }
+    }
+    return s.str();
+}
+void intern_columns(LocalData& state)
+{
+    std::map<ZKeys, std::shared_ptr<const ZKeys>> patterns;
+    for (auto it = state.columns.begin(); it != state.columns.end();)
+    {
+        if (it->second->empty())
+        {
+            it = state.columns.erase(it);
+            continue;
+        }
+        auto [p, inserted] = patterns.emplace(*it->second, it->second);
+        if (!inserted)
+            it->second = p->second;
+        ++it;
+    }
+    state.pool.leaves.clear();
+    state.pool.intervals.clear();
+    for (const auto& [base, z] : state.columns)
+    {
+        state.pool.leaves.insert(base);
+        for (const auto& interval : *z)
+            state.pool.intervals.insert(interval);
+    }
+    compact(state.pool);
+    for (auto& [key, node] : state.pool.base)
+        if (!node.children.empty() && std::none_of(node.children.begin(), node.children.end(),
+                                          [&](const auto& child) { return state.pool.base.contains(child); }))
+            std::vector<BaseCellKey>().swap(node.children);
+    for (auto& [key, node] : state.pool.axial)
+        if (!node.children.empty() && std::none_of(node.children.begin(), node.children.end(),
+                                          [&](const auto& child) { return state.pool.axial.contains(child); }))
+            std::vector<AxialIntervalKey>().swap(node.children);
+}
+struct BaseTemplate
+{
+    std::shared_ptr<const ExtrudedTopology> topology;
+    std::shared_ptr<const ExactExtrudedConstruction> construction;
+    std::shared_ptr<const std::vector<BaseCellKey>> keys;
+    std::vector<std::pair<BaseEdgeKey, std::string>> sides;
+};
+std::vector<std::size_t> axis_points(const ExtrudedAMR::Data& pool, const ZKeys& keys)
+{
+    std::vector<std::size_t> points;
+    for (const auto& key : keys)
+    {
+        const auto& node = pool.axial.at(key);
+        if (points.empty() || points.back() != node.lower)
+            points.push_back(node.lower);
+        points.push_back(node.upper);
+    }
+    return points;
+}
+void build_local_runs(LocalData& state, const std::shared_ptr<const LocalData>& previous = {})
+{
+    intern_columns(state);
+    auto& pool = state.pool;
+    std::map<std::vector<BaseCellKey>, BaseTemplate> bases;
+    std::map<std::vector<BaseCellKey>, BaseTemplate> old_bases;
+    if (previous)
+        for (const auto& run : previous->runs)
+        {
+            std::vector<BaseCellKey> keys(run.base_keys.begin(), run.base_keys.end());
+            auto topology = std::shared_ptr<const ExtrudedTopology>(previous, &run.region.topology());
+            old_bases.emplace(keys, BaseTemplate{topology, run.region.geometry().construction(),
+                                        std::make_shared<const std::vector<BaseCellKey>>(keys), {}});
+        }
+    std::map<ZKeys, std::vector<BaseCellKey>> groups;
+    std::map<ZKeys, std::shared_ptr<const ZKeys>> selections;
+    for (const auto& [base, z] : state.columns)
+    {
+        groups[*z].push_back(base);
+        selections[*z] = z;
+    }
+    std::vector<std::size_t> global_axis(pool.z.size());
+    std::iota(global_axis.begin(), global_axis.end(), 0);
+    std::vector<long double> zvalues;
+    for (const auto& recipe : pool.z)
+    {
+        long double value = recipe.root;
+        if (!recipe.parents.empty())
+        {
+            value = 0;
+            for (auto parent : recipe.parents)
+                value += zvalues.at(parent) / recipe.parents.size();
+        }
+        zvalues.push_back(value);
+    }
+    std::sort(global_axis.begin(), global_axis.end(), [&](auto a, auto b) { return zvalues[a] < zvalues[b]; });
+    std::shared_ptr<const ExactExtrudedConstruction> coordinates;
+    std::map<std::vector<std::size_t>, std::shared_ptr<const ExactExtrudedConstruction>> axes;
+    struct Planned
+    {
+        BaseTemplate base;
+        std::shared_ptr<const ZKeys> zkeys;
+        std::size_t first, count, axis_first;
+        std::shared_ptr<const ExactExtrudedConstruction> axis;
+    };
+    std::vector<Planned> plans;
+    for (const auto& [zkeys, basekeys] : groups)
+    {
+        std::map<BaseEdgeKey, std::vector<BaseCellKey>> owners;
+        for (const auto& key : basekeys)
+            for (const auto& edge : pool.base.at(key).edges)
+                owners[edge].push_back(key);
+        std::map<BaseCellKey, std::vector<BaseCellKey>> neighbors;
+        for (const auto& [edge, cells] : owners)
+        {
+            if (cells.size() > 2)
+                throw std::invalid_argument("Local product base patch is nonmanifold.");
+            if (cells.size() == 2)
+            {
+                neighbors[cells[0]].push_back(cells[1]);
+                neighbors[cells[1]].push_back(cells[0]);
+            }
+        }
+        std::set<BaseCellKey> pending(basekeys.begin(), basekeys.end());
+        while (!pending.empty())
+        {
+            std::vector<BaseCellKey> component{*pending.begin()};
+            pending.erase(component[0]);
+            for (std::size_t i = 0; i < component.size(); ++i)
+                for (const auto& next : neighbors[component[i]])
+                    if (pending.erase(next))
+                        component.push_back(next);
+            std::sort(component.begin(), component.end());
+            BaseTemplate base;
+            auto found = bases.find(component);
+            if (found != bases.end())
+                base = found->second;
+            else
+            {
+                std::map<BaseEdgeKey, unsigned> edge_counts;
+                for (const auto& key : component)
+                    for (const auto& edge : pool.base.at(key).edges)
+                        ++edge_counts[edge];
+                for (const auto& [edge, count] : edge_counts)
+                    if (count == 1)
+                    {
+                        const auto& native = pool.edges.at(edge);
+                        base.sides.push_back({edge,
+                            native.physical ? (native.boundary.empty() ? "side" : native.boundary) : edge_name(edge)});
+                    }
+                auto old = old_bases.find(component);
+                if (old != old_bases.end())
+                {
+                    base.topology = old->second.topology;
+                    base.construction = old->second.construction;
+                    base.keys = old->second.keys;
+                }
+                else
+                {
+                    auto patch = pool;
+                    patch.leaves = std::set<BaseCellKey>(component.begin(), component.end());
+                    patch.intervals = {zkeys.front()};
+                    auto grid = std::make_shared<ExtrudedAMRGrid>(*pool.grid);
+                    grid->boundary_aliases.clear();
+                    std::set<std::string> names{"zmin", "zmax"};
+                    for (auto& [edge, node] : patch.edges)
+                        node.boundary.clear();
+                    for (const auto& [edge, name] : base.sides)
+                    {
+                        patch.edges.at(edge).boundary = name;
+                        names.insert(name);
+                    }
+                    for (const auto& [source, target] : pool.grid->boundary_aliases)
+                        if (names.contains(source))
+                            grid->boundary_aliases[source] = target;
+                    patch.grid = std::move(grid);
+                    prepare_geometry(patch);
+                    base.topology = patch.topology;
+                    base.keys = std::make_shared<const std::vector<BaseCellKey>>(component);
+                    if (!coordinates)
+                    {
+                        auto all_topology = base.topology->with_layers(global_axis.size() - 1);
+                        std::vector<std::size_t> active;
+                        std::set<std::size_t> used;
+                        for (const auto& k : patch.base_keys)
+                            for (auto v : patch.base.at(k).vertices)
+                                used.insert(v);
+                        active.assign(used.begin(), used.end());
+                        coordinates =
+                            ExactExtrudedConstruction::make(all_topology, patch.points, active, pool.z, global_axis);
+                        if (previous)
+                            for (const auto& run : previous->runs)
+                                if (run.region.geometry().construction()->encode_axis_values() ==
+                                    coordinates->encode_axis_values())
+                                {
+                                    coordinates = run.region.geometry().construction();
+                                    break;
+                                }
+                    }
+                    base.construction = patch.construction;
+                }
+                bases.emplace(component, base);
+            }
+            if (!coordinates)
+            {
+                // A retained template still needs the current common axial DAG.
+                // Decode its compact point recipes, supplying the new global Z
+                // construction through the existing validated standalone format.
+                auto one = pool;
+                one.leaves = std::set<BaseCellKey>(component.begin(), component.end());
+                one.intervals = {zkeys.front()};
+                auto grid = std::make_shared<ExtrudedAMRGrid>(*pool.grid);
+                grid->boundary_aliases.clear();
+                for (auto& [edge, node] : one.edges)
+                    node.boundary.clear();
+                std::set<std::string> names{"zmin", "zmax"};
+                for (const auto& [edge, name] : base.sides)
+                {
+                    one.edges.at(edge).boundary = name;
+                    names.insert(name);
+                }
+                for (const auto& [source, target] : pool.grid->boundary_aliases)
+                    if (names.contains(source))
+                        grid->boundary_aliases[source] = target;
+                one.grid = grid;
+                prepare_geometry(one);
+                std::set<std::size_t> used;
+                for (const auto& k : one.base_keys)
+                    for (auto v : one.base.at(k).vertices)
+                        used.insert(v);
+                std::vector<std::size_t> active(used.begin(), used.end());
+                coordinates = ExactExtrudedConstruction::make(
+                    one.topology->with_layers(global_axis.size() - 1), one.points, active, pool.z, global_axis);
+                if (previous)
+                    for (const auto& run : previous->runs)
+                        if (run.region.geometry().construction()->encode_axis_values() ==
+                            coordinates->encode_axis_values())
+                        {
+                            coordinates = run.region.geometry().construction();
+                            break;
+                        }
+            }
+            const auto points = axis_points(pool, zkeys);
+            auto axis = axes.find(points);
+            if (axis == axes.end())
+            {
+                auto topology = base.topology->with_layers(points.size() - 1);
+                auto construction =
+                    ExactExtrudedConstruction::shared_axis_selection(topology, base.construction, coordinates, points);
+                if (previous)
+                    for (const auto& run : previous->runs)
+                    {
+                        const auto& old = run.region.geometry().construction();
+                        if (old->encode_axis_values() == construction->encode_axis_values() &&
+                            old->encode_axis_selection() == construction->encode_axis_selection())
+                        {
+                            construction = old;
+                            break;
+                        }
+                    }
+                axis = axes.emplace(points, std::move(construction)).first;
+            }
+            std::size_t first = 0;
+            while (first < zkeys.size())
+            {
+                std::size_t last = first + 1;
+                while (last < zkeys.size() && pool.axial.at(zkeys[last - 1]).upper == pool.axial.at(zkeys[last]).lower)
+                    ++last;
+                const auto lower = pool.axial.at(zkeys[first]).lower;
+                const auto axis_first = std::find(points.begin(), points.end(), lower) - points.begin();
+                plans.push_back(
+                    {base, selections.at(zkeys), first, last - first, std::size_t(axis_first), axis->second});
+                first = last;
+            }
+        }
+    }
+    std::sort(plans.begin(), plans.end(),
+        [](const auto& a, const auto& b)
+        {
+            if (*a.base.keys != *b.base.keys)
+                return *a.base.keys < *b.base.keys;
+            return std::lexicographical_compare(a.zkeys->begin() + a.first, a.zkeys->begin() + a.first + a.count,
+                b.zkeys->begin() + b.first, b.zkeys->begin() + b.first + b.count);
+        });
+    state.runs.clear();
+    for (const auto& plan : plans)
+    {
+        auto low = plane_key((*plan.zkeys)[plan.first], false),
+             high = plane_key((*plan.zkeys)[plan.first + plan.count - 1], true);
+        const bool physical_low = low.kind == LocalProductPlaneKey::Kind::RootPoint && low.root_point == 0,
+                   physical_high = high.kind == LocalProductPlaneKey::Kind::RootPoint &&
+                                   high.root_point + 1 == pool.grid->z_edges.size();
+        auto physical_name = [&](const std::string& source)
+        {
+            auto alias = pool.grid->boundary_aliases.find(source);
+            return alias == pool.grid->boundary_aliases.end() ? source : alias->second;
+        };
+        std::map<std::string, std::string> aliases{{"zmin", physical_low ? physical_name("zmin") : cap_name(low)},
+            {"zmax", physical_high ? physical_name("zmax") : cap_name(high)}};
+        auto topology = plan.base.topology->with_layers(plan.count, std::move(aliases));
+        auto construction = ExactExtrudedConstruction::shared_view(
+            topology, plan.base.construction, plan.axis, plan.axis_first, plan.count);
+        auto geometry = std::make_shared<const ExtrudedGeometry>(topology, std::move(construction));
+        LocalProductRun run{
+            ExtrudedRegion("product_run_" + std::to_string(state.runs.size()), topology, std::move(geometry)),
+            {plan.base.keys, 0, plan.base.keys->size()}, {plan.zkeys, plan.first, plan.count}, {}};
+        for (const auto& [edge, name] : plan.base.sides)
+        {
+            auto resolved = topology->boundary_aliases();
+            auto alias = resolved.find(name);
+            const auto& actual = alias == resolved.end() ? name : alias->second;
+            int batch = -1;
+            for (auto id : topology->boundary_batch_ids())
+                if (topology->boundary_batch_name(id) == actual)
+                {
+                    batch = id;
+                    break;
+                }
+            if (batch < 0)
+                throw std::logic_error("Local seam boundary batch is missing.");
+            run.boundaries.push_back({LocalProductBoundary::Kind::Side, batch, pool.edges.at(edge).physical, edge, {}});
+        }
+        run.boundaries.push_back({LocalProductBoundary::Kind::LowerCap, 0, physical_low, {}, low});
+        run.boundaries.push_back({LocalProductBoundary::Kind::UpperCap, 1, physical_high, {}, high});
+        state.runs.push_back(std::move(run));
+    }
+    pool.geometry.reset();
+    pool.topology.reset();
+    pool.construction.reset();
+    pool.partition.reset();
+    pool.base_keys.clear();
+    pool.interval_keys.clear();
+}
+std::vector<BaseCellKey> local_base_children(ExtrudedAMR::Data& pool, const BaseCellKey& key)
+{
+    auto found = pool.base.find(key);
+    if (found == pool.base.end())
+        throw std::invalid_argument("Unknown local XY factor.");
+    if (!found->second.children.empty() && std::all_of(found->second.children.begin(), found->second.children.end(),
+                                               [&](const auto& child) { return pool.base.contains(child); }))
+        return found->second.children;
+    pool.base[key].children.clear();
+    auto leaves = pool.leaves;
+    pool.leaves = {key};
+    split_base(pool, key);
+    auto children = pool.base.at(key).children;
+    pool.leaves = std::move(leaves);
+    return children;
+}
+std::vector<AxialIntervalKey> local_z_children(ExtrudedAMR::Data& pool, const AxialIntervalKey& key)
+{
+    const auto node = pool.axial.at(key);
+    if (node.children.size() == 2 &&
+        std::all_of(node.children.begin(), node.children.end(), [&](const auto& c) { return pool.axial.contains(c); }))
+        return node.children;
+    if (key.path.size() >= pool.grid->max_depth)
+        throw std::invalid_argument("Local Z refinement exceeds maximum depth.");
+    const auto middle = pool.z.size();
+    pool.z.push_back({0, {node.lower, node.upper}});
+    auto a = child(key, 0), b = child(key, 1);
+    pool.axial[key].children = {a, b};
+    pool.axial[a] = {node.lower, middle, {}};
+    pool.axial[b] = {middle, node.upper, {}};
+    return {a, b};
+}
+} // namespace
+LocalProductAMR::LocalProductAMR(ExtrudedAMRGrid grid)
+{
+    auto data = std::make_shared<Data>();
+    data->pool.grid = std::make_shared<const ExtrudedAMRGrid>(std::move(grid));
+    collectively(
+        [&]
+        {
+            initialize(data->pool);
+            auto intervals = std::make_shared<const ZKeys>(data->pool.interval_keys);
+            for (const auto& base : data->pool.base_keys)
+                data->columns.emplace(base, intervals);
+            build_local_runs(*data);
+        });
+    same(local_description(*data));
+    data->collective_id = SimpleFluid::Meshes::identity();
+    data_ = std::move(data);
+}
+const std::vector<LocalProductRun>& LocalProductAMR::runs() const noexcept
+{
+    return data_->runs;
+}
+const std::shared_ptr<const void>& LocalProductAMR::identity() const noexcept
+{
+    return data_->token;
+}
+std::uint64_t LocalProductAMR::generation() const noexcept
+{
+    return data_->generation;
+}
+std::uint64_t LocalProductAMR::material_id() const noexcept
+{
+    return data_->pool.grid->material_id;
+}
+AdaptiveCellKey LocalProductAMR::cell_key(std::size_t run_id, std::uint64_t cell) const
+{
+    const auto& run = data_->runs.at(run_id);
+    if (cell >= run.region.layout().cells)
+        throw std::out_of_range("Local product cell ordinal is out of bounds.");
+    return {data_->pool.grid->region_id,
+        ProductCellAncestry{run.base_keys[cell % run.base_keys.size()], run.intervals[cell / run.base_keys.size()]}};
+}
+ConvexGeometryPtr LocalProductAMR::cell_geometry(std::size_t run, std::uint64_t cell) const
+{
+    (void) cell_key(run, cell);
+    return data_->runs.at(run).region.geometry().certified_cell_geometry(cell);
+}
+std::vector<LocalProductAMR::ContactViolation> LocalProductAMR::contact_violations(
+    double ratio, unsigned maximum_jump, std::size_t contact_budget) const
+{
+    if (!std::isfinite(ratio) || ratio < 1)
+        throw std::invalid_argument("Contact span ratio must be finite and at least one.");
+    std::size_t work = 0;
+    auto charge = [&]
+    {
+        if (work >= contact_budget)
+            throw std::invalid_argument("Product contact budget exhausted.");
+        ++work;
+    };
+    using Pair = std::pair<BaseCellKey, BaseCellKey>;
+    struct Contact
+    {
+        unsigned dimension = 0;
+        std::size_t jump = 0;
+    };
+    std::map<Pair, Contact> pairs;
+    auto add = [&](BaseCellKey a, BaseCellKey b, unsigned dimension, std::size_t jump = 0)
+    {
+        charge();
+        if (a == b)
+            return;
+        if (b < a)
+            std::swap(a, b);
+        auto& value = pairs[{a, b}];
+        value.dimension = std::max(value.dimension, dimension);
+        value.jump = std::max(value.jump, jump);
+    };
+    std::map<BaseEdgeKey, std::vector<BaseCellKey>> edges;
+    std::map<std::size_t, std::set<BaseCellKey>> vertices;
+    std::map<BaseEdgeKey, std::set<std::size_t>> edge_points;
+    for (const auto& [key, selection] : data_->columns)
+    {
+        charge();
+        const auto& node = data_->pool.base.at(key);
+        for (auto vertex : node.vertices)
+        {
+            charge();
+            vertices[vertex].insert(key);
+        }
+        for (const auto& edge : node.edges)
+        {
+            charge();
+            edges[edge].push_back(key);
+            auto ancestor = edge;
+            const auto& endpoints = data_->pool.edges.at(edge);
+            for (;;)
+            {
+                charge();
+                edge_points[ancestor].insert(endpoints.a);
+                edge_points[ancestor].insert(endpoints.b);
+                if (ancestor.path.empty())
+                    break;
+                ancestor.path.pop_back();
+            }
+        }
+        auto ancestor = key;
+        while (!ancestor.path.empty())
+        {
+            ancestor.path.pop_back();
+            if (data_->columns.contains(ancestor))
+                add(key, ancestor, 2, key.path.size() - ancestor.path.size());
+        }
+    }
+    for (const auto& [edge, owners] : edges)
+    {
+        auto ancestor = edge;
+        for (;;)
+        {
+            if (auto it = edges.find(ancestor); it != edges.end())
+                for (const auto& a : owners)
+                    for (const auto& b : it->second)
+                        add(a, b, 1, edge.path.size() - ancestor.path.size());
+            if (ancestor.path.empty())
+                break;
+            ancestor.path.pop_back();
+        }
+        for (auto point : edge_points.at(edge))
+            if (auto it = vertices.find(point); it != vertices.end())
+                for (const auto& a : owners)
+                    for (const auto& b : it->second)
+                        add(a, b, 0);
+    }
+    std::map<std::pair<BaseEdgeKey, std::size_t>, std::vector<std::pair<BaseCellKey, std::size_t>>> edge_endpoints;
+    for (const auto& [edge, owners] : edges)
+    {
+        auto stem = edge;
+        stem.path.clear();
+        const auto& node = data_->pool.edges.at(edge);
+        for (auto point : {node.a, node.b})
+            for (const auto& owner : owners)
+            {
+                charge();
+                auto& incident = edge_endpoints[{stem, point}];
+                for (const auto& [other, depth] : incident)
+                    add(owner, other, 0, std::max(depth, edge.path.size()) - std::min(depth, edge.path.size()));
+                incident.emplace_back(owner, edge.path.size());
+            }
+    }
+    for (const auto& [vertex, owners] : vertices)
+        for (const auto& a : owners)
+            for (const auto& b : owners)
+                add(a, b, 0);
+    // Dyadic addresses order exact axial endpoints without converting coordinates.
+    using Address = std::pair<std::uint64_t, std::uint64_t>;
+    const auto depth = data_->pool.grid->max_depth;
+    const std::uint64_t scale = std::uint64_t(1) << depth;
+    auto endpoint = [&](const AxialIntervalKey& key, bool upper) -> Address
+    {
+        std::uint64_t ordinal = 0;
+        for (auto bit : key.path)
+            ordinal = 2 * ordinal + bit;
+        auto numerator = (ordinal + unsigned(upper)) << (depth - key.path.size());
+        return numerator == scale ? Address{key.root + 1, 0} : Address{key.root, numerator};
+    };
+    auto geometry = [&](const ProductCellAncestry& key)
+    {
+        for (std::size_t r = 0; r < data_->runs.size(); ++r)
+        {
+            const auto& run = data_->runs[r];
+            auto b = std::lower_bound(run.base_keys.begin(), run.base_keys.end(), key.base);
+            auto z = std::lower_bound(run.intervals.begin(), run.intervals.end(), key.axial);
+            if (b != run.base_keys.end() && *b == key.base && z != run.intervals.end() && *z == key.axial)
+                return cell_geometry(
+                    r, (z - run.intervals.begin()) * run.base_keys.size() + (b - run.base_keys.begin()));
+        }
+        throw std::logic_error("Contact factor is absent from native runs.");
+    };
+    std::vector<ContactViolation> result;
+    auto check = [&](const BaseCellKey& a, const AxialIntervalKey& az, const BaseCellKey& b, const AxialIntervalKey& bz,
+                     Contact contact)
+    {
+        charge();
+        const auto lo = std::max(endpoint(az, false), endpoint(bz, false));
+        const auto hi = std::min(endpoint(az, true), endpoint(bz, true));
+        if (hi < lo)
+            return;
+        unsigned dimension = contact.dimension + unsigned(lo < hi);
+        if (dimension == 3)
+            throw std::logic_error("Active local products overlap.");
+        bool jump = contact.jump > maximum_jump;
+        if (az.root == bz.root)
+            jump = jump ||
+                   std::max(az.path.size(), bz.path.size()) - std::min(az.path.size(), bz.path.size()) > maximum_jump;
+        ProductCellAncestry first{a, az}, second{b, bz};
+        const auto ga = geometry(first), gb = geometry(second);
+        bool span = false;
+        for (unsigned axis = 0; axis < 3; ++axis)
+            span = span || ga->axis_span_exceeds(*gb, axis, ratio) || gb->axis_span_exceeds(*ga, axis, ratio);
+        if (span || jump)
+            result.push_back({first, second, dimension, span, jump});
+    };
+    for (const auto& [pair, contact] : pairs)
+    {
+        const auto& first = *data_->columns.at(pair.first);
+        const auto& second = *data_->columns.at(pair.second);
+        for (const auto& az : first)
+        {
+            auto it = std::lower_bound(second.begin(), second.end(), endpoint(az, false),
+                [&](const auto& z, const auto& value) { return endpoint(z, true) < value; });
+            for (; it != second.end() && endpoint(*it, false) <= endpoint(az, true); ++it)
+                check(pair.first, az, pair.second, *it, contact);
+        }
+    }
+    for (const auto& [base, selection] : data_->columns)
+        for (std::size_t i = 1; i < selection->size(); ++i)
+            check(base, (*selection)[i - 1], base, (*selection)[i], {2, 0});
+    return result;
+}
+std::vector<ProductContactViolation> ExtrudedAMR::contact_violations(
+    double ratio, unsigned maximum_jump, std::size_t budget) const
+{
+    if (data_->base.size() + data_->edges.size() + data_->axial.size() + data_->points.size() + data_->z.size() >
+        budget)
+        throw std::invalid_argument("Product contact metadata exceeds budget.");
+    auto local = std::make_shared<LocalProductAMR::Data>();
+    local->pool = *data_;
+    auto bases = std::make_shared<const std::vector<BaseCellKey>>(data_->base_keys);
+    auto intervals = std::make_shared<const std::vector<AxialIntervalKey>>(data_->interval_keys);
+    for (const auto& base : *bases)
+        local->columns.emplace(base, intervals);
+    auto geometry = std::make_shared<const ExtrudedGeometry>(data_->topology, data_->construction);
+    local->runs.push_back({ExtrudedRegion("contact_query", data_->topology, std::move(geometry)),
+        {bases, 0, bases->size()}, {intervals, 0, intervals->size()}, {}});
+    return LocalProductAMR(std::move(local)).contact_violations(ratio, maximum_jump, budget);
+}
+std::shared_ptr<const LocalProductAMR> LocalProductAMR::adapt(const std::vector<ProductCellAncestry>& refine_xy,
+    const std::vector<ProductCellAncestry>& refine_z, const std::vector<ProductCellAncestry>& coarsen_xy,
+    const std::vector<ProductCellAncestry>& coarsen_z) const
+{
+    std::ostringstream marks;
+    marks << data_->collective_id << ' ';
+    for (const auto* list : {&refine_xy, &refine_z, &coarsen_xy, &coarsen_z})
+    {
+        marks << " marks ";
+        for (const auto& p : *list)
+        {
+            key_text(marks, p.base);
+            key_text(marks, p.axial);
+        }
+    }
+    same(marks.str());
+    auto data = std::make_shared<Data>(*data_);
+    collectively(
+        [&]
+        {
+            auto exists = [&](const ProductCellAncestry& p)
+            {
+                auto column = data_->columns.find(p.base);
+                return column != data_->columns.end() &&
+                       std::binary_search(column->second->begin(), column->second->end(), p.axial);
+            };
+            std::map<ProductCellAncestry, unsigned> refine;
+            for (const auto& p : refine_xy)
+            {
+                if (!exists(p))
+                    throw std::invalid_argument("Local XY mark is not an active product leaf.");
+                refine[p] |= 1;
+            }
+            for (const auto& p : refine_z)
+            {
+                if (!exists(p))
+                    throw std::invalid_argument("Local Z mark is not an active product leaf.");
+                refine[p] |= 2;
+            }
+            std::set<ProductCellAncestry> consumed;
+            std::set<ProductCellAncestry> unique;
+            for (const auto& p : coarsen_xy)
+            {
+                if (!unique.insert(p).second || !data_->pool.base.contains(p.base) ||
+                    data_->pool.base.at(p.base).children.empty())
+                    throw std::invalid_argument("Local XY coarsening parent is invalid.");
+                for (const auto& child : data_->pool.base.at(p.base).children)
+                {
+                    ProductCellAncestry leaf{child, p.axial};
+                    if (!exists(leaf) || refine.contains(leaf) || !consumed.insert(leaf).second)
+                        throw std::invalid_argument(
+                            "Local XY coarsening needs an unmarked complete immediate source family.");
+                }
+            }
+            unique.clear();
+            for (const auto& p : coarsen_z)
+            {
+                if (!unique.insert(p).second || !data_->pool.axial.contains(p.axial) ||
+                    data_->pool.axial.at(p.axial).children.size() != 2)
+                    throw std::invalid_argument("Local Z coarsening parent is invalid.");
+                for (const auto& child : data_->pool.axial.at(p.axial).children)
+                {
+                    ProductCellAncestry leaf{p.base, child};
+                    if (!exists(leaf) || refine.contains(leaf) || !consumed.insert(leaf).second)
+                        throw std::invalid_argument(
+                            "Local Z coarsening needs an unmarked complete immediate source family.");
+                }
+            }
+            std::map<BaseCellKey, std::set<AxialIntervalKey>> changed;
+            auto column = [&](const BaseCellKey& key) -> std::set<AxialIntervalKey>&
+            {
+                auto [it, inserted] = changed.try_emplace(key);
+                if (inserted)
+                {
+                    auto original = data_->columns.find(key);
+                    if (original != data_->columns.end())
+                        it->second.insert(original->second->begin(), original->second->end());
+                }
+                return it->second;
+            };
+            for (const auto& p : coarsen_xy)
+            {
+                for (const auto& child : data_->pool.base.at(p.base).children)
+                    column(child).erase(p.axial);
+                column(p.base).insert(p.axial);
+            }
+            for (const auto& p : coarsen_z)
+            {
+                for (const auto& child : data_->pool.axial.at(p.axial).children)
+                    column(p.base).erase(child);
+                column(p.base).insert(p.axial);
+            }
+            for (const auto& [p, flags] : refine)
+            {
+                auto bases = flags & 1 ? local_base_children(data->pool, p.base) : std::vector<BaseCellKey>{p.base};
+                auto zkeys = flags & 2 ? local_z_children(data->pool, p.axial) : std::vector<AxialIntervalKey>{p.axial};
+                column(p.base).erase(p.axial);
+                for (const auto& base : bases)
+                    for (const auto& z : zkeys)
+                        column(base).insert(z);
+            }
+            for (auto& [key, z] : changed)
+            {
+                if (z.empty())
+                    data->columns.erase(key);
+                else
+                    data->columns[key] = std::make_shared<const ZKeys>(z.begin(), z.end());
+            }
+            if (changed.empty())
+                return;
+            if (data->generation == std::numeric_limits<std::uint64_t>::max())
+                throw std::overflow_error("Local product generation exhausted.");
+            ++data->generation;
+            data->token = std::make_shared<const char>(0);
+            build_local_runs(*data, data_);
+        });
+    if (data->generation == data_->generation)
+        return std::shared_ptr<const LocalProductAMR>(new LocalProductAMR(data_));
+    same(local_description(*data));
+    data->collective_id = SimpleFluid::Meshes::identity();
+    return std::shared_ptr<const LocalProductAMR>(new LocalProductAMR(std::move(data)));
+}
+LocalProductAMR::StorageCounts LocalProductAMR::storage_counts() const
+{
+    StorageCounts counts{};
+    std::set<const void*> bases, axes, values, selections;
+    counts.runs = data_->runs.size();
+    counts.point_recipes = data_->pool.points.size();
+    counts.z_recipes = data_->pool.z.size();
+    for (const auto& [base, z] : data_->columns)
+        if (selections.insert(z.get()).second)
+            counts.selection_entries += z->size();
+    for (const auto& run : data_->runs)
+    {
+        counts.cells += run.region.layout().cells;
+        const auto& construction = run.region.geometry().construction();
+        if (bases.insert(construction->base_storage_identity()).second)
+        {
+            ++counts.base_templates;
+            counts.base_vertices += run.region.topology().indexer().num_nodes_per_layer;
+        }
+        if (axes.insert(construction->axis_storage_identity()).second)
+            ++counts.axis_templates;
+        if (values.insert(construction->axis_values_storage_identity()).second)
+            ++counts.axial_values;
+        for (const auto& b : run.boundaries)
+            counts.seam_descriptors += !b.physical;
+    }
+    return counts;
+}
+MeshStorageReport LocalProductAMR::storage_report() const
+{
+    MeshStorageReport report;
+    report.objects = sizeof(LocalProductAMR) + sizeof(Data) + data_->runs.capacity() * sizeof(LocalProductRun);
+    std::set<const void*> topology, bases, axes, values, basekeys, zkeys;
+    for (const auto& run : data_->runs)
+    {
+        report.objects += sizeof(ExtrudedTopology) + sizeof(ExtrudedGeometry) + run.region.name().capacity();
+        const auto& t = run.region.topology();
+        const auto& c = run.region.geometry().construction();
+        auto ts = t.storage_report().topology;
+        if (!topology.insert(t.base_storage_identity()).second)
+            ts -= t.base_storage_bytes();
+        report.topology += ts;
+        report.geometry += c->view_storage_bytes();
+        if (bases.insert(c->base_storage_identity()).second)
+            report.geometry += c->base_storage_bytes();
+        if (axes.insert(c->axis_storage_identity()).second)
+        {
+            report.geometry += c->axis_storage_bytes();
+            if (!values.insert(c->axis_values_storage_identity()).second)
+                report.geometry -= c->axis_values_storage_bytes();
+        }
+        if (basekeys.insert(run.base_keys.storage_identity()).second)
+            report.indexing += run.base_keys.storage_bytes();
+        if (zkeys.insert(run.intervals.storage_identity()).second)
+            report.indexing += run.intervals.storage_bytes();
+        report.interfaces += run.boundaries.capacity() * sizeof(LocalProductBoundary);
+        for (const auto& b : run.boundaries)
+            report.interfaces +=
+                (b.edge.creator.path.capacity() + b.edge.path.capacity() + b.plane.creator.path.capacity()) *
+                sizeof(std::uint64_t);
+    }
+    for (const auto& [base, z] : data_->columns)
+    {
+        report.indexing += sizeof(decltype(data_->columns)::value_type) + 4 * sizeof(void*) +
+                           base.path.capacity() * sizeof(std::uint64_t);
+        if (zkeys.insert(z.get()).second)
+        {
+            report.indexing += sizeof(ZKeys) + z->capacity() * sizeof(AxialIntervalKey);
+            for (const auto& k : *z)
+                report.indexing += k.path.capacity() * sizeof(std::uint64_t);
+        }
+    }
+    // Retained factor ancestry and construction recipes are separate from the
+    // shared native templates; this capacity estimate includes their payload.
+    const auto& p = data_->pool;
+    report.objects += sizeof(ExtrudedAMRGrid) + p.grid->xy_nodes.capacity() * sizeof(GeometryPoint) +
+                      p.grid->base_cells.capacity() * sizeof(std::vector<unsigned>) +
+                      p.grid->z_edges.capacity() * sizeof(double) + p.points.capacity() * sizeof(ExactPointRecipe) +
+                      p.z.capacity() * sizeof(ExactScalarRecipe);
+    for (const auto& c : p.grid->base_cells)
+        report.objects += c.capacity() * sizeof(unsigned);
+    for (const auto& q : p.points)
+        report.objects += q.parents.capacity() * sizeof(std::size_t);
+    for (const auto& q : p.z)
+        report.objects += q.parents.capacity() * sizeof(std::size_t);
+    for (const auto& [k, n] : p.base)
+    {
+        report.indexing += sizeof(decltype(p.base)::value_type) + 4 * sizeof(void*) +
+                           k.path.capacity() * sizeof(std::uint64_t) + n.vertices.capacity() * sizeof(std::size_t) +
+                           n.edges.capacity() * sizeof(BaseEdgeKey) + n.children.capacity() * sizeof(BaseCellKey);
+        for (const auto& e : n.edges)
+            report.indexing += (e.creator.path.capacity() + e.path.capacity()) * sizeof(std::uint64_t);
+        for (const auto& c : n.children)
+            report.indexing += c.path.capacity() * sizeof(std::uint64_t);
+    }
+    for (const auto& [k, e] : p.edges)
+        report.indexing += sizeof(decltype(p.edges)::value_type) + 4 * sizeof(void*) +
+                           (k.creator.path.capacity() + k.path.capacity()) * sizeof(std::uint64_t) +
+                           e.boundary.capacity();
+    for (const auto& [k, n] : p.axial)
+    {
+        report.indexing += sizeof(decltype(p.axial)::value_type) + 4 * sizeof(void*) +
+                           k.path.capacity() * sizeof(std::uint64_t) + n.children.capacity() * sizeof(AxialIntervalKey);
+        for (const auto& c : n.children)
+            report.indexing += c.path.capacity() * sizeof(std::uint64_t);
+    }
+    report.objects += p.grid->boundaries.capacity() * sizeof(SemiStructMeshTopo::BoundaryEdge) +
+                      p.grid->triangle_reference_edges.capacity() * sizeof(std::size_t);
+    for (const auto& b : p.grid->boundaries)
+        report.objects += b.batch_name.capacity();
+    for (const auto& [a, b] : p.grid->boundary_aliases)
+        report.objects +=
+            sizeof(decltype(p.grid->boundary_aliases)::value_type) + 4 * sizeof(void*) + a.capacity() + b.capacity();
+    report.indexing +=
+        p.base_keys.capacity() * sizeof(BaseCellKey) + p.interval_keys.capacity() * sizeof(AxialIntervalKey);
+    for (const auto& k : p.leaves)
+        report.indexing += sizeof(BaseCellKey) + 4 * sizeof(void*) + k.path.capacity() * sizeof(std::uint64_t);
+    for (const auto& k : p.intervals)
+        report.indexing += sizeof(AxialIntervalKey) + 4 * sizeof(void*) + k.path.capacity() * sizeof(std::uint64_t);
+    return report;
+}
+
 } // namespace SimpleFluid::Meshes

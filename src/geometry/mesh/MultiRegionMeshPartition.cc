@@ -17,10 +17,19 @@ using ID = MultiRegionMesh::ID;
 using Vec3 = MeshUtils::Vec3;
 // Internal MPI wire format: one executable, native scalar representation.
 // No pointers, size_t container objects, or borrowed storage are transmitted.
-constexpr uint64_t partition_magic = 0x5346524547490005ULL;
+constexpr uint64_t partition_magic = 0x5346524547490007ULL;
 struct Writer
 {
     std::vector<char> data;
+    std::map<const void*, uint64_t> topology_catalog, base_catalog, axis_catalog, axis_values_catalog;
+    void catalog(std::map<const void*, uint64_t>& entries, const void* identity, const std::vector<char>& packet)
+    {
+        const auto [where, inserted] = entries.emplace(identity, entries.size());
+        value(where->second);
+        boolean(inserted);
+        if (inserted)
+            array(packet);
+    }
     template<class T> void value(const T& v)
     {
         static_assert(std::is_trivially_copyable_v<T>);
@@ -169,6 +178,29 @@ DistributedExplicitRegion read_explicit(Reader& r, std::string name, RegionLayou
 template<class Region>
 void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<ID>& visible)
 {
+    if constexpr (std::same_as<Region, ExtrudedRegion>)
+        if (region.geometry().has_exact_construction())
+        {
+            const auto& topology = region.topology();
+            const auto& construction = *region.geometry().construction();
+            w.value(uint32_t{10});
+            w.string(region.name());
+            write_layout(w, region.layout());
+            w.catalog(w.topology_catalog, topology.base_storage_identity(), topology.encode_base());
+            const auto aliases = topology.boundary_aliases();
+            w.value(uint64_t(aliases.size()));
+            for (const auto& [from, to] : aliases)
+            {
+                w.string(from);
+                w.string(to);
+            }
+            w.catalog(w.base_catalog, construction.base_storage_identity(), construction.encode_base());
+            w.catalog(
+                w.axis_values_catalog, construction.axis_values_storage_identity(), construction.encode_axis_values());
+            w.catalog(w.axis_catalog, construction.axis_storage_identity(), construction.encode_axis_selection());
+            w.array(construction.encode_view());
+            return;
+        }
     if constexpr(requires{region.geometry().has_exact_construction();})
         if(region.geometry().has_exact_construction())tag=region.layout().family==RegionLayout::Family::Explicit ? 9 : 8;
     w.value(tag); w.string(region.name()); write_layout(w, region.layout());
@@ -240,6 +272,14 @@ struct TopologyCache
 {
     std::map<std::vector<char>, std::shared_ptr<const RectilinearTopology>> cartesian;
     std::map<std::vector<char>, std::shared_ptr<const ExtrudedTopology>> extruded;
+    struct ExactEntry
+    {
+        std::vector<char> packet;
+        std::shared_ptr<const ExactExtrudedConstruction> anchor;
+        size_t values_id = std::numeric_limits<size_t>::max();
+    };
+    std::vector<std::shared_ptr<const ExtrudedTopology>> shared_topology;
+    std::vector<ExactEntry> shared_base, shared_axis, shared_axis_values;
 };
 
 MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
@@ -253,6 +293,66 @@ MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
             throw std::invalid_argument("Reconstructed partition region differs from its declared layout.");
         return result;
     };
+    if (tag == 10)
+    {
+        if (!cache || layout.family != RegionLayout::Family::Extruded || !layout.extents[2] ||
+            layout.extents[2] > std::numeric_limits<unsigned>::max())
+            throw std::invalid_argument("Invalid shared product catalog view.");
+        const auto topology_id = r.value<uint64_t>();
+        const bool define_topology = r.boolean();
+        if (define_topology)
+        {
+            if (topology_id != cache->shared_topology.size())
+                throw std::invalid_argument("Repeated/out-of-order product topology definition.");
+            cache->shared_topology.push_back(ExtrudedTopology::decode_base(r.array<char>()));
+        }
+        if (topology_id >= cache->shared_topology.size())
+            throw std::invalid_argument("Unknown product topology reference.");
+        std::map<std::string, std::string> aliases;
+        for (size_t count = r.count(2 * sizeof(uint64_t)); count; --count)
+        {
+            auto from = r.string();
+            auto to = r.string();
+            if (!aliases.emplace(std::move(from), std::move(to)).second)
+                throw std::invalid_argument("Repeated product alias.");
+        }
+        auto topology =
+            cache->shared_topology[topology_id]->with_layers(static_cast<unsigned>(layout.extents[2]), aliases);
+        const auto read_catalog = [&](auto& entries) -> size_t
+        {
+            const auto id = r.value<uint64_t>();
+            const bool define = r.boolean();
+            if (define)
+            {
+                if (id != entries.size())
+                    throw std::invalid_argument("Repeated/out-of-order exact catalog definition.");
+                entries.push_back({r.array<char>(), {}});
+            }
+            if (id >= entries.size())
+                throw std::invalid_argument("Unknown exact construction catalog reference.");
+            return static_cast<size_t>(id);
+        };
+        const auto base_id = read_catalog(cache->shared_base), values_id = read_catalog(cache->shared_axis_values),
+                   axis_id = read_catalog(cache->shared_axis);
+        auto& base = cache->shared_base[base_id];
+        auto& axis = cache->shared_axis[axis_id];
+        auto& values = cache->shared_axis_values[values_id];
+        if (axis.values_id != std::numeric_limits<size_t>::max() && axis.values_id != values_id)
+            throw std::invalid_argument("Shared axis selection changed coordinate table.");
+        axis.values_id = values_id;
+        const auto axis_packet = ExactExtrudedConstruction::combine_axis_parts(values.packet, axis.packet);
+        const auto view = r.array<char>();
+        const auto construction = ExactExtrudedConstruction::decode_shared(
+            topology, base.packet, axis_packet, view, base.anchor, axis.anchor ? axis.anchor : values.anchor);
+        if (!base.anchor)
+            base.anchor = construction;
+        if (!axis.anchor)
+            axis.anchor = construction;
+        if (!values.anchor)
+            values.anchor = construction;
+        return checked(ExtrudedRegion(
+            std::move(name), topology, std::make_shared<const ExtrudedGeometry>(topology, construction)));
+    }
     if (tag==3 || tag==7 || tag==9) return checked(read_explicit(r,std::move(name),layout,tag==9));
     if (tag == 0 || tag == 1 || tag == 4)
     {
@@ -375,12 +475,42 @@ void write_interface(Writer& w, const MultiRegionMesh::Interface& interface)
             w.value(uint64_t(v.faces.size()));
             for (auto [a,b] : v.faces) { w.value(a); w.value(b); }
         }
-        else
+        else if constexpr (std::same_as<T, NonconformingInterface>)
         {
             w.value(v.coarse_region); w.value(v.fine_region); w.value(v.coarse_boundary); w.value(v.fine_boundary);
             w.boolean(v.partial_coarse_patch);
             w.value(uint64_t(v.faces.size()));
             for (const auto& f : v.faces) { w.value(f.coarse_face); w.array(f.fine_faces); }
+        }
+        else
+        {
+            w.value(v.coarse_region);
+            w.value(v.coarse_boundary);
+            w.boolean(v.partial_coarse_patch);
+            w.value(v.coarse_face_count);
+            w.value(uint64_t(v.fine_patches.size()));
+            for (const auto& patch : v.fine_patches)
+            {
+                w.value(patch.region);
+                w.value(uint64_t(patch.patches.size()));
+                for (const auto& native : patch.patches)
+                {
+                    w.value(native.boundary);
+                    w.value(native.face_count);
+                    w.array(native.faces);
+                }
+            }
+            w.value(uint64_t(v.faces.size()));
+            for (const auto& group : v.faces)
+            {
+                w.value(group.coarse_face);
+                w.value(uint64_t(group.fine_faces.size()));
+                for (const auto face : group.fine_faces)
+                {
+                    w.value(face.region);
+                    w.value(face.face);
+                }
+            }
         }
     }, interface);
 }
@@ -405,6 +535,38 @@ MultiRegionMesh::Interface read_interface(Reader& r)
         e.faces.resize(r.count(2 * sizeof(ID)));
         for (auto& [a,b] : e.faces) { a = r.value<ID>(); b = r.value<ID>(); }
         return e;
+    }
+    if (tag == 3)
+    {
+        MultiProviderNonconformingInterface result;
+        result.coarse_region = r.value<size_t>();
+        result.coarse_boundary = r.value<int>();
+        result.partial_coarse_patch = r.boolean();
+        result.coarse_face_count = r.value<uint64_t>();
+        result.fine_patches.resize(r.count(sizeof(size_t) + sizeof(uint64_t)));
+        for (auto& patch : result.fine_patches)
+        {
+            patch.region = r.value<size_t>();
+            patch.patches.resize(r.count(sizeof(int) + 2 * sizeof(uint64_t)));
+            for (auto& native : patch.patches)
+            {
+                native.boundary = r.value<int>();
+                native.face_count = r.value<uint64_t>();
+                native.faces = r.array<ID>();
+            }
+        }
+        result.faces.resize(r.count(2 * sizeof(uint64_t)));
+        for (auto& group : result.faces)
+        {
+            group.coarse_face = r.value<uint64_t>();
+            group.fine_faces.resize(r.count(sizeof(size_t) + sizeof(uint64_t)));
+            for (auto& face : group.fine_faces)
+            {
+                face.region = r.value<size_t>();
+                face.face = r.value<uint64_t>();
+            }
+        }
+        return result;
     }
     if (tag != 2) throw std::invalid_argument("Unknown partition interface tag.");
     NonconformingInterface n;
@@ -441,6 +603,16 @@ std::vector<char> MultiRegionMesh::serialize_partition(std::span<const ID> visib
     w.value(partition_magic); w.value(uint64_t(d_regions.size()));
     for (size_t i = 0; i < d_regions.size(); ++i)
         std::visit([&](const auto& region) { write_region(w, region, d_regions[i].index(), selected[i]); }, d_regions[i]);
+    w.value(uint64_t(d_native_patch_counts.size()));
+    for (const auto& counts : d_native_patch_counts)
+    {
+        w.value(uint64_t(counts.size()));
+        for (const auto& [boundary, count] : counts)
+        {
+            w.value(boundary);
+            w.value(count);
+        }
+    }
     w.value(uint64_t(d_interfaces.size()));
     for (const auto& interface : d_interfaces) write_interface(w, interface);
     w.value(d_tolerance);
@@ -461,6 +633,17 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     mesh->d_comm = std::move(comm);
     TopologyCache topology_cache;
     for (size_t count = r.count(); count; --count) mesh->d_regions.push_back(read_region(r, &topology_cache));
+    mesh->d_native_patch_counts.resize(r.count(sizeof(uint64_t)));
+    if (mesh->d_native_patch_counts.size() != mesh->d_regions.size())
+        throw std::invalid_argument("Invalid native patch-count catalog size.");
+    for (auto& counts : mesh->d_native_patch_counts)
+        for (size_t n = r.count(sizeof(int) + sizeof(ID)); n; --n)
+        {
+            const auto boundary = r.value<int>();
+            const auto count = r.value<ID>();
+            if (!counts.emplace(boundary, count).second)
+                throw std::invalid_argument("Repeated native patch-count catalog entry.");
+        }
     for (size_t count = r.count(); count; --count) mesh->d_interfaces.push_back(read_interface(r));
     mesh->d_tolerance = r.value<InterfaceTolerance>();
     mesh->d_cells = r.array<ID>(); mesh->d_faces = r.array<ID>(); mesh->d_nodes = r.array<ID>(); mesh->d_native_faces = r.array<ID>();
@@ -489,6 +672,66 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
         const auto ids = mesh->topology(region, [](const auto& t) { return t.boundary_batch_ids(); });
         if (std::ranges::find(ids, boundary) == ids.end())
             throw std::invalid_argument("Partition interface boundary is unknown.");
+    };
+    for (size_t region = 0; region < regions; ++region)
+        for (const auto& [boundary, count] : mesh->d_native_patch_counts[region])
+        {
+            boundary_exists(region, boundary);
+            if (!count || count > mesh->region_layout(region).faces)
+                throw std::invalid_argument("Invalid native patch-count catalog cardinality.");
+            const auto actual = mesh->topology(region,
+                [&](const auto& topology) -> std::optional<ID>
+                {
+                    if constexpr (std::same_as<std::remove_cvref_t<decltype(topology)>, ExplicitRegionProvider>)
+                        if (topology.resident_faces() != topology.layout().faces)
+                            return {};
+                    if (auto structured = mesh->structured_boundary_size(region, boundary))
+                        return *structured;
+                    if constexpr (requires {
+                                      topology.native_topology().boundary_face_batch(boundary).face_lids.size();
+                                  })
+                        return topology.native_topology().boundary_face_batch(boundary).face_lids.size();
+                    else if constexpr (requires { topology.native().boundary_face_batch(boundary).face_lids.size(); })
+                        return topology.native().boundary_face_batch(boundary).face_lids.size();
+                    ID result = 0;
+                    for (ID f = 0; f < mesh->region_layout(region).faces; ++f)
+                        result += topology.boundary_id(f) == boundary;
+                    return result;
+                });
+            if (actual && *actual != count)
+                throw std::invalid_argument("Native patch-count catalog differs from complete provider topology.");
+        }
+    for (size_t region = 0; region < regions; ++region)
+    {
+        ID total = 0;
+        for (const auto& [boundary, count] : mesh->d_native_patch_counts[region])
+        {
+            if (count > mesh->region_layout(region).faces - total)
+                throw std::invalid_argument("Native boundary catalog exceeds global face count.");
+            total += count;
+        }
+        mesh->topology(region,
+            [&](const auto& topology)
+            {
+                if constexpr (std::same_as<std::remove_cvref_t<decltype(topology)>, ExplicitRegionProvider>)
+                {
+                    std::map<int, ID> resident;
+                    for (const auto& [face, record] : topology.face_records())
+                        if (mesh->d_native_patch_counts[region].contains(record.boundary))
+                            ++resident[record.boundary];
+                    for (const auto& [boundary, count] : resident)
+                        if (count > mesh->d_native_patch_counts[region].at(boundary))
+                            throw std::invalid_argument("Resident faces contradict native patch cardinality.");
+                }
+            });
+    }
+    const auto authoritative_count = [&](size_t region, int boundary)
+    {
+        const auto& counts = mesh->d_native_patch_counts.at(region);
+        const auto entry = counts.find(boundary);
+        if (entry == counts.end())
+            throw std::invalid_argument("Missing authoritative native patch count.");
+        return entry->second;
     };
     const auto check_face = [&](size_t region, ID face, int boundary) {
         if (face >= mesh->region_layout(region).faces)
@@ -539,9 +782,9 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
                 lookup.second_to_first.emplace_back(b, a);
             }
         }
-        else
+        else if (const auto* legacy = std::get_if<NonconformingInterface>(&mesh->d_interfaces[i]))
         {
-            const auto& n = std::get<NonconformingInterface>(mesh->d_interfaces[i]);
+            const auto& n = *legacy;
             first = n.coarse_region; second = n.fine_region;
             boundary_exists(first, n.coarse_boundary); boundary_exists(second, n.fine_boundary);
             if (first == second || n.faces.empty()) throw std::invalid_argument("Invalid partition coarse/fine interface.");
@@ -584,6 +827,96 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
                 count && lookup.first_to_second.size() != *count)
                 throw std::invalid_argument("Partition coarse/fine mapping does not cover its complete fine patch.");
         }
+        else
+        {
+            const auto& n = std::get<MultiProviderNonconformingInterface>(mesh->d_interfaces[i]);
+            first = n.coarse_region;
+            boundary_exists(first, n.coarse_boundary);
+            if (n.coarse_face_count != authoritative_count(first, n.coarse_boundary) || n.faces.empty() ||
+                n.fine_patches.empty() || !n.coarse_face_count || n.faces.size() > n.coarse_face_count ||
+                (!n.partial_coarse_patch && n.faces.size() != n.coarse_face_count))
+                throw std::invalid_argument("Invalid partition multi-provider coarse coverage.");
+            std::map<size_t, const FineInterfacePatch*> participants;
+            std::map<size_t, ID> expected_counts;
+            std::map<RegionFace, int> membership;
+            for (const auto& participant : n.fine_patches)
+            {
+                if (participant.region == first || participant.patches.empty() ||
+                    !participants.emplace(participant.region, &participant).second)
+                    throw std::invalid_argument("Invalid partition fine participant.");
+                std::set<int> boundaries;
+                for (const auto& patch : participant.patches)
+                {
+                    boundary_exists(participant.region, patch.boundary);
+                    if (!boundaries.insert(patch.boundary).second || !patch.face_count ||
+                        patch.face_count != authoritative_count(participant.region, patch.boundary) ||
+                        patch.faces.size() != patch.face_count)
+                        throw std::invalid_argument("Invalid partition fine participant patch.");
+                    if (patch.face_count >
+                        mesh->region_layout(participant.region).faces - expected_counts[participant.region])
+                        throw std::invalid_argument("Fine participant cardinality exceeds native provider.");
+                    expected_counts[participant.region] += patch.face_count;
+                    if (!std::is_sorted(patch.faces.begin(), patch.faces.end()))
+                        throw std::invalid_argument("Fine patch native membership is not canonical.");
+                    for (auto face : patch.faces)
+                    {
+                        check_face(participant.region, face, patch.boundary);
+                        if (!membership.emplace(RegionFace{participant.region, face}, patch.boundary).second)
+                            throw std::invalid_argument("Fine native face belongs to multiple participant patches.");
+                    }
+                }
+                component[root(first)] = root(participant.region);
+            }
+            second = n.fine_patches.front().region;
+            std::map<size_t, size_t> counts;
+            std::map<std::pair<size_t, int>, ID> patch_counts;
+            const auto available = [&](RegionFace face)
+            {
+                return mesh->topology(face.region,
+                    [&](const auto& topology)
+                    {
+                        if constexpr (std::same_as<std::remove_cvref_t<decltype(topology)>, ExplicitRegionProvider>)
+                            return topology.has_face(face.face);
+                        else
+                            return true;
+                    });
+            };
+            for (size_t group = 0; group < n.faces.size(); ++group)
+            {
+                const auto& mapping = n.faces[group];
+                check_face(first, mapping.coarse_face, n.coarse_boundary);
+                if (mapping.fine_faces.empty())
+                    throw std::invalid_argument("Empty partition multi-provider tile set.");
+                lookup.second_to_first.emplace_back(mapping.coarse_face, group);
+                for (const auto face : mapping.fine_faces)
+                {
+                    const auto participant = participants.find(face.region);
+                    if (participant == participants.end())
+                        throw std::invalid_argument("Undeclared partition fine participant.");
+                    const auto native = membership.find(face);
+                    if (native == membership.end())
+                        throw std::invalid_argument("Mapped fine face is outside declared complete native patches.");
+                    check_face(face.region, face.face, native->second);
+                    lookup.qualified_fine_to_coarse.emplace_back(face, mapping.coarse_face);
+                    ++counts[face.region];
+                    ++patch_counts[{face.region, native->second}];
+                }
+                if (available({first, mapping.coarse_face}) &&
+                    std::all_of(mapping.fine_faces.begin(), mapping.fine_faces.end(), available))
+                    mesh->validate_exact_nested_faces({first, mapping.coarse_face}, mapping.fine_faces);
+            }
+            for (const auto& [region, patch] : participants)
+                if (counts[region] != expected_counts.at(region))
+                    throw std::invalid_argument("Incomplete partition multi-provider fine patch.");
+            for (const auto& participant : n.fine_patches)
+                for (const auto& patch : participant.patches)
+                    if (patch_counts[{participant.region, patch.boundary}] != patch.face_count)
+                        throw std::invalid_argument("Incomplete partition fine native patch coverage.");
+            std::sort(lookup.qualified_fine_to_coarse.begin(), lookup.qualified_fine_to_coarse.end());
+            for (size_t k = 1; k < lookup.qualified_fine_to_coarse.size(); ++k)
+                if (lookup.qualified_fine_to_coarse[k - 1].first == lookup.qualified_fine_to_coarse[k].first)
+                    throw std::invalid_argument("Repeated partition multi-provider fine face.");
+        }
         sort_unique(lookup.first_to_second); sort_unique(lookup.second_to_first);
         component[root(first)] = root(second);
     }
@@ -613,13 +946,23 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
         else if (const auto* e = std::get_if<ExplicitConformingInterface>(&interface))
             for (auto [a, b] : e->faces)
             { unique_explicit(e->first_region, a); unique_explicit(e->second_region, b); }
-        else
+        else if (const auto* legacy = std::get_if<NonconformingInterface>(&interface))
         {
-            const auto& n = std::get<NonconformingInterface>(interface);
+            const auto& n = *legacy;
             for (const auto& f : n.faces)
             {
                 unique_explicit(n.coarse_region, f.coarse_face);
                 for (auto fine : f.fine_faces) unique_explicit(n.fine_region, fine);
+            }
+        }
+        else
+        {
+            const auto& n = std::get<MultiProviderNonconformingInterface>(interface);
+            for (const auto& mapping : n.faces)
+            {
+                unique_explicit(n.coarse_region, mapping.coarse_face);
+                for (const auto face : mapping.fine_faces)
+                    unique_explicit(face.region, face.face);
             }
         }
     for (const auto& patch : patches)
@@ -703,6 +1046,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::merge_partitions(
 
     TopologyCache topology_cache;
     std::vector<Region> regions;
+    Writer descriptor_writer;
     regions.reserve(reference.d_regions.size());
     for (size_t region = 0; region < reference.d_regions.size(); ++region)
     {
@@ -710,10 +1054,11 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::merge_partitions(
         {
             // Reconstruct ownership-independent descriptors so the merged
             // source retains no providers or borrowed data from input shards.
-            Writer writer;
-            std::visit([&](const auto& r) { write_region(writer, r, reference.d_regions[region].index(), {}); },
-                       reference.d_regions[region]);
-            Reader reader{writer.data};
+            descriptor_writer.data.clear();
+            std::visit([&](const auto& r)
+                { write_region(descriptor_writer, r, reference.d_regions[region].index(), {}); },
+                reference.d_regions[region]);
+            Reader reader{descriptor_writer.data};
             regions.push_back(read_region(reader, &topology_cache));
             continue;
         }

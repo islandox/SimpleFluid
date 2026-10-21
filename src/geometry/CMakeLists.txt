@@ -3,6 +3,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     AdaptiveOverlap.cc
     ExtrudedAMR.cc
     PolyhedralAMR.cc
+    MixedAMR.cc
     ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc

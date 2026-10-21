@@ -133,6 +133,8 @@ public:
      * Any unsupported positive sliver rejects the entire split transaction. */
     [[nodiscard]] std::vector<ConvexOctantPiece> split_aabb_midpoints(double minimum_scaled_volume = 0) const;
     [[nodiscard]] bool quality_above(double minimum_scaled_volume) const;
+    [[nodiscard]] std::array<CertifiedGeometryValue,3> axis_spans() const;
+    [[nodiscard]] bool axis_span_exceeds(const ConvexCellGeometry&,std::size_t axis,double ratio) const;
     [[nodiscard]] ConvexClipResult clip(const GeometryHalfspace& halfspace) const;
     [[nodiscard]] ConvexGeometryPtr intersect(const ConvexCellGeometry& other) const;
     /** Exact coverage/disjointness/containment against the actual represented shell. */
@@ -143,6 +145,7 @@ public:
 private:
     friend class ExactExtrudedConstruction;
     friend class ExactPolyhedralComplex;
+    friend class ExactPlanarFace;
     explicit ConvexCellGeometry(std::shared_ptr<const Impl> implementation);
     std::shared_ptr<const Impl> impl_;
 };

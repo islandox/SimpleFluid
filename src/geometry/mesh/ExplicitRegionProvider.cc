@@ -116,6 +116,10 @@ ConvexGeometryPtr ExplicitRegionProvider::atomic_cell_geometry(std::size_t cell)
         throw std::invalid_argument("Metric-only neighbor has no resident atomic certificate.");
     return d_construction->atomic_cell_geometry(cell);
 }
+ExactPlanarFacePtr ExplicitRegionProvider::certified_face_geometry(std::size_t face) const
+{
+    return d_construction ? d_construction->face_geometry(face) : ExactPlanarFacePtr{};
+}
 real_t ExplicitRegionProvider::face_area(std::size_t face) const
 {
     return d_construction ? d_construction->face_area(face) : d_faces.at(face).area_vector.norm();

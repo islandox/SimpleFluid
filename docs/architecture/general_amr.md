@@ -1,6 +1,6 @@
 # AMR for extruded, polyhedral, and mixed-region meshes
 
-**Status: Stages 1–4 are implemented and verified within the stated scope; Stages 5–9 remain proposed.** This document
+**Status: Stages 1–5 are implemented and verified within the stated scope; Stages 6–9 remain proposed.** This document
 defines the implemented hierarchy, certified geometry and sparse remap boundaries and the remaining
 implementation sequence and acceptance contracts. It does not extend the
 supported mesh families of the existing solvers or record dated validation results.
@@ -21,6 +21,8 @@ The [Stage 3 verification record](../verification/general_amr_stage3.md) identif
 the product-provider implementation, focused evidence and qualification limits.
 The [Stage 4 verification record](../verification/general_amr_stage4.md) identifies
 the convex hierarchy/exact explicit-provider scope, focused evidence and limits.
+The [Stage 5 verification record](../verification/general_amr_stage5.md) tracks
+local/mixed provider evidence and its explicit qualification limits.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -73,12 +75,12 @@ flowchart TD
 ```
 
 `AdaptiveHierarchy` is the abstract provider seam implemented in Stage 1.
-Its concrete Cartesian implementation owns immutable native geometry and ancestry
-and selects the existing optimized Cartesian numerical backend. Composition of
-multiple region hierarchy providers and interface ancestry remains proposed for
-later mixed-hierarchy stages. Those providers will supply admissible split/coarsen
-operations, local closure rules, overlap relations and physical resolution metrics.
-The proposed region dispatch follows
+Concrete Cartesian, whole-product and convex-polyhedral implementations own
+immutable native geometry and ancestry. The Cartesian implementation retains its
+optimized numerical backend. Stage 5 adds a mixed assembly over local product
+states and supported hierarchy adapters. Provider
+splits, inverse families and physical resolution metrics remain distinct from
+solver refinement policy. Native region dispatch follows
 [`RegionGeometryView`](../../src/geometry/mesh/MultiRegionMesh.hh), rather than
 erasing every cell query.
 
@@ -314,11 +316,23 @@ runs with identical layouts. Reuse the product representation of
 Avoid one provider per 3D cell. Arbitrary layer-local patterns cannot promise
 one global O(base + layers) representation; storage also includes unique local
 templates, product descriptors, and their interface ancestry.
-Current `ExtrudedTopology` includes layer count, and each `ExtrudedGeometry`
-owns its XY coordinates/base metrics; existing full-template interning does not
-share these across arbitrary runs. Stage 5 must introduce immutable shared
-`BaseTopology`/`BaseMetrics` with lightweight product/indexer and axial views,
-or account for duplicated bases explicitly rather than claiming that bound.
+[`LocalProductAMR`](../../src/geometry/LocalProductAMR.hh) retains independent
+base/interval keys and an interned axial selection for each active base leaf.
+Connected compatible base components form templates; contiguous intervals form
+run views. Factor marks name source product keys. XY or Z coarsening requires
+complete immediate factor siblings on the unchanged other factor. Saved exact
+construction recipes preserve the original domain through inverse families.
+This implemented local-product extension does not change the Stage 3
+whole-column adaptation contract.
+
+`SemiStructMeshTopo` shares immutable base connectivity. Exact product providers
+share base construction/metrics and an axial coordinate DAG independently of
+axial selections, with lightweight layer/indexer and contiguous-run views.
+`ProductKeyView` shares base/Z key vectors rather than copying ancestry into
+every run. State-local interning and merging of compatible adjacent runs avoid
+a global strong cache. Native packets catalog each unique base topology, exact
+base, axial value table and axial selection once, then retain per-run references
+and view descriptors. Display nodes do not replace authoritative constructions.
 
 Refined wall vertices remain on the original polygonal boundary. Projection to
 an analytic cylinder, domain-volume renormalization, and unrequested remeshing
@@ -457,47 +471,145 @@ coverage at large offsets.
 
 ## Mixed-region closure and boundaries
 
-Same-fluid joins retain one connected pressure problem and one canonical
-integrated flux per fine subface. Coarse incidence visits every covering tile;
-[`MultiRegionMesh::restrict_face_flux`](../../src/geometry/mesh/MultiRegionMesh.hh)
-sums signed integrated fluxes without multiplying by area fractions again.
-Material/contact boundaries retain their physical laws and separate coupling
-maps. Coincident faces must not create fluid connectivity. Descendant patch
-labels and material membership survive both refinement and repartitioning.
+The verified Stage 5 implementation below is a
+geometry/native-field/remap extension; it does not enable a general VoF or flow
+solver. Same-fluid joins keep one connected native pressure domain. Contacts
+retain separate native meshes and external coupling maps; coincident geometry
+never creates a pressure join implicitly. Physical region, material, patch,
+fragment and persistent ancestry identities remain separate.
 
-Each region keeps independent ancestry. Closure exchanges actual interface
-subdivision traces and the reconstruction neighborhoods needed across joins.
-It combines provider-local balance, physical size-gradation/quality limits,
-and complete sibling requirements until a collective fixed point. Scalar
-levels from unrelated roots or anisotropic factors are not comparable physical
-sizes. Detect unsupported closure and budget/max-level exhaustion before maps
-or fields are published.
-Initial triangle bases remain conforming; comparable dyadic Z/base-edge traces
-allow at most one generation difference, including required edge/vertex neighbors.
+[`MixedAMRGrid`](../../src/geometry/MixedAMR.hh) accepts zero or more
+`LocalProductAMR` states, supported `CartesianAMR`, `ExtrudedAMR` and
+`PolyhedralAMR` hierarchy adapters, and retained static native participants. An
+optional first-product convenience entry is not a required dummy participant.
+`MixedPatchJoin` names participants and physical patch names, so accepted
+adaptation transactions rebuild joins from candidate native patches rather than
+requiring callers to update changing run ordinals. Typed marks distinguish
+product XY/Z factors, Cartesian block parents and saved convex parent families.
+No-op transactions retain observations; real topology changes advance topology
+and partition generations from the source. Plans pin the exact source
+observation; rejected candidates leave the source unchanged.
+
+Adaptive participant imports retain each exact hierarchy observation and its
+canonical geometry identity/epoch. Both canonical and resident provider guards
+must be valid before rewrapping regions; a fresh `IsoRegion` cannot revive a
+moved source or discard its affine transform. Later participant motion makes
+Mixed observations visibly stale and rejects geometry queries, plans and
+adaptation. Returning to old coordinates through a new epoch does not restore
+compatibility. This retained dependency metadata is O(participants) and is
+included in the assembly metadata storage breakdown.
+
+Each provider retains independent ancestry. Provider-local admission includes
+closed face, edge and vertex neighbors. Comparable dyadic base-edge and axial
+traces allow at most one generation difference, even when a larger physical
+span ratio is configured; unrelated template levels are not compared as physical
+lengths. Exact directional AABB spans enforce the configured physical ratio.
+Whole and local product `contact_violations()` queries derive contacts from base-edge prefixes,
+shared vertices/T-junctions and closed axial addresses without a persistent
+expanded cell/certificate catalog. Mixed assembly rejects a violating local
+state before native publication when provider-local closure is unsupported.
+The initial sixteen-cell fixture retains its nineteen-cell local XY and
+seventeen-cell local Z candidates. Repeated boundary-touching marks
+can reject atomically instead of silently publishing excessive gradation.
+
+Cross-participant closure compares exact physical AABB spans in each direction
+against the configured ratio, using actual canonical same-fluid adjacency,
+including low-level `grid.interfaces` joins; named joins are not a bypass gate. Supported coarse incident
+cells refine under provider depth/quality checks and explicit mixed cell,
+interface-tile and closure-round bounds. Native shared-node incidence checks
+internal supported edge/vertex neighbors. Across different providers, a
+conservative span envelope over each canonical joined face's closed AABB
+neighborhood certifies possible corner scales. Authoritative exact cell/face
+bounds select candidates; unrelated interior cells are excluded. If that
+seam-local envelope cannot prove the bound, the transaction rejects. This can
+reject an overcomplex contact requiring a sharper local seam proof. It does not weld
+coincident independent/contact domains or claim arbitrary mixed-corner closure.
+Contact incidence/pair work has an explicit bootstrap allocation/check budget. Conservative expansion preflight can
+reject before a provider allocates a large candidate. Static refinement requests
+and exhausted/incompatible closure reject the complete transaction. Static
+canonical participants keep native provider identity/epoch, local ordinals and physical
+membership. Their presence does not imply PLIC support for analytic curved or
+nonconvex cells: conservative remap requires every participating cell to have a
+qualified planar convex certificate, or rejects before publishing output.
 
 The existing [`NonconformingInterface`](../../src/geometry/mesh/ConservativeInterface.hh)
-accepts nested planar convex tilings. Its fine faces belong to one
-`fine_region`; `partial_coarse_patch` selects whole coarse faces, and the fine
-patch must be completely covered. A single coarse face's tiles cannot currently
-be spread over several fine regions. Crossed XY-edge and Z-interval splits on
-opposite sides are nonnested: impose compatible closure/grouping or reject.
+retains its one-fine-region contract. The new
+`MultiProviderNonconformingInterface` declares one participant per fine provider,
+with an explicit list of distinct complete `FineNativePatch` records. A provider
+may contribute several native patch IDs to a single coarse-face mapping; their
+physical labels are not merged. Each record retains its native patch count and
+complete face-ID membership. The descriptor maps each selected whole coarse face
+to native `RegionFace` tiles across those providers. Exact face certificates prove coplanarity, containment, disjointness,
+area and first-moment coverage and opposing orientation. A one-tile equality join
+uses the same path for run caps. No mortar polygon or synthetic flux face is
+created. Crossed XY/Z traces without a complete nested native tiling reject;
+this implementation does not promise arbitrary anisotropic seam closure.
+Even a locally graded state can have an unsupported crossed run grouping:
+a fine native patch spanning several Z ranges may need partial use under
+different coarse providers. Complete-patch rules still reject that grouping.
+The raw contact diagnostic therefore covers some states that are not admissible
+native assemblies; it is a diagnosis gate, not permission to bypass native
+coverage or publish unjoined fields.
+`RegionInterfaceDirectory` remains derived lookup data, never ancestry authority.
 
-A later part of stage 5 introduces validated multi-provider canonical-subface
-descriptors when those limits prevent useful local products. Prefer factored
-base-edge × interval descriptions for repeated side seams; retain explicit
-sparse records for irregular tiles. Require full containment, unique coverage,
-orientation, gap/overlap checks, and canonical ownership before enabling them.
-[`RegionInterfaceDirectory`](../../src/geometry/mesh/MultiRegionMesh.hh) remains
-a derived incidence/indexing cache; it is not the ancestry authority.
+Every canonical fine tile stores one integrated flux, in its retained native
+owner orientation. Coarse incidence visits all covering tiles.
+[`restrict_face_flux`](../../src/geometry/mesh/MultiRegionMesh.hh) sums signed
+integrated fluxes using retained native addresses, independently of area ratios
+or floating-point vector dot products. Prolongation uses the same discrete sign
+and positive area ratios; an unrepresentable ratio rejects explicitly. A
+range-only `hypot` fallback rescues finite nonzero area vectors whose ordinary
+squared norm underflows or overflows, preserving ordinary-range arithmetic.
+A genuinely zero vector retains zero scalar area; this does not admit a
+zero-area face to a new join.
 
-Existing structured translated-periodic joins retain matching subdivisions and
-incident-cell image vectors in reconstruction, pressure stabilization, transport,
-and component connectivity. Initial extruded/polyhedral extensions are
-nonperiodic: `ExtrudedTopology` rejects axial periodicity, and translation
-metadata currently belongs only to `StructuredPatchInterface`. New periodic
-descriptors for those providers require separate qualification before use;
-nonconforming periodic joins need an additional gate. Rotated transforms and
-curved faces are outside these stages.
+Versioned native packets retain an independent per-region native patch-count
+catalog captured from complete source topology. Interface declarations cannot
+redefine a complete fine patch by omitting tiles and decrementing their own
+counts. Decoding checks complete procedural topology counts, available explicit
+face records and global entity bounds. Sparse explicit shards keep the catalog
+without acquiring remote geometry; repacketization and configuration signatures
+preserve it. Grouped fine-patch membership adds explicit O(interface tiles)
+metadata to this bounded bootstrap; it is not compressed into a universal
+base-plus-layers seam bound. Each native patch must be completely and uniquely
+covered, and absent/duplicated patch or face declarations reject. A sparse packet
+is a descriptor from a validated source, not an independent proof admitting an
+arbitrary global embedded mesh.
+
+Constructed joins are enabled only for interfaces qualified by the exact nested
+path. Unrelated ordinary legacy joins do not invalidate qualified constructed
+joins elsewhere. Authoritative canonical face certificates close joined cells,
+including an ordinary coarse provider whose face is tiled by constructed fine
+providers. Display-node hulls are not a fallback. Materials and physical patch
+labels remain inherited rather than being inferred from region names or rank.
+Ambiguous duplicate persistent keys reject collectively; the assembler does not
+renumber physical regions to hide missing provider-root provenance.
+
+`MixedContactDomains` retains separate connected assemblies and explicit contact
+patch references. It validates references but supplies no contact constitutive
+law or numerical exchange operator. Existing connected-fluid admission remains
+in force. Structured translated-periodic joins keep their existing matching
+subdivision and image-vector rules. New exact local-product/polyhedral joins
+are nonperiodic; translated/rotated constructed and nonconforming periodic joins
+remain unsupported until separately qualified. Analytic curved subdivision
+remains unsupported.
+
+Stage 5 canonical assembly and complete-family overlap catalogs are explicitly
+bounded replicated bootstrap work. Ancestry-family indexes enumerate overlap
+relations, including independent product-factor directions and empty target
+selections; they do not search every source/target geometry pair. Native
+partition providers remain sparse, but that does not qualify per-rank hierarchy
+scaling. Exact explicit-shard reassembly and live migration remain Stage 6 gates.
+
+`MixedAMR::storage_breakdown()` exposes uniquely accounted native assembly
+providers/derived lookups and owned mixed metadata (participant arrays, joins
+and interfaces) separately from retained participant reports. Those reports overlap
+through shared providers and must not be summed. Local-product/whole-product
+reports include their planner state; Cartesian/polyhedral reports explicitly
+exclude private planner ancestry. Resident partition geometry is separate, and
+partition maps/control-block/allocator overhead are not a complete accounting.
+These are capacity estimates, not a whole-process retained-memory total or RSS
+measurement. Stage 6 must qualify actual distributed payload and memory bounds.
 
 ## Conservative remap and physical resolution
 
@@ -820,7 +932,7 @@ shell without boundary projection or domain renormalization.
 
 ## Implementation stages and focused acceptance
 
-Stages 1–4 are verified within their stated boundaries; Stages 5–9 remain
+Stages 1–5 are verified within their stated boundaries; Stages 6–9 remain
 proposed. Existing tests are starting points for later extensions, not evidence
 that they work. Run focused Debug serial tests,
 then affected MPI cases at 2 and 4 ranks where they establish the intended seam
