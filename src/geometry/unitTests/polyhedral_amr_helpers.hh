@@ -2,7 +2,7 @@
  * @brief Connected native convex fixtures for hierarchy, packet and remap tests.
  */
 #pragma once
-#include "geometry/PolyhedralAMR.hh"
+#include "geometry/mesh/AMR/PolyhedralAMR.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include <Teuchos_DefaultSerialComm.hpp>
 #include <map>
@@ -63,9 +63,10 @@ inline SP<const Meshes::MultiRegionMesh> polyhedral_tetrahedron()
                                                          "tetra", std::make_shared<U>(nodes, cells, boundaries))},
         std::vector<Meshes::MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
 }
-inline Meshes::PolyhedralAMRGrid polyhedral_grid(SP<const Meshes::MultiRegionMesh> mesh = polyhedral_pair())
+inline SimpleFluid::Meshes::AMR::PolyhedralAMRGrid polyhedral_grid(
+    SP<const Meshes::MultiRegionMesh> mesh = polyhedral_pair())
 {
-    Meshes::PolyhedralAMRGrid result;
+    SimpleFluid::Meshes::AMR::PolyhedralAMRGrid result;
     result.mesh = std::move(mesh);
     result.physical_regions.assign(result.mesh->num_cells(), (std::uint64_t{1} << 55) + 19);
     for (std::uint64_t c = 0; c < result.mesh->num_cells(); ++c)

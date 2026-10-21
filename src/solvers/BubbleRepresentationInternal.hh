@@ -25,7 +25,7 @@ public:
     {
         BubbleRepresentationInspection inspection;
         VoF::RepresentationChangeRequest request;
-        std::vector<std::vector<Meshes::AMRBox>> supports;
+        std::vector<std::vector<SimpleFluid::Meshes::AMR::AMRBox>> supports;
         std::shared_ptr<const Snapshot> next;
     };
     BubbleRepresentationEngine(BubbleRepresentationOptions options, RadiolyticGasPhysics::MolarPivotGrid pivots,
@@ -35,7 +35,8 @@ public:
     [[nodiscard]] std::shared_ptr<const Snapshot> snapshot_handle() const noexcept;
     [[nodiscard]] std::shared_ptr<const Snapshot> invalidated_snapshot() const;
     void publish(std::shared_ptr<const Snapshot> snapshot, std::uint64_t revision) noexcept;
-    [[nodiscard]] Prepared prepare(const AdaptiveVoFSolver& flow, const std::vector<Meshes::AMRBox>& headspace) const;
+    [[nodiscard]] Prepared prepare(
+        const AdaptiveVoFSolver& flow, const std::vector<SimpleFluid::Meshes::AMR::AMRBox>& headspace) const;
 
 private:
     BubbleRepresentationOptions options_;

@@ -2,9 +2,9 @@
  * @brief Immutable connected base-patch times axial-run provider state.
  */
 #pragma once
-#include "geometry/ExtrudedAMR.hh"
+#include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include <stdexcept>
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 template<class Key> class ProductKeyView
 {
@@ -112,4 +112,4 @@ private:
     explicit LocalProductAMR(std::shared_ptr<const Data> data) : data_(std::move(data)) {}
     std::shared_ptr<const Data> data_;
 };
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

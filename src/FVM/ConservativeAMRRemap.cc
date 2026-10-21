@@ -158,7 +158,7 @@ Meshes::ConvexGeometryPtr decode_certificate(const std::vector<double>& payload)
     return Meshes::ConvexCellGeometry::decode_exact_certificate(bytes);
 }
 
-std::vector<double> binding_bytes(const Meshes::AdaptiveCellBinding& cell)
+std::vector<double> binding_bytes(const SimpleFluid::Meshes::AMR::AdaptiveCellBinding& cell)
 {
     std::vector<double> bytes;
     auto append = [&](std::uint64_t value)
@@ -169,27 +169,27 @@ std::vector<double> binding_bytes(const Meshes::AdaptiveCellBinding& cell)
     append(cell.key.region);
     append(cell.material);
     append(cell.key.ancestry.index());
-    if (const auto* cartesian = std::get_if<Meshes::CartesianCellAncestry>(&cell.key.ancestry))
+    if (const auto* cartesian = std::get_if<SimpleFluid::Meshes::AMR::CartesianCellAncestry>(&cell.key.ancestry))
     {
         append(cartesian->level);
         for (const auto index : cartesian->index)
             append(index);
     }
-    else if (const auto* convex = std::get_if<Meshes::ConvexCellAncestry>(&cell.key.ancestry))
+    else if (const auto* convex = std::get_if<SimpleFluid::Meshes::AMR::ConvexCellAncestry>(&cell.key.ancestry))
     {
         append(convex->root);
         append(convex->path.size());
         for (const auto child : convex->path)
             append(child);
     }
-    else if (const auto* stationary = std::get_if<Meshes::StaticCellAncestry>(&cell.key.ancestry))
+    else if (const auto* stationary = std::get_if<SimpleFluid::Meshes::AMR::StaticCellAncestry>(&cell.key.ancestry))
     {
         append(stationary->provider_root);
         append(stationary->native_cell);
     }
     else
     {
-        const auto& product = std::get<Meshes::ProductCellAncestry>(cell.key.ancestry);
+        const auto& product = std::get<SimpleFluid::Meshes::AMR::ProductCellAncestry>(cell.key.ancestry);
         append(product.base.root);
         append(product.base.root_template);
         append(product.base.path.size());
@@ -204,12 +204,12 @@ std::vector<double> binding_bytes(const Meshes::AdaptiveCellBinding& cell)
 }
 
 void validate_catalog_shells(
-    const ConservativeAMRRemap::Handle& mesh, const std::vector<Meshes::AdaptiveCellBinding>& catalog)
+    const ConservativeAMRRemap::Handle& mesh, const std::vector<SimpleFluid::Meshes::AMR::AdaptiveCellBinding>& catalog)
 {
     const auto comm = Tpetra::getDefaultComm();
     const auto owned_map = mesh.owned_cell_map();
     std::vector<GO> requested;
-    std::map<GO, const Meshes::AdaptiveCellBinding*> owned_bindings;
+    std::map<GO, const SimpleFluid::Meshes::AMR::AdaptiveCellBinding*> owned_bindings;
     bool valid = true;
     for (const auto& cell : catalog)
     {
@@ -339,12 +339,12 @@ Wide carrier(InventoryCarrier kind, Wide bulk, Wide gas, Wide liquid, double rl,
 struct ConservativeAMRRemap::Impl
 {
     SP<const Handle> source, target;
-    std::shared_ptr<const Meshes::AdaptiveOverlapPlan> plan;
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> plan;
     Teuchos::RCP<const Pack::map_type> source_map, target_map, donors;
     std::unique_ptr<Pack::import_type> importer;
-    std::vector<const Meshes::AdaptiveCellBinding*> source_cells;
-    std::map<std::uint64_t, const Meshes::AdaptiveCellBinding*> source_catalog;
-    std::vector<const Meshes::AdaptiveOverlapRecord*> records;
+    std::vector<const SimpleFluid::Meshes::AMR::AdaptiveCellBinding*> source_cells;
+    std::map<std::uint64_t, const SimpleFluid::Meshes::AMR::AdaptiveCellBinding*> source_catalog;
+    std::vector<const SimpleFluid::Meshes::AMR::AdaptiveOverlapRecord*> records;
     std::vector<Wide> target_volumes;
     std::uint64_t source_epoch = 0, target_epoch = 0;
     const void *source_identity = nullptr, *target_identity = nullptr;
@@ -391,8 +391,8 @@ struct ConservativeAMRRemap::Impl
     }
 };
 
-ConservativeAMRRemap::ConservativeAMRRemap(
-    SP<const Handle> source, SP<const Handle> target, std::shared_ptr<const Meshes::AdaptiveOverlapPlan> overlaps)
+ConservativeAMRRemap::ConservativeAMRRemap(SP<const Handle> source, SP<const Handle> target,
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> overlaps)
     : impl_(std::make_unique<Impl>())
 {
     require(source && target && overlaps, "AMR remap requires native endpoints and a certified overlap plan.");

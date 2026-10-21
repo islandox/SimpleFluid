@@ -4,8 +4,8 @@
 #pragma once
 
 #include "FVM/GeometricVoF.hh"
-#include "geometry/CartesianAMR.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
 
 #include <memory>
 #include <optional>
@@ -86,7 +86,7 @@ struct InterfacePatch
 
 private:
     friend class AdaptiveVoF;
-    std::shared_ptr<const Meshes::CartesianAMR> source_hierarchy_;
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::CartesianAMR> source_hierarchy_;
     std::uint64_t source_entity_ = 0;
     int owner_rank_ = -1;
     Vector lower_{}, upper_{}, plane_normal_{}; ///< Carrier-cell local box and gas-side plane.
@@ -106,19 +106,20 @@ struct RefinementOptions
 struct RefinementHints
 {
     std::vector<double> wake_indicator;            ///< Optional owned-cell dimensionless nonnegative values.
-    std::vector<Meshes::AMRBox> promotion_regions; ///< Refine/protect to maximum level.
+    std::vector<SimpleFluid::Meshes::AMR::AMRBox> promotion_regions; ///< Refine/protect to maximum level.
 };
 
 struct RefinementPlan
 {
     RefinementPlan() = default;
-    std::shared_ptr<const Meshes::CartesianAMR>
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::CartesianAMR>
         source_hierarchy; ///< Guards leaf ordinals against topology replacement.
-    Meshes::HierarchyObservation source_observation; ///< Exact topology, partition and geometry observation.
+    SimpleFluid::Meshes::AMR::HierarchyObservation
+        source_observation;                   ///< Exact topology, partition and geometry observation.
     std::shared_ptr<const void> source_state; ///< Optional retained solver publication; independent of geometry.
     std::optional<std::uint64_t> source_state_revision; ///< Solver control revision when state-dependent.
     std::vector<std::size_t> refine;
-    std::vector<Meshes::AMRBlock> coarsen;
+    std::vector<SimpleFluid::Meshes::AMR::AMRBlock> coarsen;
     bool resolution_limited = false; ///< A protected interface is at max_level above the diameter target.
 };
 
@@ -149,7 +150,7 @@ struct AdaptiveGeometryStorage
 class SIMPLEFLUID_FVM_EXPORT AdaptiveVoF
 {
 public:
-    using Hierarchy = Meshes::CartesianAMR;
+    using Hierarchy = SimpleFluid::Meshes::AMR::CartesianAMR;
     using Handle = MeshHandle<>;
     explicit AdaptiveVoF(std::shared_ptr<const Hierarchy> hierarchy);
     ~AdaptiveVoF();

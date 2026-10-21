@@ -3,7 +3,7 @@
  */
 #pragma once
 
-#include "geometry/CartesianAMR.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "utils/CompensatedSum.hh"
 
 #include <cmath>
@@ -12,7 +12,7 @@
 
 namespace SimpleFluid::VoF::geometry_detail
 {
-inline long double represented_box_volume(const Meshes::AMRBox& box)
+inline long double represented_box_volume(const SimpleFluid::Meshes::AMR::AMRBox& box)
 {
     long double result = 1.0L;
     for (std::size_t a = 0; a < 3; ++a)
@@ -28,7 +28,7 @@ inline long double represented_box_volume(const Meshes::AMRBox& box)
  * The second-order term accounts for accumulation over all intersections.
  */
 inline bool has_complete_reconstruction_coverage(
-    const Meshes::AMRBox& query, std::span<const Meshes::AMROverlap> intersections)
+    const SimpleFluid::Meshes::AMR::AMRBox& query, std::span<const SimpleFluid::Meshes::AMR::AMROverlap> intersections)
 {
     for (std::size_t a = 0; a < 3; ++a)
         if (!std::isfinite(query.lower[a]) || !std::isfinite(query.upper[a]) || !(query.upper[a] > query.lower[a]))

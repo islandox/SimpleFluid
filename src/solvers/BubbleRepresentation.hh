@@ -39,7 +39,7 @@ struct BubbleBirthSeed
 {
     std::uint64_t id = 0;
     VoF::Vector center{};
-    Meshes::AMRBox donor_region{};
+    SimpleFluid::Meshes::AMR::AMRBox donor_region{};
     std::string population;
 };
 
@@ -100,7 +100,7 @@ struct ResolvedBubbleComponent
     std::uint64_t topology_generation = 0;
     std::size_t cells = 0;
     VoF::Vector centroid{};
-    Meshes::AMRBox bounds{};
+    SimpleFluid::Meshes::AMR::AMRBox bounds{};
     double gas_volume = 0;
     double hydrogen_moles = 0;
     double inert_moles = 0;

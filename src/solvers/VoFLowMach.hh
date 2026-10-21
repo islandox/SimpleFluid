@@ -11,8 +11,7 @@
 #include <memory>
 #include <string>
 #include <vector>
-
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 class CartesianAMR;
 }
@@ -162,7 +161,7 @@ struct RepresentationCarrierParcel
 /** Sparse parcels occur once on their event owner; referenced cells may be remote. */
 struct RepresentationChangeRequest
 {
-    std::shared_ptr<const Meshes::CartesianAMR> source_hierarchy;
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::CartesianAMR> source_hierarchy;
     std::uint64_t accepted_state_revision = 0;
     std::vector<RepresentationGasParcel> gas_parcels;
     std::vector<RepresentationCarrierParcel> carrier_parcels;

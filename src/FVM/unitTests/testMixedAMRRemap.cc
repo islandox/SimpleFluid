@@ -19,9 +19,9 @@ using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 struct Bound
 {
-    std::shared_ptr<const MixedAMR> hierarchy;
+    std::shared_ptr<const ::SimpleFluid::Meshes::AMR::MixedAMR> hierarchy;
     SP<Handle> mesh;
-    explicit Bound(std::shared_ptr<const MixedAMR> h) : hierarchy(std::move(h))
+    explicit Bound(std::shared_ptr<const ::SimpleFluid::Meshes::AMR::MixedAMR> h) : hierarchy(std::move(h))
     {
         CompositePartitionOptions options;
         options.policy = CompositePartitionOptions::Policy::ContiguousCanonical;
@@ -31,18 +31,18 @@ struct Bound
         hierarchy = hierarchy->with_partition(std::make_shared<const CompositePartition<>>(p));
         mesh = std::make_shared<Handle>(*hierarchy->native_partition());
     }
-    std::vector<AdaptiveCellBinding> cells() const
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> cells() const
     {
-        std::vector<AdaptiveCellBinding> result;
+        std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> result;
         for (std::uint64_t c = 0; c < hierarchy->geometry()->num_cells(); ++c)
             result.push_back({hierarchy->cell_key(c), c, hierarchy->cell_material(c), hierarchy->cell_geometry(c)});
         return result;
     }
 };
-std::shared_ptr<const AdaptiveOverlapPlan> plan(const Bound& a, const Bound& b)
+std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> plan(const Bound& a, const Bound& b)
 {
-    return AdaptiveOverlapPlan::build(a.hierarchy->observation(), b.hierarchy->observation(), a.cells(), b.cells(),
-        a.hierarchy->overlap_relations(*b.hierarchy));
+    return ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(a.hierarchy->observation(),
+        b.hierarchy->observation(), a.cells(), b.cells(), a.hierarchy->overlap_relations(*b.hierarchy));
 }
 AMRRemapPhases phases(const Bound& b)
 {
@@ -99,7 +99,7 @@ void native_fields(const Bound& b)
 }
 TEST(MixedAMRRemapTest, ProductPolyhedralTiltedPhaseAmountsAndReverseHaveActualEmptyOwners)
 {
-    auto root = std::make_shared<MixedAMR>(test::mixed_joined_grid(3));
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(test::mixed_joined_grid(3));
     auto k = test::first_product(*root);
     Bound source(root), target(root->adapt({k}, {k}));
     native_fields(source);
@@ -134,7 +134,7 @@ TEST(MixedAMRRemapTest, ProductPolyhedralTiltedPhaseAmountsAndReverseHaveActualE
 }
 TEST(MixedAMRRemapTest, RankLocalInvalidPlanesAndMapReplacementPreserveAcceptedOutputs)
 {
-    auto root = std::make_shared<MixedAMR>(test::mixed_joined_grid());
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(test::mixed_joined_grid());
     auto k = test::first_product(*root);
     Bound source(root), target(root->adapt({k}, {k}));
     ConservativeAMRRemap remap(source.mesh, target.mesh, plan(source, target));
@@ -156,7 +156,7 @@ TEST(MixedAMRRemapTest, RankLocalInvalidPlanesAndMapReplacementPreserveAcceptedO
 }
 TEST(MixedAMRRemapTest, ExplicitPureMicroscopicAndSubnormalInventoriesRemainPaired)
 {
-    auto root = std::make_shared<MixedAMR>(test::mixed_joined_grid());
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(test::mixed_joined_grid());
     auto k = test::first_product(*root);
     Bound source(root), target(root->adapt({k}, {k}));
     ConservativeAMRRemap remap(source.mesh, target.mesh, plan(source, target));
@@ -188,7 +188,7 @@ TEST(MixedAMRRemapTest, RemoteInactiveSiblingMetadataStillAuthenticatesForBothFa
 {
     if (Tpetra::getDefaultComm()->getSize() < 2)
         GTEST_SKIP() << "Remote owner checks require MPI.";
-    auto root = std::make_shared<MixedAMR>(test::mixed_joined_grid());
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(test::mixed_joined_grid());
     auto k = test::first_product(*root);
     Bound source(root), target(root->adapt({k}, {k}));
     auto from = source.cells(), to = target.cells();
@@ -201,7 +201,7 @@ TEST(MixedAMRRemapTest, RemoteInactiveSiblingMetadataStillAuthenticatesForBothFa
         for (auto& c : to)
             c.material ^= 1;
     }
-    auto altered = AdaptiveOverlapPlan::build(
+    auto altered = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
         source.hierarchy->observation(), target.hierarchy->observation(), from, to, relations);
     EXPECT_THROW((void) ConservativeAMRRemap(source.mesh, target.mesh, altered), std::invalid_argument);
 }
@@ -212,12 +212,12 @@ TEST(MixedAMRRemapTest, StaticConvexInventoryAndLargeRootIdentitySurviveProductA
     grid.adaptive.clear();
     constexpr std::uint64_t provider_root = (std::uint64_t{1} << 60) + 123;
     grid.stationary.push_back({stationary->native_geometry()->regions().front(), 9, 5, provider_root});
-    auto root = std::make_shared<MixedAMR>(grid);
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(grid);
     const auto product = test::first_product(*root);
     auto fine = root->adapt({}, {product});
     const auto source_static = root->cell_key(1), target_static = fine->cell_key(2);
     ASSERT_EQ(source_static, target_static);
-    const auto provenance = std::get<StaticCellAncestry>(source_static.ancestry);
+    const auto provenance = std::get<::SimpleFluid::Meshes::AMR::StaticCellAncestry>(source_static.ancestry);
     EXPECT_EQ(provenance.provider_root, provider_root);
     EXPECT_EQ(provenance.native_cell, 0u);
     EXPECT_EQ(root->cell_material(1), fine->cell_material(2));
@@ -263,15 +263,15 @@ TEST(MixedAMRRemapTest, StaticConvexInventoryAndLargeRootIdentitySurviveProductA
             if (Tpetra::getDefaultComm()->getRank() == 0)
                 for (auto* catalog : {&from, &to})
                     for (auto& cell : *catalog)
-                        if (auto* key = std::get_if<StaticCellAncestry>(&cell.key.ancestry))
+                        if (auto* key = std::get_if<::SimpleFluid::Meshes::AMR::StaticCellAncestry>(&cell.key.ancestry))
                         {
                             if (forge_root)
                                 key->provider_root ^= std::uint64_t{1} << 61;
                             else
                                 cell.material ^= 1;
                         }
-            const auto forged = AdaptiveOverlapPlan::build(source_observation, target_observation, from, to,
-                source.hierarchy->overlap_relations(*target.hierarchy));
+            const auto forged = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(source_observation,
+                target_observation, from, to, source.hierarchy->overlap_relations(*target.hierarchy));
             EXPECT_THROW((void) ConservativeAMRRemap(source.mesh, target.mesh, forged), std::invalid_argument);
             EXPECT_EQ(output.gas_volume, accepted.gas_volume);
             EXPECT_EQ(output.carrier_volume, accepted.carrier_volume);

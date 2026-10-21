@@ -2,7 +2,7 @@
  * @brief Local factor ancestry, shared native views and exact face certificates.
  */
 #include "geometry/ExactPlanarFace.hh"
-#include "geometry/LocalProductAMR.hh"
+#include "geometry/mesh/AMR/LocalProductAMR.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
 #include <cmath>
@@ -16,9 +16,9 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-ExtrudedAMRGrid grid()
+::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid grid()
 {
-    ExtrudedAMRGrid g;
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid g;
     for (unsigned j = 0; j < 3; ++j)
         for (unsigned i = 0; i < 3; ++i)
             g.xy_nodes.push_back({double(i), double(j), 0});
@@ -27,19 +27,21 @@ ExtrudedAMRGrid grid()
     g.boundary_aliases = {{"zmin", "floor"}, {"zmax", "roof"}, {"side", "wall"}};
     return g;
 }
-ProductCellAncestry mark(unsigned base = 0, unsigned interval = 1)
+::SimpleFluid::Meshes::AMR::ProductCellAncestry mark(unsigned base = 0, unsigned interval = 1)
 {
     return {{base, 1, {}}, {interval, {}}};
 }
-std::map<AdaptiveCellKey, ConvexGeometryPtr> cells(const LocalProductAMR& h)
+std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey, ConvexGeometryPtr> cells(
+    const ::SimpleFluid::Meshes::AMR::LocalProductAMR& h)
 {
-    std::map<AdaptiveCellKey, ConvexGeometryPtr> result;
+    std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey, ConvexGeometryPtr> result;
     for (std::size_t r = 0; r < h.runs().size(); ++r)
         for (std::uint64_t c = 0; c < h.runs()[r].region.layout().cells; ++c)
             EXPECT_TRUE(result.emplace(h.cell_key(r, c), h.cell_geometry(r, c)).second);
     return result;
 }
-void same_cells(const LocalProductAMR& a, const LocalProductAMR& b)
+void same_cells(
+    const ::SimpleFluid::Meshes::AMR::LocalProductAMR& a, const ::SimpleFluid::Meshes::AMR::LocalProductAMR& b)
 {
     const auto first = cells(a), second = cells(b);
     ASSERT_EQ(first.size(), second.size());
@@ -50,7 +52,8 @@ void same_cells(const LocalProductAMR& a, const LocalProductAMR& b)
         EXPECT_TRUE(geometry->equivalent(*it->second));
     }
 }
-void covers(const LocalProductAMR& source, const LocalProductAMR& target)
+void covers(const ::SimpleFluid::Meshes::AMR::LocalProductAMR& source,
+    const ::SimpleFluid::Meshes::AMR::LocalProductAMR& target)
 {
     const auto old = cells(source), next = cells(target);
     for (const auto& [key, geometry] : old)
@@ -64,7 +67,7 @@ void covers(const LocalProductAMR& source, const LocalProductAMR& target)
 }
 TEST(LocalProductAMRTest, SelectedColumnAndIntervalGiveNineteenOrSeventeenCells)
 {
-    LocalProductAMR source(grid());
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     EXPECT_EQ(source.storage_counts().cells, 16U);
     ASSERT_EQ(source.runs().size(), 1U);
     auto xy = source.adapt({mark()});
@@ -77,13 +80,13 @@ TEST(LocalProductAMRTest, SelectedColumnAndIntervalGiveNineteenOrSeventeenCells)
     covers(source, *z);
     auto before = cells(source), after = cells(*xy);
     for (const auto& [key, geometry] : before)
-        if (key.ancestry != AdaptiveCellKey{source.cell_key(0, 0).region, mark()}.ancestry)
+        if (key.ancestry != ::SimpleFluid::Meshes::AMR::AdaptiveCellKey{source.cell_key(0, 0).region, mark()}.ancestry)
         {
             auto found = after.find(key);
             ASSERT_NE(found, after.end());
             EXPECT_TRUE(geometry->equivalent(*found->second));
         }
-    auto whole = ExtrudedAMR(grid()).adapt({0});
+    auto whole = ::SimpleFluid::Meshes::AMR::ExtrudedAMR(grid()).adapt({0});
     EXPECT_GE(whole->geometry()->num_cells(), 28U);
     EXPECT_GT(whole->geometry()->num_cells(), xy->storage_counts().cells);
     std::cout << "Local product cells: baseline=16 local_xy=" << xy->storage_counts().cells
@@ -92,22 +95,22 @@ TEST(LocalProductAMRTest, SelectedColumnAndIntervalGiveNineteenOrSeventeenCells)
 }
 TEST(LocalProductAMRTest, FactorOrderCompleteFamiliesAndPatchLabelsRecoverOriginalDomain)
 {
-    LocalProductAMR source(grid());
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     auto xy = source.adapt({mark()});
-    std::vector<ProductCellAncestry> refine_z;
+    std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry> refine_z;
     for (const auto& [key, geometry] : cells(*xy))
     {
-        const auto p = std::get<ProductCellAncestry>(key.ancestry);
+        const auto p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(key.ancestry);
         if (p.base.root == 0 && !p.base.path.empty() && p.axial == mark().axial)
             refine_z.push_back(p);
     }
     ASSERT_EQ(refine_z.size(), 4U);
     auto xyz = xy->adapt({}, refine_z);
     auto z = source.adapt({}, {mark()});
-    std::vector<ProductCellAncestry> refine_xy;
+    std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry> refine_xy;
     for (const auto& [key, geometry] : cells(*z))
     {
-        const auto p = std::get<ProductCellAncestry>(key.ancestry);
+        const auto p = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(key.ancestry);
         if (p.base == mark().base && p.axial.root == 1 && !p.axial.path.empty())
             refine_xy.push_back(p);
     }
@@ -118,7 +121,7 @@ TEST(LocalProductAMRTest, FactorOrderCompleteFamiliesAndPatchLabelsRecoverOrigin
     same_cells(*xyz, *zxy);
     same_cells(*xyz, *together);
     covers(source, *xyz);
-    std::vector<ProductCellAncestry> coarsen_xy;
+    std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry> coarsen_xy;
     for (const auto& p : refine_xy)
         coarsen_xy.push_back({mark().base, p.axial});
     auto xy_restored = xyz->adapt({}, {}, coarsen_xy);
@@ -142,7 +145,7 @@ TEST(LocalProductAMRTest, FactorOrderCompleteFamiliesAndPatchLabelsRecoverOrigin
 }
 TEST(LocalProductAMRTest, RepeatedRunsShareBaseTopologyMetricsAxisValuesAndKeyViews)
 {
-    LocalProductAMR source(grid());
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     auto repeated = source.adapt({mark(0, 1), mark(0, 3)});
     const auto counts = repeated->storage_counts();
     EXPECT_EQ(counts.cells, 22U);
@@ -177,7 +180,7 @@ TEST(LocalProductAMRTest, RepeatedRunsShareBaseTopologyMetricsAxisValuesAndKeyVi
 }
 TEST(LocalProductAMRTest, DiscardedCyclesReleaseTemplatesAndMergeAdjacentRuns)
 {
-    auto source = std::make_shared<const LocalProductAMR>(grid());
+    auto source = std::make_shared<const ::SimpleFluid::Meshes::AMR::LocalProductAMR>(grid());
     const auto baseline = source->storage_report().measured_bytes();
     const auto initial = source->storage_counts();
     auto current = source;
@@ -203,7 +206,7 @@ TEST(LocalProductAMRTest, DiscardedCyclesReleaseTemplatesAndMergeAdjacentRuns)
 }
 TEST(LocalProductAMRTest, SharedCodecBindsPartsAndPreservesRunOffsetWithoutDisplayCopies)
 {
-    LocalProductAMR source(grid());
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     auto local = source.adapt({mark()});
     std::map<const void*, std::shared_ptr<const ExtrudedTopology>> topology;
     std::map<const void*, std::shared_ptr<const ExactExtrudedConstruction>> bases, values;
@@ -293,7 +296,7 @@ TEST(LocalProductAMRTest, LocalFailuresAreAtomicAndRankDivergenceRejectsCollecti
 {
     auto g = grid();
     g.max_depth = 1;
-    LocalProductAMR source(g);
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(g);
     const auto identity = source.identity();
     auto fine = source.adapt({mark()});
     auto deep = mark();
@@ -304,8 +307,9 @@ TEST(LocalProductAMRTest, LocalFailuresAreAtomicAndRankDivergenceRejectsCollecti
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() > 1)
     {
-        EXPECT_THROW((void) source.adapt(comm->getRank() ? std::vector<ProductCellAncestry>{mark()}
-                                                         : std::vector<ProductCellAncestry>{}),
+        EXPECT_THROW(
+            (void) source.adapt(comm->getRank() ? std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry>{mark()}
+                                                : std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry>{}),
             std::invalid_argument);
         auto invalid = mark();
         invalid.base.root = 999;
@@ -315,12 +319,12 @@ TEST(LocalProductAMRTest, LocalFailuresAreAtomicAndRankDivergenceRejectsCollecti
 }
 TEST(LocalProductAMRTest, ClosedContactsAdmitFirstSplitAndDetectFurtherUngradedDescendants)
 {
-    LocalProductAMR source(grid());
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     EXPECT_TRUE(source.contact_violations(2).empty());
     auto first = source.adapt({mark()});
     EXPECT_TRUE(first->contact_violations(2).empty());
     EXPECT_TRUE(source.adapt({}, {mark()})->contact_violations(2).empty());
-    std::vector<ProductCellAncestry> children;
+    std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry> children;
     for (unsigned child = 0; child < 4; ++child)
     {
         auto key = mark();
@@ -343,7 +347,7 @@ TEST(LocalProductAMRTest, AdjacentAxialBranchesEnforceIndependentTraceLimitAndBu
 {
     auto g = grid();
     g.z_edges = {0, 1};
-    LocalProductAMR source(g);
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(g);
     auto root = mark(0, 0);
     auto first = source.adapt({}, {root});
     auto left = root;
@@ -357,7 +361,7 @@ TEST(LocalProductAMRTest, AdjacentAxialBranchesEnforceIndependentTraceLimitAndBu
         violations.begin(), violations.end(), [](const auto& v) { return v.trace_jump_exceeded && !v.span_exceeded; }));
     EXPECT_THROW((void) source.contact_violations(16, 1, 1), std::invalid_argument);
     EXPECT_TRUE(source.contact_violations(16).empty());
-    ExtrudedAMR whole(g);
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMR whole(g);
     auto a = whole.adapt({}, {0});
     auto b = a->adapt({}, {0});
     auto c = b->adapt({}, {1});
@@ -371,7 +375,7 @@ TEST(LocalProductAMRTest, DyadicEdgeEndpointsRetainTraceDepthWithLoosePhysicalRa
 {
     auto g = grid();
     g.z_edges = {0, 1};
-    LocalProductAMR source(g);
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(g);
     auto root = mark(0, 0);
     auto first = source.adapt({root});
     auto left = root, right = root;
@@ -415,7 +419,7 @@ TEST(LocalProductAMRTest, DyadicEdgeEndpointsRetainTraceDepthWithLoosePhysicalRa
 }
 TEST(LocalProductAMRTest, ExactFaceBoundsRetainClosedTranslatedTinyContact)
 {
-    LocalProductAMR source(grid());
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     auto cell = source.cell_geometry(0, 0);
     const std::vector<GeometryPoint> on = {{0, 0, 0}, {0, 1, 0}, {0, 1, .25}, {0, 0, .25}};
     auto face = ExactPlanarFace::make(on);
@@ -424,7 +428,7 @@ TEST(LocalProductAMRTest, ExactFaceBoundsRetainClosedTranslatedTinyContact)
     auto shifted_grid = grid();
     for (auto& point : shifted_grid.xy_nodes)
         point[0] += 1e6;
-    LocalProductAMR shifted(shifted_grid);
+    ::SimpleFluid::Meshes::AMR::LocalProductAMR shifted(shifted_grid);
     auto translated_cell = shifted.cell_geometry(0, 0);
     EXPECT_TRUE(face->translated({1e6, 0, 0})->cell_bounds_overlap(*translated_cell));
 }

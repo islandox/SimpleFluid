@@ -25,13 +25,13 @@ int main(int argc, char** argv)
     const std::size_t repetitions = argc > 2 ? std::stoul(argv[2]) : 3;
     if (block_cells < 2 || block_cells % 2 || repetitions == 0)
         return 2;
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {4, 2, 1};
     grid.block_cells = {block_cells, block_cells, block_cells};
     grid.extent = {2.0, 1.0, 0.5};
     grid.periodic = {true, true, true};
     grid.max_level = 1;
-    const auto hierarchy = std::make_shared<Meshes::CartesianAMR>(grid);
+    const auto hierarchy = std::make_shared<SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     const auto start = Clock::now();
     AdaptiveVoF geometry(hierarchy);
     const auto constructed = Clock::now();

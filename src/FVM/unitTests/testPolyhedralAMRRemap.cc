@@ -21,9 +21,9 @@ using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 struct Bound
 {
-    std::shared_ptr<const PolyhedralAMR> hierarchy;
+    std::shared_ptr<const ::SimpleFluid::Meshes::AMR::PolyhedralAMR> hierarchy;
     SP<Handle> mesh;
-    explicit Bound(std::shared_ptr<const PolyhedralAMR> h) : hierarchy(std::move(h))
+    explicit Bound(std::shared_ptr<const ::SimpleFluid::Meshes::AMR::PolyhedralAMR> h) : hierarchy(std::move(h))
     {
         CompositePartitionOptions options;
         options.policy = CompositePartitionOptions::Policy::ContiguousCanonical;
@@ -34,18 +34,18 @@ struct Bound
         hierarchy = hierarchy->with_partition(partition);
         mesh = std::make_shared<Handle>(*hierarchy->native_partition());
     }
-    std::vector<AdaptiveCellBinding> cells() const
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> cells() const
     {
-        std::vector<AdaptiveCellBinding> result;
+        std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> result;
         for (std::uint64_t c = 0; c < hierarchy->geometry()->num_cells(); ++c)
             result.push_back({hierarchy->cell_key(c), c, hierarchy->cell_material(c), hierarchy->cell_geometry(c)});
         return result;
     }
 };
-std::shared_ptr<const AdaptiveOverlapPlan> plan(const Bound& a, const Bound& b)
+std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> plan(const Bound& a, const Bound& b)
 {
-    return AdaptiveOverlapPlan::build(a.hierarchy->observation(), b.hierarchy->observation(), a.cells(), b.cells(),
-        a.hierarchy->overlap_relations(*b.hierarchy));
+    return ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(a.hierarchy->observation(),
+        b.hierarchy->observation(), a.cells(), b.cells(), a.hierarchy->overlap_relations(*b.hierarchy));
 }
 AMRRemapPhases phases(const Bound& bound)
 {
@@ -105,7 +105,7 @@ void traversal(const Bound& bound)
 } // namespace
 TEST(PolyhedralAMRRemapTest, UnequalSkewCutsAndCoarseningKeepNativeFluxesAndPhysicalInventories)
 {
-    const auto root = std::make_shared<PolyhedralAMR>(test::polyhedral_grid());
+    const auto root = std::make_shared<::SimpleFluid::Meshes::AMR::PolyhedralAMR>(test::polyhedral_grid());
     Bound coarse(root), fine(root->adapt({0, 1}));
     ConservativeAMRRemap forward(coarse.mesh, fine.mesh, plan(coarse, fine)),
         reverse(fine.mesh, coarse.mesh, plan(fine, coarse));
@@ -142,7 +142,8 @@ TEST(PolyhedralAMRRemapTest, UnequalSkewCutsAndCoarseningKeepNativeFluxesAndPhys
 }
 TEST(PolyhedralAMRRemapTest, VariableTetrahedralFamiliesRetainExplicitPureSubnormalPairedCarriers)
 {
-    const auto root = std::make_shared<PolyhedralAMR>(test::polyhedral_grid(test::polyhedral_tetrahedron()));
+    const auto root = std::make_shared<::SimpleFluid::Meshes::AMR::PolyhedralAMR>(
+        test::polyhedral_grid(test::polyhedral_tetrahedron()));
     Bound coarse(root), fine(root->adapt({0}));
     ConservativeAMRRemap remap(coarse.mesh, fine.mesh, plan(coarse, fine));
     // Resolved tetra children do not have equal bulk weights; the microscopic
@@ -191,7 +192,7 @@ TEST(PolyhedralAMRRemapTest, VariableTetrahedralFamiliesRetainExplicitPureSubnor
 }
 TEST(PolyhedralAMRRemapTest, InvalidLocalInventoryAndReplacedNativeMapPreserveOutput)
 {
-    const auto root = std::make_shared<PolyhedralAMR>(test::polyhedral_grid());
+    const auto root = std::make_shared<::SimpleFluid::Meshes::AMR::PolyhedralAMR>(test::polyhedral_grid());
     Bound coarse(root), fine(root->adapt({0, 1}));
     ConservativeAMRRemap remap(coarse.mesh, fine.mesh, plan(coarse, fine));
     const auto physical = phases(coarse);
@@ -216,7 +217,7 @@ TEST(PolyhedralAMRRemapTest, RemoteConvexMetadataReplicasCannotBypassExactOwnerC
 {
     if (Tpetra::getDefaultComm()->getSize() < 2)
         GTEST_SKIP() << "Remote owner binding needs MPI.";
-    const auto root = std::make_shared<PolyhedralAMR>(test::polyhedral_grid());
+    const auto root = std::make_shared<::SimpleFluid::Meshes::AMR::PolyhedralAMR>(test::polyhedral_grid());
     Bound coarse(root), fine(root->adapt({0, 1}));
     EXPECT_NO_THROW((void) ConservativeAMRRemap(coarse.mesh, fine.mesh, plan(coarse, fine)));
     auto from = coarse.cells(), to = fine.cells();
@@ -225,7 +226,7 @@ TEST(PolyhedralAMRRemapTest, RemoteConvexMetadataReplicasCannotBypassExactOwnerC
             for (auto& cell : *cells)
                 cell.material ^= std::uint64_t{1} << 63;
     const auto relations = coarse.hierarchy->overlap_relations(*fine.hierarchy);
-    const auto bad =
-        AdaptiveOverlapPlan::build(coarse.hierarchy->observation(), fine.hierarchy->observation(), from, to, relations);
+    const auto bad = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
+        coarse.hierarchy->observation(), fine.hierarchy->observation(), from, to, relations);
     EXPECT_THROW((void) ConservativeAMRRemap(coarse.mesh, fine.mesh, bad), std::invalid_argument);
 }

@@ -18,8 +18,8 @@ namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::VoF;
-using Hierarchy = Meshes::CartesianAMR;
-using Grid = Meshes::AMRGrid;
+using Hierarchy = SimpleFluid::Meshes::AMR::CartesianAMR;
+using Grid = SimpleFluid::Meshes::AMR::AMRGrid;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 

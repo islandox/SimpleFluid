@@ -18,7 +18,7 @@ namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::VoF;
-using Hierarchy = Meshes::CartesianAMR;
+using Hierarchy = SimpleFluid::Meshes::AMR::CartesianAMR;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
@@ -120,7 +120,7 @@ double gas_volume(const AdaptiveVoF& geometry, const std::vector<double>& fracti
 
 TEST(AdaptiveVoFThreeDimensionalTest, ObliqueSphereCrossesCoarseFineAndPartitionFacesConservatively)
 {
-    Meshes::AMRGrid config;
+    SimpleFluid::Meshes::AMR::AMRGrid config;
     config.root_blocks = {4, 2, 2};
     config.block_cells = {4, 4, 4};
     config.extent = {1.0, 0.5, 0.5};

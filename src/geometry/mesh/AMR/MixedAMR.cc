@@ -1,6 +1,6 @@
-#include "geometry/MixedAMR.hh"
-#include "geometry/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/MixedAMR.hh"
 #include "geometry/ExactPlanarFace.hh"
+#include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultSerialComm.hpp>
 #include <Tpetra_Core.hpp>
@@ -15,7 +15,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 namespace
 {
@@ -1534,4 +1534,4 @@ void MixedContactDomains::validate() const
             throw std::invalid_argument("Unknown external contact patch.");
     }
 }
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

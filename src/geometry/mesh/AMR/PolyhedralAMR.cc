@@ -1,7 +1,7 @@
 /** @file PolyhedralAMR.cc
  * @brief Collective convex split/coarsen transactions and bounded canonical topology.
  */
-#include "geometry/PolyhedralAMR.hh"
+#include "geometry/mesh/AMR/PolyhedralAMR.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultSerialComm.hpp>
@@ -16,7 +16,7 @@
 #include <set>
 #include <sstream>
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 namespace
 {
@@ -545,4 +545,4 @@ std::vector<AdaptiveAncestryRelation> PolyhedralAMR::overlap_relations(
     }
     return result;
 }
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

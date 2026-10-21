@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/AdaptiveVoF.hh"
-#include "geometry/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 
 namespace SimpleFluid::VoF
 {
@@ -68,8 +68,8 @@ class SIMPLEFLUID_FVM_EXPORT ConservativeAMRRemap
 {
 public:
     using Handle = MeshHandle<>;
-    ConservativeAMRRemap(
-        SP<const Handle> source, SP<const Handle> target, std::shared_ptr<const Meshes::AdaptiveOverlapPlan> overlaps);
+    ConservativeAMRRemap(SP<const Handle> source, SP<const Handle> target,
+        std::shared_ptr<const SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> overlaps);
     ~ConservativeAMRRemap();
     ConservativeAMRRemap(ConservativeAMRRemap&&) noexcept;
     ConservativeAMRRemap& operator=(ConservativeAMRRemap&&) noexcept;

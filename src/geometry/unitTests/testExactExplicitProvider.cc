@@ -18,7 +18,7 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 } // namespace
 TEST(ExactExplicitProviderTest, SparsePacketRetainsOnlyVisibleCertificatesAndMetricNeighbors)
 {
-    PolyhedralAMR parent(test::polyhedral_grid());
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR parent(test::polyhedral_grid());
     const auto fine = parent.adapt({0, 1})->adapt({}, {parent.cell_key(0)});
     const std::vector<std::uint64_t> visible{0};
     const auto packet = fine->geometry()->serialize_partition(visible);
@@ -73,7 +73,7 @@ TEST(ExactExplicitProviderTest, SparsePacketRetainsOnlyVisibleCertificatesAndMet
 }
 TEST(ExactExplicitProviderTest, ExactRecordTamperingRejectsWhileLegacyConstructorRemainsAvailable)
 {
-    PolyhedralAMR hierarchy(test::polyhedral_grid());
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR hierarchy(test::polyhedral_grid());
     const auto& source = std::get<DistributedExplicitRegion>(hierarchy.geometry()->regions().front()).topology();
     std::vector<ExplicitRegionProvider::Cell> cells;
     std::vector<ExplicitRegionProvider::Face> faces;
@@ -99,7 +99,7 @@ TEST(ExactExplicitProviderTest, ExactRecordTamperingRejectsWhileLegacyConstructo
 }
 TEST(ExactExplicitProviderTest, ExactReassemblyRejectsAndLegacySparseMergeStillWorks)
 {
-    PolyhedralAMR hierarchy(test::polyhedral_grid());
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR hierarchy(test::polyhedral_grid());
     const std::vector<std::uint64_t> all{0, 1};
     const auto exact = MultiRegionMesh::deserialize_partition(
         hierarchy.geometry()->serialize_partition(all), Tpetra::getDefaultComm());
@@ -119,7 +119,7 @@ TEST(ExactExplicitProviderTest, ExactReassemblyRejectsAndLegacySparseMergeStillW
 
 TEST(ExactExplicitProviderTest, UnlabelledExteriorRetainsAnExplicitEmptyGlobalSchema)
 {
-    PolyhedralAMR parent(test::polyhedral_grid(test::polyhedral_pair(0, false)));
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR parent(test::polyhedral_grid(test::polyhedral_pair(0, false)));
     const auto fine = parent.adapt({0, 1});
     const std::vector<std::uint64_t> visible{0};
     const auto restored = MultiRegionMesh::deserialize_partition(

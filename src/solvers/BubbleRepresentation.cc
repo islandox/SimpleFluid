@@ -28,7 +28,7 @@ using Pack = DefaultTpetraTypes;
 using LO = Pack::local_ordinal_type;
 using GO = Pack::global_ordinal_type;
 using ID = std::uint64_t;
-using Box = Meshes::AMRBox;
+using Box = SimpleFluid::Meshes::AMR::AMRBox;
 using Vector = VoF::Vector;
 using State = VoF::LowMachState;
 using Reason = BubbleConversionReason;
@@ -121,7 +121,7 @@ bool intersects(const Box& a, const Box& b)
             return false;
     return true;
 }
-double finest_width(const Meshes::CartesianAMR& hierarchy)
+double finest_width(const SimpleFluid::Meshes::AMR::CartesianAMR& hierarchy)
 {
     const auto& g = hierarchy.config();
     double h = 0;
@@ -379,7 +379,7 @@ Box expanded(const Box& box, double factor)
     }
     return result;
 }
-Reason contain_box(Box& box, const Meshes::AMRGrid& grid, bool clip_wall)
+Reason contain_box(Box& box, const SimpleFluid::Meshes::AMR::AMRGrid& grid, bool clip_wall)
 {
     for (std::size_t a = 0; a < 3; ++a)
     {
@@ -404,8 +404,8 @@ Reason contain_box(Box& box, const Meshes::AMRGrid& grid, bool clip_wall)
 }
 
 /** Volume-exact piecewise-planar spherical birth, without an analytic curvature input. */
-std::map<ID, double> sphere(const Meshes::CartesianAMR& hierarchy, const Box& stencil, const Vector& seed,
-    double desired, const std::map<ID, double>& native_volume, const std::map<ID, double>& capacity)
+std::map<ID, double> sphere(const SimpleFluid::Meshes::AMR::CartesianAMR& hierarchy, const Box& stencil,
+    const Vector& seed, double desired, const std::map<ID, double>& native_volume, const std::map<ID, double>& capacity)
 {
     const auto cells = hierarchy.overlaps(stencil);
     std::map<ID, double> result;

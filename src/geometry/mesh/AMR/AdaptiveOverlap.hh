@@ -2,10 +2,10 @@
  * @brief Certified sparse overlaps selected by explicit cell ancestry.
  */
 #pragma once
-#include "geometry/AdaptiveHierarchy.hh"
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/mesh/AMR/AdaptiveHierarchy.hh"
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 struct AdaptiveCellBinding
 {
@@ -60,4 +60,4 @@ private:
     std::vector<AdaptiveCellBinding> source_cells_, target_cells_;
     std::vector<AdaptiveOverlapRecord> records_;
 };
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

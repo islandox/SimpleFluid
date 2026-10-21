@@ -1,8 +1,8 @@
 /** @file ExtrudedAMR.cc
  * @brief Collective conforming factor adaptation with retained exact constructions.
  */
-#include "geometry/ExtrudedAMR.hh"
-#include "geometry/LocalProductAMR.hh"
+#include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/mesh/AMR/LocalProductAMR.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -18,7 +18,7 @@
 #include <sstream>
 #include <stdexcept>
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 namespace
 {
@@ -1396,7 +1396,7 @@ LocalProductAMR::LocalProductAMR(ExtrudedAMRGrid grid)
             build_local_runs(*data);
         });
     same(local_description(*data));
-    data->collective_id = SimpleFluid::Meshes::identity();
+    data->collective_id = SimpleFluid::Meshes::AMR::identity();
     data_ = std::move(data);
 }
 const std::vector<LocalProductRun>& LocalProductAMR::runs() const noexcept
@@ -1735,7 +1735,7 @@ std::shared_ptr<const LocalProductAMR> LocalProductAMR::adapt(const std::vector<
     if (data->generation == data_->generation)
         return std::shared_ptr<const LocalProductAMR>(new LocalProductAMR(data_));
     same(local_description(*data));
-    data->collective_id = SimpleFluid::Meshes::identity();
+    data->collective_id = SimpleFluid::Meshes::AMR::identity();
     return std::shared_ptr<const LocalProductAMR>(new LocalProductAMR(std::move(data)));
 }
 LocalProductAMR::StorageCounts LocalProductAMR::storage_counts() const
@@ -1860,4 +1860,4 @@ MeshStorageReport LocalProductAMR::storage_report() const
     return report;
 }
 
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

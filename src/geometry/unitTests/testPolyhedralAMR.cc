@@ -20,7 +20,7 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 
 TEST(PolyhedralAMRTest, VariableOccupiedOctantsRestoreCanonicalParentAndPhysicalMetadata)
 {
-    PolyhedralAMR parent(test::polyhedral_grid(test::polyhedral_tetrahedron()));
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR parent(test::polyhedral_grid(test::polyhedral_tetrahedron()));
     const auto key = parent.cell_key(0);
     const auto observation = parent.observation();
     const auto fine = parent.adapt({0});
@@ -30,7 +30,7 @@ TEST(PolyhedralAMRTest, VariableOccupiedOctantsRestoreCanonicalParentAndPhysical
     for (std::uint64_t c = 0; c < fine->geometry()->num_cells(); ++c)
     {
         const auto child = fine->cell_key(c);
-        octants.insert(std::get<ConvexCellAncestry>(child.ancestry).path.back());
+        octants.insert(std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(child.ancestry).path.back());
         EXPECT_EQ(child.region, key.region);
         EXPECT_EQ(fine->cell_material(c), 17u);
         volume += fine->cell_geometry(c)->moments().volume.as_double();
@@ -46,7 +46,7 @@ TEST(PolyhedralAMRTest, VariableOccupiedOctantsRestoreCanonicalParentAndPhysical
 
 TEST(PolyhedralAMRTest, UnequalNeighborCutsRetainCanonicalTilesWhenOneParentCoarsens)
 {
-    PolyhedralAMR parent(test::polyhedral_grid());
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR parent(test::polyhedral_grid());
     const auto both = parent.adapt({0, 1});
     EXPECT_EQ(both->geometry()->num_cells(), 16u);
     std::size_t seam_tiles = 0;
@@ -56,8 +56,8 @@ TEST(PolyhedralAMRTest, UnequalNeighborCutsRetainCanonicalTilesWhenOneParentCoar
         if (neighbor == std::numeric_limits<std::uint64_t>::max())
             continue;
         const auto owner = both->complex()->owner_cell(face);
-        if (std::get<ConvexCellAncestry>(both->cell_key(owner).ancestry).root !=
-            std::get<ConvexCellAncestry>(both->cell_key(neighbor).ancestry).root)
+        if (std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(both->cell_key(owner).ancestry).root !=
+            std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(both->cell_key(neighbor).ancestry).root)
             ++seam_tiles;
     }
     EXPECT_EQ(seam_tiles, 6u); // independent interface cuts at y=3/8 and y=3/4, z=1/2
@@ -74,7 +74,7 @@ TEST(PolyhedralAMRTest, UnequalNeighborCutsRetainCanonicalTilesWhenOneParentCoar
 TEST(PolyhedralAMRTest, SourceFamilyEligibilityBudgetsAndPlansRejectWithoutChangingSource)
 {
     const auto grid = test::polyhedral_grid();
-    PolyhedralAMR parent(grid);
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR parent(grid);
     const auto key = parent.cell_key(0);
     const auto observation = parent.observation();
     const auto planned = parent.plan_adaptation({0});
@@ -87,13 +87,13 @@ TEST(PolyhedralAMRTest, SourceFamilyEligibilityBudgetsAndPlansRejectWithoutChang
     EXPECT_THROW((void) deeper->adapt({}, {key, grandchild}), std::invalid_argument);
     auto limited = grid;
     limited.maximum_cells = 2;
-    PolyhedralAMR budget(limited);
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR budget(limited);
     const auto before = budget.observation();
     EXPECT_THROW((void) budget.adapt({0}), std::invalid_argument);
     EXPECT_EQ(budget.observation(), before);
     auto faces = grid;
     faces.maximum_face_tiles = grid.mesh->num_faces();
-    PolyhedralAMR face_budget(faces);
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR face_budget(faces);
     EXPECT_THROW((void) face_budget.adapt({0, 1}), std::invalid_argument);
     EXPECT_EQ(parent.observation(), observation);
     std::vector<std::size_t> bad;
@@ -105,16 +105,17 @@ TEST(PolyhedralAMRTest, SourceFamilyEligibilityBudgetsAndPlansRejectWithoutChang
 
 TEST(PolyhedralAMRTest, SameTopologyDifferentRootCoordinatesRejectCollectively)
 {
-    EXPECT_NO_THROW((void) PolyhedralAMR(test::polyhedral_grid()));
+    EXPECT_NO_THROW((void) ::SimpleFluid::Meshes::AMR::PolyhedralAMR(test::polyhedral_grid()));
     if (Tpetra::getDefaultComm()->getSize() < 2)
         GTEST_SKIP() << "Divergent roots require MPI.";
     const double shift = Tpetra::getDefaultComm()->getRank() == 0 ? 0.125 : 0;
-    EXPECT_THROW((void) PolyhedralAMR(test::polyhedral_grid(test::polyhedral_pair(shift))), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::PolyhedralAMR(test::polyhedral_grid(test::polyhedral_pair(shift))),
+        std::invalid_argument);
 }
 
 TEST(PolyhedralAMRTest, ActualPartitionPinsResidentIdentityAndMixedRegionsReject)
 {
-    PolyhedralAMR parent(test::polyhedral_grid());
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR parent(test::polyhedral_grid());
     CompositePartitionOptions options;
     options.target_cells_per_fragment = 1;
     const auto partition = std::make_shared<const CompositePartition<>>(MeshPartitioner<DefaultTpetraTypes>::partition(
@@ -126,7 +127,7 @@ TEST(PolyhedralAMRTest, ActualPartitionPinsResidentIdentityAndMixedRegionsReject
     EXPECT_EQ(bound->with_partition(partition)->observation(), bound->observation());
     auto mixed = test::polyhedral_grid();
     ++mixed.physical_regions[1];
-    EXPECT_THROW((void) PolyhedralAMR(mixed), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::PolyhedralAMR(mixed), std::invalid_argument);
 }
 
 TEST(PolyhedralAMRTest, SliverCandidateRejectsWithoutPublishingAnyChildren)
@@ -134,11 +135,12 @@ TEST(PolyhedralAMRTest, SliverCandidateRejectsWithoutPublishingAnyChildren)
     const auto cube = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
     const auto root = cube->clip(GeometryHalfspace{{1, 1, 1e-8}, {0, 0, 0}, 1 + 1e-8}).inside;
     ASSERT_TRUE(root);
-    const AdaptiveCellKey key{19, ConvexCellAncestry{0, {}}};
+    const ::SimpleFluid::Meshes::AMR::AdaptiveCellKey key{19, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{0, {}}};
     std::vector<PolyhedralSurfaceUse> surfaces;
     for (std::uint64_t f = 0; f < root->num_faces(); ++f)
-        surfaces.push_back({PolyhedralSurfaceKey{PolyhedralSurfaceKey::Kind::Root, 19, ConvexCellAncestry{f, {}}, 0}, 1,
-            true, "wall"});
+        surfaces.push_back({PolyhedralSurfaceKey{PolyhedralSurfaceKey::Kind::Root, 19,
+                                ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{f, {}}, 0},
+            1, true, "wall"});
     const auto complex = ExactPolyhedralComplex::make({PolyhedralComplexCell{key, 0, root, surfaces}});
     const auto provider = ExplicitRegionProvider::from_exact_complex(complex);
     const auto native = std::make_shared<MultiRegionMesh>(
@@ -146,7 +148,7 @@ TEST(PolyhedralAMRTest, SliverCandidateRejectsWithoutPublishingAnyChildren)
         std::vector<MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
     auto grid = test::polyhedral_grid(native);
     grid.minimum_scaled_volume = 1e-6;
-    PolyhedralAMR parent(grid);
+    ::SimpleFluid::Meshes::AMR::PolyhedralAMR parent(grid);
     const auto before = parent.observation();
     EXPECT_THROW((void) parent.adapt({0}), std::invalid_argument);
     EXPECT_EQ(parent.observation(), before);

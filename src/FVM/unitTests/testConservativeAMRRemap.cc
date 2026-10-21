@@ -43,31 +43,35 @@ SP<Handle> native_prism(const ArrReal& levels)
         MeshPartitioner<DefaultTpetraTypes>::partition(CompositeMeshSource(catalog), options, Tpetra::getDefaultComm());
     return std::make_shared<Handle>(partition);
 }
-HierarchyObservation observation(const SP<Handle>& mesh)
+::SimpleFluid::Meshes::AMR::HierarchyObservation observation(const SP<Handle>& mesh)
 {
     auto token = std::make_shared<const char>(0);
     return {token, token, token, 0, 0, mesh->geometry_epoch(), mesh->geometry_identity(),
         Tpetra::getDefaultComm().getRawPtr()};
 }
-AdaptiveCellKey key(std::vector<std::uint64_t> path)
+::SimpleFluid::Meshes::AMR::AdaptiveCellKey key(std::vector<std::uint64_t> path)
 {
-    return {(std::uint64_t{1} << 60) + 17, ConvexCellAncestry{(std::uint64_t{1} << 61) + 41, std::move(path)}};
+    return {(std::uint64_t{1} << 60) + 17,
+        ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{(std::uint64_t{1} << 61) + 41, std::move(path)}};
 }
 struct Fixture
 {
     SP<Handle> parent = native_prism({0, 1}), children = native_prism({0, 0.5, 1});
-    HierarchyObservation before = observation(parent), after = observation(children);
-    std::vector<AdaptiveCellBinding> coarse{{key({}), 0, 3, prism(0, 1)}};
-    std::vector<AdaptiveCellBinding> fine{{key({0}), 0, 3, prism(0, 0.5)}, {key({1}), 1, 3, prism(0.5, 1)}};
-    std::shared_ptr<const AdaptiveOverlapPlan> split, coarsen;
+    ::SimpleFluid::Meshes::AMR::HierarchyObservation before = observation(parent), after = observation(children);
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> coarse{{key({}), 0, 3, prism(0, 1)}};
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> fine{
+        {key({0}), 0, 3, prism(0, 0.5)}, {key({1}), 1, 3, prism(0.5, 1)}};
+    std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> split, coarsen;
     Fixture()
     {
-        const std::vector<AdaptiveAncestryRelation> forward{
-            {AdaptiveAncestryRelation::Kind::Refinement, 0, 0}, {AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
-        const std::vector<AdaptiveAncestryRelation> reverse{
-            {AdaptiveAncestryRelation::Kind::Coarsening, 0, 0}, {AdaptiveAncestryRelation::Kind::Coarsening, 1, 0}};
-        split = AdaptiveOverlapPlan::build(before, after, coarse, fine, forward);
-        coarsen = AdaptiveOverlapPlan::build(after, before, fine, coarse, reverse);
+        const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> forward{
+            {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 0},
+            {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
+        const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> reverse{
+            {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Coarsening, 0, 0},
+            {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Coarsening, 1, 0}};
+        split = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(before, after, coarse, fine, forward);
+        coarsen = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(after, before, fine, coarse, reverse);
     }
     AMRRemapPhases phases(bool refined) const
     {
@@ -245,9 +249,11 @@ TEST(ConservativeAMRRemapTest, EqualVolumeShiftedCatalogCannotMasqueradeAsNative
     coarse[0].geometry = shifted(0, 1);
     fine[0].geometry = shifted(0, 0.5);
     fine[1].geometry = shifted(0.5, 1);
-    const std::vector<AdaptiveAncestryRelation> relations{
-        {AdaptiveAncestryRelation::Kind::Refinement, 0, 0}, {AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
-    const auto impostor = AdaptiveOverlapPlan::build(f.before, f.after, coarse, fine, relations);
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations{
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 0},
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
+    const auto impostor =
+        ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(f.before, f.after, coarse, fine, relations);
     EXPECT_THROW((void) ConservativeAMRRemap(f.parent, f.children, impostor), std::invalid_argument);
 }
 
@@ -338,21 +344,24 @@ TEST(ConservativeAMRRemapTest, LocalCompleteAncestryFamiliesDoNotRequireGlobalGe
         families.insert(source->cell_global_id(static_cast<LO>(c)));
     for (std::size_t c = 0; c < target->num_owned_cells(); ++c)
         families.insert(target->cell_global_id(static_cast<LO>(c)) / 2);
-    std::vector<AdaptiveCellBinding> sources, targets;
-    std::vector<AdaptiveAncestryRelation> relations;
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> sources, targets;
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations;
     for (const auto family : families)
     {
-        const auto coarse_key = AdaptiveCellKey{17, ConvexCellAncestry{100 + family, {}}};
+        const auto coarse_key = ::SimpleFluid::Meshes::AMR::AdaptiveCellKey{
+            17, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{100 + family, {}}};
         sources.push_back({coarse_key, family, 3, prism(0.5 * family, 0.5 * (family + 1))});
         for (std::uint64_t child = 0; child < 2; ++child)
         {
             const auto gid = 2 * family + child;
-            targets.push_back({AdaptiveCellKey{17, ConvexCellAncestry{100 + family, {child}}}, gid, 3,
-                prism(0.25 * gid, 0.25 * (gid + 1))});
-            relations.push_back({AdaptiveAncestryRelation::Kind::Refinement, family, gid});
+            targets.push_back({::SimpleFluid::Meshes::AMR::AdaptiveCellKey{
+                                   17, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{100 + family, {child}}},
+                gid, 3, prism(0.25 * gid, 0.25 * (gid + 1))});
+            relations.push_back({::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, family, gid});
         }
     }
-    const auto plan = AdaptiveOverlapPlan::build(observation(source), observation(target), sources, targets, relations);
+    const auto plan = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
+        observation(source), observation(target), sources, targets, relations);
     ConservativeAMRRemap remap(source, target, plan);
     AMRRemapPhases phases{std::vector<double>(source->num_owned_cells(), 0),
         std::vector<double>(source->num_owned_cells(), 0.25),
@@ -487,36 +496,38 @@ TEST(ConservativeAMRRemapTest, FictitiousRemoteTargetCannotCloseATrueNativeGap)
     int all_remote = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &remote_candidates, &all_remote);
     ASSERT_EQ(all_remote, 1);
-    const std::vector<AdaptiveCellBinding> coarse{{key({}), 0, 3, ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})}};
-    std::vector<AdaptiveCellBinding> fine;
-    std::vector<AdaptiveAncestryRelation> relations;
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> coarse{
+        {key({}), 0, 3, ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})}};
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> fine;
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations;
     for (std::uint64_t index = 0; index < triangles.size(); ++index)
     {
         fine.push_back({key({index}), index, 3, triangle_geometry(index, index == lower || index == upper)});
-        relations.push_back({AdaptiveAncestryRelation::Kind::Refinement, 0, index});
+        relations.push_back({::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, index});
     }
     for (std::size_t c = 0; c < target->num_owned_cells(); ++c)
     {
         const auto gid = target->cell_global_id(static_cast<LO>(c));
         EXPECT_TRUE(fine[gid].geometry->equivalent(*triangle_geometry(gid, false)));
     }
-    std::vector<AdaptiveCellBinding> actual_cells;
-    std::vector<AdaptiveAncestryRelation> identities;
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> actual_cells;
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> identities;
     for (std::uint64_t index = 0; index < triangles.size(); ++index)
     {
         actual_cells.push_back({key({index}), index, 3, triangle_geometry(index, false)});
-        identities.push_back({AdaptiveAncestryRelation::Kind::Unchanged, index, index});
+        identities.push_back({::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Unchanged, index, index});
     }
     const auto target_observation = observation(target);
-    const auto identity_plan =
-        AdaptiveOverlapPlan::build(target_observation, target_observation, actual_cells, actual_cells, identities);
+    const auto identity_plan = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
+        target_observation, target_observation, actual_cells, actual_cells, identities);
     ASSERT_NO_THROW((void) ConservativeAMRRemap(target, target, identity_plan));
     // Each local certificate fills the tiny true hole by changing only remote
     // triangles; native construction and local exact coverage must first pass.
-    std::shared_ptr<const AdaptiveOverlapPlan> plan;
+    std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> plan;
     try
     {
-        plan = AdaptiveOverlapPlan::build(observation(source), observation(target), coarse, fine, relations);
+        plan = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
+            observation(source), observation(target), coarse, fine, relations);
     }
     catch (const std::exception& error)
     {
@@ -545,13 +556,16 @@ TEST(ConservativeAMRRemapTest, RemoteAncestryAndMaterialReplicasMustMatchTheirOw
                     if (material)
                         cell.material ^= std::uint64_t{1} << 63;
                     else
-                        std::get<ConvexCellAncestry>(cell.key.ancestry).root ^= std::uint64_t{1} << 63;
+                        std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(cell.key.ancestry).root ^=
+                            std::uint64_t{1} << 63;
         }
         // Local ancestry, material relationships and exact shells still certify.
         // Only sparse owner binding authentication reveals the inconsistent replica.
-        const std::vector<AdaptiveAncestryRelation> relations{
-            {AdaptiveAncestryRelation::Kind::Refinement, 0, 0}, {AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
-        const auto plan = AdaptiveOverlapPlan::build(f.before, f.after, coarse, fine, relations);
+        const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations{
+            {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 0},
+            {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
+        const auto plan =
+            ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(f.before, f.after, coarse, fine, relations);
         EXPECT_THROW((void) ConservativeAMRRemap(f.parent, f.children, plan), std::invalid_argument);
     }
 }
@@ -560,12 +574,15 @@ TEST(ConservativeAMRRemapTest, SparsePlaneOffsetPreservesTranslatedMicroscopicPh
 {
     constexpr double origin = 1e6;
     const auto source = native_prism({origin, origin + 1}), target = native_prism({origin, origin + 0.5, origin + 1});
-    const std::vector<AdaptiveCellBinding> coarse{{key({}), 0, 3, prism(origin, origin + 1)}};
-    const std::vector<AdaptiveCellBinding> fine{
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> coarse{
+        {key({}), 0, 3, prism(origin, origin + 1)}};
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> fine{
         {key({0}), 0, 3, prism(origin, origin + 0.5)}, {key({1}), 1, 3, prism(origin + 0.5, origin + 1)}};
-    const std::vector<AdaptiveAncestryRelation> relations{
-        {AdaptiveAncestryRelation::Kind::Refinement, 0, 0}, {AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
-    const auto plan = AdaptiveOverlapPlan::build(observation(source), observation(target), coarse, fine, relations);
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations{
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 0},
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 1}};
+    const auto plan = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
+        observation(source), observation(target), coarse, fine, relations);
     ConservativeAMRRemap remap(source, target, plan);
     const auto owned = source->num_owned_cells();
     AMRRemapPhases phases{std::vector<double>(owned, 0.5e-200), std::vector<double>(owned, 0.5),

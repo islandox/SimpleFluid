@@ -39,12 +39,12 @@ void closed(const MultiRegionMesh& mesh)
 }
 TEST(MixedAMRTest, LocalRunsCloseWholeNativeTilesAndRoundTripSharedCatalogs)
 {
-    auto product = std::make_shared<LocalProductAMR>(test::mixed_product_grid(true));
-    auto key = std::get<ProductCellAncestry>(product->cell_key(0, 4).ancestry);
-    MixedAMRGrid g;
+    auto product = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(test::mixed_product_grid(true));
+    auto key = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(product->cell_key(0, 4).ancestry);
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid g;
     g.product = product;
     g.physical_region = 7;
-    MixedAMR root(g);
+    ::SimpleFluid::Meshes::AMR::MixedAMR root(g);
     auto refined = root.adapt({key});
     EXPECT_GT(refined->geometry()->regions().size(), 1u);
     EXPECT_EQ(refined->geometry()->num_cells(), 19u);
@@ -107,7 +107,7 @@ TEST(MixedAMRTest, LocalRunsCloseWholeNativeTilesAndRoundTripSharedCatalogs)
 TEST(MixedAMRTest, ProductPolyhedralJoinAdaptsWithPersistentPatchIdentityAndPhysicalClosure)
 {
     const auto grid = test::mixed_joined_grid(3);
-    MixedAMR root(grid);
+    ::SimpleFluid::Meshes::AMR::MixedAMR root(grid);
     const auto retained = root.storage_breakdown();
     ASSERT_EQ(retained.retained_participants.size(), 2u);
     EXPECT_EQ(retained.retained_participants[0].identity, grid.product.get());
@@ -123,7 +123,7 @@ TEST(MixedAMRTest, ProductPolyhedralJoinAdaptsWithPersistentPatchIdentityAndPhys
     for (std::uint64_t c = 0; c < candidate->geometry()->num_cells(); ++c)
     {
         const auto key = candidate->cell_key(c);
-        if (auto p = std::get_if<ConvexCellAncestry>(&key.ancestry); p && !p->path.empty())
+        if (auto p = std::get_if<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(&key.ancestry); p && !p->path.empty())
             polyrefined = true;
     }
     EXPECT_TRUE(polyrefined);
@@ -137,18 +137,18 @@ TEST(MixedAMRTest, ProductPolyhedralJoinAdaptsWithPersistentPatchIdentityAndPhys
     EXPECT_NE(storage.retained_participants[1].identity, nullptr);
     EXPECT_NE(storage.retained_participants[0].identity, storage.retained_participants[1].identity);
     EXPECT_FALSE(storage.resident_partition_geometry.has_value());
-    EXPECT_NO_THROW((void) AdaptiveOverlapPlan::build(
+    EXPECT_NO_THROW((void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
         root.observation(), candidate->observation(),
         [&]
         {
-            std::vector<AdaptiveCellBinding> a;
+            std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> a;
             for (std::uint64_t c = 0; c < root.geometry()->num_cells(); ++c)
                 a.push_back({root.cell_key(c), c, root.cell_material(c), root.cell_geometry(c)});
             return a;
         }(),
         [&]
         {
-            std::vector<AdaptiveCellBinding> a;
+            std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> a;
             for (std::uint64_t c = 0; c < candidate->geometry()->num_cells(); ++c)
                 a.push_back({candidate->cell_key(c), c, candidate->cell_material(c), candidate->cell_geometry(c)});
             return a;
@@ -161,7 +161,7 @@ TEST(MixedAMRTest, UnsupportedStaticClosureAndBudgetsRejectWithoutChangingSource
     auto poly = g.adaptive.front();
     g.adaptive.clear();
     g.stationary.push_back({poly->native_geometry()->regions().front(), 9, 5, 71});
-    MixedAMR source(g);
+    ::SimpleFluid::Meshes::AMR::MixedAMR source(g);
     const auto before = source.observation();
     auto k = test::first_product(source);
     EXPECT_THROW((void) source.adapt({k}, {k}), std::invalid_argument);
@@ -169,14 +169,14 @@ TEST(MixedAMRTest, UnsupportedStaticClosureAndBudgetsRejectWithoutChangingSource
     EXPECT_THROW((void) source.adapt({}, {}, {}, {}, {source.cell_key(1)}), std::invalid_argument);
     auto small = test::mixed_joined_grid();
     small.maximum_cells = 2;
-    MixedAMR bounded(small);
+    ::SimpleFluid::Meshes::AMR::MixedAMR bounded(small);
     auto mark = test::first_product(bounded);
     EXPECT_THROW((void) bounded.adapt({mark}), std::length_error);
     EXPECT_EQ(bounded.geometry()->num_cells(), 2u);
 }
 TEST(MixedAMRTest, NativePartitionEpochPlansAndActualEmptyOwners)
 {
-    auto source = std::make_shared<MixedAMR>(test::mixed_joined_grid());
+    auto source = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(test::mixed_joined_grid());
     auto plan = source->plan_adaptation();
     EXPECT_EQ(source->apply_adaptation(plan)->observation(), source->observation());
     CompositePartitionOptions options;
@@ -203,10 +203,11 @@ TEST(MixedAMRTest, NativePartitionEpochPlansAndActualEmptyOwners)
 }
 TEST(MixedAMRTest, ContactDomainsRemainIndependentNativeFluidMeshes)
 {
-    auto g = MixedAMRGrid{};
-    g.product = std::make_shared<LocalProductAMR>(test::mixed_product_grid());
-    auto a = std::make_shared<MixedAMR>(g), b = std::make_shared<MixedAMR>(g);
-    MixedContactDomains contact;
+    auto g = ::SimpleFluid::Meshes::AMR::MixedAMRGrid{};
+    g.product = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(test::mixed_product_grid());
+    auto a = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(g),
+         b = std::make_shared<::SimpleFluid::Meshes::AMR::MixedAMR>(g);
+    ::SimpleFluid::Meshes::AMR::MixedContactDomains contact;
     contact.domains = {a, b};
     contact.contacts = {{0, 1, a->geometry()->boundary_batch_name(*a->geometry()->boundary_batch_ids().begin()),
         b->geometry()->boundary_batch_name(*b->geometry()->boundary_batch_ids().begin())}};
@@ -225,9 +226,9 @@ TEST(MixedAMRTest, CrossedExternalTracesRejectAtomicallyAndQualifiedDescriptorsR
         p[0] += 1;
     right.region_id = 9;
     right.z_edges = {0, .5, 1};
-    g.adaptive = {std::make_shared<ExtrudedAMR>(right)};
+    g.adaptive = {std::make_shared<::SimpleFluid::Meshes::AMR::ExtrudedAMR>(right)};
     g.joins = {{0, 1, "east", "west"}};
-    MixedAMR source(g);
+    ::SimpleFluid::Meshes::AMR::MixedAMR source(g);
     const auto before = source.observation();
     const auto k = test::first_product(source);
     EXPECT_THROW((void) source.adapt({k}), std::invalid_argument);
@@ -247,7 +248,7 @@ TEST(MixedAMRTest, StaticProviderIdentityNativeCellsAndMembershipSurviveCompatib
     const auto provider = g.adaptive.front();
     g.adaptive.clear();
     g.stationary.push_back({provider->native_geometry()->regions().front(), 9, 5, 99});
-    MixedAMR root(g);
+    ::SimpleFluid::Meshes::AMR::MixedAMR root(g);
     const auto key = root.cell_key(1);
     const auto storage =
         std::visit([](const auto& r) { return r.geometry().storage_identity(); }, root.geometry()->regions().back());
@@ -264,31 +265,31 @@ TEST(MixedAMRTest, StaticProviderIdentityNativeCellsAndMembershipSurviveCompatib
 
 TEST(MixedAMRTest, PurePolyhedralAndCartesianParticipantsNeedNoUnrelatedProduct)
 {
-    MixedAMRGrid polygrid;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid polygrid;
     polygrid.adaptive = {test::mixed_polyhedron()};
-    MixedAMR poly(polygrid);
-    MixedParticipantMarks split;
+    ::SimpleFluid::Meshes::AMR::MixedAMR poly(polygrid);
+    ::SimpleFluid::Meshes::AMR::MixedParticipantMarks split;
     split.participant = 0;
     split.refine = {poly.cell_key(0)};
     auto refined = poly.adapt_participants({split});
     EXPECT_EQ(refined->geometry()->num_cells(), 8u);
-    MixedParticipantMarks join;
+    ::SimpleFluid::Meshes::AMR::MixedParticipantMarks join;
     join.participant = 0;
     join.coarsen_polyhedral = {poly.cell_key(0)};
     auto restored = refined->adapt_participants({join});
     EXPECT_EQ(restored->geometry()->num_cells(), 1u);
     EXPECT_TRUE(restored->cell_geometry(0)->equivalent(*poly.cell_geometry(0)));
-    AMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.block_cells = {2, 2, 2};
     grid.region_id = 31;
-    auto cart = std::make_shared<CartesianAMR>(grid);
-    MixedAMRGrid cartgrid;
+    auto cart = std::make_shared<::SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid cartgrid;
     cartgrid.adaptive = {cart};
-    MixedAMR cartesian(cartgrid);
+    ::SimpleFluid::Meshes::AMR::MixedAMR cartesian(cartgrid);
     split.refine = {cartesian.cell_key(0)};
     auto fine = cartesian.adapt_participants({split});
     EXPECT_EQ(fine->geometry()->num_cells(), 64u);
-    MixedParticipantMarks coarse;
+    ::SimpleFluid::Meshes::AMR::MixedParticipantMarks coarse;
     coarse.participant = 0;
     coarse.coarsen_cartesian = {cart->blocks().front()};
     auto back = fine->adapt_participants({coarse});
@@ -302,18 +303,19 @@ TEST(MixedAMRTest, MultipleLocalProductsRetainStablePhysicalJoinsAcrossFactorCoa
     right.region_id = 9;
     for (auto& p : right.xy_nodes)
         p[0] += 1;
-    MixedAMRGrid grid;
-    grid.local_products = {std::make_shared<LocalProductAMR>(left), std::make_shared<LocalProductAMR>(right)};
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid grid;
+    grid.local_products = {std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(left),
+        std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(right)};
     grid.joins = {{0, 1, "east", "west"}};
-    MixedAMR root(grid);
-    MixedParticipantMarks split;
+    ::SimpleFluid::Meshes::AMR::MixedAMR root(grid);
+    ::SimpleFluid::Meshes::AMR::MixedParticipantMarks split;
     split.participant = 0;
-    split.refine_z = {std::get<ProductCellAncestry>(root.cell_key(0).ancestry)};
+    split.refine_z = {std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(root.cell_key(0).ancestry)};
     auto preview = root.plan_participants({split});
     auto fine = root.apply_adaptation(preview);
     EXPECT_EQ(fine->geometry()->num_cells(), 3u);
     closed(*fine->geometry());
-    MixedParticipantMarks coarse;
+    ::SimpleFluid::Meshes::AMR::MixedParticipantMarks coarse;
     coarse.participant = 0;
     coarse.coarsen_z = split.refine_z;
     auto back = fine->adapt_participants({coarse});
@@ -324,18 +326,19 @@ TEST(MixedAMRTest, MultipleLocalProductsRetainStablePhysicalJoinsAcrossFactorCoa
 }
 TEST(MixedAMRTest, DuplicatePersistentKeysRejectWithoutRenumberingPhysicalRegions)
 {
-    AMRGrid a;
+    ::SimpleFluid::Meshes::AMR::AMRGrid a;
     a.block_cells = {2, 2, 2};
-    AMRGrid b = a;
+    ::SimpleFluid::Meshes::AMR::AMRGrid b = a;
     b.origin = {1, 0, 0};
-    auto first = std::make_shared<CartesianAMR>(a), second = std::make_shared<CartesianAMR>(b);
-    MixedAMRGrid grid;
+    auto first = std::make_shared<::SimpleFluid::Meshes::AMR::CartesianAMR>(a),
+         second = std::make_shared<::SimpleFluid::Meshes::AMR::CartesianAMR>(b);
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid grid;
     grid.adaptive = {first, second};
     grid.joins = {{0, 1, "xmax", "xmin"}};
-    EXPECT_THROW((void) MixedAMR(grid), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(grid), std::invalid_argument);
     const auto& left = std::get<CartesianRegion>(first->geometry()->regions().front());
     const auto& right = std::get<CartesianRegion>(second->geometry()->regions().front());
-    MixedAMRGrid statics;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid statics;
     statics.stationary = {
         {CartesianRegion("left_static", std::shared_ptr<const RectilinearTopology>(first, &left.topology()),
              std::shared_ptr<const RectilinearGeometry>(first, &left.geometry())),
@@ -344,28 +347,28 @@ TEST(MixedAMRTest, DuplicatePersistentKeysRejectWithoutRenumberingPhysicalRegion
              std::shared_ptr<const RectilinearGeometry>(second, &right.geometry())),
             0, 0, 0}};
     statics.joins = {{0, 1, "xmax", "xmin"}};
-    EXPECT_THROW((void) MixedAMR(statics), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(statics), std::invalid_argument);
 }
 TEST(MixedAMRTest, RankLocalProductSemanticMismatchAndInvalidMarksRejectCollectively)
 {
     if (Tpetra::getDefaultComm()->getSize() < 2)
         GTEST_SKIP() << "Rank-local semantic validation requires MPI.";
     auto rootgrid = test::mixed_product_grid();
-    auto first = std::make_shared<LocalProductAMR>(rootgrid);
+    auto first = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(rootgrid);
     ++rootgrid.region_id;
-    auto second = std::make_shared<LocalProductAMR>(rootgrid);
-    MixedAMRGrid mismatched;
+    auto second = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(rootgrid);
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid mismatched;
     mismatched.local_products = {Tpetra::getDefaultComm()->getRank() == 0 ? first : second};
-    EXPECT_THROW((void) MixedAMR(mismatched), std::invalid_argument);
-    MixedAMR source(test::mixed_joined_grid());
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(mismatched), std::invalid_argument);
+    ::SimpleFluid::Meshes::AMR::MixedAMR source(test::mixed_joined_grid());
     const auto before = source.observation();
-    std::vector<MixedParticipantMarks> marks;
+    std::vector<::SimpleFluid::Meshes::AMR::MixedParticipantMarks> marks;
     if (Tpetra::getDefaultComm()->getRank() == 0)
     {
-        MixedParticipantMarks bad;
+        ::SimpleFluid::Meshes::AMR::MixedParticipantMarks bad;
         bad.participant = 1;
         auto key = source.cell_key(1);
-        std::get<ConvexCellAncestry>(key.ancestry).path = {99};
+        std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(key.ancestry).path = {99};
         bad.refine = {key};
         marks.push_back(bad);
     }
@@ -380,7 +383,7 @@ TEST(MixedAMRTest, FourFineFacesAcrossTwoSharedRunProvidersRetainOneCanonicalFlu
     g.base_cells = {{0, 1, 3, 2}, {2, 3, 5, 4}};
     g.boundaries = {{0, 1, "south"}, {1, 3, "east"}, {3, 5, "east"}, {5, 4, "north"}, {4, 2, "west"}, {2, 0, "west"}};
     g.z_edges = {0, .5, 1};
-    auto product = std::make_shared<LocalProductAMR>(g);
+    auto product = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(g);
     ASSERT_EQ(product->runs().size(), 1u);
     const auto& full = product->runs().front().region;
     auto anchor = full.geometry().construction();
@@ -594,7 +597,7 @@ TEST(MixedAMRTest, IndependentNativePatchCatalogRejectsOmittedFineTilesAndSurviv
     {
         EXPECT_NE(std::string(error.what()).find("fine participant"), std::string::npos);
     }
-    MixedAMR mixed(test::mixed_joined_grid());
+    ::SimpleFluid::Meshes::AMR::MixedAMR mixed(test::mixed_joined_grid());
     const auto empty = mixed.geometry()->serialize_partition({});
     auto shard = MultiRegionMesh::deserialize_partition(empty, Teuchos::rcp(new Teuchos::SerialComm<int>()));
     EXPECT_EQ(shard->serialize_partition({}), empty);
@@ -688,12 +691,13 @@ TEST(MixedAMRTest, InternalLocalFaceEdgeAndVertexGradationRejectsSecondBoundaryR
             grid.z_edges = {0, 1};
         if (dimension == 0)
             grid.z_edges = {0, 1, 2};
-        auto root = std::make_shared<LocalProductAMR>(grid);
-        std::vector<ProductCellAncestry> first_marks;
+        auto root = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(grid);
+        std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry> first_marks;
         for (size_t r = 0; r < root->runs().size(); ++r)
             for (std::uint64_t c = 0; c < root->runs()[r].region.layout().cells; ++c)
             {
-                const auto key = std::get<ProductCellAncestry>(root->cell_key(r, c).ancestry);
+                const auto key =
+                    std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(root->cell_key(r, c).ancestry);
                 if (dimension == 2   ? (key.base.root == 0 && key.axial.root == 1)
                     : dimension == 1 ? key.base.root != 3
                                      : !(key.base.root == 3 && key.axial.root == 1))
@@ -701,11 +705,12 @@ TEST(MixedAMRTest, InternalLocalFaceEdgeAndVertexGradationRejectsSecondBoundaryR
             }
         const auto first = root->adapt(first_marks);
         ASSERT_TRUE(first->contact_violations(2).empty());
-        std::optional<ProductCellAncestry> selected;
+        std::optional<::SimpleFluid::Meshes::AMR::ProductCellAncestry> selected;
         for (size_t r = 0; r < first->runs().size(); ++r)
             for (std::uint64_t c = 0; c < first->runs()[r].region.layout().cells; ++c)
             {
-                const auto key = std::get<ProductCellAncestry>(first->cell_key(r, c).ancestry);
+                const auto key =
+                    std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(first->cell_key(r, c).ancestry);
                 const auto center = first->runs()[r].region.geometry().cell_centroid(c);
                 if (key.base.root == 0 && key.base.path.size() == 1 && key.axial.root == (dimension == 2 ? 1u : 0u) &&
                     center.x > .5 && (dimension == 2 ? center.y < .5 : center.y > .5))
@@ -722,7 +727,7 @@ TEST(MixedAMRTest, InternalLocalFaceEdgeAndVertexGradationRejectsSecondBoundaryR
             expected = expected || violation.dimension == dimension;
         }
         EXPECT_TRUE(expected);
-        MixedAMRGrid assembled;
+        ::SimpleFluid::Meshes::AMR::MixedAMRGrid assembled;
         assembled.local_products = {first};
         if (dimension == 0)
         {
@@ -741,7 +746,7 @@ TEST(MixedAMRTest, InternalLocalFaceEdgeAndVertexGradationRejectsSecondBoundaryR
             EXPECT_TRUE(witness);
             try
             {
-                (void) MixedAMR(assembled);
+                (void) ::SimpleFluid::Meshes::AMR::MixedAMR(assembled);
                 FAIL() << "Balanced crossed patch grouping remains unsupported.";
             }
             catch (const std::invalid_argument& error)
@@ -752,10 +757,10 @@ TEST(MixedAMRTest, InternalLocalFaceEdgeAndVertexGradationRejectsSecondBoundaryR
         }
         else
         {
-            MixedAMR source(assembled);
+            ::SimpleFluid::Meshes::AMR::MixedAMR source(assembled);
             const auto before = source.observation();
             const auto retained = source.plan_participants({});
-            MixedParticipantMarks mark;
+            ::SimpleFluid::Meshes::AMR::MixedParticipantMarks mark;
             mark.participant = 0;
             mark.refine_xy = {*selected};
             EXPECT_THROW((void) source.adapt_participants({mark}), std::invalid_argument);
@@ -765,7 +770,7 @@ TEST(MixedAMRTest, InternalLocalFaceEdgeAndVertexGradationRejectsSecondBoundaryR
         assembled.local_products = {second};
         try
         {
-            (void) MixedAMR(assembled);
+            (void) ::SimpleFluid::Meshes::AMR::MixedAMR(assembled);
             FAIL() << "Overgraded candidate must reject before native seam assembly.";
         }
         catch (const std::invalid_argument& error)
@@ -779,7 +784,7 @@ TEST(MixedAMRTest, InternalLocalFaceEdgeAndVertexGradationRejectsSecondBoundaryR
             EXPECT_TRUE(std::any_of(
                 trace.begin(), trace.end(), [](const auto& v) { return v.trace_jump_exceeded && !v.span_exceeded; }));
             assembled.maximum_span_ratio = 16;
-            EXPECT_THROW((void) MixedAMR(assembled), std::invalid_argument);
+            EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(assembled), std::invalid_argument);
         }
     }
 }
@@ -821,14 +826,14 @@ TEST(MixedAMRTest, ManualCanonicalInterfacesCannotBypassPhysicalContactAdmission
         return grid;
     };
     auto bounded = make(3);
-    EXPECT_NO_THROW((void) MixedAMR(bounded));
+    EXPECT_NO_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(bounded));
     auto excessive = make(5);
     const auto identity = excessive.product->identity();
     const auto epoch = std::visit(
         [](const auto& region) { return region.geometry().geometry_epoch(); }, excessive.stationary.front().region);
     try
     {
-        (void) MixedAMR(excessive);
+        (void) ::SimpleFluid::Meshes::AMR::MixedAMR(excessive);
         FAIL() << "Manual canonical joins must not bypass configured gradation.";
     }
     catch (const std::invalid_argument& error)
@@ -843,35 +848,35 @@ TEST(MixedAMRTest, ManualCanonicalInterfacesCannotBypassPhysicalContactAdmission
 
 TEST(MixedAMRTest, AdjacentAxialSiblingTracesKeepOneGenerationLimitWithLoosePhysicalRatio)
 {
-    auto root = std::make_shared<LocalProductAMR>(test::mixed_product_grid());
-    auto parent = std::get<ProductCellAncestry>(root->cell_key(0, 0).ancestry);
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(test::mixed_product_grid());
+    auto parent = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(root->cell_key(0, 0).ancestry);
     const auto first = root->adapt({}, {parent});
-    std::optional<ProductCellAncestry> left;
+    std::optional<::SimpleFluid::Meshes::AMR::ProductCellAncestry> left;
     for (size_t r = 0; r < first->runs().size(); ++r)
         for (std::uint64_t c = 0; c < first->runs()[r].region.layout().cells; ++c)
         {
-            const auto key = std::get<ProductCellAncestry>(first->cell_key(r, c).ancestry);
+            const auto key = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(first->cell_key(r, c).ancestry);
             if (key.axial.path == std::vector<std::uint64_t>{0})
                 left = key;
         }
     ASSERT_TRUE(left.has_value());
     const auto second = first->adapt({}, {*left});
-    std::optional<ProductCellAncestry> touching;
+    std::optional<::SimpleFluid::Meshes::AMR::ProductCellAncestry> touching;
     for (size_t r = 0; r < second->runs().size(); ++r)
         for (std::uint64_t c = 0; c < second->runs()[r].region.layout().cells; ++c)
         {
-            const auto key = std::get<ProductCellAncestry>(second->cell_key(r, c).ancestry);
+            const auto key = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(second->cell_key(r, c).ancestry);
             if (key.axial.path == std::vector<std::uint64_t>{0, 1})
                 touching = key;
         }
     ASSERT_TRUE(touching.has_value());
     ASSERT_TRUE(second->contact_violations(16).empty());
-    MixedAMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid grid;
     grid.local_products = {second};
     grid.maximum_span_ratio = 16;
-    MixedAMR source(grid);
+    ::SimpleFluid::Meshes::AMR::MixedAMR source(grid);
     const auto before = source.observation();
-    MixedParticipantMarks mark;
+    ::SimpleFluid::Meshes::AMR::MixedParticipantMarks mark;
     mark.participant = 0;
     mark.refine_z = {*touching};
     EXPECT_THROW((void) source.adapt_participants({mark}), std::invalid_argument);
@@ -890,11 +895,11 @@ TEST(MixedAMRTest, JoinedFaceNeighborhoodDoesNotEnrollUnrelatedGradedInteriorCel
     grid.base_cells = {{0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}};
     grid.boundaries = {{0, 1, "south"}, {1, 2, "south"}, {2, 3, "south"}, {3, 7, "east"}, {7, 6, "north"},
         {6, 5, "north"}, {5, 4, "north"}, {4, 0, "west"}};
-    auto root = std::make_shared<LocalProductAMR>(grid);
-    std::vector<ProductCellAncestry> marks;
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(grid);
+    std::vector<::SimpleFluid::Meshes::AMR::ProductCellAncestry> marks;
     for (std::uint64_t c = 0; c < 3; ++c)
     {
-        const auto key = std::get<ProductCellAncestry>(root->cell_key(0, c).ancestry);
+        const auto key = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(root->cell_key(0, c).ancestry);
         if (key.base.root < 2)
             marks.push_back(key);
     }
@@ -903,7 +908,7 @@ TEST(MixedAMRTest, JoinedFaceNeighborhoodDoesNotEnrollUnrelatedGradedInteriorCel
     for (size_t r = 0; r < first->runs().size(); ++r)
         for (std::uint64_t c = 0; c < first->runs()[r].region.layout().cells; ++c)
         {
-            const auto key = std::get<ProductCellAncestry>(first->cell_key(r, c).ancestry);
+            const auto key = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(first->cell_key(r, c).ancestry);
             if (key.base.root == 0)
                 marks.push_back(key);
         }
@@ -911,35 +916,35 @@ TEST(MixedAMRTest, JoinedFaceNeighborhoodDoesNotEnrollUnrelatedGradedInteriorCel
     ASSERT_EQ(graded->storage_counts().cells, 21u);
     ASSERT_TRUE(graded->contact_violations(2).empty());
     const auto stationary = test::mixed_polyhedron(4, 3);
-    MixedAMRGrid assembly;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid assembly;
     assembly.local_products = {graded};
     assembly.stationary.push_back({stationary->geometry()->regions().front(), 9, 5, 71});
     assembly.joins = {{0, 1, "east", "polyhedral/join"}};
-    MixedAMR source(assembly);
+    ::SimpleFluid::Meshes::AMR::MixedAMR source(assembly);
     EXPECT_EQ(source.geometry()->num_cells(), 22u);
     closed(*source.geometry());
 }
 
 TEST(MixedAMRTest, WholeProductAdapterCannotBypassComparableAxialTraceAdmission)
 {
-    auto root = std::make_shared<ExtrudedAMR>(test::mixed_product_grid());
+    auto root = std::make_shared<::SimpleFluid::Meshes::AMR::ExtrudedAMR>(test::mixed_product_grid());
     const auto first = root->adapt({}, {0});
     const auto second = first->adapt({}, {0});
     ASSERT_TRUE(second->contact_violations(16).empty());
-    MixedAMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid grid;
     grid.adaptive = {second};
     grid.maximum_span_ratio = 16;
-    MixedAMR source(grid);
+    ::SimpleFluid::Meshes::AMR::MixedAMR source(grid);
     const auto before = source.observation();
-    std::optional<ProductCellAncestry> selected;
+    std::optional<::SimpleFluid::Meshes::AMR::ProductCellAncestry> selected;
     for (std::uint64_t c = 0; c < source.geometry()->num_cells(); ++c)
     {
-        const auto key = std::get<ProductCellAncestry>(source.cell_key(c).ancestry);
+        const auto key = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(source.cell_key(c).ancestry);
         if (key.axial.path == std::vector<std::uint64_t>{0, 1})
             selected = key;
     }
     ASSERT_TRUE(selected.has_value());
-    MixedParticipantMarks mark;
+    ::SimpleFluid::Meshes::AMR::MixedParticipantMarks mark;
     mark.participant = 0;
     mark.refine_z = {*selected};
     EXPECT_THROW((void) source.adapt_participants({mark}), std::invalid_argument);
@@ -947,17 +952,17 @@ TEST(MixedAMRTest, WholeProductAdapterCannotBypassComparableAxialTraceAdmission)
     const auto third = second->adapt({}, {1});
     EXPECT_FALSE(third->contact_violations(16).empty());
     grid.adaptive = {third};
-    EXPECT_THROW((void) MixedAMR(grid), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(grid), std::invalid_argument);
 }
 
 TEST(MixedAMRTest, InitialLocalZSplitRemainsAdmissibleAndContactProofBudgetIsAtomic)
 {
-    const auto root = std::make_shared<LocalProductAMR>(test::mixed_product_grid(true));
-    const auto selected = std::get<ProductCellAncestry>(root->cell_key(0, 4).ancestry);
+    const auto root = std::make_shared<::SimpleFluid::Meshes::AMR::LocalProductAMR>(test::mixed_product_grid(true));
+    const auto selected = std::get<::SimpleFluid::Meshes::AMR::ProductCellAncestry>(root->cell_key(0, 4).ancestry);
     const auto first = root->adapt({}, {selected});
-    MixedAMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid grid;
     grid.local_products = {first};
-    MixedAMR admitted(grid);
+    ::SimpleFluid::Meshes::AMR::MixedAMR admitted(grid);
     EXPECT_EQ(admitted.geometry()->num_cells(), 17u);
     closed(*admitted.geometry());
     const auto identity = root->identity();
@@ -965,7 +970,7 @@ TEST(MixedAMRTest, InitialLocalZSplitRemainsAdmissibleAndContactProofBudgetIsAto
     grid.maximum_interface_tiles = 1;
     try
     {
-        (void) MixedAMR(grid);
+        (void) ::SimpleFluid::Meshes::AMR::MixedAMR(grid);
         FAIL() << "Contact proof budget must reject before publication.";
     }
     catch (const std::invalid_argument& error)
@@ -979,9 +984,9 @@ TEST(MixedAMRTest, InitialLocalZSplitRemainsAdmissibleAndContactProofBudgetIsAto
 
 TEST(MixedAMRTest, BoundAdaptiveSourceMotionCannotBeRevivedByAssemblyOrRollback)
 {
-    AMRGrid config;
+    ::SimpleFluid::Meshes::AMR::AMRGrid config;
     config.block_cells = {2, 2, 2};
-    const auto canonical = std::make_shared<CartesianAMR>(config);
+    const auto canonical = std::make_shared<::SimpleFluid::Meshes::AMR::CartesianAMR>(config);
     const auto canonical_observation = canonical->observation();
     const auto volume = canonical->geometry()->cell_volume(0);
     auto bind = [&]
@@ -997,21 +1002,21 @@ TEST(MixedAMRTest, BoundAdaptiveSourceMotionCannotBeRevivedByAssemblyOrRollback)
     before_import.begin_trial(1.1, .5);
     before_import.accept_trial();
     ASSERT_FALSE(moved->geometry_unchanged());
-    MixedAMRGrid stale;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid stale;
     stale.adaptive = {moved};
-    EXPECT_THROW((void) MixedAMR(stale), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(stale), std::invalid_argument);
     const auto moved_epoch = moved->observation().geometry;
     before_import.restore(original);
     EXPECT_GT(moved->observation().geometry, moved_epoch);
     EXPECT_FALSE(moved->geometry_unchanged());
-    EXPECT_THROW((void) MixedAMR(stale), std::invalid_argument);
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::MixedAMR(stale), std::invalid_argument);
     EXPECT_TRUE(canonical->geometry_unchanged());
     EXPECT_EQ(canonical->observation(), canonical_observation);
     EXPECT_EQ(canonical->geometry()->cell_volume(0), volume);
     const auto retained = bind();
-    MixedAMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::MixedAMRGrid grid;
     grid.adaptive = {retained};
-    MixedAMR source(grid);
+    ::SimpleFluid::Meshes::AMR::MixedAMR source(grid);
     const auto accepted = source.observation();
     const auto pending = source.plan_participants({});
     auto mesh = std::make_shared<MeshHandle<>>(*retained->native_partition());

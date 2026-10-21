@@ -1,10 +1,10 @@
 /** @file AdaptiveHierarchy.cc
  * @brief Native hierarchy lifetime and checked Cartesian parent ancestry.
  */
-#include "geometry/AdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/AdaptiveHierarchy.hh"
 #include <stdexcept>
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 AdaptiveHierarchy::~AdaptiveHierarchy() = default;
 
@@ -18,4 +18,4 @@ CartesianCellAncestry CartesianCellAncestry::parent() const
         coordinate /= 2;
     return result;
 }
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

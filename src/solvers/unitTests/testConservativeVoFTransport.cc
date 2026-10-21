@@ -20,12 +20,12 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 
 TEST(ConservativeVoFTransportTest, SplitCounterexampleHasBoundedConservativeImplicitTracesForEveryFirstAxis)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 2, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {4, 4, 200};
     grid.periodic = {true, true, true};
-    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    VoF::AdaptiveVoF geometry(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid));
     const auto mesh = geometry.mesh();
     const auto n = mesh->num_owned_cells();
     detail::ConservativeVoFTransport tracer(mesh);
@@ -86,12 +86,12 @@ TEST(ConservativeVoFTransportTest, SplitCounterexampleHasBoundedConservativeImpl
 }
 TEST(ConservativeVoFTransportTest, ChangedDirectionAndStorageRefreshTheReusableOperator)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {4, 2, 2};
     grid.periodic = {true, true, true};
-    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    VoF::AdaptiveVoF geometry(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid));
     const auto mesh = geometry.mesh();
     const auto n = mesh->num_owned_cells();
     detail::ConservativeVoFTransport tracer(mesh);
@@ -139,12 +139,12 @@ TEST(ConservativeVoFTransportTest, ChangedDirectionAndStorageRefreshTheReusableO
 
 TEST(ConservativeVoFTransportTest, EquilibratedMicroscopicCarrierPreservesConstantConcentration)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {4, 2, 2};
     grid.periodic = {true, true, true};
-    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    VoF::AdaptiveVoF geometry(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid));
     const auto mesh = geometry.mesh();
     const auto n = mesh->num_owned_cells();
     detail::ConservativeVoFTransport tracer(mesh);
@@ -177,12 +177,12 @@ TEST(ConservativeVoFTransportTest, EquilibratedMicroscopicCarrierPreservesConsta
 
 TEST(ConservativeVoFTransportTest, EquilibratedStationaryTracerHasAnOverflowSafePhysicalNormRatio)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 2, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {4, 4, 2};
     grid.periodic = {true, true, true};
-    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    VoF::AdaptiveVoF geometry(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid));
     const auto mesh = geometry.mesh();
     const auto n = mesh->num_owned_cells();
     detail::ConservativeVoFTransport tracer(mesh);
@@ -224,12 +224,12 @@ TEST(ConservativeVoFTransportTest, EquilibratedStationaryTracerHasAnOverflowSafe
 
 TEST(ConservativeVoFTransportTest, PhysicalDefectCorrectionHonorsTheSharedIterationBudgetAndRecovers)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 2, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {4, 4, 2};
     grid.periodic = {true, true, true};
-    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::CartesianAMR>(grid));
+    VoF::AdaptiveVoF geometry(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid));
     const auto mesh = geometry.mesh();
     const auto n = mesh->num_owned_cells();
     double local_empty = n == 0 ? 1.0 : 0.0, empty_ranks = 0.0;

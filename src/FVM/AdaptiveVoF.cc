@@ -26,7 +26,7 @@ namespace
 using Pack = DefaultTpetraTypes;
 using GO = Pack::global_ordinal_type;
 using LO = Pack::local_ordinal_type;
-using Box = Meshes::AMRBox;
+using Box = SimpleFluid::Meshes::AMR::AMRBox;
 constexpr double roundoff = 2.0e-12;
 // Youngs gradients need one layer. Height functions need three axial layers;
 // the radius-two surface fit needs one further layer for its PLIC gradients.
@@ -258,7 +258,7 @@ struct AdaptiveVoF::Impl
     struct Geometry
     {
         std::shared_ptr<const Hierarchy> hierarchy;
-        Meshes::HierarchyObservation observation;
+        SimpleFluid::Meshes::AMR::HierarchyObservation observation;
         SP<const Handle> mesh;
         std::shared_ptr<const Exchange::Plan> cells, faces, stencil;
         std::vector<Patch> patches;
@@ -1250,7 +1250,7 @@ AdaptiveRemapResult AdaptiveVoF::remap(const AdaptiveVoF& target, const std::vec
                     [&](double x) { return std::isfinite(x) && (!inventory.nonnegative || x >= 0.0); });
     }
     require_collective(valid, "Adaptive remap requires unique named finite extensive inventories.");
-    std::vector<std::vector<Meshes::AMROverlap>> overlaps(target.mesh()->num_owned_cells());
+    std::vector<std::vector<SimpleFluid::Meshes::AMR::AMROverlap>> overlaps(target.mesh()->num_owned_cells());
     std::set<GO> ids;
     for (std::size_t c = 0; c < overlaps.size(); ++c)
     {
@@ -1552,7 +1552,7 @@ RefinementPlan AdaptiveVoF::refinement_plan(const std::vector<double>& fraction,
     RefinementPlan plan;
     plan.source_hierarchy = hierarchy();
     plan.source_observation = hierarchy()->observation();
-    std::map<Meshes::AMRBlock, std::vector<std::size_t>> siblings;
+    std::map<SimpleFluid::Meshes::AMR::AMRBlock, std::vector<std::size_t>> siblings;
     for (std::size_t b = 0; b < blocks.size(); ++b)
     {
         if (tagged[b] && blocks[b].level < config.max_level)

@@ -1088,7 +1088,7 @@ struct AdaptiveVoFSolver::Impl
         std::shared_ptr<Context> context;
         std::shared_ptr<const Published> accepted;
         std::uint64_t nonce = 0;
-        Meshes::HierarchyObservation observation;
+        SimpleFluid::Meshes::AMR::HierarchyObservation observation;
         bool representation = false;
         VoF::RepresentationDiagnostics representation_diagnostics;
         State candidate;
@@ -1136,7 +1136,7 @@ struct AdaptiveVoFSolver::Impl
         context->low_options.reset();
     }
 
-    void regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen,
+    void regrid(const std::vector<std::size_t>& refine, const std::vector<SimpleFluid::Meshes::AMR::AMRBlock>& coarsen,
         VoF::RefinementOptions protection, VoF::RefinementHints hints)
     {
         require_all(!saved, "AdaptiveVoFSolver topology is frozen while a checkpoint is active.");
@@ -1451,8 +1451,9 @@ void AdaptiveVoFSolver::commit_low_mach_trial(const LowMachTrial& trial)
     impl_->published.swap(candidate);
 }
 
-void AdaptiveVoFSolver::regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen,
-    VoF::RefinementOptions protection, VoF::RefinementHints hints)
+void AdaptiveVoFSolver::regrid(const std::vector<std::size_t>& refine,
+    const std::vector<SimpleFluid::Meshes::AMR::AMRBlock>& coarsen, VoF::RefinementOptions protection,
+    VoF::RefinementHints hints)
 {
     impl_->regrid(refine, coarsen, protection, std::move(hints));
 }
