@@ -1,5 +1,7 @@
 set(SIMPLEFLUID_MESH_SOURCES
     AdaptiveHierarchy.cc
+    AdaptiveOverlap.cc
+    ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     CartesianAMR.cc
@@ -54,6 +56,9 @@ set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
+    set_source_files_properties(ConvexCellGeometry.cc PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION OFF
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
 endif()
 
 # Require profiles for every Mesh archive member linked into Shiri. The listed
@@ -64,6 +69,8 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/DecomposedSemiStructuredTopology.cc
     details/SemiStructuredPartition.cc
     AdaptiveHierarchy.cc
+    AdaptiveOverlap.cc
+    ConvexCellGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     CartesianAMR.cc
