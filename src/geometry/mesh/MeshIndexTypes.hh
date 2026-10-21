@@ -14,6 +14,8 @@
 #include "dataclass/typedefs.hh"
 
 #include <concepts>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 
 namespace SimpleFluid
@@ -117,5 +119,16 @@ struct MeshIndexTypes
         LFID,
         LNID>;
 };
+
+namespace Meshes
+{
+/** @brief Shared ordinal-only index pack used by unstructured meshes and region adapters. */
+using UnstructuredMeshIndexTypes = MeshIndexTypes<
+    uint64_t,
+    uint64_t,
+    uint64_t,
+    size_t,
+    uint64_t>;
+} // namespace Meshes
 
 } // namespace SimpleFluid

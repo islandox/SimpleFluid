@@ -7,6 +7,7 @@
  * @copyright Copyright (c) 2026
  */
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
+#include "geometry/mesh/UnstructuredMesh.hh"
 #include <cmath>
 #include <numeric>
 #include <set>

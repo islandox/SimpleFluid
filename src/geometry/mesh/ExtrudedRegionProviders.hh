@@ -7,7 +7,8 @@
  * @copyright Copyright (c) 2026
  */
 #pragma once
-#include "geometry/mesh/RegionProviders.hh"
+#include "geometry/mesh/MeshRegion.hh"
+#include "geometry/mesh/SemiStructMeshTopo.hh"
 #include "geometry/mesh/ExactExtrudedConstruction.hh"
 #include <map>
 namespace SimpleFluid::Meshes

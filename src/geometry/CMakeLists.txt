@@ -32,6 +32,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/DecomposedSemiStructuredTopology.cc
     mesh/SemiStructuredXY_Z.cc
     mesh/UnstructuredMesh.cc
+    mesh/MeshRegion.cc
     mesh/RegionProviders.cc
     mesh/ConservativeInterface.cc
     mesh/ExtrudedRegionProviders.cc
