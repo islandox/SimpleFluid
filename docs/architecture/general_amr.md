@@ -5,7 +5,7 @@ AMR hierarchy, ancestry, overlap and adaptation modules live in
 Generic exact geometry and native mesh providers remain in `SimpleFluid::Meshes`;
 FVM transport and solver consumers remain in their own modules.
 
-**Status: Stages 1–5 are implemented and verified within the stated scope; Stages 6–9 remain proposed.** This document
+**Status: Stages 1–6 are implemented and verified within the stated scope; Stages 7–9 remain proposed.** This document
 defines the implemented hierarchy, certified geometry and sparse remap boundaries and the remaining
 implementation sequence and acceptance contracts. It does not extend the
 supported mesh families of the existing solvers or record dated validation results.
@@ -28,6 +28,8 @@ The [Stage 4 verification record](../verification/general_amr_stage4.md) identif
 the convex hierarchy/exact explicit-provider scope, focused evidence and limits.
 The [Stage 5 verification record](../verification/general_amr_stage5.md) tracks
 local/mixed provider evidence and its explicit qualification limits.
+The [Stage 6 verification record](../verification/general_amr_stage6.md) separates
+distributed migration evidence and remaining qualification gates from this design.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -47,7 +49,7 @@ selected here; external algorithm references explain proposed approaches only.
 | Concave explicit cells | Representation of admissible closed polyhedral surfaces | Certified decomposition before adaptation/VoF, stage 9 |
 | Mixed native regions | Conforming, nested planar coarse/fine, and translated periodic joins | Independent ancestry with cross-region closure, stage 5 |
 | Analytic cylindrical / `SweptRZ` providers | Native geometry and existing supported motion | Retain as static topology participants; refinement or incompatible neighboring splits reject until provider-specific refiners/joins qualify |
-| Distributed shard input | Root assembles geometry before partition planning | Distributed closure and owner-to-owner migration, stage 6 |
+| Distributed shard input | Legacy partition planning assembles shards at a root | Stage 6 detached owner-local closure and migration after bounded complete-source bootstrap; bounded correctness, memory and work-accounting gates qualified |
 | Extruded/polyhedral VoF and radiolysis | No support implied by native geometry | General geometric transport/flow, then physical coupling, stages 7 and 8 |
 
 The relevant seams are [`CartesianAMR::adapt`](../../src/geometry/mesh/AMR/CartesianAMR.hh),
@@ -126,7 +128,8 @@ ordinals remain separate. `CartesianAMR::plan_adaptation()` and
 collective source/epoch/communicator validation. Its weak origin observer preserves
 exact source identity without retaining global partition scratch. Bound hierarchy,
 FVM and solver construction use native ownership; this is not live migration of
-an existing solver's accepted state. Live repartition/migration remains Stage 6.
+an existing solver's accepted state. The detached Stage 6 path below provides live repartition/migration separately
+from this original binding API.
 Both canonical and resident geometry must retain their captured epochs. Supported
 resident ALE motion invalidates a binding; restoring coordinates does not revive
 an earlier observation. The Cartesian numerical backend remains unchanged.
@@ -199,10 +202,14 @@ binary exponents, supported double communication and deterministic compensated
 scalar accumulation; diagnostics retain their scale instead of overflowing a
 physical double total. Physical tolerances remain independent of remap scaling.
 
-Native owner certificate exchange currently pads local/imported shells to the
-global maximum shell payload width. It exchanges no global solution array, but
-highly heterogeneous large shells can inflate storage. Variable-length packing
-and a global ancestry directory remain Stage 6 gates. The Stage 2 utilities alone add no new refinement provider; Stage 3 supplies the
+The original Stage 2 native owner certificate exchange padded local/imported
+shells to the global maximum shell payload width, which could inflate storage
+for heterogeneous large shells. The current general remap API also uses bounded
+variable-length owner packets through `exchange_owner_packets`, without a global
+solution array. The separate
+[detached Stage 6 path](#distributed-execution-and-memory-bounds) adds the sharded
+typed ancestry directory and owner-local hierarchy planning. The Stage 2
+utilities alone add no new refinement provider; Stage 3 supplies the
 whole-product provider below. Neither stage adds a general-mesh VoF solver or
 live accepted-state repartition. The optimized Cartesian numerical/remap path
 remains separate.
@@ -278,8 +285,9 @@ created only on demand. `storage_counts()` and `storage_report()` separate those
 retained allocations from maps and temporary certificates. The Stage 3 remap
 bootstrap may explicitly assemble bounded complete-family catalogs for a query;
 it does not retain a global base×layers shell cache or weaken Stage 2's exact
-source/target coverage checks. Product-family distributed proofs, a global owner
-lookup and variable-length certificate packing remain Stage 6 work. Repeated
+source/target coverage checks. The separate [detached Stage 6 path](#distributed-execution-and-memory-bounds)
+provides owner lookup, complete-family authority and variable-length packets;
+this does not remove the original bootstrap API's bounded-catalog boundary. Repeated
 refine/coarsen histories and layer-count changes have dedicated storage tests;
 the verification record identifies their observed outcomes and limits.
 
@@ -604,7 +612,9 @@ bounded replicated bootstrap work. Ancestry-family indexes enumerate overlap
 relations, including independent product-factor directions and empty target
 selections; they do not search every source/target geometry pair. Native
 partition providers remain sparse, but that does not qualify per-rank hierarchy
-scaling. Exact explicit-shard reassembly and live migration remain Stage 6 gates.
+scaling. The separate [detached Stage 6 path](#distributed-execution-and-memory-bounds)
+implements exact sparse native reassembly and owner-to-owner migration; it does
+not convert these original APIs into distributed planners.
 
 `MixedAMR::storage_breakdown()` exposes uniquely accounted native assembly
 providers/derived lookups and owned mixed metadata (participant arrays, joins
@@ -614,7 +624,9 @@ reports include their planner state; Cartesian/polyhedral reports explicitly
 exclude private planner ancestry. Resident partition geometry is separate, and
 partition maps/control-block/allocator overhead are not a complete accounting.
 These are capacity estimates, not a whole-process retained-memory total or RSS
-measurement. Stage 6 must qualify actual distributed payload and memory bounds.
+measurement. The separate Stage 6 reports distinguish actual distributed
+payload, capacity estimates and normalized process RSS; focused evidence belongs
+in its verification record.
 
 ## Conservative remap and physical resolution
 
@@ -875,35 +887,84 @@ restore must invalidate prepared trials with a fresh monotone state revision.
 
 ## Distributed execution and memory bounds
 
-The current [`MeshPartitioner::make_plan`](../../src/parallel/CompositePartition.tcc)
-distributed-source branch gathers shards, calls `merge_partitions` at a root,
-and plans that serial union. It may serve as a bounded bootstrap for earlier
-geometry stages; it does not satisfy scalable AMR migration. Stage 6 is required
-before describing the new adaptation/repartition path as distributed at scale.
+The distributed execution path imports accepted bootstrap state into
+`DistributedAdaptiveHierarchy`, then releases the original hierarchy and its
+active geometry catalog. Bootstrap adapters may inspect a complete accepted
+source; this remains a bounded import operation. Subsequent split, family
+coarsening, closure, directory lookup, migration and native publication operate
+on detached owner-local records and explicit bounded messages. They do not call
+the legacy global `adapt` path. Existing Cartesian, extruded, local-product,
+polyhedral and Mixed APIs remain bounded bootstrap/reference implementations.
 
-Exchange marks and shared face/edge decisions through canonical authorities;
-perform closure, owner lookup, and migration between ranks that need the data.
-Partition weights include PLIC/reconstruction, interface, and population work;
-the objective also includes interface communication and migration cost.
-Report weights, measured imbalance, and ownership changes, beyond bare cell counts.
-Transfer ancestry, sparse explicit geometry, carrier inventories, and histories
-together. Rebuild halos from canonical adjacency and actual reconstruction
-support. A partition cut never becomes a physical boundary. Empty ranks join
-every collective; duplicate/missing owners, shard disagreement, mixed plans,
-or stale observations reject collectively before publication.
+Persistent keys identify physical region and typed construction ancestry
+independently of current numeric GIDs. Material remains separately retained
+binding metadata, checked against the owner alongside the key. A sharded full-key directory
+records owner, revision and current GID; prefix assignment supplies current map
+addresses without a replicated active-key catalog. Owned records, full requested
+ghosts, outer metric-only neighbors, directory authority shards and locally
+needed saved-parent capsules have separate lifetimes and accounting. Saved
+families follow an actual active descendant anchor. Product base and axial
+families remain independent, including a parent synthesized on a newly refined
+other factor. Procedural descriptors share immutable root/base/axis/view parts;
+cell addresses do not retain one convex shell per procedural field cell.
 
-Per-rank storage should scale with owned/ghost leaves, local ancestry branches,
-resident explicit faces/vertices, needed stencils, and overlap records, plus
-documented compact root/templates/interface metadata. Whole products retain
-O(base + layers) geometry; local products add unique templates and run/seam
-descriptors. Permit no global solution replication, whole-mesh flattening,
-expanded global explicit topology, or retained global cell-to-rank arrays.
-Account separately for maps, transient migration buffers, and shared objects;
-measure memory on empty and unevenly loaded ranks as well as mean storage.
-Separate metadata payload from process peak RSS, using the platform-normalized
-probe and declared units. Performance needs a numerically matched baseline with
-actual ownership, solver work and configuration recorded; Debug timings or cache
-reuse alone do not establish production scaling.
+Face authorities compare complete persistent support identity and exact
+geometry. Shared face tiles and propagated exact edge points receive sparse
+IDs; closed face/edge/vertex contact proofs drive bounded physical-span and
+comparable-trace closure. Registered incidence and contact provenance define this proof: it does not
+perform arbitrary spatial search for unregistered embedded contacts. Every
+failure occurs before candidate publication.
+Procedural interfaces admit only nested whole native faces; crossed traces
+must close compatibly or reject. Explicit convex providers may rebuild certified
+atomic topology. A sparse native index retains local procedural fragments,
+explicit polyhedral shards and native ordinal routes, not a replicated region
+entry per global active fragment. Full ghost shell packages and outer metric
+neighbors are fetched from authenticated actual owners.
+
+Mixed import retains only needed original-root join capsules, including aliases
+needed by ancestors absent from a current interior leaf's faces. Those capsules
+survive migration and inverse coarsening without the old MixedData. Joined
+supports clear physical boundary labels; unjoined physical patch remainders
+retain their labels. Domain identity separates contacts from same-fluid joins.
+Standalone Cartesian periodic images are represented explicitly. Mixed periodic
+frames reject until common point-equivalence provenance is qualified; periodic
+product/polyhedral contact support is not implied.
+
+The exact adaptive/native path certifies every participating convex planar
+cell and interface. Unsupported analytic or nonconvex native models use a
+separate FrozenNative whole-model ownership-only path that preserves accepted
+native incidence, authoritative metrics, images and node aliases without convex-hull
+conversion. A weak source-observation token permits the original hierarchy and
+providers to expire. Procedural source recipes reconstruct metrics without a
+duplicate per-cell/node geometry cache; explicit source loops and native data
+remain authoritative. Nonidentity affine frames, self-periodic incidence and
+already sparse bootstrap sources reject. Its typed provenance does not bypass the strict exact sparse
+factory. Whole topology remap still requires all participating cells to admit
+certified geometry; an untouched unsupported cell does not grant a partial
+remap exemption. Nonconvex refinement and analytic curved clipping are outside
+this stage.
+
+Plans pin source identity, topology/partition revisions and actual native mesh,
+epoch and typed owned-map ordering. Candidate native geometry and extensive
+history publication are separate transaction steps. Gas and carrier extensive amounts migrate independently, with named
+accepted/history frames and declared number/mole pair metadata. Each declared
+history has its own carrier and reconstruction declaration; ownership-only transfer preserves
+bits and flags. Topology remap does not advance physical time or recompute
+pressure, and another topology remap requires an explicit target reconstruction.
+Caller-declared full ghost keys extend the default owner halo within the same
+budget; this is not a general reconstruction/PLIC qualification.
+
+Measured compute work separates reconstruction, interface and population cost
+from one-time migration penalties. Proposal acceptance is rechecked using actual
+prepared native and state owner-stream bytes, including their explicit record
+and peer framing. These counts exclude directory/halo/MPI transport internals.
+Component capacities, unique shared-part bytes and declared estimates are
+reported separately from process RSS; partial peak-buffer reports are not a
+whole-transaction allocator bound. Sparse ALE is not supported. These bounded
+correctness and memory/work-accounting gates leave production scaling open.
+This capability makes no application,
+centimeter-bubble, general-flow or scalable speedup claim. Final focused validation belongs in the
+[Stage 6 verification record](../verification/general_amr_stage6.md).
 
 ## Certified nonconvex extension
 
@@ -937,8 +998,9 @@ shell without boundary projection or domain renormalization.
 
 ## Implementation stages and focused acceptance
 
-Stages 1–5 are verified within their stated boundaries; Stages 6–9 remain
-proposed. Existing tests are starting points for later extensions, not evidence
+Stages 1–6 are verified within their stated boundaries; Stages 7–9 remain
+proposed. Distributed correctness and memory/work accounting do not establish
+production scaling, which remains open. Existing tests are starting points for later extensions, not evidence
 that they work. Run focused Debug serial tests,
 then affected MPI cases at 2 and 4 ranks where they establish the intended seam
 and ownership conditions. Choose additional ranks or deliberately sparse

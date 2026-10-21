@@ -14,7 +14,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   if(TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
-      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap")
+      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     # Catch dependencies from FVM back into the higher-level solver DSO.
     target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
   else()
@@ -22,7 +22,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
-      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap")
+      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testGeometricVoF")
@@ -237,3 +237,17 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(NAME MixedAMRRemap_2procs TARGET testMixedAMRRemap PROCS 2 LABELS "mpi;amr;mixed;conservation" TIMEOUT 180)
+
+foreach(_distributed_native_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME DistributedNativeOperators_${_distributed_native_procs}procs
+    TARGET testDistributedNativeOperators PROCS ${_distributed_native_procs} LABELS "mpi;amr;native;fvm" TIMEOUT 180)
+endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME DistributedAdaptiveState_${PROCS}procs
+    TARGET testDistributedAdaptiveState
+    PROCS ${PROCS}
+    LABELS "amr;distributed;state;history;conservation;collective"
+    TIMEOUT 240)
+endforeach()

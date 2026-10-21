@@ -2,6 +2,7 @@
  * @brief Collective convex split/coarsen transactions and bounded canonical topology.
  */
 #include "geometry/mesh/AMR/PolyhedralAMR.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultSerialComm.hpp>
@@ -542,6 +543,92 @@ std::vector<AdaptiveAncestryRelation> PolyhedralAMR::overlap_relations(
             for (const auto source : children->second)
                 result.push_back({AdaptiveAncestryRelation::Kind::Coarsening, source, destination});
         }
+    }
+    return result;
+}
+AdaptiveBootstrap PolyhedralAMR::detach_owned(std::span<const std::uint64_t> owned_cells, AdaptiveBytes domain) const
+{
+    if (!geometry_unchanged() || domain.empty())
+        throw std::invalid_argument("Cannot detach moved geometry or missing domain provenance.");
+    AdaptiveBootstrap result;
+    result.kernel = convex_adaptive_kernel(data_->grid->max_depth, data_->grid->minimum_scaled_volume);
+    std::set<AdaptiveCellKey> selected;
+    auto leaf_record = [&](const AdaptiveCellKey& key)
+    {
+        const auto& node = data_->nodes.at(key);
+        AdaptiveLeaf leaf;
+        leaf.key = key;
+        leaf.domain = domain;
+        leaf.provider = AdaptiveProviderKind::Polyhedral;
+        leaf.material = node.material;
+        leaf.geometry = node.geometry;
+        for (std::size_t f = 0; f < node.surfaces.size(); ++f)
+        {
+            const auto& use = node.surfaces[f];
+            adaptive_detail::Writer w;
+            w.word(std::uint64_t(use.key.kind));
+            w.word(use.key.region);
+            w.bytes(encode_adaptive_key({use.key.region, use.key.creator}));
+            w.word(use.key.ordinal);
+            leaf.surfaces.push_back(
+                {std::move(w.data), node.geometry->face_geometry(f), use.orientation, use.exterior, use.boundary});
+        }
+        auto ancestry = std::get<ConvexCellAncestry>(key.ancestry);
+        if (!ancestry.path.empty())
+        {
+            ancestry.path.pop_back();
+            leaf.parent_family = adaptive_family_key({key.region, ancestry}, AdaptiveSplit::Isotropic);
+        }
+        return leaf;
+    };
+    for (auto id : owned_cells)
+    {
+        const auto& key = data_->keys.at(id);
+        if (!selected.insert(key).second)
+            throw std::invalid_argument("Repeated detached polyhedral leaf.");
+        result.owned.push_back(leaf_record(key));
+        result.source_cells.push_back({key, id});
+    }
+    std::set<AdaptiveCellKey> roots;
+    for(const auto& key:selected){const auto& ancestry=std::get<ConvexCellAncestry>(key.ancestry);roots.insert({key.region,ConvexCellAncestry{ancestry.root,{}}});}
+    for(const auto& key:roots)result.support_roots.push_back(leaf_record(key));
+    std::set<AdaptiveCellKey> ancestors;
+    for (const auto& key : selected)
+    {
+        auto p = std::get<ConvexCellAncestry>(key.ancestry);
+        while (!p.path.empty())
+        {
+            p.path.pop_back();
+            ancestors.insert({key.region, p});
+        }
+    }
+    for (const auto& parent : ancestors)
+    {
+        const auto& node = data_->nodes.at(parent);
+        if (node.children.empty())
+            continue;
+        auto anchor = data_->leaves.end();
+        for (auto it = data_->leaves.begin(); it != data_->leaves.end(); ++it)
+        {
+            if (it->region != parent.region)
+                continue;
+            const auto& candidate = std::get<ConvexCellAncestry>(it->ancestry);
+            const auto& ancestor = std::get<ConvexCellAncestry>(parent.ancestry);
+            if (candidate.root == ancestor.root && candidate.path.size() > ancestor.path.size() &&
+                std::equal(ancestor.path.begin(), ancestor.path.end(), candidate.path.begin()))
+            {
+                anchor = it;
+                break;
+            }
+        }
+        if (anchor == data_->leaves.end() || !selected.contains(*anchor))
+            continue;
+        AdaptiveFamily family;
+        family.key = adaptive_family_key(parent, AdaptiveSplit::Isotropic);
+        family.parent = leaf_record(parent);
+        family.children = node.children;
+        family.anchor = encode_adaptive_key(*anchor);
+        result.families.push_back(std::move(family));
     }
     return result;
 }

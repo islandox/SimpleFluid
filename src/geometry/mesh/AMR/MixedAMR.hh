@@ -96,6 +96,8 @@ public:
     std::vector<AdaptiveAncestryRelation> overlap_relations(const MixedAMR&) const;
     std::vector<AdaptiveAncestryRelation> overlap_relations(
         const MixedAMR&, const std::vector<std::uint64_t>& targets) const;
+    [[nodiscard]] AdaptiveBootstrap detach_owned(std::span<const std::uint64_t> owned_cells, AdaptiveBytes domain,
+        std::size_t byte_budget = 64 * 1024 * 1024) const;
     struct StorageBreakdown
     {
         struct Participant

@@ -18,9 +18,18 @@
 #include <Teuchos_Comm.hpp>
 #include <optional>
 #include <variant>
+namespace SimpleFluid::Meshes::AMR
+{
+class FrozenNativeAccess;
+}
 
 namespace SimpleFluid::Meshes
 {
+struct SparseNativeIndex;
+struct SparseNativeMeshInput;
+class FrozenNativeMeshInput;
+
+class ConvexCellGeometry;
 
 /**
  * @brief Rectangular subset of a structured exterior patch, parametrized by two logical axes.
@@ -158,6 +167,12 @@ public:
         template<class Visitor> void visit_cell_faces(ID cell, Visitor&& visitor) const
         {
             check_cell(cell);
+            if (d_mesh.sparse_native())
+            {
+                for (auto face : d_mesh.cell_faces(d_mesh.composite_cell(d_index, cell)))
+                    visitor(d_mesh.resolve_sparse_face(face));
+                return;
+            }
             const auto visit = [&](ID face)
             {
                 const auto adjacent = d_region.topology().neighbor_cell(face);
@@ -231,6 +246,7 @@ public:
         template<class Visitor> void visit_regions(Visitor&& visitor) const
         {
             if (!d_mesh) throw std::logic_error("Execution view has no composite regions.");
+            if(d_mesh->sparse_native())throw std::logic_error("Sparse native regions have no global prefix offsets.");
             for (size_t r = 0; r < d_mesh->d_regions.size(); ++r)
                 std::visit([&](const auto& region) { visitor(r, d_mesh->d_cells[r], region); }, d_mesh->d_regions[r]);
         }
@@ -244,12 +260,24 @@ public:
         template<class Visitor> void visit_region_geometry(Visitor&& visitor) const
         {
             if (!d_mesh) throw std::logic_error("Execution view has no composite regions.");
+            if(d_mesh->sparse_native())throw std::logic_error("Sparse native regions require explicit ordinal routes.");
             for (size_t r = 0; r < d_mesh->d_regions.size(); ++r)
                 std::visit([&](const auto& region)
                 {
                     const RegionGeometryView<std::remove_cvref_t<decltype(region)>> geometry(*d_mesh, r, region);
                     visitor(r, d_mesh->d_cells[r], geometry);
                 }, d_mesh->d_regions[r]);
+        }
+        /** Rank-local provider dispatch without inventing global region prefixes. */
+        template<class Visitor> void visit_sparse_region_geometry(Visitor&& visitor) const
+        {
+            if(!d_mesh || !d_mesh->sparse_native())throw std::logic_error("Sparse provider dispatch requires a sparse native mesh.");
+            for(size_t r=0;r<d_mesh->d_regions.size();++r)
+                std::visit([&](const auto& region)
+                {
+                    const RegionGeometryView<std::remove_cvref_t<decltype(region)>> geometry(*d_mesh,r,region);
+                    visitor(r,geometry);
+                },d_mesh->d_regions[r]);
         }
         ResolvedFace resolve_face(ID face) const;
     private:
@@ -278,6 +306,15 @@ public:
     const Teuchos::RCP<const Teuchos::Comm<int>>& communicator() const noexcept { return d_comm; }
     /** Global catalog counts are retained; explicit geometry queries require local residency. */
     bool partition_resident() const noexcept { return d_partition_resident; }
+    bool sparse_native() const noexcept { return bool(d_sparse_native); }
+    /** Local native fragment dispatch; global counts never imply residency. */
+    static std::shared_ptr<MultiRegionMesh> from_sparse_native(
+        SparseNativeMeshInput input, Teuchos::RCP<const Teuchos::Comm<int>> communicator);
+    static std::shared_ptr<MultiRegionMesh> from_frozen_native(FrozenNativeMeshInput,Teuchos::RCP<const Teuchos::Comm<int>>);
+    bool frozen_native() const noexcept;
+    std::shared_ptr<const ConvexCellGeometry> certified_sparse_cell_geometry(ID cell) const;
+    ExactPlanarFacePtr certified_sparse_face_geometry(ID face) const;
+    int sparse_cell_owner(ID cell) const;
     /**
      * @brief Encode local geometry for selected visible composite cells.
      *
@@ -329,10 +366,11 @@ public:
     {
         real_t sum=0;
         for (const auto logical : logical_faces(native))
-            sum += (native_face(logical) == native ? 1.0 : -1.0) * value(logical);
+            sum += native_flux_orientation(native, logical) * value(logical);
         return sum;
     }
     RegionFace native_face(ID f) const;
+    real_t native_flux_orientation(RegionFace native, ID logical) const;
     std::pair<size_t, ID> native_cell(ID c) const;
     ID composite_cell(size_t r, ID c) const;
     ID patch_face(const StructuredPatch& p, std::array<size_t, 2> coordinate) const;
@@ -369,6 +407,7 @@ private:
     explicit MultiRegionMesh(PartitionTag) {}
     friend Base;
     friend class PlanarALEGeometryAccess;
+    friend class ::SimpleFluid::Meshes::AMR::FrozenNativeAccess;
     void replace_axial_edges_fixed_topology(ArrReal edges);
     Vec3 transformed_point(Vec3 point) const;
     Vec3 transformed_area_vector(Vec3 vector) const;
@@ -437,11 +476,7 @@ private:
     Vec3 node_coordinates_impl(ID n) const;
     int boundary_id_impl(ID f) const;
     const std::string& boundary_batch_name_impl(int b) const;
-    auto boundary_face_batch_impl(int b) const
-    {
-        return std::views::iota(ID{0}, static_cast<ID>(num_faces()))
-            | std::views::filter([this, b](ID f) { return boundary_id_impl(f) == b; });
-    }
+    EntityRange<ID> boundary_face_batch_impl(int b) const;
     std::vector<int> boundary_batch_ids_impl() const;
     int num_boundary_batches_impl() const noexcept;
     void normalize(StructuredPatch& patch) const;
@@ -470,8 +505,12 @@ private:
     Vec3 periodic_translation(ID face) const;
     Vec3 periodic_translation(RegionFace native) const;
     ResolvedFace resolve_retained_face(RegionFace native) const;
+    ResolvedFace resolve_sparse_face(ID face) const;
+    EntityRange<ID> sparse_cell_nodes(ID cell) const;
+    std::shared_ptr<const SparseNativeIndex> d_sparse_native;
     template<class R> ResolvedFace resolve_native_face(size_t r, const R& region, ID face, ID adjacent) const
     {
+        if (sparse_native()) return resolve_sparse_face(canonical_face({r,face}));
         ResolvedFace resolved;
         resolved.face = d_faces[r] + face - removed_before(r, face);
         const auto owner = region.topology().owner_cell(face);

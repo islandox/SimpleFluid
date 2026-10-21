@@ -63,6 +63,7 @@ struct NativeConvexShell
     std::vector<std::vector<std::size_t>> outward_faces;
 };
 
+class ExactPlanarFace;
 class ConvexCellGeometry;
 using ConvexGeometryPtr = std::shared_ptr<const ConvexCellGeometry>;
 struct ConvexFaceOrigin
@@ -117,6 +118,7 @@ public:
     [[nodiscard]] static ConvexGeometryPtr from_native_shell(
         std::span<const GeometryPoint> vertices, const std::vector<std::vector<std::size_t>>& outward_faces);
     [[nodiscard]] GeometryMoments moments() const;
+    [[nodiscard]] GeometryPoint centroid() const;
     [[nodiscard]] std::vector<char> encode_exact_certificate() const;
     /** Capacity-based allocation estimate including exact arrays/limbs; excludes
      * allocator headers and shared control blocks, and does not measure RSS. */
@@ -127,14 +129,15 @@ public:
      * volume itself is representable; first-moment underflow uses an enclosure.
      * Exact internal moments remain retained. */
     [[nodiscard]] GeometryMoments moments_binary64() const;
+    [[nodiscard]] std::shared_ptr<const ExactPlanarFace> face_geometry(std::size_t face) const;
     [[nodiscard]] std::size_t num_faces() const noexcept;
     /** Three exact AABB midpoint cuts, retaining every positive intersection.
      * Quality compares exact child volume to its largest exact AABB span cubed.
      * Any unsupported positive sliver rejects the entire split transaction. */
     [[nodiscard]] std::vector<ConvexOctantPiece> split_aabb_midpoints(double minimum_scaled_volume = 0) const;
     [[nodiscard]] bool quality_above(double minimum_scaled_volume) const;
-    [[nodiscard]] std::array<CertifiedGeometryValue,3> axis_spans() const;
-    [[nodiscard]] bool axis_span_exceeds(const ConvexCellGeometry&,std::size_t axis,double ratio) const;
+    [[nodiscard]] std::array<CertifiedGeometryValue, 3> axis_spans() const;
+    [[nodiscard]] bool axis_span_exceeds(const ConvexCellGeometry&, std::size_t axis, double ratio) const;
     [[nodiscard]] ConvexClipResult clip(const GeometryHalfspace& halfspace) const;
     [[nodiscard]] ConvexGeometryPtr intersect(const ConvexCellGeometry& other) const;
     /** Exact coverage/disjointness/containment against the actual represented shell. */

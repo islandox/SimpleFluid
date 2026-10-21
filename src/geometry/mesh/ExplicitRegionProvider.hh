@@ -89,8 +89,8 @@ public:
             if (f.id >= layout.faces || f.owner >= layout.cells
                 || (f.neighbor != UnstructuredMesh::invalid_ordinal && f.neighbor >= layout.cells)
                 || f.owner == f.neighbor || f.nodes.size() < 3
-                || !finite(f.centroid) || !finite(f.area_vector) || !(f.area_vector.norm() > 0)
-                || !std::isfinite(f.area_vector.norm())
+                || !finite(f.centroid) || !finite(f.area_vector) || !(native_area_magnitude(f.area_vector) > 0)
+                || !std::isfinite(native_area_magnitude(f.area_vector))
                 || !d_cells.contains(f.owner)
                 || (f.neighbor != UnstructuredMesh::invalid_ordinal && !d_cells.contains(f.neighbor)))
                 throw std::invalid_argument("Invalid explicit region face record.");
@@ -152,7 +152,15 @@ public:
     [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_exact_complex(
         std::shared_ptr<const ExactPolyhedralComplex> construction,
         std::map<int, std::string> boundaries);
-    bool has_exact_construction() const noexcept { return bool(d_construction); }
+    /** Authority-certified local explicit fragment. Native ordinals are local
+     * to the fragment; MultiRegion sparse routes provide global entity IDs.
+     * This preserves explicit polyhedra without expanding procedural families. */
+    [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_certified_records(RegionLayout layout,
+        std::vector<Cell> cells, std::vector<Face> faces, std::vector<Node> nodes,
+        std::map<int, std::string> boundaries, std::map<ID, ConvexGeometryPtr> cell_certificates,
+        std::map<ID, ExactPlanarFacePtr> face_certificates, const std::map<ID, std::vector<char>>& node_certificates);
+    bool has_exact_construction() const noexcept { return bool(d_construction) || !d_cell_certificates.empty(); }
+    bool has_local_certificates() const noexcept { return !d_cell_certificates.empty(); }
     const std::shared_ptr<const ExactPolyhedralComplex>& construction() const noexcept { return d_construction; }
     [[nodiscard]] ConvexGeometryPtr certified_cell_geometry(std::size_t cell) const;
     [[nodiscard]] ConvexGeometryPtr atomic_cell_geometry(std::size_t cell) const;
@@ -220,6 +228,7 @@ private:
         return type == MeshUtils::CellType::HEXAHEDRON || type == MeshUtils::CellType::TRIPRISM
             || type == MeshUtils::CellType::POLYHEDRON;
     }
+    static real_t native_area_magnitude(Vec3);
     static bool finite(Vec3 p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
     static EntityRange<ID> range(const std::vector<ID>& values)
     {
@@ -228,6 +237,8 @@ private:
     }
     [[nodiscard]] std::size_t exact_storage_bytes() const;
     std::shared_ptr<const ExactPolyhedralComplex> d_construction;
+    std::map<ID,ConvexGeometryPtr> d_cell_certificates;
+    std::map<ID,ExactPlanarFacePtr> d_face_certificates;
     RegionLayout d_layout;
     std::map<ID, Cell> d_cells;
     std::map<ID, Face> d_faces;

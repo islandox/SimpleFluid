@@ -2,6 +2,7 @@ add_library(SimpleFluidFVM SHARED
     GeometricVoF.cc
     AdaptiveVoF.cc
     ConservativeAMRRemap.cc
+    DistributedAdaptiveState.cc
     # Non-orthogonal FVM solves and higher-level solvers share this instance.
     explicit_instantiation/DICPreconditioner.cc
     explicit_instantiation/ALEControlVolumeState.cc
@@ -15,4 +16,4 @@ simplefluid_configure_component(SimpleFluidFVM)
 target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 
 # The independent VoF workstream is outside the existing Shiri PGO workload.
-simplefluid_exclude_from_pgo_sources(GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc)
+simplefluid_exclude_from_pgo_sources(GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc)
