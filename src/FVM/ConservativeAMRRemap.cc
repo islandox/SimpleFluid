@@ -182,6 +182,11 @@ std::vector<double> binding_bytes(const Meshes::AdaptiveCellBinding& cell)
         for (const auto child : convex->path)
             append(child);
     }
+    else if (const auto* stationary = std::get_if<Meshes::StaticCellAncestry>(&cell.key.ancestry))
+    {
+        append(stationary->provider_root);
+        append(stationary->native_cell);
+    }
     else
     {
         const auto& product = std::get<Meshes::ProductCellAncestry>(cell.key.ancestry);

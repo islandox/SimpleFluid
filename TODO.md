@@ -23,10 +23,11 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 Phase 22 has uniform and distributed Cartesian AMR VoF backends, numerical
 radiolytic coupling, and conservative representation changes with focused
 verification. Physical calibration and application resolution qualification
-remain open. Phase 23 Stages 1–4 implement the common hierarchy/Cartesian seam,
-certified geometry/remap, whole-product XY/Z refinement and single-region convex
-polyhedral adaptation with focused verification. Mixed-region closure, scalable
-migration and general flow qualification remain proposed in Stages 5–9.
+remain open. Phase 23 Stages 1–5 implement the common hierarchy/Cartesian seam,
+certified geometry/remap, whole/local XY/Z products, convex polyhedral adaptation
+and bounded mixed-provider closure with focused verification. Scalable migration,
+general flow, physical coupling and nonconvex qualification remain proposed in
+Stages 6–9.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -65,7 +66,7 @@ migration and general flow qualification remain proposed in Stages 5–9.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
-| Phase 23, general native AMR | Stages 1–4 implemented and verified; Stages 5–9 proposed | Hierarchy, certified remap, whole-product XY/Z and single-region convex polyhedral adaptation complete; local/mixed products, live migration and general VoF qualification remain open |
+| Phase 23, general native AMR | Stages 1–5 implemented and verified; Stages 6–9 proposed | Local/mixed providers, bounded contact admission and native join/remap gates complete within stated limits; live migration and general VoF qualification remain open |
 
 ### Checklist conventions
 
@@ -1860,7 +1861,7 @@ for the implemented API, reproducible checks and qualification limits.
 
 ## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
 
-**Status: Stages 1–4 implemented and verified; Stages 5–9 remain proposed.** See the
+**Status: Stages 1–5 implemented and verified within the stated scope; Stages 6–9 remain proposed.** See the
 [general AMR design](docs/architecture/general_amr.md) for the algorithms,
 ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
@@ -1946,21 +1947,34 @@ General-mesh VoF/flow and local/mixed product adaptation remain later stages.
 Stage 4 evidence and limits are recorded in
 [convex hierarchy and exact explicit-provider verification](docs/verification/general_amr_stage4.md).
 This is bounded replicated canonical planning with sparse native resident
-providers, not scalable distributed hierarchy storage. Exact shard reassembly,
-mixed-region closure and general VoF/flow remain later gates.
+providers, not scalable distributed hierarchy storage. Exact shard reassembly
+remains a Stage 6 gate. Stage 4 alone does not qualify mixed-region closure
+(Stage 5) or general VoF/flow.
 
 ### Stage 5 — Mixed-region closure and local XY/Z products
 
-- [ ] Represent local extrusion refinement as shared base patches times Z
+Implemented and verified within the scope recorded in
+[Stage 5 verification](docs/verification/general_amr_stage5.md). The boundary includes
+shared exact base/axis/run views, typed multiple adaptive/static participants,
+stable physical-patch joins, bounded physical-span closure and closed face/edge/
+vertex admission (including one-generation comparable factor traces), exact multi-provider
+native tiles, grouped complete native-patch membership, and independent sparse
+patch cardinality catalogs. Explicit O(interface tiles) seam metadata remains a
+bounded bootstrap cost rather than a universal base-plus-layers bound. Contacts retain
+separate native domains. Mixed storage reports are explicitly nonadditive and
+do not establish complete planner/RSS or distributed scaling bounds. Native
+field/remap qualification does not enable a general VoF/flow solver.
+
+- [x] Represent local extrusion refinement as shared base patches times Z
       runs, with immutable shared base topology/metrics and compact seam
       descriptors. Account for unique templates and local-product overhead.
-- [ ] Close refinement across region joins using physical scales and common
+- [x] Close refinement across region joins using physical scales and common
       interface ancestry; preserve same-fluid pressure connectivity and
       distinct material/contact laws. Keep unsupported providers static.
-- [ ] Initially require nested supported joins. Add validated multi-provider
+- [x] Initially require nested supported joins. Add validated multi-provider
       subface descriptors for local products after qualifying coverage and
       ownership; crossed anisotropic tilings must close compatibly or reject.
-- [ ] Verify one canonical integrated flux per tile, complete unique coverage,
+- [x] Verify one canonical integrated flux per tile, complete unique coverage,
       patch inheritance, periodic support limits, contact isolation, bounded
       closure, and compact repeated seam storage.
 
@@ -1973,6 +1987,8 @@ mixed-region closure and general VoF/flow remain later gates.
 - [ ] Replace Stage 2's global-maximum-width padded native certificate bootstrap
       with variable-length sparse owner packets; bound heterogeneous-shell memory
       by actual local/imported payload and add the global ancestry directory.
+      Include distributed seam/contact proofs and explicit membership payloads,
+      planner ancestry, partition maps and actual per-rank memory accounting.
 - [ ] Balance measured reconstruction/interface/population work and migration
       cost; retain sparse native fragments and reconstruction halos.
 - [ ] Verify partition-equivalent keys and budgets, split sibling families,

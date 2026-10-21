@@ -4,6 +4,7 @@
 #pragma once
 #include "geometry/AdaptiveHierarchy.hh"
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/ExactPlanarFace.hh"
 #include <string>
 
 namespace SimpleFluid::Meshes
@@ -71,6 +72,7 @@ public:
     [[nodiscard]] MeshUtils::Vec3 face_area_vector(std::uint64_t) const;
     [[nodiscard]] ConvexGeometryPtr cell_geometry(std::uint64_t) const;
     [[nodiscard]] ConvexGeometryPtr atomic_cell_geometry(std::uint64_t) const;
+    [[nodiscard]] ExactPlanarFacePtr face_geometry(std::uint64_t) const;
     [[nodiscard]] std::vector<char> encode() const;
     /** Empty explicit selection creates an empty resident shard. */
     [[nodiscard]] std::vector<char> encode(std::span<const std::uint64_t> visible_cells) const;

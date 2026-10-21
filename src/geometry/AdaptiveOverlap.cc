@@ -55,6 +55,8 @@ bool descendant(const AdaptiveCellKey& parent, const AdaptiveCellKey& child)
         return p->root == c.root && p->path.size() < c.path.size() &&
                std::equal(p->path.begin(), p->path.end(), c.path.begin());
     }
+    if (std::holds_alternative<StaticCellAncestry>(parent.ancestry))
+        return false;
     const auto& p = std::get<ProductCellAncestry>(parent.ancestry);
     const auto& c = std::get<ProductCellAncestry>(child.ancestry);
     return p != c && prefix(p.base, c.base) && prefix(p.axial, c.axial);

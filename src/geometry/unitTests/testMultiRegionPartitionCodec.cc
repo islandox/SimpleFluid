@@ -78,30 +78,66 @@ struct PacketOffsets
 };
 PacketOffsets inspect_cartesian_packet(const std::vector<char>& packet)
 {
-    Cursor r{packet}; PacketOffsets p;
-    r.take<uint64_t>(); const auto regions = r.take<uint64_t>();
+    Cursor r{packet};
+    PacketOffsets p;
+    if (r.take<uint64_t>() != 0x5346524547490007ULL)
+        throw std::logic_error("Codec test expected native packet format 7.");
+    const auto regions = r.take<uint64_t>();
     for (size_t region = 0; region < regions; ++region)
     {
-        if (r.take<uint32_t>() != 0) throw std::logic_error("Codec test expected Cartesian providers.");
+        if (r.take<uint32_t>() != 0)
+            throw std::logic_error("Codec test expected Cartesian providers.");
         r.array(1);
-        const auto family = r.pos; r.take<RegionLayout::Family>();
-        const auto cells = r.pos; r.pos += 3 * sizeof(uint64_t);
-        const auto extents = r.pos; r.pos += 3 * sizeof(uint64_t);
-        const auto periodic = r.pos; r.pos += 3;
-        if (region == 0) { p.family = family; p.cells = cells; p.extents = extents; p.periodic = periodic; }
-        for (size_t axis = 0; axis < 3; ++axis) r.array(sizeof(real_t));
-        for (size_t boundary = 0; boundary < 6; ++boundary) r.array(1);
+        const auto family = r.pos;
+        r.take<RegionLayout::Family>();
+        const auto cells = r.pos;
+        r.pos += 3 * sizeof(uint64_t);
+        const auto extents = r.pos;
+        r.pos += 3 * sizeof(uint64_t);
+        const auto periodic = r.pos;
+        r.pos += 3;
+        if (region == 0)
+        {
+            p.family = family;
+            p.cells = cells;
+            p.extents = extents;
+            p.periodic = periodic;
+        }
+        for (size_t axis = 0; axis < 3; ++axis)
+            r.array(sizeof(real_t));
+        for (size_t boundary = 0; boundary < 6; ++boundary)
+            r.array(1);
     }
-    if (r.take<uint64_t>() != 1) throw std::logic_error("Codec test expected one interface.");
+    if (r.take<uint64_t>() != regions)
+        throw std::logic_error("Codec test expected one native patch catalog per region.");
+    for (size_t region = 0; region < regions; ++region)
+    {
+        const auto patches = r.take<uint64_t>();
+        if (patches > 6)
+            throw std::logic_error("Invalid Cartesian native patch catalog size.");
+        std::set<int> boundaries;
+        for (size_t patch = 0; patch < patches; ++patch)
+        {
+            const auto boundary = r.take<int>();
+            const auto count = r.take<uint64_t>();
+            if (boundary < 0 || boundary >= 6 || !count || !boundaries.insert(boundary).second)
+                throw std::logic_error("Invalid Cartesian native patch catalog entry.");
+        }
+    }
+    if (r.take<uint64_t>() != 1)
+        throw std::logic_error("Codec test expected one interface.");
     p.interface_tag = r.pos;
-    if (r.take<uint32_t>() != 0) throw std::logic_error("Codec test expected structured interface.");
+    if (r.take<uint32_t>() != 0)
+        throw std::logic_error("Codec test expected structured interface.");
     p.patch = r.pos;
     constexpr size_t patch_bytes = 5 * sizeof(uint64_t) + sizeof(int) + 2 * sizeof(unsigned) + 2;
     r.pos += 2 * patch_bytes + 2 * sizeof(unsigned) + 2;
-    if (r.take<uint8_t>()) r.pos += sizeof(MeshUtils::Vec3);
+    if (r.take<uint8_t>())
+        r.pos += sizeof(MeshUtils::Vec3);
     r.pos += sizeof(InterfaceTolerance);
     p.cell_offsets = r.pos;
-    for (size_t field = 0; field < 4; ++field) r.array(sizeof(ID));
+    for (size_t field = 0; field < 4; ++field)
+        r.array(sizeof(ID));
     p.boundaries = r.pos;
     return p;
 }

@@ -54,7 +54,11 @@ struct AxialIntervalKey
 };
 struct BaseEdgeKey
 {
-    enum class Kind { Root, TemplateInterior };
+    enum class Kind
+    {
+        Root,
+        TemplateInterior
+    };
     BaseCellKey creator;
     std::uint64_t ordinal = 0;
     std::vector<std::uint64_t> path;
@@ -68,10 +72,24 @@ struct ProductCellAncestry
     auto operator<=>(const ProductCellAncestry&) const = default;
 };
 
+struct ProductContactViolation
+{
+    ProductCellAncestry first, second;
+    unsigned dimension;
+    bool span_exceeded, trace_jump_exceeded;
+};
+
+/** Immutable native participant provenance; no refinement is defined. */
+struct StaticCellAncestry
+{
+    std::uint64_t provider_root = 0, native_cell = 0;
+    auto operator<=>(const StaticCellAncestry&) const = default;
+};
+
 struct AdaptiveCellKey
 {
     std::uint64_t region = 0;
-    std::variant<CartesianCellAncestry, ConvexCellAncestry, ProductCellAncestry> ancestry;
+    std::variant<CartesianCellAncestry, ConvexCellAncestry, ProductCellAncestry, StaticCellAncestry> ancestry;
     auto operator<=>(const AdaptiveCellKey&) const = default;
 };
 

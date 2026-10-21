@@ -157,3 +157,8 @@ foreach(_region_procs IN ITEMS 2 4)
         LABELS "mpi;multi_region"
         TIMEOUT 120)
 endforeach()
+
+simplefluid_add_mpi_test(NAME MixedAMR_2procs TARGET testMixedAMR PROCS 2 LABELS "mpi;amr;mixed" TIMEOUT 180)
+
+simplefluid_add_mpi_test(NAME LocalProductAMR_2procs TARGET testLocalProductAMR PROCS 2
+    ARGS "--gtest_filter=LocalProductAMRTest.*" LABELS "mpi;amr;local_product" TIMEOUT 180)
