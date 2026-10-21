@@ -199,3 +199,32 @@ simplefluid_add_mpi_test(NAME MixedAMR_2procs TARGET testMixedAMR PROCS 2 LABELS
 
 simplefluid_add_mpi_test(NAME LocalProductAMR_2procs TARGET testLocalProductAMR PROCS 2
     ARGS "--gtest_filter=LocalProductAMRTest.*" LABELS "mpi;amr;local_product" TIMEOUT 180)
+
+simplefluid_add_mpi_test(
+    NAME DistributedAdaptiveAuthority_2procs
+    TARGET testDistributedAdaptiveAuthority
+    PROCS 2)
+simplefluid_add_mpi_test(
+    NAME DistributedAdaptiveAuthority_4procs
+    TARGET testDistributedAdaptiveAuthority
+    PROCS 4)
+
+simplefluid_add_mpi_test(
+    NAME DistributedCartesianKernel_2procs
+    TARGET testDistributedCartesianKernel
+    PROCS 2)
+simplefluid_add_mpi_test(
+    NAME DistributedCartesianKernel_4procs
+    TARGET testDistributedCartesianKernel
+    PROCS 4)
+
+simplefluid_add_mpi_test(NAME DistributedAdaptiveClosure_2procs TARGET testDistributedAdaptiveClosure PROCS 2)
+simplefluid_add_mpi_test(NAME DistributedAdaptiveClosure_4procs TARGET testDistributedAdaptiveClosure PROCS 4)
+simplefluid_add_mpi_test(NAME DistributedProductKernel_2procs TARGET testDistributedProductKernel PROCS 2)
+simplefluid_add_mpi_test(NAME DistributedProductKernel_4procs TARGET testDistributedProductKernel PROCS 4)
+
+simplefluid_add_mpi_test(NAME DistributedAdaptiveBalance_2procs TARGET testDistributedAdaptiveBalance PROCS 2)
+simplefluid_add_mpi_test(NAME DistributedAdaptiveBalance_4procs TARGET testDistributedAdaptiveBalance PROCS 4)
+
+simplefluid_add_mpi_test(NAME DistributedMixedKernel_2procs TARGET testDistributedMixedKernel PROCS 2 TIMEOUT 900)
+simplefluid_add_mpi_test(NAME DistributedMixedKernel_4procs TARGET testDistributedMixedKernel PROCS 4 TIMEOUT 900)

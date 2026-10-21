@@ -3,6 +3,7 @@
  * @brief Collective dyadic hierarchy adaptation and canonical Cartesian seams.
  */
 #include "geometry/mesh/AMR/CartesianAMR.hh"
+#include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -314,26 +315,111 @@ ID CartesianAMR::partition_generation() const noexcept
     return partition_generation_;
 }
 
-const SP<const MultiRegionMesh>& CartesianAMR::native_geometry() const noexcept { return geometry_; }
+const SP<const MultiRegionMesh>& CartesianAMR::native_geometry() const noexcept
+{
+    return geometry_;
+}
 
 bool CartesianAMR::geometry_unchanged() const noexcept
 {
     try
     {
-        return geometry_->geometry_epoch() == geometry_epoch_ &&
-            (!partition_ || partition_->geometry_unchanged());
+        return geometry_->geometry_epoch() == geometry_epoch_ && (!partition_ || partition_->geometry_unchanged());
     }
-    catch (...) { return false; }
+    catch (...)
+    {
+        return false;
+    }
 }
 
 HierarchyObservation CartesianAMR::observation() const noexcept
 {
     const auto& native = partition_ ? partition_->geometry() : geometry_;
     ID epoch = std::numeric_limits<ID>::max();
-    try { epoch = native->geometry_epoch(); }
-    catch (...) { /* Immutable consumers reject through geometry_unchanged(). */ }
-    return {identity_, topology_identity_, partition_identity_, generation_, partition_generation_,
-        epoch, native.get(), Tpetra::getDefaultComm().getRawPtr()};
+    try
+    {
+        epoch = native->geometry_epoch();
+    }
+    catch (...)
+    { /* Immutable consumers reject through geometry_unchanged(). */
+    }
+    return {identity_, topology_identity_, partition_identity_, generation_, partition_generation_, epoch, native.get(),
+        Tpetra::getDefaultComm().getRawPtr()};
+}
+
+AdaptiveBootstrap CartesianAMR::detach_owned(std::span<const std::uint64_t> cells, AdaptiveBytes domain) const
+{
+    if (!geometry_unchanged())
+        throw std::invalid_argument("Cannot detach a changed Cartesian source.");
+    AdaptiveBootstrap result;
+    result.kernel = cartesian_adaptive_kernel(config_);
+    std::set<AdaptiveCellKey> selected;
+    for (auto cell : cells)
+    {
+        auto key = cell_key(cell);
+        if (!selected.insert(key).second)
+            throw std::invalid_argument("Repeated detached Cartesian source cell.");
+        result.source_cells.push_back({key, cell});
+        result.owned.push_back(cartesian_adaptive_leaf(config_, std::move(key), domain));
+    }
+    result.owned = result.kernel->repack(result.owned);
+    std::map<AdaptiveCellKey, AdaptiveFamily> families;
+    for (const auto& leaf : result.owned)
+    {
+        auto ancestor = std::get<CartesianCellAncestry>(leaf.key.ancestry);
+        while (ancestor.level)
+        {
+            ancestor = ancestor.parent();
+            AdaptiveCellKey parent{config_.region_id, ancestor};
+            if (families.contains(parent))
+                continue;
+            // Find the actual minimum active descendant from compact blocks,
+            // without expanding the bootstrap catalog into global cell keys.
+            std::optional<AdaptiveCellKey> anchor;
+            for (const auto& source : blocks_)
+            {
+                if (source.level < ancestor.level)
+                    continue;
+                CartesianCellAncestry candidate{source.level, {}};
+                bool overlaps = true;
+                const auto factor = level_scale(source.level - ancestor.level);
+                for (std::size_t a = 0; a < 3; ++a)
+                {
+                    auto low =
+                        std::max(product(source.index[a], config_.block_cells[a]), product(ancestor.index[a], factor));
+                    auto high = std::min(
+                        product(source.index[a] + 1, config_.block_cells[a]), product(ancestor.index[a] + 1, factor));
+                    candidate.index[a] = low;
+                    overlaps = overlaps && low < high;
+                }
+                AdaptiveCellKey key{config_.region_id, candidate};
+                if (overlaps && (!anchor || key < *anchor))
+                    anchor = std::move(key);
+            }
+            if (!anchor)
+                throw std::invalid_argument("Cartesian ancestor has no active descendant.");
+            if (!selected.contains(*anchor))
+                continue;
+            auto capsule =
+                result.kernel->split(cartesian_adaptive_leaf(config_, parent, domain), AdaptiveSplit::Isotropic).family;
+            capsule.anchor = encode_adaptive_key(*anchor);
+            families.emplace(std::move(parent), std::move(capsule));
+        }
+    }
+    // One export-local interning pass covers active and saved ancestor records;
+    // capsules must not replicate an identical topology/axis graph per cell.
+    std::vector<AdaptiveLeaf> records = result.owned;
+    for (const auto& [parent, family] : families)
+        records.push_back(family.parent);
+    records = result.kernel->repack(records);
+    std::copy_n(records.begin(), result.owned.size(), result.owned.begin());
+    auto record = records.begin() + result.owned.size();
+    for (auto& [parent, family] : families)
+    {
+        family.parent = std::move(*record++);
+        result.families.push_back(std::move(family));
+    }
+    return result;
 }
 
 AdaptiveCellKey CartesianAMR::cell_key(ID cell) const
@@ -349,25 +435,38 @@ AdaptiveCellKey CartesianAMR::cell_key(ID cell) const
     return {config_.region_id, ancestry};
 }
 
-ID CartesianAMR::cell_material(ID cell) const { (void)cell_block(cell); return config_.material_id; }
-std::size_t CartesianAMR::cell_fragment(ID cell) const { return cell_block(cell); }
-const std::shared_ptr<const CompositePartition<>>& CartesianAMR::native_partition() const noexcept { return partition_; }
+ID CartesianAMR::cell_material(ID cell) const
+{
+    (void) cell_block(cell);
+    return config_.material_id;
+}
+std::size_t CartesianAMR::cell_fragment(ID cell) const
+{
+    return cell_block(cell);
+}
+const std::shared_ptr<const CompositePartition<>>& CartesianAMR::native_partition() const noexcept
+{
+    return partition_;
+}
 
 std::shared_ptr<const CartesianAMR> CartesianAMR::with_partition(
     std::shared_ptr<const CompositePartition<>> partition) const
 {
-    collective_check([&] {
-        const auto comm = Tpetra::getDefaultComm();
-        if (!geometry_unchanged() || !partition || !partition->geometry_unchanged() ||
-            partition->plan().communicator().getRawPtr() != comm.getRawPtr() ||
-            (comm->getRank() == partition->plan().source_rank() && !partition->plan().matches_source(geometry_)) ||
-            partition->plan().global_cells() != geometry_->num_cells())
-            throw std::invalid_argument("Cartesian AMR partition has a foreign source, revision, or communicator.");
-        if (partition_generation_ == std::numeric_limits<ID>::max())
-            throw std::overflow_error("Cartesian AMR partition generation overflow.");
-    });
+    collective_check(
+        [&]
+        {
+            const auto comm = Tpetra::getDefaultComm();
+            if (!geometry_unchanged() || !partition || !partition->geometry_unchanged() ||
+                partition->plan().communicator().getRawPtr() != comm.getRawPtr() ||
+                (comm->getRank() == partition->plan().source_rank() && !partition->plan().matches_source(geometry_)) ||
+                partition->plan().global_cells() != geometry_->num_cells())
+                throw std::invalid_argument("Cartesian AMR partition has a foreign source, revision, or communicator.");
+            if (partition_generation_ == std::numeric_limits<ID>::max())
+                throw std::overflow_error("Cartesian AMR partition generation overflow.");
+        });
     auto result = std::make_shared<CartesianAMR>(*this);
-    same_description(std::to_string(collective_identity_) + " " + std::to_string(partition->plan().collective_identity()));
+    same_description(
+        std::to_string(collective_identity_) + " " + std::to_string(partition->plan().collective_identity()));
     same_description(partition_ == partition ? "unchanged" : "replace");
     if (partition_ == partition)
         return result;
@@ -391,10 +490,12 @@ CartesianAMR::AdaptationPlan CartesianAMR::plan_adaptation(
 
 std::shared_ptr<const CartesianAMR> CartesianAMR::apply_adaptation(const AdaptationPlan& plan) const
 {
-    collective_check([&] {
-        if (!geometry_unchanged() || !(plan.source_ == observation()) || !plan.candidate_)
-            throw std::invalid_argument("Cartesian AMR adaptation plan is stale or belongs to a different source.");
-    });
+    collective_check(
+        [&]
+        {
+            if (!geometry_unchanged() || !(plan.source_ == observation()) || !plan.candidate_)
+                throw std::invalid_argument("Cartesian AMR adaptation plan is stale or belongs to a different source.");
+        });
     same_description(std::to_string(plan.collective_id_));
     return plan.candidate_;
 }
@@ -673,10 +774,12 @@ std::shared_ptr<const CartesianAMR> CartesianAMR::adapt(
                 throw std::overflow_error("Cartesian AMR generation counter overflow.");
         });
     auto result = std::shared_ptr<CartesianAMR>(new CartesianAMR(config_, std::move(candidate), generation_ + 1));
-    collective_check([&] {
-        if (partition_generation_ == std::numeric_limits<ID>::max())
-            throw std::overflow_error("Cartesian AMR partition generation overflow.");
-    });
+    collective_check(
+        [&]
+        {
+            if (partition_generation_ == std::numeric_limits<ID>::max())
+                throw std::overflow_error("Cartesian AMR partition generation overflow.");
+        });
     result->partition_generation_ = partition_generation_ + 1;
     return result;
 }

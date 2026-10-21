@@ -2,6 +2,7 @@
  * @brief Versioned native region transfer and sparse explicit region residency.
  */
 #include "geometry/mesh/MultiRegionMesh.hh"
+#include "geometry/mesh/NativeFragmentRecipe.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/ExactPolyhedralComplex.hh"
 #include <cstring>
@@ -212,6 +213,7 @@ void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<
         if constexpr (std::same_as<Region,DistributedExplicitRegion>)
             if (g.has_exact_construction())
             {
+                if(!g.construction())throw std::invalid_argument("Certified local explicit fragments require sparse route serialization.");
                 const std::vector<ID> selected(visible.begin(),visible.end());
                 w.array(g.construction()->encode(selected));
             }
@@ -579,8 +581,277 @@ MultiRegionMesh::Interface read_interface(Reader& r)
 }
 } // namespace
 
+struct NativeFragmentCache::Impl
+{
+    using Bytes = NativeFragmentBytes;
+    std::map<std::uint64_t, std::vector<std::weak_ptr<const Bytes>>> parts;
+    std::map<Bytes, std::shared_ptr<const NativeFragmentDescriptor>> descriptors;
+    std::map<Bytes, std::shared_ptr<const MultiRegionMesh::Region>> regions;
+    std::map<Bytes, std::shared_ptr<const ExtrudedTopology>> topology;
+    std::map<Bytes, std::shared_ptr<const RectilinearTopology>> cartesian_topology;
+    std::map<Bytes, std::shared_ptr<const ExactExtrudedConstruction>> bases, axes, values;
+    std::shared_ptr<const Bytes> intern(Bytes bytes)
+    {
+        std::uint64_t hash = 1469598103934665603ULL;
+        for (unsigned char c : bytes)
+        {
+            hash ^= c;
+            hash *= 1099511628211ULL;
+        }
+        auto& bucket = parts[hash];
+        for (auto it = bucket.begin(); it != bucket.end();)
+        {
+            if (auto part = it->lock())
+            {
+                if (*part == bytes)
+                    return part;
+                ++it;
+            }
+            else
+                it = bucket.erase(it);
+        }
+        auto part = std::make_shared<const Bytes>(std::move(bytes));
+        bucket.push_back(part);
+        return part;
+    }
+    Bytes key(const NativeFragmentDescriptor& d) const
+    {
+        Writer w;
+        w.value(static_cast<std::uint64_t>(d.kind));
+        w.value(std::uint64_t(d.parts.size()));
+        for (const auto& part : d.parts)
+        {
+            const auto address = reinterpret_cast<std::uintptr_t>(part.get());
+            w.value(address);
+        }
+        w.array(d.view);
+        return std::move(w.data);
+    }
+    std::shared_ptr<const NativeFragmentDescriptor> adopt(NativeFragmentDescriptor d)
+    {
+        for (auto& part : d.parts)
+        {
+            if (!part)
+                throw std::invalid_argument("Null native fragment part.");
+            part = intern(*part);
+        }
+        const auto k = key(d);
+        if (auto found = descriptors.find(k); found != descriptors.end())
+            return found->second;
+        auto result = std::make_shared<const NativeFragmentDescriptor>(std::move(d));
+        descriptors.emplace(k, result);
+        return result;
+    }
+};
+NativeFragmentCache::NativeFragmentCache() : impl_(std::make_unique<Impl>()) {}
+NativeFragmentCache::~NativeFragmentCache() = default;
+NativeFragmentCache::NativeFragmentCache(NativeFragmentCache&&) noexcept = default;
+NativeFragmentCache& NativeFragmentCache::operator=(NativeFragmentCache&&) noexcept = default;
+std::shared_ptr<const NativeFragmentDescriptor> extract_native_fragment(
+    const MultiRegionMesh::Region& region, NativeFragmentCache& cache)
+{
+    NativeFragmentDescriptor d;
+    Writer view;
+    view.string(std::visit([](const auto& r) { return r.name(); }, region));
+    if (const auto* cart = std::get_if<CartesianRegion>(&region))
+    {
+        d.kind = NativeFragmentDescriptor::Kind::Cartesian;
+        Writer topology;
+        for (auto n : cart->layout().extents)
+            topology.value(std::uint64_t(n));
+        for (auto periodic : cart->layout().periodic)
+            topology.boolean(periodic);
+        for (int b = 0; b < 6; ++b)
+            topology.string(cart->topology().boundary_batch_name(b));
+        d.parts.push_back(cache.impl_->intern(std::move(topology.data)));
+        for (const auto& axis : cart->geometry().cell_edges())
+        {
+            Writer w;
+            w.array(axis);
+            d.parts.push_back(cache.impl_->intern(std::move(w.data)));
+        }
+    }
+    else if (const auto* product = std::get_if<ExtrudedRegion>(&region);
+        product && product->geometry().has_exact_construction())
+    {
+        d.kind = NativeFragmentDescriptor::Kind::ExactProduct;
+        const auto& construction = *product->geometry().construction();
+        d.parts = {cache.impl_->intern(product->topology().encode_base()),
+            cache.impl_->intern(construction.encode_base()), cache.impl_->intern(construction.encode_axis_values()),
+            cache.impl_->intern(construction.encode_axis_selection())};
+        view.value(std::uint64_t(product->layout().extents[2]));
+        const auto aliases = product->topology().boundary_aliases();
+        view.value(std::uint64_t(aliases.size()));
+        for (const auto& [from, to] : aliases)
+        {
+            view.string(from);
+            view.string(to);
+        }
+        view.array(construction.encode_view());
+    }
+    else
+    {
+        if (std::visit([](const auto& r) { return r.layout().family == RegionLayout::Family::Explicit; }, region))
+            throw std::invalid_argument(
+                "Explicit geometry requires an authoritative sparse shard, not a procedural fragment recipe.");
+        d.kind = NativeFragmentDescriptor::Kind::LegacyProcedural;
+        Writer w;
+        std::visit([&](const auto& r) { write_region(w, r, region.index(), {}); }, region);
+        d.parts.push_back(cache.impl_->intern(std::move(w.data)));
+    }
+    d.view = std::move(view.data);
+    return cache.impl_->adopt(std::move(d));
+}
+NativeFragmentBytes encode_native_fragment_descriptor(const NativeFragmentDescriptor& descriptor)
+{
+    Writer w;
+    w.value(std::uint64_t{0x53464e4154520001ULL});
+    w.value(static_cast<std::uint64_t>(descriptor.kind));
+    w.value(std::uint64_t(descriptor.parts.size()));
+    for (const auto& part : descriptor.parts)
+    {
+        if (!part)
+            throw std::invalid_argument("Null native descriptor part.");
+        w.array(*part);
+    }
+    w.array(descriptor.view);
+    return std::move(w.data);
+}
+std::shared_ptr<const NativeFragmentDescriptor> decode_native_fragment_descriptor(
+    std::span<const char> bytes, NativeFragmentCache& cache)
+{
+    Reader r{bytes};
+    if (r.value<std::uint64_t>() != 0x53464e4154520001ULL)
+        throw std::invalid_argument("Unsupported native fragment recipe version.");
+    NativeFragmentDescriptor d;
+    const auto kind = r.value<std::uint64_t>();
+    if (kind > 2)
+        throw std::invalid_argument("Unknown native fragment recipe kind.");
+    d.kind = static_cast<NativeFragmentDescriptor::Kind>(kind);
+    for (size_t count = r.count(sizeof(std::uint64_t)); count; --count)
+        d.parts.push_back(cache.impl_->intern(r.array<char>()));
+    d.view = r.array<char>();
+    if (!r.data.empty())
+        throw std::invalid_argument("Trailing native fragment recipe bytes.");
+    return cache.impl_->adopt(std::move(d));
+}
+MultiRegionMesh::Region materialize_native_fragment(const NativeFragmentDescriptor& input, NativeFragmentCache& cache)
+{
+    const auto d = cache.impl_->adopt(input);
+    const auto key = cache.impl_->key(*d);
+    if (auto found = cache.impl_->regions.find(key); found != cache.impl_->regions.end())
+        return *found->second;
+    Reader view{d->view};
+    const auto name = view.string();
+    std::optional<MultiRegionMesh::Region> result;
+    if (d->kind == NativeFragmentDescriptor::Kind::Cartesian)
+    {
+        if (d->parts.size() != 4)
+            throw std::invalid_argument("Cartesian fragment recipe needs topology and three axes.");
+        Reader t{*d->parts[0]};
+        std::array<unsigned, 3> counts{};
+        for (auto& n : counts)
+        {
+            auto value = t.value<std::uint64_t>();
+            if (!value || value >= std::numeric_limits<unsigned>::max())
+                throw std::invalid_argument("Invalid Cartesian fragment extent.");
+            n = static_cast<unsigned>(value);
+        }
+        std::array<bool, 3> periodic{};
+        for (auto& p : periodic)
+            p = t.boolean();
+        OrthoMeshTopo::BoundaryNames names;
+        for (auto& n : names)
+            n = t.string();
+        if (!t.data.empty() || std::any_of(periodic.begin(), periodic.end(), [](bool p) { return p; }))
+            throw std::invalid_argument("Cartesian procedural fragments require nonperiodic local topology.");
+        Vec3D<ArrReal> axes;
+        for (size_t a = 0; a < 3; ++a)
+        {
+            Reader axis{*d->parts[a + 1]};
+            axes[a] = axis.array<real_t>();
+            if (!axis.data.empty() || axes[a].size() != size_t(counts[a]) + 1)
+                throw std::invalid_argument("Cartesian fragment axis differs from topology.");
+        }
+        auto& topology = cache.impl_->cartesian_topology[*d->parts[0]];
+        if (!topology)
+            topology = std::make_shared<const RectilinearTopology>(std::make_shared<const OrthoMeshTopo>(
+                counts[0], counts[1], counts[2], false, false, false, std::move(names)));
+        auto geometry = std::make_shared<const RectilinearGeometry>(std::move(axes));
+        result = CartesianRegion(name, std::move(topology), std::move(geometry));
+    }
+    else if (d->kind == NativeFragmentDescriptor::Kind::ExactProduct)
+    {
+        if (d->parts.size() != 4)
+            throw std::invalid_argument("Exact product fragment needs four shared parts.");
+        auto& top = cache.impl_->topology[*d->parts[0]];
+        if (!top)
+            top = ExtrudedTopology::decode_base(*d->parts[0]);
+        const auto layers = view.value<std::uint64_t>();
+        if (!layers || layers > std::numeric_limits<unsigned>::max())
+            throw std::invalid_argument("Invalid exact product run size.");
+        std::map<std::string, std::string> aliases;
+        for (size_t n = view.count(2 * sizeof(std::uint64_t)); n; --n)
+        {
+            auto from = view.string(), to = view.string();
+            if (!aliases.emplace(std::move(from), std::move(to)).second)
+                throw std::invalid_argument("Repeated exact product alias.");
+        }
+        auto topology = top->with_layers(static_cast<unsigned>(layers), aliases);
+        auto& base = cache.impl_->bases[*d->parts[1]];
+        const auto axis_bytes = ExactExtrudedConstruction::combine_axis_parts(*d->parts[2], *d->parts[3]);
+        auto& axis = cache.impl_->axes[axis_bytes];
+        auto& values = cache.impl_->values[*d->parts[2]];
+        const auto run = view.array<char>();
+        auto construction = ExactExtrudedConstruction::decode_shared(
+            topology, *d->parts[1], axis_bytes, run, base, axis ? axis : values);
+        if (!base)
+            base = construction;
+        if (!axis)
+            axis = construction;
+        if (!values)
+            values = construction;
+        result = ExtrudedRegion(name, topology, std::make_shared<const ExtrudedGeometry>(topology, construction));
+    }
+    else
+    {
+        if (d->parts.size() != 1)
+            throw std::invalid_argument("Legacy native recipe needs one descriptor.");
+        Reader r{*d->parts[0]};
+        TopologyCache local;
+        result = read_region(r, &local);
+        if (!r.data.empty())
+            throw std::invalid_argument("Trailing legacy native recipe bytes.");
+        if (std::visit([](const auto& r) { return r.name(); }, *result) != name)
+            throw std::invalid_argument("Native recipe view/name differs from provider descriptor.");
+        if (std::visit(
+                [](const auto& region) { return region.layout().family == RegionLayout::Family::Explicit; }, *result))
+            throw std::invalid_argument("Explicit payload is not a procedural native recipe.");
+    }
+    if (!view.data.empty())
+        throw std::invalid_argument("Trailing native fragment view bytes.");
+    auto retained = std::make_shared<const MultiRegionMesh::Region>(std::move(*result));
+    cache.impl_->regions.emplace(key, retained);
+    return *retained;
+}
+std::vector<char> encode_native_fragment(const MultiRegionMesh::Region& region)
+{
+    NativeFragmentCache cache;
+    return encode_native_fragment_descriptor(*extract_native_fragment(region, cache));
+}
+MultiRegionMesh::Region decode_native_fragment(std::span<const char> bytes, NativeFragmentCache& cache)
+{
+    return materialize_native_fragment(*decode_native_fragment_descriptor(bytes, cache), cache);
+}
+MultiRegionMesh::Region decode_native_fragment(std::span<const char> bytes)
+{
+    NativeFragmentCache cache;
+    return decode_native_fragment(bytes, cache);
+}
+
 std::vector<char> MultiRegionMesh::serialize_partition(std::span<const ID> visible_cells) const
 {
+    if(sparse_native())throw std::invalid_argument("Sparse native shards require their local route codec, not global catalog serialization.");
     const auto execution = acquire_execution_view();
     std::vector<std::set<ID>> selected(d_regions.size());
     for (auto c : visible_cells)
@@ -590,19 +861,22 @@ std::vector<char> MultiRegionMesh::serialize_partition(std::span<const ID> visib
     }
     // A canonical seam can refer to the other side of an outer halo face.
     // Retain that side's native owner geometry without enlarging field halos.
-    for (auto c : visible_cells) for (auto f : cell_faces(c))
-    {
-        for (auto neighbor : {owner_cell(f), neighbor_cell(f)})
-            if (neighbor != invalid_cell_id())
-            {
-                const auto [region, native] = native_cell(neighbor);
-                selected[region].insert(native);
-            }
-    }
+    for (auto c : visible_cells)
+        for (auto f : cell_faces(c))
+        {
+            for (auto neighbor : {owner_cell(f), neighbor_cell(f)})
+                if (neighbor != invalid_cell_id())
+                {
+                    const auto [region, native] = native_cell(neighbor);
+                    selected[region].insert(native);
+                }
+        }
     Writer w;
-    w.value(partition_magic); w.value(uint64_t(d_regions.size()));
+    w.value(partition_magic);
+    w.value(uint64_t(d_regions.size()));
     for (size_t i = 0; i < d_regions.size(); ++i)
-        std::visit([&](const auto& region) { write_region(w, region, d_regions[i].index(), selected[i]); }, d_regions[i]);
+        std::visit(
+            [&](const auto& region) { write_region(w, region, d_regions[i].index(), selected[i]); }, d_regions[i]);
     w.value(uint64_t(d_native_patch_counts.size()));
     for (const auto& counts : d_native_patch_counts)
     {
@@ -614,25 +888,40 @@ std::vector<char> MultiRegionMesh::serialize_partition(std::span<const ID> visib
         }
     }
     w.value(uint64_t(d_interfaces.size()));
-    for (const auto& interface : d_interfaces) write_interface(w, interface);
+    for (const auto& interface : d_interfaces)
+        write_interface(w, interface);
     w.value(d_tolerance);
-    w.array(d_cells); w.array(d_faces); w.array(d_nodes); w.array(d_native_faces);
+    w.array(d_cells);
+    w.array(d_faces);
+    w.array(d_nodes);
+    w.array(d_native_faces);
     w.value(uint64_t(d_boundaries.size()));
-    for (const auto& b : d_boundaries) { w.value(b.region); w.value(b.native_id); w.value(b.id); w.string(b.name); }
-    w.array(d_reference_axial_edges); w.array(d_axial_edges); w.value(d_geometry_state.epoch);
+    for (const auto& b : d_boundaries)
+    {
+        w.value(b.region);
+        w.value(b.native_id);
+        w.value(b.id);
+        w.string(b.name);
+    }
+    w.array(d_reference_axial_edges);
+    w.array(d_axial_edges);
+    w.value(d_geometry_state.epoch);
     return std::move(w.data);
 }
 
 std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     std::span<const char> packet, Teuchos::RCP<const Teuchos::Comm<int>> comm)
 {
-    if (comm.is_null()) throw std::invalid_argument("Partition geometry requires a communicator.");
+    if (comm.is_null())
+        throw std::invalid_argument("Partition geometry requires a communicator.");
     Reader r{packet};
-    if (r.value<uint64_t>() != partition_magic) throw std::invalid_argument("Unsupported composite partition packet version.");
+    if (r.value<uint64_t>() != partition_magic)
+        throw std::invalid_argument("Unsupported composite partition packet version.");
     auto mesh = std::shared_ptr<MultiRegionMesh>(new MultiRegionMesh(PartitionTag{}));
     mesh->d_comm = std::move(comm);
     TopologyCache topology_cache;
-    for (size_t count = r.count(); count; --count) mesh->d_regions.push_back(read_region(r, &topology_cache));
+    for (size_t count = r.count(); count; --count)
+        mesh->d_regions.push_back(read_region(r, &topology_cache));
     mesh->d_native_patch_counts.resize(r.count(sizeof(uint64_t)));
     if (mesh->d_native_patch_counts.size() != mesh->d_regions.size())
         throw std::invalid_argument("Invalid native patch-count catalog size.");
@@ -644,20 +933,32 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
             if (!counts.emplace(boundary, count).second)
                 throw std::invalid_argument("Repeated native patch-count catalog entry.");
         }
-    for (size_t count = r.count(); count; --count) mesh->d_interfaces.push_back(read_interface(r));
+    for (size_t count = r.count(); count; --count)
+        mesh->d_interfaces.push_back(read_interface(r));
     mesh->d_tolerance = r.value<InterfaceTolerance>();
-    mesh->d_cells = r.array<ID>(); mesh->d_faces = r.array<ID>(); mesh->d_nodes = r.array<ID>(); mesh->d_native_faces = r.array<ID>();
+    mesh->d_cells = r.array<ID>();
+    mesh->d_faces = r.array<ID>();
+    mesh->d_nodes = r.array<ID>();
+    mesh->d_native_faces = r.array<ID>();
     mesh->d_boundaries.resize(r.count(sizeof(uint64_t) + 2 * sizeof(int) + sizeof(uint64_t)));
     for (auto& b : mesh->d_boundaries)
-    { b.region = r.value<size_t>(); b.native_id = r.value<int>(); b.id = r.value<int>(); b.name = r.string(); }
-    mesh->d_reference_axial_edges = r.array<real_t>(); mesh->d_axial_edges = r.array<real_t>();
+    {
+        b.region = r.value<size_t>();
+        b.native_id = r.value<int>();
+        b.id = r.value<int>();
+        b.name = r.string();
+    }
+    mesh->d_reference_axial_edges = r.array<real_t>();
+    mesh->d_axial_edges = r.array<real_t>();
     mesh->d_geometry_state.epoch = r.value<uint64_t>();
-    if(mesh->has_exact_construction() && mesh->d_reference_axial_edges!=mesh->d_axial_edges)
-        throw std::invalid_argument("Constructed extrusion partition packets require the identity composite affine transform.");
-    if (!r.data.empty()) throw std::invalid_argument("Trailing composite partition bytes.");
+    if (mesh->has_exact_construction() && mesh->d_reference_axial_edges != mesh->d_axial_edges)
+        throw std::invalid_argument(
+            "Constructed extrusion partition packets require the identity composite affine transform.");
+    if (!r.data.empty())
+        throw std::invalid_argument("Trailing composite partition bytes.");
     const auto regions = mesh->d_regions.size();
-    if (!regions || !std::isfinite(mesh->d_tolerance.absolute_length) || !std::isfinite(mesh->d_tolerance.relative)
-        || mesh->d_tolerance.absolute_length < 0 || !(mesh->d_tolerance.relative > 0))
+    if (!regions || !std::isfinite(mesh->d_tolerance.absolute_length) || !std::isfinite(mesh->d_tolerance.relative) ||
+        mesh->d_tolerance.absolute_length < 0 || !(mesh->d_tolerance.relative > 0))
         throw std::invalid_argument("Invalid partition catalog dimensions.");
     std::set<std::string> region_names;
     for (size_t region = 0; region < regions; ++region)
@@ -667,8 +968,10 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     // Directories, strides and inverse lookups are derived only from validated
     // descriptors. They are never accepted as executable indexing data on wire.
     mesh->d_explicit.resize(mesh->d_interfaces.size());
-    const auto boundary_exists = [&](size_t region, int boundary) {
-        if (region >= regions) throw std::invalid_argument("Partition interface region is out of range.");
+    const auto boundary_exists = [&](size_t region, int boundary)
+    {
+        if (region >= regions)
+            throw std::invalid_argument("Partition interface region is out of range.");
         const auto ids = mesh->topology(region, [](const auto& t) { return t.boundary_batch_ids(); });
         if (std::ranges::find(ids, boundary) == ids.end())
             throw std::invalid_argument("Partition interface boundary is unknown.");
@@ -1022,6 +1325,8 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::merge_partitions(
     const std::vector<std::shared_ptr<MultiRegionMesh>>& shards,
     Teuchos::RCP<const Teuchos::Comm<int>> serial_comm)
 {
+    for(const auto& shard:shards)
+        if(shard && shard->sparse_native())throw std::invalid_argument("Sparse native migration bypasses legacy global shard merge.");
     if (serial_comm.is_null() || serial_comm->getSize() != 1 || shards.empty())
         throw std::invalid_argument("Merging composite partitions requires shards and a serial communicator.");
     struct Views

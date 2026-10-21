@@ -553,6 +553,22 @@ public:
         const auto execution = composite.acquire_execution_view();
         const auto count = num_owned_cells();
         if (!count) return;
+        if (composite.sparse_native())
+        {
+            std::vector<std::vector<size_t>> selected(composite.regions().size());
+            for (size_t local=0; local<count; ++local)
+                selected.at(composite.native_cell(geometry_cell_lid(checked_local(local))).first).push_back(local);
+            execution.visit_sparse_region_geometry([&](size_t region, const auto& geometry)
+            {
+                for(auto local:selected[region])
+                {
+                    const auto field_lid=checked_local(local);
+                    const auto cell=static_cast<MultiRegion::ID>(geometry_cell_lid(field_lid));
+                    visitor(field_lid,cell,composite.native_cell(cell).second,geometry);
+                }
+            });
+            return;
+        }
         size_t local = 0;
         execution.visit_region_geometry([&](size_t, MultiRegion::ID offset, const auto& geometry)
         {

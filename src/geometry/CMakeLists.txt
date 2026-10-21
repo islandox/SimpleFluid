@@ -1,5 +1,19 @@
 set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/AdaptiveHierarchy.cc
+    mesh/AMR/DistributedAdaptiveTypes.cc
+    mesh/AMR/DistributedAdaptivePackets.cc
+    mesh/AMR/DistributedAdaptiveNative.cc
+    mesh/AMR/DistributedAdaptiveNativeGhosts.cc
+    mesh/AMR/DistributedAncestryDirectory.cc
+    mesh/AMR/AdaptiveProviderKernel.cc
+    mesh/AMR/DistributedAdaptiveAuthority.cc
+    mesh/AMR/DistributedAdaptiveHierarchy.cc
+    mesh/AMR/DistributedAdaptiveClosure.cc
+    mesh/AMR/DistributedAdaptiveBalance.cc
+    mesh/AMR/DistributedCartesianKernel.cc
+    mesh/AMR/DistributedMixedKernel.cc
+    mesh/AMR/FrozenNative.cc
+    mesh/MultiRegionMeshFrozen.cc
     mesh/AMR/AdaptiveOverlap.cc
     mesh/AMR/ExtrudedAMR.cc
     mesh/AMR/PolyhedralAMR.cc
@@ -40,6 +54,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/ExplicitRegionProvider.cc
     mesh/SweptRZRegionProviders.cc
     mesh/MultiRegionMesh.cc
+    mesh/MultiRegionMeshSparse.cc
     mesh/MultiRegionMeshPartition.cc
 )
 
@@ -74,6 +89,20 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/DecomposedSemiStructuredTopology.cc
     details/SemiStructuredPartition.cc
     mesh/AMR/AdaptiveHierarchy.cc
+    mesh/AMR/DistributedAdaptiveTypes.cc
+    mesh/AMR/DistributedAdaptivePackets.cc
+    mesh/AMR/DistributedAdaptiveNative.cc
+    mesh/AMR/DistributedAdaptiveNativeGhosts.cc
+    mesh/AMR/DistributedAncestryDirectory.cc
+    mesh/AMR/AdaptiveProviderKernel.cc
+    mesh/AMR/DistributedAdaptiveAuthority.cc
+    mesh/AMR/DistributedAdaptiveHierarchy.cc
+    mesh/AMR/DistributedAdaptiveClosure.cc
+    mesh/AMR/DistributedAdaptiveBalance.cc
+    mesh/AMR/DistributedCartesianKernel.cc
+    mesh/AMR/DistributedMixedKernel.cc
+    mesh/AMR/FrozenNative.cc
+    mesh/MultiRegionMeshFrozen.cc
     mesh/AMR/AdaptiveOverlap.cc
     mesh/AMR/ExtrudedAMR.cc
     ConvexCellGeometry.cc

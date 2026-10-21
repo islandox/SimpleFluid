@@ -5,6 +5,7 @@
 #pragma once
 
 #include "geometry/mesh/AMR/AdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "parallel/CompositePartition.hh"
 
 #include <array>
@@ -26,7 +27,7 @@ struct AMRGrid
     std::array<double, 3> extent{1.0, 1.0, 1.0};
     std::array<bool, 3> periodic{false, false, false};
     unsigned max_level = 2;
-    std::uint64_t region_id = 0; ///< Physical region, independent of block fragments.
+    std::uint64_t region_id = 0;   ///< Physical region, independent of block fragments.
     std::uint64_t material_id = 0; ///< Material membership, independent of ancestry.
 };
 
@@ -75,6 +76,10 @@ class CartesianAMR : public AdaptiveHierarchy
 public:
     explicit CartesianAMR(AMRGrid config);
 
+    /** Export only selected owned cells and their anchored ancestor capsules.
+     * The detached result retains compact native block recipes and no source
+     * hierarchy, global block directory, geometry or partition ownership. */
+    [[nodiscard]] AdaptiveBootstrap detach_owned(std::span<const std::uint64_t> cells, AdaptiveBytes domain) const;
     [[nodiscard]] const AMRGrid& config() const noexcept;
     [[nodiscard]] const std::vector<AMRBlock>& blocks() const noexcept;
     [[nodiscard]] const SP<const MultiRegionMesh>& geometry() const noexcept;
@@ -102,6 +107,7 @@ public:
     public:
         const HierarchyObservation& source_observation() const noexcept { return source_; }
         const std::shared_ptr<const CartesianAMR>& candidate() const noexcept { return candidate_; }
+
     private:
         friend class CartesianAMR;
         HierarchyObservation source_;
@@ -109,8 +115,8 @@ public:
         std::uint64_t collective_id_ = 0;
     };
     /** Collectively build a private native candidate pinned to this exact source. */
-    [[nodiscard]] AdaptationPlan plan_adaptation(const std::vector<std::size_t>& refine,
-        const std::vector<AMRBlock>& coarsen = {}) const;
+    [[nodiscard]] AdaptationPlan plan_adaptation(
+        const std::vector<std::size_t>& refine, const std::vector<AMRBlock>& coarsen = {}) const;
     /** Collectively reject foreign, stale, or rank-mixed plans before publication. */
     [[nodiscard]] std::shared_ptr<const CartesianAMR> apply_adaptation(const AdaptationPlan& plan) const;
 

@@ -67,7 +67,7 @@ a source-presence entry is not a tested or supported execution claim.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Retained source: uniform VoF, Cartesian adaptive VoF, resolved/dispersed coupling, representation conversion | Generic reacting integration and physical qualification remain open |
-| Phase 23, general native AMR | Retained source: common hierarchy, conservative remap, extruded XY/Z, polyhedral, local products, mixed providers | Source presence does not establish full physical or scaling qualification |
+| Phase 23, general native AMR | Retained source: common hierarchy, conservative remap, extruded XY/Z, polyhedral, local products, mixed providers, distributed native migration | Source presence does not establish full physical or scaling qualification |
 
 ### Checklist conventions
 

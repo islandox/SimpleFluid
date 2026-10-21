@@ -1,6 +1,10 @@
 #include "geometry/mesh/AMR/MixedAMR.hh"
 #include "geometry/ExactPlanarFace.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
+#include "geometry/mesh/AMR/DistributedMixedKernel.hh"
+#include "geometry/mesh/AMR/DistributedProductKernel.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Teuchos_DefaultSerialComm.hpp>
 #include <Tpetra_Core.hpp>
@@ -1533,5 +1537,452 @@ void MixedContactDomains::validate() const
         if (!contains(c.first_domain, c.first_patch) || !contains(c.second_domain, c.second_patch))
             throw std::invalid_argument("Unknown external contact patch.");
     }
+}
+AdaptiveBootstrap MixedAMR::detach_owned(
+    std::span<const std::uint64_t> owned, AdaptiveBytes domain, std::size_t byte_budget) const
+{
+    AdaptiveBootstrap result;
+    collective(
+        [&]
+        {
+            if (!geometry_unchanged() || domain.empty() || !byte_budget)
+                throw std::invalid_argument("Mixed detach needs an unchanged accepted source, domain and byte budget.");
+            using adaptive_detail::Writer;
+            using adaptive_detail::Budget;
+            const auto count = data_->participant_cells.size() - 1;
+            Budget allocation{byte_budget};
+            allocation.add(count * (sizeof(AdaptiveBootstrap) + sizeof(DistributedMixedRoute)));
+            std::vector<std::vector<ID>> selected(count);
+            std::set<ID> unique;
+            auto participant = [&](ID cell)
+            {
+                if (cell >= data_->participant_cells.back())
+                    throw std::out_of_range("Mixed detached source cell.");
+                return std::size_t(
+                    std::upper_bound(data_->participant_cells.begin(), data_->participant_cells.end(), cell) -
+                    data_->participant_cells.begin() - 1);
+            };
+            auto root_key = [](AdaptiveCellKey key)
+            {
+                std::visit(
+                    [](auto& p)
+                    {
+                        using T = std::decay_t<decltype(p)>;
+                        if constexpr (std::is_same_v<T, CartesianCellAncestry>)
+                        {
+                            while (p.level)
+                                p = p.parent();
+                        }
+                        else if constexpr (std::is_same_v<T, ConvexCellAncestry>)
+                            p.path.clear();
+                        else if constexpr (std::is_same_v<T, ProductCellAncestry>)
+                        {
+                            p.base.path.clear();
+                            p.axial.path.clear();
+                        }
+                    },
+                    key.ancestry);
+                return key;
+            };
+            for (auto cell : owned)
+            {
+                allocation.add(sizeof(ID));
+                if (!unique.insert(cell).second)
+                    throw std::invalid_argument("Repeated mixed detached source cell.");
+                const auto p = participant(cell);
+                selected[p].push_back(cell - data_->participant_cells[p]);
+            }
+            auto original_region = [&](std::size_t p)
+            {
+                if (p < product_count(data_->grid))
+                    return product_at(data_->grid, p)->cell_key(0, 0).region;
+                auto a = p - product_count(data_->grid);
+                if (a < data_->grid.adaptive.size())
+                    return data_->grid.adaptive[a]->cell_key(0).region;
+                return data_->grid.stationary[a - data_->grid.adaptive.size()].physical_region;
+            };
+            auto bootstrap = [&](std::size_t p, std::span<const ID> cells) -> AdaptiveBootstrap
+            {
+                if (p < product_count(data_->grid))
+                {
+                    std::vector<ProductCellAncestry> keys;
+                    for (auto local : cells)
+                        keys.push_back(std::get<ProductCellAncestry>(
+                            data_key(*data_, data_->participant_cells[p] + local, p).ancestry));
+                    return product_at(data_->grid, p)->detach_owned(keys, domain);
+                }
+                const auto a = p - product_count(data_->grid);
+                if (a < data_->grid.adaptive.size())
+                {
+                    const auto& source = data_->grid.adaptive[a];
+                    if (auto h = std::dynamic_pointer_cast<const CartesianAMR>(source))
+                        return h->detach_owned(cells, domain);
+                    if (auto h = std::dynamic_pointer_cast<const ExtrudedAMR>(source))
+                        return h->detach_owned(cells, domain);
+                    if (auto h = std::dynamic_pointer_cast<const PolyhedralAMR>(source))
+                        return h->detach_owned(cells, domain);
+                    throw std::invalid_argument("Mixed participant has no detached pure provider kernel.");
+                }
+                const auto& stationary = data_->grid.stationary[a - data_->grid.adaptive.size()];
+                return detach_static_participant(stationary.region, stationary.provider_root,
+                    stationary.physical_region, stationary.material, cells, domain);
+            };
+            std::vector<AdaptiveBootstrap> parts(count);
+            std::vector<DistributedMixedRoute> routes;
+            for (std::size_t p = 0; p < count; ++p)
+            {
+                parts[p] = bootstrap(p, selected[p]);
+                DistributedMixedRoute route;
+                route.identity = p;
+                route.original_region = original_region(p);
+                route.region = data_key(*data_, data_->participant_cells[p], p).region;
+                route.kernel = parts[p].kernel;
+                if (p < product_count(data_->grid))
+                {
+                    route.provider = AdaptiveProviderKind::Product;
+                    route.compact_root_schema = product_at(data_->grid, p)->root_descriptor();
+                }
+                else
+                {
+                    const auto a = p - product_count(data_->grid);
+                    if (a < data_->grid.adaptive.size())
+                    {
+                        const auto& source = data_->grid.adaptive[a];
+                        if (auto h = std::dynamic_pointer_cast<const CartesianAMR>(source))
+                        {
+                            route.provider = AdaptiveProviderKind::Cartesian;
+                            route.periodic = std::any_of(h->config().periodic.begin(), h->config().periodic.end(),
+                                [](bool value) { return value; });
+                            route.compact_root_schema = parts[p].kernel->descriptor();
+                        }
+                        else if (auto h = std::dynamic_pointer_cast<const ExtrudedAMR>(source))
+                        {
+                            route.provider = AdaptiveProviderKind::Product;
+                            route.compact_root_schema = h->root_descriptor();
+                        }
+                        else if (std::dynamic_pointer_cast<const PolyhedralAMR>(source))
+                        {
+                            route.provider = AdaptiveProviderKind::Polyhedral;
+                            route.compact_root_schema = parts[p].kernel->descriptor();
+                        }
+                    }
+                    else
+                    {
+                        route.provider = AdaptiveProviderKind::Static;
+                        route.compact_root_schema = parts[p].kernel->descriptor();
+                        const auto periodic = std::visit([](const auto& r) { return r.layout().periodic; },
+                            data_->grid.stationary[a - data_->grid.adaptive.size()].region);
+                        route.periodic = std::any_of(periodic.begin(), periodic.end(), [](bool b) { return b; });
+                    }
+                }
+                if (route.periodic)
+                    throw std::invalid_argument("Mixed periodic participant frames are not qualified; use standalone "
+                                                "Cartesian periodic hierarchy.");
+                // Whole physical joins are compact root declarations. Current face
+                // membership vectors are deliberately absent from this descriptor.
+                Writer schema;
+                schema.bytes(route.compact_root_schema);
+                schema.word(data_->grid.joins.size());
+                for (const auto& join : data_->grid.joins)
+                {
+                    schema.word(join.first_participant);
+                    schema.word(join.second_participant);
+                    schema.bytes(std::span(join.first_patch));
+                    schema.bytes(std::span(join.second_patch));
+                }
+                route.compact_root_schema = std::move(schema.data);
+                allocation.add(route.compact_root_schema.size());
+                routes.push_back(std::move(route));
+            }
+            using Root = std::pair<std::size_t, AdaptiveCellKey>;
+            struct Prototype
+            {
+                AdaptiveLeaf leaf;
+                std::vector<AdaptiveSurface> faces;
+            };
+            std::map<Root, Prototype> prototypes;
+            auto global_key = [&](std::size_t p, AdaptiveCellKey key)
+            {
+                key.region = routes[p].region;
+                return key;
+            };
+            auto prototype = [&](std::size_t p, ID current) -> Prototype&
+            {
+                const auto global_root = root_key(data_key(*data_, current, p));
+                const Root identity{p, global_root};
+                auto found = prototypes.find(identity);
+                if (found != prototypes.end())
+                    return found->second;
+                const ID local = current - data_->participant_cells[p];
+                auto temporary = bootstrap(p, std::span<const ID>(&local, 1));
+                if (temporary.owned.size() != 1)
+                    throw std::logic_error("One source cell did not produce one detached root branch.");
+                auto leaf = temporary.owned[0];
+                if (leaf.provider == AdaptiveProviderKind::Product)
+                    leaf = product_support_root(leaf);
+                else if (leaf.provider == AdaptiveProviderKind::Cartesian)
+                {
+                    const auto a = p - product_count(data_->grid);
+                    const auto source = std::dynamic_pointer_cast<const CartesianAMR>(data_->grid.adaptive[a]);
+                    auto key = root_key(leaf.key);
+                    leaf = cartesian_adaptive_leaf(source->config(), std::move(key), domain);
+                }
+                else if (leaf.provider == AdaptiveProviderKind::Polyhedral)
+                {
+                    const auto key = root_key(leaf.key);
+                    auto it = std::find_if(temporary.support_roots.begin(), temporary.support_roots.end(),
+                        [&](const auto& root) { return root.key == key; });
+                    if (it == temporary.support_roots.end())
+                        throw std::invalid_argument("Needed original polyhedral support root was not detached.");
+                    leaf = *it;
+                }
+                auto faces = routes[p].kernel->surfaces(leaf);
+                for (const auto& face : faces)
+                    allocation.add(face.geometry->storage_bytes() + face.key.size());
+                auto [it, inserted] = prototypes.emplace(identity, Prototype{std::move(leaf), std::move(faces)});
+                (void) inserted;
+                return it->second;
+            };
+            std::set<Root> needed;
+            for (auto cell : owned)
+            {
+                const auto p = participant(cell);
+                const Root root{p, root_key(data_key(*data_, cell, p))};
+                needed.insert(root);
+                (void) prototype(p, cell);
+            }
+            struct RuleGroup
+            {
+                AdaptiveBytes original, canonical;
+                ExactPlanarFacePtr common;
+                std::vector<ExactPlanarFacePtr> selected;
+            };
+            std::map<Root, std::map<AdaptiveBytes, RuleGroup>> groups;
+            for (ID face = 0; face < data_->geometry->num_faces(); ++face)
+            {
+                const auto owner = data_->geometry->owner_cell(face), neighbor = data_->geometry->neighbor_cell(face);
+                if (neighbor == MultiRegionMesh::invalid_cell_id())
+                    continue;
+                const auto p = participant(owner), q = participant(neighbor);
+                if (p == q)
+                    continue;
+                const Root left{p, root_key(data_key(*data_, owner, p))},
+                    right{q, root_key(data_key(*data_, neighbor, q))};
+                if (!needed.contains(left) && !needed.contains(right))
+                    continue;
+                auto selected_face = ExactPlanarFace::from_native_face(*data_->geometry, face);
+                auto& a = prototype(p, owner);
+                auto& b = prototype(q, neighbor);
+                auto support = [&](Prototype& root) -> const AdaptiveSurface&
+                {
+                    const AdaptiveSurface* found = nullptr;
+                    for (const auto& candidate : root.faces)
+                        if (candidate.geometry->contains(*selected_face))
+                        {
+                            if (found)
+                                throw std::invalid_argument(
+                                    "Mixed joined tile ambiguously spans original atomic root faces.");
+                            found = &candidate;
+                        }
+                    if (!found)
+                        throw std::invalid_argument("Mixed joined face lacks an immutable original-root support.");
+                    return *found;
+                };
+                const auto& af = support(a);
+                const auto& bf = support(b);
+                auto common = af.geometry->intersection(*bf.geometry);
+                if (!common || !common->contains(*selected_face))
+                    throw std::invalid_argument("Mixed source join lies outside original root intersection.");
+                Writer canonical;
+                canonical.word(0x53464d4a4f494e36ULL);
+                canonical.bytes(domain);
+                if (p < q)
+                {
+                    canonical.word(p);
+                    canonical.word(q);
+                    canonical.bytes(encode_adaptive_key(left.second));
+                    canonical.bytes(af.key);
+                    canonical.bytes(encode_adaptive_key(right.second));
+                    canonical.bytes(bf.key);
+                }
+                else
+                {
+                    canonical.word(q);
+                    canonical.word(p);
+                    canonical.bytes(encode_adaptive_key(right.second));
+                    canonical.bytes(bf.key);
+                    canonical.bytes(encode_adaptive_key(left.second));
+                    canonical.bytes(af.key);
+                }
+                auto forward = common->encode(), reverse = common->reversed()->encode();
+                canonical.bytes(std::min(forward, reverse));
+                auto id = std::move(canonical.data);
+                auto add = [&](const Root& root, const AdaptiveSurface& source)
+                {
+                    if (!needed.contains(root))
+                        return;
+                    auto [it, inserted] = groups[root].try_emplace(id, RuleGroup{source.key, id, common, {}});
+                    (void) inserted;
+                    allocation.add(selected_face->storage_bytes() + sizeof(ExactPlanarFacePtr));
+                    it->second.selected.push_back(selected_face);
+                };
+                add(left, af);
+                add(right, bf);
+            }
+            // Preserve accepted physical destinations independently of pure provider
+            // naming. Only needed original-root faces are retained, including the
+            // ancestor supports absent from an interior descendant's current shell.
+            std::map<Root, std::vector<AdaptiveBoundaryRule>> physical;
+            for (ID face = 0; face < data_->geometry->num_faces(); ++face)
+            {
+                if (!data_->geometry->is_exterior_face(face))
+                    continue;
+                const auto owner = data_->geometry->owner_cell(face);
+                const auto p = participant(owner);
+                const Root root{p, root_key(data_key(*data_, owner, p))};
+                if (!needed.contains(root))
+                    continue;
+                auto shape = ExactPlanarFace::from_native_face(*data_->geometry, face);
+                auto& original = prototype(p, owner);
+                const AdaptiveSurface* support = nullptr;
+                for (const auto& candidate : original.faces)
+                    if (candidate.geometry->contains(*shape))
+                    {
+                        if (support)
+                            throw std::invalid_argument("Ambiguous physical original-root support.");
+                        support = &candidate;
+                    }
+                if (!support)
+                    throw std::invalid_argument("Physical source face lacks original-root support.");
+                std::string name;
+                const auto boundary = data_->geometry->boundary_id(face);
+                if (boundary != MultiRegionMesh::invalid_boundary_id)
+                    name = data_->geometry->boundary_batch_name(boundary);
+                allocation.add(
+                    shape->storage_bytes() + support->key.size() + name.size() + sizeof(AdaptiveBoundaryRule));
+                physical[root].push_back({support->key, std::move(shape), std::move(name)});
+            }
+            std::map<Root, std::shared_ptr<const AdaptiveBytes>> capsules;
+            for (const auto& root : needed)
+            {
+                AdaptiveJoinCapsule capsule;
+                capsule.route = root.first;
+                for (auto& [id, group] : groups[root])
+                {
+                    std::vector<ExactPlanarFacePtr> unique;
+                    for (const auto& face : group.selected)
+                    {
+                        bool duplicate = false;
+                        for (const auto& previous : unique)
+                            if (auto overlap = previous->intersection(*face))
+                            {
+                                if (previous->equivalent(*face))
+                                {
+                                    duplicate = true;
+                                    break;
+                                }
+                                throw std::invalid_argument(
+                                    "Accepted mixed source has overlapping canonical join tiles.");
+                            }
+                        if (!duplicate)
+                            unique.push_back(face);
+                    }
+                    bool complete = true;
+                    try
+                    {
+                        group.common->certify_partition(unique);
+                    }
+                    catch (const std::invalid_argument&)
+                    {
+                        complete = false;
+                    }
+                    if (complete)
+                        capsule.rules.push_back({group.original, group.canonical, group.common});
+                    else
+                        for (auto& face : unique)
+                            capsule.rules.push_back({group.original, group.canonical, std::move(face)});
+                }
+                // A single accepted destination can cover a complete original
+                // support after subtracting joins. Collapse its source subdivisions
+                // to that immutable root selection; distinct destinations stay exact.
+                std::map<AdaptiveBytes, std::vector<AdaptiveBoundaryRule>> by_support;
+                for (auto& rule : physical[root])
+                    by_support[rule.original_support].push_back(std::move(rule));
+                for (auto& [support, rules] : by_support)
+                {
+                    const bool one_name = std::all_of(rules.begin(), rules.end(),
+                        [&](const auto& rule) { return rule.boundary == rules.front().boundary; });
+                    const auto& original = prototypes.at(root).faces;
+                    auto original_face = std::find_if(
+                        original.begin(), original.end(), [&](const auto& face) { return face.key == support; });
+                    if (original_face == original.end())
+                        throw std::logic_error("Lost original physical support.");
+                    std::vector<ExactPlanarFacePtr> coverage;
+                    for (const auto& rule : rules)
+                        coverage.push_back(rule.original_root_selection);
+                    for (const auto& rule : capsule.rules)
+                        if (rule.original_support == support)
+                            coverage.push_back(rule.original_root_selection);
+                    bool complete = one_name;
+                    if (complete)
+                        try
+                        {
+                            original_face->geometry->certify_partition(coverage);
+                        }
+                        catch (const std::invalid_argument&)
+                        {
+                            complete = false;
+                        }
+                    if (complete)
+                        capsule.boundaries.push_back({support, original_face->geometry, rules.front().boundary});
+                    else
+                        for (auto& rule : rules)
+                            capsule.boundaries.push_back(std::move(rule));
+                }
+                auto bytes = encode_join_capsule(capsule, byte_budget);
+                allocation.add(bytes.size());
+                capsules.emplace(root, std::make_shared<const AdaptiveBytes>(std::move(bytes)));
+            }
+            auto wrap = [&](std::size_t p, AdaptiveLeaf leaf)
+            {
+                leaf.key = global_key(p, std::move(leaf.key));
+                leaf.join_recipe = capsules.at({p, root_key(leaf.key)});
+                if (!leaf.parent_family.empty())
+                {
+                    adaptive_detail::Reader family{leaf.parent_family};
+                    if (family.word() != 0x534646414d363031ULL)
+                        throw std::invalid_argument("Unknown inherited mixed family identity.");
+                    auto split = family.word();
+                    auto key = decode_adaptive_key(family.bytes());
+                    family.done();
+                    leaf.parent_family = adaptive_family_key(global_key(p, std::move(key)), AdaptiveSplit(split));
+                }
+                return leaf;
+            };
+            for (std::size_t p = 0; p < count; ++p)
+            {
+                for (auto& leaf : parts[p].owned)
+                    result.owned.push_back(wrap(p, std::move(leaf)));
+                for (auto& family : parts[p].families)
+                {
+                    family.parent = wrap(p, std::move(family.parent));
+                    family.key = adaptive_family_key(family.parent.key, family.split);
+                    for (auto& child : family.children)
+                        child = global_key(p, std::move(child));
+                    family.anchor = encode_adaptive_key(global_key(p, decode_adaptive_key(family.anchor)));
+                    result.families.push_back(std::move(family));
+                }
+            }
+            for (auto cell : owned)
+                result.source_cells.push_back({data_key(*data_, cell, participant(cell)), cell});
+            result.kernel = mixed_adaptive_kernel(std::move(routes), byte_budget);
+            for (const auto& leaf : result.owned)
+                result.kernel->validate(leaf);
+            for (const auto& family : result.families)
+                result.kernel->validate(family.parent);
+            if (!geometry_unchanged())
+                throw std::invalid_argument("Mixed source moved while detaching its root aliases.");
+        });
+    return result;
 }
 } // namespace SimpleFluid::Meshes::AMR

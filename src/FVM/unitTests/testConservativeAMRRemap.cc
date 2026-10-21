@@ -4,6 +4,7 @@
 #include "FVM/ConservativeAMRRemap.hh"
 #include "FVM/details/AMRRemapBudget.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/mesh/SparseNativeMesh.hh"
 #include "parallel/MeshPartitioner.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -597,4 +598,44 @@ TEST(ConservativeAMRRemapTest, SparsePlaneOffsetPreservesTranslatedMicroscopicPh
         EXPECT_DOUBLE_EQ(result.gas_volume[c], gid == 0 ? 0.5e-200 : 0.0);
         EXPECT_DOUBLE_EQ(result.inventories[0].amount[c], gid == 0 ? 7.0 : 0.0);
     }
+}
+
+TEST(ConservativeAMRRemapTest, VariableOwnerCertificateBudgetRejectsOneRankBeforePublication)
+{
+    Fixture f;
+    const auto comm = Tpetra::getDefaultComm();
+    EXPECT_ANY_THROW(ConservativeAMRRemap(
+        f.parent, f.children, f.split, comm->getRank() == 0 ? std::size_t(1) : std::size_t(64 * 1024 * 1024)));
+    ConservativeAMRRemap accepted(f.parent, f.children, f.split);
+    auto phase = f.phases(false);
+    AMRRemapOutput result;
+    EXPECT_NO_THROW((void) accepted.apply(phase, inventories(phase), result, 1000, 2));
+    EXPECT_EQ(result.gas_volume.size(), f.children->num_owned_cells());
+}
+
+TEST(ConservativeAMRRemapTest, GloballyEmptyNativeDomainsRejectThroughBothConstructorOverloads)
+{
+    SparseNativeMeshInput input;
+    auto geometry = MultiRegionMesh::from_sparse_native(std::move(input), Tpetra::getDefaultComm());
+    auto partition = CompositePartition<>::from_sparse_native(geometry, {}, {});
+    auto mesh = std::make_shared<Handle>(partition);
+    const auto stamp = observation(mesh);
+    auto plan = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(stamp, stamp, {}, {}, {});
+    const auto rejects_empty = [&](bool explicit_budget)
+    {
+        try
+        {
+            if (explicit_budget)
+                (void) ConservativeAMRRemap(mesh, mesh, plan, 1024 * 1024);
+            else
+                (void) ConservativeAMRRemap(mesh, mesh, plan);
+            ADD_FAILURE() << "Globally empty native remap unexpectedly constructed.";
+        }
+        catch (const std::invalid_argument& error)
+        {
+            EXPECT_NE(std::string(error.what()).find("nonempty global source and target domains"), std::string::npos);
+        }
+    };
+    rejects_empty(false);
+    rejects_empty(true);
 }

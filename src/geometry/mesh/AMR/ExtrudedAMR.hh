@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
 #include "parallel/CompositePartition.hh"
 
@@ -43,6 +44,9 @@ public:
     [[nodiscard]] ConvexGeometryPtr cell_geometry(std::uint64_t cell) const;
     [[nodiscard]] std::vector<ProductContactViolation> contact_violations(
         double maximum_span_ratio, unsigned maximum_trace_jump = 1, std::size_t contact_budget = 65536) const;
+    [[nodiscard]] AdaptiveBootstrap detach_owned(
+        std::span<const std::uint64_t> owned_cells, AdaptiveBytes domain) const;
+    [[nodiscard]] AdaptiveBytes root_descriptor() const;
     struct StorageCounts
     {
         std::size_t base_cells, base_vertices, base_edges, z_edges, point_recipes, z_recipes, base_history_nodes,
