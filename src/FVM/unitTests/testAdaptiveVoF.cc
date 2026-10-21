@@ -22,8 +22,8 @@ namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::VoF;
-using Hierarchy = Meshes::CartesianAMR;
-using Grid = Meshes::AMRGrid;
+using Hierarchy = SimpleFluid::Meshes::AMR::CartesianAMR;
+using Grid = SimpleFluid::Meshes::AMR::AMRGrid;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
@@ -125,7 +125,7 @@ void expect_inventory_conservation(
     }
 }
 
-bool contains(const std::vector<Meshes::AMRBlock>& keys, Meshes::AMRBlock key)
+bool contains(const std::vector<SimpleFluid::Meshes::AMR::AMRBlock>& keys, SimpleFluid::Meshes::AMR::AMRBlock key)
 {
     return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
@@ -522,7 +522,8 @@ TEST(AdaptiveVoFTest, RefinementDirectoryMatchesExhaustivePeriodicGuardSelection
     hints.wake_indicator.assign(fraction.size(), 0.0);
     hints.promotion_regions = {{{6.0, 3.0, 0.5}, {6.0, 3.0, 0.5}}};
     std::vector<int> expected(hierarchy->blocks().size());
-    const auto closed_intersection = [](const Meshes::AMRBox& a, const Meshes::AMRBox& b)
+    const auto closed_intersection =
+        [](const SimpleFluid::Meshes::AMR::AMRBox& a, const SimpleFluid::Meshes::AMR::AMRBox& b)
     {
         for (std::size_t axis = 0; axis < 3; ++axis)
             if (a.upper[axis] < b.lower[axis] || b.upper[axis] < a.lower[axis])
@@ -663,12 +664,12 @@ TEST(AdaptiveVoFTest, TranslatedNarrowDomainReconstructsConstantFractions)
 
 TEST(AdaptiveVoFTest, RepresentedCoverageRejectsMissingTranslatedQueryVolume)
 {
-    const Meshes::AMRBox query{{1.0e6, 0.0, 0.0}, {1.0e6 + 0.001, 1.0, 1.0}};
+    const SimpleFluid::Meshes::AMR::AMRBox query{{1.0e6, 0.0, 0.0}, {1.0e6 + 0.001, 1.0, 1.0}};
     const double middle = std::midpoint(query.lower[0], query.upper[0]);
     auto left = query, right = query;
     left.upper[0] = middle;
     right.lower[0] = middle;
-    std::vector<Meshes::AMROverlap> intersections{{0, left}, {1, right}};
+    std::vector<SimpleFluid::Meshes::AMR::AMROverlap> intersections{{0, left}, {1, right}};
     EXPECT_TRUE(geometry_detail::has_complete_reconstruction_coverage(query, intersections));
     // This represented width already differs from nominal 0.001 by more than
     // the former 1e-9 relative gate, without any missing geometric coverage.

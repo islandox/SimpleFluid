@@ -2,11 +2,11 @@
  * @brief Immutable conforming whole-column base and common-Z adaptation.
  */
 #pragma once
-#include "geometry/AdaptiveOverlap.hh"
+#include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
 #include "parallel/CompositePartition.hh"
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 struct ExtrudedAMRGrid
 {
@@ -87,4 +87,4 @@ private:
     explicit ExtrudedAMR(std::shared_ptr<const Data> data);
     std::shared_ptr<const Data> data_;
 };
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

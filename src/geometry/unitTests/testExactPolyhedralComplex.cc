@@ -2,7 +2,7 @@
  * @brief Exact octants, canonical nonnested seams, sparse topology and parent recovery.
  */
 #include "geometry/ExactPolyhedralComplex.hh"
-#include "geometry/ExtrudedAMR.hh"
+#include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
 #include <cmath>
@@ -25,9 +25,9 @@ ConvexGeometryPtr cube()
 {
     return ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
 }
-AdaptiveCellKey key(ID root, std::vector<ID> path = {})
+::SimpleFluid::Meshes::AMR::AdaptiveCellKey key(ID root, std::vector<ID> path = {})
 {
-    return {0, ConvexCellAncestry{root, std::move(path)}};
+    return {0, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{root, std::move(path)}};
 }
 PolyhedralComplexCell tagged(ConvexGeometryPtr geometry, ID root, ID gid)
 {
@@ -39,7 +39,7 @@ PolyhedralComplexCell tagged(ConvexGeometryPtr geometry, ID root, ID gid)
 std::vector<PolyhedralComplexCell> split(const PolyhedralComplexCell& parent, ID first)
 {
     std::vector<PolyhedralComplexCell> cells;
-    const auto ancestry = std::get<ConvexCellAncestry>(parent.key.ancestry);
+    const auto ancestry = std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(parent.key.ancestry);
     for (const auto& piece : parent.geometry->split_aabb_midpoints())
     {
         auto path = ancestry.path;
@@ -273,11 +273,11 @@ TEST(ExactPolyhedralComplexTest, SparseCodecRetainsOnlyVisibleGeometryAndMetricN
 }
 TEST(ExactPolyhedralComplexTest, OrderedAtomicNativeImportDoesNotGuessConstructedFaceOrder)
 {
-    ExtrudedAMRGrid grid;
+    ::SimpleFluid::Meshes::AMR::ExtrudedAMRGrid grid;
     grid.xy_nodes = {{{.1, .1, 0}}, {{.2, .1, 0}}, {{.2, .2, 0}}, {{.1, .2, 0}}};
     grid.base_cells = {{0, 1, 2, 3}};
     grid.z_edges = {.1, .2};
-    auto hierarchy = ExtrudedAMR(grid).adapt({0});
+    auto hierarchy = ::SimpleFluid::Meshes::AMR::ExtrudedAMR(grid).adapt({0});
     const auto& native = *hierarchy->geometry();
     std::vector<PolyhedralComplexCell> cells;
     for (ID cell = 0; cell < native.num_cells(); ++cell)

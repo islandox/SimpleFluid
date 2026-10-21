@@ -30,7 +30,7 @@ using namespace SimpleFluid;
 using Solver = AdaptiveVoFSolver;
 using State = VoF::LowMachState;
 using Vector = VoF::Vector;
-using Box = Meshes::AMRBox;
+using Box = SimpleFluid::Meshes::AMR::AMRBox;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 constexpr double reference_temperature = 300.0, reference_pressure = 100000.0;
@@ -109,13 +109,14 @@ VoF::LowMachOptions thermodynamics(double liquid_reference_energy = 1000.0, doub
 
 SP<Solver> make_flow(double sigma = 0.0, bool periodic = true, bool refined = false, unsigned maximum_level = 0)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 2, 2};
     grid.block_cells = {4, 4, 4};
     grid.extent = {1.0, 1.0, 1.0};
     grid.periodic = {periodic, periodic, periodic};
     grid.max_level = std::max(maximum_level, refined ? 1U : 0U);
-    std::shared_ptr<const Meshes::CartesianAMR> hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::CartesianAMR> hierarchy =
+        std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     if (refined)
         hierarchy = hierarchy->adapt({0});
     VoFMaterial material;
@@ -493,7 +494,7 @@ TEST(BubbleRepresentationTest, DisjointEventsPreserveLocalCompositionAndReportTh
     const std::array<Box, 2> neighborhoods{first_box, second_box};
     const std::array<double, 2> radii{radius, second_radius};
     const std::array<double, 2> concentrations{0.01, 0.03};
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 2, 2};
     grid.block_cells = {6, 6, 6};
     grid.periodic = {true, true, true};
@@ -503,7 +504,8 @@ TEST(BubbleRepresentationTest, DisjointEventsPreserveLocalCompositionAndReportTh
     material.gas_density = 0.1;
     material.liquid_viscosity = material.gas_viscosity = 0.0;
     material.surface_tension = sigma;
-    auto flow = std::make_shared<Solver>(std::make_shared<const Meshes::CartesianAMR>(grid), material);
+    auto flow =
+        std::make_shared<Solver>(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid), material);
     const auto cells = flow->mesh()->num_owned_cells();
     VoF::LowMachInitialState initial;
     initial.thermodynamic_pressure = reference_pressure;
@@ -905,7 +907,7 @@ TEST(BubbleRepresentationTest, WallLigamentsHeadspaceAndInertComponentsRemainRes
 TEST(BubbleRepresentationTest, DisjointGasTracesStaySeparateAndPeriodicComponentsAreNotWalls)
 {
     {
-        Meshes::AMRGrid grid;
+        SimpleFluid::Meshes::AMR::AMRGrid grid;
         grid.block_cells = {2, 4, 2};
         grid.extent = {2.0, 4.0, 2.0};
         grid.periodic = {false, false, true};
@@ -914,7 +916,8 @@ TEST(BubbleRepresentationTest, DisjointGasTracesStaySeparateAndPeriodicComponent
         material.liquid_density = reference_density;
         material.gas_density = 0.1;
         material.liquid_viscosity = material.gas_viscosity = material.surface_tension = 0.0;
-        auto flow = std::make_shared<Solver>(std::make_shared<const Meshes::CartesianAMR>(grid), material);
+        auto flow =
+            std::make_shared<Solver>(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid), material);
         VoF::LowMachInitialState initial;
         initial.thermodynamic_pressure = reference_pressure;
         const auto cells = flow->mesh()->num_owned_cells();
@@ -1119,7 +1122,7 @@ TEST(BubbleRepresentationTest, InvalidSparseParcelAndRankLocalStaleRevisionRejec
 TEST(BubbleRepresentationTest, CoupledContinuationReplaysPendingHistoryWithoutDuplicatingHeatOrRadiolysis)
 {
     constexpr double sigma = 0.05, dt = 1e-4, conversion_radius = 0.25;
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {1, 1, 1};
     grid.block_cells = {4, 4, 4};
     grid.periodic = {true, true, true};
@@ -1129,7 +1132,8 @@ TEST(BubbleRepresentationTest, CoupledContinuationReplaysPendingHistoryWithoutDu
     material.gas_density = 0.1;
     material.liquid_viscosity = material.gas_viscosity = 0.0;
     material.surface_tension = sigma;
-    auto flow = std::make_shared<Solver>(std::make_shared<const Meshes::CartesianAMR>(grid), material);
+    auto flow =
+        std::make_shared<Solver>(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid), material);
     const auto cells = flow->mesh()->num_owned_cells();
     const double pivot = sphere_moles(conversion_radius, sigma);
     VoF::LowMachInitialState initial;
@@ -1299,7 +1303,7 @@ TEST(BubbleRepresentationTest, IncompatibleCarriedPhaseTemperaturesRejectWithout
 
 TEST(BubbleRepresentationTest, EmptyOwnedRankParticipatesInRegistryPreviewAndReplay)
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {1, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {1.0, 1.0, 1.0};
@@ -1309,7 +1313,8 @@ TEST(BubbleRepresentationTest, EmptyOwnedRankParticipatesInRegistryPreviewAndRep
     material.liquid_density = reference_density;
     material.gas_density = 0.1;
     material.liquid_viscosity = material.gas_viscosity = material.surface_tension = 0.0;
-    auto flow = std::make_shared<Solver>(std::make_shared<const Meshes::CartesianAMR>(grid), material);
+    auto flow =
+        std::make_shared<Solver>(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid), material);
     flow->initialize_low_mach(thermodynamics(), dispersed_initial(*flow, 1.0, false, {}, {}));
     if (Tpetra::getDefaultComm()->getSize() > 8)
         EXPECT_GT(global_sum(flow->mesh()->num_owned_cells() == 0 ? 1.0 : 0.0), 0.0);

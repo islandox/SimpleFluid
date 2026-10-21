@@ -39,7 +39,7 @@ namespace SimpleFluid
 class SIMPLEFLUID_SOLVERS_EXPORT AdaptiveVoFSolver
 {
 public:
-    using Hierarchy = Meshes::CartesianAMR;
+    using Hierarchy = SimpleFluid::Meshes::AMR::CartesianAMR;
     using Handle = MeshHandle<>;
     using ScalarField = VoFSolver::ScalarField;
     using VectorField = VoFSolver::VectorField;
@@ -104,8 +104,9 @@ public:
     [[nodiscard]] bool pending_representation_relaxation() const noexcept;
 
     /** Conservative adaptation; supplied stencil/motion/wake/promotion guards constrain coarsening. */
-    void regrid(const std::vector<std::size_t>& refine, const std::vector<Meshes::AMRBlock>& coarsen = {},
-        VoF::RefinementOptions protection = {}, VoF::RefinementHints hints = {});
+    void regrid(const std::vector<std::size_t>& refine,
+        const std::vector<SimpleFluid::Meshes::AMR::AMRBlock>& coarsen = {}, VoF::RefinementOptions protection = {},
+        VoF::RefinementHints hints = {});
     /** Apply a plan only to its exact source observation and, for solver-issued plans, unchanged
      * accepted state; recheck current interface guards before conservative adaptation. */
     void regrid(const VoF::RefinementPlan& plan);

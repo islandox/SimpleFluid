@@ -79,13 +79,14 @@ VoF::LowMachOptions thermodynamics()
 
 SP<Solver> make_flow(bool refine = false, VoF::Vector gravity = {})
 {
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 1, 1};
     grid.block_cells = {2, 2, 2};
     grid.extent = {1.0, 0.5, 0.5};
     grid.periodic = {false, true, true};
     grid.max_level = 1;
-    std::shared_ptr<const Meshes::CartesianAMR> hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    std::shared_ptr<const SimpleFluid::Meshes::AMR::CartesianAMR> hierarchy =
+        std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     if (refine)
         hierarchy = hierarchy->adapt({0, 1});
     VoFMaterial material;
@@ -651,15 +652,15 @@ TEST(RadiolyticVoFCouplerTest, NormalGalileanTranslationLeavesTheIncidentCapture
     for (double translation : {0.0, 0.3})
     {
         SCOPED_TRACE(translation);
-        Meshes::AMRGrid grid;
+        SimpleFluid::Meshes::AMR::AMRGrid grid;
         grid.root_blocks = {4, 1, 1};
         grid.block_cells = {2, 2, 2};
         grid.extent = {1.0, 0.5, 0.5};
         grid.periodic = {true, true, true};
         grid.max_level = 0;
         const auto prototype = make_flow(false, {1e-8, 0.0, 0.0});
-        auto flow = std::make_shared<Solver>(
-            std::make_shared<const Meshes::CartesianAMR>(grid), prototype->material(), prototype->options());
+        auto flow = std::make_shared<Solver>(std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid),
+            prototype->material(), prototype->options());
         auto init = planar_state(*flow, 0.0);
         const auto thermo = thermodynamics();
         const double bubble_moles =

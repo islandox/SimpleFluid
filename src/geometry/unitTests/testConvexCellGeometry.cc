@@ -1,8 +1,8 @@
 /** @file testConvexCellGeometry.cc
  * @brief Independent convex clipping, represented coverage and ancestry oracles.
  */
-#include "geometry/AdaptiveOverlap.hh"
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
 #include <cmath>
@@ -27,15 +27,15 @@ void near_value(const CertifiedGeometryValue& actual, long double expected, long
     EXPECT_GE(actual.absolute_error, 0);
 }
 
-HierarchyObservation observation(const ConvexGeometryPtr& geometry)
+::SimpleFluid::Meshes::AMR::HierarchyObservation observation(const ConvexGeometryPtr& geometry)
 {
     std::shared_ptr<const void> identity = geometry;
     return {identity, identity, identity, 0, 0, 0, geometry.get(), nullptr};
 }
 
-AdaptiveCellKey key(std::initializer_list<std::uint64_t> path = {})
+::SimpleFluid::Meshes::AMR::AdaptiveCellKey key(std::initializer_list<std::uint64_t> path = {})
 {
-    return {7, ConvexCellAncestry{19, path}};
+    return {7, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{19, path}};
 }
 
 TEST(ConvexCellGeometryTest, CubeObliqueTetrahedronAndIndependentComplementMoments)
@@ -315,11 +315,13 @@ TEST(AdaptiveOverlapTest, TypedRefinementCoarseningAndExactSourceObservation)
     auto parent = cube();
     auto split = parent->clip({{1, 0, 0}, {.5, 0, 0}});
     const auto source = observation(parent), target = observation(split.inside);
-    std::vector<AdaptiveCellBinding> old{{key(), 17, 3, parent}};
-    std::vector<AdaptiveCellBinding> children{{key({0}), 900, 3, split.inside}, {key({1}), 12, 3, split.outside}};
-    const std::vector<AdaptiveAncestryRelation> relations{
-        {AdaptiveAncestryRelation::Kind::Refinement, 17, 900}, {AdaptiveAncestryRelation::Kind::Refinement, 17, 12}};
-    auto plan = AdaptiveOverlapPlan::build(source, target, old, children, relations);
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> old{{key(), 17, 3, parent}};
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> children{
+        {key({0}), 900, 3, split.inside}, {key({1}), 12, 3, split.outside}};
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations{
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 17, 900},
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 17, 12}};
+    auto plan = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(source, target, old, children, relations);
     ASSERT_EQ(plan->records().size(), 2U);
     near_value(plan->records()[0].moments.volume, .5L);
     EXPECT_EQ(plan->records()[0].source_key, key());
@@ -327,19 +329,28 @@ TEST(AdaptiveOverlapTest, TypedRefinementCoarseningAndExactSourceObservation)
     ++stale.geometry;
     EXPECT_THROW(plan->validate_observations(stale, target), std::invalid_argument);
     EXPECT_NO_THROW(plan->validate_observations(source, target));
-    std::vector<AdaptiveAncestryRelation> reverse{
-        {AdaptiveAncestryRelation::Kind::Coarsening, 900, 17}, {AdaptiveAncestryRelation::Kind::Coarsening, 12, 17}};
-    EXPECT_NO_THROW((void) AdaptiveOverlapPlan::build(target, source, children, old, reverse));
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> reverse{
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Coarsening, 900, 17},
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Coarsening, 12, 17}};
+    EXPECT_NO_THROW(
+        (void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(target, source, children, old, reverse));
     children[1].geometry = split.inside;
-    EXPECT_THROW((void) AdaptiveOverlapPlan::build(source, target, old, children, relations), std::invalid_argument);
+    EXPECT_THROW(
+        (void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(source, target, old, children, relations),
+        std::invalid_argument);
     children[1].geometry = split.outside;
     children[1].material = 9;
-    EXPECT_THROW((void) AdaptiveOverlapPlan::build(source, target, old, children, relations), std::invalid_argument);
+    EXPECT_THROW(
+        (void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(source, target, old, children, relations),
+        std::invalid_argument);
     children[1].material = 3;
     children[1].key = key({1, 0});
-    const std::vector<AdaptiveAncestryRelation> false_same{
-        {AdaptiveAncestryRelation::Kind::Unchanged, 17, 900}, {AdaptiveAncestryRelation::Kind::Unchanged, 17, 12}};
-    EXPECT_THROW((void) AdaptiveOverlapPlan::build(source, target, old, children, false_same), std::invalid_argument);
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> false_same{
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Unchanged, 17, 900},
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Unchanged, 17, 12}};
+    EXPECT_THROW(
+        (void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(source, target, old, children, false_same),
+        std::invalid_argument);
 }
 
 TEST(AdaptiveOverlapTest, ActiveCatalogAncestryMustBeALeafAntichain)
@@ -347,24 +358,30 @@ TEST(AdaptiveOverlapTest, ActiveCatalogAncestryMustBeALeafAntichain)
     auto parent = cube();
     const auto split = parent->clip({{1, 0, 0}, {.5, 0, 0}});
     const auto obs = observation(parent);
-    std::vector<AdaptiveCellBinding> root{{key(), 0, 0, parent}};
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> root{{key(), 0, 0, parent}};
     // These shells partition the root exactly, but their claimed active keys
     // overlap genealogically. Pure geometric coverage must not admit them.
-    std::vector<AdaptiveCellBinding> invalid{{key({0}), 1, 0, split.inside}, {key({0, 1}), 2, 0, split.outside}};
-    const std::vector<AdaptiveAncestryRelation> forward{
-        {AdaptiveAncestryRelation::Kind::Refinement, 0, 1}, {AdaptiveAncestryRelation::Kind::Refinement, 0, 2}};
-    EXPECT_THROW((void) AdaptiveOverlapPlan::build(obs, obs, root, invalid, forward), std::invalid_argument);
-    const std::vector<AdaptiveAncestryRelation> reverse{
-        {AdaptiveAncestryRelation::Kind::Coarsening, 1, 0}, {AdaptiveAncestryRelation::Kind::Coarsening, 2, 0}};
-    EXPECT_THROW((void) AdaptiveOverlapPlan::build(obs, obs, invalid, root, reverse), std::invalid_argument);
+    std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> invalid{
+        {key({0}), 1, 0, split.inside}, {key({0, 1}), 2, 0, split.outside}};
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> forward{
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 1},
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 0, 2}};
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(obs, obs, root, invalid, forward),
+        std::invalid_argument);
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> reverse{
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Coarsening, 1, 0},
+        {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Coarsening, 2, 0}};
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(obs, obs, invalid, root, reverse),
+        std::invalid_argument);
     // Exercise the independent Cartesian bounded-parent walk as well.
-    root[0].key = {7, CartesianCellAncestry{0, {0, 0, 0}}};
-    invalid[0].key = {7, CartesianCellAncestry{1, {0, 0, 0}}};
-    invalid[1].key = {7, CartesianCellAncestry{2, {1, 0, 0}}};
-    EXPECT_THROW((void) AdaptiveOverlapPlan::build(obs, obs, root, invalid, forward), std::invalid_argument);
+    root[0].key = {7, ::SimpleFluid::Meshes::AMR::CartesianCellAncestry{0, {0, 0, 0}}};
+    invalid[0].key = {7, ::SimpleFluid::Meshes::AMR::CartesianCellAncestry{1, {0, 0, 0}}};
+    invalid[1].key = {7, ::SimpleFluid::Meshes::AMR::CartesianCellAncestry{2, {1, 0, 0}}};
+    EXPECT_THROW((void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(obs, obs, root, invalid, forward),
+        std::invalid_argument);
     root[0].key = key();
     invalid[0].key = key({0});
     invalid[1].key = key({1});
-    EXPECT_NO_THROW((void) AdaptiveOverlapPlan::build(obs, obs, root, invalid, forward));
+    EXPECT_NO_THROW((void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(obs, obs, root, invalid, forward));
 }
 } // namespace

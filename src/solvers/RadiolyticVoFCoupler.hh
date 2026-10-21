@@ -40,7 +40,7 @@ struct DispersedCaptureModel
 struct ResolvedHeadspaceVent
 {
     bool enabled = false;
-    std::vector<Meshes::AMRBox> regions;
+    std::vector<SimpleFluid::Meshes::AMR::AMRBox> regions;
     std::string model_name;
     std::string validity_description;
     /** Headspace mole-weighted p [Pa], T [K], H2 mole fraction -> total mol/s leaving. */

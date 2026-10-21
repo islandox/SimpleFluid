@@ -2,11 +2,11 @@
  * @brief Immutable bounded-bootstrap convex refinement with canonical atomic faces.
  */
 #pragma once
-#include "geometry/AdaptiveOverlap.hh"
 #include "geometry/ExactPolyhedralComplex.hh"
+#include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "parallel/CompositePartition.hh"
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 /** Already embedded native planar-convex input. Region/material membership is
  * explicit per original native cell and independent of topology fragments.
@@ -71,4 +71,4 @@ private:
     explicit PolyhedralAMR(std::shared_ptr<const Data> data) : data_(std::move(data)) {}
     std::shared_ptr<const Data> data_;
 };
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

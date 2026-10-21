@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "geometry/AdaptiveHierarchy.hh"
+#include "geometry/mesh/AMR/AdaptiveHierarchy.hh"
 #include "parallel/CompositePartition.hh"
 
 #include <array>
@@ -14,7 +14,7 @@
 #include <memory>
 #include <vector>
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 
 /** @brief Cartesian AMR domain; block cell counts are positive even integers. */
@@ -165,4 +165,4 @@ private:
     std::shared_ptr<const CompositePartition<>> partition_;
 };
 
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

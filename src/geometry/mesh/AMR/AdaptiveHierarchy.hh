@@ -9,7 +9,7 @@
 #include <variant>
 #include <vector>
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 /** Exact retained observations, independent of solver state and population schema.
  * Identity tokens compare by retained object identity, never by a digest. */
@@ -108,4 +108,4 @@ public:
     [[nodiscard]] virtual std::uint64_t cell_material(std::uint64_t cell) const = 0;
     [[nodiscard]] virtual std::size_t cell_fragment(std::uint64_t cell) const = 0;
 };
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR

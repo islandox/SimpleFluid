@@ -1,5 +1,10 @@
 # AMR for extruded, polyhedral, and mixed-region meshes
 
+AMR hierarchy, ancestry, overlap and adaptation modules live in
+`src/geometry/mesh/AMR` and namespace `SimpleFluid::Meshes::AMR`.
+Generic exact geometry and native mesh providers remain in `SimpleFluid::Meshes`;
+FVM transport and solver consumers remain in their own modules.
+
 **Status: Stages 1–5 are implemented and verified within the stated scope; Stages 6–9 remain proposed.** This document
 defines the implemented hierarchy, certified geometry and sparse remap boundaries and the remaining
 implementation sequence and acceptance contracts. It does not extend the
@@ -45,7 +50,7 @@ selected here; external algorithm references explain proposed approaches only.
 | Distributed shard input | Root assembles geometry before partition planning | Distributed closure and owner-to-owner migration, stage 6 |
 | Extruded/polyhedral VoF and radiolysis | No support implied by native geometry | General geometric transport/flow, then physical coupling, stages 7 and 8 |
 
-The relevant seams are [`CartesianAMR::adapt`](../../src/geometry/CartesianAMR.hh),
+The relevant seams are [`CartesianAMR::adapt`](../../src/geometry/mesh/AMR/CartesianAMR.hh),
 [`MultiRegionMesh::Region`](../../src/geometry/mesh/MultiRegionMesh.hh),
 [`MeshHandle::initialize_semi_structured`](../../src/geometry/MeshHandle.tcc), and
 [`ExtrudedTopology::cell_type`](../../src/geometry/mesh/ExtrudedRegionProviders.cc).
@@ -93,7 +98,7 @@ The current composite prefix ordinals can change when an earlier region grows,
 so they cannot serve as persistent ancestry or physical boundary identity.
 
 The implemented Stage 1 interface is declared in
-[`AdaptiveHierarchy.hh`](../../src/geometry/AdaptiveHierarchy.hh):
+[`AdaptiveHierarchy.hh`](../../src/geometry/mesh/AMR/AdaptiveHierarchy.hh):
 
 ```cpp
 class AdaptiveHierarchy {
@@ -163,7 +168,7 @@ the exact internal moment remains available for further geometry. Checked narrow
 rejects disappearance of a known nonzero value. Binary64-format moment queries
 exercise this contract even when the host's `long double` has a wider range.
 
-[`AdaptiveOverlapPlan`](../../src/geometry/AdaptiveOverlap.hh) takes explicit
+[`AdaptiveOverlapPlan`](../../src/geometry/mesh/AMR/AdaptiveOverlap.hh) takes explicit
 source/target bindings and unchanged/refine/coarsen relations. It certifies actual
 intersection geometry, per-cell disjointness and complete coverage exactly.
 Catalogs may contain only the complete ancestry families needed locally. This is
@@ -211,7 +216,7 @@ interval; cap ancestry is base-cell leaf × axial plane. Shared coordinates come
 from the same ancestral construction. XY-then-Z and Z-then-XY refinement must
 produce identical final product keys and geometry.
 
-The Stage 3 implementation is [`ExtrudedAMR`](../../src/geometry/ExtrudedAMR.hh).
+The Stage 3 implementation is [`ExtrudedAMR`](../../src/geometry/mesh/AMR/ExtrudedAMR.hh).
 Its `ExtrudedAMRGrid` supplies represented root XY nodes/base loops, boundary edge
 labels, Z edges, optional compatible triangle reference edges, physical region and
 material IDs, depth and quality limits. `adapt(refine_base, refine_z, coarsen_base,
@@ -316,7 +321,7 @@ runs with identical layouts. Reuse the product representation of
 Avoid one provider per 3D cell. Arbitrary layer-local patterns cannot promise
 one global O(base + layers) representation; storage also includes unique local
 templates, product descriptors, and their interface ancestry.
-[`LocalProductAMR`](../../src/geometry/LocalProductAMR.hh) retains independent
+[`LocalProductAMR`](../../src/geometry/mesh/AMR/LocalProductAMR.hh) retains independent
 base/interval keys and an interned axial selection for each active base leaf.
 Connected compatible base components form templates; contiguous intervals form
 run views. Factor marks name source product keys. XY or Z coarsening requires
@@ -348,7 +353,7 @@ version, and parent/child ancestry; do not require eight children or replace
 the physical cell by its box. Each child's coordinate spans are bounded by
 half the corresponding parent box spans.
 
-[`PolyhedralAMR`](../../src/geometry/PolyhedralAMR.hh) implements this stage for
+[`PolyhedralAMR`](../../src/geometry/mesh/AMR/PolyhedralAMR.hh) implements this stage for
 one native region without joins and one physical region ID; per-root materials
 and physical patch labels are retained independently. Input must already be a
 valid embedded native planar-convex mesh with complete canonical root residency.
@@ -478,7 +483,7 @@ retain separate native meshes and external coupling maps; coincident geometry
 never creates a pressure join implicitly. Physical region, material, patch,
 fragment and persistent ancestry identities remain separate.
 
-[`MixedAMRGrid`](../../src/geometry/MixedAMR.hh) accepts zero or more
+[`MixedAMRGrid`](../../src/geometry/mesh/AMR/MixedAMR.hh) accepts zero or more
 `LocalProductAMR` states, supported `CartesianAMR`, `ExtrudedAMR` and
 `PolyhedralAMR` hierarchy adapters, and retained static native participants. An
 optional first-product convenience entry is not a required dummy participant.

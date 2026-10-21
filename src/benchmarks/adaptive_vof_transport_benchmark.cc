@@ -22,12 +22,12 @@ int main(int argc, char** argv)
     const std::size_t repetitions = argc > 3 ? std::stoul(argv[3]) : 3;
     if (b < 2 || b % 2 || !repetitions)
         return 2;
-    Meshes::AMRGrid grid;
+    SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {4, 1, 1};
     grid.block_cells = {b, b, b};
     grid.extent = {4, 1, 1};
     grid.periodic = {true, true, true};
-    const auto hierarchy = std::make_shared<const Meshes::CartesianAMR>(grid);
+    const auto hierarchy = std::make_shared<const SimpleFluid::Meshes::AMR::CartesianAMR>(grid);
     VoFMaterial material;
     material.liquid_viscosity = material.gas_viscosity = material.surface_tension = 0;
     AdaptiveVoFSolver flow(hierarchy, material);

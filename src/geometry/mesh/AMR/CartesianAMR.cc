@@ -2,7 +2,7 @@
  * @file CartesianAMR.cc
  * @brief Collective dyadic hierarchy adaptation and canonical Cartesian seams.
  */
-#include "geometry/CartesianAMR.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
@@ -19,7 +19,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes::AMR
 {
 namespace
 {
@@ -813,4 +813,4 @@ void CartesianAMR::build_geometry()
     geometry_epoch_ = geometry_->geometry_epoch();
 }
 
-} // namespace SimpleFluid::Meshes
+} // namespace SimpleFluid::Meshes::AMR
