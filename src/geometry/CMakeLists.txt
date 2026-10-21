@@ -1,4 +1,5 @@
 set(SIMPLEFLUID_MESH_SOURCES
+    AdaptiveHierarchy.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     CartesianAMR.cc
@@ -55,6 +56,7 @@ endif()
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
+    AdaptiveHierarchy.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     CartesianAMR.cc

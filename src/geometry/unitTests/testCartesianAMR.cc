@@ -4,6 +4,8 @@
  */
 #include "geometry/CartesianAMR.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
@@ -15,6 +17,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <iostream>
+#include <map>
 #include <numeric>
 #include <set>
 
@@ -417,5 +421,145 @@ TEST(CartesianAMRTest, DirectoryClosedBlockQueriesMatchExhaustiveIntersections)
     }
     EXPECT_THROW((void) hierarchy->intersecting_blocks({{NAN, 0.0, 0.0}, {1.0, 1.0, 1.0}}), std::invalid_argument);
     EXPECT_THROW((void) hierarchy->intersecting_blocks({{1.0, 0.0, 0.0}, {0.0, 1.0, 1.0}}), std::invalid_argument);
+}
+TEST(CartesianAMRTest, StableCellAncestryAndExactSourcePlans)
+{
+    AMRGrid grid;
+    grid.root_blocks = {2, 1, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.region_id = 41;
+    grid.material_id = 73;
+    CartesianAMR source(grid), foreign(grid);
+    const AdaptiveHierarchy& provider = source;
+    EXPECT_EQ(provider.native_geometry(), source.geometry());
+    const auto original_key = source.cell_key(8);
+    const auto plan = source.plan_adaptation({0});
+    auto refined = source.apply_adaptation(plan);
+    EXPECT_THROW((void)foreign.apply_adaptation(plan), std::invalid_argument);
+    EXPECT_THROW((void)refined->apply_adaptation(plan), std::invalid_argument);
+    EXPECT_EQ(source.observation(), plan.source_observation());
+    // The untouched level-zero block sorts before the refined level-one leaves.
+    EXPECT_EQ(refined->cell_key(0), original_key);
+    EXPECT_EQ(refined->cell_material(0), 73U);
+    EXPECT_EQ(refined->cell_key(0).region, 41U);
+    EXPECT_EQ(refined->cell_fragment(0), 0U);
+    std::set<AdaptiveCellKey> keys;
+    std::map<CartesianCellAncestry, unsigned> parent_counts;
+    for (ID cell = 0; cell < refined->geometry()->num_cells(); ++cell)
+    {
+        const auto key = refined->cell_key(cell);
+        EXPECT_TRUE(keys.insert(key).second);
+        const auto ancestry = std::get<CartesianCellAncestry>(key.ancestry);
+        if (ancestry.level)
+            ++parent_counts[ancestry.parent()];
+    }
+    EXPECT_EQ(parent_counts.size(), 8U);
+    for (const auto& [parent, count] : parent_counts)
+        EXPECT_EQ(count, 8U);
+    EXPECT_THROW((void)std::get<CartesianCellAncestry>(original_key.ancestry).parent(), std::invalid_argument);
+    EXPECT_EQ(source.adapt({})->observation(), source.observation());
+    const auto other_plan = source.plan_adaptation({});
+    if (Tpetra::getDefaultComm()->getSize() > 1)
+    {
+        const auto& mixed = Tpetra::getDefaultComm()->getRank() == 0 ? plan : other_plan;
+        EXPECT_THROW((void)source.apply_adaptation(mixed), std::invalid_argument);
+    }
+}
+
+TEST(CartesianAMRTest, NativePartitionChangesOnlyOwnershipObservation)
+{
+    AMRGrid grid;
+    grid.block_cells = {8, 2, 2};
+    grid.extent = {4.0, 1.0, 1.0};
+    CartesianAMR source(grid), foreign(grid);
+    const auto comm = Tpetra::getDefaultComm();
+    const MeshHandle<> original(source.geometry());
+    CompositePartitionOptions options;
+    options.policy = CompositePartitionOptions::Policy::TopologyAware;
+    options.target_cells_per_fragment = 8;
+    options.require_balance = false;
+    auto partition = std::make_shared<const CompositePartition<>>(MeshPartitioner<DefaultTpetraTypes>::partition(
+        CompositeMeshSource(source.geometry()), options, comm));
+    const auto pending = source.plan_adaptation({});
+    auto rebound = source.with_partition(partition);
+    const auto before = source.observation(), after = rebound->observation();
+    EXPECT_EQ(before.topology_identity, after.topology_identity);
+    EXPECT_EQ(before.topology, after.topology);
+    EXPECT_EQ(before.geometry, after.geometry);
+    EXPECT_NE(before.partition_identity, after.partition_identity);
+    EXPECT_NE(before.identity, after.identity);
+    EXPECT_EQ(after.partition, before.partition + 1);
+    EXPECT_EQ(rebound->geometry(), source.geometry());
+    EXPECT_EQ(rebound->cell_key(0), source.cell_key(0));
+    EXPECT_THROW((void)rebound->apply_adaptation(pending), std::invalid_argument);
+    EXPECT_THROW((void)foreign.with_partition(partition), std::invalid_argument);
+    MeshHandle<> native(*rebound->native_partition());
+    const auto owned = native.owned_cell_map()->getLocalNumElements();
+    EXPECT_EQ(owned, partition->plan().owned_cells().size());
+    std::set<ID> native_ids, original_ids, planned_ids;
+    for (std::size_t cell = 0; cell < native.num_owned_cells(); ++cell)
+        native_ids.insert(native.cell_global_id(cell));
+    for (std::size_t cell = 0; cell < original.num_owned_cells(); ++cell)
+        original_ids.insert(original.cell_global_id(cell));
+    for (const auto cell : partition->plan().owned_cells())
+        planned_ids.insert(cell);
+    EXPECT_EQ(native_ids, planned_ids);
+    const int changed = native_ids != original_ids;
+    const int empty = native_ids.empty();
+    int changed_ranks = 0, empty_ranks = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &changed, &changed_ranks);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &empty_ranks);
+    if (comm->getRank() == 0)
+        std::cout << "Partition observation: ranks=" << comm->getSize()
+                  << " global_cells=" << source.geometry()->num_cells()
+                  << " changed_owner_ranks=" << changed_ranks
+                  << " empty_owner_ranks=" << empty_ranks << '\n';
+    if (comm->getSize() > 1)
+    {
+        if (comm->getSize() == 2 || comm->getSize() == 4)
+            EXPECT_GT(changed_ranks, 0);
+        // The anisotropic graph favors cuts across x over the default canonical
+        // slices. Empty ownership is checked only when ranks outnumber cells.
+        const auto cells = static_cast<int>(source.geometry()->num_cells());
+        if (comm->getSize() > cells)
+            EXPECT_GE(empty_ranks, comm->getSize() - cells);
+    }
+    else
+    {
+        EXPECT_EQ(changed_ranks, 0);
+        EXPECT_EQ(empty_ranks, 0);
+    }
+    auto repeated = rebound->with_partition(partition);
+    EXPECT_EQ(repeated->observation(), after);
+    if (comm->getSize() > 1)
+    {
+        // Same hierarchy and collective partition plan on every rank; only rank
+        // zero supplies the already retained wrapper. The pointer no-op status
+        // must agree before any replacement identity broadcast.
+        auto copy = std::make_shared<const CompositePartition<>>(*partition);
+        const auto mixed = comm->getRank() == 0 ? partition : copy;
+        EXPECT_THROW((void)rebound->with_partition(mixed), std::invalid_argument);
+    }
+    EXPECT_EQ(source.observation(), before);
+}
+TEST(CartesianAMRTest, RejectsMovedResidentBeforePartitionBinding)
+{
+    CartesianAMR source(AMRGrid{});
+    const auto observation = source.observation();
+    const auto box = source.cell_box(0);
+    auto partition = std::make_shared<const CompositePartition<>>(MeshPartitioner<DefaultTpetraTypes>::partition(
+        CompositeMeshSource(source.geometry()), {}, Tpetra::getDefaultComm()));
+    EXPECT_TRUE(partition->geometry_unchanged());
+    ASSERT_NO_THROW((void)source.with_partition(partition));
+    auto mesh = std::make_shared<MeshHandle<>>(*partition);
+    PlanarALEMeshMotion<> motion(mesh);
+    motion.begin_trial(1.1, 0.5);
+    motion.accept_trial();
+    EXPECT_FALSE(partition->geometry_unchanged());
+    EXPECT_THROW((void)source.with_partition(partition), std::invalid_argument);
+    EXPECT_TRUE(source.geometry_unchanged());
+    EXPECT_EQ(source.observation(), observation);
+    EXPECT_EQ(source.cell_box(0).lower, box.lower);
+    EXPECT_EQ(source.cell_box(0).upper, box.upper);
 }
 } // namespace

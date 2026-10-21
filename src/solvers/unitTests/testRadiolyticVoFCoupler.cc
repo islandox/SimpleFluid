@@ -394,6 +394,7 @@ TEST(RadiolyticVoFCouplerTest, CaptureEfficiencyAndCommonTranslationPreserveTheI
             const auto first_momentum = physical_momentum(first_state);
             VoF::RefinementPlan plan;
             plan.source_hierarchy = flow->hierarchy();
+            plan.source_observation = flow->hierarchy()->observation();
             plan.refine = {0}; // Exercise gas-side refinement before the next physical step.
             const auto generation = flow->topology_generation();
             coupler.regrid(plan);

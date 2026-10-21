@@ -657,7 +657,8 @@ CompositePartition<Pack> MeshPartitioner<Pack>::distribute(
     });
     auto local_plan = plan;
     local_plan.d_destination_cells.reset();
-    local_plan.d_source.reset();
+    // Keep the weak source identity and captured epoch for immutable hierarchy
+    // binding. This retains no source geometry or global ownership payload.
     local_plan.d_assembled_source.reset();
     local_plan.d_original_owned_cells.clear(); local_plan.d_original_owned_cells.shrink_to_fit();
     return CompositePartition<Pack>(std::move(geometry), std::move(local_plan));

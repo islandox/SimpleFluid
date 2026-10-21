@@ -23,8 +23,9 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 Phase 22 has uniform and distributed Cartesian AMR VoF backends, numerical
 radiolytic coupling, and conservative representation changes with focused
 verification. Physical calibration and application resolution qualification
-remain open. Phase 23 proposes native XY/Z, polyhedral, and mixed-region AMR;
-its mesh and solver extensions are not implemented.
+remain open. Phase 23 Stage 1 implements the common hierarchy seam and Cartesian
+adapter with focused verification. Native XY/Z, polyhedral, and mixed-region AMR
+remain proposed in Stages 2–9.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -63,7 +64,7 @@ its mesh and solver extensions are not implemented.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
-| Phase 23, general native AMR | Design proposed; implementation open | XY/Z products, polyhedral refinement, mixed-region closure, distributed migration, and general VoF qualification |
+| Phase 23, general native AMR | Stage 1 implemented and verified; Stages 2–9 proposed | Common hierarchy/Cartesian adapter complete; XY/Z products, polyhedral refinement, mixed-region closure, live distributed migration, and general VoF qualification remain open |
 
 ### Checklist conventions
 
@@ -1858,7 +1859,7 @@ for the implemented API, reproducible checks and qualification limits.
 
 ## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
 
-**Status: design proposed; all implementation stages remain open.** See the
+**Status: Stage 1 implemented and verified; Stages 2–9 remain proposed.** See the
 [general AMR design](docs/architecture/general_amr.md) for the algorithms,
 ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
@@ -1868,20 +1869,25 @@ throughout; they do not qualify the proposed non-Cartesian algorithms.
 
 ### Stage 1 — Common hierarchy contracts and Cartesian adapter
 
-- [ ] Introduce immutable provider-specific ancestry behind an
+- [x] Introduce immutable provider-specific ancestry behind an
       `AdaptiveHierarchy` seam, preserving the `CartesianAMR` API and optimized
       backend. Keep physical region/material identity separate from fragments,
       canonical GIDs, and MPI/local field order.
-- [ ] Track topology, partition, geometry, and accepted-state/control revisions
+- [x] Track topology, partition, geometry, and accepted-state/control revisions
       independently. Pin plans and trials to exact source observations and
       preserve collective preflight, atomic publication, and stale-plan rejection.
-- [ ] Separate canonical inventories/history and immutable trial ledgers from
+- [x] Separate canonical inventories/history and immutable trial ledgers from
       derived fields and mutable workspaces. Require exact collective geometry
       and numerical-operator cache compatibility; schema identity is independent
       of mesh identity, and reinitialization invalidates old trials.
-- [ ] Verify unchanged corrected Cartesian geometry/numerics, native traversal,
+- [x] Verify unchanged corrected Cartesian geometry/numerics, native traversal,
       independent repartition stamps, retained-trial isolation after failure,
       cache refresh/reuse, and rollback without compatibility CSR.
+
+Stage 1 evidence and qualification limits are recorded in
+[general AMR verification](docs/verification/general_amr.md). Native partition
+bindings qualify hierarchy, FVM and solver construction; live accepted-state
+repartition/migration remains Stage 6.
 
 ### Stage 2 — Geometric kernels and ancestry-based overlap
 

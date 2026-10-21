@@ -3,6 +3,7 @@
  */
 #include "solvers/AdaptiveVoFSolver.hh"
 #include "utils/testing_environment.hh"
+#include "parallel/MeshPartitioner.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <gtest/gtest.h>
@@ -15,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <set>
 #include <vector>
 
 namespace
@@ -466,6 +468,82 @@ TEST(AdaptiveVoFSolverTest, UniformVelocityAndPhaseInventoriesCrossCoarseFineAnd
         EXPECT_LT(solver.mesh()->num_owned_cells(), solver.mesh()->owned_cell_map()->getGlobalNumElements());
 }
 
+TEST(AdaptiveVoFSolverTest, BoundNativePartitionTransportsUniformFlowAndConservedInventories)
+{
+    Grid grid;
+    grid.block_cells = {8, 2, 2};
+    grid.extent = {4.0, 1.0, 1.0};
+    grid.periodic = {true, false, false};
+    auto hierarchy = std::make_shared<Hierarchy>(grid);
+    CompositePartitionOptions options;
+    options.policy = CompositePartitionOptions::Policy::TopologyAware;
+    options.target_cells_per_fragment = 8;
+    const auto partition = std::make_shared<const CompositePartition<>>(
+        MeshPartitioner<DefaultTpetraTypes>::partition(
+            CompositeMeshSource(hierarchy->geometry()), options, Tpetra::getDefaultComm()));
+    const auto bound = hierarchy->with_partition(partition);
+    Solver canonical(hierarchy, inviscid(0.0, 10.0)), native(bound, inviscid(0.0, 10.0));
+    std::set<std::uint64_t> canonical_ids, native_ids, planned_ids;
+    for (std::size_t c = 0; c < canonical.mesh()->num_owned_cells(); ++c)
+        canonical_ids.insert(canonical.mesh()->cell_global_id(static_cast<LO>(c)));
+    for (std::size_t c = 0; c < native.mesh()->num_owned_cells(); ++c)
+        native_ids.insert(native.mesh()->cell_global_id(static_cast<LO>(c)));
+    for (const auto gid : partition->plan().owned_cells())
+        planned_ids.insert(gid);
+    EXPECT_EQ(native_ids, planned_ids);
+    const auto comm = Tpetra::getDefaultComm();
+    const auto empty_owners = reduce(native_ids.empty() ? 1.0 : 0.0, Teuchos::REDUCE_SUM);
+    const auto global_cells = hierarchy->geometry()->num_cells();
+    if (static_cast<std::uint64_t>(comm->getSize()) > global_cells)
+        EXPECT_GE(empty_owners, static_cast<double>(comm->getSize() - global_cells));
+    if (comm->getRank() == 0)
+        std::cout << "bound_native_partition_transport,ranks=" << comm->getSize()
+                  << ",global_cells=" << global_cells << ",empty_owners=" << empty_owners << '\n';
+    if (Tpetra::getDefaultComm()->getSize() == 2)
+        EXPECT_GT(reduce(canonical_ids != native_ids ? 1.0 : 0.0, Teuchos::REDUCE_SUM), 0.0);
+
+    for (auto* flow : {&canonical, &native})
+    {
+        const auto fraction = slab(*flow, 1.75, 2.75);
+        flow->initialize(fraction, std::vector<Vector>(fraction.size(), {0.2, 0.0, 0.0}));
+        register_physical_inventories(*flow);
+    }
+    const auto observation = bound->observation();
+    const double initial_volume = gas_volume(native);
+    const auto initial_amounts = inventory_totals(native), norms = inventory_norms(native);
+    const auto initial_momentum = momentum(native);
+    for (int step = 0; step < 2; ++step)
+    {
+        for (auto* flow : {&canonical, &native})
+        {
+            (void) flow->step(0.1);
+            expect_native_publication(*flow);
+            EXPECT_LT(maximum_divergence(*flow), 1e-9);
+            for (const auto& velocity : flow->velocity())
+            {
+                EXPECT_NEAR(velocity[0], 0.2, 2e-9);
+                EXPECT_NEAR(velocity[1], 0.0, 2e-9);
+                EXPECT_NEAR(velocity[2], 0.0, 2e-9);
+            }
+        }
+        EXPECT_EQ(bound->observation(), observation);
+        EXPECT_NEAR(gas_volume(native), initial_volume, 2e-12);
+        EXPECT_NEAR(gas_volume(native), gas_volume(canonical), 2e-12);
+        const auto amounts = inventory_totals(native), reference = inventory_totals(canonical);
+        for (std::size_t q = 0; q < amounts.size(); ++q)
+        {
+            EXPECT_NEAR(amounts[q], initial_amounts[q], 3e-11 * norms[q]);
+            EXPECT_NEAR(amounts[q], reference[q], 3e-11 * norms[q]);
+        }
+        const auto current_momentum = momentum(native), reference_momentum = momentum(canonical);
+        for (std::size_t a = 0; a < 3; ++a)
+        {
+            EXPECT_NEAR(current_momentum[a], initial_momentum[a], 2e-10);
+            EXPECT_NEAR(current_momentum[a], reference_momentum[a], 2e-10);
+        }
+    }
+}
+
 TEST(AdaptiveVoFSolverTest, PassiveTransverseMomentumRemainsBoundedAcrossSplitPhaseTransport)
 {
     // The 4x4x2 case is the reviewed x-first counterexample. The extended
@@ -887,6 +965,34 @@ TEST(AdaptiveVoFSolverTest, PeriodicSymmetricStressMatchesAnIndependentFourierMo
             maximum_error = std::max(maximum_error, std::abs(solver.velocity()[c][a] - decay * initial[c][a]));
     EXPECT_LT(reduce(maximum_error, Teuchos::REDUCE_MAX), 5e-13);
     EXPECT_LT(maximum_divergence(solver), 1e-10);
+}
+
+TEST(AdaptiveVoFSolverTest, RefinementPlansPinAcceptedStateIndependentlyOfMeshObservation)
+{
+    auto hierarchy = std::make_shared<Hierarchy>(transport_grid());
+    Solver solver(hierarchy, inviscid());
+    const std::vector<double> fraction(solver.mesh()->num_owned_cells(), 0.0);
+    solver.initialize(fraction);
+    const auto observation = hierarchy->observation();
+    const auto stale = solver.refinement_plan();
+    const auto revision = solver.state_revision();
+    solver.initialize(fraction);
+    EXPECT_EQ(hierarchy->observation(), observation);
+    EXPECT_GT(solver.state_revision(), revision);
+    const Snapshot accepted(solver);
+    EXPECT_THROW(solver.regrid(stale), std::exception);
+    accepted.expect_equal(solver);
+
+    // Equal mesh and revision values do not make another solver's state interchangeable.
+    Solver other(hierarchy, inviscid());
+    other.initialize(fraction);
+    other.initialize(fraction);
+    EXPECT_EQ(other.state_revision(), solver.state_revision());
+    EXPECT_THROW(solver.regrid(other.refinement_plan()), std::exception);
+    accepted.expect_equal(solver);
+    const auto current = solver.refinement_plan();
+    EXPECT_NO_THROW(solver.regrid(current));
+    EXPECT_EQ(hierarchy->observation(), observation);
 }
 
 TEST(AdaptiveVoFSolverTest, ConservativeRegridPublishesNewMapsAndRejectsProtectedCoarsening)

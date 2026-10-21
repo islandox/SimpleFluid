@@ -4,7 +4,8 @@
  */
 #pragma once
 
-#include "geometry/mesh/MultiRegionMesh.hh"
+#include "geometry/AdaptiveHierarchy.hh"
+#include "parallel/CompositePartition.hh"
 
 #include <array>
 #include <compare>
@@ -25,6 +26,8 @@ struct AMRGrid
     std::array<double, 3> extent{1.0, 1.0, 1.0};
     std::array<bool, 3> periodic{false, false, false};
     unsigned max_level = 2;
+    std::uint64_t region_id = 0; ///< Physical region, independent of block fragments.
+    std::uint64_t material_id = 0; ///< Material membership, independent of ancestry.
 };
 
 /**
@@ -67,7 +70,7 @@ struct AMROverlap
  * Invalid or rank-divergent descriptions reject collectively before publishing
  * a native mesh. The old hierarchy remains valid after successful adaptation.
  */
-class CartesianAMR
+class CartesianAMR : public AdaptiveHierarchy
 {
 public:
     explicit CartesianAMR(AMRGrid config);
@@ -77,6 +80,39 @@ public:
     [[nodiscard]] const SP<const MultiRegionMesh>& geometry() const noexcept;
     [[nodiscard]] std::uint64_t topology_generation() const noexcept;
     [[nodiscard]] std::uint64_t partition_generation() const noexcept;
+    [[nodiscard]] HierarchyObservation observation() const noexcept override;
+    /** Local nonthrowing predicate for collective immutable-geometry preflight. */
+    [[nodiscard]] bool geometry_unchanged() const noexcept;
+    [[nodiscard]] const SP<const MultiRegionMesh>& native_geometry() const noexcept override;
+    [[nodiscard]] AdaptiveCellKey cell_key(std::uint64_t cell) const override;
+    [[nodiscard]] std::uint64_t cell_material(std::uint64_t cell) const override;
+    [[nodiscard]] std::size_t cell_fragment(std::uint64_t cell) const override;
+    [[nodiscard]] const std::shared_ptr<const CompositePartition<>>& native_partition() const noexcept;
+    /** Collectively retain an actual source-matching native ownership layout.
+     * Native geometry/ancestry are unchanged; new ownership advances only the
+     * partition generation. All ranks must agree whether this is a no-op.
+     * observation().native_geometry identifies the resident partition geometry,
+     * while native_geometry() continues to expose the canonical catalog.
+     */
+    [[nodiscard]] std::shared_ptr<const CartesianAMR> with_partition(
+        std::shared_ptr<const CompositePartition<>> partition) const;
+
+    class AdaptationPlan
+    {
+    public:
+        const HierarchyObservation& source_observation() const noexcept { return source_; }
+        const std::shared_ptr<const CartesianAMR>& candidate() const noexcept { return candidate_; }
+    private:
+        friend class CartesianAMR;
+        HierarchyObservation source_;
+        std::shared_ptr<const CartesianAMR> candidate_;
+        std::uint64_t collective_id_ = 0;
+    };
+    /** Collectively build a private native candidate pinned to this exact source. */
+    [[nodiscard]] AdaptationPlan plan_adaptation(const std::vector<std::size_t>& refine,
+        const std::vector<AMRBlock>& coarsen = {}) const;
+    /** Collectively reject foreign, stale, or rank-mixed plans before publication. */
+    [[nodiscard]] std::shared_ptr<const CartesianAMR> apply_adaptation(const AdaptationPlan& plan) const;
 
     [[nodiscard]] AMRBox block_box(std::size_t leaf) const;
     [[nodiscard]] std::array<double, 3> block_spacing(std::size_t leaf) const;
@@ -120,6 +156,13 @@ private:
     SP<const MultiRegionMesh> geometry_;
     std::shared_ptr<const LeafDirectory> leaf_directory_;
     std::uint64_t generation_ = 0;
+    std::uint64_t partition_generation_ = 0;
+    std::uint64_t collective_identity_ = 0;
+    std::uint64_t geometry_epoch_ = 0;
+    std::shared_ptr<const void> identity_ = std::make_shared<const char>(0);
+    std::shared_ptr<const void> topology_identity_ = identity_;
+    std::shared_ptr<const void> partition_identity_ = identity_;
+    std::shared_ptr<const CompositePartition<>> partition_;
 };
 
 } // namespace SimpleFluid::Meshes

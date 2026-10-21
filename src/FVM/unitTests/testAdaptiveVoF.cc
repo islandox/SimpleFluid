@@ -4,6 +4,8 @@
 #include "FVM/AdaptiveVoF.hh"
 #include "FVM/details/VoFReconstructionCoverage.hh"
 #include "utils/testing_environment.hh"
+#include "parallel/MeshPartitioner.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 
 #include <Teuchos_CommHelpers.hpp>
 #include <gtest/gtest.h>
@@ -398,6 +400,68 @@ TEST(AdaptiveVoFTest, SharedGeometryRetainsPrivateFieldResultsAndInvalidatesAfte
     AdaptiveVoF changed(tree->adapt({0}));
     EXPECT_NE(first.mesh().get(), changed.mesh().get());
     EXPECT_EQ(first.hierarchy().get(), tree.get());
+}
+
+TEST(AdaptiveVoFTest, IndependentNativePartitionRebuildsGeometryWithoutChangingCartesianAncestry)
+{
+    auto tree = std::make_shared<Hierarchy>(column(2, 1.0));
+    AdaptiveVoF source(tree);
+    const auto observation = tree->observation();
+    const auto partition = std::make_shared<const CompositePartition<>>(MeshPartitioner<DefaultTpetraTypes>::partition(
+        CompositeMeshSource(tree->geometry()), CompositePartitionOptions{}, Tpetra::getDefaultComm()));
+    const auto repartitioned = tree->with_partition(partition);
+    AdaptiveVoF target(repartitioned), shared(repartitioned);
+    EXPECT_EQ(target.mesh().get(), shared.mesh().get());
+    EXPECT_NE(source.mesh().get(), target.mesh().get());
+    EXPECT_EQ(repartitioned->observation().topology_identity, observation.topology_identity);
+    EXPECT_EQ(repartitioned->topology_generation(), tree->topology_generation());
+    EXPECT_GT(repartitioned->partition_generation(), tree->partition_generation());
+    const auto fraction = slab(source, 0.14, 0.63);
+    const auto remapped = source.remap(target, fraction);
+    EXPECT_NEAR(gas_volume(target, remapped.fraction), gas_volume(source, fraction), 2e-12);
+    const auto expected = slab(target, 0.14, 0.63);
+    ASSERT_EQ(expected.size(), remapped.fraction.size());
+    for (std::size_t c = 0; c < expected.size(); ++c)
+    {
+        EXPECT_NEAR(remapped.fraction[c], expected[c], 2e-12);
+        const auto gid = target.mesh()->cell_global_id(static_cast<LO>(c));
+        EXPECT_EQ(repartitioned->cell_key(gid), tree->cell_key(gid));
+    }
+}
+
+TEST(AdaptiveVoFTest, MovedBoundPartitionRejectsCachedNumericsAndLocalFilmQueries)
+{
+    auto tree = std::make_shared<Hierarchy>(column(2, 1.0));
+    AdaptiveVoF source(tree);
+    const auto source_observation = tree->observation();
+    const auto partition = std::make_shared<const CompositePartition<>>(MeshPartitioner<DefaultTpetraTypes>::partition(
+        CompositeMeshSource(tree->geometry()), CompositePartitionOptions{}, Tpetra::getDefaultComm()));
+    const auto bound = tree->with_partition(partition);
+    AdaptiveVoF geometry(bound);
+    const auto fraction = slab(geometry, 0.14, 0.63);
+    const auto patches = geometry.interface_patches(fraction);
+    const std::vector<double> velocity(geometry.mesh()->num_faces(), 0.0);
+    const auto observation = bound->observation();
+    auto mutable_mesh = std::make_shared<MeshHandle<>>(*partition);
+    PlanarALEMeshMotion<> motion(mutable_mesh);
+    motion.begin_trial(0.75, 0.1);
+    EXPECT_NE(bound->observation(), observation);
+    EXPECT_EQ(tree->observation(), source_observation);
+    EXPECT_THROW((void) geometry.reconstruct(fraction), std::invalid_argument);
+    EXPECT_THROW((void) geometry.curvature(fraction), std::invalid_argument);
+    EXPECT_THROW((void) geometry.advect(fraction, velocity, 0.0), std::invalid_argument);
+    EXPECT_THROW((void) geometry.refinement_plan(fraction, velocity), std::invalid_argument);
+    EXPECT_THROW((void) geometry.exchange_cells(fraction), std::invalid_argument);
+    EXPECT_THROW((void) geometry.exchange_faces(velocity), std::invalid_argument);
+    EXPECT_THROW((void) geometry.sample_patch_values(patches, fraction, InterfaceSide::Gas), std::invalid_argument);
+    EXPECT_THROW((void) source.remap(geometry, slab(source, 0.14, 0.63)), std::invalid_argument);
+    EXPECT_THROW((void) AdaptiveVoF(bound), std::invalid_argument);
+    for (const auto& patch : patches)
+        EXPECT_THROW((void) geometry.film_length(patch, 0.01), std::invalid_argument);
+    motion.rollback_trial();
+    // Rollback publishes another epoch; frozen Cartesian metadata cannot be revived by coordinate equality.
+    EXPECT_THROW((void) geometry.reconstruct(fraction), std::invalid_argument);
+    EXPECT_NO_THROW((void) source.reconstruct(slab(source, 0.14, 0.63)));
 }
 
 TEST(AdaptiveVoFTest, BatchedVectorImportsMatchScalarImportsIncludingEmptyOwners)
