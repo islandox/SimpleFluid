@@ -23,9 +23,9 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 Phase 22 has uniform and distributed Cartesian AMR VoF backends, numerical
 radiolytic coupling, and conservative representation changes with focused
 verification. Physical calibration and application resolution qualification
-remain open. Phase 23 Stage 1 implements the common hierarchy seam and Cartesian
-adapter with focused verification. Native XY/Z, polyhedral, and mixed-region AMR
-remain proposed in Stages 2–9.
+remain open. Phase 23 Stages 1–2 implement the common hierarchy/Cartesian seam, certified
+convex geometry and sparse conservative remap with focused verification. Native
+XY/Z, polyhedral and mixed-region refinement remain proposed in Stages 3–9.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -64,7 +64,7 @@ remain proposed in Stages 2–9.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
-| Phase 23, general native AMR | Stage 1 implemented and verified; Stages 2–9 proposed | Common hierarchy/Cartesian adapter complete; XY/Z products, polyhedral refinement, mixed-region closure, live distributed migration, and general VoF qualification remain open |
+| Phase 23, general native AMR | Stages 1–2 implemented and verified; Stages 3–9 proposed | Common hierarchy, certified convex kernels and sparse remap complete; XY/Z products, polyhedral refinement, mixed-region closure, live distributed migration, and general VoF qualification remain open |
 
 ### Checklist conventions
 
@@ -1859,7 +1859,7 @@ for the implemented API, reproducible checks and qualification limits.
 
 ## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
 
-**Status: Stage 1 implemented and verified; Stages 2–9 remain proposed.** See the
+**Status: Stages 1–2 implemented and verified; Stages 3–9 remain proposed.** See the
 [general AMR design](docs/architecture/general_amr.md) for the algorithms,
 ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
@@ -1891,21 +1891,25 @@ repartition/migration remains Stage 6.
 
 ### Stage 2 — Geometric kernels and ancestry-based overlap
 
-- [ ] Add certified actual-cell halfspace clips, sections, moments, face
+- [x] Add certified actual-cell halfspace clips, sections, moments, face
       apertures, and nested ancestry overlap records. Preserve positive tiny
       pieces; reject invalid/sliver geometry instead of dropping volume.
-- [ ] Factor reusable sparse transfer semantics while retaining physical
+- [x] Factor reusable sparse transfer semantics while retaining physical
       carrier geometry. Use polygon-area times Z-overlap for bulk products and
       actual 3D clipped intersections for tilted PLIC phase volumes.
-- [ ] Verify analytic cube/tetrahedron/prism/skew cuts, tangencies, complements,
+- [x] Verify analytic cube/tetrahedron/prism/skew cuts, tangencies, complements,
       represented coverage under scale/translation, first moments, and signed
       and nonnegative extensive conservation. Use provider-specific arithmetic
       bounds on actual clipped queries; retain real-gap rejection without
       nominal-spacing/origin-scaled tolerances or coverage normalization.
-- [ ] Preserve positive phase remnants hidden by rounded pure fractions,
+- [x] Preserve positive phase remnants hidden by rounded pure fractions,
       moving paired inventories by consistent overlap weights only when that
       retained phase volume lies within its consistency bound; reject material
       carrier mismatches.
+
+Stage 2 evidence and qualification limits are recorded in
+[certified geometry and remap verification](docs/verification/general_amr_stage2.md).
+This utility stage does not enable general-mesh VoF or a new refinement provider.
 
 ### Stage 3 — Whole-product XY/Z refinement
 
@@ -1953,6 +1957,9 @@ repartition/migration remains Stage 6.
       lookup, canonical face/edge decisions, and owner-to-owner geometry/state
       migration. Use the present root assembly only as an explicitly bounded
       bootstrap for preceding stages.
+- [ ] Replace Stage 2's global-maximum-width padded native certificate bootstrap
+      with variable-length sparse owner packets; bound heterogeneous-shell memory
+      by actual local/imported payload and add the global ancestry directory.
 - [ ] Balance measured reconstruction/interface/population work and migration
       cost; retain sparse native fragments and reconstruction halos.
 - [ ] Verify partition-equivalent keys and budgets, split sibling families,

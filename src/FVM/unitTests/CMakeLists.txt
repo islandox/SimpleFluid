@@ -14,7 +14,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   if(TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
-      OR TEST_NAME STREQUAL "testVoFPhysicalSources")
+      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap")
     # Catch dependencies from FVM back into the higher-level solver DSO.
     target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
   else()
@@ -22,7 +22,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
-      OR TEST_NAME STREQUAL "testVoFPhysicalSources")
+      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testGeometricVoF")
@@ -32,6 +32,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME ConservativeAMRRemap_2procs
+    TARGET testConservativeAMRRemap
+    PROCS 2
+    LABELS "vof;amr;geometry;conservation;collective"
+    TIMEOUT 120)
 
 simplefluid_add_mpi_test(
     NAME VoFPhysicalSources_2procs
