@@ -132,6 +132,12 @@ public:
     ID global_faces() const noexcept { return d_global_faces; }
     ID global_nodes() const noexcept { return d_global_nodes; }
     int source_rank() const noexcept { return d_source_rank; }
+    /** Exact source and numeric revision captured when this plan was built. */
+    bool matches_source(const std::shared_ptr<const Meshes::MultiRegionMesh>& mesh) const
+    {
+        return mesh && d_source.lock() == mesh && d_source_epoch == mesh->geometry_epoch();
+    }
+    uint64_t collective_identity() const noexcept { return d_collective_id; }
 private:
     friend class MeshPartitioner<Pack>;
     CompositePartitionPlan() = default;
@@ -161,12 +167,20 @@ class CompositePartition
 public:
     const std::shared_ptr<Meshes::MultiRegionMesh>& geometry() const noexcept { return d_geometry; }
     const CompositePartitionPlan<Pack>& plan() const noexcept { return d_plan; }
+    /** Resident geometry still matches the immutable partition construction. */
+    bool geometry_unchanged() const noexcept
+    {
+        try { return d_geometry && d_geometry->geometry_epoch() == d_geometry_epoch; }
+        catch (...) { return false; }
+    }
 private:
     friend class MeshPartitioner<Pack>;
     CompositePartition(std::shared_ptr<Meshes::MultiRegionMesh> geometry,
                        CompositePartitionPlan<Pack> plan)
-        : d_geometry(std::move(geometry)), d_plan(std::move(plan)) {}
+        : d_geometry(std::move(geometry)), d_plan(std::move(plan)),
+          d_geometry_epoch(d_geometry->geometry_epoch()) {}
     std::shared_ptr<Meshes::MultiRegionMesh> d_geometry;
     CompositePartitionPlan<Pack> d_plan;
+    uint64_t d_geometry_epoch = 0;
 };
 } // namespace SimpleFluid

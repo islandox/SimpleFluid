@@ -1,4 +1,5 @@
 set(SIMPLEFLUID_MESH_SOURCES
+    AdaptiveHierarchy.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     CartesianAMR.cc
@@ -63,6 +64,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/DecomposedOrthogonalTopology.cc
     mesh/DecomposedSemiStructuredTopology.cc
     details/SemiStructuredPartition.cc
+    AdaptiveHierarchy.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     CartesianAMR.cc

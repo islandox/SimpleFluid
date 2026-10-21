@@ -8,6 +8,7 @@
 #include <Tpetra_Core.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <iomanip>
@@ -24,6 +25,29 @@ namespace
 {
 using ID = std::uint64_t;
 using LeafSet = std::set<AMRBlock>;
+
+ID next_identity()
+{
+    static std::atomic<ID> next{0};
+    const auto comm = Tpetra::getDefaultComm();
+    ID value = 0;
+    if (comm->getRank() == 0)
+    {
+        auto previous = next.load();
+        while (previous != std::numeric_limits<ID>::max())
+        {
+            if (next.compare_exchange_weak(previous, previous + 1))
+            {
+                value = previous + 1;
+                break;
+            }
+        }
+    }
+    Teuchos::broadcast(*comm, 0, 1, &value);
+    if (value == 0)
+        throw std::overflow_error("Cartesian AMR collective identity overflow.");
+    return value;
+}
 
 ID product(ID a, ID b)
 {
@@ -128,7 +152,7 @@ std::string description(const AMRGrid& config, const std::vector<AMRBlock>& bloc
     for (std::size_t a = 0; a < 3; ++a)
         out << config.root_blocks[a] << ' ' << config.block_cells[a] << ' ' << config.origin[a] << ' '
             << config.extent[a] << ' ' << config.periodic[a] << ' ';
-    out << blocks.size() << ' ';
+    out << config.region_id << ' ' << config.material_id << ' ' << blocks.size() << ' ';
     for (const auto& block : blocks)
         out << block.level << ' ' << block.index[0] << ' ' << block.index[1] << ' ' << block.index[2] << ' ';
     return out.str();
@@ -245,10 +269,11 @@ CartesianAMR::CartesianAMR(AMRGrid config) : config_(std::move(config))
         });
     same_description(description(config_, blocks_, generation_));
     build_geometry();
+    collective_identity_ = next_identity();
 }
 
 CartesianAMR::CartesianAMR(AMRGrid config, std::vector<AMRBlock> blocks, ID generation)
-    : config_(std::move(config)), blocks_(std::move(blocks)), generation_(generation)
+    : config_(std::move(config)), blocks_(std::move(blocks)), generation_(generation), partition_generation_(generation)
 {
     collective_check(
         [&]
@@ -265,6 +290,7 @@ CartesianAMR::CartesianAMR(AMRGrid config, std::vector<AMRBlock> blocks, ID gene
         });
     same_description(description(config_, blocks_, generation_));
     build_geometry();
+    collective_identity_ = next_identity();
 }
 
 const AMRGrid& CartesianAMR::config() const noexcept
@@ -285,7 +311,92 @@ ID CartesianAMR::topology_generation() const noexcept
 }
 ID CartesianAMR::partition_generation() const noexcept
 {
-    return generation_;
+    return partition_generation_;
+}
+
+const SP<const MultiRegionMesh>& CartesianAMR::native_geometry() const noexcept { return geometry_; }
+
+bool CartesianAMR::geometry_unchanged() const noexcept
+{
+    try
+    {
+        return geometry_->geometry_epoch() == geometry_epoch_ &&
+            (!partition_ || partition_->geometry_unchanged());
+    }
+    catch (...) { return false; }
+}
+
+HierarchyObservation CartesianAMR::observation() const noexcept
+{
+    const auto& native = partition_ ? partition_->geometry() : geometry_;
+    ID epoch = std::numeric_limits<ID>::max();
+    try { epoch = native->geometry_epoch(); }
+    catch (...) { /* Immutable consumers reject through geometry_unchanged(). */ }
+    return {identity_, topology_identity_, partition_identity_, generation_, partition_generation_,
+        epoch, native.get(), Tpetra::getDefaultComm().getRawPtr()};
+}
+
+AdaptiveCellKey CartesianAMR::cell_key(ID cell) const
+{
+    const auto leaf = cell_block(cell);
+    const auto local = cell % per_block(config_);
+    const std::array<ID, 3> index{local % config_.block_cells[0],
+        (local / config_.block_cells[0]) % config_.block_cells[1],
+        local / (config_.block_cells[0] * config_.block_cells[1])};
+    CartesianCellAncestry ancestry{blocks_[leaf].level, {}};
+    for (std::size_t a = 0; a < 3; ++a)
+        ancestry.index[a] = blocks_[leaf].index[a] * config_.block_cells[a] + index[a];
+    return {config_.region_id, ancestry};
+}
+
+ID CartesianAMR::cell_material(ID cell) const { (void)cell_block(cell); return config_.material_id; }
+std::size_t CartesianAMR::cell_fragment(ID cell) const { return cell_block(cell); }
+const std::shared_ptr<const CompositePartition<>>& CartesianAMR::native_partition() const noexcept { return partition_; }
+
+std::shared_ptr<const CartesianAMR> CartesianAMR::with_partition(
+    std::shared_ptr<const CompositePartition<>> partition) const
+{
+    collective_check([&] {
+        const auto comm = Tpetra::getDefaultComm();
+        if (!geometry_unchanged() || !partition || !partition->geometry_unchanged() ||
+            partition->plan().communicator().getRawPtr() != comm.getRawPtr() ||
+            (comm->getRank() == partition->plan().source_rank() && !partition->plan().matches_source(geometry_)) ||
+            partition->plan().global_cells() != geometry_->num_cells())
+            throw std::invalid_argument("Cartesian AMR partition has a foreign source, revision, or communicator.");
+        if (partition_generation_ == std::numeric_limits<ID>::max())
+            throw std::overflow_error("Cartesian AMR partition generation overflow.");
+    });
+    auto result = std::make_shared<CartesianAMR>(*this);
+    same_description(std::to_string(collective_identity_) + " " + std::to_string(partition->plan().collective_identity()));
+    same_description(partition_ == partition ? "unchanged" : "replace");
+    if (partition_ == partition)
+        return result;
+    result->partition_ = std::move(partition);
+    ++result->partition_generation_;
+    result->identity_ = std::make_shared<const char>(0);
+    result->partition_identity_ = result->identity_;
+    result->collective_identity_ = next_identity();
+    return result;
+}
+
+CartesianAMR::AdaptationPlan CartesianAMR::plan_adaptation(
+    const std::vector<std::size_t>& refine, const std::vector<AMRBlock>& coarsen) const
+{
+    AdaptationPlan plan;
+    plan.source_ = observation();
+    plan.candidate_ = adapt(refine, coarsen);
+    plan.collective_id_ = next_identity();
+    return plan;
+}
+
+std::shared_ptr<const CartesianAMR> CartesianAMR::apply_adaptation(const AdaptationPlan& plan) const
+{
+    collective_check([&] {
+        if (!geometry_unchanged() || !(plan.source_ == observation()) || !plan.candidate_)
+            throw std::invalid_argument("Cartesian AMR adaptation plan is stale or belongs to a different source.");
+    });
+    same_description(std::to_string(plan.collective_id_));
+    return plan.candidate_;
 }
 
 double CartesianAMR::coordinate(std::size_t axis, ID finest_cell_index) const
@@ -509,6 +620,8 @@ std::shared_ptr<const CartesianAMR> CartesianAMR::adapt(
     collective_check(
         [&]
         {
+            if (!geometry_unchanged())
+                throw std::invalid_argument("Cartesian AMR requires unchanged immutable geometry.");
             for (const auto leaf : refine)
             {
                 const auto& block = blocks_.at(leaf);
@@ -559,7 +672,13 @@ std::shared_ptr<const CartesianAMR> CartesianAMR::adapt(
             if (generation_ == std::numeric_limits<ID>::max())
                 throw std::overflow_error("Cartesian AMR generation counter overflow.");
         });
-    return std::shared_ptr<const CartesianAMR>(new CartesianAMR(config_, std::move(candidate), generation_ + 1));
+    auto result = std::shared_ptr<CartesianAMR>(new CartesianAMR(config_, std::move(candidate), generation_ + 1));
+    collective_check([&] {
+        if (partition_generation_ == std::numeric_limits<ID>::max())
+            throw std::overflow_error("Cartesian AMR partition generation overflow.");
+    });
+    result->partition_generation_ = partition_generation_ + 1;
+    return result;
 }
 
 void CartesianAMR::build_geometry()
@@ -691,6 +810,7 @@ void CartesianAMR::build_geometry()
         });
     geometry_ = std::make_shared<const MultiRegionMesh>(std::move(regions), std::move(interfaces), InterfaceTolerance{},
         MultiRegionMesh::BoundaryNamePolicy::MergeMatchingNames);
+    geometry_epoch_ = geometry_->geometry_epoch();
 }
 
 } // namespace SimpleFluid::Meshes

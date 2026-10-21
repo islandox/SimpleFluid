@@ -258,6 +258,7 @@ struct AdaptiveVoF::Impl
     struct Geometry
     {
         std::shared_ptr<const Hierarchy> hierarchy;
+        Meshes::HierarchyObservation observation;
         SP<const Handle> mesh;
         std::shared_ptr<const Exchange::Plan> cells, faces, stencil;
         std::vector<Patch> patches;
@@ -266,7 +267,9 @@ struct AdaptiveVoF::Impl
         explicit Geometry(std::shared_ptr<const Hierarchy> h) : hierarchy(std::move(h))
         {
             require_collective(bool(hierarchy), "AdaptiveVoF requires a hierarchy on every rank.");
-            mesh = std::make_shared<Handle>(hierarchy->geometry());
+            observation = hierarchy->observation();
+            mesh = hierarchy->native_partition() ? std::make_shared<Handle>(*hierarchy->native_partition())
+                                                 : std::make_shared<Handle>(hierarchy->geometry());
             cells = std::make_shared<Exchange::Plan>(mesh->owned_cell_map(), mesh->overlap_cell_map());
             faces = std::make_shared<Exchange::Plan>(mesh->owned_face_map(), mesh->overlap_face_map());
             std::set<std::size_t> blocks;
@@ -384,6 +387,8 @@ struct AdaptiveVoF::Impl
     static std::shared_ptr<const Geometry> acquire(std::shared_ptr<const Hierarchy> hierarchy)
     {
         require_collective(bool(hierarchy), "AdaptiveVoF requires a hierarchy on every rank.");
+        require_collective(hierarchy->geometry_unchanged(),
+            "AdaptiveVoF cannot bind a hierarchy whose resident partition geometry has moved.");
         // Hierarchies are immutable, including their communicator ownership layout.
         // A hit must occur on every rank before any rank skips collective construction.
         static std::map<const Hierarchy*, std::weak_ptr<const Geometry>> cache;
@@ -400,7 +405,7 @@ struct AdaptiveVoF::Impl
             if (found != cache.end())
                 cached = found->second.lock();
         }
-        int hit = bool(cached), all_hit = 0;
+        int hit = cached && cached->observation == hierarchy->observation(), all_hit = 0;
         Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MIN, 1, &hit, &all_hit);
         if (all_hit)
             return cached;
@@ -418,6 +423,17 @@ struct AdaptiveVoF::Impl
           cells(std::make_unique<Exchange>(geometry->cells)), faces(std::make_unique<Exchange>(geometry->faces)),
           stencil(std::make_unique<Exchange>(geometry->stencil))
     {
+    }
+
+    bool geometry_unchanged() const noexcept
+    {
+        return hierarchy->geometry_unchanged() && geometry->observation == hierarchy->observation();
+    }
+
+    void validate_geometry() const
+    {
+        require_collective(geometry_unchanged(),
+            "AdaptiveVoF requires its exact frozen hierarchy and resident partition geometry.");
     }
 
     UniformGrid operator_grid(const Patch& patch, std::size_t width) const
@@ -550,12 +566,14 @@ AdaptiveGeometryStorage AdaptiveVoF::geometry_storage() const noexcept
 
 std::vector<double> AdaptiveVoF::exchange_cells(const std::vector<double>& owned) const
 {
+    impl_->validate_geometry();
     require_collective(owned.size() == mesh()->num_owned_cells(), "AdaptiveVoF cell exchange requires owned values.");
     return (*impl_->cells)(owned);
 }
 
 std::vector<Vector> AdaptiveVoF::exchange_cell_vectors(const std::vector<Vector>& owned) const
 {
+    impl_->validate_geometry();
     require_collective(owned.size() == mesh()->num_owned_cells(), "AdaptiveVoF vector exchange requires owned values.");
     std::vector<std::vector<double>> components(3, std::vector<double>(owned.size()));
     for (std::size_t c = 0; c < owned.size(); ++c)
@@ -571,12 +589,14 @@ std::vector<Vector> AdaptiveVoF::exchange_cell_vectors(const std::vector<Vector>
 
 std::vector<double> AdaptiveVoF::exchange_faces(const std::vector<double>& overlap) const
 {
+    impl_->validate_geometry();
     require_collective(overlap.size() == mesh()->num_faces(), "AdaptiveVoF face exchange requires overlap values.");
     return (*impl_->faces)(std::vector<double>(overlap.begin(), overlap.begin() + mesh()->num_owned_faces()));
 }
 
 std::vector<Vector> AdaptiveVoF::exchange_face_vectors(const std::vector<Vector>& overlap) const
 {
+    impl_->validate_geometry();
     require_collective(
         overlap.size() == mesh()->num_faces(), "AdaptiveVoF vector exchange requires overlap face values.");
     std::vector<std::vector<double>> components(3, std::vector<double>(mesh()->num_owned_faces()));
@@ -593,6 +613,7 @@ std::vector<Vector> AdaptiveVoF::exchange_face_vectors(const std::vector<Vector>
 
 std::vector<InterfacePlane> AdaptiveVoF::reconstruct(const std::vector<double>& fraction) const
 {
+    impl_->validate_geometry();
     validate_f(fraction, mesh()->num_owned_cells());
     return impl_->reconstruct(fraction);
 }
@@ -797,6 +818,8 @@ std::vector<double> AdaptiveVoF::phase_face_aperture(const std::vector<double>& 
 
 double AdaptiveVoF::film_length(const InterfacePatch& patch, double delta) const
 {
+    if (!impl_->geometry_unchanged())
+        throw std::invalid_argument("Interface film integration requires frozen source geometry.");
     if (patch.source_hierarchy_.get() != hierarchy().get() || !(patch.area > 0.0) || !std::isfinite(delta) ||
         !(delta > 0.0))
         throw std::invalid_argument(
@@ -849,6 +872,7 @@ double AdaptiveVoF::film_length(const InterfacePatch& patch, double delta) const
 
 void AdaptiveVoF::validate_patches(const std::vector<InterfacePatch>& patches, InterfaceSide side) const
 {
+    impl_->validate_geometry();
     identical(static_cast<double>(side), "Interface side selection differs between ranks.");
     bool valid = side == InterfaceSide::Gas || side == InterfaceSide::Carrier;
     const int rank = mesh()->owned_cell_map()->getComm()->getRank();
@@ -929,6 +953,7 @@ AdaptiveAdvection AdaptiveVoF::advect_with_sources(const std::vector<double>& fr
     const std::vector<double>& face_velocity, double dt, const PhaseVolumeIncrement* source,
     std::size_t first_axis) const
 {
+    impl_->validate_geometry();
     validate_f(fraction, mesh()->num_owned_cells());
     identical(dt, "AdaptiveVoF timestep must be identical and finite on every rank.");
     identical(static_cast<double>(first_axis), "AdaptiveVoF sweep order differs between ranks.");
@@ -1191,6 +1216,8 @@ AdaptiveAdvection AdaptiveVoF::advect_with_sources(const std::vector<double>& fr
 AdaptiveRemapResult AdaptiveVoF::remap(const AdaptiveVoF& target, const std::vector<double>& fraction,
     const std::vector<ConservedQuantity>& inventories, double rl, double rg) const
 {
+    impl_->validate_geometry();
+    target.impl_->validate_geometry();
     validate_f(fraction, mesh()->num_owned_cells());
     identical(rl, "Adaptive remap liquid density must agree on all ranks.");
     identical(rg, "Adaptive remap gas density must agree on all ranks.");
@@ -1347,6 +1374,7 @@ AdaptiveRemapResult AdaptiveVoF::remap(const AdaptiveVoF& target, const std::vec
 RefinementPlan AdaptiveVoF::refinement_plan(const std::vector<double>& fraction,
     const std::vector<double>& face_velocity, RefinementOptions options, RefinementHints hints) const
 {
+    impl_->validate_geometry();
     validate_f(fraction, mesh()->num_owned_cells());
     identical(options.minimum_resolved_diameter, "Refinement diameter differs between ranks.");
     identical(options.cells_per_diameter, "Refinement resolution differs between ranks.");
@@ -1523,6 +1551,7 @@ RefinementPlan AdaptiveVoF::refinement_plan(const std::vector<double>& fraction,
     reduce(phase_max, Teuchos::REDUCE_MAX);
     RefinementPlan plan;
     plan.source_hierarchy = hierarchy();
+    plan.source_observation = hierarchy()->observation();
     std::map<Meshes::AMRBlock, std::vector<std::size_t>> siblings;
     for (std::size_t b = 0; b < blocks.size(); ++b)
     {

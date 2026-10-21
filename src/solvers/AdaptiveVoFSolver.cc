@@ -1088,6 +1088,7 @@ struct AdaptiveVoFSolver::Impl
         std::shared_ptr<Context> context;
         std::shared_ptr<const Published> accepted;
         std::uint64_t nonce = 0;
+        Meshes::HierarchyObservation observation;
         bool representation = false;
         VoF::RepresentationDiagnostics representation_diagnostics;
         State candidate;
@@ -1152,7 +1153,9 @@ struct AdaptiveVoFSolver::Impl
             require_all(valid, "AdaptiveVoFSolver refuses to coarsen an interface, its stencil/motion guard, or a "
                                "nonuniform sibling group.");
         }
-        const auto hierarchy = context->geometry->hierarchy()->adapt(refine, coarsen);
+        const auto& source = context->geometry->hierarchy();
+        const auto adaptation = source->plan_adaptation(refine, coarsen);
+        const auto hierarchy = source->apply_adaptation(adaptation);
         if (hierarchy->topology_generation() == context->geometry->hierarchy()->topology_generation())
             return;
         auto candidate_context = std::make_shared<Context>(hierarchy, context->material, context->options);
@@ -1415,6 +1418,7 @@ AdaptiveVoFSolver::LowMachTrial AdaptiveVoFSolver::preview_representation_change
     candidate->context = impl_->context;
     candidate->accepted = impl_->published;
     candidate->nonce = impl_->low_trial_nonce;
+    candidate->observation = hierarchy()->observation();
     candidate->representation = true;
     candidate->candidate =
         impl_->context->change_representation(impl_->published->state, request, candidate->representation_diagnostics);
@@ -1430,6 +1434,7 @@ AdaptiveVoFSolver::LowMachTrial AdaptiveVoFSolver::preview_low_mach_step(
     candidate->context = impl_->context;
     candidate->accepted = impl_->published;
     candidate->nonce = impl_->low_trial_nonce;
+    candidate->observation = hierarchy()->observation();
     candidate->candidate = impl_->context->advance_low(impl_->published->state, dt, sources, guess);
     return LowMachTrial(std::move(candidate));
 }
@@ -1438,7 +1443,8 @@ void AdaptiveVoFSolver::commit_low_mach_trial(const LowMachTrial& trial)
 {
     const auto data = std::static_pointer_cast<const Impl::LowTrialData>(trial.candidate_);
     require_all(data && data->owner == impl_.get() && data->context == impl_->context &&
-                    data->accepted == impl_->published && data->nonce == impl_->low_trial_nonce,
+                    data->accepted == impl_->published && data->nonce == impl_->low_trial_nonce &&
+                    data->observation == hierarchy()->observation(),
         "AdaptiveVoFSolver low-Mach trial is stale or belongs to another solver.");
     auto candidate = std::make_shared<Impl::Published>(data->candidate, impl_->context->mesh);
     impl_->invalidate_low_trials();
@@ -1452,13 +1458,19 @@ void AdaptiveVoFSolver::regrid(const std::vector<std::size_t>& refine, const std
 }
 void AdaptiveVoFSolver::regrid(const VoF::RefinementPlan& plan)
 {
-    require_all(plan.source_hierarchy && plan.source_hierarchy.get() == hierarchy().get(),
-        "AdaptiveVoFSolver refinement plan belongs to a different or replaced hierarchy.");
+    require_all(plan.source_hierarchy && plan.source_hierarchy.get() == hierarchy().get() &&
+                    plan.source_observation == hierarchy()->observation() &&
+                    (!plan.source_state_revision ||
+                        (*plan.source_state_revision == impl_->low_trial_nonce && plan.source_state == impl_->published)),
+        "AdaptiveVoFSolver refinement plan belongs to a different or replaced hierarchy or accepted state.");
     impl_->regrid(plan.refine, plan.coarsen, {}, {});
 }
 VoF::RefinementPlan AdaptiveVoFSolver::refinement_plan(VoF::RefinementOptions options, VoF::RefinementHints hints) const
 {
-    return impl_->context->geometry->refinement_plan(gas_fraction(), face_velocity(), options, std::move(hints));
+    auto plan = impl_->context->geometry->refinement_plan(gas_fraction(), face_velocity(), options, std::move(hints));
+    plan.source_state = impl_->published;
+    plan.source_state_revision = impl_->low_trial_nonce;
+    return plan;
 }
 
 void AdaptiveVoFSolver::register_inventory(Inventory inventory)

@@ -8,6 +8,7 @@
 #include "geometry/MeshHandle.hh"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -113,6 +114,9 @@ struct RefinementPlan
     RefinementPlan() = default;
     std::shared_ptr<const Meshes::CartesianAMR>
         source_hierarchy; ///< Guards leaf ordinals against topology replacement.
+    Meshes::HierarchyObservation source_observation; ///< Exact topology, partition and geometry observation.
+    std::shared_ptr<const void> source_state; ///< Optional retained solver publication; independent of geometry.
+    std::optional<std::uint64_t> source_state_revision; ///< Solver control revision when state-dependent.
     std::vector<std::size_t> refine;
     std::vector<Meshes::AMRBlock> coarsen;
     bool resolution_limited = false; ///< A protected interface is at max_level above the diameter target.

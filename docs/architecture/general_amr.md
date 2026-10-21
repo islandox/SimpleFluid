@@ -1,8 +1,9 @@
 # AMR for extruded, polyhedral, and mixed-region meshes
 
-**Status: PROPOSED; the extensions below are unimplemented.** This document
-defines an implementation sequence and acceptance contracts. It does not extend
-the supported-mesh claims of the existing solvers or record validation results.
+**Status: Stage 1 is implemented; Stages 2–9 remain proposed.** This document
+defines the implemented common hierarchy/Cartesian boundary and the remaining
+implementation sequence and acceptance contracts. It does not extend the
+supported mesh families of the existing solvers or record dated validation results.
 Geometry adaptation and numerical VoF qualification are separate deliverables.
 
 The existing [VoF transport and state-ownership contract](vof_transport.md) is
@@ -12,6 +13,8 @@ population identity rules are requirements to preserve, not work deferred until
 the new geometry is available. The [durable verification contracts](../verification/vof_solver_contracts.md)
 identify the retained regressions; [review follow-up evidence](../verification/vof_review_followup.md)
 records measured results and qualification limits separately from this design.
+The [Stage 1 verification record](../verification/general_amr.md) covers hierarchy
+observations, native partition bindings, cache isolation and solver transactions.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -22,9 +25,9 @@ selected here; external algorithm references explain proposed approaches only.
 
 ## Existing support and proposed scope
 
-| Mesh or operation | Existing native capability | Proposed adaptive capability and gate |
+| Mesh or operation | Existing native capability | Adaptive capability and gate |
 | --- | --- | --- |
-| Dyadic Cartesian blocks | Immutable balanced `CartesianAMR`, canonical subfaces, adaptive VoF/flow | Preserve behavior through a common hierarchy adapter, stage 1 |
+| Dyadic Cartesian blocks | Immutable balanced `CartesianAMR`, canonical subfaces, adaptive VoF/flow; Stage 1 common hierarchy seam and source-validated native partition bindings | Existing Cartesian behavior retained; general clips/overlaps remain Stage 2 |
 | Direct `SemiStructuredXY_Z` handle | Serial native execution; direct MPI construction rejects | Use the composite route for distributed adaptation, stage 3 |
 | Composite native/independent extrusion | MPI ownership; triangle, quadrilateral, and polygonal prisms | Common-Z whole-column refinement, then local products, stages 3 and 5 |
 | Explicit planar-faced polyhedra | Native incidence, variable face loops, partitioned FVM | Certified convex refinement/coarsening, stage 4 |
@@ -63,13 +66,15 @@ flowchart TD
     R --> D
 ```
 
-`AdaptiveHierarchy` owns immutable region hierarchy providers and interface
-ancestry. A provider supplies persistent keys, admissible split/coarsen
-operations, local closure rules, native geometry, overlap relations, and
-physical resolution metrics. Dispatch occurs once per region, following
+`AdaptiveHierarchy` is the abstract provider seam implemented in Stage 1.
+Its concrete Cartesian implementation owns immutable native geometry and ancestry
+and selects the existing optimized Cartesian numerical backend. Composition of
+multiple region hierarchy providers and interface ancestry remains proposed for
+later mixed-hierarchy stages. Those providers will supply admissible split/coarsen
+operations, local closure rules, overlap relations and physical resolution metrics.
+The proposed region dispatch follows
 [`RegionGeometryView`](../../src/geometry/mesh/MultiRegionMesh.hh), rather than
-erasing every cell query. A `CartesianAMR` compatibility adapter preserves its
-public operations and selects the existing Cartesian numerical backend.
+erasing every cell query.
 
 Stable region identity, material membership, provider-fragment ordinal,
 canonical field GID, and rank-local field order are distinct. Materials and
@@ -79,28 +84,41 @@ fragments and span ranks. Unchanged fragments may share their const providers.
 The current composite prefix ordinals can change when an earlier region grows,
 so they cannot serve as persistent ancestry or physical boundary identity.
 
-Illustrative API seam; these types are proposals, not declarations to compile:
+The implemented Stage 1 interface is declared in
+[`AdaptiveHierarchy.hh`](../../src/geometry/AdaptiveHierarchy.hh):
 
 ```cpp
-struct MeshStamp {
-    HierarchyIdentity identity;
-    uint64_t topology, partition, geometry;
-};
-struct CellKey { RegionKey region; NativeCellAncestry native; };
-struct ProductCellKey { BaseCellKey base; AxialIntervalKey axial; };
-
 class AdaptiveHierarchy {
 public:
-    MeshStamp stamp() const;
-    AdaptationPlan plan(LocalRefinementMarks, ClosureRules) const; // collective
-    GeometryCandidate build(const AdaptationPlan&) const;         // collective
-    // Provider visits expose native views, keys, and resolution metrics.
+    virtual ~AdaptiveHierarchy();
+    virtual HierarchyObservation observation() const noexcept = 0;
+    virtual const SP<const MultiRegionMesh>& native_geometry() const noexcept = 0;
+    virtual AdaptiveCellKey cell_key(uint64_t cell) const = 0;
+    virtual uint64_t cell_material(uint64_t cell) const = 0;
+    virtual size_t cell_fragment(uint64_t cell) const = 0;
 };
-// GeometryCandidate contains an immutable hierarchy, native partition/handle,
-// and sparse old/new overlap relations; it contains no solver or physical state.
-// Solver/controller prepare_regrid additionally pins accepted-state revisions,
-// builds transferred fields and operators, and returns a private RegridTrial.
 ```
+
+`HierarchyObservation` retains exact hierarchy, topology and partition identity
+tokens independently of generation values, effective resident geometry identity
+and epoch, and communicator identity. `AdaptiveCellKey` currently admits only
+`CartesianCellAncestry`; physical region identity, material membership and fragment
+ordinals remain separate. `CartesianAMR::plan_adaptation()` and
+`apply_adaptation()` retain and validate the exact source observation.
+
+`CartesianAMR::with_partition()` binds an actual completed native partition after
+collective source/epoch/communicator validation. Its weak origin observer preserves
+exact source identity without retaining global partition scratch. Bound hierarchy,
+FVM and solver construction use native ownership; this is not live migration of
+an existing solver's accepted state. Live repartition/migration remains Stage 6.
+Both canonical and resident geometry must retain their captured epochs. Supported
+resident ALE motion invalidates a binding; restoring coordinates does not revive
+an earlier observation. The Cartesian numerical backend remains unchanged.
+
+Provider-specific product/polyhedral ancestry, geometric candidates with sparse
+ancestry overlap records, and a general solver `RegridTrial` remain proposed for
+later stages. Their data must contain geometry/partition state separately from
+solver inventories and controller revisions.
 
 Plans pin the exact source identity, communicator, provider observations, and
 topology/partition/geometry stamps. Solver trials additionally pin accepted
@@ -585,7 +603,8 @@ shell without boundary projection or domain renormalization.
 
 ## Implementation stages and focused acceptance
 
-Every stage is proposed and has its own exit gate. Existing tests are starting
+Stage 1 is implemented and verified within its Cartesian boundary; Stages 2–9
+are proposed and each has its own exit gate. Existing tests are starting
 points, not evidence that the extension works. Run focused Debug serial tests,
 then affected MPI cases at 2 and 4 ranks where they establish the intended seam
 and ownership conditions. Choose additional ranks or deliberately sparse

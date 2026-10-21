@@ -30,6 +30,27 @@ not construct a domain-sized grid at the finest level. An immutable block
 directory restricts overlap searches to intersecting dyadic branches. There is
 no large-scale partition/load-balance performance claim.
 
+`CartesianAMR` implements the immutable `AdaptiveHierarchy` seam while retaining
+its Cartesian ancestry and numerical backend. Persistent cell keys carry physical
+region identity and dyadic ancestry; material membership, native fragment ordinal,
+canonical GID and rank-local field order remain separate observations.
+
+`observation()` retains exact hierarchy, topology and partition identities together
+with their generations, the native geometry identity/epoch and communicator.
+`with_partition()` binds a completed, source-matching native `CompositePartition`;
+the completed plan preserves a weak exact origin identity and epoch without
+retaining global planning scratch. `AdaptiveVoF` constructs its handle from that
+partition, and `AdaptiveVoFSolver` construction inherits that native ownership. This changes the ownership
+observation independently of Cartesian topology and ancestry. Constructing a new
+partition does not mutate existing hierarchies, handles or accepted solver state.
+This qualifies hierarchy, native FVM and solver construction bindings; live
+repartition/migration of an existing accepted solver state remains Stage 6.
+Canonical and resident geometry must retain their captured epochs. Resident ALE
+motion rejects subsequent numerical use and new binding, including after rollback
+changes the epoch again; equal restored coordinates do not revive frozen caches.
+`plan_adaptation()` and `apply_adaptation()` pin candidate geometry to the exact
+source observation and reject foreign or stale plans collectively.
+
 ## Interface geometry and transport
 
 `VoF::AdaptiveVoF` reconstructs conservative PLIC planes on local block patches.
@@ -134,8 +155,14 @@ must pass that protection policy too. If an interface remains above its diameter
 target at the configured maximum level, `RefinementPlan::resolution_limited`
 reports that limitation instead of claiming the resolution target was met.
 
-A plan retains its source hierarchy. `regrid(plan)` rejects a plan from a
-replaced topology; regenerate plans after advancing the state. The explicit
+A plan retains its source hierarchy and exact `source_observation`.
+`AdaptiveVoFSolver::refinement_plan()` additionally retains the accepted publication
+and its independent state/control revision. `regrid(plan)` rejects a replaced
+source observation or a solver-issued plan whose accepted state has changed,
+including reinitialization with identical dimensions on the same mesh. Regenerate
+solver plans after an accepted mutation or restore. A manually assembled
+`RefinementPlan` must set both `source_hierarchy` and `source_observation` from its
+actual source; geometry-only plans do not carry a solver-state revision. The explicit
 `regrid(refine, coarsen, protection, hints)` overload can revalidate forecast,
 wake and promotion guards for a manual request. Its default protection checks
 the current interface and stencil neighborhood; it does not remember hints
@@ -159,6 +186,22 @@ reacquired after a successful state change or restore. A separately retained
 mesh shared pointer keeps the old immutable mesh alive; it does not follow the
 replacement mesh.
 
+Accepted-state/control revisions are independent of topology, partition and
+geometry observations. A physical commit can advance the state revision while
+leaving every mesh observation unchanged. Low-Mach trials retain their exact
+source context, accepted publication, state revision and hierarchy observation.
+Their canonical inventories and transport ledgers do not alias mutable solver
+workspaces: a later rejected preview preserves a previously retained valid trial.
+Successful reinitialization invalidates older trials even when geometry is reused.
+
+Immutable reconstruction metadata and communication plans may be shared only
+when the full retained hierarchy observation matches and every rank reports a
+cache hit. Each `AdaptiveVoF` instance keeps private exchange workspaces;
+fraction-dependent reconstruction remains call-local. A native partition binding
+therefore rebuilds geometry/maps while repeated instances on that exact binding
+can share immutable metadata. Existing numerical-operator compatibility and
+physical acceptance checks continue to apply.
+
 One explicit checkpoint can retain the accepted snapshot for replay. Topology
 changes are forbidden until that checkpoint is released. Restoring it restores
 the flow and passive inventories together and permits another trial. Coupled
@@ -176,8 +219,10 @@ and moving mesh/ALE retain their own roadmap gates.
 
 The proposed [general AMR design](../architecture/general_amr.md) extends native
 XY/Z products, polyhedra, and mixed regions through separate geometry, migration,
-and VoF qualification stages. These extensions are unimplemented; native mesh
-support alone does not qualify the Cartesian transport algorithm on those cells.
+and VoF qualification stages. The common hierarchy seam and Cartesian adapter are separate from these future
+mesh extensions; native mesh support alone does not qualify the Cartesian
+transport algorithm on those cells. No additional mesh family gains adaptive VoF
+support through the hierarchy seam.
 [Bidirectional representation trials](bubble_representation.md) have separate
 birth, resolution, component and thermodynamic-history guards.
 Physical gas growth and dissolved transfer use
@@ -194,3 +239,6 @@ The [transport and state-ownership contract](../architecture/vof_transport.md)
 defines compatible implicit momentum transport, canonical inventories and cache
 lifetimes. The verification index lists reproducible assertions; local dated
 measurements are not available as tracked qualification reports.
+
+The [general AMR Stage 1 verification record](../verification/general_amr.md)
+lists the focused observation, partition, cache and transaction gates.
