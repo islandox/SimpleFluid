@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
+#include <string>
+#include <utility>
 namespace
 {
 using namespace SimpleFluid::Meshes;
@@ -30,6 +32,38 @@ std::vector<ExactNodeTrajectory> traces(const ExactPlanarFacePtr& face, Geometry
     for (const auto& p : face->vertex_identities())
         result.push_back(ExactNodeTrajectory::backtrace(p, velocity, dt));
     return result;
+}
+template<class Callable>
+std::string invalid_argument_message(Callable&& callable)
+{
+    try
+    {
+        std::forward<Callable>(callable)();
+    }
+    catch (const std::invalid_argument& error)
+    {
+        return error.what();
+    }
+    catch (const std::exception& error)
+    {
+        ADD_FAILURE() << "Expected std::invalid_argument, got: " << error.what();
+        return error.what();
+    }
+    ADD_FAILURE() << "Expected std::invalid_argument, but the call succeeded.";
+    return {};
+}
+std::size_t support_cache_fallback_count(const std::string& message)
+{
+    const std::string key = " support_cache_fallbacks=";
+    const auto begin = message.find(key);
+    if (begin == std::string::npos)
+    {
+        ADD_FAILURE() << "Missing support-cache fallback diagnostic: " << message;
+        return 0;
+    }
+    const auto digits = begin + key.size();
+    const auto end = message.find(' ', digits);
+    return std::stoull(message.substr(digits, end == std::string::npos ? std::string::npos : end - digits));
 }
 TEST(ExactSweptGeometry, SignedPointProjectionRetainsRationalSupportBehindDisplayAnchor)
 {
@@ -657,6 +691,106 @@ TEST(ExactSweptGeometry, SupportingPlanesPreserveContactsOverlapAndSubnormalDono
         EXPECT_THROW(ExactTransportPartition::certify_donor_cover(donor, column), std::invalid_argument);
     }
 }
+TEST(ExactSweptGeometry, SupportPlaneCacheBoundariesPreserveProofsPairChargesAndScratchAccounting)
+{
+    const auto cell = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    const ExactSweepDonor donor{37, cell};
+    std::vector<ExactTransportAtom> octants;
+    for (unsigned z = 0; z < 2; ++z)
+        for (unsigned y = 0; y < 2; ++y)
+            for (unsigned x = 0; x < 2; ++x)
+            {
+                const auto part =
+                    ConvexCellGeometry::box({.5 * x, .5 * y, .5 * z}, {.5 * (x + 1), .5 * (y + 1), .5 * (z + 1)});
+                octants.push_back({37, octants.size(), ExactConvexFragment::from_geometry(*part)});
+            }
+
+    // The admitted piece array exactly consumes its budget, leaving zero bytes
+    // for either optional cache. The cache-free path must retain every exact
+    // contact proof. A roomy lease selects the cache and must be equivalent.
+    ExactSweepLimits fallback;
+    fallback.byte_budget = octants.size() * sizeof(ExactConvexFragmentPtr);
+    auto cached = fallback;
+    cached.byte_budget = 1 << 20;
+    for (const auto& limits : {fallback, cached})
+    {
+        EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, octants, limits));
+        std::reverse(octants.begin(), octants.end());
+        EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, octants, limits));
+        std::reverse(octants.begin(), octants.end());
+    }
+
+    // The donor-cover entry point conservatively pre-charges every pair and
+    // the partition certificate charges them again. Caching changes neither
+    // call nor order: 8 choose 2 = 28, doubled to 56.
+    auto short_pair_budget = fallback;
+    short_pair_budget.maximum_pair_tests = 55;
+    EXPECT_THROW(ExactTransportPartition::certify_donor_cover(donor, octants, short_pair_budget), std::invalid_argument);
+    auto exact_pair_budget = fallback;
+    exact_pair_budget.maximum_pair_tests = 56;
+    EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, octants, exact_pair_budget));
+
+    const auto left = ExactConvexFragment::from_geometry(*ConvexCellGeometry::box({0, 0, 0}, {.5, 1, 1}));
+    const auto right = ExactConvexFragment::from_geometry(*ConvexCellGeometry::box({.5, 0, 0}, {1, 1, 1}));
+    const std::vector<ExactTransportAtom> contact{{37, 0, left}, {37, 1, right}};
+    const auto middle = ExactConvexFragment::from_geometry(*ConvexCellGeometry::box({.25, 0, 0}, {.75, 1, 1}));
+    EXPECT_EQ((middle->volume() + middle->volume()).compare(ExactGeometryMeasure::volume(*donor.geometry)), 0);
+    const std::vector<ExactTransportAtom> balanced_overlap{{37, 0, middle}, {37, 1, middle}};
+
+    // Sweep from zero optional bytes through a roomy lease. Two-piece shells
+    // reach cache-array and limb-capacity exhaustion without relying on a
+    // private sizeof() boundary. A two-piece contact must remain valid at
+    // every point. The equal-volume/equal-moment duplicate pair must always
+    // reject only in the overlap proof, whether support caching or its typed
+    // fallback is active.
+    const auto admitted_bytes = contact.size() * sizeof(ExactConvexFragmentPtr);
+    std::vector<std::size_t> offsets;
+    for (std::size_t offset = 0; offset <= 65536; offset += 256)
+        offsets.push_back(offset);
+    for (const auto offset : {std::size_t{1} << 17, std::size_t{1} << 18, std::size_t{1} << 19, std::size_t{1} << 20})
+        offsets.push_back(offset);
+    bool observed_partial_limb_fallback = false, observed_nested_clip_fallback = false,
+         observed_fully_cached_pair = false;
+    std::string partial_limb_fallback_evidence, nested_clip_fallback_evidence, fully_cached_pair_evidence;
+    for (const auto offset : offsets)
+    {
+        auto limits = fallback;
+        limits.byte_budget = admitted_bytes + offset;
+        EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, contact, limits));
+        const auto message =
+            invalid_argument_message([&] { ExactTransportPartition::certify_donor_cover(donor, balanced_overlap, limits); });
+        EXPECT_NE(message.find("Exact signed fragment cover overlaps."), std::string::npos) << message;
+        const bool support_cache_active = message.find("support_cache=cached") != std::string::npos;
+        const auto fallbacks = support_cache_fallback_count(message);
+        if (!support_cache_active)
+        {
+            observed_partial_limb_fallback =
+                observed_partial_limb_fallback || message.find("scalar cache exceeds") != std::string::npos;
+            if (partial_limb_fallback_evidence.empty() && message.find("scalar cache exceeds") != std::string::npos)
+                partial_limb_fallback_evidence = message;
+        }
+        else if (fallbacks)
+        {
+            observed_nested_clip_fallback = true;
+            if (nested_clip_fallback_evidence.empty())
+                nested_clip_fallback_evidence = message;
+        }
+        else
+        {
+            observed_fully_cached_pair = true;
+            if (fully_cached_pair_evidence.empty())
+                fully_cached_pair_evidence = message;
+        }
+    }
+    EXPECT_TRUE(observed_partial_limb_fallback)
+        << "The sweep did not charge the support arrays and enter limb-capacity fallback.";
+    EXPECT_TRUE(observed_nested_clip_fallback)
+        << "The sweep never admitted support planes while a nested clipping cache exhausted.";
+    EXPECT_TRUE(observed_fully_cached_pair) << "The sweep never exercised a fully cached overlapping pair.";
+    RecordProperty("partial_limb_fallback_evidence", partial_limb_fallback_evidence);
+    RecordProperty("nested_clip_fallback_evidence", nested_clip_fallback_evidence);
+    RecordProperty("fully_cached_pair_evidence", fully_cached_pair_evidence);
+}
 TEST(ExactSweptGeometry, SupportingPlanesRetainActualCirculationDonorFragmentCover)
 {
     using M = ExactGeometryMeasure;
@@ -768,9 +902,28 @@ TEST(ExactSweptGeometry, SupportingSignsPreserveObliqueRationalContactsAndSubnor
             // the entire cut is subnormal and the overlap volume is much smaller.
             EXPECT_GT((wider->volume() + right->volume() - whole).sign(), 0);
             column = {{37, 0, wider}, {37, 1, right}};
-            EXPECT_THROW(ExactTransportPartition::certify_donor_cover(donor, column), std::invalid_argument);
-            std::reverse(column.begin(), column.end());
-            EXPECT_THROW(ExactTransportPartition::certify_donor_cover(donor, column), std::invalid_argument);
+            ExactSweepLimits fallback;
+            fallback.byte_budget = column.size() * sizeof(ExactConvexFragmentPtr);
+            auto cached = fallback;
+            cached.byte_budget = 1 << 20;
+            const std::array<std::pair<ExactSweepLimits, const char*>, 2> configurations{{
+                {fallback, "support_cache=fallback"},
+                {cached, "support_cache=cached"},
+            }};
+            for (const auto& [limits, expected_path] : configurations)
+                for (const bool reverse : {false, true})
+                {
+                    auto arranged = column;
+                    if (reverse)
+                        std::reverse(arranged.begin(), arranged.end());
+                    const auto message = invalid_argument_message(
+                        [&] { ExactTransportPartition::certify_donor_cover(donor, arranged, limits); });
+                    // The aggregate volume exceeds the donor here, but the
+                    // overlap proof runs first and must remain the causal
+                    // rejection in both cached and fallback configurations.
+                    EXPECT_NE(message.find("Exact signed fragment cover overlaps."), std::string::npos) << message;
+                    EXPECT_NE(message.find(expected_path), std::string::npos) << message;
+                }
         }
 }
 

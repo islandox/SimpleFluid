@@ -404,6 +404,7 @@ bool support_separates(CertifiedPolyRef, CertifiedPolyRef);
 std::optional<CertifiedPoly> certified_clip(CertifiedPolyRef, const Plane&, ClipScratch&);
 std::optional<CertifiedPoly> certified_clip_uncached(CertifiedPolyRef, const Plane&);
 std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef, CertifiedPolyRef, ClipScratch&);
+std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef, std::span<const Plane>, ClipScratch&);
 /** Only immutable fully admitted cells, full raw admission, and the exact
  * halfspace preservation proof below can mint this private certificate. */
 class CertifiedPoly
@@ -422,6 +423,7 @@ private:
     friend std::optional<CertifiedPoly> certified_clip(CertifiedPolyRef, const Plane&, ClipScratch&);
     friend std::optional<CertifiedPoly> certified_clip_uncached(CertifiedPolyRef, const Plane&);
     friend std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef, CertifiedPolyRef, ClipScratch&);
+    friend std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef, std::span<const Plane>, ClipScratch&);
     explicit CertifiedPoly(Poly poly) : poly_(std::move(poly)) {}
     Poly poly_;
 };
@@ -635,6 +637,18 @@ std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef a, Certifie
 {
     std::optional<CertifiedPoly> result{CertifiedPoly(a.get())};
     for (const auto& plane : planes(b.get()))
+    {
+        result = certified_clip(result->ref(), plane, scratch);
+        if (!result)
+            break;
+    }
+    return result;
+}
+std::optional<CertifiedPoly> certified_intersection(
+    CertifiedPolyRef a, std::span<const Plane> clipper_planes, ClipScratch& scratch)
+{
+    std::optional<CertifiedPoly> result{CertifiedPoly(a.get())};
+    for (const auto& plane : clipper_planes)
     {
         result = certified_clip(result->ref(), plane, scratch);
         if (!result)
@@ -4111,6 +4125,85 @@ struct SweepBudget
             add(f.capacity() * sizeof(std::size_t));
     }
 };
+template<class T>
+void reserve_support_planes(std::vector<T>& values, std::size_t count, ClipScratch& scratch, const char* description)
+{
+    if (count > scratch.limit / sizeof(T))
+        throw ClipCacheExhausted(std::string("Optional ") + description + " exceeds its live capacity lease.");
+    scratch.add(count * sizeof(T));
+    values.reserve(count);
+    if (values.capacity() < count)
+        throw std::logic_error("Optional support-plane vector allocated below its requested capacity.");
+    if (values.capacity() > count)
+        scratch.add((values.capacity() - count) * sizeof(T));
+}
+struct SupportPlaneRange
+{
+    std::size_t begin, end;
+};
+P sparse_support_normal(const Poly& poly, const Face& face)
+{
+    const auto& anchor = poly.vertices[face[0]];
+    P normal{};
+    for (std::size_t i = 1; i + 1 < face.size(); ++i)
+    {
+        normal = cross(sub(poly.vertices[face[i]], anchor), sub(poly.vertices[face[i + 1]], anchor));
+        if (!zero(normal))
+            return normal;
+    }
+    throw std::logic_error("Certified convex face lost its supporting plane.");
+}
+/** Certification-local derived planes. The source references remain owned by
+ * immutable admitted pieces; this cache never enters a fragment, identity or
+ * retained-storage certificate. */
+class SupportPlaneCache
+{
+    ClipCacheLease lease_;
+    ClipScratch& scratch_;
+    std::vector<Plane> planes_;
+    std::vector<SupportPlaneRange> ranges_;
+
+public:
+    SupportPlaneCache(std::span<const ExactConvexFragmentPtr> pieces, ClipScratch& scratch)
+        : lease_(scratch), scratch_(scratch)
+    {
+        scratch_.add(sizeof(SupportPlaneCache));
+        const auto plane_capacity = scratch_.limit / sizeof(Plane);
+        std::size_t face_count = 0;
+        for (const auto& piece : pieces)
+        {
+            const auto piece_faces = ExactSweepAccess::poly(*piece).faces.size();
+            if (piece_faces > plane_capacity - face_count)
+                throw ClipCacheExhausted("Optional support-plane face count exceeds its live capacity lease.");
+            face_count += piece_faces;
+        }
+        reserve_support_planes(ranges_, pieces.size(), scratch_, "support-plane ranges");
+        reserve_support_planes(planes_, face_count, scratch_, "support-plane array");
+        for (const auto& piece : pieces)
+        {
+            const auto& poly = ExactSweepAccess::poly(*piece);
+            const auto begin = planes_.size();
+            for (const auto& face : poly.faces)
+            {
+                Plane plane{sparse_support_normal(poly, face), poly.vertices[face[0]]};
+                for (const auto& value : plane.normal)
+                    scratch_.scalar(value);
+                for (const auto& value : plane.anchor)
+                    scratch_.scalar(value);
+                scratch_.scalar(plane.offset);
+                planes_.push_back(std::move(plane));
+            }
+            ranges_.push_back({begin, planes_.size()});
+        }
+    }
+    SupportPlaneCache(const SupportPlaneCache&) = delete;
+    SupportPlaneCache& operator=(const SupportPlaneCache&) = delete;
+    std::span<const Plane> for_piece(std::size_t piece) const
+    {
+        const auto range = ranges_.at(piece);
+        return {planes_.data() + range.begin, range.end - range.begin};
+    }
+};
 std::string cover_scalar(const Q& q, std::size_t maximum_bits = 8192)
 {
     const I numerator = boost::multiprecision::numerator(q), denominator = boost::multiprecision::denominator(q);
@@ -4199,67 +4292,83 @@ bool axis_separates(CertifiedPolyRef first, CertifiedPolyRef second)
 // therefore supplies the same outward supporting halfspace as its full area
 // vector, without summing all polygon cross products. No derived/raw Poly can
 // enter this certificate without the existing private admission bridge.
+bool support_plane_separates(const P& normal, const P& anchor, const Poly& other)
+{
+    // a lies on the nonpositive side. Convexity makes every point of b a
+    // convex combination of its vertices. If all are nonnegative, the
+    // intersection is confined to this exact plane and has zero volume.
+    // Equality retains face/edge/vertex contacts as zero-volume contacts;
+    // even an arbitrarily thin positive overlap prevents this shortcut.
+    std::array<unsigned, 3> active{};
+    unsigned active_count = 0;
+    for (unsigned axis = 0; axis < 3; ++axis)
+        if (normal[axis] != 0)
+            active[active_count++] = axis;
+    bool separated = true;
+    for (const auto& vertex : other.vertices)
+    {
+        bool negative = false;
+        if (active_count == 1)
+        {
+            // Only a sign is needed. The nonzero normal coefficient
+            // cannot change equality, so compare exact coordinates without
+            // constructing any rational difference, product or sum.
+            const auto axis = active[0];
+            negative = normal[axis] > 0 ? vertex[axis] < anchor[axis] : vertex[axis] > anchor[axis];
+        }
+        else
+        {
+            // Zero normal components contribute exactly zero. Avoid the
+            // unrelated coordinate subtractions performed by distance().
+            const auto first = active[0];
+            Q value = normal[first] * (vertex[first] - anchor[first]);
+            for (unsigned term = 1; term < active_count; ++term)
+            {
+                const auto axis = active[term];
+                value += normal[axis] * (vertex[axis] - anchor[axis]);
+            }
+            negative = value < 0;
+        }
+        if (negative)
+        {
+            separated = false;
+            break;
+        }
+    }
+    return separated;
+}
 bool support_separates(CertifiedPolyRef boundary, CertifiedPolyRef other)
 {
     const auto& a = boundary.get();
     const auto& b = other.get();
     for (const auto& face : a.faces)
+        if (support_plane_separates(sparse_support_normal(a, face), a.vertices[face[0]], b))
+            return true;
+    return false;
+}
+bool support_separates(CertifiedPolyRef boundary, CertifiedPolyRef other, std::span<const Plane> support_planes)
+{
+    const auto& a = boundary.get();
+    const auto& b = other.get();
+    if (support_planes.size() != a.faces.size())
+        throw std::logic_error("Certified support-plane cache does not match its immutable shell.");
+    for (const auto& plane : support_planes)
     {
-        const auto& anchor = a.vertices[face[0]];
-        P normal{};
-        for (std::size_t i = 1; i + 1 < face.size(); ++i)
-        {
-            normal = cross(sub(a.vertices[face[i]], anchor), sub(a.vertices[face[i + 1]], anchor));
-            if (!zero(normal))
-                break;
-        }
-        if (zero(normal))
+        if (zero(plane.normal))
             throw std::logic_error("Certified convex face lost its supporting plane.");
-        // a lies on the nonpositive side. Convexity makes every point of b a
-        // convex combination of its vertices. If all are nonnegative, the
-        // intersection is confined to this exact plane and has zero volume.
-        // Equality retains face/edge/vertex contacts as zero-volume contacts;
-        // even an arbitrarily thin positive overlap prevents this shortcut.
-        std::array<unsigned, 3> active{};
-        unsigned active_count = 0;
-        for (unsigned axis = 0; axis < 3; ++axis)
-            if (normal[axis] != 0)
-                active[active_count++] = axis;
-        bool separated = true;
-        for (const auto& vertex : b.vertices)
-        {
-            bool negative = false;
-            if (active_count == 1)
-            {
-                // Only a sign is needed. The nonzero normal coefficient
-                // cannot change equality, so compare exact coordinates without
-                // constructing any rational difference, product or sum.
-                const auto axis = active[0];
-                negative = normal[axis] > 0 ? vertex[axis] < anchor[axis] : vertex[axis] > anchor[axis];
-            }
-            else
-            {
-                // Zero normal components contribute exactly zero. Avoid the
-                // unrelated coordinate subtractions performed by distance().
-                const auto first = active[0];
-                Q value = normal[first] * (vertex[first] - anchor[first]);
-                for (unsigned term = 1; term < active_count; ++term)
-                {
-                    const auto axis = active[term];
-                    value += normal[axis] * (vertex[axis] - anchor[axis]);
-                }
-                negative = value < 0;
-            }
-            if (negative)
-            {
-                separated = false;
-                break;
-            }
-        }
-        if (separated)
+        if (support_plane_separates(plane.normal, plane.anchor, b))
             return true;
     }
     return false;
+}
+bool cached_pair_intersects(CertifiedPolyRef first, std::size_t first_index, CertifiedPolyRef second,
+    std::size_t second_index, const SupportPlaneCache& cache, ClipScratch& scratch)
+{
+    if (axis_separates(first, second) ||
+        support_separates(first, second, cache.for_piece(first_index)) ||
+        support_separates(second, first, cache.for_piece(second_index)))
+        return false;
+    return certified_intersection(first, cache.for_piece(second_index), scratch).has_value();
 }
 
 // Only immutable admitted convex shells can enter this predicate. For each
@@ -4304,6 +4413,27 @@ void certify_sweep_partition(
     ExactMoments sum{};
     if (!certified_cover_contained(pieces, expected_certificate))
         throw std::invalid_argument("Exact signed fragment lies outside its actual donor.");
+    ClipScratch support_scratch{budget.limits.byte_budget - budget.bytes};
+    std::optional<SupportPlaneCache> support_cache;
+    std::string support_cache_failure;
+    if (pieces.size() > 1)
+    {
+        try
+        {
+            support_cache.emplace(pieces, support_scratch);
+        }
+        catch (const ClipCacheExhausted& error)
+        {
+            // The support cache is optional scratch only. Its lease is fully
+            // released by the failed constructor before the unchanged
+            // predicate/intersection path is selected below.
+            if (support_scratch.fallbacks != std::numeric_limits<std::size_t>::max())
+                ++support_scratch.fallbacks;
+            support_cache_failure = error.what();
+            if (support_scratch.used)
+                throw std::logic_error("Exact support-plane cache lease leaked during construction failure.");
+        }
+    }
     for (std::size_t i = 0; i < pieces.size(); ++i)
     {
         const auto part = exact_moments(ExactSweepAccess::poly(*pieces[i]), origin);
@@ -4314,8 +4444,24 @@ void certify_sweep_partition(
             budget.test();
             const auto a = ExactSweepAccess::certified(*pieces[i]);
             const auto b = ExactSweepAccess::certified(*pieces[j]);
-            if (ExactSweepAccess::intersect(a, b, budget))
-                throw std::invalid_argument("Exact signed fragment cover overlaps.");
+            const bool intersects = support_cache ? cached_pair_intersects(a, i, b, j, *support_cache, support_scratch)
+                                                  : ExactSweepAccess::intersect(a, b, budget).has_value();
+            if (intersects)
+            {
+                const bool cache_active = support_cache.has_value();
+                const auto cache_peak = support_scratch.peak;
+                const auto cache_fallbacks = support_scratch.fallbacks;
+                support_cache.reset();
+                if (support_scratch.used)
+                    throw std::logic_error("Exact support-plane cache lease leaked before overlap rejection.");
+                std::ostringstream detail;
+                detail << "Exact signed fragment cover overlaps. support_cache="
+                       << (cache_active ? "cached" : "fallback") << " support_cache_peak=" << cache_peak
+                       << " support_cache_fallbacks=" << cache_fallbacks;
+                if (!support_cache_failure.empty())
+                    detail << " support_cache_failure=\"" << support_cache_failure << '"';
+                throw std::invalid_argument(detail.str());
+            }
         }
     }
     if (sum.volume != whole.volume || sum.first != whole.first)
@@ -4328,6 +4474,10 @@ void certify_sweep_partition(
                << " moment_anchor=" << cover_point(origin) << " pieces=" << pieces.size();
         throw std::invalid_argument(detail.str());
     }
+    support_cache.reset();
+    if (support_scratch.used)
+        throw std::logic_error("Exact support-plane cache lease leaked before certification completed.");
+    budget.cache(support_scratch);
 }
 template<class Geometry> Q sweep_volume(const Geometry& cell)
 {
