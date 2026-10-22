@@ -179,6 +179,44 @@ std::vector<Vector> GeneralVoFFlowWorkspace::gradient(const std::vector<double>&
 {
     const auto halo = cells(owned);
     std::vector<Vector> result(owned.size());
+    // A single extruded layer has no samples in its transverse direction.
+    // Determine absent coordinate directions globally (including empty owners),
+    // using exact equality in the represented centroids. Periodic image
+    // displacements also count as samples even when absolute centroids coincide.
+    std::array<double, 4> low, high, global_low, global_high;
+    std::array<int, 3> sampled{}, global_sampled{};
+    low.fill(std::numeric_limits<double>::infinity());
+    high.fill(-std::numeric_limits<double>::infinity());
+    bool finite = true;
+    {
+        const auto coordinate_lease = mesh_->acquire_execution_view();
+        for (std::size_t c = 0; c < owned.size(); ++c)
+        {
+            const auto x = mesh_->cell_centroid(LO(c));
+            for (auto fid : mesh_->faces(LO(c)))
+                if (!geometry_[fid].boundary)
+                {
+                    const auto r = convert(mesh_->cell_center_vector(fid, LO(c)));
+                    for (unsigned a = 0; a < 3; ++a)
+                        sampled[a] = sampled[a] || r[a] != 0;
+                }
+            const std::array<double, 4> sample{x.x, x.y, x.z, owned[c]};
+            for (double value : sample)
+                finite = finite && std::isfinite(value);
+            for (unsigned a = 0; a < 4; ++a)
+            {
+                low[a] = std::min(low[a], sample[a]);
+                high[a] = std::max(high[a], sample[a]);
+            }
+        }
+    }
+    const auto comm = mesh_->owned_cell_map()->getComm();
+    require(finite, "General VoF gradient samples must be finite.");
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 4, low.data(), global_low.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 4, high.data(), global_high.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, sampled.data(), global_sampled.data());
+    if (global_low[3] == global_high[3] && std::isfinite(global_low[3]))
+        return result;
     bool valid = true;
     {
         const auto lease = mesh_->acquire_execution_view();
@@ -202,6 +240,17 @@ std::vector<Vector> GeneralVoFFlowWorkspace::gradient(const std::vector<double>&
                 }
             }
             double norm = 0;
+            for (unsigned a = 0; a < 3; ++a)
+                if (global_low[a] == global_high[a] && !global_sampled[a])
+                {
+                    // The field is interpreted as constant along an unsampled
+                    // coordinate; retain rank checks in every sampled direction.
+                    for (unsigned b = 0; b < 4; ++b)
+                        m[a][b] = 0;
+                    for (unsigned b = 0; b < 3; ++b)
+                        m[b][a] = 0;
+                    m[a][a] = 1;
+                }
             for (unsigned row = 0; row < 3; ++row)
             {
                 double sum = 0;

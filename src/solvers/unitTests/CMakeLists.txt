@@ -509,6 +509,21 @@ simplefluid_add_mpi_test(
 )
 
 simplefluid_add_mpi_test(
+    NAME GeneralVoFFlowWorkspace_EmptyRank_4procs
+    TARGET testGeneralVoFFlowWorkspace
+    PROCS 4
+    LABELS "mpi;vof;flow;collective;empty_rank"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
+    NAME GeneralVoFSolver_SingleLayer_4procs
+    TARGET testGeneralVoFSolver
+    PROCS 4
+    ARGS "--gtest_filter=GeneralVoFSolverTest.ClosedTwoByTwoSingleLayerConstantCarrierAdvancesAndRejectsAtomically"
+    LABELS "mpi;vof;general_mesh;integration;empty_rank"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
     NAME GeneralVoFSolver_EmptyRank_4procs
     TARGET testGeneralVoFSolver
     PROCS 4

@@ -106,33 +106,50 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     const bool gas = sample.gas_volume <= sample.carrier_volume;
     const auto center = sample.geometry->centroid();
     Point support{};
-    double extremum = gas ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity();
+    Meshes::ExactGeometryMeasure extremum;
+    bool have_support = false;
     for (std::size_t f = 0; f < sample.geometry->num_faces(); ++f)
         for (const auto& id : sample.geometry->face_geometry(f)->vertex_identities())
         {
-            const auto point = Meshes::exact_point_display(id);
-            const auto projection = dot(result.gas.normal, minus(point, center));
-            if ((gas && projection < extremum) || (!gas && projection > extremum))
+            const auto projection = Meshes::exact_point_projection(id, result.gas.normal, center);
+            if (!have_support || (gas ? projection.compare(extremum) < 0 : projection.compare(extremum) > 0))
             {
+                have_support = true;
                 extremum = projection;
-                support = point;
+                support = Meshes::exact_point_display(id);
             }
         }
     // The scalar offset now resolves a minority cut relative to its supporting
     // extremum, rather than adding a microscopic offset to a cell-scale distance.
     result.gas.anchor = support;
-    double lower = std::numeric_limits<double>::infinity(), upper = -lower;
+    Meshes::ExactGeometryMeasure lower, upper;
+    bool have_bounds = false;
     for (std::size_t f = 0; f < sample.geometry->num_faces(); ++f)
         for (const auto& id : sample.geometry->face_geometry(f)->vertex_identities())
         {
-            const auto point = Meshes::exact_point_display(id);
-            const auto projection = dot(result.gas.normal, minus(point, support));
-            lower = std::min(lower, projection);
-            upper = std::max(upper, projection);
+            const auto projection = Meshes::exact_point_projection(id, result.gas.normal, support);
+            if (!have_bounds || projection.compare(lower) < 0)
+                lower = projection;
+            if (!have_bounds || projection.compare(upper) > 0)
+                upper = projection;
+            have_bounds = true;
         }
+    const auto outward = [](const Meshes::ExactGeometryMeasure& value, bool upward)
+    {
+        double rounded = value.certified().as_double();
+        const auto comparison = Meshes::ExactGeometryMeasure::from_value(rounded).compare(value);
+        if (upward ? comparison < 0 : comparison > 0)
+            rounded = std::nextafter(rounded,
+                upward ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity());
+        if (!std::isfinite(rounded))
+            throw std::invalid_argument("PLIC supporting projection is not representable.");
+        return rounded;
+    };
     if (result.pure_gas || result.pure_carrier)
     {
-        result.gas.offset = result.pure_gas ? upper : lower;
+        const auto& bound = result.pure_gas ? upper : lower;
+        // Round outward so a pure phase also contains the exact rational support.
+        result.gas.offset = outward(bound, result.pure_gas);
         return result;
     }
     const double target = gas ? sample.gas_volume : sample.carrier_volume;
@@ -143,9 +160,11 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     auto magnitude = [](const auto& x) { return x.sign() < 0 ? x.scaled(-1) : x; };
     Meshes::ExactGeometryMeasure best;
     bool have_best = false;
-    // Work in positive distance from the relevant supporting extremum.
+    // Work in positive distance from the exact supporting extremum. Its signed
+    // offset relative to the displayed anchor need not be zero (or positive).
     // A power-law seed reaches subnormal axis cuts without 1000 linear halvings.
-    double lo = 0, hi = gas ? upper : -lower;
+    const auto& base = gas ? lower : upper;
+    double lo = 0, hi = outward(upper - lower, true);
     if (!std::isfinite(hi) || !(hi > 0))
         throw std::invalid_argument("PLIC supporting projection is not representable.");
     double distance = std::exp(std::log(hi) + requested.log_ratio(volume) / 3);
@@ -156,7 +175,8 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     for (unsigned iteration = 0; iteration < options.maximum_offset_iterations; ++iteration)
     {
         auto plane = result.gas;
-        plane.offset = gas ? distance : -distance;
+        plane.offset = (base + Meshes::ExactGeometryMeasure::from_value(gas ? distance : -distance))
+                           .certified().as_double();
         if (evaluations++ >= options.maximum_clip_evaluations)
             throw std::invalid_argument("PLIC clip evaluation budget exhausted.");
         const auto measured = phase(*fragment, plane, gas);

@@ -4487,6 +4487,11 @@ ExactGeometryMeasure ExactGeometryMeasure::from_value(double value)
 {
     return ExactSweepAccess::measure(exact(value));
 }
+ExactGeometryMeasure exact_point_projection(
+    std::span<const char> identity, GeometryPoint normal, GeometryPoint anchor)
+{
+    return ExactSweepAccess::measure(dot(point(normal), sub(authority_point(identity), point(anchor))));
+}
 ExactGeometryMeasure ExactGeometryMeasure::volume(const ConvexCellGeometry& cell)
 {
     return ExactSweepAccess::measure(sweep_volume(cell));
