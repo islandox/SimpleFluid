@@ -346,6 +346,14 @@ TEST(GeneralVoF, ActualUnsplitCirculationHasPositiveRoutesIndependentComplements
     auto controls = cycle(state);
     auto trial = state.plan_transport(nodes(state), controls, 1);
     auto moved = state.apply(trial);
+    // A nonidentity transport publication owns new phase arrays while retaining
+    // the same immutable native topology and canonical incidence storage.
+    EXPECT_EQ(&moved->tiles(), &state.tiles());
+    EXPECT_EQ(&moved->nodes(), &state.nodes());
+    EXPECT_EQ(&moved->owned_order(), &state.owned_order());
+    EXPECT_NE(&moved->gas_volumes(), &state.gas_volumes());
+    for (const auto& node : state.nodes())
+        EXPECT_EQ(&moved->node_tiles(node.gid), &state.node_tiles(node.gid));
     double gas = 0, carrier = 0;
     for (std::size_t i = 0; i < moved->owned_order().size(); ++i)
     {

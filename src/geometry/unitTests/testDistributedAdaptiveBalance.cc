@@ -4,11 +4,15 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveBalance.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptivePackets.hh"
+#include "geometry/mesh/AMR/DistributedAncestryDirectory.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
 #include "utils/testing_environment.hh"
+#include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
+#include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
+#include <numeric>
 namespace
 {
 using namespace SimpleFluid;
@@ -149,6 +153,83 @@ TEST(DistributedAdaptiveBalance, SyntheticWeightedProposalImprovesUnevenOwners)
         EXPECT_GT(plan.final.moved_bytes, 0);
         EXPECT_GT(plan.final.moved_cells, 0);
     }
+}
+TEST(DistributedAdaptiveBalance, ActiveRankBudgetsPreserveGreedyAssignmentsAndIdentityValidation)
+{
+    using namespace SimpleFluid::Meshes::AMR;
+    const auto comm = Tpetra::getDefaultComm();
+    for (int pattern = 0; pattern < 3; ++pattern)
+    {
+        std::vector<AdaptiveBalanceCell> cells;
+        const bool populated = pattern == 0 ? comm->getRank() == 0 : (pattern == 1 ? comm->getRank() < 2 : true);
+        const auto count = pattern == 2 ? 17 * (comm->getRank() + 1) : 65 - 16 * comm->getRank();
+        if (populated)
+            for (std::uint64_t i = 0; i < std::uint64_t(count); ++i)
+                cells.push_back({key(1000 * std::uint64_t(comm->getRank()) + i), 0,
+                    {pattern == 2 ? double(i % 7) / 10 : double(i % 7), 0, 0, 64, AdaptiveWorkUnit::Operations}});
+        double local = 0;
+        for (const auto& cell : cells)
+            local += cell.work.total();
+        std::vector<double> loads(comm->getSize()), budgets(comm->getSize());
+        Teuchos::gatherAll(*comm, 1, &local, int(loads.size()), loads.data());
+        const auto mean = std::accumulate(loads.begin(), loads.end(), 0.0) / loads.size();
+        // Independent reference retains the former rank-wide greedy allocation.
+        for (int donor = 0; donor < comm->getSize(); ++donor)
+        {
+            double excess = std::max(0.0, loads[donor] - mean);
+            for (int receiver = 0; receiver < comm->getSize() && excess > 0; ++receiver)
+            {
+                if (receiver == donor)
+                    continue;
+                const auto transfer = std::min(excess, std::max(0.0, mean - loads[receiver]));
+                loads[receiver] += transfer;
+                loads[donor] -= transfer;
+                excess -= transfer;
+                if (donor == comm->getRank())
+                    budgets[receiver] += transfer;
+            }
+        }
+        std::vector<std::size_t> order(cells.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(
+            order.begin(), order.end(), [&](auto a, auto b) { return cells[a].work.total() > cells[b].work.total(); });
+        std::vector<int> expected(cells.size(), comm->getRank());
+        for (const auto index : order)
+        {
+            const auto work = cells[index].work.total();
+            auto target = std::max_element(budgets.begin(), budgets.end());
+            if (*target > 0 && work > 0 && work <= 2 * *target)
+            {
+                expected[index] = int(target - budgets.begin());
+                *target = std::max(0.0, *target - work);
+            }
+        }
+        const auto plan = balance_owned_cells(cells, {}, source(), comm);
+        if (!plan.accepted)
+            std::fill(expected.begin(), expected.end(), comm->getRank());
+        EXPECT_EQ(plan.localdestinations, expected);
+        std::vector<int> identity(cells.size(), comm->getRank());
+        const auto unchanged = balance_owned_cells(cells, {}, source(), comm, {}, std::span<const int>(identity));
+        EXPECT_FALSE(unchanged.accepted);
+        EXPECT_EQ(unchanged.localdestinations, identity);
+        EXPECT_EQ(unchanged.proposed.objective, unchanged.before.objective);
+        EXPECT_EQ(unchanged.proposed.moved_cells, 0);
+        if (!cells.empty())
+            identity[0] = comm->getSize();
+        EXPECT_THROW(
+            balance_owned_cells(cells, {}, source(), comm, {}, std::span<const int>(identity)), std::invalid_argument);
+    }
+}
+TEST(DistributedAdaptiveBalance, EmptyBalancedOwnersNeedNoDestinationBudgetStorage)
+{
+    using namespace SimpleFluid::Meshes::AMR;
+    AdaptiveBalanceOptions options;
+    options.byte_budget = std::max<std::size_t>(192, sizeof(DistributedAncestryDirectory));
+    const auto plan = balance_owned_cells({}, {}, source(), Tpetra::getDefaultComm(), options);
+    EXPECT_FALSE(plan.accepted);
+    EXPECT_TRUE(plan.localdestinations.empty());
+    EXPECT_EQ(plan.before.objective, 0);
+    EXPECT_EQ(plan.proposed.moved_cells, 0);
 }
 TEST(DistributedAdaptiveBalance, SyntheticCommunicationAndMigrationObjectiveOracle)
 {

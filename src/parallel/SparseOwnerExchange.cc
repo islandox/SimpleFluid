@@ -32,19 +32,31 @@ std::size_t times(std::size_t a, std::size_t b)
 template<class F> void collectively(const Teuchos::Comm<int>& comm, F&& f)
 {
     std::exception_ptr error;
+    int failed = 0, any = 0;
     try
     {
         f();
     }
+    catch (const std::length_error&)
+    {
+        error = std::current_exception();
+        failed = 1;
+    }
     catch (...)
     {
         error = std::current_exception();
+        failed = 2;
     }
-    int failed = bool(error), any = 0;
     Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, 1, &failed, &any);
-    if (any)
+    if (any == 1)
     {
         if (error)
+            std::rethrow_exception(error);
+        throw std::length_error("Owner packet validation failed on another rank.");
+    }
+    if (any == 2)
+    {
+        if (failed == 2)
             std::rethrow_exception(error);
         throw std::invalid_argument("Owner packet validation failed on another rank.");
     }

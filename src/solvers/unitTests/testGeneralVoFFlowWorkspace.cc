@@ -6,6 +6,7 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "geometry/unitTests/polyhedral_amr_helpers.hh"
+#include "geometry/unitTests/region_mesh_helpers.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
 #include "utils/testing_environment.hh"
 #include <bit>
@@ -404,5 +405,122 @@ TEST(GeneralVoFFlowWorkspaceTest, ZeroRadiusOrthogonalPressureUsesSameExactRateA
         // native x-centers instead of relying on a particular gauge value.
         EXPECT_NEAR(pressure[c] - pressure[0], mesh->cell_centroid(LO(c)).x - mesh->cell_centroid(0).x, 5e-15);
     }
+}
+} // namespace
+
+namespace
+{
+// Independent uncached least-squares assembly for the fully sampled fixture.
+std::vector<VoF::Vector> uncached_gradient(const MeshHandle<>& mesh, const std::vector<double>& scalar,
+    const std::vector<double>& halo, const std::vector<VoF::Vector>& spans)
+{
+    std::vector<VoF::Vector> result(scalar.size());
+    const auto lease = mesh.acquire_execution_view();
+    for (std::size_t c = 0; c < scalar.size(); ++c)
+    {
+        std::array<std::array<double, 4>, 3> m{};
+        for (const auto fid : mesh.faces(LO(c)))
+        {
+            if (mesh.is_geometry_exterior_face(fid))
+                continue;
+            const auto displacement = mesh.cell_center_vector(fid, LO(c));
+            VoF::Vector r{displacement.x, displacement.y, displacement.z};
+            for (unsigned a = 0; a < 3; ++a)
+                r[a] /= spans[c][a];
+            const double w = 1 / (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            const double delta = halo[mesh.opposite_cell(fid, LO(c))] - scalar[c];
+            for (unsigned a = 0; a < 3; ++a)
+            {
+                m[a][3] += w * r[a] * delta;
+                for (unsigned b = 0; b < 3; ++b)
+                    m[a][b] += w * r[a] * r[b];
+            }
+        }
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            unsigned pivot = a;
+            for (unsigned b = a + 1; b < 3; ++b)
+                if (std::abs(m[b][a]) > std::abs(m[pivot][a]))
+                    pivot = b;
+            std::swap(m[a], m[pivot]);
+            const double d = m[a][a];
+            for (unsigned b = a; b < 4; ++b)
+                m[a][b] /= d;
+            for (unsigned row = 0; row < 3; ++row)
+                if (row != a)
+                {
+                    const double factor = m[row][a];
+                    for (unsigned b = a; b < 4; ++b)
+                        m[row][b] -= factor * m[a][b];
+                }
+        }
+        for (unsigned a = 0; a < 3; ++a)
+            result[c][a] = m[a][3] / spans[c][a];
+    }
+    return result;
+}
+TEST(GeneralVoFFlowWorkspaceTest, PreparedGradientRetainsNonlinearResultsAfterRejectedSamplesAndNewWorkspaces)
+{
+    const auto mesh = skew_native();
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<double> scalar(mesh->num_owned_cells());
+    for (std::size_t c = 0; c < scalar.size(); ++c)
+    {
+        const auto x = mesh->cell_centroid(LO(c));
+        scalar[c] = std::sin(x.x) + x.y * x.z + .25 * x.x * x.x;
+    }
+    const auto first = flow.gradient(scalar);
+    const auto reference = uncached_gradient(*mesh, scalar, flow.cells(scalar), flow.physical_spans());
+    auto rejected = scalar;
+    if (!rejected.empty())
+        rejected.front() = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW((void) flow.gradient(rejected), std::runtime_error);
+    const auto again = flow.gradient(scalar);
+    detail::GeneralVoFFlowWorkspace fresh(mesh);
+    const auto rebuilt = fresh.gradient(scalar);
+    ASSERT_EQ(first.size(), again.size());
+    for (std::size_t c = 0; c < first.size(); ++c)
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(first[c][a]), std::bit_cast<std::uint64_t>(reference[c][a]));
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(first[c][a]), std::bit_cast<std::uint64_t>(again[c][a]));
+            EXPECT_EQ(std::bit_cast<std::uint64_t>(first[c][a]), std::bit_cast<std::uint64_t>(rebuilt[c][a]));
+        }
+}
+} // namespace
+
+namespace
+{
+TEST(GeneralVoFFlowWorkspaceTest, GeometryReplacementRejectsAllRetainedGeometryAndFreshWorkspaceRecovers)
+{
+    using namespace Meshes;
+    auto native = std::make_shared<OrthogonalCartesian3D>(Vec3D<ArrReal>{{{0, 1, 2}, {0, 1, 2}, {0, 1, 2}}});
+    const auto composite =
+        std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("moving", native)},
+            std::vector<MultiRegionMesh::Interface>{});
+    const auto mesh = std::make_shared<MeshHandle<>>(composite);
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<double> scalar(mesh->num_owned_cells(), 3), face(mesh->num_faces());
+    EXPECT_NO_THROW((void) flow.gradient(scalar));
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        *native = OrthogonalCartesian3D(Vec3D<ArrReal>{{{0, 1, 2}, {0, 1, 2}, {0, 2, 4}}});
+    EXPECT_THROW((void) flow.gradient(scalar), std::runtime_error);
+    EXPECT_THROW((void) flow.cells(scalar), std::runtime_error);
+    EXPECT_THROW((void) flow.faces(face), std::runtime_error);
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        EXPECT_THROW((void) flow.physical_spans(), std::runtime_error);
+    else
+        EXPECT_NO_THROW((void) flow.physical_spans());
+    EXPECT_THROW((void) flow.stable_timestep(face, 1, 0, 0, VoFSolverOptions{}), std::runtime_error);
+    if (Tpetra::getDefaultComm()->getRank() != 0)
+        *native = OrthogonalCartesian3D(Vec3D<ArrReal>{{{0, 1, 2}, {0, 1, 2}, {0, 2, 4}}});
+    const auto replacement =
+        std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("replacement", native)},
+            std::vector<MultiRegionMesh::Interface>{});
+    const auto target = std::make_shared<MeshHandle<>>(replacement);
+    detail::GeneralVoFFlowWorkspace rebuilt(target);
+    for (const auto& g : rebuilt.gradient(std::vector<double>(target->num_owned_cells(), 3)))
+        for (double component : g)
+            EXPECT_EQ(component, 0);
 }
 } // namespace

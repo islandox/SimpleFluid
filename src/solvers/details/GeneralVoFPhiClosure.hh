@@ -28,6 +28,7 @@ struct GeneralVoFPhiClosure
 {
     std::vector<Meshes::ExactGeometryMeasure> volume, correction; ///< Input face order.
     std::size_t forest_rounds = 0;
+    bool bounded_resource_fallback = false; ///< Diagnostic only; original gates were rerun unchanged.
 };
 /** Bounded correction is infeasible; metadata/range/resource errors are distinct. */
 class GeneralVoFPhiInfeasible : public std::runtime_error
@@ -64,6 +65,14 @@ struct GeneralVoFProjectionClosureTopology
  */
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>&,
     const std::vector<GeneralVoFPhiCell>&, const std::vector<GeneralVoFPhiFace>&, std::size_t byte_budget);
+/** Propose fixed-precision dyadic rates before forest closure. All discarded
+ * differences consume the ORIGINAL face/cell arithmetic capacities. Exact
+ * nonzero signs are preserved; infeasible proposals or typed proposal/packet resource
+ * failures retry the original closure. Invalid metadata still rejects.
+ * No physical or arithmetic tolerance is changed. */
+[[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFPhiClosure close_general_vof_bounded_rate(
+    const SP<const MeshHandle<>>&, const std::vector<GeneralVoFPhiCell>&,
+    const std::vector<GeneralVoFPhiFace>&, std::size_t byte_budget);
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL std::optional<GeneralVoFPhiClosure> try_close_general_vof_phi(
     const SP<const MeshHandle<>>&, const std::vector<GeneralVoFPhiCell>&, const std::vector<GeneralVoFPhiFace>&,
     std::size_t byte_budget);

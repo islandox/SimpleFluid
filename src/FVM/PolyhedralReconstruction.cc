@@ -95,52 +95,80 @@ Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condit
     }
     return result;
 }
-PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal,
-    PolyhedralReconstructionOptions options, std::size_t& evaluations)
+// Geometry preparation belongs to this reconstruction call, never to phase
+// history. Reuse opaque exact vertices and fragments while angular candidates
+// continue to run every clipping, offset and model-admissibility gate.
+struct ReconstructionGeometry
 {
-    validate_sample(sample, options);
+    Point center{};
+    double volume = 0;
+    Meshes::ExactGeometryMeasure exact_volume;
+    std::vector<std::vector<char>> vertices;
+    std::shared_ptr<const Meshes::ExactConvexFragment> fragment;
+};
+ReconstructionGeometry prepare_geometry(
+    const PolyhedralPhaseSample& sample, bool vertices, bool fragment, bool metric_volume = false)
+{
+    ReconstructionGeometry result;
+    result.center = sample.geometry->centroid();
+    if (metric_volume)
+        result.volume = sample.geometry->moments().volume.as_double();
+    if (vertices && fragment)
+        result.exact_volume = Meshes::ExactGeometryMeasure::volume(*sample.geometry);
+    if (vertices)
+        for (std::size_t f = 0; f < sample.geometry->num_faces(); ++f)
+        {
+            auto points = sample.geometry->face_geometry(f)->vertex_identities();
+            for (auto& point : points)
+                result.vertices.push_back(std::move(point));
+        }
+    if (fragment)
+        result.fragment = Meshes::ExactConvexFragment::from_geometry(*sample.geometry);
+    return result;
+}
+PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal,
+    PolyhedralReconstructionOptions options, std::size_t& evaluations, const ReconstructionGeometry& geometry)
+{
     PolyhedralInterface result;
     result.pure_gas = sample.carrier_volume == 0;
     result.pure_carrier = sample.gas_volume == 0;
     result.gas.normal = unit(normal);
     const bool gas = sample.gas_volume <= sample.carrier_volume;
-    const auto center = sample.geometry->centroid();
+    const auto center = geometry.center;
     Point support{};
     Meshes::ExactGeometryMeasure extremum;
     bool have_support = false;
-    for (std::size_t f = 0; f < sample.geometry->num_faces(); ++f)
-        for (const auto& id : sample.geometry->face_geometry(f)->vertex_identities())
+    for (const auto& id : geometry.vertices)
+    {
+        const auto projection = Meshes::exact_point_projection(id, result.gas.normal, center);
+        if (!have_support || (gas ? projection.compare(extremum) < 0 : projection.compare(extremum) > 0))
         {
-            const auto projection = Meshes::exact_point_projection(id, result.gas.normal, center);
-            if (!have_support || (gas ? projection.compare(extremum) < 0 : projection.compare(extremum) > 0))
-            {
-                have_support = true;
-                extremum = projection;
-                support = Meshes::exact_point_display(id);
-            }
+            have_support = true;
+            extremum = projection;
+            support = Meshes::exact_point_display(id);
         }
+    }
     // The scalar offset now resolves a minority cut relative to its supporting
     // extremum, rather than adding a microscopic offset to a cell-scale distance.
     result.gas.anchor = support;
     Meshes::ExactGeometryMeasure lower, upper;
     bool have_bounds = false;
-    for (std::size_t f = 0; f < sample.geometry->num_faces(); ++f)
-        for (const auto& id : sample.geometry->face_geometry(f)->vertex_identities())
-        {
-            const auto projection = Meshes::exact_point_projection(id, result.gas.normal, support);
-            if (!have_bounds || projection.compare(lower) < 0)
-                lower = projection;
-            if (!have_bounds || projection.compare(upper) > 0)
-                upper = projection;
-            have_bounds = true;
-        }
+    for (const auto& id : geometry.vertices)
+    {
+        const auto projection = Meshes::exact_point_projection(id, result.gas.normal, support);
+        if (!have_bounds || projection.compare(lower) < 0)
+            lower = projection;
+        if (!have_bounds || projection.compare(upper) > 0)
+            upper = projection;
+        have_bounds = true;
+    }
     const auto outward = [](const Meshes::ExactGeometryMeasure& value, bool upward)
     {
         double rounded = value.certified().as_double();
         const auto comparison = Meshes::ExactGeometryMeasure::from_value(rounded).compare(value);
         if (upward ? comparison < 0 : comparison > 0)
-            rounded = std::nextafter(rounded,
-                upward ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity());
+            rounded = std::nextafter(
+                rounded, upward ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity());
         if (!std::isfinite(rounded))
             throw std::invalid_argument("PLIC supporting projection is not representable.");
         return rounded;
@@ -153,8 +181,8 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
         return result;
     }
     const double target = gas ? sample.gas_volume : sample.carrier_volume;
-    const auto volume = Meshes::ExactGeometryMeasure::volume(*sample.geometry);
-    const auto fragment = Meshes::ExactConvexFragment::from_geometry(*sample.geometry);
+    const auto& volume = geometry.exact_volume;
+    const auto& fragment = geometry.fragment;
     const auto requested = Meshes::ExactGeometryMeasure::from_value(target);
     const auto tolerance = requested.scaled(options.volume_tolerance);
     auto magnitude = [](const auto& x) { return x.sign() < 0 ? x.scaled(-1) : x; };
@@ -175,8 +203,8 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     for (unsigned iteration = 0; iteration < options.maximum_offset_iterations; ++iteration)
     {
         auto plane = result.gas;
-        plane.offset = (base + Meshes::ExactGeometryMeasure::from_value(gas ? distance : -distance))
-                           .certified().as_double();
+        plane.offset =
+            (base + Meshes::ExactGeometryMeasure::from_value(gas ? distance : -distance)).certified().as_double();
         if (evaluations++ >= options.maximum_clip_evaluations)
             throw std::invalid_argument("PLIC clip evaluation budget exhausted.");
         const auto measured = phase(*fragment, plane, gas);
@@ -237,7 +265,9 @@ PolyhedralInterface PolyhedralReconstruction::solve_offset(
     const PolyhedralPhaseSample& sample, Point normal, PolyhedralReconstructionOptions options)
 {
     std::size_t evaluations = 0;
-    return offset_fit(sample, normal, options, evaluations);
+    validate_sample(sample, options);
+    const auto geometry = prepare_geometry(sample, true, sample.gas_volume != 0 && sample.carrier_volume != 0);
+    return offset_fit(sample, normal, options, evaluations, geometry);
 }
 PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseSample& target,
     std::span<const PolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions options)
@@ -249,19 +279,24 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
         throw std::invalid_argument("PLIC physical stencil budget exhausted.");
     if (stencil.size() < 4)
         throw std::invalid_argument("PLIC physical stencil is insufficient.");
-    const auto center = target.geometry->centroid();
-    const double volume = target.geometry->moments().volume.as_double();
+    const auto geometry = prepare_geometry(target, true, true, true);
+    const auto center = geometry.center;
+    const double volume = geometry.volume;
+    std::vector<ReconstructionGeometry> stencil_geometry;
+    stencil_geometry.reserve(stencil.size());
     const double alpha = target.gas_volume / volume;
     std::array<Point, 3> matrix{};
     Point rhs{};
     for (const auto& sample : stencil)
     {
         validate_sample(sample, options);
-        const auto d = minus(sample.geometry->centroid(), center);
+        stencil_geometry.push_back(prepare_geometry(sample, false, true, true));
+        const auto& prepared = stencil_geometry.back();
+        const auto d = minus(prepared.center, center);
         const auto d2 = dot(d, d);
         if (d2 == 0)
             throw std::invalid_argument("PLIC stencil repeats the target center.");
-        const double delta = sample.gas_volume / sample.geometry->moments().volume.as_double() - alpha;
+        const double delta = sample.gas_volume / prepared.volume - alpha;
         for (unsigned i = 0; i < 3; ++i)
         {
             rhs[i] -= d[i] * delta / d2;
@@ -281,19 +316,17 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
     const auto evaluate = [&](Point n)
     {
         Evaluation value;
-        value.plane = offset_fit(target, unit(n), options, evaluations);
+        value.plane = offset_fit(target, unit(n), options, evaluations, geometry);
         value.residual.reserve(stencil.size());
-        for (const auto& sample : stencil)
+        for (std::size_t i = 0; i < stencil.size(); ++i)
         {
+            const auto& sample = stencil[i];
+            const auto& prepared = stencil_geometry[i];
             const bool gas = sample.gas_volume <= sample.carrier_volume;
             if (evaluations++ >= options.maximum_clip_evaluations)
                 throw std::invalid_argument("PLIC clip evaluation budget exhausted.");
-            const long double measured =
-                phase(*Meshes::ExactConvexFragment::from_geometry(*sample.geometry), value.plane.gas, gas)
-                    .enclosure()
-                    .value;
-            const double residual = (measured - (gas ? sample.gas_volume : sample.carrier_volume)) /
-                                    sample.geometry->moments().volume.as_double();
+            const long double measured = phase(*prepared.fragment, value.plane.gas, gas).enclosure().value;
+            const double residual = (measured - (gas ? sample.gas_volume : sample.carrier_volume)) / prepared.volume;
             value.residual.push_back(residual);
             value.objective += residual * residual;
         }

@@ -5,6 +5,7 @@
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
 #include <gtest/gtest.h>
+#include <stdexcept>
 namespace
 {
 using namespace SimpleFluid;
@@ -52,7 +53,20 @@ TEST(SparseOwnerExchange, RankLocalBadPeerAndReceiveBudgetRejectCollectively)
     packets.clear();
     if (comm->getRank() == 0)
         packets.push_back({comm->getSize() - 1, std::vector<char>(8192, 'x')});
-    EXPECT_ANY_THROW(exchange_owner_packets(packets, comm, comm->getRank() == comm->getSize() - 1 ? 1 : budget));
+    EXPECT_THROW(exchange_owner_packets(packets, comm, comm->getRank() == comm->getSize() - 1 ? 1 : budget),
+        std::length_error);
+    // Invalid metadata outranks a simultaneous resource failure on another
+    // owner; every rank must make the same reject-versus-fallback decision.
+    if (comm->getSize() > 1)
+    {
+        packets.clear();
+        if (comm->getRank() == 0)
+            packets.push_back({comm->getSize(), {'x'}});
+        else if (comm->getRank() == comm->getSize() - 1)
+            packets.push_back({0, {'x'}});
+        EXPECT_THROW(exchange_owner_packets(packets, comm, comm->getRank() == 0 ? budget : 0),
+            std::invalid_argument);
+    }
     // A failed round does not poison later exchanges, including all-empty ranks.
     EXPECT_TRUE(exchange_owner_packets({}, comm, 0).packets.empty());
 }

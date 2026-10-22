@@ -155,6 +155,9 @@ public:
     [[nodiscard]] std::vector<GeneralVoFReconstructionPatch> reconstruction_patches() const;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveNode>& nodes() const noexcept;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveTile>& tiles() const noexcept;
+    /** Retained tile ordinals incident to a canonical node, in tiles() order.
+     * The immutable incidence storage is shared by accepted transport states. */
+    [[nodiscard]] const std::vector<std::size_t>& node_tiles(std::uint64_t node) const;
     [[nodiscard]] std::vector<Meshes::ConvexGeometryPtr> owned_geometry() const;
     [[nodiscard]] std::vector<std::uint64_t> node_cells(std::uint64_t node) const;
     [[nodiscard]] std::vector<std::uint64_t> cell_support(std::uint64_t owned_cell) const;

@@ -1060,3 +1060,126 @@ TEST(ConservativeVoFTransportTest, LeasedPhysicalNormSeparatesAggregateOperation
         EXPECT_EQ(empty, comm->getSize() - 3);
 }
 } // namespace
+
+namespace
+{
+SP<const MeshHandle<>> preparation_pair_mesh()
+{
+    namespace AMR = Meshes::AMR;
+    AMR::ExtrudedAMRGrid grid;
+    for (unsigned y = 0; y < 2; ++y)
+        for (unsigned x = 0; x < 3; ++x)
+            grid.xy_nodes.push_back({double(x), double(y), 0});
+    grid.base_cells = {{0, 1, 4, 3}, {1, 2, 5, 4}};
+    grid.z_edges = {0, 1};
+    AMR::ExtrudedAMR source(grid);
+    const auto comm = Tpetra::getDefaultComm();
+    std::vector<std::uint64_t> owned;
+    for (std::uint64_t c = 0; c < 2; ++c)
+        if (int(c % std::min(2, comm->getSize())) == comm->getRank())
+            owned.push_back(c);
+    auto boot = source.detach_owned(owned, {'p', 'r', 'e', 'p'});
+    const auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
+        std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
+    return AMR::assemble_adaptive_native(*hierarchy, hierarchy->configuration_descriptor()).mesh;
+}
+TEST(ConservativeVoFTransportTest, ExactPreparationRequiresSharedProvenanceAndRetainsEveryRejectionGate)
+{
+    using M = Meshes::ExactGeometryMeasure;
+    using Transport = detail::ConservativeVoFTransport;
+    const auto mesh = preparation_pair_mesh();
+    const auto n = mesh->num_owned_cells();
+    Transport transport(mesh);
+    std::vector<M> old(n, M::from_value(7)), source(n), capacity(n, M::from_value(1)), outgoing(n);
+    const auto solve = [&](std::size_t budget = 64 * 1024 * 1024)
+    { return transport.solve_exact(old, source, capacity, outgoing, {}, {}, true, 3000, 1e-12, budget); };
+    for (double amount : solve().amount)
+        EXPECT_NEAR(amount, 7, 32 * std::numeric_limits<double>::epsilon() * 7);
+    EXPECT_EQ(transport.preparation_statistics().exact_builds, 1u);
+    EXPECT_EQ(transport.preparation_statistics().exact_hits, 0u);
+    for (auto& value : old)
+        value = M::from_value(14);
+    for (double amount : solve().amount)
+        EXPECT_NEAR(amount, 14, 32 * std::numeric_limits<double>::epsilon() * 14);
+    EXPECT_EQ(transport.preparation_statistics().exact_hits, 1u);
+    EXPECT_THROW((void) solve(1), std::runtime_error);
+    EXPECT_NO_THROW((void) solve());
+    EXPECT_EQ(transport.preparation_statistics().exact_hits, 2u);
+    // A different exact capacity with the same binary64 view must rebuild on
+    // every rank, including ranks with no changed or owned row.
+    const auto tail = M::from_value(std::numeric_limits<double>::denorm_min()).divided_by(M::from_value(3));
+    if (!capacity.empty())
+    {
+        const auto changed = capacity.front() + tail;
+        EXPECT_EQ(double(changed.enclosure().value), double(capacity.front().enclosure().value));
+        capacity.front() = changed;
+    }
+    EXPECT_NO_THROW((void) solve());
+    EXPECT_EQ(transport.preparation_statistics().exact_builds, 2u);
+    // An unauthenticated outgoing amount cannot publish a partial preparation.
+    if (!outgoing.empty())
+        outgoing.front() = M::from_value(1);
+    EXPECT_THROW((void) solve(), std::runtime_error);
+    EXPECT_EQ(transport.preparation_statistics().exact_builds, 2u);
+    for (auto& value : outgoing)
+        value = {};
+    EXPECT_NO_THROW((void) solve());
+    EXPECT_EQ(transport.preparation_statistics().exact_builds, 3u);
+    EXPECT_NO_THROW((void) solve());
+    EXPECT_EQ(transport.preparation_statistics().exact_hits, 3u);
+}
+} // namespace
+
+namespace
+{
+TEST(ConservativeVoFTransportTest, ExactPreparationReusesAuthenticatedNonzeroRoutesAcrossThreeComponents)
+{
+    using M = Meshes::ExactGeometryMeasure;
+    using GO = DefaultTpetraTypes::global_ordinal_type;
+    using Transport = detail::ConservativeVoFTransport;
+    const auto mesh = preparation_pair_mesh();
+    const auto n = mesh->num_owned_cells();
+    GO local[2] = {-1, -1}, ids[2]{};
+    for (std::size_t c = 0; c < n; ++c)
+        local[mesh->cell_centroid(LO(c)).x < 1 ? 0 : 1] = mesh->cell_global_id(LO(c));
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 2, local, ids);
+    std::vector<M> old(n), source(n), capacity(n), outgoing(n);
+    std::vector<Transport::ExactTransfer> incoming;
+    std::vector<Transport::ExactFaceContribution> faces;
+    const auto quarter = M::from_value(.25);
+    for (std::size_t c = 0; c < n; ++c)
+        if (mesh->cell_global_id(LO(c)) == ids[0])
+        {
+            capacity[c] = M::from_value(.75);
+            outgoing[c] = quarter;
+        }
+        else
+        {
+            capacity[c] = M::from_value(1.25);
+            incoming.push_back({ids[0], ids[1], quarter});
+        }
+    for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
+        if (!mesh->is_geometry_exterior_face(LO(f)))
+            faces.push_back({LO(f), ids[0], quarter.scaled(mesh->face_normal(LO(f)).x)});
+    Transport transport(mesh);
+    for (unsigned component = 1; component <= 3; ++component)
+    {
+        for (std::size_t c = 0; c < n; ++c)
+            old[c] = M::from_value(component * (mesh->cell_global_id(LO(c)) == ids[0] ? 2 : 6));
+        const auto result = transport.solve_exact(old, source, capacity, outgoing, incoming, faces, true, 3000);
+        for (std::size_t c = 0; c < n; ++c)
+            EXPECT_NEAR(result.amount[c], component * (mesh->cell_global_id(LO(c)) == ids[0] ? 1.5 : 6.5), 2e-12);
+        EXPECT_EQ(transport.preparation_statistics().exact_builds, 1u);
+        EXPECT_EQ(transport.preparation_statistics().exact_hits, component - 1);
+    }
+    for (std::size_t c = 0; c < n; ++c)
+        old[c] = M::from_value(-1);
+    EXPECT_THROW(
+        (void) transport.solve_exact(old, source, capacity, outgoing, incoming, faces, true, 3000), std::runtime_error);
+    EXPECT_EQ(transport.preparation_statistics().exact_hits, 2u);
+    for (std::size_t c = 0; c < n; ++c)
+        old[c] = M::from_value(mesh->cell_global_id(LO(c)) == ids[0] ? 2 : 6);
+    EXPECT_NO_THROW((void) transport.solve_exact(old, source, capacity, outgoing, incoming, faces, true, 3000));
+    EXPECT_EQ(transport.preparation_statistics().exact_hits, 3u);
+}
+} // namespace

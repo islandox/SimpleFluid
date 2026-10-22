@@ -6,8 +6,11 @@
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "solvers/details/GeneralVoFProjectionArithmetic.hh"
 #include "solvers/details/VoFProjectionWorkspace.hh"
+#include <array>
+#include <cstdint>
 #include <optional>
 #include <span>
+#include <stdexcept>
 
 namespace SimpleFluid::detail
 {
@@ -46,7 +49,14 @@ public:
         const GeneralVoFProjectionClosureTopology* closure_topology = nullptr);
     [[nodiscard]] double stable_timestep(const std::vector<double>& face_velocity, double minimum_density,
         double maximum_viscosity, double surface_tension, const VoFSolverOptions& options) const;
-    [[nodiscard]] const std::vector<Vector>& physical_spans() const noexcept { return spans_; }
+    /** Rank-local cached geometry view; unlike collective numerical operators,
+     * this accessor may be called within a rank-local owned-cell loop. */
+    [[nodiscard]] const std::vector<Vector>& physical_spans() const
+    {
+        if (!current_geometry())
+            throw std::runtime_error("General VoF cached physical spans have stale geometry or partition.");
+        return spans_;
+    }
 
 private:
     using Pack = DefaultTpetraTypes;
@@ -63,6 +73,26 @@ private:
     std::vector<double> volumes_;
     std::vector<Meshes::ExactGeometryMeasure> exact_volumes_;
     std::vector<Vector> spans_;
+    struct GradientSample
+    {
+        LO neighbor = -1;
+        Vector displacement{};
+        double weight = 0;
+    };
+    struct GradientStencil
+    {
+        std::vector<GradientSample> samples;
+        std::array<unsigned, 3> pivot{};
+        Vector divisor{};
+        std::array<Vector, 3> factor{};
+        bool valid = true;
+    };
+    std::vector<GradientStencil> gradient_stencils_;
+    std::array<bool, 3> absent_gradient_axis_{};
+    std::uint64_t geometry_epoch_ = 0;
+    MeshHandle<>::MultiRegionPtr native_owner_;
+    void prepare_gradient_geometry();
+    [[nodiscard]] bool current_geometry() const noexcept;
     Pack::import_type cell_import_, face_import_;
     mutable Pack::vector_type cell_owned_, cell_overlap_, face_owned_, face_overlap_;
     VoFProjectionWorkspace projection_;
