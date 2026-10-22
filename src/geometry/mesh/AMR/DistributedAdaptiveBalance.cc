@@ -128,19 +128,23 @@ AdaptiveBalanceMetrics metrics(double local_compute, std::uint64_t cut, std::uin
 std::vector<int> heuristic(std::span<const AdaptiveBalanceCell> cells, double local_compute,
     Teuchos::RCP<const Teuchos::Comm<int>> comm, const AdaptiveBalanceOptions& options)
 {
-    std::vector<double> loads, budgets;
+    std::vector<double> loads;
+    struct Target
+    {
+        double budget;
+        int rank;
+    };
+    std::vector<Target> targets;
     std::vector<int> result;
     std::vector<std::size_t> order;
     collective(*comm,
         [&]
         {
             Budget allocation{options.byte_budget};
-            allocation.add(std::size_t(comm->getSize()) * 2 * sizeof(double));
-            allocation.add(cells.size() * (sizeof(int) + sizeof(std::size_t)));
+            allocation.add(std::size_t(comm->getSize()) * sizeof(double));
+            allocation.add(cells.size() * sizeof(int));
             loads.resize(comm->getSize());
-            budgets.resize(comm->getSize());
             result.assign(cells.size(), comm->getRank());
-            order.resize(cells.size());
         });
     Teuchos::gatherAll(*comm, 1, &local_compute, int(loads.size()), loads.data());
     collective(*comm,
@@ -148,34 +152,77 @@ std::vector<int> heuristic(std::span<const AdaptiveBalanceCell> cells, double lo
         {
             const double mean = std::accumulate(loads.begin(), loads.end(), 0.0) / loads.size();
             observation(mean);
+            if (std::none_of(loads.begin(), loads.end(), [&](double load) { return load > mean; }))
+                return;
+            Budget allocation{options.byte_budget};
+            allocation.add(loads.size() * (sizeof(double) + sizeof(int) + 4 * sizeof(void*) + sizeof(Target)));
+            allocation.add(cells.size() * sizeof(int));
+            std::set<int> receivers;
+            for (int receiver = 0; receiver < comm->getSize(); ++receiver)
+                if (loads[receiver] < mean)
+                    receivers.insert(receiver);
             // Compact rank-only allocation of excess work. No cell assignments are
             // gathered. Indivisible cells are chosen locally against these budgets.
             for (int donor = 0; donor < comm->getSize(); ++donor)
             {
                 double excess = std::max(0.0, loads[donor] - mean);
-                for (int receiver = 0; receiver < comm->getSize() && excess > 0; ++receiver)
+                for (auto current = receivers.begin(); current != receivers.end() && excess > 0;)
                 {
+                    const int receiver = *current++;
                     if (receiver == donor)
                         continue;
                     double transfer = std::min(excess, std::max(0.0, mean - loads[receiver]));
                     loads[receiver] += transfer;
                     loads[donor] -= transfer;
                     excess -= transfer;
-                    if (donor == comm->getRank())
-                        budgets[receiver] += transfer;
+                    if (loads[receiver] >= mean)
+                        receivers.erase(receiver);
+                    if (donor == comm->getRank() && transfer > 0)
+                    {
+                        if (targets.capacity() == 0)
+                            targets.reserve(loads.size());
+                        targets.push_back({transfer, receiver});
+                    }
                 }
+                // Preserve the original binary64 update order, including a
+                // possible tiny deficit left by donor subtraction roundoff.
+                if (loads[donor] < mean)
+                    receivers.insert(donor);
             }
+            if (targets.empty())
+                return;
+            allocation.add(cells.size() * sizeof(std::size_t));
+            order.resize(cells.size());
+            const auto target_less = [](const Target& a, const Target& b)
+            {
+                return a.budget < b.budget || (a.budget == b.budget && a.rank > b.rank);
+            };
+            std::make_heap(targets.begin(), targets.end(), target_less);
             std::iota(order.begin(), order.end(), 0);
+            // Admission already checked every immutable work observation and
+            // its total. Sorting need not repeat those checks per comparison.
+            const auto work_at = [&](std::size_t index)
+            {
+                const auto& work = cells[index].work;
+                return work.reconstruction + work.interface + work.population;
+            };
             std::sort(order.begin(), order.end(),
-                [&](auto a, auto b) { return cells[a].work.total() > cells[b].work.total(); });
+                [&](auto a, auto b) { return work_at(a) > work_at(b); });
             for (auto index : order)
             {
-                const double work = cells[index].work.total();
-                auto target = std::max_element(budgets.begin(), budgets.end());
-                if (target == budgets.end() || *target <= 0 || work <= 0 || work > 2 * (*target))
+                const double work = work_at(index);
+                if (targets.empty())
+                    break;
+                if (work <= 0 || work > 2 * targets.front().budget)
                     continue;
-                result[index] = int(target - budgets.begin());
-                *target = std::max(0.0, *target - work);
+                std::pop_heap(targets.begin(), targets.end(), target_less);
+                auto& target = targets.back();
+                result[index] = target.rank;
+                target.budget = std::max(0.0, target.budget - work);
+                if (target.budget > 0)
+                    std::push_heap(targets.begin(), targets.end(), target_less);
+                else
+                    targets.pop_back();
             }
         });
     return result;
@@ -277,6 +324,29 @@ AdaptiveBalancePlan balance_owned_cells(std::span<const AdaptiveBalanceCell> cel
     }
     else
         proposal = heuristic(cells, local_compute, comm, options);
+    int local_migration = 0, any_migration = 0;
+    collective(*comm,
+        [&]
+        {
+            for (const auto destination : proposal)
+            {
+                if (destination < 0 || destination >= comm->getSize())
+                    throw std::invalid_argument("Invalid proposed owner.");
+                local_migration |= destination != comm->getRank();
+            }
+        });
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_migration, &any_migration);
+    if (!any_migration)
+    {
+        // Input keys, canonical edges and current neighbor owners have already
+        // been authenticated above. An identity proposal cannot improve the
+        // objective and needs no assignment directory or load exchange.
+        plan.proposed = plan.before;
+        plan.proposed.wire_bytes_exact = false;
+        plan.final = plan.before;
+        plan.localdestinations = std::move(proposal);
+        return plan;
+    }
     std::vector<AdaptiveOwner> assignments;
     std::vector<OwnerPacket> load_packets;
     std::uint64_t moved = 0, moved_cells = 0;

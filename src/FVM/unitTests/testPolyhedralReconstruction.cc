@@ -4,7 +4,9 @@
 #include "FVM/GeometricVoF.hh"
 #include "FVM/PolyhedralReconstruction.hh"
 #include "geometry/ExactSweptGeometry.hh"
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <limits>
 namespace
@@ -53,6 +55,43 @@ TEST(PolyhedralReconstruction, InfersObliquePlanarNormalFromIndependentSkewNonun
     EXPECT_LT(result.stencil_volume_residual, 2e-9);
     EXPECT_NEAR(target.geometry->clip(result.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
 }
+TEST(PolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedReconstruction)
+{
+    const std::array<double, 4> edges{-1, -.25, .5, 1.5};
+    const GeometryPoint reference_normal{.75, -.5, .625};
+    const double offset = .125;
+    const auto sample = [&](int i, int j, int k)
+    {
+        GeometryPoint lower{edges[i], edges[j], edges[k]}, upper{edges[i + 1], edges[j + 1], edges[k + 1]};
+        // Analytic box inclusion/exclusion in reference coordinates, independent
+        // of the actual skew-polyhedron clipping and nonlinear fit under test.
+        const auto gas = GeometricVoF::box_plane_volume(lower, upper, reference_normal, offset);
+        const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
+        return PolyhedralPhaseSample{skew_cell(lower, upper), gas, volume - gas};
+    };
+    auto target = sample(1, 1, 1);
+    std::vector<PolyhedralPhaseSample> stencil;
+    for (auto ijk : std::vector<std::array<int, 3>>{{0, 1, 1}, {2, 1, 1}, {1, 0, 1}, {1, 2, 1}, {1, 1, 0}, {1, 1, 2},
+             {0, 0, 0}, {2, 2, 2}, {0, 2, 2}, {2, 0, 0}})
+        stencil.push_back(sample(ijk[0], ijk[1], ijk[2]));
+    auto result = PolyhedralReconstruction::reconstruct(target, stencil);
+    GeometryPoint expected{.75, -.5 - .25 * .75, .625 - .125 * .75 - .25 * (-.5 - .25 * .75)};
+    const double norm = std::hypot(expected[0], expected[1], expected[2]);
+    for (unsigned a = 0; a < 3; ++a)
+        EXPECT_NEAR(result.gas.normal[a], expected[a] / norm, 2e-7);
+    EXPECT_LT(result.stencil_volume_residual, 2e-9);
+    EXPECT_NEAR(target.geometry->clip(result.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
+
+    auto rejected = target;
+    rejected.gas_volume = -1;
+    EXPECT_THROW((void) PolyhedralReconstruction::reconstruct(rejected, stencil), std::invalid_argument);
+    const auto repeated = PolyhedralReconstruction::reconstruct(target, stencil);
+    for (unsigned a = 0; a < 3; ++a)
+        EXPECT_EQ(
+            std::bit_cast<std::uint64_t>(result.gas.normal[a]), std::bit_cast<std::uint64_t>(repeated.gas.normal[a]));
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(result.gas.offset), std::bit_cast<std::uint64_t>(repeated.gas.offset));
+}
+
 TEST(PolyhedralReconstruction, IndependentMicroscopicPhasesAreNeverNormalizedOrDiscarded)
 {
     for (const double trace : {1e-24, 1e-310})

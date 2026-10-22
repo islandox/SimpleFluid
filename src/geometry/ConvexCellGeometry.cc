@@ -117,7 +117,16 @@ bool zero(const P& p)
 }
 Q distance(const Plane& plane, const P& p)
 {
-    return dot(plane.normal, sub(p, plane.anchor)) - plane.offset;
+    // An absent coordinate contributes exactly zero, even when its represented
+    // rational displacement is expensive to construct. Retain the same signed
+    // distance (not a rescaled predicate) for edge intersection parameters.
+    Q result = 0;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        if (plane.normal[axis] != 0)
+            result += plane.normal[axis] * (p[axis] - plane.anchor[axis]);
+    if (plane.offset != 0)
+        result -= plane.offset;
+    return result;
 }
 
 template<class Storage = long double>
@@ -187,11 +196,38 @@ ExactMoments exact_moments(const Poly& poly, const P& origin)
     for (const auto& face : poly.faces)
         for (std::size_t i = 1; i + 1 < face.size(); ++i)
         {
+            // A triangle incident on the moment origin has zero determinant
+            // and zero first moment. Equality is exact; collinear triangles
+            // not incident on that origin are handled by the determinant below.
+            if (poly.vertices[face[0]] == origin || poly.vertices[face[i]] == origin ||
+                poly.vertices[face[i + 1]] == origin)
+                continue;
             const P a = sub(poly.vertices[face[0]], origin), b = sub(poly.vertices[face[i]], origin),
                     c = sub(poly.vertices[face[i + 1]], origin);
             const Q volume = dot(a, cross(b, c)) / 6;
+            if (volume == 0)
+                continue;
             result.volume += volume;
             result.first = add(result.first, mul(add(add(a, b), c), Q(volume / 4)));
+        }
+    return result;
+}
+
+Q exact_volume(const Poly& poly, const P& origin)
+{
+    // Volume-only consumers use the identical oriented fan determinants and
+    // exact accumulation. Full moment admission and cover proofs still call
+    // exact_moments, including their independent first-moment certificates.
+    Q result = 0;
+    for (const auto& face : poly.faces)
+        for (std::size_t i = 1; i + 1 < face.size(); ++i)
+        {
+            if (poly.vertices[face[0]] == origin || poly.vertices[face[i]] == origin ||
+                poly.vertices[face[i + 1]] == origin)
+                continue;
+            const P a = sub(poly.vertices[face[0]], origin), b = sub(poly.vertices[face[i]], origin),
+                    c = sub(poly.vertices[face[i + 1]], origin);
+            result += dot(a, cross(b, c)) / 6;
         }
     return result;
 }
@@ -1192,7 +1228,7 @@ bool ConvexCellGeometry::quality_above(double minimum_scaled_volume) const
     Q largest = 0;
     for (std::size_t a = 0; a < 3; ++a)
         largest = std::max(largest, Q(upper[a] - lower[a]));
-    const auto volume = exact_moments(impl_->poly, point(impl_->origin)).volume;
+    const auto volume = exact_volume(impl_->poly, point(impl_->origin));
     return volume > exact(minimum_scaled_volume) * largest * largest * largest;
 }
 std::array<CertifiedGeometryValue, 3> ConvexCellGeometry::axis_spans() const
@@ -4184,29 +4220,92 @@ bool support_separates(CertifiedPolyRef boundary, CertifiedPolyRef other)
         // intersection is confined to this exact plane and has zero volume.
         // Equality retains face/edge/vertex contacts as zero-volume contacts;
         // even an arbitrarily thin positive overlap prevents this shortcut.
-        const Plane plane{std::move(normal), anchor};
+        std::array<unsigned, 3> active{};
+        unsigned active_count = 0;
+        for (unsigned axis = 0; axis < 3; ++axis)
+            if (normal[axis] != 0)
+                active[active_count++] = axis;
         bool separated = true;
         for (const auto& vertex : b.vertices)
-            if (distance(plane, vertex) < 0)
+        {
+            bool negative = false;
+            if (active_count == 1)
+            {
+                // Only a sign is needed. The nonzero normal coefficient
+                // cannot change equality, so compare exact coordinates without
+                // constructing any rational difference, product or sum.
+                const auto axis = active[0];
+                negative = normal[axis] > 0 ? vertex[axis] < anchor[axis] : vertex[axis] > anchor[axis];
+            }
+            else
+            {
+                // Zero normal components contribute exactly zero. Avoid the
+                // unrelated coordinate subtractions performed by distance().
+                const auto first = active[0];
+                Q value = normal[first] * (vertex[first] - anchor[first]);
+                for (unsigned term = 1; term < active_count; ++term)
+                {
+                    const auto axis = active[term];
+                    value += normal[axis] * (vertex[axis] - anchor[axis]);
+                }
+                negative = value < 0;
+            }
+            if (negative)
             {
                 separated = false;
                 break;
             }
+        }
         if (separated)
             return true;
     }
     return false;
 }
 
-void certify_sweep_partition(const Poly& expected, std::span<const ExactConvexFragmentPtr> pieces, SweepBudget& budget)
+// Only immutable admitted convex shells can enter this predicate. For each
+// outward convex planar face, its first nonzero fan triangle is a positive
+// multiple of the full area normal. It therefore defines exactly the same
+// closed halfspace, including equality and arbitrarily thin outside slivers.
+// Construct one supporting normal per face, then test every piece vertex;
+// avoid rebuilding and summing the donor's polygon normals for each piece.
+bool certified_cover_contained(std::span<const ExactConvexFragmentPtr> pieces, CertifiedPolyRef outer)
 {
+    const auto& b = outer.get();
+    for (const auto& piece : pieces)
+        if (!piece)
+            return false;
+    for (const auto& face : b.faces)
+    {
+        const auto& anchor = b.vertices[face[0]];
+        P normal{};
+        for (std::size_t i = 1; i + 1 < face.size(); ++i)
+        {
+            normal = cross(sub(b.vertices[face[i]], anchor), sub(b.vertices[face[i + 1]], anchor));
+            if (!zero(normal))
+                break;
+        }
+        if (zero(normal))
+            throw std::logic_error("Certified convex face lost its containment plane.");
+        const Plane plane{std::move(normal), anchor};
+        for (const auto& piece : pieces)
+            for (const auto& vertex : ExactSweepAccess::certified(*piece).get().vertices)
+                if (distance(plane, vertex) > 0)
+                    return false;
+    }
+    return true;
+}
+
+void certify_sweep_partition(
+    CertifiedPolyRef expected_certificate, std::span<const ExactConvexFragmentPtr> pieces, SweepBudget& budget)
+{
+    const auto& expected = expected_certificate.get();
     const auto origin = expected.vertices[0];
     const auto whole = exact_moments(expected, origin);
     ExactMoments sum{};
+    if (!certified_cover_contained(pieces, expected_certificate))
+        throw std::invalid_argument("Exact signed fragment lies outside its actual donor.");
     for (std::size_t i = 0; i < pieces.size(); ++i)
     {
-        if (!pieces[i] || !contained(ExactSweepAccess::poly(*pieces[i]), expected))
-            throw std::invalid_argument("Exact signed fragment lies outside its actual donor.");
         const auto part = exact_moments(ExactSweepAccess::poly(*pieces[i]), origin);
         sum.volume += part.volume;
         sum.first = add(sum.first, part.first);
@@ -4233,7 +4332,7 @@ void certify_sweep_partition(const Poly& expected, std::span<const ExactConvexFr
 template<class Geometry> Q sweep_volume(const Geometry& cell)
 {
     const auto& p = ExactSweepAccess::poly(cell);
-    return exact_moments(p, p.vertices[0]).volume;
+    return exact_volume(p, p.vertices[0]);
 }
 std::optional<SignedSweepSimplex> swept_tetra(const P& origin, const P& a, const P& b, const P& c)
 {
@@ -4372,10 +4471,10 @@ ExactPhaseMeasures sweep_phases(std::span<const ExactConvexFragmentPtr> atoms, c
         result.bulk = result.bulk + atom->volume();
         if (auto cut = certified_clip_uncached(ExactSweepAccess::certified(*atom), plane))
             result.gas =
-                result.gas + ExactSweepAccess::measure(exact_moments(cut->get(), cut->get().vertices[0]).volume);
+                result.gas + ExactSweepAccess::measure(exact_volume(cut->get(), cut->get().vertices[0]));
         if (auto cut = certified_clip_uncached(ExactSweepAccess::certified(*atom), outside))
             result.carrier =
-                result.carrier + ExactSweepAccess::measure(exact_moments(cut->get(), cut->get().vertices[0]).volume);
+                result.carrier + ExactSweepAccess::measure(exact_volume(cut->get(), cut->get().vertices[0]));
     }
     if ((result.gas + result.carrier).compare(result.bulk) != 0)
         throw std::logic_error("Exact independent phase clips lost complementarity.");
@@ -4670,6 +4769,53 @@ ExactGeometryMeasure ExactGeometryMeasure::compacted(std::size_t operation_byte_
     if (result.impl_->value != impl_->value || result.storage_bytes() > copied ||
         result.storage_bytes() > operation_byte_budget - source_bytes)
         throw std::invalid_argument("Exact measure compact copy failed its exact value or capacity certificate.");
+    return result;
+}
+ExactGeometryMeasure ExactGeometryMeasure::rounded_dyadic(
+    unsigned significant_bits, std::size_t operation_byte_budget) const
+{
+    if (significant_bits < 2)
+        throw std::invalid_argument("Exact dyadic representation needs at least two significand bits.");
+    const auto source_bytes = storage_bytes();
+    const auto precision_bytes = std::size_t(significant_bits / 8) + (significant_bits % 8 != 0);
+    // The largest shifted integer has at most max(numerator,denominator) bits
+    // plus the requested precision. Reserve all copies, quotient, dyadic power,
+    // rational normalization and conservative backend growth before allocating.
+    if (source_bytes > operation_byte_budget / 16 ||
+        precision_bytes > operation_byte_budget / 16 - source_bytes)
+        throw std::length_error("Exact dyadic representation exceeds its operation lease.");
+    if (!sign())
+        return from_value(0);
+    I numerator = boost::multiprecision::numerator(impl_->value);
+    const bool negative = numerator < 0;
+    if (negative)
+        numerator = -numerator;
+    I denominator = boost::multiprecision::denominator(impl_->value);
+    const auto numerator_bits = exact_integer_bits(numerator), denominator_bits = exact_integer_bits(denominator);
+    if (numerator_bits > std::size_t(std::numeric_limits<std::int64_t>::max()) ||
+        denominator_bits > std::size_t(std::numeric_limits<std::int64_t>::max()))
+        throw std::invalid_argument("Exact dyadic exponent exceeds the signed index range.");
+    const auto exponent = std::int64_t(numerator_bits) - std::int64_t(denominator_bits);
+    if (exponent < std::int64_t(significant_bits) - 1 - std::numeric_limits<std::int64_t>::max())
+        throw std::invalid_argument("Exact dyadic shift exceeds the signed index range.");
+    const auto shift = std::int64_t(significant_bits) - 1 - exponent;
+    if (shift >= 0)
+        numerator <<= std::size_t(shift);
+    else
+        denominator <<= std::size_t(-shift);
+    I significand = numerator / denominator;
+    if (negative)
+        significand = -significand;
+    Q rounded;
+    if (shift >= 0)
+        rounded = Q(significand, I{1} << std::size_t(shift));
+    else
+        rounded = Q(significand << std::size_t(-shift));
+    auto result = ExactSweepAccess::measure(std::move(rounded));
+    if (result.sign() != sign())
+        throw std::logic_error("Exact dyadic representation failed its nonzero sign certificate.");
+    if (result.storage_bytes() > operation_byte_budget / 16)
+        throw std::length_error("Exact dyadic representation exceeds its retained storage certificate.");
     return result;
 }
 std::size_t ExactConvexFragment::storage_bytes() const
@@ -5057,7 +5203,7 @@ std::vector<ExactSweepIntersection> ExactSweptFace::partition(
         }
         try
         {
-            certify_sweep_partition(ExactSweepAccess::poly(*piece.geometry), coverage, budget);
+            certify_sweep_partition(ExactSweepAccess::certified(*piece.geometry), coverage, budget);
         }
         catch (const std::invalid_argument& error)
         {
@@ -5106,7 +5252,7 @@ ExactDonorExport ExactDonorExport::make(
         coverage.push_back(atom.geometry);
         (atom.coefficient[0] ? result->exported : result->retained).push_back(std::move(atom.geometry));
     }
-    certify_sweep_partition(ExactSweepAccess::poly(donor), coverage, budget);
+    certify_sweep_partition(ExactSweepAccess::certified(donor), coverage, budget);
     return ExactDonorExport(std::move(result));
 }
 ExactGeometryMeasure ExactDonorExport::exported_volume() const
@@ -5212,7 +5358,7 @@ ExactTransportPartition ExactTransportPartition::local(
                             budget.test();
                     try
                     {
-                        certify_sweep_partition(ExactSweepAccess::poly(*piece.geometry), coverage, budget);
+                        certify_sweep_partition(ExactSweepAccess::certified(*piece.geometry), coverage, budget);
                     }
                     catch (const std::invalid_argument& error)
                     {
@@ -5292,7 +5438,7 @@ void ExactTransportPartition::certify_donor_cover(
     for (std::size_t i = 0; i < pieces.size(); ++i)
         for (std::size_t j = 0; j < i; ++j)
             budget.test();
-    certify_sweep_partition(ExactSweepAccess::poly(*donor.geometry), pieces, budget);
+    certify_sweep_partition(ExactSweepAccess::certified(*donor.geometry), pieces, budget);
 }
 ExactTransportPartition ExactTransportPartition::make(
     std::span<const ExactSweepDonor> donors, std::span<const ExactSweepRecipient> recipients, ExactSweepLimits limits)

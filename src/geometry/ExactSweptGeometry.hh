@@ -44,6 +44,14 @@ public:
      * covers simultaneous source and destination capacities; source is unchanged.
      * No represented-value conversion or change to other measure factories. */
     [[nodiscard]] ExactGeometryMeasure compacted(std::size_t operation_byte_budget) const;
+    /** Truncate toward zero to at most significant_bits binary significand bits
+     * at the exact value's own exponent. Nonzero signs survive below binary64
+     * range. This is a proposed representation only: callers must independently
+     * admit its exact discarded difference against their original certificate.
+     * The lease covers source, result and conservative integer workspace;
+     * resource failures throw length_error, distinct from malformed inputs. */
+    [[nodiscard]] ExactGeometryMeasure rounded_dyadic(
+        unsigned significant_bits, std::size_t operation_byte_budget) const;
     /** Capacity estimate, including the opaque rational allocation; excludes
      * allocator/control-block overhead. Deduplicate shared storage_identity(). */
     [[nodiscard]] std::size_t storage_bytes() const;

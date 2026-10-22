@@ -29,6 +29,33 @@ TEST(GeneralVoFPhiClosureTest, ArithmeticTracksCancellationAndRejectsUncertainDe
     const auto zero = arithmetic.multiply(arithmetic.leaf(0), arithmetic.leaf(3));
     EXPECT_EQ(arithmetic.radius(zero).sign(), 0);
 }
+TEST(GeneralVoFPhiClosureTest, InnerPressureScaleBoundsNormalizedRhsWithoutCarrierRangeLoss)
+{
+    constexpr auto cap = 1024 * 1024;
+    auto huge = M::from_value(2);
+    for (unsigned i = 0; i < 12; ++i)
+        huge = huge.squared();
+    const auto tiny = M::from_value(std::numeric_limits<double>::denorm_min()).squared();
+    for (const auto& maximum : {M::from_value(1), M::from_value(3),
+             M::from_value(1).divided_by(M::from_value(3)), huge, tiny})
+    {
+        const auto authority = maximum.encode();
+        const auto scale = detail::general_vof_pressure_normalization_scale(maximum, cap);
+        EXPECT_GT(scale.sign(), 0);
+        EXPECT_GT(scale.compare(maximum), 0);
+        EXPECT_LE(scale.compare(maximum.scaled(2)), 0);
+        const auto normalized = maximum.divided_by(scale, cap);
+        EXPECT_GE(normalized.certified().as_double(), .5);
+        EXPECT_LT(normalized.certified().as_double(), 1);
+        const auto recovered = normalized.divided_by(M::from_value(1).divided_by(scale, cap), cap);
+        EXPECT_EQ(recovered.compare(maximum), 0);
+        EXPECT_EQ(maximum.encode(), authority);
+    }
+    EXPECT_EQ(detail::general_vof_pressure_normalization_scale(M{}, cap).compare(M::from_value(1)), 0);
+    EXPECT_THROW((void) detail::general_vof_pressure_normalization_scale(M::from_value(-1), cap),
+        std::invalid_argument);
+    EXPECT_THROW((void) detail::general_vof_pressure_normalization_scale(M::from_value(3), 1), std::length_error);
+}
 TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
 {
     Meshes::AMR::AMRGrid grid;
@@ -89,6 +116,104 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
             EXPECT_LE(magnitude.compare(radius), 0);
             EXPECT_EQ(result.volume[i].compare(faces[i].volume + result.correction[i]), 0);
         }
+    }
+
+    // A source-free circulation can carry thousands of historical binary bits.
+    // Fixed-precision proposals spend only the independently supplied original
+    // arithmetic capacities; original input authority remains unchanged.
+    auto power = M::from_value(2);
+    for (unsigned i = 0; i < 12; ++i)
+        power = power.squared();
+    power = power.scaled(std::ldexp(1.0, 512));
+    const auto tail = M::from_value(1).divided_by(power);
+    auto precise = base;
+    for (auto& face : precise)
+        face.volume = (face.volume + tail.scaled(face.volume.sign())).compacted(1024 * 1024);
+    const auto bounded = detail::close_general_vof_bounded_rate(mesh, cells, precise, 4 * 1024 * 1024);
+    for (std::size_t i = 0; i < precise.size(); ++i)
+    {
+        EXPECT_EQ(bounded.volume[i].compare(base[i].volume), 0);
+        EXPECT_EQ((precise[i].volume + bounded.correction[i]).compare(bounded.volume[i]), 0);
+        const auto magnitude = bounded.correction[i].sign() < 0 ? bounded.correction[i].scaled(-1)
+                                                               : bounded.correction[i];
+        EXPECT_LE(magnitude.compare(precise[i].arithmetic_radius), 0);
+        if (base[i].volume.sign())
+            EXPECT_LT(bounded.volume[i].storage_bytes(), precise[i].volume.storage_bytes());
+    }
+    // Scalar and packet boundaries differ with actual rank ownership. Vary only
+    // authenticated key padding, within the SAME four-MiB cap, and require an
+    // observed typed resource fallback at an admitted original boundary.
+    bool found_resource_fallback = false;
+    for (const auto key_bytes : {256, 512, 1024, 1536, 2048})
+    {
+        auto framed = precise;
+        for (auto& face : framed)
+            face.identity.resize(key_bytes, 'p');
+        std::size_t rejected_budget = 0, admitted_budget = 4 * 1024 * 1024;
+        try
+        {
+            (void) detail::close_general_vof_phi(mesh, cells, framed, admitted_budget);
+        }
+        catch (const std::exception&)
+        {
+            continue;
+        }
+        while (admitted_budget - rejected_budget > 1)
+        {
+            const auto budget = rejected_budget + (admitted_budget - rejected_budget) / 2;
+            try
+            {
+                (void) detail::close_general_vof_phi(mesh, cells, framed, budget);
+                admitted_budget = budget;
+            }
+            catch (const std::exception&)
+            {
+                rejected_budget = budget;
+            }
+        }
+        try
+        {
+            const auto boundary = detail::close_general_vof_bounded_rate(mesh, cells, framed, admitted_budget);
+            if (!boundary.bounded_resource_fallback)
+                continue;
+            found_resource_fallback = true;
+            for (std::size_t i = 0; i < framed.size(); ++i)
+            {
+                EXPECT_EQ(boundary.volume[i].compare(framed[i].volume), 0);
+                EXPECT_EQ(boundary.correction[i].sign(), 0);
+            }
+            break;
+        }
+        catch (const std::exception&)
+        {
+            continue;
+        }
+    }
+    EXPECT_TRUE(found_resource_fallback);
+    auto strict_cells = cells;
+    for (auto& cell : strict_cells)
+        cell.arithmetic_radius = {};
+    const auto unchanged = detail::close_general_vof_bounded_rate(mesh, strict_cells, precise, 4 * 1024 * 1024);
+    for (std::size_t i = 0; i < precise.size(); ++i)
+    {
+        // Positive face capacity cannot authorize spending a zero cell budget.
+        EXPECT_EQ(unchanged.volume[i].compare(precise[i].volume), 0);
+        EXPECT_EQ(unchanged.correction[i].sign(), 0);
+    }
+    auto tiny_faces = base;
+    const auto below_range = M::from_value(std::numeric_limits<double>::denorm_min()).squared();
+    for (auto& face : tiny_faces)
+        face.volume = below_range.scaled(face.volume.sign());
+    const auto tiny_closed = detail::close_general_vof_bounded_rate(mesh, cells, tiny_faces, 4 * 1024 * 1024);
+    for (std::size_t i = 0; i < tiny_faces.size(); ++i)
+        EXPECT_EQ(tiny_closed.volume[i].compare(tiny_faces[i].volume), 0);
+    for (auto& face : precise)
+        face.arithmetic_radius = {};
+    const auto immutable = detail::close_general_vof_bounded_rate(mesh, cells, precise, 4 * 1024 * 1024);
+    for (std::size_t i = 0; i < precise.size(); ++i)
+    {
+        EXPECT_EQ(immutable.volume[i].compare(precise[i].volume), 0);
+        EXPECT_EQ(immutable.correction[i].sign(), 0);
     }
 
     auto invalid = base;

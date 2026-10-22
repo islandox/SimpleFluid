@@ -136,11 +136,15 @@ GeneralVoFFlowWorkspace::GeneralVoFFlowWorkspace(SP<const MeshHandle<>> mesh)
         valid = false;
     }
     require(valid, "General VoF native physical spans or face distances are invalid.");
+    geometry_epoch_ = mesh_->geometry_epoch();
+    native_owner_ = std::get<MeshHandle<>::MultiRegionPtr>(mesh_->variant());
+    prepare_gradient_geometry();
     Teuchos::reduceAll(*mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local_gauge, &gauge_);
 }
 std::vector<double> GeneralVoFFlowWorkspace::cells(const std::vector<double>& owned) const
 {
-    require(owned.size() == mesh_->num_owned_cells(), "General VoF owned scalar shape mismatch.");
+    require(current_geometry() && owned.size() == mesh_->num_owned_cells(),
+        "General VoF owned scalar shape mismatch or stale workspace geometry/partition.");
     {
         auto d = cell_owned_.getDataNonConst();
         std::copy(owned.begin(), owned.end(), d.begin());
@@ -151,7 +155,8 @@ std::vector<double> GeneralVoFFlowWorkspace::cells(const std::vector<double>& ow
 }
 std::vector<double> GeneralVoFFlowWorkspace::faces(const std::vector<double>& overlap) const
 {
-    require(overlap.size() == mesh_->num_faces(), "General VoF overlap face shape mismatch.");
+    require(current_geometry() && overlap.size() == mesh_->num_faces(),
+        "General VoF overlap face shape mismatch or stale workspace geometry/partition.");
     {
         auto d = face_owned_.getDataNonConst();
         std::copy_n(overlap.begin(), d.size(), d.begin());
@@ -162,7 +167,8 @@ std::vector<double> GeneralVoFFlowWorkspace::faces(const std::vector<double>& ov
 }
 std::vector<Vector> GeneralVoFFlowWorkspace::vectors(const std::vector<Vector>& owned) const
 {
-    require(owned.size() == mesh_->num_owned_cells(), "General VoF owned vector shape mismatch.");
+    require(current_geometry() && owned.size() == mesh_->num_owned_cells(),
+        "General VoF owned vector shape mismatch or stale workspace geometry/partition.");
     std::vector<Vector> result(mesh_->num_cells());
     for (unsigned a = 0; a < 3; ++a)
     {
@@ -175,127 +181,180 @@ std::vector<Vector> GeneralVoFFlowWorkspace::vectors(const std::vector<Vector>& 
     }
     return result;
 }
-std::vector<Vector> GeneralVoFFlowWorkspace::gradient(const std::vector<double>& owned) const
+bool GeneralVoFFlowWorkspace::current_geometry() const noexcept
 {
-    const auto halo = cells(owned);
-    std::vector<Vector> result(owned.size());
-    // A single extruded layer has no samples in its transverse direction.
-    // Determine absent coordinate directions globally (including empty owners),
-    // using exact equality in the represented centroids. Periodic image
-    // displacements also count as samples even when absolute centroids coincide.
-    std::array<double, 4> low, high, global_low, global_high;
+    bool current = false;
+    try
+    {
+        const auto lease = mesh_->acquire_execution_view();
+        const auto* native = std::get_if<MeshHandle<>::MultiRegionPtr>(&mesh_->variant());
+        current = native && native->get() == native_owner_.get() && mesh_->geometry_epoch() == geometry_epoch_ &&
+                  mesh_->owned_cell_map().getRawPtr() == cell_owned_.getMap().getRawPtr() &&
+                  mesh_->overlap_cell_map().getRawPtr() == cell_overlap_.getMap().getRawPtr() &&
+                  mesh_->owned_face_map().getRawPtr() == face_owned_.getMap().getRawPtr() &&
+                  mesh_->overlap_face_map().getRawPtr() == face_overlap_.getMap().getRawPtr();
+    }
+    catch (...)
+    {
+        current = false;
+    }
+    return current;
+}
+void GeneralVoFFlowWorkspace::prepare_gradient_geometry()
+{
+    // Cache only geometry and the elimination schedule. Applying that schedule
+    // preserves the original RHS arithmetic order for every scalar field.
+    std::array<double, 3> low, high, global_low, global_high;
     std::array<int, 3> sampled{}, global_sampled{};
     low.fill(std::numeric_limits<double>::infinity());
     high.fill(-std::numeric_limits<double>::infinity());
     bool finite = true;
+    try
     {
-        const auto coordinate_lease = mesh_->acquire_execution_view();
-        for (std::size_t c = 0; c < owned.size(); ++c)
+        const auto lease = mesh_->acquire_execution_view();
+        gradient_stencils_.resize(volumes_.size());
+        for (std::size_t c = 0; c < volumes_.size(); ++c)
         {
-            const auto x = mesh_->cell_centroid(LO(c));
+            const auto x = convert(mesh_->cell_centroid(LO(c)));
+            for (unsigned a = 0; a < 3; ++a)
+            {
+                finite = finite && std::isfinite(x[a]);
+                low[a] = std::min(low[a], x[a]);
+                high[a] = std::max(high[a], x[a]);
+            }
+            auto& stencil = gradient_stencils_[c];
             for (auto fid : mesh_->faces(LO(c)))
                 if (!geometry_[fid].boundary)
                 {
-                    const auto r = convert(mesh_->cell_center_vector(fid, LO(c)));
+                    auto r = convert(mesh_->cell_center_vector(fid, LO(c)));
                     for (unsigned a = 0; a < 3; ++a)
+                    {
                         sampled[a] = sampled[a] || r[a] != 0;
+                        r[a] /= spans_[c][a];
+                    }
+                    stencil.samples.push_back({mesh_->opposite_cell(fid, LO(c)), r, 1 / dot(r, r)});
                 }
-            const std::array<double, 4> sample{x.x, x.y, x.z, owned[c]};
-            for (double value : sample)
-                finite = finite && std::isfinite(value);
-            for (unsigned a = 0; a < 4; ++a)
-            {
-                low[a] = std::min(low[a], sample[a]);
-                high[a] = std::max(high[a], sample[a]);
-            }
         }
     }
-    const auto comm = mesh_->owned_cell_map()->getComm();
-    require(finite, "General VoF gradient samples must be finite.");
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 4, low.data(), global_low.data());
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 4, high.data(), global_high.data());
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, sampled.data(), global_sampled.data());
-    if (global_low[3] == global_high[3] && std::isfinite(global_low[3]))
-        return result;
-    bool valid = true;
+    catch (...)
     {
-        const auto lease = mesh_->acquire_execution_view();
-        for (std::size_t c = 0; c < owned.size(); ++c)
+        finite = false;
+    }
+    require(finite, "General VoF gradient samples must be finite.");
+    const auto comm = mesh_->owned_cell_map()->getComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 3, low.data(), global_low.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, high.data(), global_high.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, sampled.data(), global_sampled.data());
+    for (unsigned a = 0; a < 3; ++a)
+        absent_gradient_axis_[a] = global_low[a] == global_high[a] && !global_sampled[a];
+    for (auto& stencil : gradient_stencils_)
+    {
+        std::array<std::array<double, 7>, 3> m{};
+        for (const auto& sample : stencil.samples)
+            for (unsigned a = 0; a < 3; ++a)
+                for (unsigned b = 0; b < 3; ++b)
+                    m[a][b] += sample.weight * sample.displacement[a] * sample.displacement[b];
+        double norm = 0;
+        for (unsigned a = 0; a < 3; ++a)
+            if (absent_gradient_axis_[a])
+            {
+                for (unsigned b = 0; b < 4; ++b)
+                    m[a][b] = 0;
+                for (unsigned b = 0; b < 3; ++b)
+                    m[b][a] = 0;
+                m[a][a] = 1;
+            }
+        for (unsigned row = 0; row < 3; ++row)
         {
-            std::array<std::array<double, 7>, 3> m{};
-            for (auto fid : mesh_->faces(LO(c)))
+            double sum = 0;
+            for (unsigned column = 0; column < 3; ++column)
+                sum += std::abs(m[row][column]);
+            norm = std::max(norm, sum);
+            m[row][4 + row] = 1;
+        }
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            unsigned pivot = a;
+            for (unsigned b = a + 1; b < 3; ++b)
+                if (std::abs(m[b][a]) > std::abs(m[pivot][a]))
+                    pivot = b;
+            stencil.pivot[a] = pivot;
+            if (!(std::abs(m[pivot][a]) > 1e-12))
             {
-                const auto& f = geometry_[fid];
-                if (f.boundary)
-                    continue;
-                auto r = convert(mesh_->cell_center_vector(fid, LO(c)));
-                for (unsigned a = 0; a < 3; ++a)
-                    r[a] /= spans_[c][a];
-                const double w = 1 / dot(r, r), delta = halo[mesh_->opposite_cell(fid, LO(c))] - owned[c];
-                for (unsigned a = 0; a < 3; ++a)
-                {
-                    m[a][3] += w * r[a] * delta;
-                    for (unsigned b = 0; b < 3; ++b)
-                        m[a][b] += w * r[a] * r[b];
-                }
+                stencil.valid = false;
+                break;
             }
-            double norm = 0;
-            for (unsigned a = 0; a < 3; ++a)
-                if (global_low[a] == global_high[a] && !global_sampled[a])
-                {
-                    // The field is interpreted as constant along an unsampled
-                    // coordinate; retain rank checks in every sampled direction.
-                    for (unsigned b = 0; b < 4; ++b)
-                        m[a][b] = 0;
-                    for (unsigned b = 0; b < 3; ++b)
-                        m[b][a] = 0;
-                    m[a][a] = 1;
-                }
+            std::swap(m[a], m[pivot]);
+            const double d = m[a][a];
+            stencil.divisor[a] = d;
+            for (unsigned b = a; b < 7; ++b)
+                m[a][b] /= d;
             for (unsigned row = 0; row < 3; ++row)
-            {
-                double sum = 0;
-                for (unsigned column = 0; column < 3; ++column)
-                    sum += std::abs(m[row][column]);
-                norm = std::max(norm, sum);
-                m[row][4 + row] = 1;
-            }
+                if (row != a)
+                {
+                    const double factor = m[row][a];
+                    stencil.factor[a][row] = factor;
+                    for (unsigned b = a; b < 7; ++b)
+                        m[row][b] -= factor * m[a][b];
+                }
+        }
+        double inverse_norm = 0;
+        for (unsigned row = 0; row < 3; ++row)
+        {
+            double sum = 0;
+            for (unsigned column = 4; column < 7; ++column)
+                sum += std::abs(m[row][column]);
+            inverse_norm = std::max(inverse_norm, sum);
+        }
+        stencil.valid = stencil.valid && std::isfinite(norm * inverse_norm) && norm * inverse_norm <= 1e8;
+    }
+}
+std::vector<Vector> GeneralVoFFlowWorkspace::gradient(const std::vector<double>& owned) const
+{
+    const auto halo = cells(owned);
+    std::vector<Vector> result(owned.size());
+    double low = std::numeric_limits<double>::infinity(), high = -std::numeric_limits<double>::infinity();
+    bool valid = true;
+    for (double value : owned)
+    {
+        valid = valid && std::isfinite(value);
+        low = std::min(low, value);
+        high = std::max(high, value);
+    }
+    require(valid, "General VoF gradient samples must be finite.");
+    double global_low = 0, global_high = 0;
+    const auto comm = mesh_->owned_cell_map()->getComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &low, &global_low);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &high, &global_high);
+    if (global_low == global_high && std::isfinite(global_low))
+        return result;
+    for (std::size_t c = 0; c < owned.size(); ++c)
+    {
+        const auto& stencil = gradient_stencils_[c];
+        valid = valid && stencil.valid;
+        Vector rhs{};
+        for (const auto& sample : stencil.samples)
+        {
+            const double delta = halo[sample.neighbor] - owned[c];
+            for (unsigned a = 0; a < 3; ++a)
+                rhs[a] += sample.weight * sample.displacement[a] * delta;
+        }
+        for (unsigned a = 0; a < 3; ++a)
+            if (absent_gradient_axis_[a])
+                rhs[a] = 0;
+        if (stencil.valid)
             for (unsigned a = 0; a < 3; ++a)
             {
-                unsigned pivot = a;
-                for (unsigned b = a + 1; b < 3; ++b)
-                    if (std::abs(m[b][a]) > std::abs(m[pivot][a]))
-                        pivot = b;
-                if (!(std::abs(m[pivot][a]) > 1e-12))
-                {
-                    valid = false;
-                    break;
-                }
-                std::swap(m[a], m[pivot]);
-                const double d = m[a][a];
-                for (unsigned b = a; b < 7; ++b)
-                    m[a][b] /= d;
+                std::swap(rhs[a], rhs[stencil.pivot[a]]);
+                rhs[a] /= stencil.divisor[a];
                 for (unsigned row = 0; row < 3; ++row)
                     if (row != a)
-                    {
-                        const double factor = m[row][a];
-                        for (unsigned b = a; b < 7; ++b)
-                            m[row][b] -= factor * m[a][b];
-                    }
+                        rhs[row] -= stencil.factor[a][row] * rhs[a];
             }
-            double inverse_norm = 0;
-            for (unsigned row = 0; row < 3; ++row)
-            {
-                double sum = 0;
-                for (unsigned column = 4; column < 7; ++column)
-                    sum += std::abs(m[row][column]);
-                inverse_norm = std::max(inverse_norm, sum);
-            }
-            valid = valid && std::isfinite(norm * inverse_norm) && norm * inverse_norm <= 1e8;
-            for (unsigned a = 0; a < 3; ++a)
-            {
-                result[c][a] = m[a][3] / spans_[c][a];
-                valid = valid && std::isfinite(result[c][a]);
-            }
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            result[c][a] = rhs[a] / spans_[c][a];
+            valid = valid && std::isfinite(result[c][a]);
         }
     }
     require(valid, "General VoF physical least-squares stencil is deficient or ill-conditioned.");
@@ -426,8 +485,8 @@ void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::v
         *mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &closure_requested, &closure_minimum);
     Teuchos::reduceAll(
         *mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &closure_requested, &closure_maximum);
-    require(closure_minimum == closure_maximum && (!closure_topology || provenance),
-        "General VoF rate-closure request differs across ranks or lacks provenance output.");
+    require(current_geometry() && closure_minimum == closure_maximum && (!closure_topology || provenance),
+        "General VoF rate-closure request differs across ranks, lacks provenance or has stale workspace geometry.");
     int mass_requested = bool(physical_mass), mass_minimum = 0, mass_maximum = 0;
     Teuchos::reduceAll(*mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &mass_requested, &mass_minimum);
     Teuchos::reduceAll(*mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &mass_requested, &mass_maximum);
@@ -702,7 +761,7 @@ void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::v
         std::optional<GeneralVoFPhiClosure> closed;
         try
         {
-            closed = close_general_vof_phi(mesh_, cells, faces, admission_budget);
+            closed = close_general_vof_bounded_rate(mesh_, cells, faces, admission_budget);
         }
         catch (const GeneralVoFPhiInfeasible& error)
         {
@@ -1082,10 +1141,32 @@ void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::v
                                 vof_exact::leased_scale(current_certificate.owned_net_rate[c], -1, scalar_budget),
                                 M::from_value(dt), scalar_budget);
                     });
-                pressure_scale = vof_exact::leased_maximum_absolute(
+                const auto maximum = vof_exact::leased_maximum_absolute(
                     exact_rhs, *mesh_->owned_cell_map(), scalar_budget, admission_budget);
-                if (!pressure_scale.sign())
-                    pressure_scale = M::from_value(1);
+                std::optional<M> proposed_scale;
+                int local_scale_admitted = 1, scale_admitted = 0;
+                arithmetic_guard(
+                    [&]
+                    {
+                        try
+                        {
+                            proposed_scale.emplace(general_vof_pressure_normalization_scale(maximum, scalar_budget));
+                        }
+                        catch (const std::length_error&)
+                        {
+                            local_scale_admitted = 0;
+                        }
+                    });
+                Teuchos::reduceAll(*mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1,
+                    &local_scale_admitted, &scale_admitted);
+                arithmetic_guard(
+                    [&]
+                    {
+                        // Rank-local backend capacities must not choose
+                        // different normalizers for the same pressure solve.
+                        pressure_scale = scale_admitted ? *proposed_scale
+                                                       : (maximum.sign() ? maximum : M::from_value(1));
+                    });
             }
             arithmetic_guard(
                 [&]
@@ -1301,7 +1382,7 @@ void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::v
 double GeneralVoFFlowWorkspace::stable_timestep(
     const std::vector<double>& velocity, double rho, double mu, double sigma, const VoFSolverOptions& options) const
 {
-    require(velocity.size() == geometry_.size() && std::isfinite(rho) && rho > 0 && std::isfinite(mu) && mu >= 0 &&
+    require(current_geometry() && velocity.size() == geometry_.size() && std::isfinite(rho) && rho > 0 && std::isfinite(mu) && mu >= 0 &&
                 std::isfinite(sigma) && sigma >= 0 && std::isfinite(options.max_courant) && options.max_courant > 0 &&
                 std::isfinite(options.viscous_safety) && options.viscous_safety > 0 &&
                 std::isfinite(options.capillary_safety) && options.capillary_safety > 0,

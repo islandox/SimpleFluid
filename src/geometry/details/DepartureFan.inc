@@ -592,7 +592,7 @@ std::optional<std::vector<ExactTransportAtom>> optional_departure_fan_partition(
             }
             // Complete, contained and pairwise interior-disjoint per tetra.
             // Original donor-cover failures are errors, not optional fallbacks.
-            certify_sweep_partition(ExactSweepAccess::poly(*tetra), coverage, budget);
+            certify_sweep_partition(ExactSweepAccess::certified(*tetra), coverage, budget);
         }
     for (std::size_t r = 0; r < recipients.size(); ++r)
         if (received[r] != sweep_volume(*recipients[r].geometry))

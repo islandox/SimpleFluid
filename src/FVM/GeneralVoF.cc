@@ -18,6 +18,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 namespace SimpleFluid::VoF
 {
 namespace
@@ -214,24 +215,30 @@ struct GeneralVoF::Data
         AMR::AdaptiveBytes identity;
         Meshes::ExactPlanarFacePtr geometry;
     };
+    struct Topology
+    {
+        AMR::AdaptiveNativePublication native;
+        AMR::AdaptiveNativeDraft draft;
+        std::vector<AMR::AdaptiveTile> tiles;
+        std::vector<AMR::AdaptiveNode> nodes;
+        std::map<std::uint64_t, Key> by_gid;
+        std::map<Key, std::set<Key>> adjacency;
+        std::map<std::uint64_t, std::set<Key>> node_fans;
+        std::map<std::uint64_t, std::vector<Wall>> node_walls;
+        std::vector<Key> order;
+        std::map<Key, std::vector<std::size_t>> cell_tiles;
+        std::map<std::uint64_t, std::vector<std::size_t>> node_tiles;
+    };
+    std::shared_ptr<const Topology> topology;
     std::shared_ptr<const Hierarchy> hierarchy;
     AMR::HierarchyObservation observation;
     std::shared_ptr<const Hierarchy> supplied_hierarchy;
     AMR::HierarchyObservation supplied_observation;
-    AMR::AdaptiveNativePublication native;
-    AMR::AdaptiveNativeDraft draft;
-    std::vector<AMR::AdaptiveTile> tiles;
-    std::vector<AMR::AdaptiveNode> nodes;
     GeneralVoFOptions options;
     std::uint64_t control = 0;
     std::weak_ptr<const void> adopted_source;
     std::uint64_t adopted_source_control = 0, adopted_transaction = 0, adopted_target_control = 0;
     std::map<Key, Cell> cells;
-    std::map<std::uint64_t, Key> by_gid;
-    std::map<Key, std::set<Key>> adjacency;
-    std::map<std::uint64_t, std::set<Key>> node_fans;
-    std::map<std::uint64_t, std::vector<Wall>> node_walls;
-    std::vector<Key> order;
     std::vector<double> gas, carrier;
     std::vector<PhaseVolumes> phases;
     std::vector<PhaseRoundoff> roundoff;
@@ -248,12 +255,12 @@ void refresh_experimental_catalog(GeneralVoF::Data& data)
         return;
     }
     wire::Budget budget{data.options.byte_budget};
-    if (data.order.size() > budget.limit / sizeof(Meshes::ExactPhaseMeasures))
+    if (data.topology->order.size() > budget.limit / sizeof(Meshes::ExactPhaseMeasures))
         throw std::invalid_argument("Experimental owned inventory catalog exceeds budget.");
-    budget.add(data.order.size() * sizeof(Meshes::ExactPhaseMeasures));
+    budget.add(data.topology->order.size() * sizeof(Meshes::ExactPhaseMeasures));
     auto catalog = std::make_shared<std::vector<Meshes::ExactPhaseMeasures>>();
-    catalog->reserve(data.order.size());
-    for (const auto& key : data.order)
+    catalog->reserve(data.topology->order.size());
+    for (const auto& key : data.topology->order)
     {
         const auto& cell = data.cells.at(key);
         if (!cell.experimental_exact)
@@ -273,7 +280,7 @@ void retained_budget(const GeneralVoF::Data& data)
 {
     wire::Budget budget{data.options.byte_budget};
     std::set<const void*> geometry;
-    budget.add(sizeof(data) + data.order.capacity() * sizeof(Key) +
+    budget.add(sizeof(data) + sizeof(GeneralVoF::Data::Topology) + data.topology->order.capacity() * sizeof(Key) +
                (data.gas.capacity() + data.carrier.capacity()) * sizeof(double) +
                data.phases.capacity() * sizeof(PhaseVolumes) + data.roundoff.capacity() * sizeof(PhaseRoundoff) +
                data.occupancy.capacity() * sizeof(PhaseError));
@@ -302,9 +309,9 @@ void retained_budget(const GeneralVoF::Data& data)
                 charge_exact(*q);
         }
     }
-    for (const auto& node : data.nodes)
+    for (const auto& node : data.topology->nodes)
         budget.add(sizeof(node) + node.identity.capacity() + node.exact_identity.capacity());
-    for (const auto& tile : data.tiles)
+    for (const auto& tile : data.topology->tiles)
     {
         budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t));
         if (geometry.insert(tile.geometry.get()).second)
@@ -319,9 +326,23 @@ void retained_budget(const GeneralVoF::Data& data)
                 budget.add(sizeof(value) + 4 * sizeof(void*) + AMR::encode_adaptive_key(value).size());
         }
     };
-    graph(data.adjacency);
-    graph(data.node_fans);
-    for (const auto& [node, walls] : data.node_walls)
+    graph(data.topology->adjacency);
+    graph(data.topology->node_fans);
+    for (const auto& [gid, key] : data.topology->by_gid)
+        budget.add(sizeof(gid) + sizeof(Key) + 4 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
+    const auto incidence = [&](const auto& entries)
+    {
+        for (const auto& [key, indices] : entries)
+        {
+            budget.add(sizeof(key) + sizeof(indices) + 4 * sizeof(void*) +
+                       indices.capacity() * sizeof(std::size_t));
+            if constexpr (std::is_same_v<std::decay_t<decltype(key)>, Key>)
+                budget.add(AMR::encode_adaptive_key(key).size());
+        }
+    };
+    incidence(data.topology->cell_tiles);
+    incidence(data.topology->node_tiles);
+    for (const auto& [node, walls] : data.topology->node_walls)
     {
         budget.add(sizeof(node) + sizeof(walls) + walls.capacity() * sizeof(GeneralVoF::Data::Wall));
         for (const auto& wall : walls)
@@ -336,20 +357,23 @@ void retained_budget(const GeneralVoF::Data& data)
 // authenticates those registrations and returns the complete canonical fan;
 // geometric coincidence and whichever ghost rows happen to be resident play no
 // part in defining the interpolation stencil.
-void complete_node_fans(GeneralVoF::Data& data)
+void complete_node_fans(GeneralVoF::Data& data, GeneralVoF::Data::Topology& topology)
 {
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
     std::vector<OwnerPacket> requests;
+    std::map<std::uint64_t, const AMR::AdaptiveNode*> native_nodes;
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{limit};
             std::map<std::uint64_t, std::set<Key>> local;
-            std::map<std::uint64_t, AMR::AdaptiveBytes> identities;
-            for (const auto& node : data.draft.nodes)
-                identities.emplace(node.gid, node.identity);
-            for (const auto& tile : data.draft.tiles)
+            for (const auto& node : topology.draft.nodes)
+            {
+                budget.add(sizeof(decltype(native_nodes)::value_type) + 4 * sizeof(void*));
+                native_nodes.emplace(node.gid, &node);
+            }
+            for (const auto& tile : topology.draft.tiles)
                 for (auto node : tile.node_gids)
                     for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
                         if (key && data.hierarchy->owned().contains(*key))
@@ -360,9 +384,10 @@ void complete_node_fans(GeneralVoF::Data& data)
             for (const auto& [node, keys] : local)
             {
                 wire::Writer w;
-                budget.packet(32 + identities.at(node).size());
+                const auto& identity = native_nodes.at(node)->identity;
+                budget.packet(32 + identity.size());
                 w.word(node);
-                w.bytes(identities.at(node));
+                w.bytes(identity);
                 w.word(keys.size());
                 for (const auto& key : keys)
                 {
@@ -372,7 +397,7 @@ void complete_node_fans(GeneralVoF::Data& data)
                     w.word(data.hierarchy->owned().at(key).revision);
                 }
                 requests.push_back({int(node % std::uint64_t(comm->getSize())), std::move(w.data)});
-                data.node_fans.emplace(node, std::set<Key>{});
+                topology.node_fans.emplace(node, std::set<Key>{});
             }
         });
     auto received = exchange_owner_packets(requests, comm, limit);
@@ -455,18 +480,18 @@ void complete_node_fans(GeneralVoF::Data& data)
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(native_nodes.size() * (sizeof(decltype(native_nodes)::value_type) + 4 * sizeof(void*)));
             std::set<std::uint64_t> seen;
             for (const auto& packet : returned.packets)
             {
                 wire::Reader r{packet.bytes};
                 const auto node = r.word();
                 const auto identity = r.bytes();
-                if (!data.node_fans.contains(node) || !seen.insert(node).second ||
+                if (!topology.node_fans.contains(node) || !seen.insert(node).second ||
                     packet.peer != int(node % std::uint64_t(comm->getSize())))
                     throw std::invalid_argument("General VoF unexpected node fan reply.");
-                const auto native = std::find_if(data.draft.nodes.begin(), data.draft.nodes.end(),
-                    [&](const auto& value) { return value.gid == node; });
-                if (native == data.draft.nodes.end() || native->identity != identity)
+                const auto native = native_nodes.find(node);
+                if (native == native_nodes.end() || native->second->identity != identity)
                     throw std::invalid_argument("General VoF node fan reply identity differs.");
                 const auto count = r.word();
                 if (!count || count > data.options.maximum_stencil_cells)
@@ -475,12 +500,12 @@ void complete_node_fans(GeneralVoF::Data& data)
                 {
                     const auto bytes = r.bytes();
                     budget.add(bytes.size() + sizeof(Key) + 8 * sizeof(void*));
-                    if (!data.node_fans.at(node).insert(AMR::decode_adaptive_key(bytes)).second)
+                    if (!topology.node_fans.at(node).insert(AMR::decode_adaptive_key(bytes)).second)
                         throw std::invalid_argument("General VoF duplicate node fan member.");
                 }
                 r.done();
             }
-            if (seen.size() != data.node_fans.size())
+            if (seen.size() != topology.node_fans.size())
                 throw std::invalid_argument("General VoF incomplete canonical node fan.");
         });
 }
@@ -658,7 +683,7 @@ void import_phases(GeneralVoF::Data& data)
 std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data)
 {
     std::map<Key, PolyhedralInterface> result;
-    for (const auto& key : data.order)
+    for (const auto& key : data.topology->order)
     {
         const auto& target = data.cells.at(key);
         validate_cell(target, data.options);
@@ -693,8 +718,8 @@ std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& dat
             std::set<Key> next;
             for (const auto& center : front)
             {
-                const auto found = data.adjacency.find(center);
-                if (found == data.adjacency.end())
+                const auto found = data.topology->adjacency.find(center);
+                if (found == data.topology->adjacency.end())
                     continue;
                 for (const auto& neighbor : found->second)
                     if (data.cells.contains(neighbor) && visited.insert(neighbor).second)
@@ -810,6 +835,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
     const auto* capsules = transfer ? &transfer->owned() : nullptr;
     auto comm = hierarchy ? hierarchy->communicator() : Tpetra::getDefaultComm();
     std::shared_ptr<Data> data;
+    std::shared_ptr<Data::Topology> topology;
     wire::collective(*comm,
         [&]
         {
@@ -822,6 +848,8 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
             wire::Budget budget{options.byte_budget};
             budget.add(order.size() * (sizeof(Cell) + sizeof(Key) + 2 * sizeof(double)));
             data = std::make_shared<Data>();
+            topology = std::make_shared<Data::Topology>();
+            data->topology = topology;
             data->hierarchy = hierarchy;
             data->observation = hierarchy->observation();
             data->supplied_hierarchy = hierarchy;
@@ -902,8 +930,8 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
         data->adopted_transaction = transfer->transaction();
         data->adopted_target_control = data->control;
     }
-    data->draft = AMR::fetch_adaptive_native_draft(*hierarchy);
-    complete_node_fans(*data);
+    topology->draft = AMR::fetch_adaptive_native_draft(*hierarchy);
+    complete_node_fans(*data, *topology);
     for (unsigned ring = 1; ring <= options.support_rings; ++ring)
     {
         std::vector<Key> additional;
@@ -912,7 +940,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
             {
                 wire::Budget budget{options.byte_budget};
                 std::map<Key, std::set<Key>> graph;
-                for (const auto& tile : data->draft.tiles)
+                for (const auto& tile : topology->draft.tiles)
                     if (tile.second)
                     {
                         budget.add(4 * (sizeof(Key) + 8 * sizeof(void*) + AMR::encode_adaptive_key(tile.first).size() +
@@ -926,7 +954,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     seen.insert(key);
                     front.insert(key);
                 }
-                for (const auto& [node, fan] : data->node_fans)
+                for (const auto& [node, fan] : topology->node_fans)
                     for (const auto& key : fan)
                     {
                         seen.insert(key);
@@ -950,19 +978,19 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     if (!hierarchy->owned().contains(key))
                         additional.push_back(key);
             });
-        data->draft = AMR::fetch_adaptive_native_draft(*hierarchy, additional);
+        topology->draft = AMR::fetch_adaptive_native_draft(*hierarchy, additional);
     }
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{options.byte_budget};
-            budget.add(data->draft.cell_bindings.size() * (sizeof(Cell) + sizeof(Key)));
+            budget.add(topology->draft.cell_bindings.size() * (sizeof(Cell) + sizeof(Key)));
             std::map<Key, const AMR::AdaptiveLeaf*> leaves;
-            for (const auto& leaf : data->draft.owned)
+            for (const auto& leaf : topology->draft.owned)
                 leaves.emplace(leaf.key, &leaf);
-            for (const auto& leaf : data->draft.ghosts)
+            for (const auto& leaf : topology->draft.ghosts)
                 leaves.emplace(leaf.key, &leaf);
-            for (const auto& binding : data->draft.cell_bindings)
+            for (const auto& binding : topology->draft.cell_bindings)
                 if (binding.full)
                 {
                     auto found = data->cells.find(binding.key);
@@ -986,35 +1014,65 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     found->second.gid = binding.gid;
                     found->second.centroid = binding.centroid;
                     found->second.native_volume = binding.volume;
-                    if (!data->by_gid.emplace(binding.gid, binding.key).second)
+                    if (!topology->by_gid.emplace(binding.gid, binding.key).second)
                         throw std::invalid_argument("General VoF duplicate native cell GID.");
                 }
-            for (const auto& tile : data->draft.tiles)
+            for (const auto& tile : topology->draft.tiles)
             {
                 if (!tile.exact_second_image.empty())
                     throw std::invalid_argument("General VoF periodic image sweeps are not qualified.");
                 if (tile.second)
                 {
-                    data->adjacency[tile.first].insert(*tile.second);
-                    data->adjacency[*tile.second].insert(tile.first);
+                    topology->adjacency[tile.first].insert(*tile.second);
+                    topology->adjacency[*tile.second].insert(tile.first);
                 }
                 if (hierarchy->owned().contains(tile.first) ||
                     (tile.second && hierarchy->owned().contains(*tile.second)))
-                    data->tiles.push_back(tile);
+                    topology->tiles.push_back(tile);
+            }
+            // Preserve canonical tile order in every incidence row. Transport
+            // sums and node-wall packets use this same order after publication.
+            const auto append_index = [&](auto& entries, const auto& key, std::size_t index)
+            {
+                if (!entries.contains(key))
+                {
+                    budget.add(sizeof(key) + sizeof(std::vector<std::size_t>) + 4 * sizeof(void*));
+                    if constexpr (std::is_same_v<std::decay_t<decltype(key)>, Key>)
+                        budget.add(AMR::encode_adaptive_key(key).size());
+                }
+                auto& indices = entries[key];
+                if (!indices.empty() && indices.back() == index)
+                    return;
+                if (indices.size() == indices.capacity())
+                {
+                    const auto capacity = indices.capacity() ? 2 * indices.capacity() : 1;
+                    budget.add((capacity - indices.capacity()) * sizeof(std::size_t));
+                    indices.reserve(capacity);
+                }
+                indices.push_back(index);
+            };
+            for (std::size_t index = 0; index < topology->tiles.size(); ++index)
+            {
+                const auto& tile = topology->tiles[index];
+                append_index(topology->cell_tiles, tile.first, index);
+                if (tile.second)
+                    append_index(topology->cell_tiles, *tile.second, index);
+                for (auto node : tile.node_gids)
+                    append_index(topology->node_tiles, node, index);
             }
             std::set<std::uint64_t> control_nodes;
-            for (const auto& tile : data->tiles)
+            for (const auto& tile : topology->tiles)
                 control_nodes.insert(tile.node_gids.begin(), tile.node_gids.end());
-            for (const auto& node : data->draft.nodes)
+            for (const auto& node : topology->draft.nodes)
                 if (control_nodes.contains(node.gid))
-                    data->nodes.push_back(node);
+                    topology->nodes.push_back(node);
             std::map<std::uint64_t, std::map<AMR::AdaptiveBytes, Meshes::ExactPlanarFacePtr>> walls;
             std::map<std::uint64_t, std::set<Key>> incident;
-            for (const auto& tile : data->draft.tiles)
+            for (const auto& tile : topology->draft.tiles)
                 for (auto node : tile.node_gids)
                     if (control_nodes.contains(node))
                     {
-                        const auto& fan = data->node_fans.at(node);
+                        const auto& fan = topology->node_fans.at(node);
                         for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
                             if (key && fan.contains(*key) && incident[node].insert(*key).second)
                                 budget.add(sizeof(Key) + AMR::encode_adaptive_key(*key).size() + 4 * sizeof(void*));
@@ -1033,21 +1091,21 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                                 throw std::invalid_argument("General VoF canonical wall certificates differ.");
                         }
                     }
-            for (const auto& node : data->nodes)
+            for (const auto& node : topology->nodes)
             {
-                if (incident[node.gid] != data->node_fans.at(node.gid))
+                if (incident[node.gid] != topology->node_fans.at(node.gid))
                     throw std::invalid_argument(
                         "General VoF wall catalog lacks a complete authenticated incident fan.");
-                for (const auto& key : data->node_fans.at(node.gid))
+                for (const auto& key : topology->node_fans.at(node.gid))
                     if (!leaves.contains(key))
                         throw std::invalid_argument("General VoF wall catalog requires full incident native shells.");
-                auto& retained = data->node_walls[node.gid];
+                auto& retained = topology->node_walls[node.gid];
                 for (const auto& [identity, geometry] : walls[node.gid])
                     retained.push_back({identity, geometry});
             }
             for (const auto& [key, leaf] : hierarchy->owned())
             {
-                data->order.push_back(key);
+                topology->order.push_back(key);
                 data->gas.push_back(data->cells.at(key).phase.gas_volume);
                 data->carrier.push_back(data->cells.at(key).phase.carrier_volume);
             }
@@ -1061,22 +1119,22 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
             if (schema.size() > options.byte_budget)
                 throw std::invalid_argument("General VoF native schema budget exhausted.");
         });
-    data->native = AMR::assemble_adaptive_native(std::move(data->draft), schema, comm, options.byte_budget);
-    data->hierarchy = hierarchy->with_partition(data->native.partition, data->native.mesh->owned_cell_map());
+    topology->native = AMR::assemble_adaptive_native(std::move(topology->draft), schema, comm, options.byte_budget);
+    data->hierarchy = hierarchy->with_partition(topology->native.partition, topology->native.mesh->owned_cell_map());
     data->observation = data->hierarchy->observation();
     wire::collective(*comm,
         [&]
         {
-            data->order.clear();
+            topology->order.clear();
             data->gas.clear();
             data->carrier.clear();
             data->phases.clear();
             data->roundoff.clear();
             data->occupancy.clear();
-            for (std::size_t c = 0; c < data->native.mesh->num_owned_cells(); ++c)
+            for (std::size_t c = 0; c < topology->native.mesh->num_owned_cells(); ++c)
             {
-                const auto key = data->by_gid.at(data->native.mesh->cell_global_id(int(c)));
-                data->order.push_back(key);
+                const auto key = topology->by_gid.at(topology->native.mesh->cell_global_id(int(c)));
+                topology->order.push_back(key);
                 data->gas.push_back(data->cells.at(key).phase.gas_volume);
                 data->carrier.push_back(data->cells.at(key).phase.carrier_volume);
                 data->phases.push_back({data->cells.at(key).native_volume, data->cells.at(key).phase.gas_volume,
@@ -1199,7 +1257,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(bool prepare_geometr
             current(*data_);
             wire::Budget budget{data_->options.byte_budget};
             const auto interfaces = prepare_geometry ? reconstruct_local(*data_) : std::map<Key, PolyhedralInterface>{};
-            for (const auto& key : data_->order)
+            for (const auto& key : data_->topology->order)
             {
                 budget.add(sizeof(ExactPhaseTransferCapsule) + AMR::encode_adaptive_key(key).size());
                 const auto& cell = data_->cells.at(key);
@@ -1317,7 +1375,7 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::adopt_transfer(const ExactPhaseTra
 }
 const std::shared_ptr<const MeshHandle<>>& GeneralVoF::mesh() const noexcept
 {
-    return data_->native.mesh;
+    return data_->topology->native.mesh;
 }
 const std::shared_ptr<const GeneralVoF::Hierarchy>& GeneralVoF::hierarchy() const noexcept
 {
@@ -1325,7 +1383,7 @@ const std::shared_ptr<const GeneralVoF::Hierarchy>& GeneralVoF::hierarchy() cons
 }
 const std::vector<GeneralVoF::Key>& GeneralVoF::owned_order() const noexcept
 {
-    return data_->order;
+    return data_->topology->order;
 }
 const std::vector<double>& GeneralVoF::gas_volumes() const noexcept
 {
@@ -1373,7 +1431,7 @@ std::vector<Meshes::ExactPhaseMeasures> GeneralVoF::geometric_phases() const
         {
             current(*data_);
             wire::Budget budget{data_->options.byte_budget};
-            for (const auto& key : data_->order)
+            for (const auto& key : data_->topology->order)
             {
                 const auto& cell = data_->cells.at(key);
                 validate_cell(cell, data_->options);
@@ -1395,7 +1453,7 @@ std::vector<double> GeneralVoF::geometric_gas_fractions() const
             current(*data_);
             wire::Budget budget{data_->options.byte_budget};
             const auto one = Measure::from_value(1);
-            for (const auto& key : data_->order)
+            for (const auto& key : data_->topology->order)
             {
                 const auto& cell = data_->cells.at(key);
                 validate_cell(cell, data_->options);
@@ -1431,7 +1489,7 @@ std::vector<PolyhedralInterface> GeneralVoF::reconstruct() const
         {
             current(*data_);
             auto planes = reconstruct_local(*data_);
-            for (const auto& key : data_->order)
+            for (const auto& key : data_->topology->order)
                 result.push_back(planes.at(key));
         });
     return result;
@@ -1450,23 +1508,27 @@ std::vector<GeneralVoFReconstructionPatch> GeneralVoF::reconstruction_patches() 
 }
 const std::vector<AMR::AdaptiveNode>& GeneralVoF::nodes() const noexcept
 {
-    return data_->nodes;
+    return data_->topology->nodes;
 }
 const std::vector<AMR::AdaptiveTile>& GeneralVoF::tiles() const noexcept
 {
-    return data_->tiles;
+    return data_->topology->tiles;
+}
+const std::vector<std::size_t>& GeneralVoF::node_tiles(std::uint64_t node) const
+{
+    return data_->topology->node_tiles.at(node);
 }
 std::vector<Meshes::ConvexGeometryPtr> GeneralVoF::owned_geometry() const
 {
     std::vector<Meshes::ConvexGeometryPtr> result;
-    for (const auto& key : data_->order)
+    for (const auto& key : data_->topology->order)
         result.push_back(data_->cells.at(key).phase.geometry);
     return result;
 }
 std::vector<std::uint64_t> GeneralVoF::node_cells(std::uint64_t node) const
 {
     std::set<std::uint64_t> cells;
-    const auto& fan = data_->node_fans.at(node);
+    const auto& fan = data_->topology->node_fans.at(node);
     std::set<Key> seen = fan, front = fan;
     for (const auto& key : fan)
         cells.insert(data_->cells.at(key).gid);
@@ -1475,8 +1537,8 @@ std::vector<std::uint64_t> GeneralVoF::node_cells(std::uint64_t node) const
         std::set<Key> next;
         for (const auto& key : front)
         {
-            auto found = data_->adjacency.find(key);
-            if (found == data_->adjacency.end())
+            auto found = data_->topology->adjacency.find(key);
+            if (found == data_->topology->adjacency.end())
                 continue;
             for (const auto& neighbor : found->second)
             {
@@ -1497,7 +1559,7 @@ std::vector<std::uint64_t> GeneralVoF::node_cells(std::uint64_t node) const
 }
 std::vector<std::uint64_t> GeneralVoF::cell_support(std::uint64_t gid) const
 {
-    const auto key = data_->by_gid.at(gid);
+    const auto key = data_->topology->by_gid.at(gid);
     if (!data_->hierarchy->owned().contains(key))
         throw std::invalid_argument("General VoF cell support requires an owned seed.");
     std::set<Key> seen{key}, front{key};
@@ -1506,8 +1568,8 @@ std::vector<std::uint64_t> GeneralVoF::cell_support(std::uint64_t gid) const
         std::set<Key> next;
         for (const auto& center : front)
         {
-            const auto found = data_->adjacency.find(center);
-            if (found == data_->adjacency.end())
+            const auto found = data_->topology->adjacency.find(center);
+            if (found == data_->topology->adjacency.end())
                 continue;
             for (const auto& neighbor : found->second)
                 if (data_->cells.contains(neighbor) && seen.insert(neighbor).second)
@@ -1582,7 +1644,7 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
         [&]
         {
             current(data);
-            if (!std::isfinite(dt) || dt < 0 || nodes.size() != data.nodes.size() || faces.size() != data.tiles.size())
+            if (!std::isfinite(dt) || dt < 0 || nodes.size() != data.topology->nodes.size() || faces.size() != data.topology->tiles.size())
                 throw std::invalid_argument("General VoF controls do not cover retained nodes/faces.");
             wire::Budget budget{data.options.byte_budget};
             for (const auto& node : nodes)
@@ -1600,11 +1662,11 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                                                                          : Measure::from_value(face.integrated_volume))
                         .second)
                     throw std::invalid_argument("General VoF invalid/repeated face control.");
-            for (const auto& node : data.nodes)
+            for (const auto& node : data.topology->nodes)
             {
                 auto v = velocity.at(node.gid);
                 std::vector<Meshes::ExactPlanarFacePtr> walls;
-                const auto& catalog = data.node_walls.at(node.gid);
+                const auto& catalog = data.topology->node_walls.at(node.gid);
                 budget.add(catalog.size() * sizeof(Meshes::ExactPlanarFacePtr));
                 for (const auto& wall : catalog)
                     walls.push_back(wall.geometry);
@@ -1634,7 +1696,7 @@ void controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVeloci
                 trajectories.emplace(node.gid, std::move(trajectory));
                 packets.push_back({int(node.gid % comm->getSize()), std::move(w.data)});
             }
-            for (const auto& tile : data.tiles)
+            for (const auto& tile : data.topology->tiles)
             {
                 const auto phi = flux.at(tile.face_gid);
                 if ((tile.exterior || dt == 0) && phi.sign() != 0)
@@ -1691,8 +1753,8 @@ std::vector<Meshes::ExactSweepDonor> donor_support(
         std::set<Key> next;
         for (const auto& key : front)
         {
-            auto found = data.adjacency.find(key);
-            if (found == data.adjacency.end())
+            auto found = data.topology->adjacency.find(key);
+            if (found == data.topology->adjacency.end())
                 continue;
             for (const auto& neighbor : found->second)
                 if (data.cells.contains(neighbor) && seen.insert(neighbor).second)
@@ -1731,12 +1793,12 @@ std::vector<Meshes::ExactSweepDonor> face_donor_support(
         }
     };
     for (const auto& donor : donor_support(data, face.first, face.second))
-        insert(data.by_gid.at(donor.id));
+        insert(data.topology->by_gid.at(donor.id));
     // A high-valence native corner is not bounded by two face hops. These
     // complete fans were registered by ALL incident owners and their full
     // shells fetched before construction; geometric coincidence is irrelevant.
     for (auto node : face.node_gids)
-        for (const auto& key : data.node_fans.at(node))
+        for (const auto& key : data.topology->node_fans.at(node))
             insert(key);
     std::vector<Meshes::ExactSweepDonor> result;
     budget.add(selected.size() * sizeof(Meshes::ExactSweepDonor));
@@ -1816,11 +1878,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
     wire::collective(*comm,
         [&]
         {
-            for (const auto& key : data.order)
+            for (const auto& key : data.topology->order)
             {
                 Measure divergence;
-                for (const auto& tile : data.tiles)
+                for (const auto index : data.topology->cell_tiles.at(key))
                 {
+                    const auto& tile = data.topology->tiles[index];
                     const int sign = tile.first == key ? 1 : (tile.second && *tile.second == key ? -1 : 0);
                     if (sign)
                         divergence = divergence + flux.at(tile.face_gid).scaled(sign);
@@ -1849,9 +1912,9 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
             [&]
             {
                 wire::Budget budget{limit};
-                budget.add(data.order.size() * sizeof(PhaseRoundoff));
-                trial.roundoff_.resize(data.order.size());
-                for (const auto& key : data.order)
+                budget.add(data.topology->order.size() * sizeof(PhaseRoundoff));
+                trial.roundoff_.resize(data.topology->order.size());
+                for (const auto& key : data.topology->order)
                 {
                     budget.add(sizeof(GeneralVoFTransfer) + sizeof(GeneralVoFDonorBudget));
                     const auto& cell = data.cells.at(key);
@@ -1910,9 +1973,9 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
             wire::Budget budget{limit};
             ExactStorageBudget exact_storage{budget};
             detail::ExactLiveStorage raw_live(budget, limit / 4);
-            budget.add(data.order.size() * sizeof(PhaseRoundoff));
-            trial.roundoff_.resize(data.order.size());
-            for (const auto& tile : data.tiles)
+            budget.add(data.topology->order.size() * sizeof(PhaseRoundoff));
+            trial.roundoff_.resize(data.topology->order.size());
+            for (const auto& tile : data.topology->tiles)
             {
                 std::vector<Meshes::ExactNodeTrajectory> trajectories;
                 budget.add(tile.node_gids.size() * sizeof(Meshes::ExactNodeTrajectory));
@@ -1944,13 +2007,14 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                 face_parts.emplace(tile.face_gid, std::move(pieces));
                 face_donors.emplace(tile.face_gid, std::move(candidates));
             }
-            for (const auto& key : data.order)
+            for (const auto& key : data.topology->order)
             {
                 const auto& cell = data.cells.at(key);
                 Meshes::ExactSweepRecipient recipient{cell.gid, cell.phase.geometry, {}};
                 Measure divergence;
-                for (const auto& tile : data.tiles)
+                for (const auto index : data.topology->cell_tiles.at(key))
                 {
+                    const auto& tile = data.topology->tiles[index];
                     int sign = tile.first == key ? 1 : (tile.second && *tile.second == key ? -1 : 0);
                     if (!sign)
                         continue;
@@ -1960,21 +2024,23 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                 if (divergence.sign())
                     throw std::invalid_argument("General VoF projected flux violates source-free occupancy.");
                 std::map<Key, Meshes::ExactSweepDonor> selected;
-                for (const auto& tile : data.tiles)
-                    if (tile.first == key || (tile.second && *tile.second == key))
-                        for (const auto& donor : face_donors.at(tile.face_gid))
+                for (const auto index : data.topology->cell_tiles.at(key))
+                {
+                    const auto& tile = data.topology->tiles[index];
+                    for (const auto& donor : face_donors.at(tile.face_gid))
+                    {
+                        const auto& donor_key = data.topology->by_gid.at(donor.id);
+                        if (!selected.contains(donor_key))
                         {
-                            const auto& donor_key = data.by_gid.at(donor.id);
-                            if (!selected.contains(donor_key))
-                            {
-                                if (selected.size() >= data.options.maximum_stencil_cells)
-                                    throw std::invalid_argument(
-                                        "General VoF recipient face-donor union budget exhausted.");
-                                budget.add(sizeof(Key) + sizeof(Meshes::ExactSweepDonor) +
-                                           AMR::encode_adaptive_key(donor_key).size() + 8 * sizeof(void*));
-                                selected.emplace(donor_key, donor);
-                            }
+                            if (selected.size() >= data.options.maximum_stencil_cells)
+                                throw std::invalid_argument(
+                                    "General VoF recipient face-donor union budget exhausted.");
+                            budget.add(sizeof(Key) + sizeof(Meshes::ExactSweepDonor) +
+                                       AMR::encode_adaptive_key(donor_key).size() + 8 * sizeof(void*));
+                            selected.emplace(donor_key, donor);
                         }
+                    }
+                }
                 std::vector<Meshes::ExactSweepDonor> donors;
                 budget.add(selected.size() * sizeof(Meshes::ExactSweepDonor));
                 for (const auto& [donor_key, donor] : selected)
@@ -1994,14 +2060,14 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                         for (const auto& donor : donors)
                             context << donor.id << ',';
                         context << "] incident_faces=[";
-                        for (const auto& tile : data.tiles)
-                            if (tile.first == key || (tile.second && *tile.second == key))
-                            {
-                                std::uint64_t hash = 1469598103934665603ULL;
-                                for (unsigned char byte : tile.geometry->encode())
-                                    hash = (hash ^ byte) * 1099511628211ULL;
-                                context << tile.face_gid << ':' << hash << ',';
-                            }
+                        for (const auto index : data.topology->cell_tiles.at(key))
+                        {
+                            const auto& tile = data.topology->tiles[index];
+                            std::uint64_t hash = 1469598103934665603ULL;
+                            for (unsigned char byte : tile.geometry->encode())
+                                hash = (hash ^ byte) * 1099511628211ULL;
+                            context << tile.face_gid << ':' << hash << ',';
+                        }
                         context << "]: " << error.what();
                         throw std::invalid_argument(context.str());
                     }
@@ -2020,15 +2086,16 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                     return row.try_emplace(donor, raw_live).first->second;
                 };
                 for (const auto& atom : partition.atoms())
-                    row_for(atom.donor).add(phases(*atom.geometry, planes.at(data.by_gid.at(atom.donor))));
-                for (const auto& tile : data.tiles)
+                    row_for(atom.donor).add(phases(*atom.geometry, planes.at(data.topology->by_gid.at(atom.donor))));
+                for (const auto index : data.topology->cell_tiles.at(key))
                 {
+                    const auto& tile = data.topology->tiles[index];
                     const int sign = tile.first == key ? 1 : (tile.second && *tile.second == key ? -1 : 0);
                     if (!sign)
                         continue;
                     for (const auto& piece : face_parts.at(tile.face_gid))
                         row_for(piece.donor)
-                            .add(phases(*piece.geometry, planes.at(data.by_gid.at(piece.donor))), sign * piece.sign);
+                            .add(phases(*piece.geometry, planes.at(data.topology->by_gid.at(piece.donor))), sign * piece.sign);
                 }
                 const auto original =
                     phases(*Meshes::ExactConvexFragment::from_geometry(*cell.phase.geometry), planes.at(key));
@@ -2037,13 +2104,13 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                 {
                     // Keep the original MAPPED-zero gate, including singular
                     // donor maps; raw-zero alone is not the same acceptance.
-                    const auto paired = amount.apply(labels.at(data.by_gid.at(donor)));
+                    const auto paired = amount.apply(labels.at(data.topology->by_gid.at(donor)));
                     if (paired.bulk.sign() || paired.gas.sign() || paired.carrier.sign())
                         throw std::invalid_argument(
                             "General VoF signed donor face ledger differs from positive recipient atoms.");
                 }
             }
-            for (const auto& tile : data.tiles)
+            for (const auto& tile : data.topology->tiles)
                 if (tile.first_owner == comm->getRank())
                 {
                     using GroupKey = std::pair<std::uint64_t, int>;
@@ -2054,11 +2121,11 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                         if (!grouped.contains(key))
                             budget.add(sizeof(decltype(grouped)::value_type) + 4 * sizeof(void*));
                         grouped.try_emplace(key, raw_live)
-                            .first->second.add(phases(*piece.geometry, planes.at(data.by_gid.at(piece.donor))));
+                            .first->second.add(phases(*piece.geometry, planes.at(data.topology->by_gid.at(piece.donor))));
                     }
                     for (const auto& [group, amount] : grouped)
                     {
-                        const auto& key = data.by_gid.at(group.first);
+                        const auto& key = data.topology->by_gid.at(group.first);
                         const auto& donor = data.cells.at(key);
                         auto paired = amount.apply(labels.at(key));
                         detail::ExactLiveStorage::Scope paired_scope(
@@ -2153,8 +2220,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
             for (std::size_t index = 0; index < local_atoms.size(); ++index)
             {
                 const auto& atom = local_atoms[index];
-                const auto& donor = data.cells.at(data.by_gid.at(atom.donor));
-                const auto& recipient = data.cells.at(data.by_gid.at(atom.recipient));
+                const auto& donor = data.cells.at(data.topology->by_gid.at(atom.donor));
+                const auto& recipient = data.cells.at(data.topology->by_gid.at(atom.recipient));
                 const bool local = donor.owner == comm->getRank();
                 auto dk = AMR::encode_adaptive_key(donor.key), rk = AMR::encode_adaptive_key(recipient.key);
                 std::vector<char> geometry;
@@ -2212,8 +2279,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                     if (packet.peer != comm->getRank() || index >= local_atoms.size())
                         throw std::invalid_argument("General VoF foreign/out-of-range local atom reference.");
                     const auto& original = local_atoms[std::size_t(index)];
-                    const auto& original_donor = data.cells.at(data.by_gid.at(original.donor));
-                    const auto& original_recipient = data.cells.at(data.by_gid.at(original.recipient));
+                    const auto& original_donor = data.cells.at(data.topology->by_gid.at(original.donor));
+                    const auto& original_recipient = data.cells.at(data.topology->by_gid.at(original.recipient));
                     if (!original.geometry || original.donor != gid || original.recipient != recipient ||
                         original_donor.key != dk || original_recipient.key != rk ||
                         original_recipient.owner != comm->getRank() || original_recipient.gid != recipient)
@@ -2328,7 +2395,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                     metadata(route.recipient, sizeof(decltype(recipients)::value_type));
                 recipients[route.recipient] = {route.recipient_owner, route.recipient_gid};
             }
-            for (const auto& key : data.order)
+            for (const auto& key : data.topology->order)
             {
                 const auto& donor = data.cells.at(key);
                 Meshes::ExactTransportPartition::certify_donor_cover(
@@ -2599,7 +2666,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
             candidate->phases.clear();
             candidate->roundoff.clear();
             candidate->occupancy.clear();
-            for (const auto& key : data.order)
+            for (const auto& key : data.topology->order)
             {
                 auto& cell = candidate->cells.at(key);
                 const auto& total = totals.at(key);
@@ -2672,7 +2739,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
         [&]
         {
             std::array<::SimpleFluid::detail::CompensatedSum<>, 6> sums;
-            for (const auto& key : data.order)
+            for (const auto& key : data.topology->order)
             {
                 const auto& old = data.cells.at(key);
                 const auto& next = candidate->cells.at(key);
