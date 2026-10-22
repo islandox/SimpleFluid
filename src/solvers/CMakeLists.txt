@@ -1,7 +1,16 @@
 set(SIMPLEFLUID_SOLVER_SOURCES
+    GeneralVoFSolver.cc
     VoFSolver.cc
     details/ConservativeVoFTransport.cc
     details/VoFProjectionWorkspace.cc
+    details/GeneralVoFPhiClosure.cc
+    details/GeneralVoFProjectionArithmetic.cc
+    details/GeneralVoFExactPressure.cc
+    details/GeneralVoFFlowWorkspace.cc
+    details/GeneralVoFCurvature.cc
+    details/GeneralVoFExactStorage.cc
+    details/ConservativeVoFExactArithmetic.cc
+    details/GeneralVoFTransferBinding.cc
     AdaptiveVoFSolver.cc
     VoFLowMach.cc
     RadiolyticVoFCoupler.cc
@@ -38,6 +47,10 @@ target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidFVM)
 simplefluid_exclude_from_pgo_sources(VoFSolver.cc)
 simplefluid_exclude_from_pgo_sources(details/ConservativeVoFTransport.cc)
 simplefluid_exclude_from_pgo_sources(details/VoFProjectionWorkspace.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFFlowWorkspace.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFCurvature.cc)
+simplefluid_exclude_from_pgo_sources(details/ConservativeVoFExactArithmetic.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFTransferBinding.cc)
 simplefluid_exclude_from_pgo_sources(AdaptiveVoFSolver.cc)
 simplefluid_exclude_from_pgo_sources(VoFLowMach.cc)
 simplefluid_exclude_from_pgo_sources(RadiolyticVoFCoupler.cc)
@@ -55,3 +68,11 @@ if(SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
     target_compile_options(SimpleFluidSolvers PRIVATE
         "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-fno-semantic-interposition>")
 endif()
+
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFPhiClosure.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFProjectionArithmetic.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactPressure.cc)
+
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactStorage.cc)
+
+simplefluid_exclude_from_pgo_sources(GeneralVoFSolver.cc)

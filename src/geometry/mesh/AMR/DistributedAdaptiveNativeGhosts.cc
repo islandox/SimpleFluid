@@ -34,8 +34,8 @@ AdaptiveNode node_read(Reader& r)
     return node;
 }
 } // namespace
-AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHierarchy& hierarchy,
-    std::span<const char> root_schema, std::span<const AdaptiveCellKey> additional_full_ghosts)
+AdaptiveNativeDraft fetch_adaptive_native_draft(
+    const DistributedAdaptiveHierarchy& hierarchy, std::span<const AdaptiveCellKey> additional_full_ghosts)
 {
     const auto comm = hierarchy.communicator();
     const auto limit = hierarchy.options().byte_budget;
@@ -93,8 +93,7 @@ AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHier
             }
         });
     auto incoming = exchange_owner_packets(requests, comm, limit);
-    requests.clear();
-    requests.shrink_to_fit();
+    std::vector<OwnerPacket>().swap(requests);
     std::vector<OwnerPacket> responses;
     adaptive_detail::collective(*comm,
         [&]
@@ -137,8 +136,7 @@ AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHier
                 responses.push_back({packet.peer, std::move(w.data)});
             }
         });
-    incoming.packets.clear();
-    incoming.packets.shrink_to_fit();
+    std::vector<OwnerPacket>().swap(incoming.packets);
     auto returned = exchange_owner_packets(responses, comm, limit);
     adaptive_detail::collective(*comm,
         [&]
@@ -278,6 +276,13 @@ AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHier
                 draft.cell_bindings.push_back(std::move(binding));
             }
         });
-    return assemble_adaptive_native(std::move(draft), root_schema, comm, limit);
+    return draft;
+}
+AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHierarchy& hierarchy,
+    std::span<const char> root_schema, std::span<const AdaptiveCellKey> additional_full_ghosts)
+{
+    auto draft = fetch_adaptive_native_draft(hierarchy, additional_full_ghosts);
+    return assemble_adaptive_native(
+        std::move(draft), root_schema, hierarchy.communicator(), hierarchy.options().byte_budget);
 }
 } // namespace SimpleFluid::Meshes::AMR

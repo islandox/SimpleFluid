@@ -2014,15 +2014,41 @@ qualify general VoF, sparse ALE, production scaling or physical applications.
 
 ### Stage 7 — General VoF and flow qualification
 
+Implementation is in progress and under qualification; checkboxes remain pending
+integrated solver evidence. See [Stage 7 verification](docs/verification/general_amr_stage7.md)
+for the source-bound campaign, reproducible focused commands and limits.
+The default native backend is being revised to independent finite-precision
+gas/carrier inventories and finite accepted histories; no rational physical
+remainder is carried across default-path steps or regrid. Exact native geometry predicates/certificates,
+bounded geometric labels, shared-node unsplit sweeps, positive donor transfers
+and physical-coordinate pressure/capillary/viscous operators remain distinct.
+The earlier exact-history prototype and source-bound evidence are retained for
+a planned opt-in experimental path, not qualification of the finite default or
+of the future optional integration. Configurable rank-local
+memory guards are engineering admission limits, not physical constraints.
+Source-free closed nonperiodic flow is the intended bounded scope. Periodic
+images, low-Mach/material/species sources and drift remain unsupported here.
+
+
 - [ ] Add polyhedral PLIC reconstruction and canonical unsplit swept-volume
       transport with complementary gas/carrier fluxes matching projected face
       volume. Retain the Cartesian implementation as a specialized backend.
+- [ ] Publish independent finite phase volumes and histories once per accepted
+      step/remap; remove persistent rational remainders. Preserve representable
+      tiny phases with cancellation-resistant arithmetic and scale-aware counted
+      conservation/positivity/rounding bounds, without cell-volume phase floors.
+- [ ] After separately committing the finite-default implementation, preserve
+      the exact-inventory prototype in a separate explicit opt-in experimental-path
+      commit with an assistance/provenance note and documented unqualified
+      performance, memory, long-horizon and production-scaling boundaries.
+      Do not restore persistent rational phase history into the default path.
 - [ ] Derive unsplit donor budgets that preserve microscopic gas/carrier tails;
       allow only bounded canonical-face roundoff repair, with collective donor
       rechecks and no cell clipping. Cartesian directional helpers alone do not
       establish this contract for general polyhedra.
-- [ ] Reuse compatible implicit momentum with final mass storage and actual
-      phase/species/population mass fluxes. Preserve separate drift impulses,
+- [ ] Qualify compatible implicit momentum with final mass storage and actual
+      source-free phase-mass fluxes. Species/population mass-flux integration
+      and separate drift impulses remain Stage 8; preserve
       first-order accuracy limits, and force-free passive-bound scope.
 - [ ] Retain attainable equilibrated solves plus the original physical residual,
       positivity/conservation gates, bounded physical-defect corrections and

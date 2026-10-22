@@ -12,7 +12,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
+  if(TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
       OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     # Catch dependencies from FVM back into the higher-level solver DSO.
@@ -21,10 +21,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  if(TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
+  if(TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
       OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testPolyhedralReconstruction")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;geometry\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testGeometricVoF")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;geometry\\;conservation")
@@ -250,4 +253,34 @@ foreach(PROCS IN ITEMS 2 4)
     PROCS ${PROCS}
     LABELS "amr;distributed;state;history;conservation;collective"
     TIMEOUT 240)
+endforeach()
+
+# General unsplit transport is separate from the optimized Cartesian backend.
+simplefluid_add_mpi_test(
+    NAME GeneralVoF_2procs
+    TARGET testGeneralVoF
+    PROCS 2
+    LABELS "vof;geometry;conservation;collective"
+    TIMEOUT 300)
+simplefluid_add_mpi_test(
+    NAME GeneralVoF_4procs
+    TARGET testGeneralVoF
+    PROCS 4
+    LABELS "vof;geometry;conservation;collective"
+    TIMEOUT 300)
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME ExactPhaseTransfer_${PROCS}procs
+    TARGET testExactPhaseTransfer PROCS ${PROCS}
+    LABELS "vof;amr;exact;history;conservation;collective"
+    TIMEOUT 300)
+endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME ExactFaceTransfer_${PROCS}procs
+    TARGET testExactFaceTransfer PROCS ${PROCS}
+    LABELS "vof;amr;exact;face_flux;conservation;collective"
+    TIMEOUT 300)
 endforeach()

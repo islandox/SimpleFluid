@@ -17,10 +17,27 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   target_link_libraries(${TEST_NAME} SimpleFluid::Solvers GTest::gtest_main)
   if(TEST_NAME STREQUAL "testConservativeVoFTransport")
     # Compile the private numerical boundary directly; it is not a DSO export.
-    target_sources(${TEST_NAME} PRIVATE ../details/ConservativeVoFTransport.cc)
+    target_sources(${TEST_NAME} PRIVATE ../details/ConservativeVoFTransport.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc ../details/GeneralVoFTransferBinding.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFCurvature")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFCurvature.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFFlowWorkspace")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/VoFProjectionWorkspace.cc
+      ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactPressure.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFExactPressure")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFExactPressure.cc
+      ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFPhiClosure")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFPhiClosure.cc
+      ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  if(TEST_NAME STREQUAL "testVerificationCases")
+  if(TEST_NAME STREQUAL "testGeneralVoFSolver")
+    simplefluid_discover_tests(${TEST_NAME} PROPERTIES LABELS "vof\\;general_mesh\\;integration" TIMEOUT 1800)
+  elseif(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
       ${TEST_NAME}
       PROPERTIES LABELS "verification\\;integration"
@@ -473,3 +490,42 @@ simplefluid_add_mpi_test(
     PROCS 33
     LABELS "vof;conservation;collective;empty_rank"
     TIMEOUT 120)
+
+
+simplefluid_add_mpi_test(
+    NAME GeneralVoFFlowWorkspace_2procs
+    TARGET testGeneralVoFFlowWorkspace
+    PROCS 2
+    LABELS "vof;amr;flow;collective"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
+    NAME GeneralVoFSolver_2procs
+    TARGET testGeneralVoFSolver
+    PROCS 2
+    ARGS "--gtest_filter=GeneralVoFSolverTest.*"
+    LABELS "mpi;vof;general_mesh;integration"
+    TIMEOUT 3600
+)
+
+simplefluid_add_mpi_test(
+    NAME GeneralVoFSolver_EmptyRank_4procs
+    TARGET testGeneralVoFSolver
+    PROCS 4
+    ARGS "--gtest_filter=GeneralVoFSolverTest.NativeSourceFreeStationaryAdvanceAndRejectedStepRetainAcceptedPublication:GeneralVoFSolverTest.IndependentMixedPlaneRetainsBothPhaseMassesInSourceFreeStationaryFlow:GeneralVoFSolverTest.MicroscopicDeclaredTraceAggregatesPhaseMassBeforeDiagnosticNarrowing:GeneralVoFSolverTest.SymmetricNativeRegridRetainsAcceptedPhysicalMomentumAtFixedClock:GeneralVoFSolverTest.TinyCellRepartitionRetainsIndependentZeroRatesAndSubnormalAggregateMomentum"
+    LABELS "mpi;vof;general_mesh;integration;empty_rank"
+    TIMEOUT 3600
+)
+
+simplefluid_add_mpi_test(
+    NAME GeneralVoFExactPressure_2procs
+    TARGET testGeneralVoFExactPressure
+    PROCS 2
+    LABELS "vof;pressure;exact;collective;empty_rank"
+    TIMEOUT 180)
+simplefluid_add_mpi_test(
+    NAME GeneralVoFExactPressure_4procs
+    TARGET testGeneralVoFExactPressure
+    PROCS 4
+    LABELS "vof;pressure;exact;collective;empty_rank"
+    TIMEOUT 180)
