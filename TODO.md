@@ -27,8 +27,8 @@ remain open. Phase 23 Stages 1–6 implement the common hierarchy/Cartesian seam
 certified geometry/remap, whole/local XY/Z products, convex polyhedral adaptation,
 bounded mixed-provider closure and detached distributed migration with focused
 correctness, memory and work-accounting verification. Production scaling remains
-open; general flow, physical coupling and nonconvex qualification remain proposed
-in Stages 7–9.
+open. Stage 7 general flow is implemented and under qualification; physical
+coupling and nonconvex extensions remain proposed in Stages 8–9.
 
 1. Qualify the authenticated pitzDaily acceptance manifest with converged,
    checked-in OpenFOAM and SimpleFluid profiles and evidence-based tolerances.
@@ -67,7 +67,7 @@ in Stages 7–9.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
-| Phase 23, general native AMR | Stages 1–6 implemented and verified; Stages 7–9 proposed | Local/mixed providers and detached distributed migration meet bounded correctness, memory and work-accounting gates; production scaling and general VoF remain open |
+| Phase 23, general native AMR | Stages 1–6 implemented and verified; Stage 7 implemented/under qualification; Stages 8–9 proposed | Local/mixed providers and detached distributed migration meet bounded correctness, memory and work-accounting gates; production scaling and general VoF remain open |
 
 ### Checklist conventions
 
@@ -1862,7 +1862,8 @@ for the implemented API, reproducible checks and qualification limits.
 
 ## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
 
-**Status: Stages 1–6 implemented and verified within the stated scope; Stages 7–9 remain proposed.** See the
+**Status: Stages 1–6 implemented and verified within the stated scope; Stage 7
+implemented and under qualification; Stages 8–9 remain proposed.** See the
 [general AMR design](docs/architecture/general_amr.md) for the algorithms,
 ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
@@ -2014,17 +2015,18 @@ qualify general VoF, sparse ALE, production scaling or physical applications.
 
 ### Stage 7 — General VoF and flow qualification
 
-Implementation is in progress and under qualification; checkboxes remain pending
-integrated solver evidence. See [Stage 7 verification](docs/verification/general_amr_stage7.md)
+Implementation exists and is under qualification; capability checkboxes remain
+pending integrated physical-solver evidence. See [Stage 7 verification](docs/verification/general_amr_stage7.md)
 for the source-bound campaign, reproducible focused commands and limits.
 The default native backend is being revised to independent finite-precision
 gas/carrier inventories and finite accepted histories; no rational physical
 remainder is carried across default-path steps or regrid. Exact native geometry predicates/certificates,
 bounded geometric labels, shared-node unsplit sweeps, positive donor transfers
 and physical-coordinate pressure/capillary/viscous operators remain distinct.
-The earlier exact-history prototype and source-bound evidence are retained for
-a planned opt-in experimental path, not qualification of the finite default or
-of the future optional integration. Configurable rank-local
+The exact-history prototype is retained as an explicit opt-in experimental
+policy, not the default. Historical source-bound evidence qualifies neither the
+finite default nor the new optional integration. General physical qualification
+and production performance remain open. Configurable rank-local
 memory guards are engineering admission limits, not physical constraints.
 Source-free closed nonperiodic flow is the intended bounded scope. Periodic
 images, low-Mach/material/species sources and drift remain unsupported here.
@@ -2037,11 +2039,17 @@ images, low-Mach/material/species sources and drift remain unsupported here.
       step/remap; remove persistent rational remainders. Preserve representable
       tiny phases with cancellation-resistant arithmetic and scale-aware counted
       conservation/positivity/rounding bounds, without cell-volume phase floors.
-- [ ] After separately committing the finite-default implementation, preserve
-      the exact-inventory prototype in a separate explicit opt-in experimental-path
-      commit with an assistance/provenance note and documented unqualified
-      performance, memory, long-horizon and production-scaling boundaries.
-      Do not restore persistent rational phase history into the default path.
+- [x] Implement an explicit experimental exact-inventory policy with a cold
+      optional phase/provenance payload, source/result/policy pins and same-mode
+      remap. Keep finite authoritative phase storage as the default and reject
+      cross-policy adoption or silent fallback. This is implementation only.
+- [x] Preserve the experimental policy in a separate implementation commit after
+      the finite-default commit, with a structured assistance/provenance note.
+      Focused policy/API/rollback/remap checks are recorded separately; this
+      preservation does not claim complete Stage 7 qualification.
+- [ ] Qualify the optional exact integration's physical accuracy, storage/RSS,
+      performance, long-horizon and scaling behavior. Retain documented rational
+      history growth and unresolved resource/physical boundaries.
 - [ ] Derive unsplit donor budgets that preserve microscopic gas/carrier tails;
       allow only bounded canonical-face roundoff repair, with collective donor
       rechecks and no cell clipping. Cartesian directional helpers alone do not

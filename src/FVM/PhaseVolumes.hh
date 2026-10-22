@@ -4,8 +4,16 @@
 #pragma once
 namespace SimpleFluid::VoF
 {
-/** Independent authoritative binary64 volumes. bulk is the native cell metric;
- * neither phase is reconstructed as bulk minus the other. */
+/** ExperimentalExact is opt-in and physically/performance unqualified.
+ * Finite remains the default and allocates no rational phase history. */
+enum class PhaseInventoryPolicy
+{
+    Finite,
+    ExperimentalExact
+};
+/** Independent binary64 volumes: authoritative in Finite, rounded diagnostic
+ * views in ExperimentalExact. bulk is the native cell metric; neither phase
+ * is reconstructed as bulk minus the other. */
 struct PhaseVolumes
 {
     double bulk = 0, gas = 0, carrier = 0;

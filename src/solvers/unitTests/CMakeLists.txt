@@ -517,6 +517,24 @@ simplefluid_add_mpi_test(
     TIMEOUT 3600
 )
 
+# Explicit optional-authority contract checks, not experimental physical qualification.
+set(general_vof_experimental_inventory_filter
+    "--gtest_filter=GeneralVoFSolverTest.ExperimentalInventoryIsExplicitAndRollbackPreservesItsSelectedAuthority:GeneralVoFSolverTest.ExperimentalInventorySamePolicyRegridRetainsClockAndPhaseAuthority:GeneralVoFSolverTest.ExperimentalInventoryRejectsForeignPolicyTrialWithoutChangingAcceptedSolver")
+simplefluid_add_mpi_test(
+    NAME GeneralVoFSolver_ExperimentalInventory_2procs
+    TARGET testGeneralVoFSolver
+    PROCS 2
+    ARGS "${general_vof_experimental_inventory_filter}"
+    LABELS "mpi;vof;general_mesh;experimental;policy"
+    TIMEOUT 180)
+simplefluid_add_mpi_test(
+    NAME GeneralVoFSolver_ExperimentalInventory_4procs
+    TARGET testGeneralVoFSolver
+    PROCS 4
+    ARGS "${general_vof_experimental_inventory_filter}"
+    LABELS "mpi;vof;general_mesh;experimental;policy;empty_rank"
+    TIMEOUT 180)
+
 simplefluid_add_mpi_test(
     NAME GeneralVoFExactPressure_2procs
     TARGET testGeneralVoFExactPressure
