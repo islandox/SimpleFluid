@@ -24,6 +24,34 @@ M absolute(const M& a, std::size_t budget)
     return a.sign() < 0 ? vof_exact::scale(a, -1, budget) : a;
 }
 } // namespace
+M general_vof_pressure_normalization_scale(const M& maximum, std::size_t cap)
+{
+    if (maximum.sign() < 0)
+        throw std::invalid_argument("Negative pressure normalization maximum.");
+    if (cap > std::numeric_limits<std::size_t>::max() / 16)
+        throw std::length_error("Pressure normalization operation lease overflow.");
+    if (!maximum.sign())
+    {
+        auto one = M::from_value(1);
+        if (one.storage_bytes() > cap)
+            throw std::length_error("Pressure normalization exceeds its retained scalar cap.");
+        return one;
+    }
+    // A two-bit truncation r satisfies m/2 < r <= m, at arbitrary exact
+    // exponent. Doubling therefore keeps the largest normalized RHS below one
+    // without propagating the exact residual's entire significand history.
+    const auto truncated = maximum.rounded_dyadic(2, 16 * cap);
+    try
+    {
+        return vof_exact::leased_scale(truncated, 2, cap);
+    }
+    catch (const std::runtime_error& error)
+    {
+        // With an admitted exact input and fixed finite factor two, this
+        // operation's runtime failures are scalar lease/capacity failures.
+        throw std::length_error(error.what());
+    }
+}
 M general_vof_projection_divergence_limit(const M& initial_maximum, double dt, double absolute_tolerance,
     double relative_tolerance, double divergence_tolerance, std::size_t cap)
 {

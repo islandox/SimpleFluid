@@ -253,17 +253,34 @@ struct GeneralVoFSolver::Impl
                 for (const auto& patch : patches)
                     if (auto sample = detail::GeneralVoFCurvature::patch(patch.cell, *patch.geometry, patch.interface))
                         surface.push_back(*sample);
+                constexpr auto index_entry_bytes =
+                    sizeof(std::pair<const std::uint64_t, std::size_t>) + 4 * sizeof(void*);
+                if (surface.size() > options.byte_budget / index_entry_bytes)
+                    throw std::runtime_error("General VoF curvature index exceeds its byte budget.");
+                const auto index_bytes = surface.size() * index_entry_bytes;
+                std::map<std::uint64_t, std::size_t> surface_index;
+                for (std::size_t index = 0; index < surface.size(); ++index)
+                    surface_index.emplace(surface[index].cell, index);
                 for (const auto& patch : surface)
                 {
                     const auto local = mesh->owned_cell_map()->getLocalElement(GO(patch.cell));
                     if (local >= 0)
                     {
                         const auto support = state.phases->cell_support(patch.cell);
-                        const std::set<std::uint64_t> admitted(support.begin(), support.end());
+                        if (support.size() > (options.byte_budget - index_bytes) / sizeof(std::size_t))
+                            throw std::runtime_error("General VoF curvature support index exceeds its byte budget.");
+                        std::vector<std::size_t> selected;
+                        selected.reserve(support.size());
+                        for (const auto cell : support)
+                            if (const auto found = surface_index.find(cell); found != surface_index.end())
+                                selected.push_back(found->second);
+                        // Retain the original surface order: curvature fits sum
+                        // floating-point stencil contributions in this order.
+                        std::sort(selected.begin(), selected.end());
                         std::vector<detail::GeneralVoFCurvaturePatch> stencil;
-                        for (const auto& sample : surface)
-                            if (admitted.contains(sample.cell))
-                                stencil.push_back(sample);
+                        stencil.reserve(selected.size());
+                        for (const auto index : selected)
+                            stencil.push_back(surface[index]);
                         state.curvature[local] = detail::GeneralVoFCurvature::fit(patch, stencil).curvature;
                     }
                 }
@@ -441,10 +458,12 @@ struct GeneralVoFSolver::Impl
                         packet.bytes.insert(packet.bytes.end(), key.begin(), key.end());
                     }
                     std::vector<const Meshes::AMR::AdaptiveTile*> walls;
-                    for (const auto& tile : state.phases->tiles())
-                        if (tile.exterior &&
-                            std::find(tile.node_gids.begin(), tile.node_gids.end(), node.gid) != tile.node_gids.end())
+                    for (const auto index : state.phases->node_tiles(node.gid))
+                    {
+                        const auto& tile = state.phases->tiles()[index];
+                        if (tile.exterior)
                             walls.push_back(&tile);
+                    }
                     append_word(packet.bytes, walls.size());
                     for (const auto* wall : walls)
                     {
@@ -1145,6 +1164,7 @@ struct GeneralVoFSolver::Impl
         collective(
             [&]
             {
+                capacity = next->physical_mass;
                 std::set<GO> seen;
                 for (const auto& donor : trial.donor_budgets())
                 {
@@ -1177,7 +1197,6 @@ struct GeneralVoFSolver::Impl
                     for (std::size_t c = 0; c < volume.size(); ++c)
                     {
                         momentum[c] = old.physical_mass[c].scaled(old.velocity[c][a]);
-                        capacity[c] = next->physical_mass[c];
                     }
                 });
             const auto carried =

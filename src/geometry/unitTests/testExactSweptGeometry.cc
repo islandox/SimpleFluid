@@ -45,6 +45,49 @@ TEST(ExactSweptGeometry, SignedPointProjectionRetainsRationalSupportBehindDispla
     EXPECT_EQ((projection + exact_point_projection(identity, {-1, 0, 0}, anchor)).sign(), 0);
     EXPECT_EQ(exact_point_projection(identity, {10, 0, 0}, {}).compare(M::from_value(1)), 0);
 }
+TEST(ExactSweptGeometry, VolumeOnlyAndFullMomentsAgreeForTranslatedSkewWithZeroFanTriangles)
+{
+    using M = ExactGeometryMeasure;
+    // The top face starts with a collinear fan triangle away from the moment
+    // origin; incident faces also have exactly zero tetrahedral determinants.
+    const std::vector<GeometryPoint> reference{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0},
+        {0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {1, 1, 1}, {.5, 0, 0}, {.5, 0, 1}};
+    const std::vector<std::vector<std::size_t>> faces{{0, 4, 6, 2}, {1, 3, 7, 5},
+        {0, 8, 1, 5, 9, 4}, {2, 6, 7, 3}, {0, 2, 3, 1, 8}, {4, 9, 5, 7, 6}};
+    for (const GeometryPoint shift : std::array<GeometryPoint, 2>{{{0, 0, 0}, {8, -4, 2}}})
+    {
+        auto points = reference;
+        for (auto& p : points)
+            p = {shift[0] + p[0] + .5 * p[1] + .25 * p[2],
+                shift[1] + p[1] + .25 * p[2], shift[2] + p[2]};
+        const auto cell = ConvexCellGeometry::make(points, faces);
+        const auto fragment = ExactConvexFragment::from_geometry(*cell);
+        EXPECT_EQ(fragment->volume().compare(M::from_value(1)), 0);
+        EXPECT_EQ(M::volume(*cell).compare(fragment->volume()), 0);
+        const auto full = cell->moments();
+        EXPECT_EQ(full.volume.value, 1);
+        const std::array<long double, 3> first{.875L, .625L, .5L};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            EXPECT_EQ(full.first_moment[axis].value, first[axis]);
+            EXPECT_EQ(full.first_moment[axis].absolute_error, 0);
+        }
+        const GeometryHalfspace plane{{1, -.5, -.125}, shift, .25};
+        const auto phases = fragment->phases(plane);
+        EXPECT_EQ(phases.gas.compare(M::from_value(.25)), 0);
+        EXPECT_EQ(phases.carrier.compare(M::from_value(.75)), 0);
+        const auto split = cell->clip(plane);
+        ASSERT_TRUE(split.inside);
+        ASSERT_TRUE(split.outside);
+        const auto inside = split.inside->moments();
+        EXPECT_EQ(inside.volume.value, .25L);
+        const std::array<long double, 3> cut_first{.125L, .15625L, .125L};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(inside.first_moment[axis].value, cut_first[axis]);
+        const std::array children{split.inside, split.outside};
+        EXPECT_NO_THROW(cell->certify_partition(children));
+    }
+}
 TEST(ExactSweptGeometry, CertifiedClipsPreserveCollinearContactsSliversAndStrictRawAdmission)
 {
     using M = ExactGeometryMeasure;
@@ -473,6 +516,38 @@ TEST(ExactSweptGeometry, FreshExactCompactionChargesOverlapAndPreservesSourceAnd
     EXPECT_THROW((void) tiny_compact.certified().as_double(), std::runtime_error);
 }
 
+TEST(ExactSweptGeometry, BoundedDyadicRepresentationPreservesNonzeroRangeAndOriginalAuthority)
+{
+    using M = ExactGeometryMeasure;
+    auto power = M::from_value(2);
+    for (unsigned i = 0; i < 12; ++i)
+        power = power.squared();
+    const auto tail = M::from_value(1).divided_by(power);
+    EXPECT_EQ(power.rounded_dyadic(106, 1024 * 1024).compare(power), 0);
+    EXPECT_EQ(power.scaled(-1).rounded_dyadic(106, 1024 * 1024).compare(power.scaled(-1)), 0);
+    const auto original = M::from_value(1) + tail;
+    const auto original_wire = original.encode();
+    const auto rounded = original.rounded_dyadic(106, 1024 * 1024);
+    EXPECT_EQ(rounded.compare(M::from_value(1)), 0);
+    EXPECT_EQ((original - rounded).compare(tail), 0);
+    EXPECT_LT(rounded.storage_bytes(), original.storage_bytes());
+    EXPECT_EQ(original.encode(), original_wire);
+    EXPECT_EQ(original.scaled(-1).rounded_dyadic(106, 1024 * 1024).compare(rounded.scaled(-1)), 0);
+    const auto third = M::from_value(1).divided_by(M::from_value(3));
+    const auto bounded_third = third.rounded_dyadic(106, 1024 * 1024);
+    EXPECT_LT(bounded_third.compare(third), 0);
+    EXPECT_TRUE(bounded_third.relative_error_at_most(third, std::ldexp(1.0, -104)));
+    const auto tiny = M::from_value(std::numeric_limits<double>::denorm_min()).squared();
+    const auto bounded_tiny = tiny.rounded_dyadic(106, 1024 * 1024);
+    EXPECT_EQ(bounded_tiny.compare(tiny), 0);
+    EXPECT_GT(bounded_tiny.sign(), 0);
+    EXPECT_THROW((void) bounded_tiny.certified().as_double(), std::runtime_error);
+    EXPECT_EQ(M{}.rounded_dyadic(106, 1024 * 1024).sign(), 0);
+    EXPECT_THROW((void) original.rounded_dyadic(1, 1024 * 1024), std::invalid_argument);
+    EXPECT_THROW((void) original.rounded_dyadic(106, original.storage_bytes()), std::length_error);
+    EXPECT_EQ(original.encode(), original_wire);
+}
+
 TEST(ExactSweptGeometry, ExactWallNullspaceHandlesSlantedPlanesEdgesAndCorners)
 {
     using M = ExactGeometryMeasure;
@@ -634,6 +709,69 @@ TEST(ExactSweptGeometry, SupportingPlanesHandleCollinearPrefixAndMomentBalancedO
     EXPECT_EQ((middle->volume() + middle->volume()).compare(ExactGeometryMeasure::volume(*donor.geometry)), 0);
     column = {{37, 0, middle}, {37, 1, middle}};
     EXPECT_THROW(ExactTransportPartition::certify_donor_cover(donor, column), std::invalid_argument);
+}
+
+TEST(ExactSweptGeometry, CertifiedContainmentRetainsCollinearDonorAndSubnormalOutsideRejection)
+{
+    const std::vector<GeometryPoint> points{
+        {0, 0, 0}, {.5, 0, 0}, {0, 1, 0}, {.5, 1, 0}, {0, 0, 1}, {.5, 0, 1}, {0, 1, 1}, {.5, 1, 1}, {.5, .5, 0}};
+    const std::vector<std::vector<std::size_t>> faces{
+        {1, 8, 3, 7, 5}, {0, 4, 6, 2}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 8, 1}, {4, 5, 7, 6}};
+    const ExactSweepDonor donor{37, ConvexCellGeometry::make(points, faces)};
+    // The donor's first outward face begins with a collinear fan triangle.
+    std::vector<ExactTransportAtom> column{{37, 0,
+        ExactConvexFragment::from_geometry(*ConvexCellGeometry::box({0, 0, 0}, {.5, 1, 1}))}};
+    EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, column));
+    column[0].geometry = ExactConvexFragment::from_geometry(*ConvexCellGeometry::box(
+        {-std::numeric_limits<double>::denorm_min(), 0, 0}, {.5, 1, 1}));
+    try
+    {
+        ExactTransportPartition::certify_donor_cover(donor, column);
+        FAIL() << "A subnormal outside sliver must fail containment.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_NE(std::string(error.what()).find("outside its actual donor"), std::string::npos);
+    }
+}
+
+TEST(ExactSweptGeometry, SupportingSignsPreserveObliqueRationalContactsAndSubnormalSliverOverlap)
+{
+    const auto cell = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    const ExactSweepDonor donor{37, cell};
+    const auto whole = ExactGeometryMeasure::volume(*cell);
+    for (const GeometryPoint normal : {GeometryPoint{1, 3, 0}, GeometryPoint{1, 3, 5}})
+        for (const double cut : {1., 1e-310})
+        {
+            const GeometryPoint opposite{-normal[0], -normal[1], -normal[2]};
+            const auto left_geometry = cell->clip({normal, {0, 0, 0}, cut}).inside;
+            const auto right_geometry = cell->clip({opposite, {0, 0, 0}, -cut}).inside;
+            ASSERT_TRUE(left_geometry);
+            ASSERT_TRUE(right_geometry);
+            const auto left = ExactConvexFragment::from_geometry(*left_geometry);
+            const auto right = ExactConvexFragment::from_geometry(*right_geometry);
+            // These oblique pieces have overlapping axis bounds. Their exact
+            // rational cut vertices meet on a two- or three-axis support plane;
+            // supporting-plane signs, rather than axis separation, prove contact.
+            EXPECT_GT(left->volume().sign(), 0);
+            EXPECT_EQ((left->volume() + right->volume()).compare(whole), 0);
+            std::vector<ExactTransportAtom> column{{37, 0, left}, {37, 1, right}};
+            EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, column));
+            std::reverse(column.begin(), column.end());
+            EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, column));
+
+            const auto wider_geometry =
+                cell->clip({normal, {0, 0, 0}, std::nextafter(cut, std::numeric_limits<double>::infinity())}).inside;
+            ASSERT_TRUE(wider_geometry);
+            const auto wider = ExactConvexFragment::from_geometry(*wider_geometry);
+            // One binary64 step of positive penetration must survive even when
+            // the entire cut is subnormal and the overlap volume is much smaller.
+            EXPECT_GT((wider->volume() + right->volume() - whole).sign(), 0);
+            column = {{37, 0, wider}, {37, 1, right}};
+            EXPECT_THROW(ExactTransportPartition::certify_donor_cover(donor, column), std::invalid_argument);
+            std::reverse(column.begin(), column.end());
+            EXPECT_THROW(ExactTransportPartition::certify_donor_cover(donor, column), std::invalid_argument);
+        }
 }
 
 } // namespace

@@ -20,6 +20,11 @@ namespace
 using GO = DefaultTpetraTypes::global_ordinal_type;
 using M = Meshes::ExactGeometryMeasure;
 using Bytes = std::vector<char>;
+class PhiProposalResource : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
 struct Codec
 {
     Bytes bytes;
@@ -28,16 +33,16 @@ struct Codec
     Codec(const Bytes& input, std::size_t budget) : limit(input.size()), decode_limit(budget)
     {
         if (input.size() > decode_limit)
-            throw std::runtime_error("Phi decode copy exceeds its live packet arena.");
+            throw PhiProposalResource("Phi decode copy exceeds its live packet arena.");
         bytes = input;
         if (bytes.capacity() > decode_limit)
-            throw std::runtime_error("Phi decode capacity exceeds its live packet arena.");
+            throw PhiProposalResource("Phi decode capacity exceeds its live packet arena.");
         decode_used = bytes.capacity();
     }
     void put(std::uint64_t v)
     {
         if (bytes.size() > limit || limit - bytes.size() < 8)
-            throw std::runtime_error("Phi closure framing exceeds its budget.");
+            throw PhiProposalResource("Phi closure framing exceeds its budget.");
         for (unsigned i = 0; i < 8; ++i)
             bytes.push_back(char(v >> (8 * i)));
     }
@@ -53,7 +58,7 @@ struct Codec
     void put(const Bytes& v)
     {
         if (bytes.size() > limit || limit - bytes.size() < 8 || v.size() > limit - bytes.size() - 8)
-            throw std::runtime_error("Phi closure payload exceeds its budget.");
+            throw PhiProposalResource("Phi closure payload exceeds its budget.");
         put(v.size());
         bytes.insert(bytes.end(), v.begin(), v.end());
     }
@@ -63,10 +68,10 @@ struct Codec
         if (n > bytes.size() - cursor)
             throw std::runtime_error("Invalid Phi closure framing.");
         if (n > decode_limit - decode_used)
-            throw std::runtime_error("Phi decoded blobs exceed their live packet arena.");
+            throw PhiProposalResource("Phi decoded blobs exceed their live packet arena.");
         Bytes v(bytes.begin() + cursor, bytes.begin() + cursor + n);
         if (v.capacity() > decode_limit - decode_used)
-            throw std::runtime_error("Phi decoded blob capacity exceeds its live packet arena.");
+            throw PhiProposalResource("Phi decoded blob capacity exceeds its live packet arena.");
         // Conservatively retain every blob's capacity until this Codec dies,
         // even when a scalar decoder has already released its temporary blob.
         decode_used += v.capacity();
@@ -94,10 +99,15 @@ template<class Work> void collective(const Teuchos::Comm<int>& comm, Work work)
         error = std::current_exception();
         local = 1;
     }
-    catch (...)
+    catch (const PhiProposalResource&)
     {
         error = std::current_exception();
         local = 2;
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+        local = 3;
     }
     Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, 1, &local, &global);
     if (global == 1)
@@ -109,6 +119,12 @@ template<class Work> void collective(const Teuchos::Comm<int>& comm, Work work)
     if (global == 2)
     {
         if (local == 2)
+            std::rethrow_exception(error);
+        throw PhiProposalResource("Bounded arithmetic closure resources exhausted on another rank.");
+    }
+    if (global == 3)
+    {
+        if (local == 3)
             std::rethrow_exception(error);
         throw std::runtime_error("General VoF Phi arithmetic closure invalid on another rank.");
     }
@@ -132,12 +148,12 @@ struct Node
 std::size_t packet_capacity(const std::vector<OwnerPacket>& packets, std::size_t budget)
 {
     if (packets.capacity() > budget / sizeof(OwnerPacket))
-        throw std::runtime_error("Phi packet metadata capacity exceeds its arena.");
+        throw PhiProposalResource("Phi packet metadata capacity exceeds its arena.");
     std::size_t used = packets.capacity() * sizeof(OwnerPacket);
     for (const auto& packet : packets)
     {
         if (packet.bytes.capacity() > budget - used)
-            throw std::runtime_error("Phi packet payload capacities exceed their arena.");
+            throw PhiProposalResource("Phi packet payload capacities exceed their arena.");
         used += packet.bytes.capacity();
     }
     return used;
@@ -164,24 +180,32 @@ OwnerExchange exchange_phi_packets(const std::vector<OwnerPacket>& packets,
         [&]
         {
             if (exchange_cap > arena_cap || packets.capacity() > (arena_cap - exchange_cap) / sizeof(OwnerPacket))
-                throw std::runtime_error("Phi caller packet metadata exceeds its arena share.");
+                throw PhiProposalResource("Phi caller packet metadata exceeds its arena share.");
             resident = packets.capacity() * sizeof(OwnerPacket);
             for (const auto& packet : packets)
             {
                 if (packet.bytes.capacity() > arena_cap - exchange_cap - resident)
-                    throw std::runtime_error("Phi caller packet capacities exceed their arena share.");
+                    throw PhiProposalResource("Phi caller packet capacities exceed their arena share.");
                 resident += packet.bytes.capacity();
                 if (packet.bytes.size() > input_cap - payload)
-                    throw std::runtime_error("Phi outgoing payload exceeds its unchanged input cap.");
+                    throw PhiProposalResource("Phi outgoing payload exceeds its unchanged input cap.");
                 payload += packet.bytes.size();
                 if (packet.bytes.size() > std::numeric_limits<std::size_t>::max() - sizeof(std::uint64_t) ||
                     wire > std::numeric_limits<std::size_t>::max() - sizeof(std::uint64_t) - packet.bytes.size())
-                    throw std::runtime_error("Phi packet wire count overflow.");
+                    throw PhiProposalResource("Phi packet wire count overflow.");
                 wire += sizeof(std::uint64_t) + packet.bytes.size();
             }
         });
     if (resident_input)
         *resident_input = resident;
+    const auto context = [&](const std::exception& error)
+    {
+        return std::string(error.what()) + " Phi packet arena: payload=" + std::to_string(payload) +
+               ", sent_wire=" + std::to_string(wire) +
+               ", serial_received_wire=" + (comm->getSize() == 1 ? std::to_string(wire) : std::string("not-local")) +
+               ", resident_input=" + std::to_string(resident) + ", input_cap=" + std::to_string(input_cap) +
+               ", exchange_cap=" + std::to_string(exchange_cap) + ", arena_cap=" + std::to_string(arena_cap);
+    };
     try
     {
         // The exchange cap includes its packed send, two receive copies and
@@ -189,14 +213,13 @@ OwnerExchange exchange_phi_packets(const std::vector<OwnerPacket>& packets,
         // audited capacities occupy the disjoint remainder of the same arena.
         return exchange_owner_packets(packets, comm, exchange_cap);
     }
+    catch (const std::length_error& error)
+    {
+        throw PhiProposalResource(context(error));
+    }
     catch (const std::exception& error)
     {
-        throw std::runtime_error(
-            std::string(error.what()) + " Phi packet arena: payload=" + std::to_string(payload) +
-            ", sent_wire=" + std::to_string(wire) +
-            ", serial_received_wire=" + (comm->getSize() == 1 ? std::to_string(wire) : std::string("not-local")) +
-            ", resident_input=" + std::to_string(resident) + ", input_cap=" + std::to_string(input_cap) +
-            ", exchange_cap=" + std::to_string(exchange_cap) + ", arena_cap=" + std::to_string(arena_cap));
+        throw std::runtime_error(context(error));
     }
 }
 M absolute(const M& v, std::size_t budget)
@@ -204,8 +227,9 @@ M absolute(const M& v, std::size_t budget)
     return v.sign() < 0 ? vof_exact::leased_scale(v, -1, budget) : v;
 }
 } // namespace
-GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
-    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget)
+static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle<>>& mesh,
+    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget,
+    bool bounded_rates)
 {
     namespace E = vof_exact;
     const auto map = mesh->owned_cell_map();
@@ -272,9 +296,12 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
     std::map<GO, Node> nodes;
     std::map<GO, std::size_t> face_index;
     std::set<GO> endpoint_set;
+    GeneralVoFPhiClosure result;
     collective(*comm,
         [&]
         {
+            result.volume.reserve(faces.size());
+            result.correction.reserve(faces.size());
             if (cells.size() != mesh->num_owned_cells())
                 throw std::runtime_error("Incomplete closure cells.");
             for (const auto& c : cells)
@@ -301,6 +328,36 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
                     throw std::runtime_error("Wrong closure endpoint.");
                 endpoint_set.insert(f.first);
                 endpoint_set.insert(f.second);
+                constexpr unsigned precision = 106;
+                constexpr std::size_t precision_bytes = (precision + 7) / 8;
+                const auto source_bytes = f.volume.storage_bytes();
+                // Precision proposes a bounded representation; neither this
+                // choice nor a failed proposal changes any acceptance radius.
+                const bool can_propose = bounded_rates && f.arithmetic_radius.sign() &&
+                                         source_bytes <= scalar_budget &&
+                                         precision_bytes <= scalar_budget - source_bytes;
+                auto proposed = f.volume;
+                if (can_propose)
+                {
+                    try
+                    {
+                        proposed = f.volume.rounded_dyadic(precision, 16 * scalar_budget);
+                    }
+                    catch (const std::length_error& error)
+                    {
+                        throw PhiProposalResource(error.what());
+                    }
+                }
+                auto rounding = bounded_rates && proposed.storage_identity() != f.volume.storage_identity()
+                                    ? E::leased_add(proposed, E::leased_scale(f.volume, -1, scalar_budget), scalar_budget)
+                                    : M{};
+                if (absolute(rounding, scalar_budget).compare(f.arithmetic_radius) > 0)
+                {
+                    proposed = f.volume;
+                    rounding = {};
+                }
+                result.volume.push_back(std::move(proposed));
+                result.correction.push_back(std::move(rounding));
             }
             const auto lease = mesh->acquire_execution_view();
             for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
@@ -330,14 +387,16 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
     {
         if (bytes.size() > packet_budget || packet_bytes > packet_budget - bytes.size() ||
             sizeof(OwnerPacket) > packet_budget - bytes.size() - packet_bytes)
-            throw std::runtime_error("Phi closure outgoing packets exceed their budget.");
+            throw PhiProposalResource("Phi closure outgoing packets exceed their budget.");
         packet_bytes += bytes.size() + sizeof(OwnerPacket);
         packets.push_back({peer, std::move(bytes)});
     };
     collective(*comm,
         [&]
         {
-            for (const auto& f : faces)
+            for (std::size_t i = 0; i < faces.size(); ++i)
+            {
+                const auto& f = faces[i];
                 for (int sign : {1, -1})
                 {
                     Codec c(packet_budget);
@@ -349,8 +408,15 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
                     c.put(f.identity);
                     c.put(f.volume, scalar_budget);
                     c.put(f.arithmetic_radius, scalar_budget);
+                    if (bounded_rates)
+                    {
+                        c.put(result.correction[i].sign() != 0);
+                        if (result.correction[i].sign())
+                            c.put(result.volume[i], scalar_budget);
+                    }
                     enqueue(owner.at(sign == 1 ? f.first : f.second), std::move(c.bytes));
                 }
+            }
         });
     auto received = exchange_phi_packets(packets, comm, packet_budget, packet_exchange_budget, packet_arena_budget);
     const auto receive_decode_budget = phi_decode_budget(packets, received.packets, *comm, packet_arena_budget);
@@ -365,7 +431,29 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
                 const auto gid = GO(c.get()), other = GO(c.get()), face = GO(c.get());
                 const int peer = int(c.get()), sign = c.get() ? 1 : -1;
                 const auto identity = c.blob();
-                const auto volume = c.measure(scalar_budget), radius = c.measure(scalar_budget);
+                auto volume = c.measure(scalar_budget), radius = c.measure(scalar_budget);
+                M rounding;
+                if (bounded_rates)
+                {
+                    const auto changed = c.get();
+                    if (changed > 1)
+                        throw std::runtime_error("Invalid bounded rate proposal flag.");
+                    if (changed)
+                    {
+                        const auto proposed = c.measure(scalar_budget);
+                        rounding = absolute(E::leased_add(
+                                                proposed, E::leased_scale(volume, -1, scalar_budget), scalar_budget),
+                            scalar_budget);
+                        // Reserve the exact discarded difference first. The
+                        // forest may spend only the remaining ORIGINAL face
+                        // capacity, while n.used below charges the discarded
+                        // difference to the ORIGINAL incident-cell capacity.
+                        radius = E::leased_add(radius, E::leased_scale(rounding, -1, scalar_budget), scalar_budget);
+                        if (radius.sign() < 0)
+                            throw std::runtime_error("Bounded rate exceeds its original face certificate.");
+                        volume = proposed;
+                    }
+                }
                 c.done();
                 if (!nodes.contains(gid) || peer < 0 || peer >= comm->getSize())
                     throw std::runtime_error("Invalid incident closure edge.");
@@ -374,6 +462,8 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
                     throw std::runtime_error("Duplicate incident closure edge.");
                 n.edges.push_back({face, other, peer, p.peer, sign, identity, volume, radius});
                 n.defect = E::leased_add(n.defect, E::leased_scale(volume, sign, scalar_budget), scalar_budget);
+                if (bounded_rates)
+                    n.used = E::leased_add(n.used, rounding, scalar_budget);
                 auth_faces.push_back(face);
                 auth_senders.push_back(p.peer);
             }
@@ -395,7 +485,6 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
     received = {}; // Decoded/authenticated records now live in budgeted nodes.
     std::uint64_t local_count = nodes.size(), count = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_count, &count);
-    GeneralVoFPhiClosure result;
     for (std::uint64_t round = 0;; ++round)
     {
         packets.clear();
@@ -470,14 +559,6 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
     for (const auto& [gid, n] : nodes)
         local_depth = std::max(local_depth, n.depth);
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_depth, &depth);
-    collective(*comm,
-        [&]
-        {
-            result.volume.reserve(faces.size());
-            for (const auto& f : faces)
-                result.volume.push_back(f.volume);
-            result.correction.resize(faces.size());
-        });
     std::map<GO, M> local_correction;
     for (std::uint64_t level = depth; level > 0; --level)
     {
@@ -574,8 +655,10 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
                 if (!seen.insert(face).second || (child != f.first && child != f.second) || owner.at(child) != p.peer ||
                     absolute(delta, scalar_budget).compare(f.arithmetic_radius) > 0)
                     throw std::runtime_error("Invalid canonical face correction.");
-                result.correction[i] = delta;
-                result.volume[i] = E::leased_add(f.volume, delta, scalar_budget);
+                result.correction[i] = E::leased_add(result.correction[i], delta, scalar_budget);
+                result.volume[i] = E::leased_add(result.volume[i], delta, scalar_budget);
+                if (absolute(result.correction[i], scalar_budget).compare(f.arithmetic_radius) > 0)
+                    throw std::runtime_error("Canonical rate change exceeds its original face certificate.");
             }
         });
     corrections = {}; // Do not retain old receive payload across final exchange.
@@ -623,6 +706,29 @@ GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
                     throw std::runtime_error("Corrected Phi is not exactly source-free.");
         });
     return result;
+}
+GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
+    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget)
+{
+    return close_general_vof_phi_impl(mesh, cells, faces, budget, false);
+}
+GeneralVoFPhiClosure close_general_vof_bounded_rate(const SP<const MeshHandle<>>& mesh,
+    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget)
+{
+    try
+    {
+        return close_general_vof_phi_impl(mesh, cells, faces, budget, true);
+    }
+    catch (const GeneralVoFPhiInfeasible&)
+    {
+        return close_general_vof_phi_impl(mesh, cells, faces, budget, false);
+    }
+    catch (const PhiProposalResource&)
+    {
+        auto result = close_general_vof_phi_impl(mesh, cells, faces, budget, false);
+        result.bounded_resource_fallback = true;
+        return result;
+    }
 }
 std::optional<GeneralVoFPhiClosure> try_close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
     const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget)

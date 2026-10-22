@@ -41,6 +41,12 @@ public:
         std::vector<Meshes::CertifiedGeometryValue> flux_enclosure;
     };
     explicit ConservativeVoFTransport(SP<const MeshHandle<>> mesh);
+    /** Successful published exact preparations and successful reuses. */
+    struct PreparationStatistics
+    {
+        std::size_t exact_builds = 0, exact_hits = 0;
+    };
+    [[nodiscard]] PreparationStatistics preparation_statistics() const noexcept { return preparation_statistics_; }
     /** Extensive Q_old/S/M_new; overlap-face F in canonical owner orientation.
      * Optional row equilibration preserves microscopic carrier rows without a
      * reciprocal diagonal overflow; the original physical residual still must
@@ -119,6 +125,9 @@ public:
 private:
     using Pack = DefaultTpetraTypes;
     struct SparseAssembly;
+    struct ExactPreparation;
+    std::shared_ptr<ExactPreparation> exact_preparation_;
+    PreparationStatistics preparation_statistics_;
     [[nodiscard]] Result solve_impl(const std::vector<double>& old, const std::vector<double>& source,
         const std::vector<double>& capacity, const std::vector<double>& forward, const std::vector<double>& reverse,
         bool nonnegative, int maximum_iterations, double tolerance, bool equilibrate_rows,
