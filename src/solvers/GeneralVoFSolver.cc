@@ -66,8 +66,9 @@ struct GeneralVoFSolver::Impl
         std::shared_ptr<const VoF::GeneralVoF> phases;
         std::vector<double> fraction, density, face_velocity, pressure, curvature;
         std::vector<Vector> velocity;
-        // Derived afresh from finite accepted phases/material, not a retained
-        // rational phase inventory or a carried physical-step remainder.
+        // Derived from the source-selected authority. Finite mode always
+        // rebuilds from represented phases; experimental exact mode opts into
+        // its separately retained authority, never a solver-side reinterpretation.
         std::vector<Meshes::ExactGeometryMeasure> physical_mass;
         detail::GeneralVoFProjectionProvenance projection_arithmetic;
         VoFStepDiagnostics diagnostics;
@@ -172,12 +173,14 @@ struct GeneralVoFSolver::Impl
         const auto& gas = state.phases->gas_volumes();
         const auto& carrier = state.phases->carrier_volumes();
         const auto geometric_fraction = state.phases->geometric_gas_fractions();
+        std::vector<Meshes::ExactPhaseMeasures> authority;
         require(gas.size() == volume.size() && carrier.size() == volume.size(),
             "General VoF phase/native storage dimensions differ.");
         std::vector<Meshes::ConvexGeometryPtr> geometry;
         collective(
             [&]
             {
+                authority = current_inventory(*state.phases);
                 geometry = state.phases->owned_geometry();
                 state.fraction.resize(volume.size());
                 state.density.resize(volume.size());
@@ -189,7 +192,7 @@ struct GeneralVoFSolver::Impl
                 for (std::size_t c = 0; c < volume.size(); ++c)
                 {
                     state.fraction[c] = geometric_fraction[c];
-                    state.physical_mass[c] = phase_mass_measure(*state.phases, c);
+                    state.physical_mass[c] = phase_mass_measure(authority[c]);
                     const auto& mass = state.physical_mass[c];
                     const auto density =
                         mass.divided_by(Meshes::ExactGeometryMeasure::volume(*geometry[c]), options.byte_budget);
@@ -308,15 +311,17 @@ struct GeneralVoFSolver::Impl
     void budget(State& state) const
     {
         std::array<Meshes::ExactGeometryMeasure, 7> local;
+        std::vector<Meshes::ExactPhaseMeasures> authority;
         bool valid = true;
         collective(
             [&]
             {
+                authority = current_inventory(*state.phases);
                 for (std::size_t c = 0; c < volume.size(); ++c)
                 {
-                    const auto gas = Meshes::ExactGeometryMeasure::from_value(state.phases->gas_volumes()[c]);
-                    const auto carrier = Meshes::ExactGeometryMeasure::from_value(state.phases->carrier_volumes()[c]);
-                    const auto mass = phase_mass_measure(*state.phases, c);
+                    const auto& gas = authority[c].gas;
+                    const auto& carrier = authority[c].carrier;
+                    const auto& mass = state.physical_mass[c];
                     const auto& velocity = state.velocity[c];
                     local[0] = detail::vof_exact::add(local[0], gas, options.byte_budget);
                     local[1] = detail::vof_exact::add(local[1], gas.scaled(material.gas_density), options.byte_budget);
@@ -751,13 +756,11 @@ struct GeneralVoFSolver::Impl
     {
         return phase.gas.scaled(material.gas_density) + phase.carrier.scaled(material.liquid_density);
     }
-    Meshes::ExactGeometryMeasure phase_mass_measure(const VoF::GeneralVoF& phases, std::size_t cell) const
+    std::vector<Meshes::ExactPhaseMeasures> current_inventory(const VoF::GeneralVoF& phases) const
     {
-        // Rebuild bounded dyadic arithmetic from the finite accepted phase views.
-        // No rational gas/carrier remainder is retained between physical steps.
-        const auto& finite = phases.phase_volumes()[cell];
-        return Meshes::ExactGeometryMeasure::from_value(finite.gas).scaled(material.gas_density) +
-               Meshes::ExactGeometryMeasure::from_value(finite.carrier).scaled(material.liquid_density);
+        // The immutable FVM source selects the policy. Finite is the default;
+        // experimental exact authority is explicit and remains unqualified.
+        return phases.inventory_measures();
     }
     void verify_phase_publication(const VoF::GeneralVoF::Trial& trial, const VoF::GeneralVoF& candidate) const
     {
@@ -805,6 +808,18 @@ struct GeneralVoFSolver::Impl
                         throw std::runtime_error("General VoF publication proof has a foreign recipient.");
                     add(gas[local], route.exact.gas);
                     add(carrier[local], route.exact.carrier);
+                }
+                if (candidate.inventory_policy() != accepted->phases->inventory_policy())
+                    throw std::runtime_error("General VoF trial changed inventory authority policy.");
+                if (candidate.inventory_policy() == VoF::PhaseInventoryPolicy::ExperimentalExact)
+                {
+                    const auto& exact = candidate.experimental_phases();
+                    if (exact.size() != n)
+                        throw std::runtime_error("Experimental exact phase publication shape differs.");
+                    for (std::size_t c = 0; c < n; ++c)
+                        if (gas[c].compare(exact[c].gas) || carrier[c].compare(exact[c].carrier))
+                            throw std::runtime_error("Experimental exact phase publication differs from its routes.");
+                    return;
                 }
                 const auto& phases = candidate.phase_volumes();
                 // Identity trials retain the accepted object and its historical
@@ -1161,8 +1176,8 @@ struct GeneralVoFSolver::Impl
                 {
                     for (std::size_t c = 0; c < volume.size(); ++c)
                     {
-                        momentum[c] = phase_mass_measure(*old.phases, c).scaled(old.velocity[c][a]);
-                        capacity[c] = phase_mass_measure(*next->phases, c);
+                        momentum[c] = old.physical_mass[c].scaled(old.velocity[c][a]);
+                        capacity[c] = next->physical_mass[c];
                     }
                 });
             const auto carried =
@@ -1175,15 +1190,15 @@ struct GeneralVoFSolver::Impl
         }
         std::vector<double> viscosity(volume.size());
         const auto physical_geometry = old.phases->owned_geometry();
+        std::vector<Meshes::ExactPhaseMeasures> old_inventory;
         collective(
             [&]
             {
+                old_inventory = current_inventory(*old.phases);
                 for (std::size_t c = 0; c < volume.size(); ++c)
                 {
-                    const auto weighted = Meshes::ExactGeometryMeasure::from_value(old.phases->gas_volumes()[c])
-                                              .scaled(material.gas_viscosity) +
-                                          Meshes::ExactGeometryMeasure::from_value(old.phases->carrier_volumes()[c])
-                                              .scaled(material.liquid_viscosity);
+                    const auto weighted = old_inventory[c].gas.scaled(material.gas_viscosity) +
+                                          old_inventory[c].carrier.scaled(material.liquid_viscosity);
                     const auto coefficient = weighted.divided_by(
                         Meshes::ExactGeometryMeasure::volume(*physical_geometry[c]), options.byte_budget);
                     viscosity[c] = coefficient.sign() ? coefficient.certified().as_double() : 0;
@@ -1197,7 +1212,7 @@ struct GeneralVoFSolver::Impl
                 for (std::size_t c = 0; c < volume.size(); ++c)
                     for (unsigned a = 0; a < 3; ++a)
                     {
-                        const auto mass = phase_mass_measure(*next->phases, c);
+                        const auto mass = next->physical_mass[c];
                         const auto viscous_change = Meshes::ExactGeometryMeasure::from_value(viscous[c][a])
                                                         .scaled(dt)
                                                         .divided_by(mass, options.byte_budget);
@@ -1293,13 +1308,15 @@ struct GeneralVoFSolver::Impl
             {"pressure_volume", VoF::ExactTransferCarrier::BulkVolume, false}};
         std::vector<VoF::ExactTransferOwnedChannels> channels;
         const auto source_geometry = old.phases->owned_geometry();
+        std::vector<Meshes::ExactPhaseMeasures> source_inventory;
         collective(
             [&]
             {
+                source_inventory = current_inventory(*old.phases);
                 for (std::size_t c = 0; c < old.phases->owned_order().size(); ++c)
                 {
-                    const auto gas = M::from_value(old.phases->gas_volumes()[c]);
-                    const auto carrier = M::from_value(old.phases->carrier_volumes()[c]);
+                    const auto& gas = source_inventory[c].gas;
+                    const auto& carrier = source_inventory[c].carrier;
                     VoF::ExactTransferOwnedChannels item;
                     item.key = old.phases->owned_order()[c];
                     item.phase_mass = VoF::ExactTransferPhaseMass{
@@ -1339,6 +1356,8 @@ struct GeneralVoFSolver::Impl
         const auto target = hierarchy->apply(plan, bound_target);
         const auto transferred = VoF::ExactPhaseTransfer::prepare(source, plan, target, transfer_options);
         const auto candidate_phase = old.phases->adopt_transfer(transferred);
+        require(candidate_phase->inventory_policy() == old.phases->inventory_policy(),
+            "General VoF remap changed inventory authority policy.");
         auto candidate = std::make_unique<Impl>(candidate_phase, material, options);
         auto state = std::make_shared<State>();
         state->phases = candidate_phase;
@@ -1357,7 +1376,7 @@ struct GeneralVoFSolver::Impl
                     const auto& item = *result.at(candidate_phase->owned_order()[c]);
                     if (item.amounts.size() != 4 || !item.phase_mass)
                         throw std::runtime_error("Exact general flow transfer schema differs.");
-                    const auto mass = phase_mass_measure(*candidate_phase, c);
+                    const auto mass = state->physical_mass[c];
                     if (!std::isfinite(item.roundoff.gas) || !std::isfinite(item.roundoff.carrier) ||
                         item.roundoff.gas < 0 || item.roundoff.carrier < 0)
                         throw std::runtime_error("Remapped phase publication bound is invalid.");
@@ -1365,10 +1384,13 @@ struct GeneralVoFSolver::Impl
                     const auto mass_error = mass_difference.sign() < 0 ? mass_difference.scaled(-1) : mass_difference;
                     // Ownership copies perform no new publication. Their
                     // historical phase metadata cannot admit a mass mismatch.
+                    const bool exact_policy =
+                        candidate_phase->inventory_policy() == VoF::PhaseInventoryPolicy::ExperimentalExact;
                     const auto mass_bound =
-                        migration ? M{}
-                                  : M::from_value(item.roundoff.gas).scaled(material.gas_density) +
-                                        M::from_value(item.roundoff.carrier).scaled(material.liquid_density);
+                        migration || exact_policy
+                            ? M{}
+                            : M::from_value(item.roundoff.gas).scaled(material.gas_density) +
+                                  M::from_value(item.roundoff.carrier).scaled(material.liquid_density);
                     if (mass_error.compare(mass_bound) > 0)
                         throw std::runtime_error("Remapped phase mass exceeds its finite publication bound.");
                     for (unsigned a = 0; a < 3; ++a)
@@ -1502,13 +1524,13 @@ struct GeneralVoFSolver::Impl
                 {
                     for (std::size_t c = 0; c < old.velocity.size(); ++c)
                     {
-                        const auto value = phase_mass_measure(*old.phases, c).scaled(old.velocity[c][a]);
+                        const auto value = old.physical_mass[c].scaled(old.velocity[c][a]);
                         before.push_back(value);
                         reference.push_back(value.sign() < 0 ? value.scaled(-1) : value);
                     }
                     for (std::size_t c = 0; c < state->velocity.size(); ++c)
                     {
-                        const auto value = phase_mass_measure(*candidate_phase, c).scaled(state->velocity[c][a]);
+                        const auto value = state->physical_mass[c].scaled(state->velocity[c][a]);
                         after.push_back(value);
                         reference.push_back(value.sign() < 0 ? value.scaled(-1) : value);
                     }

@@ -2,6 +2,7 @@
  * @brief Exact-geometry handoff of finite phase inventories across native AMR transactions.
  */
 #pragma once
+#include "FVM/ExperimentalPhaseInventory.hh"
 #include "FVM/PhaseVolumes.hh"
 #include "FVM/PolyhedralReconstruction.hh"
 #include "geometry/ExactSweptGeometry.hh"
@@ -25,7 +26,7 @@ struct ExactTransferChannel
     bool nonnegative = true;
     auto operator<=>(const ExactTransferChannel&) const = default;
 };
-/** Bounded transaction-local products from finite current phases/material.
+/** Bounded transaction-local products from current selected phase authority.
  * Not an accepted physical-state remainder or a physical-step history. */
 struct ExactTransferPhaseMass
 {
@@ -38,6 +39,10 @@ struct ExactPhaseTransferCapsule
 {
     Meshes::AMR::AdaptiveCellKey key;
     std::uint64_t revision = 0;
+    PhaseInventoryPolicy policy = PhaseInventoryPolicy::Finite;
+    /** Present only for explicit ExperimentalExact authority. Finite views and
+     * finite diagnostic bounds remain distinct from this cold payload. */
+    std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
     PhaseVolumes phases;
     PhaseRoundoff roundoff;
     PolyhedralInterface geometry;
@@ -45,7 +50,8 @@ struct ExactPhaseTransferCapsule
     ExactTransferError error;
     std::optional<ExactTransferPhaseMass> phase_mass;
     /** Transaction-local weighted products, never adopted as accepted physical
-     * phase/history state. Rebuild from the current finite state per remap. */
+     * phase/history state. Rebuild from the current selected authority and
+     * physical fields per remap; these are distinct from the optional payload. */
     std::vector<Meshes::ExactGeometryMeasure> amounts;
 };
 struct ExactTransferOwnedChannels
@@ -75,6 +81,7 @@ public:
     [[nodiscard]] const std::shared_ptr<const Hierarchy>& hierarchy() const noexcept;
     [[nodiscard]] const std::shared_ptr<const void>& identity() const noexcept;
     [[nodiscard]] std::uint64_t control() const noexcept;
+    [[nodiscard]] PhaseInventoryPolicy inventory_policy() const noexcept;
     [[nodiscard]] const std::vector<ExactPhaseTransferCapsule>& owned() const noexcept;
     [[nodiscard]] const std::vector<ExactTransferChannel>& channels() const noexcept;
     /** Collective. Exact keyed inventory inputs must cover local owners once. */
@@ -85,7 +92,7 @@ private:
     friend class GeneralVoF;
     friend class ExactPhaseTransfer;
     ExactPhaseTransferSource(std::shared_ptr<const Hierarchy>, std::shared_ptr<const void> identity,
-        std::uint64_t control, std::vector<ExactPhaseTransferCapsule>);
+        std::uint64_t control, std::vector<ExactPhaseTransferCapsule>, PhaseInventoryPolicy);
     explicit ExactPhaseTransferSource(std::shared_ptr<const Data>);
     std::shared_ptr<const Data> data_;
 };
@@ -98,7 +105,8 @@ struct ExactTransferPlanStep
     std::shared_ptr<const ExactPhaseTransferSource::Hierarchy> candidate;
 };
 /** Opaque validated handoff. GeneralVoF adoption compares source identity,
- * control and observed native maps, then installs finite ledgers directly.
+ * policy, control and observed native maps, then installs the selected finite
+ * or explicitly experimental authority. The finite path has no cold payload.
  * Mixed topology outputs require reconstruction on the target geometry. */
 class SIMPLEFLUID_FVM_EXPORT ExactPhaseTransferResult
 {
@@ -110,6 +118,7 @@ public:
     [[nodiscard]] std::uint64_t source_control() const noexcept;
     [[nodiscard]] std::uint64_t transaction() const noexcept;
     [[nodiscard]] bool ownership_only() const noexcept;
+    [[nodiscard]] PhaseInventoryPolicy inventory_policy() const noexcept;
     [[nodiscard]] const std::vector<ExactPhaseTransferCapsule>& owned() const noexcept;
     [[nodiscard]] const std::vector<ExactTransferChannel>& channels() const noexcept;
     /** Collective source/target geometry and map staleness preflight. */
@@ -126,7 +135,9 @@ public:
     /** Target is the actual native-bound candidate of the supplied source plan.
      * Geometric source/target coverage is exact. Physical phases publish once
      * in binary64 with derived conversion bounds; Source/Result phase/error
-     * fields retain no rational remainder. Optional bounded weighted products
+     * fields retain no rational remainder in the default Finite policy. An
+     * explicit ExperimentalExact handoff preserves its separate cold authority;
+     * policies are pinned and cannot cross on adoption. Optional weighted products
      * remain transaction-local until consumers publish finite u/p histories. */
     [[nodiscard]] static ExactPhaseTransferResult prepare(const ExactPhaseTransferSource&,
         const ExactPhaseTransferSource::Hierarchy::Plan&,

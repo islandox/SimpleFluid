@@ -5,6 +5,7 @@
 #include "FVM/details/ExactLiveStorage.hh"
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
+#include "FVM/details/ExperimentalPhaseBackend.hh"
 #include "FVM/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "utils/CompensatedSum.hh"
@@ -35,13 +36,16 @@ struct Cell
     PolyhedralPhaseSample phase;
     PhaseError occupancy;
     PhaseRoundoff roundoff;
+    std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
     GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
     std::optional<PolyhedralInterface> retained_interface;
     bool inherited = false;
 };
 Meshes::ExactPhaseMeasures phase_measures(const Cell& cell)
 {
-    // One-step dyadic lift only. Accepted cells retain no rational phase history.
+    if (cell.experimental_exact)
+        return cell.experimental_exact->phases;
+    // Default policy: one-step lift only, no rational accepted history.
     return {Measure::volume(*cell.phase.geometry), Measure::from_value(cell.phase.gas_volume),
         Measure::from_value(cell.phase.carrier_volume)};
 }
@@ -73,7 +77,20 @@ void occupancy(Cell& cell)
 }
 void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
 {
-    const auto lifted = phase_measures(cell);
+    const bool experimental = options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact;
+    if (experimental != bool(cell.experimental_exact))
+        throw std::invalid_argument("General VoF inventory policy/payload differs.");
+    if (experimental)
+    {
+        detail::validate_experimental(
+            *cell.experimental_exact, *cell.phase.geometry, cell.native_volume, options.byte_budget);
+        const auto view = detail::experimental_view(*cell.experimental_exact, cell.native_volume);
+        if (view.phases.gas != cell.phase.gas_volume || view.phases.carrier != cell.phase.carrier_volume)
+            throw std::invalid_argument("Experimental exact diagnostic phase view differs.");
+    }
+    // Finite diagnostic views still have honest finite conversion provenance.
+    const Meshes::ExactPhaseMeasures lifted{Measure::volume(*cell.phase.geometry),
+        Measure::from_value(cell.phase.gas_volume), Measure::from_value(cell.phase.carrier_volume)};
     const auto defect = lifted.gas + lifted.carrier - lifted.bulk;
     const auto absolute = defect.sign() < 0 ? defect.scaled(-1) : defect;
     const auto& e = cell.occupancy;
@@ -98,9 +115,19 @@ void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
             cell.declaration == GeneralVoFPhaseGeometry::PureGas ? cell.phase.carrier_volume : cell.phase.gas_volume;
         const auto metric = cell.phase.geometry->moments().volume;
         const double inherited_bound = std::max(e.admitted_bound, e.fit_bound);
-        if ((cell.inherited && minority > inherited_bound) ||
-            (!cell.inherited && minority > metric.binary64_absolute_error() +
-                                               8 * std::numeric_limits<double>::epsilon() * metric.value))
+        if (experimental)
+        {
+            const auto& x = *cell.experimental_exact;
+            const auto actual = cell.declaration == GeneralVoFPhaseGeometry::PureGas ? x.phases.carrier : x.phases.gas;
+            const auto bound =
+                x.error.admitted_bound.compare(x.error.fit_bound) >= 0 ? x.error.admitted_bound : x.error.fit_bound;
+            if (actual.compare(bound) > 0)
+                throw std::invalid_argument("Experimental pure declaration contradicts exact inventory.");
+        }
+        if ((!experimental && cell.inherited && minority > inherited_bound) ||
+            (!experimental && !cell.inherited &&
+                minority >
+                    metric.binary64_absolute_error() + 8 * std::numeric_limits<double>::epsilon() * metric.value))
             throw std::invalid_argument("General VoF pure declaration contradicts finite inventory.");
     }
 }
@@ -209,9 +236,32 @@ struct GeneralVoF::Data
     std::vector<PhaseVolumes> phases;
     std::vector<PhaseRoundoff> roundoff;
     std::vector<PhaseError> occupancy;
+    std::shared_ptr<const std::vector<Meshes::ExactPhaseMeasures>> experimental_catalog;
 };
 namespace
 {
+void refresh_experimental_catalog(GeneralVoF::Data& data)
+{
+    if (data.options.inventory_policy == PhaseInventoryPolicy::Finite)
+    {
+        data.experimental_catalog.reset();
+        return;
+    }
+    wire::Budget budget{data.options.byte_budget};
+    if (data.order.size() > budget.limit / sizeof(Meshes::ExactPhaseMeasures))
+        throw std::invalid_argument("Experimental owned inventory catalog exceeds budget.");
+    budget.add(data.order.size() * sizeof(Meshes::ExactPhaseMeasures));
+    auto catalog = std::make_shared<std::vector<Meshes::ExactPhaseMeasures>>();
+    catalog->reserve(data.order.size());
+    for (const auto& key : data.order)
+    {
+        const auto& cell = data.cells.at(key);
+        if (!cell.experimental_exact)
+            throw std::invalid_argument("Missing experimental owned inventory.");
+        catalog->push_back(cell.experimental_exact->phases);
+    }
+    data.experimental_catalog = std::move(catalog);
+}
 void current(const GeneralVoF::Data& data)
 {
     if (!data.hierarchy->geometry_unchanged() || data.hierarchy->observation() != data.observation ||
@@ -227,11 +277,30 @@ void retained_budget(const GeneralVoF::Data& data)
                (data.gas.capacity() + data.carrier.capacity()) * sizeof(double) +
                data.phases.capacity() * sizeof(PhaseVolumes) + data.roundoff.capacity() * sizeof(PhaseRoundoff) +
                data.occupancy.capacity() * sizeof(PhaseError));
+    std::set<const void*> exact_payloads;
+    const auto charge_exact = [&](const Meshes::ExactGeometryMeasure& value)
+    {
+        if (exact_payloads.insert(value.storage_identity()).second)
+            budget.add(value.storage_bytes());
+    };
+    if (data.experimental_catalog)
+        budget.add(sizeof(*data.experimental_catalog) +
+                   data.experimental_catalog->capacity() * sizeof(Meshes::ExactPhaseMeasures));
     for (const auto& [key, cell] : data.cells)
     {
         budget.add(sizeof(Cell) + sizeof(Key) + 8 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
         if (geometry.insert(cell.phase.geometry.get()).second)
             budget.add(cell.phase.geometry->storage_bytes());
+        if (cell.experimental_exact)
+        {
+            budget.add(sizeof(ExperimentalPhaseInventory));
+            const auto& x = *cell.experimental_exact;
+            for (const auto* q :
+                {&x.phases.bulk, &x.phases.gas, &x.phases.carrier, &x.error.difference, &x.error.admitted_bound,
+                    &x.error.native_conversion, &x.error.phase_input_bound, &x.error.fit_residual, &x.error.fit_bound,
+                    &x.error.transferred_bound, &x.error.fit_allocation_bound})
+                charge_exact(*q);
+        }
     }
     for (const auto& node : data.nodes)
         budget.add(sizeof(node) + node.identity.capacity() + node.exact_identity.capacity());
@@ -451,10 +520,12 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
         [&]
         {
             wire::Budget budget{options.byte_budget};
-            budget.packet(16 * 8);
+            if (std::uint64_t(options.inventory_policy) > 1)
+                throw std::invalid_argument("Unknown General VoF inventory policy.");
+            budget.packet(17 * 8);
             wire::Writer w;
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
-                     std::uint64_t(options.support_rings),
+                     std::uint64_t(options.support_rings), std::uint64_t(options.inventory_policy),
                      std::uint64_t(options.reconstruction.maximum_offset_iterations),
                      std::uint64_t(options.reconstruction.maximum_fit_iterations),
                      std::uint64_t(options.reconstruction.maximum_stencil_cells),
@@ -519,10 +590,11 @@ void import_phases(GeneralVoF::Data& data)
                 const auto& cell = data.cells.at(key);
                 if (cell.owner != comm->getRank() || cell.revision != revision)
                     throw std::invalid_argument("General VoF stale phase request.");
-                budget.packet(bytes.size() + 128);
+                budget.packet(bytes.size() + 136);
                 wire::Writer w;
                 w.bytes(bytes);
                 w.word(revision);
+                w.word(std::uint64_t(data.options.inventory_policy));
                 real(w, cell.phase.gas_volume);
                 real(w, cell.phase.carrier_volume);
                 w.word(std::uint64_t(cell.declaration));
@@ -534,6 +606,14 @@ void import_phases(GeneralVoF::Data& data)
                         &cell.occupancy.phase_input_bound, &cell.occupancy.fit_residual, &cell.occupancy.fit_bound,
                         &cell.occupancy.transferred_bound, &cell.occupancy.fit_allocation_bound})
                     real(w, *value);
+                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                {
+                    if (!cell.experimental_exact)
+                        throw std::invalid_argument("Missing exact owner phase state.");
+                    const auto encoded = detail::encode_experimental(*cell.experimental_exact, limit);
+                    budget.add(8 + encoded.size());
+                    w.bytes(encoded);
+                }
                 replies.push_back({packet.peer, std::move(w.data)});
             }
         });
@@ -551,6 +631,8 @@ void import_phases(GeneralVoF::Data& data)
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated phase reply.");
+                if (r.word() != std::uint64_t(data.options.inventory_policy))
+                    throw std::invalid_argument("General VoF ghost inventory policy differs.");
                 cell.phase.gas_volume = real(r);
                 cell.phase.carrier_volume = real(r);
                 cell.declaration = GeneralVoFPhaseGeometry(r.word());
@@ -562,6 +644,10 @@ void import_phases(GeneralVoF::Data& data)
                         &cell.occupancy.phase_input_bound, &cell.occupancy.fit_residual, &cell.occupancy.fit_bound,
                         &cell.occupancy.transferred_bound, &cell.occupancy.fit_allocation_bound})
                     *value = real(r);
+                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                    cell.experimental_exact = detail::decode_experimental(r.bytes(), limit);
+                else
+                    cell.experimental_exact.reset();
                 r.done();
                 validate_cell(cell, data.options);
             }
@@ -772,6 +858,22 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 }
                 else
                     occupancy(cell);
+                if (options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                {
+                    if (capsules)
+                    {
+                        const auto& capsule = capsules->at(i);
+                        if (capsule.policy != options.inventory_policy || !capsule.experimental_exact)
+                            throw std::invalid_argument("Experimental adoption policy/payload differs.");
+                        cell.experimental_exact = capsule.experimental_exact;
+                    }
+                    else
+                        cell.experimental_exact = detail::experimental_initial(*cell.phase.geometry, cell.native_volume,
+                            cell.phase.gas_volume, cell.phase.carrier_volume, options.byte_budget);
+                }
+                else if (capsules &&
+                         (capsules->at(i).policy != PhaseInventoryPolicy::Finite || capsules->at(i).experimental_exact))
+                    throw std::invalid_argument("Finite adoption cannot acquire experimental history.");
                 if (!declarations.empty())
                     cell.declaration = declarations[i];
                 else if (!capsules)
@@ -982,6 +1084,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 data->roundoff.push_back(data->cells.at(key).roundoff);
                 data->occupancy.push_back(data->cells.at(key).occupancy);
             }
+            refresh_experimental_catalog(*data);
         });
     wire::collective(*comm,
         [&]
@@ -1015,6 +1118,8 @@ void GeneralVoF::validate_transfer_target(const ExactPhaseTransferResult& result
                 result.target_hierarchy()->communicator().getRawPtr() != comm.getRawPtr())
                 throw std::invalid_argument("General VoF transfer target communicator differs.");
             current(*data_);
+            if (result.inventory_policy() != data_->options.inventory_policy)
+                throw std::invalid_argument("General VoF transfer target policy differs.");
         });
     result.validate_observations();
     agree_transaction(comm, data_->control);
@@ -1040,6 +1145,26 @@ void GeneralVoF::validate_transfer_target(const ExactPhaseTransferResult& result
                 if (found == data_->cells.end() || !data_->hierarchy->owned().contains(capsule.key))
                     throw std::invalid_argument("General VoF adopted transfer ownership differs.");
                 const auto& cell = found->second;
+                if (capsule.policy != data_->options.inventory_policy ||
+                    bool(capsule.experimental_exact) != bool(cell.experimental_exact))
+                    throw std::invalid_argument("General VoF adopted policy/payload differs.");
+                if (cell.experimental_exact)
+                {
+                    const auto& a = *cell.experimental_exact;
+                    const auto& b = *capsule.experimental_exact;
+                    for (const auto& pair : {std::pair{&a.phases.bulk, &b.phases.bulk},
+                             std::pair{&a.phases.gas, &b.phases.gas}, std::pair{&a.phases.carrier, &b.phases.carrier},
+                             std::pair{&a.error.difference, &b.error.difference},
+                             std::pair{&a.error.admitted_bound, &b.error.admitted_bound},
+                             std::pair{&a.error.native_conversion, &b.error.native_conversion},
+                             std::pair{&a.error.phase_input_bound, &b.error.phase_input_bound},
+                             std::pair{&a.error.fit_residual, &b.error.fit_residual},
+                             std::pair{&a.error.fit_bound, &b.error.fit_bound},
+                             std::pair{&a.error.transferred_bound, &b.error.transferred_bound},
+                             std::pair{&a.error.fit_allocation_bound, &b.error.fit_allocation_bound}})
+                        if (pair.first->compare(*pair.second))
+                            throw std::invalid_argument("Experimental adopted authority/provenance differs.");
+                }
                 const auto declaration = capsule.geometry.pure_gas
                                              ? GeneralVoFPhaseGeometry::PureGas
                                              : (capsule.geometry.pure_carrier ? GeneralVoFPhaseGeometry::PureCarrier
@@ -1080,6 +1205,8 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(bool prepare_geometr
                 const auto& cell = data_->cells.at(key);
                 ExactPhaseTransferCapsule capsule;
                 capsule.key = key;
+                capsule.policy = data_->options.inventory_policy;
+                capsule.experimental_exact = cell.experimental_exact;
                 capsule.revision = cell.revision;
                 capsule.phases = {cell.native_volume, cell.phase.gas_volume, cell.phase.carrier_volume};
                 capsule.roundoff = cell.roundoff;
@@ -1119,19 +1246,39 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(bool prepare_geometr
                     auto fit_bound = view.scaled(data_->options.reconstruction.volume_tolerance) +
                                      (conversion.sign() < 0 ? conversion.scaled(-1) : conversion);
                     if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
-                        fit_bound = finite_bound(std::max(e.admitted_bound, e.fit_bound));
+                    {
+                        if (cell.experimental_exact)
+                        {
+                            const auto& exact = cell.experimental_exact->error;
+                            fit_bound = exact.admitted_bound.compare(exact.fit_bound) >= 0 ? exact.admitted_bound
+                                                                                           : exact.fit_bound;
+                        }
+                        else
+                            fit_bound = finite_bound(std::max(e.admitted_bound, e.fit_bound));
+                    }
                     capsule.error.fit_bound =
                         detail::phase_upper_bound(fit_bound + finite_bound(fit_diagnostic.absolute_error));
                     // Reuse the same independent admission proof as transport;
                     // merely observing the fit residual never enlarges its bound.
                     (void) detail::ExactPhaseLabelMap::create(raw, gas, target, fit_bound, data_->options.byte_budget);
+                    if (cell.experimental_exact)
+                    {
+                        auto prepared = std::make_shared<ExperimentalPhaseInventory>(*cell.experimental_exact);
+                        prepared->error.fit_residual = target - (gas ? raw.gas : raw.carrier);
+                        prepared->error.fit_bound = fit_bound;
+                        capsule.experimental_exact = std::move(prepared);
+                    }
                 }
                 capsules.push_back(std::move(capsule));
             }
         });
     std::optional<ExactPhaseTransferSource> result;
-    wire::collective(*comm, [&]
-        { result.emplace(ExactPhaseTransferSource(data_->hierarchy, data_, data_->control, std::move(capsules))); });
+    wire::collective(*comm,
+        [&]
+        {
+            result.emplace(ExactPhaseTransferSource(
+                data_->hierarchy, data_, data_->control, std::move(capsules), data_->options.inventory_policy));
+        });
     return std::move(*result);
 }
 std::shared_ptr<const GeneralVoF> GeneralVoF::adopt_transfer(const ExactPhaseTransferResult& result) const
@@ -1145,6 +1292,8 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::adopt_transfer(const ExactPhaseTra
         [&]
         {
             current(*data_);
+            if (result.inventory_policy() != data_->options.inventory_policy)
+                throw std::invalid_argument("General VoF adoption inventory policy differs.");
             if (result.source_identity().get() != data_.get() || result.source_control() != data_->control ||
                 result.source_hierarchy().get() != data_->hierarchy.get())
                 throw std::invalid_argument("General VoF exact transfer belongs to another accepted source.");
@@ -1189,6 +1338,27 @@ const std::vector<double>& GeneralVoF::carrier_volumes() const noexcept
 const std::vector<PhaseVolumes>& GeneralVoF::phase_volumes() const noexcept
 {
     return data_->phases;
+}
+PhaseInventoryPolicy GeneralVoF::inventory_policy() const noexcept
+{
+    return data_->options.inventory_policy;
+}
+std::vector<Meshes::ExactPhaseMeasures> GeneralVoF::inventory_measures() const
+{
+    if (inventory_policy() == PhaseInventoryPolicy::ExperimentalExact)
+        return experimental_phases();
+    std::vector<Meshes::ExactPhaseMeasures> result;
+    result.reserve(data_->phases.size());
+    for (const auto& value : data_->phases)
+        result.push_back(
+            {Measure::from_value(value.bulk), Measure::from_value(value.gas), Measure::from_value(value.carrier)});
+    return result;
+}
+const std::vector<Meshes::ExactPhaseMeasures>& GeneralVoF::experimental_phases() const
+{
+    if (inventory_policy() != PhaseInventoryPolicy::ExperimentalExact || !data_->experimental_catalog)
+        throw std::invalid_argument("Exact inventory access requires explicit ExperimentalExact policy.");
+    return *data_->experimental_catalog;
 }
 const std::vector<PhaseRoundoff>& GeneralVoF::phase_roundoff_bounds() const noexcept
 {
@@ -1392,6 +1562,8 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::Trial::candidate() const
         [&]
         {
             current(*source_);
+            if (candidate_->options.inventory_policy != source_->options.inventory_policy)
+                throw std::invalid_argument("General VoF trial candidate inventory policy differs.");
             result = std::shared_ptr<const GeneralVoF>(new GeneralVoF(candidate_));
         });
     return result;
@@ -1709,7 +1881,15 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                 const auto absolute_conversion = conversion.sign() < 0 ? conversion.scaled(-1) : conversion;
                 auto bound = view.scaled(data.options.reconstruction.volume_tolerance) + absolute_conversion;
                 if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
-                    bound = finite_bound(std::max(cell.occupancy.admitted_bound, cell.occupancy.fit_bound));
+                {
+                    if (cell.experimental_exact)
+                    {
+                        const auto& e = cell.experimental_exact->error;
+                        bound = e.admitted_bound.compare(e.fit_bound) >= 0 ? e.admitted_bound : e.fit_bound;
+                    }
+                    else
+                        bound = finite_bound(std::max(cell.occupancy.admitted_bound, cell.occupancy.fit_bound));
+                }
                 auto label = detail::ExactPhaseLabelMap::create(raw, gas, target, bound, limit);
                 budget.add(label.storage_bytes());
                 labels.emplace(key, std::move(label));
@@ -2430,27 +2610,40 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                     throw std::invalid_argument(
                         "General VoF transport changed the independent source occupancy defect.");
                 cell.retained_interface.reset();
-                // Round each independently conserved phase ONCE. The next step
-                // starts from these published values, never total's rational tail.
-                const auto gas = detail::round_phase_value(total.gas);
-                const auto carrier = detail::round_phase_value(total.carrier);
-                cell.phase.gas_volume = gas.value;
-                cell.phase.carrier_volume = carrier.value;
-                cell.roundoff = {gas.absolute_error, carrier.absolute_error};
-                const auto rounding = finite_bound(gas.absolute_error) + finite_bound(carrier.absolute_error);
-                cell.occupancy.admitted_bound =
-                    detail::phase_upper_bound(finite_bound(cell.occupancy.admitted_bound) + rounding);
-                cell.occupancy.phase_input_bound =
-                    detail::phase_upper_bound(finite_bound(cell.occupancy.phase_input_bound) + rounding);
-                const auto published = phase_measures(cell);
-                const auto diagnostic =
-                    detail::round_phase_residual(published.gas + published.carrier - published.bulk);
-                cell.occupancy.difference = diagnostic.value;
-                cell.occupancy.admitted_bound = detail::phase_upper_bound(
-                    finite_bound(cell.occupancy.admitted_bound) + finite_bound(diagnostic.absolute_error));
-                cell.occupancy.phase_input_bound = detail::phase_upper_bound(
-                    finite_bound(cell.occupancy.phase_input_bound) + finite_bound(diagnostic.absolute_error));
-                candidate->phases.push_back({cell.native_volume, gas.value, carrier.value});
+                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                {
+                    cell.experimental_exact = detail::experimental_advance(*data.cells.at(key).experimental_exact,
+                        {total.bulk, total.gas, total.carrier}, *cell.phase.geometry, cell.native_volume, limit);
+                    const auto view = detail::experimental_view(*cell.experimental_exact, cell.native_volume);
+                    cell.phase.gas_volume = view.phases.gas;
+                    cell.phase.carrier_volume = view.phases.carrier;
+                    cell.occupancy = view.error;
+                    cell.roundoff = view.roundoff;
+                }
+                else
+                {
+                    // Round each independently conserved phase ONCE. The next step
+                    // starts from these published values, never total's rational tail.
+                    const auto gas = detail::round_phase_value(total.gas);
+                    const auto carrier = detail::round_phase_value(total.carrier);
+                    cell.phase.gas_volume = gas.value;
+                    cell.phase.carrier_volume = carrier.value;
+                    cell.roundoff = {gas.absolute_error, carrier.absolute_error};
+                    const auto rounding = finite_bound(gas.absolute_error) + finite_bound(carrier.absolute_error);
+                    cell.occupancy.admitted_bound =
+                        detail::phase_upper_bound(finite_bound(cell.occupancy.admitted_bound) + rounding);
+                    cell.occupancy.phase_input_bound =
+                        detail::phase_upper_bound(finite_bound(cell.occupancy.phase_input_bound) + rounding);
+                    const auto published = phase_measures(cell);
+                    const auto diagnostic =
+                        detail::round_phase_residual(published.gas + published.carrier - published.bulk);
+                    cell.occupancy.difference = diagnostic.value;
+                    cell.occupancy.admitted_bound = detail::phase_upper_bound(
+                        finite_bound(cell.occupancy.admitted_bound) + finite_bound(diagnostic.absolute_error));
+                    cell.occupancy.phase_input_bound = detail::phase_upper_bound(
+                        finite_bound(cell.occupancy.phase_input_bound) + finite_bound(diagnostic.absolute_error));
+                }
+                candidate->phases.push_back({cell.native_volume, cell.phase.gas_volume, cell.phase.carrier_volume});
                 candidate->roundoff.push_back(cell.roundoff);
                 candidate->occupancy.push_back(cell.occupancy);
                 if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
@@ -2467,6 +2660,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                 candidate->gas.push_back(cell.phase.gas_volume);
                 candidate->carrier.push_back(cell.phase.carrier_volume);
             }
+            refresh_experimental_catalog(*candidate);
             std::copy(candidate->roundoff.begin(), candidate->roundoff.end(), trial.roundoff_.begin());
             current(data);
         });
@@ -2486,6 +2680,11 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
                 sums[1] += static_cast<long double>(next.phase.carrier_volume) - old.phase.carrier_volume;
                 sums[2] += next.roundoff.gas;
                 sums[3] += next.roundoff.carrier;
+                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                {
+                    sums[2] += old.roundoff.gas;
+                    sums[3] += old.roundoff.carrier;
+                }
                 sums[4] += std::abs(static_cast<long double>(next.phase.gas_volume)) +
                            std::abs(static_cast<long double>(old.phase.gas_volume));
                 sums[5] += std::abs(static_cast<long double>(next.phase.carrier_volume)) +
@@ -2562,7 +2761,8 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::apply(const Trial& trial) const
         [&]
         {
             current(*data_);
-            if (trial.source_ != data_ || !trial.candidate_)
+            if (trial.source_ != data_ || !trial.candidate_ ||
+                trial.candidate_->options.inventory_policy != data_->options.inventory_policy)
                 throw std::invalid_argument("General VoF trial belongs to another source.");
         });
     return trial.candidate();

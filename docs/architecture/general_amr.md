@@ -789,18 +789,28 @@ adoption. Solver regrid
 and repartition rebuild candidate geometry-dependent operators without advancing
 the clock; a failed step or adaptation retains the complete accepted publication.
 
-A separate opt-in experimental exact-inventory path is planned for preservation
-of the earlier prototype. It is not yet integrated with the finite default and
-must be introduced in a separate commit after the finite implementation commit,
-without waiting for every pending physical qualification gate. Its
-selection must be explicit; it must not retain rational phase remainders in the
-default state or silently change that state's publication/error contract.
-Exact evolving inventories have a different cost model from exact geometry:
-normalized history denominators, rational arithmetic and communication can grow
-with accepted steps even after allocation slack and duplicate retention are
-removed. The experimental path remains unqualified for long horizons,
-centimetric bubbles and production scaling. Preserved prototype tests or source
-snapshots do not qualify the future opt-in integration.
+An explicit `PhaseInventoryPolicy::ExperimentalExact` retains an experimental
+exact-inventory path; `Finite` remains the default. The cold exact phase/error
+payload is allocated only in the opt-in policy. Its ordinary finite views and
+conversion bounds remain diagnostics; the cold payload is that mode's authority.
+Source, result, capsules, imported records and accepted-control checks pin the
+policy, including empty owners. Cross-policy adoption rejects; resource or
+numerical failure never silently switches policy. The finite branch stores no
+exact phase/error remainder, and transaction-local weighted momentum products
+remain a separate concept in both modes.
+
+Experimental exact handoff preserves its authoritative phases and provenance
+through same-policy ownership migration and certified overlap transfer. Positive
+owned exact inventories must still have representable positive scalar views;
+tiny internal fragments are aggregated before that unchanged admission boundary.
+The retained exact implementation is experimental: focused policy/API/remap
+contracts do not qualify general physical use, performance or total storage. Normalized history denominators, rational arithmetic and packets
+can grow with accepted steps even after allocation slack and duplicate retention
+are removed. It has no long-horizon, centimetric-bubble or production-scaling
+qualification. Preserved prototype tests do not qualify this new opt-in
+integration. Commit the implementation separately after the finite-default
+implementation commit, while keeping pending physical qualification explicit,
+with an assistance/provenance and limitations note.
 
 A multi-plan transfer names each actual native-bound candidate explicitly. The
 next plan must originate from that candidate's observed maps and geometry;

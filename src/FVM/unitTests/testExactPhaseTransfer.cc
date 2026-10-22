@@ -141,6 +141,12 @@ TEST(ExactPhaseTransfer, FiniteInventoriesMigrateSplitAndCoarsenWithinActualPubl
     std::vector<GeneralVoFPhaseGeometry> declarations(keys.size(), GeneralVoFPhaseGeometry::PureCarrier);
     GeneralVoF initial(h, keys, gas, carrier, {}, declarations);
     auto source = channels(initial);
+    EXPECT_EQ(source.inventory_policy(), PhaseInventoryPolicy::Finite);
+    for (const auto& c : source.owned())
+    {
+        EXPECT_EQ(c.policy, PhaseInventoryPolicy::Finite);
+        EXPECT_FALSE(c.experimental_exact);
+    }
     std::vector<int> destinations(
         keys.size(), (h->communicator()->getRank() + 1) % std::min(2, h->communicator()->getSize()));
     const auto migration = source.hierarchy()->plan_migration(destinations);
@@ -302,4 +308,145 @@ TEST(ExactPhaseTransfer, TinyMomentumRemainsTransactionLocalUntilAggregationAndV
         EXPECT_GT(p.gas, 0);
     empty_owners(*target);
 }
+// Runtime opt-in only: these tests do not change the finite default policy.
+TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAndRejectsCrossPolicy)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {2, 2, .7};
+    CartesianAMR root(grid);
+    const auto h = bootstrap(root, 8);
+    const auto corner = [](const CartesianCellAncestry& c)
+    {
+        const auto x = c.index[0] >> c.level, y = c.index[1] >> c.level;
+        return unsigned(y ? (x ? 2 : 3) : (x ? 1 : 0));
+    };
+    const auto expected = [&](const CartesianCellAncestry& c)
+    {
+        const auto xy = corner(c), z = unsigned(c.index[2] >> c.level);
+        const auto old = M::from_value(std::ldexp(1e-200, int(xy + 4 * z)));
+        const auto previous = M::from_value(std::ldexp(1e-200, int((xy + 3) % 4 + 4 * z)));
+        return old + (previous - old).scaled(1. / 64).divided_by(M::from_value(.35));
+    };
+    std::vector<AdaptiveCellKey> keys;
+    std::vector<double> gas, carrier;
+    for (const auto& [key, leaf] : h->owned())
+    {
+        const auto& c = std::get<CartesianCellAncestry>(key.ancestry);
+        keys.push_back(key);
+        gas.push_back(std::ldexp(1e-200, int(corner(c) + 4 * c.index[2])));
+        carrier.push_back(h->metrics(leaf).volume);
+    }
+    std::vector<GeneralVoFPhaseGeometry> pure(keys.size(), GeneralVoFPhaseGeometry::PureCarrier);
+    GeneralVoF finite(h, keys, gas, carrier, {}, pure);
+    EXPECT_EQ(finite.inventory_policy(), PhaseInventoryPolicy::Finite);
+    EXPECT_THROW((void) finite.experimental_phases(), std::invalid_argument);
+    GeneralVoFOptions options;
+    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    GeneralVoF exact(h, keys, gas, carrier, options, pure);
+    std::vector<GeneralVoFNodeVelocity> nodes;
+    for (const auto& n : exact.nodes())
+        nodes.push_back({n.gid, {0, 0, 0}});
+    std::vector<GeneralVoFFaceVolume> faces;
+    for (const auto& face : exact.tiles())
+    {
+        const auto center = face.geometry->centroid(), area = face.geometry->area_vector();
+        double phi = 0;
+        if (!face.exterior && center.x == 1 && area.x != 0)
+            phi = (center.y < 1 ? 1 : -1) * (area.x > 0 ? 1 : -1) / 64.;
+        if (!face.exterior && center.y == 1 && area.y != 0)
+            phi = (center.x > 1 ? 1 : -1) * (area.y > 0 ? 1 : -1) / 64.;
+        faces.push_back({face.face_gid, phi});
+    }
+    const auto transported = exact.apply(exact.plan_transport(nodes, faces, 1));
+    auto source = transported->export_transfer_source(false);
+    EXPECT_EQ(source.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
+    int local_remainder = 0;
+    for (const auto& c : source.owned())
+    {
+        EXPECT_EQ(c.policy, PhaseInventoryPolicy::ExperimentalExact);
+        ASSERT_TRUE(c.experimental_exact);
+        EXPECT_EQ(
+            c.experimental_exact->phases.gas.compare(expected(std::get<CartesianCellAncestry>(c.key.ancestry))), 0);
+        local_remainder += c.experimental_exact->phases.gas.compare(M::from_value(c.phases.gas)) != 0;
+    }
+    int remainder = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_remainder, &remainder);
+    EXPECT_GT(remainder, 0);
+    std::vector<int> destinations(keys.size(), (comm->getRank() + 1) % std::min(2, comm->getSize()));
+    const auto migration = source.hierarchy()->plan_migration(destinations);
+    const auto moved_h = bind(*source.hierarchy(), migration);
+    const auto moved = ExactPhaseTransfer::prepare(source, migration, moved_h);
+    EXPECT_EQ(moved.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
+    const auto state = transported->adopt_transfer(moved);
+    empty_owners(*state->hierarchy());
+    for (const auto& c : moved.owned())
+    {
+        ASSERT_TRUE(c.experimental_exact);
+        EXPECT_EQ(
+            c.experimental_exact->phases.gas.compare(expected(std::get<CartesianCellAncestry>(c.key.ancestry))), 0);
+    }
+    bool policy_rejected = false;
+    try
+    {
+        (void) finite.adopt_transfer(moved);
+    }
+    catch (const std::invalid_argument& error)
+    {
+        policy_rejected = true;
+        EXPECT_NE(std::string(error.what()).find("policy"), std::string::npos);
+    }
+    EXPECT_TRUE(policy_rejected);
+    const auto finite_source = finite.export_transfer_source(false);
+    EXPECT_EQ(finite_source.inventory_policy(), PhaseInventoryPolicy::Finite);
+    for (const auto& c : finite_source.owned())
+    {
+        EXPECT_EQ(c.policy, PhaseInventoryPolicy::Finite);
+        EXPECT_FALSE(c.experimental_exact);
+    }
+    std::vector<AdaptiveMark> marks;
+    for (const auto& [key, leaf] : state->hierarchy()->owned())
+        if (key == root.cell_key(0))
+            marks.push_back({key, AdaptiveSplit::Isotropic});
+    const auto plan = state->hierarchy()->plan_adaptation(marks);
+    const auto target = bind(*state->hierarchy(), plan);
+    const auto result = ExactPhaseTransfer::prepare(state->export_transfer_source(false), plan, target);
+    for (const auto& c : result.owned())
+    {
+        ASSERT_TRUE(c.experimental_exact);
+        const auto& ancestry = std::get<CartesianCellAncestry>(c.key.ancestry);
+        const auto child = M::volume(*target->geometry(target->owned().at(c.key)));
+        const auto wanted =
+            expected(ancestry).divided_by(M::from_value(.35)).divided_by(M::from_value(1).divided_by(child));
+        EXPECT_EQ(c.experimental_exact->phases.gas.compare(wanted), 0);
+        EXPECT_EQ((c.experimental_exact->phases.gas + c.experimental_exact->phases.carrier - child)
+                      .compare(c.experimental_exact->error.difference),
+            0);
+    }
+    const auto refined = state->adopt_transfer(result);
+    EXPECT_EQ(refined->inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
+    std::vector<AdaptiveBytes> inverse;
+    if (comm->getRank() == 0)
+        inverse.push_back(adaptive_family_key(root.cell_key(0), AdaptiveSplit::Isotropic));
+    const auto inverse_plan = refined->hierarchy()->plan_adaptation({}, inverse);
+    const auto inverse_target = bind(*refined->hierarchy(), inverse_plan);
+    const auto inverse_result =
+        ExactPhaseTransfer::prepare(refined->export_transfer_source(false), inverse_plan, inverse_target);
+    for (const auto& c : inverse_result.owned())
+    {
+        ASSERT_TRUE(c.experimental_exact);
+        const auto& key = std::get<CartesianCellAncestry>(c.key.ancestry);
+        EXPECT_EQ(c.experimental_exact->phases.gas.compare(expected(key)), 0);
+    }
+    EXPECT_EQ(refined->adopt_transfer(inverse_result)->inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
+    EXPECT_THROW(
+        exact.adopt_transfer(result), std::invalid_argument); // wrong accepted source/control despite same mode
+    ExactPhaseTransferOptions exhausted;
+    exhausted.byte_budget = 1;
+    EXPECT_THROW(ExactPhaseTransfer::prepare(state->export_transfer_source(false), plan, target, exhausted),
+        std::invalid_argument);
+    result.validate_observations();
+}
+
 } // namespace
