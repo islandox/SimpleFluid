@@ -77,6 +77,42 @@ TEST(PolyhedralReconstruction, IndependentMicroscopicPhasesAreNeverNormalizedOrD
                 EXPECT_NEAR(minority.certified().as_double(), trace, 1e-37);
         }
 }
+TEST(PolyhedralReconstruction, RationalSupportRetainsSignedMinorityOffsets)
+{
+    const auto box = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    // The exact lower support is 1/10, while its displayed coordinate is
+    // slightly larger. The gas plane for a 1e-18 layer must have negative offset.
+    const auto cell = box->clip({{-10, 0, 0}, {}, -1}).inside;
+    const auto fragment = ExactConvexFragment::from_geometry(*cell);
+    for (const double direction : {1., -1.})
+        for (const bool minority_gas : {true, false})
+        {
+            SCOPED_TRACE(::testing::Message() << direction << " " << minority_gas);
+            PolyhedralPhaseSample sample{cell, minority_gas ? 1e-18 : .9, minority_gas ? .9 : 1e-18};
+            const auto original = sample;
+            const auto plane = PolyhedralReconstruction::solve_offset(sample, {direction, 0, 0});
+            const auto phases = fragment->phases(plane.gas);
+            const auto minority = minority_gas ? phases.gas : phases.carrier;
+            EXPECT_TRUE(minority.relative_error_at_most(ExactGeometryMeasure::from_value(1e-18), 8e-15));
+            EXPECT_GT(minority.sign(), 0);
+            EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
+            EXPECT_EQ(sample.gas_volume, original.gas_volume);
+            EXPECT_EQ(sample.carrier_volume, original.carrier_volume);
+            EXPECT_FALSE(plane.pure_gas);
+            EXPECT_FALSE(plane.pure_carrier);
+            if (direction == 1 && minority_gas)
+                EXPECT_NEAR(plane.gas.offset, -4.5511151231257829e-18, 1e-32);
+        }
+    for (const double direction : {1., -1.})
+        for (const bool pure_gas : {true, false})
+        {
+            const auto plane = PolyhedralReconstruction::solve_offset(
+                {cell, pure_gas ? .9 : 0., pure_gas ? 0. : .9}, {direction, 0, 0});
+            const auto phases = fragment->phases(plane.gas);
+            EXPECT_EQ((pure_gas ? phases.carrier : phases.gas).sign(), 0);
+            EXPECT_EQ((pure_gas ? phases.gas : phases.carrier).compare(fragment->volume()), 0);
+        }
+}
 TEST(PolyhedralReconstruction, CurvedVolumeModelSeparatesAngularConvergenceFromPlanarDefect)
 {
     constexpr double width = .25, linear_x = .125, linear_y = -.0625, curvature = .03125;

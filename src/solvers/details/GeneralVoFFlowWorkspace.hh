@@ -28,8 +28,11 @@ public:
     [[nodiscard]] std::vector<double> cells(const std::vector<double>& owned) const;
     [[nodiscard]] std::vector<Vector> vectors(const std::vector<Vector>& owned) const;
     [[nodiscard]] std::vector<double> faces(const std::vector<double>& overlap) const;
+    /** Physical least squares; globally unsampled coordinate directions have zero
+     * derivative. Constant fields are exact even on isolated boundary cells;
+     * unresolved nonconstant sampled directions are rejected collectively. */
     [[nodiscard]] std::vector<Vector> gradient(const std::vector<double>& owned) const;
-    /** Divergence of unit interface normals; rejects rank-deficient stencils. */
+    /** Divergence of unit interface normals using the gradient support contract. */
     [[nodiscard]] std::vector<double> curvature(const std::vector<Vector>& owned_normals) const;
     [[nodiscard]] std::vector<double> interpolate(const std::vector<Vector>& owned_velocity) const;
     [[nodiscard]] std::vector<Vector> viscous_force(
