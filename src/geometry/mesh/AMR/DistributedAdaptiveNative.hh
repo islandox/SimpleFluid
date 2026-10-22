@@ -21,6 +21,11 @@ struct AdaptiveNativePublication
  * is common across ranks; no active global region/cell catalog is constructed. */
 [[nodiscard]] AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft, std::span<const char> root_schema,
     Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget);
+/** Fetch complete owner-authenticated first-ring and explicitly requested full
+ * ghost records, plus metric-only outer neighbors. No recursive halo closure or
+ * global catalog is constructed. The native publisher uses this identical path. */
+[[nodiscard]] AdaptiveNativeDraft fetch_adaptive_native_draft(
+    const DistributedAdaptiveHierarchy&, std::span<const AdaptiveCellKey> additional_full_ghosts = {});
 /** Owner-authenticated first-ring and caller-declared full ghosts, with outer
  * metric neighbors. Additional keys are bounded by the hierarchy byte budget. */
 [[nodiscard]] AdaptiveNativePublication assemble_adaptive_native(const DistributedAdaptiveHierarchy&,

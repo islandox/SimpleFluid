@@ -7,6 +7,7 @@
 namespace SimpleFluid::Meshes
 {
 class ExactPlanarFace;
+class ExactGeometryMeasure;
 using ExactPlanarFacePtr = std::shared_ptr<const ExactPlanarFace>;
 /** Exact planar support and subtraction helpers; independent of AMR ancestry. */
 [[nodiscard]] std::vector<char> exact_planar_support(const ExactPlanarFace&);
@@ -44,6 +45,14 @@ public:
     [[nodiscard]] CertifiedGeometryValue area() const;
     [[nodiscard]] MeshUtils::Vec3 centroid() const;
     [[nodiscard]] MeshUtils::Vec3 area_vector() const;
+    /** Positive exact area ratio on one exact support plane; opposite winding
+     * is allowed. Noncoplanar or degenerate support rejects, without sqrt. */
+    [[nodiscard]] ExactGeometryMeasure coplanar_area_ratio(
+        const ExactPlanarFace& denominator, std::size_t byte_budget = 64 * 1024 * 1024) const;
+    /** Signed exact integral velocity dot n dA for represented velocity (m^3/s).
+     * The opaque result may remain nonzero below the public scalar range. */
+    [[nodiscard]] ExactGeometryMeasure area_vector_dot(
+        GeometryPoint velocity, std::size_t byte_budget = 64 * 1024 * 1024) const;
     [[nodiscard]] ExactPlanarFacePtr reversed() const;
     [[nodiscard]] ExactPlanarFacePtr translated(GeometryPoint displacement) const;
     [[nodiscard]] ExactPlanarFacePtr translated_exact(std::span<const char> displacement) const;
@@ -71,8 +80,10 @@ public:
 private:
     friend std::vector<char> exact_planar_support(const ExactPlanarFace&);
     friend int exact_planar_orientation(const ExactPlanarFace&);
-    friend std::vector<ExactPlanarFacePtr> subtract_planar_faces(const ExactPlanarFace&,std::span<const ExactPlanarFacePtr>);
+    friend std::vector<ExactPlanarFacePtr> subtract_planar_faces(
+        const ExactPlanarFace&, std::span<const ExactPlanarFacePtr>);
     friend class ConvexCellGeometry;
+    friend class ExactSweepAccess;
     friend class ExactExtrudedConstruction;
     friend class ExactPolyhedralComplex;
     explicit ExactPlanarFace(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}

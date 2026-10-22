@@ -6,7 +6,9 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAncestryDirectory.hh"
 #include "parallel/CompositePartition.hh"
+
 #include <map>
+#include <optional>
 namespace SimpleFluid::Meshes::AMR
 {
 struct AdaptiveBalancePlan;
@@ -40,18 +42,26 @@ public:
     [[nodiscard]] std::uint64_t topology_generation() const noexcept;
     [[nodiscard]] std::uint64_t partition_generation() const noexcept;
     [[nodiscard]] const std::shared_ptr<const void>& identity() const noexcept;
-    /** Collective sparse owner lookup; address is the current observed native GID. */
+    /** Collective sparse owner lookup; address is the current observed native
+     * GID. Optional cap presence must agree collectively; values may differ by rank.
+     * These transient caps are positive local application leases no
+     * larger than options().byte_budget; exhaustion rejects collectively.
+     * Omitting the cap preserves the original service budget. */
     [[nodiscard]] std::vector<AdaptiveOwner> lookup_cells(
-        std::span<const AdaptiveCellKey>, bool require_all = true) const;
+        std::span<const AdaptiveCellKey>, bool require_all = true, std::optional<std::size_t> transient_cap = {}) const;
     [[nodiscard]] std::vector<AdaptiveOwner> lookup_families(
-        std::span<const AdaptiveBytes>, bool require_all = true) const;
+        std::span<const AdaptiveBytes>, bool require_all = true, std::optional<std::size_t> transient_cap = {}) const;
     [[nodiscard]] AdaptiveBytes configuration_descriptor() const;
     /** Preserves key/material/revision/exact shape. Native descriptors may be
      * repacked to the requested subset: returned native_cell is valid only in
      * its returned recipe. Resolve tile faces by persistent support+geometry,
-     * never reuse an owner's ephemeral native face/cell ordinal. */
-    [[nodiscard]] std::vector<AdaptiveLeaf> fetch_leaves(std::span<const AdaptiveCellKey>) const;
-    [[nodiscard]] std::vector<AdaptiveFamily> fetch_families(std::span<const AdaptiveBytes>) const;
+     * never reuse an owner's ephemeral native face/cell ordinal. Explicitly
+     * leased fetches retain original immutable recipes and ordinals instead of
+     * constructing new subset views before packet admission. */
+    [[nodiscard]] std::vector<AdaptiveLeaf> fetch_leaves(
+        std::span<const AdaptiveCellKey>, std::optional<std::size_t> transient_cap = {}) const;
+    [[nodiscard]] std::vector<AdaptiveFamily> fetch_families(
+        std::span<const AdaptiveBytes>, std::optional<std::size_t> transient_cap = {}) const;
     [[nodiscard]] const Teuchos::RCP<const Teuchos::Comm<int>>& communicator() const noexcept;
     [[nodiscard]] const DistributedAdaptiveOptions& options() const noexcept;
     [[nodiscard]] std::uint64_t global_cells() const noexcept;

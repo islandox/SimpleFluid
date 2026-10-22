@@ -710,16 +710,151 @@ std::shared_ptr<const DistributedAdaptiveHierarchy> DistributedAdaptiveHierarchy
 }
 namespace
 {
-AdaptiveBatch fetch_records(
-    const DistributedAdaptiveHierarchy::Data& state, std::span<const AdaptiveBytes> keys, bool family)
+std::size_t fetch_key_bytes(const AdaptiveCellKey& key)
+{
+    return std::visit(
+        [](const auto& p) -> std::size_t
+        {
+            if constexpr (requires { p.path; })
+                return p.path.capacity() * sizeof(std::uint64_t);
+            else if constexpr (requires { p.base.path; })
+                return (p.base.path.capacity() + p.axial.path.capacity()) * sizeof(std::uint64_t);
+            else
+                return 0;
+        },
+        key.ancestry);
+}
+void fetch_copy_charge(Budget& budget, const AdaptiveLeaf& leaf)
+{
+    budget.add(sizeof(AdaptiveLeaf));
+    budget.add(fetch_key_bytes(leaf.key));
+    budget.add(leaf.domain.capacity());
+    budget.add(leaf.parent_family.capacity());
+    if (leaf.surfaces.capacity() > budget.limit / sizeof(AdaptiveSurface))
+        throw std::invalid_argument("Needed leaf surface count exceeds lease.");
+    budget.add(leaf.surfaces.capacity() * sizeof(AdaptiveSurface));
+    for (const auto& face : leaf.surfaces)
+    {
+        budget.add(face.key.capacity());
+        budget.add(face.boundary.capacity());
+        budget.add(face.authority_image.capacity());
+    }
+}
+void fetch_copy_charge(Budget& budget, const AdaptiveFamily& family)
+{
+    budget.add(sizeof(AdaptiveFamily));
+    budget.add(family.key.capacity());
+    budget.add(family.anchor.capacity());
+    if (family.children.capacity() > budget.limit / sizeof(AdaptiveCellKey))
+        throw std::invalid_argument("Needed family child count exceeds lease.");
+    budget.add(family.children.capacity() * sizeof(AdaptiveCellKey));
+    for (const auto& key : family.children)
+        budget.add(fetch_key_bytes(key));
+    fetch_copy_charge(budget, family.parent);
+}
+// Per-message decoded retention admission. Shared procedural dictionaries are
+// counted once, while separately decoded cell/face certificates are counted per
+// occurrence. The sender reserves growth slack; the receiver checks capacities.
+std::size_t fetch_retention(std::span<const AdaptiveLeaf> leaves, std::span<const AdaptiveFamily> families,
+    std::size_t limit, bool reserve_growth)
+{
+    Budget bytes{limit};
+    std::set<const void*> objects;
+    auto charge = [&](std::size_t n)
+    {
+        if (reserve_growth)
+        {
+            if (n > limit / 4)
+                throw std::invalid_argument("Needed decoded record exceeds retention lease.");
+            n *= 4;
+        }
+        bytes.add(n);
+    };
+    auto unique = [&](const void* p)
+    {
+        if (!p || objects.contains(p))
+            return false;
+        bytes.add(8 * sizeof(void*));
+        objects.insert(p);
+        return true;
+    };
+    auto part = [&](const std::shared_ptr<const AdaptiveBytes>& p)
+    {
+        if (p && unique(p.get()))
+            charge(sizeof(AdaptiveBytes) + p->capacity());
+    };
+    auto leaf = [&](const AdaptiveLeaf& value)
+    {
+        Budget metadata{limit};
+        fetch_copy_charge(metadata, value);
+        charge(metadata.used);
+        if (value.native_recipe && unique(value.native_recipe.get()))
+        {
+            charge(sizeof(NativeFragmentDescriptor) + value.native_recipe->view.capacity() +
+                   value.native_recipe->parts.capacity() * sizeof(std::shared_ptr<const AdaptiveBytes>));
+            for (const auto& p : value.native_recipe->parts)
+                part(p);
+        }
+        part(value.join_recipe);
+        if (value.factor_recipe && unique(value.factor_recipe.get()))
+        {
+            charge(sizeof(AdaptiveFactorRecipe));
+            part(value.factor_recipe->root);
+            part(value.factor_recipe->base);
+            part(value.factor_recipe->axis);
+        }
+        if (value.geometry)
+            charge(value.geometry->storage_bytes());
+        for (const auto& face : value.surfaces)
+        {
+            if (face.geometry)
+                charge(face.geometry->storage_bytes());
+            if (face.native_whole_geometry)
+                charge(face.native_whole_geometry->storage_bytes());
+        }
+    };
+    for (const auto& value : leaves)
+        leaf(value);
+    for (const auto& value : families)
+    {
+        Budget metadata{limit};
+        fetch_copy_charge(metadata, value);
+        charge(metadata.used);
+        leaf(value.parent);
+    }
+    return bytes.used;
+}
+AdaptiveBatch fetch_records(const DistributedAdaptiveHierarchy::Data& state, std::span<const AdaptiveBytes> keys,
+    bool family, std::size_t cap, bool leased)
 {
     const auto& directory = family ? state.family_directory : state.cells;
-    auto owners = directory->lookup(keys);
+    const auto packet_cap = leased ? cap / 8 : cap;
+    const auto exchange_cap = leased ? cap / 2 : cap;
+    const auto batch_cap = leased ? cap / 4 : cap;
+    const auto owner_cap = leased ? std::optional<std::size_t>(cap / 4) : std::nullopt;
+    collective(*state.comm,
+        [&]
+        {
+            if (leased && packet_cap < 256)
+                throw std::invalid_argument("Needed-record lease is too small.");
+        });
+    auto owners = directory->lookup(keys, true, owner_cap);
+    const auto check_packets = [&](const auto& packets)
+    {
+        if (!leased)
+            return;
+        Budget live{cap / 4};
+        if (packets.capacity() > (cap / 4) / sizeof(OwnerPacket))
+            throw std::invalid_argument("Needed packet metadata exceeds transient lease.");
+        live.add(packets.capacity() * sizeof(OwnerPacket));
+        for (const auto& packet : packets)
+            live.add(packet.bytes.capacity());
+    };
     std::vector<OwnerPacket> packets;
     collective(*state.comm,
         [&]
         {
-            Budget budget{state.options.byte_budget};
+            Budget budget{packet_cap};
             std::map<int, Writer> groups;
             for (std::size_t i = 0; i < keys.size(); ++i)
             {
@@ -735,18 +870,52 @@ AdaptiveBatch fetch_records(
                 packets.push_back({rank, std::move(w.data)});
             }
         });
-    auto incoming = exchange_owner_packets(packets, state.comm, state.options.byte_budget);
+    collective(*state.comm, [&] { check_packets(packets); });
+    auto incoming = exchange_owner_packets(packets, state.comm, exchange_cap);
     packets.clear();
     collective(*state.comm,
         [&]
         {
-            Budget budget{state.options.byte_budget};
+            Budget budget{leased ? cap / 4 : cap};
             for (const auto& packet : incoming.packets)
             {
                 Reader r{packet.bytes};
                 Writer order;
                 std::vector<AdaptiveLeaf> leaves;
                 std::vector<AdaptiveFamily> families;
+                if (leased)
+                {
+                    // Count framed requests without allocating key copies. Reserve
+                    // the outer record array before any immutable source copy.
+                    Reader scan{packet.bytes};
+                    std::size_t count = 0;
+                    while (scan.offset < scan.data.size())
+                    {
+                        (void) scan.word();
+                        const auto length = scan.word();
+                        if (length > scan.data.size() - scan.offset)
+                            throw std::invalid_argument("Invalid needed-record request framing.");
+                        scan.offset += length;
+                        (void) scan.word();
+                        ++count;
+                    }
+                    const auto record_bytes = family ? sizeof(AdaptiveFamily) : sizeof(AdaptiveLeaf);
+                    if (count > budget.limit / (2 * record_bytes))
+                        throw std::invalid_argument("Needed source-record vector exceeds lease.");
+                    budget.add(2 * count * record_bytes);
+                    if (family)
+                    {
+                        families.reserve(count);
+                        if (families.capacity() > 2 * count)
+                            throw std::invalid_argument("Needed family vector capacity exceeds admission.");
+                    }
+                    else
+                    {
+                        leaves.reserve(count);
+                        if (leaves.capacity() > 2 * count)
+                            throw std::invalid_argument("Needed leaf vector capacity exceeds admission.");
+                    }
+                }
                 while (r.offset < r.data.size())
                 {
                     auto index = r.word();
@@ -759,6 +928,8 @@ AdaptiveBatch fetch_records(
                         auto it = state.families.find(key);
                         if (it == state.families.end() || it->second.revision != revision)
                             throw std::invalid_argument("Missing or stale needed family capsule.");
+                        if (leased)
+                            fetch_copy_charge(budget, it->second);
                         families.push_back(it->second);
                     }
                     else
@@ -767,10 +938,12 @@ AdaptiveBatch fetch_records(
                         auto it = state.owned.find(typed);
                         if (it == state.owned.end() || it->second.revision != revision)
                             throw std::invalid_argument("Missing or stale needed owned leaf.");
+                        if (leased)
+                            fetch_copy_charge(budget, it->second);
                         leaves.push_back(it->second);
                     }
                 }
-                if (!family)
+                if (!family && !leased)
                 {
                     std::map<AdaptiveCellKey, AdaptiveLeaf> unique;
                     for (const auto& leaf : leaves)
@@ -785,19 +958,68 @@ AdaptiveBatch fetch_records(
                     for (auto& leaf : leaves)
                         leaf = unique.at(leaf.key);
                 }
+                const auto retention = leased ? fetch_retention(leaves, families, batch_cap, true) : 0;
+                if (leased)
+                {
+                    // The owner table, received requests, copies/order, prior replies
+                    // and codec arena coexist until this reply has been constructed.
+                    Budget live{cap};
+                    live.add(owners.capacity() * sizeof(AdaptiveOwner));
+                    for (const auto& owner : owners)
+                        live.add(owner.key.capacity());
+                    live.add(incoming.packets.capacity() * sizeof(OwnerPacket));
+                    for (const auto& input : incoming.packets)
+                        live.add(input.bytes.capacity());
+                    live.add(budget.used);
+                    live.add(order.data.capacity());
+                    live.add(packets.capacity() * sizeof(OwnerPacket));
+                    for (const auto& output : packets)
+                        live.add(output.bytes.capacity());
+                    live.add(2 * packet_cap); // encoder vector growth, not only logical wire size
+                    live.add(cap / 4);        // pending reply allocation
+                }
+                const auto encoded_batch = encode_adaptive_batch(leaves, families, packet_cap);
                 Writer reply;
+                if (leased)
+                {
+                    if (encoded_batch.capacity() > 2 * packet_cap)
+                        throw std::invalid_argument("Needed-record encoded capacity exceeds its growth lease.");
+                    Budget live{cap / 4};
+                    if (packets.capacity() > live.limit / sizeof(OwnerPacket))
+                        throw std::invalid_argument("Needed reply metadata exceeds lease.");
+                    live.add(packets.capacity() * sizeof(OwnerPacket));
+                    for (const auto& packet : packets)
+                        live.add(packet.bytes.capacity());
+                    live.add(24);
+                    live.add(order.data.size());
+                    live.add(encoded_batch.size());
+                    reply.data.reserve(24 + order.data.size() + encoded_batch.size());
+                }
                 reply.bytes(order.data);
-                reply.bytes(encode_adaptive_batch(leaves, families, state.options.byte_budget));
+                if (leased)
+                    reply.word(retention);
+                reply.bytes(encoded_batch);
                 budget.packet(reply.data.size());
                 packets.push_back({packet.peer, std::move(reply.data)});
             }
         });
-    auto replies = exchange_owner_packets(packets, state.comm, state.options.byte_budget);
+    if (leased)
+        incoming = {};
+    collective(*state.comm, [&] { check_packets(packets); });
+    auto replies = exchange_owner_packets(packets, state.comm, exchange_cap);
+    if (leased)
+        std::vector<OwnerPacket>().swap(packets);
     AdaptiveBatch result;
     collective(*state.comm,
         [&]
         {
-            Budget budget{state.options.byte_budget};
+            Budget budget{leased ? cap / 4 : cap};
+            if (leased)
+            {
+                if (keys.size() > budget.limit / (sizeof(AdaptiveLeaf) + sizeof(AdaptiveFamily) + 1))
+                    throw std::invalid_argument("Needed result metadata exceeds retention lease.");
+                budget.add(keys.size()); // packed seen flags, conservatively one byte per key
+            }
             std::vector<bool> seen(keys.size());
             if (family)
             {
@@ -809,12 +1031,25 @@ AdaptiveBatch fetch_records(
                 budget.add(keys.size() * sizeof(AdaptiveLeaf));
                 result.leaves.resize(keys.size());
             }
+            std::size_t remaining_retention = batch_cap;
             for (const auto& packet : replies.packets)
             {
                 budget.add(packet.bytes.size());
                 Reader r{packet.bytes};
                 auto order = r.bytes();
-                auto batch = decode_adaptive_batch(r.bytes(), state.options.byte_budget);
+                const auto retention = leased ? r.word() : batch_cap;
+                if (leased && retention > remaining_retention)
+                    throw std::invalid_argument("Cumulative needed-record retention exceeds lease.");
+                // One half of this reservation is the bounded codec arena;
+                // the other half is decoded record retention. Thus previous
+                // replies and this decode share one cumulative pool.
+                auto batch = decode_adaptive_batch(r.bytes(), leased ? std::min(batch_cap, retention / 2) : batch_cap);
+                if (leased)
+                {
+                    if (fetch_retention(batch.leaves, batch.families, retention / 2, false) > retention / 2)
+                        throw std::invalid_argument("Needed-record decoded capacities exceed admission.");
+                    remaining_retention -= retention;
+                }
                 r.done();
                 Reader indices{order};
                 if ((family && !batch.leaves.empty()) || (!family && !batch.families.empty()))
@@ -854,8 +1089,16 @@ AdaptiveBatch fetch_records(
 }
 } // namespace
 std::vector<AdaptiveOwner> DistributedAdaptiveHierarchy::lookup_cells(
-    std::span<const AdaptiveCellKey> keys, bool require_all) const
+    std::span<const AdaptiveCellKey> keys, bool require_all, std::optional<std::size_t> transient_cap) const
 {
+    const auto cap = transient_cap.value_or(data_->options.byte_budget);
+    collective(*data_->comm,
+        [&]
+        {
+            if (!cap || cap > data_->options.byte_budget)
+                throw std::invalid_argument("Invalid hierarchy transient lease.");
+        });
+
     collective(*data_->comm,
         [&]
         {
@@ -866,33 +1109,66 @@ std::vector<AdaptiveOwner> DistributedAdaptiveHierarchy::lookup_cells(
     collective(*data_->comm,
         [&]
         {
-            Budget budget{data_->options.byte_budget};
+            Budget budget{transient_cap ? cap / 8 : cap};
+            if (transient_cap)
+            {
+                if (keys.size() > (cap / 8) / sizeof(AdaptiveBytes))
+                    throw std::invalid_argument("Needed key metadata exceeds transient lease.");
+                budget.add(keys.size() * sizeof(AdaptiveBytes));
+                encoded.reserve(keys.size());
+            }
             for (const auto& key : keys)
             {
+                if (transient_cap)
+                {
+                    const auto dynamic = fetch_key_bytes(key);
+                    if (budget.limit < 256 || dynamic > budget.limit / 2 - 128)
+                        throw std::invalid_argument("Needed key encoding exceeds transient lease.");
+                    budget.add(2 * (128 + dynamic)); // framing plus vector growth, BEFORE encoding
+                }
                 auto bytes = encode_adaptive_key(key);
-                budget.add(bytes.size());
+                if (!transient_cap)
+                    budget.add(bytes.size());
                 encoded.push_back(std::move(bytes));
             }
         });
-    return data_->cells->lookup(encoded, require_all);
+    return data_->cells->lookup(
+        encoded, require_all, transient_cap ? std::optional<std::size_t>(cap - cap / 8) : std::nullopt);
 }
 std::vector<AdaptiveOwner> DistributedAdaptiveHierarchy::lookup_families(
-    std::span<const AdaptiveBytes> keys, bool require_all) const
+    std::span<const AdaptiveBytes> keys, bool require_all, std::optional<std::size_t> transient_cap) const
 {
+    const auto cap = transient_cap.value_or(data_->options.byte_budget);
+    collective(*data_->comm,
+        [&]
+        {
+            if (!cap || cap > data_->options.byte_budget)
+                throw std::invalid_argument("Invalid hierarchy transient lease.");
+        });
+
     collective(*data_->comm,
         [&]
         {
             if (!geometry_unchanged())
                 throw std::invalid_argument("Distributed source resident geometry moved.");
         });
-    return data_->family_directory->lookup(keys, require_all);
+    return data_->family_directory->lookup(keys, require_all, transient_cap);
 }
 AdaptiveBytes DistributedAdaptiveHierarchy::configuration_descriptor() const
 {
     return data_->kernel->descriptor();
 }
-std::vector<AdaptiveLeaf> DistributedAdaptiveHierarchy::fetch_leaves(std::span<const AdaptiveCellKey> keys) const
+std::vector<AdaptiveLeaf> DistributedAdaptiveHierarchy::fetch_leaves(
+    std::span<const AdaptiveCellKey> keys, std::optional<std::size_t> transient_cap) const
 {
+    const auto cap = transient_cap.value_or(data_->options.byte_budget);
+    collective(*data_->comm,
+        [&]
+        {
+            if (!cap || cap > data_->options.byte_budget)
+                throw std::invalid_argument("Invalid hierarchy transient lease.");
+        });
+
     collective(*data_->comm,
         [&]
         {
@@ -903,25 +1179,49 @@ std::vector<AdaptiveLeaf> DistributedAdaptiveHierarchy::fetch_leaves(std::span<c
     collective(*data_->comm,
         [&]
         {
-            Budget budget{data_->options.byte_budget};
+            Budget budget{transient_cap ? cap / 8 : cap};
+            if (transient_cap)
+            {
+                if (keys.size() > (cap / 8) / sizeof(AdaptiveBytes))
+                    throw std::invalid_argument("Needed key metadata exceeds transient lease.");
+                budget.add(keys.size() * sizeof(AdaptiveBytes));
+                encoded.reserve(keys.size());
+            }
             for (const auto& key : keys)
             {
+                if (transient_cap)
+                {
+                    const auto dynamic = fetch_key_bytes(key);
+                    if (budget.limit < 256 || dynamic > budget.limit / 2 - 128)
+                        throw std::invalid_argument("Needed key encoding exceeds transient lease.");
+                    budget.add(2 * (128 + dynamic)); // framing plus vector growth, BEFORE encoding
+                }
                 auto bytes = encode_adaptive_key(key);
-                budget.add(bytes.size());
+                if (!transient_cap)
+                    budget.add(bytes.size());
                 encoded.push_back(std::move(bytes));
             }
         });
-    return fetch_records(*data_, encoded, false).leaves;
+    return fetch_records(*data_, encoded, false, transient_cap ? cap - cap / 8 : cap, transient_cap.has_value()).leaves;
 }
-std::vector<AdaptiveFamily> DistributedAdaptiveHierarchy::fetch_families(std::span<const AdaptiveBytes> keys) const
+std::vector<AdaptiveFamily> DistributedAdaptiveHierarchy::fetch_families(
+    std::span<const AdaptiveBytes> keys, std::optional<std::size_t> transient_cap) const
 {
+    const auto cap = transient_cap.value_or(data_->options.byte_budget);
+    collective(*data_->comm,
+        [&]
+        {
+            if (!cap || cap > data_->options.byte_budget)
+                throw std::invalid_argument("Invalid hierarchy transient lease.");
+        });
+
     collective(*data_->comm,
         [&]
         {
             if (!geometry_unchanged())
                 throw std::invalid_argument("Distributed source resident geometry moved.");
         });
-    return fetch_records(*data_, keys, true).families;
+    return fetch_records(*data_, keys, true, cap, transient_cap.has_value()).families;
 }
 DistributedAdaptiveHierarchy::Storage DistributedAdaptiveHierarchy::storage() const
 {

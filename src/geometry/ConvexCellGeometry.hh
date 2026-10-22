@@ -146,6 +146,7 @@ public:
     [[nodiscard]] bool equivalent(const ConvexCellGeometry& other) const;
 
 private:
+    friend class ExactSweepAccess;
     friend class ExactExtrudedConstruction;
     friend class ExactPolyhedralComplex;
     friend class ExactPlanarFace;
