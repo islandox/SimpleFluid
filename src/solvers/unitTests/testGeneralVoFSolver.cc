@@ -22,12 +22,12 @@ namespace
 using namespace SimpleFluid;
 namespace AMR = SimpleFluid::Meshes::AMR;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-std::shared_ptr<const VoF::GeneralVoF> phases(unsigned fixture, bool skew = false)
+std::shared_ptr<const VoF::GeneralVoF> phases(unsigned fixture, bool skew = false, bool single_layer = false)
 {
     const auto comm = Tpetra::getDefaultComm();
     std::vector<std::uint64_t> owned;
     const auto owning_ranks = std::min(2, comm->getSize());
-    for (std::uint64_t gid = 0; gid < 27; ++gid)
+    for (std::uint64_t gid = 0; gid < (single_layer ? 9 : 27); ++gid)
         if (int(gid % owning_ranks) == comm->getRank())
             owned.push_back(gid);
     AMR::ExtrudedAMRGrid grid;
@@ -48,6 +48,20 @@ std::shared_ptr<const VoF::GeneralVoF> phases(unsigned fixture, bool skew = fals
         grid.boundaries.push_back({4 * i + 3, 4 * (i + 1) + 3, "wall"});
     }
     grid.z_edges = {0, 1, 2, 3};
+    if (single_layer)
+    {
+        // Four boundary cells, one layer; two MPI ranks deliberately own none.
+        grid.xy_nodes = {
+            {0, 0, 0}, {1, 0, 0}, {2, 0, 0}, {0, 1, 0}, {1, 1, 0}, {2, 1, 0}, {0, 2, 0}, {1, 2, 0}, {2, 2, 0}};
+        grid.base_cells = {{0, 1, 4, 3}, {1, 2, 5, 4}, {3, 4, 7, 6}, {4, 5, 8, 7}};
+        grid.boundaries = {{0, 1, "wall"}, {1, 2, "wall"}, {6, 7, "wall"}, {7, 8, "wall"}, {0, 3, "wall"},
+            {3, 6, "wall"}, {2, 5, "wall"}, {5, 8, "wall"}};
+        grid.z_edges = {0, 1};
+        owned.clear();
+        for (std::uint64_t gid = 0; gid < 4; ++gid)
+            if (int(gid % owning_ranks) == comm->getRank())
+                owned.push_back(gid);
+    }
     auto source = std::make_shared<AMR::ExtrudedAMR>(grid);
     auto bootstrap = source->detach_owned(owned, {'g', 'e', 'n', 'e', 'r', 'a', 'l', 'f', 'l', 'o', 'w'});
     auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
@@ -245,6 +259,22 @@ VoFMaterial inviscid()
     VoFMaterial material;
     material.gas_viscosity = material.liquid_viscosity = material.surface_tension = 0;
     return material;
+}
+TEST(GeneralVoFSolverTest, ClosedTwoByTwoSingleLayerConstantCarrierAdvancesAndRejectsAtomically)
+{
+    GeneralVoFSolver solver(phases(0, false, true), inviscid());
+    const auto before = solver.diagnostics();
+    const auto accepted = solver.phases();
+    EXPECT_THROW((void) solver.step(-1), std::runtime_error);
+    EXPECT_EQ(solver.phases(), accepted);
+    EXPECT_EQ(solver.time(), 0);
+    const auto after = solver.step(.01);
+    EXPECT_EQ(after.gas_volume, 0);
+    EXPECT_EQ(after.gas_mass, 0);
+    EXPECT_EQ(after.liquid_mass, before.liquid_mass);
+    EXPECT_EQ(after.maximum_velocity, 0);
+    EXPECT_EQ(after.maximum_divergence, 0);
+    EXPECT_EQ(solver.time(), .01);
 }
 TEST(GeneralVoFSolverTest, NativeSourceFreeStationaryAdvanceAndRejectedStepRetainAcceptedPublication)
 {

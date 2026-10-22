@@ -24,6 +24,9 @@ using ExactPlanarFacePtr = std::shared_ptr<const ExactPlanarFace>;
 [[nodiscard]] std::vector<char> exact_periodic_point(
     std::span<const char> point, GeometryPoint lower, GeometryPoint upper, std::array<bool, 3> periodic);
 [[nodiscard]] GeometryPoint exact_point_display(std::span<const char> identity);
+/** Exact signed normal dot (point-anchor), retaining rational support locations. */
+[[nodiscard]] ExactGeometryMeasure exact_point_projection(
+    std::span<const char> identity, GeometryPoint normal, GeometryPoint anchor);
 class ExactEdgePointIndex
 {
 public:

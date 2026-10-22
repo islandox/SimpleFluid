@@ -5,19 +5,21 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/unitTests/polyhedral_amr_helpers.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
 #include "utils/testing_environment.hh"
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <gtest/gtest.h>
+#include <limits>
 namespace
 {
 using namespace SimpleFluid;
 namespace AMR = SimpleFluid::Meshes::AMR;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-SP<const MeshHandle<>> skew_native()
+SP<const MeshHandle<>> skew_native(unsigned layers = 3)
 {
     AMR::ExtrudedAMRGrid grid;
     for (unsigned j = 0; j < 4; ++j)
@@ -37,10 +39,11 @@ SP<const MeshHandle<>> skew_native()
         grid.boundaries.push_back({4 * i + 3, 4 * (i + 1) + 3, "wall"});
     }
     grid.z_edges = {0, 1, 2, 3};
+    grid.z_edges.resize(layers + 1);
     auto source = std::make_shared<AMR::ExtrudedAMR>(grid);
     std::vector<std::uint64_t> owned;
     if (Tpetra::getDefaultComm()->getRank() == 0)
-        for (std::uint64_t c = 0; c < 27; ++c)
+        for (std::uint64_t c = 0; c < 9 * layers; ++c)
             owned.push_back(c);
     auto bootstrap = source->detach_owned(owned, {'f', 'l', 'o', 'w'});
     source.reset();
@@ -48,6 +51,65 @@ SP<const MeshHandle<>> skew_native()
     auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, Tpetra::getDefaultComm());
     return AMR::assemble_adaptive_native(*hierarchy, schema).mesh;
+}
+TEST(GeneralVoFFlowWorkspaceTest, SingleExtrudedLayerRetainsConstantAndInPlaneAffineGradients)
+{
+    const auto mesh = skew_native(1);
+    EXPECT_EQ(mesh->num_owned_cells() == 0, Tpetra::getDefaultComm()->getRank() != 0);
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<double> field(mesh->num_owned_cells(), 7);
+    for (const auto& g : flow.gradient(field))
+        for (double component : g)
+            EXPECT_EQ(component, 0);
+    for (std::size_t c = 0; c < field.size(); ++c)
+    {
+        const auto x = mesh->cell_centroid(LO(c));
+        field[c] = 2 * x.x - .75 * x.y + 3;
+    }
+    for (const auto& g : flow.gradient(field))
+    {
+        EXPECT_NEAR(g[0], 2, 2e-12);
+        EXPECT_NEAR(g[1], -.75, 2e-12);
+        EXPECT_EQ(g[2], 0);
+    }
+}
+SP<const MeshHandle<>> boundary_polyhedron(bool pair)
+{
+    const auto native = pair ? test::polyhedral_pair() : test::polyhedral_tetrahedron();
+    AMR::PolyhedralAMR source(test::polyhedral_grid(native));
+    std::vector<std::uint64_t> owned;
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        for (std::uint64_t c = 0; c < native->num_cells(); ++c)
+            owned.push_back(c);
+    auto bootstrap = source.detach_owned(owned, {'b', 'o', 'u', 'n', 'd', 'a', 'r', 'y'});
+    const auto schema = bootstrap.kernel->descriptor();
+    const AMR::DistributedAdaptiveHierarchy hierarchy(
+        std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, Tpetra::getDefaultComm());
+    return AMR::assemble_adaptive_native(hierarchy, schema).mesh;
+}
+TEST(GeneralVoFFlowWorkspaceTest, IsolatedBoundaryTetrahedronConstantIsExactAndNonfiniteIsRejectedCollectively)
+{
+    const auto mesh = boundary_polyhedron(false);
+    EXPECT_EQ(mesh->num_owned_cells() == 0, Tpetra::getDefaultComm()->getRank() != 0);
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<double> scalar(mesh->num_owned_cells(), 3);
+    for (const auto& g : flow.gradient(scalar))
+        for (double component : g)
+            EXPECT_EQ(component, 0);
+    for (double value : {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
+    {
+        std::fill(scalar.begin(), scalar.end(), value);
+        EXPECT_THROW((void) flow.gradient(scalar), std::runtime_error);
+    }
+}
+TEST(GeneralVoFFlowWorkspaceTest, UnresolvedNonconstantBoundaryPolyhedralStencilRemainsRejected)
+{
+    const auto mesh = boundary_polyhedron(true);
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<double> scalar(mesh->num_owned_cells());
+    for (std::size_t c = 0; c < scalar.size(); ++c)
+        scalar[c] = mesh->cell_centroid(LO(c)).x;
+    EXPECT_THROW((void) flow.gradient(scalar), std::runtime_error);
 }
 TEST(GeneralVoFFlowWorkspaceTest, AffinePhysicalGradientAndCurvatureOnActualSkewNativeMesh)
 {

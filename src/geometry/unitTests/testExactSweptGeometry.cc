@@ -31,6 +31,20 @@ std::vector<ExactNodeTrajectory> traces(const ExactPlanarFacePtr& face, Geometry
         result.push_back(ExactNodeTrajectory::backtrace(p, velocity, dt));
     return result;
 }
+TEST(ExactSweptGeometry, SignedPointProjectionRetainsRationalSupportBehindDisplayAnchor)
+{
+    using M = ExactGeometryMeasure;
+    const auto cell = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})->clip({{-10, 0, 0}, {}, -1}).inside;
+    const auto face = face_at(cell, 0, .1);
+    const auto identity = face->vertex_identities().front();
+    const auto anchor = exact_point_display(identity);
+    const auto projection = exact_point_projection(identity, {1, 0, 0}, anchor);
+    const auto expected = M::from_value(1).divided_by(M::from_value(10)) - M::from_value(.1);
+    EXPECT_LT(projection.sign(), 0);
+    EXPECT_EQ(projection.compare(expected), 0);
+    EXPECT_EQ((projection + exact_point_projection(identity, {-1, 0, 0}, anchor)).sign(), 0);
+    EXPECT_EQ(exact_point_projection(identity, {10, 0, 0}, {}).compare(M::from_value(1)), 0);
+}
 TEST(ExactSweptGeometry, CertifiedClipsPreserveCollinearContactsSliversAndStrictRawAdmission)
 {
     using M = ExactGeometryMeasure;
