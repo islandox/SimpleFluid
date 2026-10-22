@@ -1390,3 +1390,91 @@ TEST(GeneralVoF, NonDyadicPublicationContinuesWithDerivedErrorInsteadOfFreshInpu
     EXPECT_EQ(continued->carrier_volumes(), moved->carrier_volumes());
 }
 } // namespace
+
+namespace
+{
+TEST(GeneralVoF, ExperimentalInventoryPolicyIsExplicitCollectiveAndIsolatedFromFinite)
+{
+    auto f = setup();
+    GeneralVoF finite(f.hierarchy, f.order, f.gas, f.carrier);
+    EXPECT_EQ(finite.inventory_policy(), PhaseInventoryPolicy::Finite);
+    EXPECT_THROW((void) finite.experimental_phases(), std::invalid_argument);
+    const auto finite_source = finite.export_transfer_source(false);
+    for (const auto& capsule : finite_source.owned())
+    {
+        EXPECT_EQ(capsule.policy, PhaseInventoryPolicy::Finite);
+        EXPECT_FALSE(capsule.experimental_exact);
+    }
+    GeneralVoFOptions options;
+    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    GeneralVoF exact(f.hierarchy, f.order, f.gas, f.carrier, options);
+    EXPECT_EQ(exact.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
+    EXPECT_EQ(exact.experimental_phases().size(), exact.owned_order().size());
+    int local_empty = exact.owned_order().empty(), empty = 0;
+    const auto comm = Tpetra::getDefaultComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+    if (comm->getSize() == 4)
+        EXPECT_GT(empty, 0);
+    if (comm->getSize() > 1)
+    {
+        auto mixed = options;
+        if (comm->getRank() != 0)
+            mixed.inventory_policy = PhaseInventoryPolicy::Finite;
+        EXPECT_THROW((GeneralVoF(f.hierarchy, f.order, f.gas, f.carrier, mixed)), std::invalid_argument);
+    }
+    auto invalid = options;
+    invalid.inventory_policy = static_cast<PhaseInventoryPolicy>(2);
+    EXPECT_THROW((GeneralVoF(f.hierarchy, f.order, f.gas, f.carrier, invalid)), std::invalid_argument);
+    std::vector<GeneralVoFFaceVolume> zero;
+    for (const auto& face : exact.tiles())
+        zero.push_back({face.face_gid, 0});
+    const auto exact_trial = exact.plan_transport(nodes(exact), zero, 1);
+    EXPECT_THROW((void) finite.apply(exact_trial), std::invalid_argument);
+    const auto finite_trial = finite.plan_transport(nodes(finite), zero, 1);
+    EXPECT_THROW((void) exact.apply(finite_trial), std::invalid_argument);
+    EXPECT_NO_THROW((void) exact.apply(exact_trial));
+    EXPECT_NO_THROW((void) finite.apply(finite_trial));
+}
+TEST(GeneralVoF, ExperimentalNonDyadicHistorySurvivesOnlyAfterExplicitOptIn)
+{
+    using M = ExactGeometryMeasure;
+    auto f = setup();
+    GeneralVoFOptions options;
+    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    GeneralVoF exact(f.hierarchy, f.order, f.gas, f.carrier, options);
+    auto controls = cycle(exact);
+    const auto q = M::from_value(1).divided_by(M::from_value(79));
+    for (auto& face : controls)
+        if (face.integrated_volume != 0)
+        {
+            face.exact_integrated_volume = q.scaled(face.integrated_volume > 0 ? 1 : -1);
+            face.integrated_volume = static_cast<double>(face.exact_integrated_volume->enclosure().value);
+        }
+    const auto trial = exact.plan_transport(nodes(exact), controls, 1);
+    const auto moved = exact.apply(trial);
+    const auto delivered = delivered_phases(trial);
+    int local_difference = 0;
+    for (std::size_t i = 0; i < moved->owned_order().size(); ++i)
+    {
+        const auto gid = std::uint64_t(moved->mesh()->cell_global_id(int(i)));
+        const auto& authority = moved->experimental_phases()[i];
+        EXPECT_EQ(authority.gas.encode(), delivered.at(gid).gas.encode());
+        EXPECT_EQ(authority.carrier.encode(), delivered.at(gid).carrier.encode());
+        local_difference += authority.gas.compare(M::from_value(moved->phase_volumes()[i].gas)) != 0;
+    }
+    int difference = 0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_difference, &difference);
+    EXPECT_GT(difference, 0); // Exact authority has not been replaced by its display.
+    const auto accepted = moved->inventory_measures();
+    std::vector<GeneralVoFFaceVolume> zero;
+    for (const auto& face : moved->tiles())
+        zero.push_back({face.face_gid, 0});
+    const auto replay = moved->plan_transport(nodes(*moved), zero, 1);
+    const auto unchanged = moved->apply(replay);
+    for (std::size_t i = 0; i < accepted.size(); ++i)
+        EXPECT_EQ(unchanged->experimental_phases()[i].gas.encode(), accepted[i].gas.encode());
+    EXPECT_THROW((void) moved->apply(trial), std::invalid_argument); // old-source trial
+    EXPECT_EQ(exact.gas_volumes(), f.gas);
+    EXPECT_NO_THROW((void) moved->apply(replay));
+}
+} // namespace

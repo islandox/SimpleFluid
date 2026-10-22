@@ -48,6 +48,7 @@ struct WorkingCapsule
 {
     Key key;
     std::uint64_t revision = 0;
+    PhaseInventoryPolicy policy = PhaseInventoryPolicy::Finite;
     Meshes::ExactPhaseMeasures phases;
     PolyhedralInterface geometry;
     bool geometry_ready = false;
@@ -60,6 +61,7 @@ WorkingCapsule lift(const ExactPhaseTransferCapsule& c, const M& bulk)
     WorkingCapsule w;
     w.key = c.key;
     w.revision = c.revision;
+    w.policy = c.policy;
     w.geometry = c.geometry;
     w.geometry_ready = c.geometry_ready;
     w.phases = {bulk, M::from_value(c.phases.gas), M::from_value(c.phases.carrier)};
@@ -67,6 +69,16 @@ WorkingCapsule lift(const ExactPhaseTransferCapsule& c, const M& bulk)
         M::from_value(c.phases.bulk) - bulk, M::from_value(c.error.phase_input_bound),
         M::from_value(c.error.fit_residual), M::from_value(c.error.fit_bound), M::from_value(c.error.transferred_bound),
         M::from_value(c.error.fit_allocation_bound)};
+    if (c.policy == PhaseInventoryPolicy::ExperimentalExact)
+    {
+        if (!c.experimental_exact)
+            throw std::invalid_argument("Missing experimental transfer authority.");
+        const auto& exact = *c.experimental_exact;
+        w.phases = exact.phases;
+        const auto& e = exact.error;
+        w.error = {e.difference, e.admitted_bound, e.native_conversion, e.phase_input_bound, e.fit_residual,
+            e.fit_bound, e.transferred_bound, e.fit_allocation_bound};
+    }
     if (c.phase_mass)
         w.phase_mass = WorkingMass{c.phase_mass->gas, c.phase_mass->carrier};
     w.amounts = c.amounts;
@@ -107,6 +119,18 @@ struct Capacity
     }
     void capsule(const ExactPhaseTransferCapsule& c)
     {
+        if (c.experimental_exact)
+        {
+            budget.add(sizeof(ExperimentalPhaseInventory));
+            const auto& x = *c.experimental_exact;
+            measure(x.phases.bulk);
+            measure(x.phases.gas);
+            measure(x.phases.carrier);
+            for (const auto* q : {&x.error.difference, &x.error.admitted_bound, &x.error.native_conversion,
+                     &x.error.phase_input_bound, &x.error.fit_residual, &x.error.fit_bound, &x.error.transferred_bound,
+                     &x.error.fit_allocation_bound})
+                measure(*q);
+        }
         budget.add(sizeof(c) + AMR::encode_adaptive_key(c.key).size() + c.amounts.capacity() * sizeof(M));
         if (c.phase_mass)
         {
@@ -198,10 +222,12 @@ PolyhedralInterface plane(wire::Reader& r)
 AMR::AdaptiveBytes encode_work(const WorkingCapsule& c, std::size_t limit)
 {
     wire::Budget budget{limit};
-    budget.add(256);
+    const auto key_bytes = AMR::encode_adaptive_key(c.key);
+    budget.add(272 + key_bytes.size());
     wire::Writer w;
     w.word(0x5346455054523731ULL);
-    w.word(1);
+    w.word(2);
+    w.word(std::uint64_t(c.policy));
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
     w.word(std::numeric_limits<long double>::max_exponent);
@@ -240,11 +266,16 @@ WorkingCapsule decode_work(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Exact phase capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346455054523731ULL || r.word() != 1 || r.word() != sizeof(long double) ||
-        r.word() != std::numeric_limits<long double>::digits ||
+    if (r.word() != 0x5346455054523731ULL || r.word() != 2)
+        throw std::invalid_argument("Unknown policy-pinned working capsule format.");
+    const auto policy = r.word();
+    if (policy > 1)
+        throw std::invalid_argument("Invalid working policy.");
+    if (r.word() != sizeof(long double) || r.word() != std::numeric_limits<long double>::digits ||
         r.word() != std::numeric_limits<long double>::max_exponent)
         throw std::invalid_argument("Unknown exact phase capsule format.");
     WorkingCapsule c;
+    c.policy = PhaseInventoryPolicy(policy);
     c.key = AMR::decode_adaptive_key(r.bytes());
     c.revision = r.word();
     c.geometry_ready = boolean(r);
@@ -292,16 +323,18 @@ void validate_channels(const ExactPhaseTransferCapsule& c, std::span<const Exact
 {
     if (c.amounts.size() != channels.size())
         throw std::invalid_argument("Finite transfer channel dimensions differ.");
-    if (c.phase_mass &&
-        (c.phase_mass->gas.sign() < 0 || c.phase_mass->carrier.sign() < 0 ||
-            (!c.phases.gas && c.phase_mass->gas.sign()) || (!c.phases.carrier && c.phase_mass->carrier.sign())))
+    const bool has_gas = c.experimental_exact ? c.experimental_exact->phases.gas.sign() != 0 : c.phases.gas != 0;
+    const bool has_carrier =
+        c.experimental_exact ? c.experimental_exact->phases.carrier.sign() != 0 : c.phases.carrier != 0;
+    if (c.phase_mass && (c.phase_mass->gas.sign() < 0 || c.phase_mass->carrier.sign() < 0 ||
+                            (!has_gas && c.phase_mass->gas.sign()) || (!has_carrier && c.phase_mass->carrier.sign())))
         throw std::invalid_argument("Transfer mass product contradicts its finite carrier.");
     for (std::size_t i = 0; i < channels.size(); ++i)
     {
         const auto& q = channels[i];
         if (q.name.empty() || std::uint64_t(q.carrier) > 3 || (q.nonnegative && c.amounts[i].sign() < 0) ||
-            (q.carrier == ExactTransferCarrier::GasVolume && !c.phases.gas && c.amounts[i].sign()) ||
-            (q.carrier == ExactTransferCarrier::CarrierVolume && !c.phases.carrier && c.amounts[i].sign()) ||
+            (q.carrier == ExactTransferCarrier::GasVolume && !has_gas && c.amounts[i].sign()) ||
+            (q.carrier == ExactTransferCarrier::CarrierVolume && !has_carrier && c.amounts[i].sign()) ||
             (q.carrier == ExactTransferCarrier::MixtureMass &&
                 (!c.phase_mass || (c.phase_mass->gas + c.phase_mass->carrier).sign() <= 0)))
             throw std::invalid_argument("Invalid transfer product/channel carrier.");
@@ -309,6 +342,9 @@ void validate_channels(const ExactPhaseTransferCapsule& c, std::span<const Exact
 }
 void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<const ExactTransferChannel> channels)
 {
+    if (std::uint64_t(c.policy) > 1 ||
+        (c.policy == PhaseInventoryPolicy::ExperimentalExact) != bool(c.experimental_exact))
+        throw std::invalid_argument("Transfer capsule policy/payload mismatch.");
     const auto found = h.owned().find(c.key);
     if (found == h.owned().end() || found->second.revision != c.revision ||
         c.phases.bulk != h.metrics(found->second).volume || !std::isfinite(c.phases.bulk) || c.phases.bulk <= 0 ||
@@ -328,6 +364,22 @@ void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<
         abs(difference).compare(M::from_value(c.error.admitted_bound)) > 0 ||
         (c.geometry.pure_gas && c.geometry.pure_carrier))
         throw std::invalid_argument("Finite source occupancy exceeds its proven bound.");
+    if (c.experimental_exact)
+    {
+        const auto& x = *c.experimental_exact;
+        const auto actual = x.phases.gas + x.phases.carrier - x.phases.bulk;
+        if (x.phases.bulk.compare(bulk) || x.phases.gas.sign() < 0 || x.phases.carrier.sign() < 0 ||
+            (x.phases.gas.sign() > 0 && c.phases.gas == 0) || (x.phases.carrier.sign() > 0 && c.phases.carrier == 0) ||
+            detail::phase_signed_value(x.phases.gas) != c.phases.gas ||
+            detail::phase_signed_value(x.phases.carrier) != c.phases.carrier || actual.compare(x.error.difference) ||
+            abs(actual).compare(x.error.admitted_bound) > 0 ||
+            (M::from_value(c.phases.bulk) - bulk).compare(x.error.native_conversion))
+            throw std::invalid_argument("Experimental transfer authority/provenance differs.");
+        for (const auto* bound : {&x.error.admitted_bound, &x.error.phase_input_bound, &x.error.fit_bound,
+                 &x.error.transferred_bound, &x.error.fit_allocation_bound})
+            if (bound->sign() < 0)
+                throw std::invalid_argument("Negative experimental transfer bound.");
+    }
     validate_channels(c, channels);
 }
 AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
@@ -337,7 +389,8 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
     capacity.add(512 + key_bytes.size());
     wire::Writer w;
     w.word(0x5346465054523731ULL);
-    w.word(1);
+    w.word(2);
+    w.word(std::uint64_t(c.policy));
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
     w.word(std::numeric_limits<long double>::max_exponent);
@@ -355,6 +408,18 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
         capacity.add(bytes.size() + 8);
         w.bytes(bytes);
     };
+    w.word(bool(c.experimental_exact));
+    if (c.experimental_exact)
+    {
+        const auto& x = *c.experimental_exact;
+        put(x.phases.bulk);
+        put(x.phases.gas);
+        put(x.phases.carrier);
+        for (const auto* q :
+            {&x.error.difference, &x.error.admitted_bound, &x.error.native_conversion, &x.error.phase_input_bound,
+                &x.error.fit_residual, &x.error.fit_bound, &x.error.transferred_bound, &x.error.fit_allocation_bound})
+            put(*q);
+    }
     w.word(bool(c.phase_mass));
     if (c.phase_mass)
     {
@@ -373,11 +438,16 @@ ExactPhaseTransferCapsule decode(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Finite source capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346465054523731ULL || r.word() != 1 || r.word() != sizeof(long double) ||
-        r.word() != std::numeric_limits<long double>::digits ||
+    if (r.word() != 0x5346465054523731ULL || r.word() != 2)
+        throw std::invalid_argument("Unknown policy-pinned source capsule format.");
+    const auto policy = r.word();
+    if (policy > 1)
+        throw std::invalid_argument("Invalid source policy.");
+    if (r.word() != sizeof(long double) || r.word() != std::numeric_limits<long double>::digits ||
         r.word() != std::numeric_limits<long double>::max_exponent)
         throw std::invalid_argument("Unknown finite source capsule format.");
     ExactPhaseTransferCapsule c;
+    c.policy = PhaseInventoryPolicy(policy);
     c.key = AMR::decode_adaptive_key(r.bytes());
     c.revision = r.word();
     c.geometry_ready = boolean(r);
@@ -389,6 +459,19 @@ ExactPhaseTransferCapsule decode(std::span<const char> bytes, std::size_t limit)
             &c.error.fit_residual, &c.error.fit_bound, &c.error.transferred_bound, &c.error.fit_allocation_bound})
         *q = real(r);
     const auto get = [&] { return M::decode(r.bytes(), limit); };
+    const bool has_exact = boolean(r);
+    if (has_exact != (c.policy == PhaseInventoryPolicy::ExperimentalExact))
+        throw std::invalid_argument("Source capsule policy/exact payload mismatch.");
+    if (has_exact)
+    {
+        auto x = std::make_shared<ExperimentalPhaseInventory>();
+        x->phases = {get(), get(), get()};
+        for (auto* q : {&x->error.difference, &x->error.admitted_bound, &x->error.native_conversion,
+                 &x->error.phase_input_bound, &x->error.fit_residual, &x->error.fit_bound, &x->error.transferred_bound,
+                 &x->error.fit_allocation_bound})
+            *q = get();
+        c.experimental_exact = std::move(x);
+    }
     if (boolean(r))
         c.phase_mass = ExactTransferPhaseMass{get(), get()};
     const auto n = r.word();
@@ -407,9 +490,13 @@ ExactPhaseTransferCapsule publish(const WorkingCapsule& c, double native_bulk, E
     ExactPhaseTransferCapsule out;
     out.key = c.key;
     out.revision = c.revision;
+    out.policy = c.policy;
     out.geometry = c.geometry;
     out.geometry_ready = c.geometry_ready;
     const auto gas = detail::round_phase_value(c.phases.gas), carrier = detail::round_phase_value(c.phases.carrier);
+    if (c.policy == PhaseInventoryPolicy::ExperimentalExact &&
+        ((c.phases.gas.sign() > 0 && gas.value == 0) || (c.phases.carrier.sign() > 0 && carrier.value == 0)))
+        throw std::invalid_argument("Experimental exact remap requires representable positive owned views.");
     out.phases = {native_bulk, gas.value, carrier.value};
     out.roundoff = {gas.absolute_error, carrier.absolute_error};
     const auto round = M::from_value(gas.absolute_error) + M::from_value(carrier.absolute_error);
@@ -421,8 +508,9 @@ ExactPhaseTransferCapsule publish(const WorkingCapsule& c, double native_bulk, E
     const auto admitted = c.error.admitted_bound + round + M::from_value(diagnostic.absolute_error);
     const auto fit = c.error.fit_allocation_bound + round + M::from_value(fit_diagnostic.absolute_error);
     if (abs(defect).compare(admitted) > 0 ||
-        admitted.compare(c.phases.bulk.scaled(options.maximum_relative_target_defect)) > 0 ||
-        fit.compare(c.phases.bulk.scaled(options.maximum_relative_target_fit)) > 0)
+        (c.policy == PhaseInventoryPolicy::Finite &&
+            (admitted.compare(c.phases.bulk.scaled(options.maximum_relative_target_defect)) > 0 ||
+                fit.compare(c.phases.bulk.scaled(options.maximum_relative_target_fit)) > 0)))
         throw std::invalid_argument("Finite target occupancy/fit publication exceeds derived bounds.");
     out.error.difference = diagnostic.value;
     out.error.admitted_bound = detail::phase_upper_bound(admitted);
@@ -432,6 +520,15 @@ ExactPhaseTransferCapsule publish(const WorkingCapsule& c, double native_bulk, E
     out.error.fit_residual = fit_diagnostic.value;
     out.error.fit_bound = out.error.fit_allocation_bound = detail::phase_upper_bound(fit);
     out.error.transferred_bound = detail::phase_upper_bound(c.error.transferred_bound);
+    if (c.policy == PhaseInventoryPolicy::ExperimentalExact)
+    {
+        auto exact = std::make_shared<ExperimentalPhaseInventory>();
+        exact->phases = c.phases;
+        const auto& e = c.error;
+        exact->error = {e.difference, e.admitted_bound, e.native_conversion, e.phase_input_bound, e.fit_residual,
+            e.fit_bound, e.transferred_bound, e.fit_allocation_bound};
+        out.experimental_exact = std::move(exact);
+    }
     // These bounded products belong only to the current remap transaction.
     // Consumers aggregate before narrowing u/p and never adopt them as history.
     if (c.phase_mass)
@@ -444,19 +541,20 @@ void current(const H& h, const AMR::HierarchyObservation& observation)
     if (!h.geometry_unchanged() || h.observation() != observation)
         throw std::invalid_argument("Exact phase transfer source/target observation is stale.");
 }
-void agree(std::uint64_t control, std::span<const ExactTransferChannel> channels,
+void agree(std::uint64_t control, PhaseInventoryPolicy policy, std::span<const ExactTransferChannel> channels,
     const ExactPhaseTransferOptions& options, Teuchos::RCP<const Teuchos::Comm<int>> comm)
 {
     std::vector<OwnerPacket> packets;
     wire::collective(*comm,
         [&]
         {
-            if (!control || !options.byte_budget || !std::isfinite(options.maximum_relative_target_defect) ||
-                options.maximum_relative_target_defect < 0 || !std::isfinite(options.maximum_relative_target_fit) ||
-                options.maximum_relative_target_fit < 0)
+            if (std::uint64_t(policy) > 1 || !control || !options.byte_budget ||
+                !std::isfinite(options.maximum_relative_target_defect) || options.maximum_relative_target_defect < 0 ||
+                !std::isfinite(options.maximum_relative_target_fit) || options.maximum_relative_target_fit < 0)
                 throw std::invalid_argument("Invalid exact phase transfer controls.");
             wire::Writer w;
             w.word(control);
+            w.word(std::uint64_t(policy));
             real(w, options.maximum_relative_target_defect);
             real(w, options.maximum_relative_target_fit);
             w.word(channels.size());
@@ -493,6 +591,7 @@ struct ExactPhaseTransferSource::Data
     std::shared_ptr<const Hierarchy> hierarchy;
     std::shared_ptr<const void> identity;
     std::uint64_t control = 0;
+    PhaseInventoryPolicy policy = PhaseInventoryPolicy::Finite;
     AMR::HierarchyObservation observation;
     std::vector<ExactPhaseTransferCapsule> owned;
     std::vector<ExactTransferChannel> channels;
@@ -510,19 +609,22 @@ struct ExactPhaseTransferResult::Data
     std::vector<std::uint64_t> chain_ids;
 };
 ExactPhaseTransferSource::ExactPhaseTransferSource(std::shared_ptr<const Hierarchy> h, std::shared_ptr<const void> id,
-    std::uint64_t control, std::vector<ExactPhaseTransferCapsule> owned)
+    std::uint64_t control, std::vector<ExactPhaseTransferCapsule> owned, PhaseInventoryPolicy policy)
 {
-    if (!h || !id || !control || owned.size() != h->owned().size())
+    if (!h || !id || !control || std::uint64_t(policy) > 1 || owned.size() != h->owned().size())
         throw std::invalid_argument("Invalid accepted exact phase source.");
     auto d = std::make_shared<Data>();
     d->hierarchy = std::move(h);
     d->identity = std::move(id);
     d->control = control;
+    d->policy = policy;
     d->observation = d->hierarchy->observation();
     current(*d->hierarchy, d->observation);
     std::map<Key, ExactPhaseTransferCapsule> unique;
     for (auto& c : owned)
     {
+        if (c.policy != policy)
+            throw std::invalid_argument("Source policy differs from owned capsule.");
         validate_capsule(*d->hierarchy, c, {});
         if (!unique.emplace(c.key, std::move(c)).second)
             throw std::invalid_argument("Duplicate exact source key.");
@@ -544,6 +646,10 @@ std::uint64_t ExactPhaseTransferSource::control() const noexcept
 {
     return data_->control;
 }
+PhaseInventoryPolicy ExactPhaseTransferSource::inventory_policy() const noexcept
+{
+    return data_->policy;
+}
 const std::vector<ExactPhaseTransferCapsule>& ExactPhaseTransferSource::owned() const noexcept
 {
     return data_->owned;
@@ -556,7 +662,7 @@ ExactPhaseTransferSource ExactPhaseTransferSource::with_channels(std::vector<Exa
     std::vector<ExactTransferOwnedChannels> values, ExactPhaseTransferOptions options) const
 {
     const auto comm = data_->hierarchy->communicator();
-    agree(data_->control, channels, options, comm);
+    agree(data_->control, data_->policy, channels, options, comm);
     std::shared_ptr<Data> next;
     wire::collective(*comm,
         [&]
@@ -606,6 +712,10 @@ std::uint64_t ExactPhaseTransferResult::transaction() const noexcept
 bool ExactPhaseTransferResult::ownership_only() const noexcept
 {
     return data_->ownership;
+}
+PhaseInventoryPolicy ExactPhaseTransferResult::inventory_policy() const noexcept
+{
+    return data_->source->policy;
 }
 const std::vector<ExactPhaseTransferCapsule>& ExactPhaseTransferResult::owned() const noexcept
 {
@@ -706,7 +816,7 @@ std::vector<ExactPhaseTransferCapsule> migrate_capsules(
                 if (i >= keys.size() || slots[i] || packet.peer != locations[i].owner)
                     throw std::invalid_argument("Foreign or duplicate exact ownership capsule reply.");
                 auto c = decode(bytes, limit);
-                if (c.key != keys[i] || c.revision != locations[i].revision ||
+                if (c.policy != source.policy || c.key != keys[i] || c.revision != locations[i].revision ||
                     target.owned().at(c.key).revision != c.revision)
                     throw std::invalid_argument("Exact ownership key/revision differs.");
                 validate_capsule(target, c, source.channels);
@@ -889,6 +999,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 {
                     const auto& record = *records[i];
                     WorkingCapsule out;
+                    out.policy = source.policy;
                     out.key = record.target;
                     out.revision = record.target_revision;
                     out.phases.bulk = M::volume(*record.geometry);
@@ -1007,7 +1118,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 p.capsule = decode_work(r.bytes(), limit);
                 r.done();
                 p.owner = packet.peer;
-                if (!target.owned().contains(p.capsule.key) ||
+                if (p.capsule.policy != source.policy || !target.owned().contains(p.capsule.key) ||
                     target.owned().at(p.capsule.key).revision != p.capsule.revision ||
                     !seen.emplace(p.source, p.capsule.key).second)
                     throw std::invalid_argument("Foreign or duplicate exact phase row reply.");
@@ -1037,13 +1148,15 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 {
                     out.key = c.key;
                     out.revision = c.revision;
+                    out.policy = c.policy;
                     out.amounts.resize(source.channels.size());
                     if (c.phase_mass)
                         out.phase_mass = WorkingMass{};
                     all_gas[c.key] = true;
                     all_carrier[c.key] = true;
                 }
-                if (bool(out.phase_mass) != bool(c.phase_mass) || out.amounts.size() != c.amounts.size())
+                if (out.policy != c.policy || bool(out.phase_mass) != bool(c.phase_mass) ||
+                    out.amounts.size() != c.amounts.size())
                     throw std::invalid_argument("Exact phase row inventory schema differs.");
                 out.phases.bulk = out.phases.bulk + c.phases.bulk;
                 out.phases.gas = out.phases.gas + c.phases.gas;
@@ -1098,7 +1211,7 @@ ExactPhaseTransferResult ExactPhaseTransfer::prepare(const ExactPhaseTransferSou
 {
     const auto& source = *input.data_;
     const auto comm = source.hierarchy->communicator();
-    agree(source.control, source.channels, options, comm);
+    agree(source.control, source.policy, source.channels, options, comm);
     std::array<std::uint64_t, 9> manifest{};
     wire::collective(*comm,
         [&]

@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "FVM/ExactPhaseTransfer.hh"
+#include "FVM/ExperimentalPhaseInventory.hh"
 #include "FVM/PhaseVolumes.hh"
 #include "FVM/PolyhedralReconstruction.hh"
 #include "geometry/ExactSweptGeometry.hh"
@@ -31,6 +32,7 @@ struct GeneralVoFOptions
     unsigned support_rings = 2;
     PolyhedralReconstructionOptions reconstruction;
     Meshes::ExactSweepLimits sweep;
+    PhaseInventoryPolicy inventory_policy = PhaseInventoryPolicy::Finite;
 };
 struct GeneralVoFNodeVelocity
 {
@@ -125,8 +127,16 @@ public:
     [[nodiscard]] const std::vector<Key>& owned_order() const noexcept;
     [[nodiscard]] const std::vector<double>& gas_volumes() const noexcept;
     [[nodiscard]] const std::vector<double>& carrier_volumes() const noexcept;
-    /** Authoritative independent finite binary64 phase volumes in owned order. */
+    /** Finite-mode authority; in ExperimentalExact these are rounded diagnostic
+     * views only. The policy is explicit and never inferred from phase values. */
     [[nodiscard]] const std::vector<PhaseVolumes>& phase_volumes() const noexcept;
+    [[nodiscard]] PhaseInventoryPolicy inventory_policy() const noexcept;
+    /** Current authority: fresh finite lifts by default, retained exact values
+     * only after explicit ExperimentalExact opt-in. No cross-mode cache. */
+    [[nodiscard]] std::vector<Meshes::ExactPhaseMeasures> inventory_measures() const;
+    /** Explicit experimental authority; rejects Finite mode. Unqualified for
+     * finite-duration physical flow, performance and storage scalability. */
+    [[nodiscard]] const std::vector<Meshes::ExactPhaseMeasures>& experimental_phases() const;
     /** Latest publication arithmetic uncertainty, never a physical source. */
     [[nodiscard]] const std::vector<PhaseRoundoff>& phase_roundoff_bounds() const noexcept;
     /** Complementary geometric fitting labels in owned_order. The physical

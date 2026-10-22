@@ -34,8 +34,11 @@ struct GeneralVoFMomentumDiagnostics
 /** Independent general-mesh backend; Cartesian specialized solvers are retained.
  *
  * The supplied immutable phase authority owns exact geometry and independent
- * authoritative binary64 gas/carrier volumes. Current-step arithmetic proofs
- * are rebuilt from these finite values; no rational phase remainder is carried.
+ * default finite gas/carrier volumes. Its construction policy may explicitly
+ * select ExperimentalExact; that optional path retains exact phase history and
+ * remains unqualified, with known memory/performance gaps. The solver never
+ * reinterprets or switches the source policy. Current-step arithmetic in finite
+ * mode is rebuilt from finite values without a retained rational remainder.
  * All construction, initialization, timestep and
  * advance operations are collective, including empty-owner ranks. Pressure,
  * viscosity and curvature use actual physical geometry. Source-free compatible
