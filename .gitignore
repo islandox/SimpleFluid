@@ -84,7 +84,6 @@ CMakeUserPresets.json
 .github/skills
 .codex
 .agents
-AGENTS.md
 
 # python cache
 __pycache__
