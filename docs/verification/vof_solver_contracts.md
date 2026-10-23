@@ -129,3 +129,65 @@ shortened prefixes, operator-only diagnostics and timeouts cannot replace these
 physical assertions. Use distinct per-rank XML paths and count logical methods
 separately from rank executions. Explicit exclusions and known failures must
 remain visible; consult the design's qualification table before reporting a pass.
+
+## Proposed FP geometry acceptance gates
+
+**Status: planned verification for the
+[FP geometry proposal](../architecture/general_amr.md#proposed-floating-point-geometry-for-finite-vof),
+not implemented behavior or a newly executed campaign.** The integrated
+integer/FP predicate and lazy-distance optimizations still construct exact
+geometry and run exact coverage/measure checks. Their recorded results do not
+qualify approximate constructions, FP moments or a replacement coverage contract.
+
+Keep exact-utility and conservative-accounting oracles distinct from physical
+resolution requirements. The mandatory arbitrary subcell-phase reconstruction
+success cases have been retired; ordinary-volume fits retain complementary,
+reversed-normal and pure-endpoint coverage. Historical tiny-fit results are not
+future production gates. Add separate resolution/refinement cases for the
+proposed numerical path and compare admitted reconstructions against independent
+geometric or analytic references. A changed policy must be named in its evidence.
+
+| Gate | Required evidence before integration |
+| --- | --- |
+| Arithmetic routing and exact-work limits | Assert that the proposed finite backend performs no rational construction, volume/moment or ledger operations, including cache preparation, MPI serialization and retries. Exercise bounded FP retry, the sign-only exact exception and cap exhaustion; no hidden whole-geometry retry or policy switch. Reference/oracle work is explicit and measured separately |
+| Volume and moment bounds | Analytic boxes/tetrahedra, oblique rational cuts, translated/scaled cells and extreme ranges; the independent reference lies inside every claimed enclosure, and the propagated error fits the unchanged physical budget. No moment is required solely to replay a qualified structural coverage proof |
+| Construction and topology | Shared edge/face identity, complementary cuts, coplanarity, tangencies, collinear prefixes, positive slivers and real holes/overlaps; bounded FP retries or sign-only exact predicates must resolve decisions from original provenance. Unresolved geometry rejects; an exact classification of rounded coordinates cannot certify the source construction |
+| PLIC fitting | `IndependentPhaseVolumesAreUnchangedDuringFitting` and `RationalCellFitsComplementaryPlanesAndPureEndpoints` cover ordinary phase amounts, nonbinary cell support, complementary labels, reversed normals and pure endpoints; no arbitrarily thin phase-fit success is required |
+| Physical resolution and refinement | Planned cases must distinguish adequately resolved features, genuinely underresolved thickness/curvature/stencils, and small cut fractions from resolved grazing interfaces. Verify unit/scale invariance, refinement request and recheck, exhausted/unavailable refinement, actionable diagnostics and atomic rejection without phase-mass deletion |
+| Inventory and zero-phase accounting | Independent gas/carrier storage, dominant-phase cancellation, small carrier products, pure phases and zero-reference residuals remain accounting checks. They do not require physical reconstruction of an underresolved phase; refinement or rejection must preserve accepted inventory rather than erase mass |
+| Small intermediate contributions | Exercise individually unrepresentable contributions accumulated with scaling/compensation and propagated bounds, including many pieces whose total is significant. No contribution vanishes from the accounting/error budget; an uncertain sign is not clamped. Accept only established nonnegative, conservative budgets; otherwise reject atomically without rational volume fallback |
+| Canonical conservation | One shared phase transfer per face across MPI, opposite incidences, compatible coarse/fine sums, source-free constant/pure states, donor availability and recipient occupancy; check local and global extensive budgets independently |
+| Boundedness and repairs | Nonnegative phase amounts and supported CFL/capacity bounds; any permitted roundoff correction is shared-face conservative and bounded by derived uncertainty; no independent cell clipping or residual renormalization |
+| Structural coverage certificates | Independently demonstrate containment, non-overlap and completeness for each admitted construction class before skipping repeated moment/pair checks; balanced gap/overlap examples must still reject. Cover signed overlays separately from positive partitions |
+| Coupled physical acceptance | Compatible phase/mass/momentum ledgers, original pressure/divergence and physical-residual targets, and the named hydrostatic, capillary, viscous and coarse/fine horizons above |
+| Provenance and transactions | Topology/geometry/partition and policy invalidation, rejected cache preparation, collective failure with asserted empty owners, stale/foreign owner evidence, and unchanged accepted state/time/history after rejection |
+| Accumulated error and policy isolation | Track error across repeated steps, conservative remap and repartition without resetting it; preserve `ExperimentalExact` authority and reject cross-policy adoption or silent resource-triggered switching |
+| Bounded retries and compiler coverage | Directly exercise decisive, ambiguous, range-limited and unsupported FP cases. Compare retries/predicates with original inputs and independent references; exhaust their work/storage budget and verify collective rejection. Unsupported environments must select a qualified bounded FP route or reject, never silently enable full rational geometry. Keep actual compiler/environment coverage explicit |
+
+The general-native targets listed above provide the starting regression map.
+Inspect their current CMake registrations, run affected Debug serial cases first,
+then relevant MPI modes with observed empty owners. A new FP acceptance path
+needs its own independent resolution, error and convergence tests. Test separately
+that spatial underresolution requests refinement, while a resolved construction
+with unresolved arithmetic rejects with an arithmetic diagnostic. Neither an
+exact predicate nor a successful reference reconstruction can bypass the
+resolution gate or rescue a failed finite acceptance budget. Existing exact-API
+and `ExperimentalExact` tests keep their own authority; do not weaken them to
+match FP values. No resolution controller, refinement request or FP backend is
+implemented by these design changes or the earlier test retirement.
+Full flow qualification includes both
+long capillary/viscous methods; any exclusion remains an open named boundary.
+
+After correctness gates pass, compare matched Release source/runtime snapshots
+over complete physical horizons in serial and at two/four ranks. Preserve the
+50-cell coarse/fine case's ten `0.002`-second steps through `0.02`, and add
+longer runs to expose accumulated drift. Record initialization and step costs,
+repetitions, per-rank wall/CPU time, fragment/pair counts, bounded FP retries and
+rejections, and exact work split into predicate/construction/measure/ledger
+counts. Report operand-size distributions for any exact predicates, their cap
+usage, certificate/measure-cache reuse and process peak RSS. Verify zero rational
+construction/measure/ledger work in the proposed finite backend; do not infer it
+from a low sampling percentage. Report reference-oracle and instrumentation
+cost separately; uninstrumented timing runs must not overlap other builds or
+numerical jobs. No operation-count, memory or universal scaling claim may be
+inferred from an inclusive CPU profile alone.
