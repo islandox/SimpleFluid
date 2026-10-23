@@ -100,42 +100,15 @@ flux and continuity operators under region decomposition. Incompressible flow
 convergence and its continuity tolerance remain covered by the existing coupled
 solver regression tests.
 
-## Measured results
+## Qualification status
 
-On 2026-09-10 the final working-tree implementation passed all three tests at one,
-two and four ranks in each of the following configurations, including every
-runner serial/MPI comparison:
-
-| Compiler/configuration | Retained report |
-|---|---|
-| GNU 16.2.1, Debug | `/tmp/region-accuracy-gcc-debug/accuracy.json` |
-| GNU 16.2.1, Release | `/tmp/region-accuracy-gcc-release/accuracy.json` |
-| Clang 22.1.8 with libc++, Debug | `/tmp/region-accuracy-llvm-debug/accuracy.json` |
-
-The reports record executable hashes and full diagnostics. Temporary artifacts
-are local observations; the commands below recreate them. The following table
-summarizes all three configurations:
-
-| Metric | Result over the tested cases/ranks |
-|---|---:|
-| Finest global convergence order | 1.950--2.009 |
-| Finest interface-band convergence order | 1.922--1.960 |
-| MPI correction iterations | 8--14 |
-| Maximum final relative equation residual | `9.96e-13` |
-| Maximum serial/MPI diagnostic difference | `1.01e-12` |
-| Maximum scalar inventory error after two periods | `4.45e-16` |
-| Maximum decomposition operator difference | `1.083e-15` |
-| Maximum decomposition scalar difference | `3.775e-15` |
-| Maximum decomposition integrated-flux difference | `2.915e-16` |
-| Maximum decomposition divergence difference | `6.351e-14` |
-
-The periodic results agree across all three rank counts:
-
-| Cells | Amplitude after two periods | Phase error (radians) | Global L2 error |
-|---:|---:|---:|---:|
-| 32 | 0.1622640590 | 0.2376709817 | 0.5962064793 |
-| 64 | 0.3980372987 | 0.0602689450 | 0.4264999796 |
-| 128 | 0.6299420467 | 0.0151215693 | 0.2618080688 |
+Recorded GCC Debug/Release and LLVM Debug campaigns passed these three
+fixtures in serial and at two/four ranks, including independent runner parity
+checks. Finest-grid global/interface rates exceeded the stated 1.7 gate,
+periodic inventories and Fourier coefficients met their bounds, and region
+decomposition preserved the fixed physical operator and fluxes. These are
+bounded numerical observations, not a general mesh-family convergence proof
+or a fresh test run during documentation consolidation.
 
 ## Reproduction
 

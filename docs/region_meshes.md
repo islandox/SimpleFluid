@@ -264,10 +264,10 @@ paths. No wall-time/RSS threshold or percentage saving is asserted.
 Linear reconstruction tests use tolerances around `2e-12`; diffusion solutions
 use `2e-10`–`3e-10`. Coupled field/flux comparisons use `2e-8`, with integrated
 cell continuity below `1e-8`. These establish discrete consistency and
-conservation, not convergence order or experimental physical validation. See
-[the extension record](region_mesh_extensions.md) for observed results and
-[the original implementation record](region_mesh_implementation.md) for dated
-initial measurements. Rebuild downstream C++ consumers after interface/layout
+conservation, not convergence order or experimental physical validation. The recorded focused serial/MPI campaigns cover these contracts, including
+owned-only VTU/PVTU output and coupled-backend equivalence. See
+[accuracy gates](region_accuracy.md) and [measurement methodology](region_scaling.md)
+for reproducible numerical and performance checks. Rebuild downstream C++ consumers after interface/layout
 changes; symbol export checks do not certify class-layout ABI compatibility.
 
 ## Per-rank partition diagnostics
@@ -354,3 +354,22 @@ for `OrthogonalCartesian3D`, `OrthogonalCylindrial3D`, `SemiStructuredXY_Z`, and
 `MeshRegion.tcc` in one implementation unit and explicitly instantiate
 `SimpleFluid::Meshes::NativeRegionProvider<Native>` there. Public headers never
 include `.tcc` files. Custom `IsoRegion<T, G>` pairs need only `MeshRegion.hh`.
+
+## Qualification status
+
+Compact composition, canonical coarse/fine fluxes, translated periodic geometry,
+independent extrusion providers and common affine axial ALE have focused
+serial/two/four-rank numerical coverage. Tests assert actual split/empty owners,
+native fields, zero implicit compatibility materialization, coupled backend
+switching, geometry refresh and rollback. Graph ownership and distributed
+explicit providers use the separate [partitioning contract](composite_partitioning.md);
+the automatic constructor's global explicit-input restrictions still apply.
+
+Production scalar diffusion uses region geometry traversal with the original
+maps, coefficient and callback order; parity tests retain the generic reference.
+Explicit compatibility materialization uses amortized growth and has an
+allocation-volume regression. Recorded accuracy checks qualify the specified
+manufactured coarse/fine, periodic Fourier and fixed-mesh decomposition cases.
+They do not qualify arbitrary tilings, rotating periodic transformations,
+nonaffine composite motion, physical turbulence or general production scaling.
+Structural mesh capacity, map estimates and whole-process RSS remain distinct.
