@@ -88,22 +88,29 @@ struct PolyhedralInterface
 class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction
 {
 public:
+    static void validate(const FinitePolyhedralPhaseSample&, PolyhedralReconstructionOptions = {});
+    /** Read-only preflight. Missing/dilute support requests refinement, never
+     * increased exact precision. The angular model gate remains independent. */
+    [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution(
+        const FinitePolyhedralPhaseSample&, std::span<const FinitePolyhedralPhaseSample> stencil,
+        PolyhedralReconstructionOptions = {});
+    /** Numerical offset utility for a supplied normal. Physical interface
+     * admission belongs to reconstruct()/assess_resolution(). */
+    [[nodiscard]] static PolyhedralInterface solve_offset(
+        const FinitePolyhedralPhaseSample&, Meshes::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
+    [[nodiscard]] static PolyhedralInterface reconstruct(const FinitePolyhedralPhaseSample&,
+        std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
+};
+namespace Exact
+{
+class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction
+{
+public:
     static void validate(const PolyhedralPhaseSample&, PolyhedralReconstructionOptions = {});
     [[nodiscard]] static PolyhedralInterface solve_offset(
         const PolyhedralPhaseSample&, Meshes::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
     [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample&,
         std::span<const PolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
-    static void validate_finite(const FinitePolyhedralPhaseSample&, PolyhedralReconstructionOptions = {});
-    /** Read-only preflight. Missing/dilute support requests refinement, never
-     * increased exact precision. The angular model gate remains independent. */
-    [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution_finite(
-        const FinitePolyhedralPhaseSample&, std::span<const FinitePolyhedralPhaseSample> stencil,
-        PolyhedralReconstructionOptions = {});
-    /** Numerical offset utility for a supplied normal. Physical interface
-     * admission belongs to reconstruct_finite()/assess_resolution_finite(). */
-    [[nodiscard]] static PolyhedralInterface solve_offset_finite(
-        const FinitePolyhedralPhaseSample&, Meshes::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
-    [[nodiscard]] static PolyhedralInterface reconstruct_finite(const FinitePolyhedralPhaseSample&,
-        std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
 };
+} // namespace Exact
 } // namespace SimpleFluid::VoF

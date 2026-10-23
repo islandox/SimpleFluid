@@ -11,6 +11,7 @@
 
 namespace SimpleFluid::detail
 {
+namespace Exact { struct ConservativeVoFTransport; struct TransportPreparation; }
 /** Private native-grid transport boundary shared by VoF momentum and species.
  *
  * Solves M_new*c_new + div(F*c_new_upwind) = Q_old + S. F is an
@@ -110,10 +111,10 @@ public:
         DefaultTpetraTypes::global_ordinal_type donor = 0;
         long double amount = 0, absolute_error = 0;
     };
-    /** Separate fixed-storage FP ledger. Row normalization is a numerical
+    /** Default fixed-storage FP ledger. Row normalization is a numerical
      * solve aid; acceptance checks the original canonical raw-face equation
      * with propagated arithmetic bounds and the unchanged physical tolerance. */
-    [[nodiscard]] Result solve_finite(const std::vector<long double>& old,
+    [[nodiscard]] Result solve(const std::vector<long double>& old,
         const std::vector<long double>& source, const std::vector<long double>& capacity,
         const std::vector<long double>& outgoing, const std::vector<FiniteTransfer>& incoming,
         const std::vector<FiniteFaceContribution>& contributions, bool nonnegative,
@@ -132,23 +133,12 @@ public:
         DefaultTpetraTypes::global_ordinal_type donor = 0;
         Meshes::ExactGeometryMeasure amount; ///< Signed canonical carrier measure.
     };
-    /** Form row diagonals, coefficients and RHS ratios exactly before narrowing.
-     * The original physical quantity/face equation and shared correction budget
-     * remain authoritative. Only final owned amounts require strict binary64
-     * publication; internal exact face fluxes have typed diagnostic enclosures.
-     */
-    [[nodiscard]] Result solve_exact(const std::vector<Meshes::ExactGeometryMeasure>& old,
-        const std::vector<Meshes::ExactGeometryMeasure>& source,
-        const std::vector<Meshes::ExactGeometryMeasure>& capacity,
-        const std::vector<Meshes::ExactGeometryMeasure>& outgoing, const std::vector<ExactTransfer>& incoming,
-        const std::vector<ExactFaceContribution>& contributions, bool nonnegative, int maximum_iterations,
-        double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024);
 
 private:
+    friend struct Exact::ConservativeVoFTransport;
     using Pack = DefaultTpetraTypes;
     struct SparseAssembly;
-    struct ExactPreparation;
-    std::shared_ptr<ExactPreparation> exact_preparation_;
+    std::shared_ptr<Exact::TransportPreparation> exact_preparation_;
     PreparationStatistics preparation_statistics_;
     [[nodiscard]] Result solve_impl(const std::vector<double>& old, const std::vector<double>& source,
         const std::vector<double>& capacity, const std::vector<double>& forward, const std::vector<double>& reverse,
@@ -167,4 +157,25 @@ private:
     [[nodiscard]] std::vector<double> cells(const std::vector<double>& owned) const;
     [[nodiscard]] std::vector<double> faces(const std::vector<double>& overlap) const;
 };
+namespace Exact
+{
+struct SIMPLEFLUID_SOLVERS_LOCAL ConservativeVoFTransport
+{
+    using Result = detail::ConservativeVoFTransport::Result;
+    using ExactTransfer = detail::ConservativeVoFTransport::ExactTransfer;
+    using ExactFaceContribution = detail::ConservativeVoFTransport::ExactFaceContribution;
+    using ExactPreparation = TransportPreparation;
+    /** Form row diagonals, coefficients and RHS ratios exactly before narrowing.
+     * The original physical quantity/face equation and shared correction budget
+     * remain authoritative. Only final owned amounts require strict binary64
+     * publication; internal exact face fluxes have typed diagnostic enclosures.
+     */
+    [[nodiscard]] static Result solve(detail::ConservativeVoFTransport& self,
+        const std::vector<Meshes::ExactGeometryMeasure>& old, const std::vector<Meshes::ExactGeometryMeasure>& source,
+        const std::vector<Meshes::ExactGeometryMeasure>& capacity,
+        const std::vector<Meshes::ExactGeometryMeasure>& outgoing, const std::vector<ExactTransfer>& incoming,
+        const std::vector<ExactFaceContribution>& contributions, bool nonnegative, int maximum_iterations,
+        double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024);
+};
+} // namespace Exact
 } // namespace SimpleFluid::detail

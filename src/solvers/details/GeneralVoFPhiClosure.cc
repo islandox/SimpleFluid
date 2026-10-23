@@ -1,5 +1,5 @@
-/** @file GeneralVoFPhiClosure.cc
- * @brief Sparse persistent-identity forest closure with exact arithmetic gates.
+/** @file Exact::GeneralVoFPhiClosure.cc
+ * @brief Sparse persistent-identity forest closure with bounded floating-point arithmetic.
  */
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "parallel/SparseOwnerExchange.hh"
@@ -19,7 +19,6 @@ namespace SimpleFluid::detail
 namespace
 {
 using GO = DefaultTpetraTypes::global_ordinal_type;
-using M = Meshes::ExactGeometryMeasure;
 using Bytes = std::vector<char>;
 class PhiProposalResource : public std::runtime_error
 {
@@ -79,8 +78,6 @@ struct Codec
         cursor += n;
         return v;
     }
-    void put(const M& v, std::size_t b) { put(v.encode(b)); }
-    M measure(std::size_t b) { return M::decode(blob(), b); }
     void done()
     {
         if (cursor != bytes.size())
@@ -130,22 +127,6 @@ template<class Work> void collective(const Teuchos::Comm<int>& comm, Work work)
         throw std::runtime_error("General VoF Phi arithmetic closure invalid on another rank.");
     }
 }
-struct Edge
-{
-    GO face, other;
-    int peer, authority, sign;
-    Bytes identity;
-    M volume, radius;
-};
-struct Node
-{
-    GO gid;
-    Bytes identity, label;
-    std::uint64_t depth = 0;
-    std::vector<Edge> edges;
-    GO parent_face = -1, parent = -1;
-    M defect, radius, used;
-};
 std::size_t packet_capacity(const std::vector<OwnerPacket>& packets, std::size_t budget)
 {
     if (packets.capacity() > budget / sizeof(OwnerPacket))
@@ -223,19 +204,90 @@ OwnerExchange exchange_phi_packets(const std::vector<OwnerPacket>& packets,
         throw std::runtime_error(context(error));
     }
 }
-M absolute(const M& v, std::size_t budget)
-{
-    return v.sign() < 0 ? vof_exact::leased_scale(v, -1, budget) : v;
-}
 } // namespace
-static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle<>>& mesh,
-    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget,
-    bool bounded_rates)
+namespace finite_phi
 {
-    namespace E = vof_exact;
+long double leased_add(long double a, long double b, std::size_t)
+{
+    const auto v = a + b;
+    if (!std::isfinite(v))
+        throw std::runtime_error("Finite Phi addition exceeds wide FP range.");
+    return v;
+}
+long double leased_scale(long double a, double b, std::size_t)
+{
+    const auto v = a * b;
+    if (!std::isfinite(v) || (a != 0 && b != 0 && v == 0))
+        throw std::runtime_error("Finite Phi scaling exceeds wide FP range.");
+    return v;
+}
+} // namespace finite_phi
+namespace
+{
+struct FCodec : Codec
+{
+    using Codec::Codec;
+    using Codec::put;
+    void put(long double value, std::size_t)
+    {
+        if (!std::isfinite(value))
+            throw std::runtime_error("Nonfinite Phi packet value.");
+        int exponent = 0;
+        const auto mantissa = std::frexp(value, &exponent);
+        const double high = static_cast<double>(mantissa);
+        const double low = static_cast<double>(mantissa - high);
+        put(std::uint64_t(std::int64_t(exponent)));
+        put(std::bit_cast<std::uint64_t>(high));
+        put(std::bit_cast<std::uint64_t>(low));
+    }
+    long double finite_measure(std::size_t)
+    {
+        const auto exponent = std::int64_t(get());
+        const auto high = std::bit_cast<double>(get()), low = std::bit_cast<double>(get());
+        if (exponent < std::numeric_limits<int>::min() || exponent > std::numeric_limits<int>::max() ||
+            !std::isfinite(high) || !std::isfinite(low))
+            throw std::runtime_error("Invalid finite Phi scalar packet.");
+        const auto value = std::ldexp(static_cast<long double>(high) + low, int(exponent));
+        if (!std::isfinite(value) || ((high != 0 || low != 0) && value == 0))
+            throw std::runtime_error("Finite Phi scalar packet exceeds wide FP range.");
+        return value;
+    }
+};
+struct FCell
+{
+    GO cell;
+    Bytes identity;
+    long double arithmetic_radius = 0;
+};
+struct FFace
+{
+    GO face, first, second;
+    Bytes identity;
+    long double volume = 0, arithmetic_radius = 0;
+};
+struct FEdge
+{
+    GO face, other;
+    int peer, authority, sign;
+    Bytes identity;
+    long double volume = 0, radius = 0;
+};
+struct FNode
+{
+    GO gid;
+    Bytes identity, label;
+    std::uint64_t depth = 0;
+    std::vector<FEdge> edges;
+    GO parent_face = -1, parent = -1;
+    long double defect = 0, radius = 0, used = 0, roundoff = 0;
+};
+} // namespace
+static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHandle<>>& mesh,
+    const std::vector<FCell>& cells, const std::vector<FFace>& faces, std::size_t budget)
+{
+    namespace E = finite_phi;
     const auto map = mesh->owned_cell_map();
     const auto comm = map->getComm();
-    const int rank = comm->getRank();
     using Domain = GeneralVoFStorageDomain;
     GeneralVoFExactStorage storage(budget);
     std::size_t edge_bound = 0, max_cell_key = 0, max_face_key = 0, scalar_budget = 0, packet_budget = 0;
@@ -243,19 +295,18 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
     collective(*comm,
         [&]
         {
-            storage.capacity(Domain::Input, cells.capacity(), sizeof(GeneralVoFPhiCell));
-            storage.capacity(Domain::Input, faces.capacity(), sizeof(GeneralVoFPhiFace));
+            storage.capacity(Domain::Input, cells.capacity(), sizeof(FCell));
+            storage.capacity(Domain::Input, faces.capacity(), sizeof(FFace));
             for (const auto& c : cells)
             {
                 storage.capacity(Domain::Input, c.identity.capacity(), sizeof(char));
-                storage.measure(Domain::Input, c.arithmetic_radius);
+
                 max_cell_key = std::max(max_cell_key, c.identity.size());
             }
             for (const auto& f : faces)
             {
                 storage.capacity(Domain::Input, f.identity.capacity(), sizeof(char));
-                storage.measure(Domain::Input, f.volume);
-                storage.measure(Domain::Input, f.arithmetic_radius);
+
                 max_face_key = std::max(max_face_key, f.identity.size());
             }
             const auto lease = mesh->acquire_execution_view();
@@ -273,13 +324,13 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
         [&]
         {
             const auto n = cells.size(), f = faces.size(), e = edge_bound;
-            storage.capacity(Domain::Scratch, n, sizeof(Node) + 4 * sizeof(void*));
+            storage.capacity(Domain::Scratch, n, sizeof(FNode) + 4 * sizeof(void*));
             storage.capacity(Domain::Scratch, n, 2 * std::size_t(key_global[0]));
-            storage.capacity(Domain::Scratch, e, 2 * sizeof(Edge) + 2 * std::size_t(key_global[1]));
+            storage.capacity(Domain::Scratch, e, 2 * sizeof(FEdge) + 2 * std::size_t(key_global[1]));
             storage.capacity(Domain::Scratch, 2 * f, 3 * sizeof(GO) + 2 * sizeof(int) + 12 * sizeof(void*));
             storage.capacity(Domain::Scratch, e, 3 * sizeof(GO) + 2 * sizeof(int) + 8 * sizeof(void*));
-            storage.capacity(Domain::Scratch, n, 3 * (sizeof(std::pair<const GO, M>) + 4 * sizeof(void*)));
-            storage.capacity(Domain::Result, 2 * f, sizeof(M));
+            storage.capacity(Domain::Scratch, n, 3 * (sizeof(std::pair<const GO, long double>) + 4 * sizeof(void*)));
+            storage.capacity(Domain::Result, 2 * f, sizeof(long double));
             const auto packet_pool = storage.remaining() / 2;
             storage.capacity(Domain::Scratch, packet_pool, 1);
             packet_budget = packet_pool / 8;
@@ -288,29 +339,29 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
             if (n > (std::numeric_limits<std::size_t>::max() - 48 - 2 * f - 2 * e) / 5)
                 throw std::runtime_error("Phi closure scalar count overflow.");
             const auto result_slots = 2 * f, scratch_slots = 5 * n + 2 * e + 48;
-            scalar_budget = storage.remaining() / (scratch_slots + result_slots);
-            if (scalar_budget < 1024 || packet_budget < 1024)
+            scalar_budget = sizeof(long double);
+            if (packet_budget < 1024)
                 throw std::runtime_error("Phi closure cumulative resource reserve exhausted.");
             storage.capacity(Domain::Scratch, scratch_slots, scalar_budget);
             storage.capacity(Domain::Result, result_slots, scalar_budget);
         });
-    std::map<GO, Node> nodes;
+    std::map<GO, FNode> nodes;
     std::map<GO, std::size_t> face_index;
     std::set<GO> endpoint_set;
-    GeneralVoFPhiClosure result;
+    GeneralVoFFiniteRateClosure result;
     collective(*comm,
         [&]
         {
-            result.volume.reserve(faces.size());
+            result.rate.reserve(faces.size());
             result.correction.reserve(faces.size());
             if (cells.size() != mesh->num_owned_cells())
                 throw std::runtime_error("Incomplete closure cells.");
             for (const auto& c : cells)
             {
-                if (map->getLocalElement(c.cell) < 0 || c.identity.empty() || c.arithmetic_radius.sign() < 0 ||
+                if (map->getLocalElement(c.cell) < 0 || c.identity.empty() || c.arithmetic_radius < 0 ||
                     nodes.contains(c.cell))
                     throw std::runtime_error("Foreign closure cell.");
-                Node n;
+                FNode n;
                 n.gid = c.cell;
                 n.identity = n.label = c.identity;
                 n.radius = c.arithmetic_radius;
@@ -320,7 +371,7 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
             {
                 const auto& f = faces[i];
                 const auto lid = mesh->owned_face_map()->getLocalElement(f.face);
-                if (lid < 0 || f.first == f.second || f.identity.empty() || f.arithmetic_radius.sign() < 0 ||
+                if (lid < 0 || f.first == f.second || f.identity.empty() || f.arithmetic_radius < 0 ||
                     !face_index.emplace(f.face, i).second)
                     throw std::runtime_error("Invalid closure face.");
                 const auto lease = mesh->acquire_execution_view();
@@ -329,36 +380,10 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                     throw std::runtime_error("Wrong closure endpoint.");
                 endpoint_set.insert(f.first);
                 endpoint_set.insert(f.second);
-                constexpr unsigned precision = 106;
-                constexpr std::size_t precision_bytes = (precision + 7) / 8;
-                const auto source_bytes = f.volume.storage_bytes();
-                // Precision proposes a bounded representation; neither this
-                // choice nor a failed proposal changes any acceptance radius.
-                const bool can_propose = bounded_rates && f.arithmetic_radius.sign() &&
-                                         source_bytes <= scalar_budget &&
-                                         precision_bytes <= scalar_budget - source_bytes;
-                auto proposed = f.volume;
-                if (can_propose)
-                {
-                    try
-                    {
-                        proposed = f.volume.rounded_dyadic(precision, 16 * scalar_budget);
-                    }
-                    catch (const std::length_error& error)
-                    {
-                        throw PhiProposalResource(error.what());
-                    }
-                }
-                auto rounding = bounded_rates && proposed.storage_identity() != f.volume.storage_identity()
-                                    ? E::leased_add(proposed, E::leased_scale(f.volume, -1, scalar_budget), scalar_budget)
-                                    : M{};
-                if (absolute(rounding, scalar_budget).compare(f.arithmetic_radius) > 0)
-                {
-                    proposed = f.volume;
-                    rounding = {};
-                }
-                result.volume.push_back(std::move(proposed));
-                result.correction.push_back(std::move(rounding));
+                const auto proposed = f.volume;
+                const long double rounding = 0;
+                result.rate.push_back(proposed);
+                result.correction.push_back(rounding);
             }
             const auto lease = mesh->acquire_execution_view();
             for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
@@ -400,7 +425,7 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                 const auto& f = faces[i];
                 for (int sign : {1, -1})
                 {
-                    Codec c(packet_budget);
+                    FCodec c(packet_budget);
                     c.put(std::uint64_t(sign == 1 ? f.first : f.second));
                     c.put(std::uint64_t(sign == 1 ? f.second : f.first));
                     c.put(std::uint64_t(f.face));
@@ -409,12 +434,6 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                     c.put(f.identity);
                     c.put(f.volume, scalar_budget);
                     c.put(f.arithmetic_radius, scalar_budget);
-                    if (bounded_rates)
-                    {
-                        c.put(result.correction[i].sign() != 0);
-                        if (result.correction[i].sign())
-                            c.put(result.volume[i], scalar_budget);
-                    }
                     enqueue(owner.at(sign == 1 ? f.first : f.second), std::move(c.bytes));
                 }
             }
@@ -428,33 +447,11 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
         {
             for (const auto& p : received.packets)
             {
-                Codec c{p.bytes, receive_decode_budget};
+                FCodec c{p.bytes, receive_decode_budget};
                 const auto gid = GO(c.get()), other = GO(c.get()), face = GO(c.get());
                 const int peer = int(c.get()), sign = c.get() ? 1 : -1;
                 const auto identity = c.blob();
-                auto volume = c.measure(scalar_budget), radius = c.measure(scalar_budget);
-                M rounding;
-                if (bounded_rates)
-                {
-                    const auto changed = c.get();
-                    if (changed > 1)
-                        throw std::runtime_error("Invalid bounded rate proposal flag.");
-                    if (changed)
-                    {
-                        const auto proposed = c.measure(scalar_budget);
-                        rounding = absolute(E::leased_add(
-                                                proposed, E::leased_scale(volume, -1, scalar_budget), scalar_budget),
-                            scalar_budget);
-                        // Reserve the exact discarded difference first. The
-                        // forest may spend only the remaining ORIGINAL face
-                        // capacity, while n.used below charges the discarded
-                        // difference to the ORIGINAL incident-cell capacity.
-                        radius = E::leased_add(radius, E::leased_scale(rounding, -1, scalar_budget), scalar_budget);
-                        if (radius.sign() < 0)
-                            throw std::runtime_error("Bounded rate exceeds its original face certificate.");
-                        volume = proposed;
-                    }
-                }
+                auto volume = c.finite_measure(scalar_budget), radius = c.finite_measure(scalar_budget);
                 c.done();
                 if (!nodes.contains(gid) || peer < 0 || peer >= comm->getSize())
                     throw std::runtime_error("Invalid incident closure edge.");
@@ -462,9 +459,8 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                 if (std::any_of(n.edges.begin(), n.edges.end(), [&](const auto& e) { return e.face == face; }))
                     throw std::runtime_error("Duplicate incident closure edge.");
                 n.edges.push_back({face, other, peer, p.peer, sign, identity, volume, radius});
+                n.roundoff += 8 * std::numeric_limits<long double>::epsilon() * (std::abs(n.defect) + std::abs(volume));
                 n.defect = E::leased_add(n.defect, E::leased_scale(volume, sign, scalar_budget), scalar_budget);
-                if (bounded_rates)
-                    n.used = E::leased_add(n.used, rounding, scalar_budget);
                 auth_faces.push_back(face);
                 auth_senders.push_back(p.peer);
             }
@@ -496,11 +492,11 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                 for (const auto& [gid, n] : nodes)
                     for (const auto& e : n.edges)
                     {
-                        // Exactly immutable faces remain in divergence and final
+                        // Immutable faces remain in divergence and final
                         // incidence, but cannot route an arithmetic correction.
-                        if (e.radius.sign() == 0)
+                        if (e.radius == 0)
                             continue;
-                        Codec c(packet_budget);
+                        FCodec c(packet_budget);
                         c.put(std::uint64_t(e.other));
                         c.put(std::uint64_t(gid));
                         c.put(std::uint64_t(e.face));
@@ -518,7 +514,7 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
             {
                 for (const auto& p : updates.packets)
                 {
-                    Codec c{p.bytes, update_decode_budget};
+                    FCodec c{p.bytes, update_decode_budget};
                     const GO gid = c.get(), other = c.get(), face = c.get();
                     const auto label = c.blob();
                     const auto depth = c.get();
@@ -526,7 +522,7 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                     auto& n = nodes.at(gid);
                     const auto found = std::find_if(n.edges.begin(), n.edges.end(),
                         [&](const auto& e) { return e.face == face && e.other == other && e.peer == p.peer; });
-                    if (found == n.edges.end() || found->radius.sign() <= 0 || label.empty() || depth >= count)
+                    if (found == n.edges.end() || found->radius <= 0 || label.empty() || depth >= count)
                         throw std::runtime_error("Unauthenticated forest label.");
                     bool better = label < n.label || (label == n.label && depth + 1 < n.depth);
                     if (label == n.label && depth + 1 == n.depth && n.parent_face >= 0)
@@ -560,7 +556,7 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
     for (const auto& [gid, n] : nodes)
         local_depth = std::max(local_depth, n.depth);
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_depth, &depth);
-    std::map<GO, M> local_correction;
+    std::map<GO, long double> local_correction;
     for (std::uint64_t level = depth; level > 0; --level)
     {
         packets.clear();
@@ -576,15 +572,16 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                         if (e == n.edges.end())
                             throw std::runtime_error("Missing forest parent.");
                         const auto delta = E::leased_scale(n.defect, -e->sign, scalar_budget);
-                        if (absolute(delta, scalar_budget).compare(e->radius) > 0)
+                        if (std::abs(delta) > e->radius)
                             throw GeneralVoFPhiInfeasible("Face closure exceeds arithmetic radius.");
                         local_correction[e->face] = delta;
-                        n.used = E::leased_add(n.used, absolute(delta, scalar_budget), scalar_budget);
-                        Codec c(packet_budget);
+                        n.used = E::leased_add(n.used, std::abs(delta), scalar_budget);
+                        FCodec c(packet_budget);
                         c.put(std::uint64_t(e->other));
                         c.put(std::uint64_t(gid));
                         c.put(std::uint64_t(e->face));
                         c.put(n.defect, scalar_budget);
+                        c.put(n.roundoff, scalar_budget);
                         c.put(delta, scalar_budget);
                         enqueue(e->peer, std::move(c.bytes));
                     }
@@ -597,17 +594,20 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
             {
                 for (const auto& p : sums.packets)
                 {
-                    Codec c{p.bytes, sum_decode_budget};
+                    FCodec c{p.bytes, sum_decode_budget};
                     const GO gid = c.get(), child = c.get(), face = c.get();
-                    const auto sum = c.measure(scalar_budget), delta = c.measure(scalar_budget);
+                    const auto sum = c.finite_measure(scalar_budget), sum_error = c.finite_measure(scalar_budget),
+                               delta = c.finite_measure(scalar_budget);
                     c.done();
                     auto& n = nodes.at(gid);
                     const auto e = std::find_if(n.edges.begin(), n.edges.end(),
                         [&](const auto& e) { return e.face == face && e.other == child && e.peer == p.peer; });
                     if (e == n.edges.end())
                         throw std::runtime_error("Wrong forest sum route.");
+                    n.roundoff += sum_error + 8 * std::numeric_limits<long double>::epsilon() *
+                                                  (std::abs(n.defect) + std::abs(sum));
                     n.defect = E::leased_add(n.defect, sum, scalar_budget);
-                    n.used = E::leased_add(n.used, absolute(delta, scalar_budget), scalar_budget);
+                    n.used = E::leased_add(n.used, std::abs(delta), scalar_budget);
                 }
             });
     }
@@ -616,7 +616,7 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
         {
             for (const auto& [gid, n] : nodes)
             {
-                if ((!n.depth && n.defect.sign()) || n.used.compare(n.radius) > 0)
+                if ((!n.depth && std::abs(n.defect) > n.roundoff) || n.used > n.radius)
                     throw GeneralVoFPhiInfeasible("Incompatible closed component or cell arithmetic radius.");
             }
         });
@@ -631,7 +631,7 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                     const auto found = local_correction.find(e.face);
                     if (found != local_correction.end() && e.face == n.parent_face)
                     {
-                        Codec c(packet_budget);
+                        FCodec c(packet_budget);
                         c.put(std::uint64_t(e.face));
                         c.put(std::uint64_t(gid));
                         c.put(found->second, scalar_budget);
@@ -647,24 +647,24 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
             std::set<GO> seen;
             for (const auto& p : corrections.packets)
             {
-                Codec c{p.bytes, correction_decode_budget};
+                FCodec c{p.bytes, correction_decode_budget};
                 const GO face = c.get(), child = c.get();
-                const auto delta = c.measure(scalar_budget);
+                const auto delta = c.finite_measure(scalar_budget);
                 c.done();
                 const auto i = face_index.at(face);
                 const auto& f = faces[i];
                 if (!seen.insert(face).second || (child != f.first && child != f.second) || owner.at(child) != p.peer ||
-                    absolute(delta, scalar_budget).compare(f.arithmetic_radius) > 0)
+                    std::abs(delta) > f.arithmetic_radius)
                     throw std::runtime_error("Invalid canonical face correction.");
                 result.correction[i] = E::leased_add(result.correction[i], delta, scalar_budget);
-                result.volume[i] = E::leased_add(result.volume[i], delta, scalar_budget);
-                if (absolute(result.correction[i], scalar_budget).compare(f.arithmetic_radius) > 0)
+                result.rate[i] = E::leased_add(result.rate[i], delta, scalar_budget);
+                if (std::abs(result.correction[i]) > f.arithmetic_radius)
                     throw std::runtime_error("Canonical rate change exceeds its original face certificate.");
             }
         });
     corrections = {}; // Do not retain old receive payload across final exchange.
-    // Reassemble canonical corrected controls independently of the forest
-    // accumulation. Exact zero divergence is the acceptance predicate.
+    // Reassemble canonical corrected controls independently of the forest.
+    // Only the derived wide-FP accumulation error admits a nonzero residual.
     packets.clear();
     packet_bytes = 0;
     collective(*comm,
@@ -674,10 +674,10 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
                 for (int sign : {1, -1})
                 {
                     const auto endpoint = sign == 1 ? faces[i].first : faces[i].second;
-                    Codec c(packet_budget);
+                    FCodec c(packet_budget);
                     c.put(std::uint64_t(endpoint));
                     c.put(std::uint64_t(faces[i].face));
-                    c.put(E::leased_scale(result.volume[i], sign, scalar_budget), scalar_budget);
+                    c.put(E::leased_scale(result.rate[i], sign, scalar_budget), scalar_budget);
                     enqueue(owner.at(endpoint), std::move(c.bytes));
                 }
         });
@@ -687,264 +687,122 @@ static GeneralVoFPhiClosure close_general_vof_phi_impl(const SP<const MeshHandle
     collective(*comm,
         [&]
         {
-            std::map<GO, M> divergence;
+            std::map<GO, long double> divergence, uncertainty;
             std::map<GO, std::set<GO>> seen;
             for (const auto& p : final_controls.packets)
             {
-                Codec c{p.bytes, final_decode_budget};
+                FCodec c{p.bytes, final_decode_budget};
                 const GO endpoint = c.get(), face = c.get();
-                const auto value = c.measure(scalar_budget);
+                const auto value = c.finite_measure(scalar_budget);
                 c.done();
                 const auto& n = nodes.at(endpoint);
                 const auto e = std::find_if(n.edges.begin(), n.edges.end(),
                     [&](const auto& e) { return e.face == face && e.authority == p.peer; });
                 if (e == n.edges.end() || !seen[endpoint].insert(face).second)
                     throw std::runtime_error("Invalid corrected Phi authority.");
+                uncertainty[endpoint] += 16 * std::numeric_limits<long double>::epsilon() *
+                                         (std::abs(divergence[endpoint]) + std::abs(value));
                 divergence[endpoint] = E::leased_add(divergence[endpoint], value, scalar_budget);
             }
             for (const auto& [gid, n] : nodes)
-                if (seen[gid].size() != n.edges.size() || divergence[gid].sign())
-                    throw std::runtime_error("Corrected Phi is not exactly source-free.");
+                if (seen[gid].size() != n.edges.size() || std::abs(divergence[gid]) > uncertainty[gid])
+                    throw std::runtime_error("Finite corrected Phi exceeds its operation-derived closure error.");
         });
+    result.admitted_storage_bytes = budget - storage.remaining();
     return result;
 }
-GeneralVoFPhiClosure close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
-    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget)
+GeneralVoFFiniteRateClosure close_general_vof_finite_rate(const SP<const MeshHandle<>>& mesh,
+    std::span<const long double> rate, std::span<const long double> face_radius,
+    std::span<const long double> cell_radius, std::size_t budget,
+    const GeneralVoFFiniteProjectionClosureTopology* topology)
 {
-    return close_general_vof_phi_impl(mesh, cells, faces, budget, false);
-}
-GeneralVoFPhiClosure close_general_vof_bounded_rate(const SP<const MeshHandle<>>& mesh,
-    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget)
-{
-    try
-    {
-        return close_general_vof_phi_impl(mesh, cells, faces, budget, true);
-    }
-    catch (const GeneralVoFPhiInfeasible&)
-    {
-        return close_general_vof_phi_impl(mesh, cells, faces, budget, false);
-    }
-    catch (const PhiProposalResource&)
-    {
-        auto result = close_general_vof_phi_impl(mesh, cells, faces, budget, false);
-        result.bounded_resource_fallback = true;
-        return result;
-    }
-}
-std::optional<GeneralVoFPhiClosure> try_close_general_vof_phi(const SP<const MeshHandle<>>& mesh,
-    const std::vector<GeneralVoFPhiCell>& cells, const std::vector<GeneralVoFPhiFace>& faces, std::size_t budget)
-{
-    try
-    {
-        return close_general_vof_phi(mesh, cells, faces, budget);
-    }
-    catch (const GeneralVoFPhiInfeasible&)
-    {
-        return std::nullopt;
-    }
-}
-GeneralVoFProjectionRateCertificate certify_general_vof_projection_rate(const SP<const MeshHandle<>>& mesh,
-    const std::vector<GeneralVoFRoundedValue>& values, std::size_t budget, const std::vector<M>* primary_rate,
-    const std::vector<M>* primary_radius)
-{
-    const auto map = mesh->owned_cell_map();
-    const auto comm = map->getComm();
-    using Domain = GeneralVoFStorageDomain;
-    GeneralVoFExactStorage storage(budget);
-    std::size_t scalar_budget = 0, packet_budget = 0, packet_exchange_budget = 0, packet_arena_budget = 0;
-    GeneralVoFProjectionRateCertificate result;
+    std::vector<FCell> cells;
+    std::vector<FFace> faces;
+    const auto comm = mesh->owned_cell_map()->getComm();
     collective(*comm,
         [&]
         {
-            storage.capacity(Domain::Input, values.capacity(), sizeof(GeneralVoFRoundedValue));
-            for (const auto& value : values)
+            if (rate.size() != mesh->num_owned_faces() || face_radius.size() != rate.size() ||
+                cell_radius.size() != mesh->num_owned_cells() || std::numeric_limits<long double>::digits > 106 ||
+                !std::numeric_limits<long double>::is_iec559)
+                throw std::runtime_error("Finite Phi shapes or FP environment are unsupported.");
+            const auto identity = [](GO gid)
             {
-                storage.measure(Domain::Input, value.lower);
-                storage.measure(Domain::Input, value.upper);
+                Bytes bytes(8);
+                for (unsigned i = 0; i < 8; ++i)
+                    bytes[i] = char(std::uint64_t(gid) >> (56 - i * 8));
+                return bytes;
+            };
+            for (std::size_t c = 0; c < cell_radius.size(); ++c)
+            {
+                if (!std::isfinite(cell_radius[c]) || cell_radius[c] < 0)
+                    throw std::runtime_error("Invalid finite cell arithmetic capacity.");
+                const auto gid = mesh->cell_global_id(DefaultTpetraTypes::local_ordinal_type(c));
+                cells.push_back({gid, identity(gid), cell_radius[c]});
             }
-            if (bool(primary_rate) != bool(primary_radius) ||
-                (primary_rate && (primary_rate->size() != values.size() || primary_radius->size() != values.size())))
-                throw std::runtime_error("Exact primary rate shape mismatch.");
-            if (primary_rate)
-                for (const auto* input : {primary_rate, primary_radius})
-                {
-                    storage.capacity(Domain::Input, input->capacity(), sizeof(M));
-                    for (const auto& value : *input)
-                        storage.measure(Domain::Input, value);
-                }
-            const auto n = mesh->num_owned_cells(), f = values.size();
-            storage.capacity(Domain::Scratch, 2 * f, 3 * sizeof(GO) + 2 * sizeof(int) + 12 * sizeof(void*));
-            storage.capacity(Domain::Scratch, n, 2 * (sizeof(std::pair<const GO, M>) + 4 * sizeof(void*)));
-            const auto pool = storage.remaining() / 2;
-            storage.capacity(Domain::Scratch, pool, 1);
-            packet_budget = pool / 8;
-            packet_exchange_budget = pool / 2;
-            packet_arena_budget = pool;
-            result.packet_input_cap = packet_budget;
-            result.packet_exchange_cap = packet_exchange_budget;
-            result.packet_arena_cap = packet_arena_budget;
-            if (n > (std::numeric_limits<std::size_t>::max() - 32) / 2)
-                throw std::runtime_error("Projection admission scalar overflow.");
-            const auto slots = 4 * n + 2 * f + 48;
-            storage.capacity(Domain::Result, 2 * n + 2 * f, sizeof(M));
-            scalar_budget = storage.remaining() / slots;
-            if (scalar_budget < 1024 || packet_budget < 1024)
-                throw std::runtime_error("Projection admission cumulative reserve exhausted.");
-            storage.capacity(Domain::Scratch, slots, scalar_budget);
-            result.owned_rate.resize(f);
-            result.owned_face_radius.resize(f);
-            result.owned_cell_radius.resize(n);
-            result.owned_net_rate.resize(n);
-        });
-    GeneralVoFProjectionArithmetic arithmetic(scalar_budget);
-    std::set<GO> endpoint_set;
-    collective(*comm,
-        [&]
-        {
-            if (values.size() != mesh->num_owned_faces())
-                throw std::runtime_error("Projection provenance shape.");
-            const auto lease = mesh->acquire_execution_view();
-            for (std::size_t f = 0; f < values.size(); ++f)
+            for (std::size_t f = 0; f < rate.size(); ++f)
             {
-                const auto face = static_cast<DefaultTpetraTypes::local_ordinal_type>(f);
-                if (mesh->is_geometry_exterior_face(face))
+                const auto lid = DefaultTpetraTypes::local_ordinal_type(f);
+                if (!std::isfinite(rate[f]) || !std::isfinite(face_radius[f]) || face_radius[f] < 0)
+                    throw std::runtime_error("Invalid finite face arithmetic capacity.");
+                if (mesh->is_geometry_exterior_face(lid))
                 {
-                    if (values[f].value != 0 || arithmetic.radius(values[f]).sign() ||
-                        (primary_rate && ((*primary_rate)[f].sign() || (*primary_radius)[f].sign())))
-                        throw std::runtime_error("Nonzero closed wall provenance.");
+                    if (rate[f] != 0)
+                        throw std::runtime_error("Finite Phi requires impermeable exterior faces.");
                     continue;
                 }
-                endpoint_set.insert(mesh->cell_global_id(mesh->owner_cell(face)));
-                endpoint_set.insert(mesh->cell_global_id(mesh->neighbor_cell(face)));
+                const auto gid = mesh->face_global_id(lid);
+                faces.push_back({gid, mesh->cell_global_id(mesh->owner_cell(lid)),
+                    mesh->cell_global_id(mesh->neighbor_cell(lid)), identity(gid), rate[f], face_radius[f]});
             }
-        });
-    Teuchos::Array<GO> ids(endpoint_set.begin(), endpoint_set.end());
-    Teuchos::Array<int> ranks(ids.size(), -1);
-    (void) map->getRemoteIndexList(ids(), ranks());
-    std::map<GO, int> owners;
-    collective(*comm,
-        [&]
-        {
-            for (std::size_t i = 0; i < std::size_t(ids.size()); ++i)
+            if (topology)
             {
-                if (ranks[i] < 0)
-                    throw std::runtime_error("Absent projection endpoint.");
-                owners.emplace(ids[i], ranks[i]);
-            }
-        });
-    std::vector<OwnerPacket> packets;
-    std::size_t used = 0;
-    collective(*comm,
-        [&]
-        {
-            const auto lease = mesh->acquire_execution_view();
-            for (std::size_t f = 0; f < values.size(); ++f)
-            {
-                const auto face = static_cast<DefaultTpetraTypes::local_ordinal_type>(f);
-                if (mesh->is_geometry_exterior_face(face))
-                    continue;
-                const auto flux =
-                    primary_rate ? (*primary_rate)[f] : M::from_value(values[f].value).scaled(mesh->face_area(face));
-                const auto radius = primary_radius ? (*primary_radius)[f]
-                                                   : vof_exact::leased_scale(arithmetic.radius(values[f]),
-                                                         mesh->face_area(face), scalar_budget);
-                if (radius.sign() < 0)
-                    throw std::runtime_error("Negative exact primary rate radius.");
-                if (primary_rate)
+                if (topology->cells.size() != cells.size() || topology->faces.size() != faces.size())
+                    throw std::runtime_error("Finite Phi persistent topology shape mismatch.");
+                for (std::size_t c = 0; c < cells.size(); ++c)
                 {
-                    const auto view = flux.divided_by(M::from_value(mesh->face_area(face)), scalar_budget).enclosure();
-                    if (!std::isfinite(static_cast<double>(view.value)) ||
-                        static_cast<double>(view.value) != values[f].value)
-                        throw std::runtime_error("Exact primary rate differs from its diagnostic view.");
+                    if (topology->cells[c].cell != cells[c].cell || topology->cells[c].identity.empty())
+                        throw std::runtime_error("Finite Phi foreign persistent cell identity.");
+                    cells[c].identity = topology->cells[c].identity;
                 }
-                result.owned_rate[f] = flux;
-                result.owned_face_radius[f] = radius;
-                for (int sign : {1, -1})
+                for (std::size_t f = 0; f < faces.size(); ++f)
                 {
-                    const auto endpoint =
-                        mesh->cell_global_id(sign == 1 ? mesh->owner_cell(face) : mesh->neighbor_cell(face));
-                    Codec c(packet_budget);
-                    c.put(std::uint64_t(endpoint));
-                    c.put(std::uint64_t(mesh->face_global_id(face)));
-                    c.put(vof_exact::leased_scale(flux, sign, scalar_budget), scalar_budget);
-                    c.put(radius, scalar_budget);
-                    if (c.bytes.size() > packet_budget || used > packet_budget - c.bytes.size() ||
-                        sizeof(OwnerPacket) > packet_budget - used - c.bytes.size())
-                        throw std::runtime_error("Projection admission packets exceed budget.");
-                    used += sizeof(OwnerPacket) + c.bytes.size();
-                    packets.push_back({owners.at(endpoint), std::move(c.bytes)});
+                    const auto& t = topology->faces[f];
+                    if (t.face != faces[f].face || t.first != faces[f].first || t.second != faces[f].second ||
+                        t.identity.empty())
+                        throw std::runtime_error("Finite Phi foreign persistent face identity.");
+                    faces[f].identity = t.identity;
                 }
             }
         });
-    const auto received = exchange_phi_packets(
-        packets, comm, packet_budget, packet_exchange_budget, packet_arena_budget, &result.packet_resident_input_bytes);
-    const auto receive_decode_budget = phi_decode_budget(packets, received.packets, *comm, packet_arena_budget);
-    result.packet_sent_bytes = received.stats.sent_bytes;
-    result.packet_received_bytes = received.stats.received_bytes;
-    result.packet_exchange_peak_bytes = received.stats.peak_scratch_bytes;
-    result.packet_resident_output_bytes = packet_capacity(received.packets, packet_arena_budget);
-    result.packet_decode_cap = receive_decode_budget;
-    std::map<GO, M> divergence, radius;
-    std::vector<GO> face_ids;
-    std::vector<int> senders;
+    std::size_t wrapper_storage = 0;
     collective(*comm,
         [&]
         {
-            std::map<GO, std::set<GO>> seen;
-            for (const auto& p : received.packets)
-            {
-                Codec c{p.bytes, receive_decode_budget};
-                const GO endpoint = c.get(), face = c.get();
-                const auto flux = c.measure(scalar_budget), error = c.measure(scalar_budget);
-                c.done();
-                result.packet_codec_peak_bytes = std::max(result.packet_codec_peak_bytes, c.decode_used);
-                if (map->getLocalElement(endpoint) < 0 || error.sign() < 0 || !seen[endpoint].insert(face).second)
-                    throw std::runtime_error("Invalid projection admission route.");
-                divergence[endpoint] = vof_exact::leased_add(divergence[endpoint], flux, scalar_budget);
-                radius[endpoint] = vof_exact::leased_add(radius[endpoint], error, scalar_budget);
-                face_ids.push_back(face);
-                senders.push_back(p.peer);
-            }
+            if (rate.size() > budget / (2 * sizeof(long double)) || cell_radius.size() > budget / sizeof(long double))
+                throw std::length_error("Finite Phi output capacity exceeds its payload cap.");
+            wrapper_storage = 2 * rate.size() * sizeof(long double);
+            if (cell_radius.size() > (budget - wrapper_storage) / sizeof(long double))
+                throw std::length_error("Finite Phi simultaneous output capacity exhausts its payload cap.");
+            wrapper_storage += cell_radius.size() * sizeof(long double);
+
+            if (wrapper_storage >= budget)
+                throw std::length_error("Finite Phi simultaneous output capacity exhausts its payload cap.");
         });
-    const std::set<GO> unique_face_set(face_ids.begin(), face_ids.end());
-    Teuchos::Array<GO> unique_faces(unique_face_set.begin(), unique_face_set.end());
-    Teuchos::Array<int> authority(unique_faces.size(), -1);
-    (void) mesh->owned_face_map()->getRemoteIndexList(unique_faces(), authority());
-    std::map<GO, int> face_authority;
-    for (std::size_t i = 0; i < std::size_t(unique_faces.size()); ++i)
-        face_authority.emplace(unique_faces[i], authority[i]);
-    collective(*comm,
-        [&]
-        {
-            for (std::size_t i = 0; i < face_ids.size(); ++i)
-                if (face_authority.at(face_ids[i]) != senders[i])
-                    throw std::runtime_error("Wrong projection face authority.");
-        });
-    int accepted = 1, global = 0;
-    collective(*comm,
-        [&]
-        {
-            for (const auto& [cell, flux] : divergence)
-                accepted = accepted && absolute(flux, scalar_budget).compare(radius[cell]) <= 0;
-        });
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &accepted, &global);
-    result.arithmetic_admitted = global;
-    collective(*comm,
-        [&]
-        {
-            for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
-            {
-                const auto gid = map->getGlobalElement(static_cast<DefaultTpetraTypes::local_ordinal_type>(c));
-                result.owned_cell_radius[c] = radius[gid];
-                result.owned_net_rate[c] = divergence[gid];
-            }
-        });
+    auto internal = close_finite_phi_impl(mesh, cells, faces, budget - wrapper_storage);
+    GeneralVoFFiniteRateClosure result;
+    result.rate.assign(rate.begin(), rate.end());
+    result.correction.resize(rate.size());
+    result.cell_radius.assign(cell_radius.begin(), cell_radius.end());
+    result.forest_rounds = internal.forest_rounds;
+    result.admitted_storage_bytes = internal.admitted_storage_bytes + wrapper_storage;
+    for (std::size_t f = 0; f < faces.size(); ++f)
+    {
+        const auto lid = mesh->owned_face_map()->getLocalElement(faces[f].face);
+        result.rate[lid] = internal.rate[f];
+        result.correction[lid] = internal.correction[f];
+    }
     return result;
 }
-bool general_vof_projection_arithmetic_admitted(
-    const SP<const MeshHandle<>>& mesh, const std::vector<GeneralVoFRoundedValue>& values, std::size_t budget)
-{
-    return certify_general_vof_projection_rate(mesh, values, budget).arithmetic_admitted;
-}
-#include "solvers/details/GeneralVoFFinitePhiClosure.inc"
+#include "solvers/details/GeneralVoFExactPhiClosure.inc"
 } // namespace SimpleFluid::detail

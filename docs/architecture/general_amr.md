@@ -825,6 +825,19 @@ numerical failure never silently switches policy. The finite branch stores no
 exact phase/error remainder, and transaction-local weighted momentum products
 remain a separate concept in both modes.
 
+The default floating-point transport, remap, momentum, projection and closure
+definitions live directly in their owning `.cc` files and use unsuffixed
+entry points, including `plan_transport`, `plan_remap`, `solve` and `project`.
+Optional rational operations live in the owning component's `Exact` namespace:
+`SimpleFluid::VoF::Exact`, `SimpleFluid::detail::Exact` or
+`SimpleFluid::Exact`. Their definitions are isolated in `GeneralVoFExact*.inc` and
+`ConservativeVoFExactTransport.inc` detail fragments, included by those same
+translation units. Shared geometry, packet framing and collective admission
+helpers remain common. This organization preserves the arithmetic compiler
+flags and policy dispatch; the exact fragments are not a finite-path fallback.
+Explicit rational reconstruction uses `VoF::Exact::PolyhedralReconstruction`;
+the unsuffixed `VoF::PolyhedralReconstruction` accepts bounded geometry.
+
 Experimental exact handoff preserves its authoritative phases and provenance
 through same-policy ownership migration and certified overlap transfer. Positive
 owned exact inventories must still have representable positive scalar views;

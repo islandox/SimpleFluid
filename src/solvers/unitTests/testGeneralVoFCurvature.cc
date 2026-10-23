@@ -18,7 +18,7 @@ std::vector<Patch> paraboloid(double bending, bool permute)
             interface.gas.normal = {bending * x, bending * y, 1};
             interface.gas.anchor = {double(x), double(y), -.5 * bending * (x * x + y * y)};
             auto cell = Meshes::ConvexCellGeometry::box({x - .5, y - .5, -2}, {x + .5, y + .5, 2});
-            auto patch = detail::GeneralVoFCurvature::patch(patches.size(), *cell, interface);
+            auto patch = detail::Exact::GeneralVoFCurvature::patch(patches.size(), *cell, interface);
             EXPECT_TRUE(patch.has_value());
             if (permute)
             {

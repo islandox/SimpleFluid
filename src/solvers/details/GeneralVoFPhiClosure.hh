@@ -43,6 +43,14 @@ struct GeneralVoFFiniteRateClosure
     const SP<const MeshHandle<>>&, std::span<const long double> owned_rate,
     std::span<const long double> owned_face_radius, std::span<const long double> owned_cell_radius,
     std::size_t byte_budget, const GeneralVoFFiniteProjectionClosureTopology* topology = nullptr);
+/** Bounded correction is infeasible; metadata/range/resource errors are distinct. */
+class GeneralVoFPhiInfeasible : public std::runtime_error
+{
+public:
+    using std::runtime_error::runtime_error;
+};
+namespace Exact
+{
 /** Persistent identities are authenticated geometry-provider certificates,
  * independent of observed global numbering and ownership. */
 struct GeneralVoFPhiCell
@@ -62,12 +70,6 @@ struct GeneralVoFPhiClosure
     std::vector<Meshes::ExactGeometryMeasure> volume, correction; ///< Input face order.
     std::size_t forest_rounds = 0;
     bool bounded_resource_fallback = false; ///< Diagnostic only; original gates were rerun unchanged.
-};
-/** Bounded correction is infeasible; metadata/range/resource errors are distinct. */
-class GeneralVoFPhiInfeasible : public std::runtime_error
-{
-public:
-    using std::runtime_error::runtime_error;
 };
 struct GeneralVoFProjectionRateCertificate
 {
@@ -119,4 +121,5 @@ struct GeneralVoFProjectionClosureTopology
 /** Exact source-free rate admission before any arithmetic face repair. */
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL bool general_vof_projection_arithmetic_admitted(
     const SP<const MeshHandle<>>&, const std::vector<GeneralVoFRoundedValue>&, std::size_t byte_budget);
+} // namespace Exact
 } // namespace SimpleFluid::detail

@@ -62,7 +62,7 @@ void require(bool value, const char* message)
         throw std::runtime_error(message);
 }
 } // namespace
-std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
+std::optional<GeneralVoFCurvaturePatch> Exact::GeneralVoFCurvature::patch(
     std::uint64_t cell, const Meshes::ConvexCellGeometry& geometry, const VoF::PolyhedralInterface& plane)
 {
     if (plane.pure_gas || plane.pure_carrier)
@@ -113,7 +113,7 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
         "General VoF curvature has no positive physical cell scale.");
     return result;
 }
-std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch_finite(
+std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
     std::uint64_t cell, const Meshes::BoundedConvexGeometry& geometry, const VoF::PolyhedralInterface& plane)
 {
     if (plane.pure_gas || plane.pure_carrier)

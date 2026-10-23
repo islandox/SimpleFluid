@@ -287,7 +287,7 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
         const auto original_channels = channels(*source);
         const auto plan = refine(*source);
         const auto trial =
-            source->plan_remap_finite(plan, bound_target(source->hierarchy(), plan), original_channels, schema);
+            source->plan_remap(plan, bound_target(source->hierarchy(), plan), original_channels, schema);
         const auto fine = trial.candidate();
         EXPECT_FALSE(trial.ownership_only());
         EXPECT_EQ(fine->hierarchy()->global_cells(), 64u);
@@ -302,7 +302,7 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
             families.push_back(key);
         const auto coarsen = fine->hierarchy()->plan_adaptation({}, families);
         const auto coarse_trial =
-            fine->plan_remap_finite(coarsen, bound_target(fine->hierarchy(), coarsen), trial.owned_channels(), schema);
+            fine->plan_remap(coarsen, bound_target(fine->hierarchy(), coarsen), trial.owned_channels(), schema);
         const auto coarse = coarse_trial.candidate();
         EXPECT_EQ(coarse->hierarchy()->global_cells(), 8u);
         plane_oracle(*coarse, initial.plane);
@@ -327,14 +327,14 @@ TEST(FiniteVoFRemap, MigrationCopiesNonbinaryInventoriesAndInheritedBoundsExactl
     const auto initial = input();
     const auto schema = options();
     const auto plan = refine(*initial.state);
-    const auto refined = initial.state->plan_remap_finite(
+    const auto refined = initial.state->plan_remap(
         plan, bound_target(initial.state->hierarchy(), plan), channels(*initial.state, true), schema);
     const auto source = refined.candidate();
     const auto before = publication(*source, refined.owned_channels());
     const auto comm = Tpetra::getDefaultComm();
     std::vector<int> destinations(source->owned_order().size(), (comm->getRank() + 1) % comm->getSize());
     const auto migration = source->hierarchy()->plan_migration(destinations);
-    const auto trial = source->plan_remap_finite(
+    const auto trial = source->plan_remap(
         migration, bound_target(source->hierarchy(), migration), refined.owned_channels(), schema);
     EXPECT_TRUE(trial.ownership_only());
     const auto after = trial.candidate();
@@ -358,31 +358,31 @@ TEST(FiniteVoFRemap, ForeignStalePlansSchemasAndCapsRejectWithoutPublicationChan
     const auto plan = refine(*source);
     const auto target = bound_target(source->hierarchy(), plan);
     const auto foreign = input(1, {}, false, true, 2).state;
-    EXPECT_THROW((void) foreign->plan_remap_finite(plan, target, channels(*foreign), schema), std::invalid_argument);
+    EXPECT_THROW((void) foreign->plan_remap(plan, target, channels(*foreign), schema), std::invalid_argument);
     const auto other_plan = refine(*source);
-    EXPECT_THROW((void) source->plan_remap_finite(plan, bound_target(source->hierarchy(), other_plan), values, schema),
+    EXPECT_THROW((void) source->plan_remap(plan, bound_target(source->hierarchy(), other_plan), values, schema),
         std::invalid_argument);
-    const auto valid = source->plan_remap_finite(plan, target, values, schema);
-    EXPECT_THROW((void) valid.candidate()->plan_remap_finite(plan, target, valid.owned_channels(), schema),
+    const auto valid = source->plan_remap(plan, target, values, schema);
+    EXPECT_THROW((void) valid.candidate()->plan_remap(plan, target, valid.owned_channels(), schema),
         std::invalid_argument);
     auto malformed = schema;
     malformed.byte_budget = 1;
-    EXPECT_THROW((void) source->plan_remap_finite(plan, target, values, malformed), std::invalid_argument);
+    EXPECT_THROW((void) source->plan_remap(plan, target, values, malformed), std::invalid_argument);
     malformed = schema;
     if (Tpetra::getDefaultComm()->getRank() == 0)
         malformed.channels[0].name.clear();
-    EXPECT_THROW((void) source->plan_remap_finite(plan, target, values, malformed), std::invalid_argument);
+    EXPECT_THROW((void) source->plan_remap(plan, target, values, malformed), std::invalid_argument);
     if (Tpetra::getDefaultComm()->getSize() > 1)
     {
         malformed = schema;
         if (Tpetra::getDefaultComm()->getRank() == 0)
             malformed.channels[3].name += "_different";
-        EXPECT_THROW((void) source->plan_remap_finite(plan, target, values, malformed), std::invalid_argument);
+        EXPECT_THROW((void) source->plan_remap(plan, target, values, malformed), std::invalid_argument);
     }
     auto missing = values;
     if (Tpetra::getDefaultComm()->getRank() == 0 && !missing.empty())
         missing.pop_back();
-    EXPECT_THROW((void) source->plan_remap_finite(plan, target, missing, schema), std::invalid_argument);
+    EXPECT_THROW((void) source->plan_remap(plan, target, missing, schema), std::invalid_argument);
     EXPECT_EQ(source->accepted_control(), control);
     EXPECT_EQ(source->accepted_identity(), identity);
     EXPECT_EQ(source->gas_volumes(), gas);
@@ -401,7 +401,7 @@ TEST(FiniteVoFRemap, WholeCellMigrationCannotGiveAChannelAnAbsentPhysicalCarrier
     std::vector<GeneralVoFFiniteOwnedChannels> absent;
     for (const auto& key : source->owned_order())
         absent.push_back({key, {{0, 0}}});
-    const auto accepted = source->plan_remap_finite(plan, target, absent, schema);
+    const auto accepted = source->plan_remap(plan, target, absent, schema);
     const auto accepted_state = accepted.candidate();
     EXPECT_EQ(accepted_state->hierarchy()->global_cells(), source->hierarchy()->global_cells());
     EXPECT_TRUE(std::all_of(
@@ -409,12 +409,12 @@ TEST(FiniteVoFRemap, WholeCellMigrationCannotGiveAChannelAnAbsentPhysicalCarrier
     auto invalid = absent;
     if (comm->getRank() == 0 && !invalid.empty())
         invalid.front().amounts[0] = {1, 0};
-    EXPECT_THROW((void) source->plan_remap_finite(plan, target, invalid, schema), std::invalid_argument);
+    EXPECT_THROW((void) source->plan_remap(plan, target, invalid, schema), std::invalid_argument);
     schema.channels[0].nonnegative = false;
     invalid = absent;
     if (comm->getRank() == 0 && !invalid.empty())
         invalid.front().amounts[0] = {0, 1e-24L};
-    EXPECT_THROW((void) source->plan_remap_finite(plan, target, invalid, schema), std::invalid_argument);
+    EXPECT_THROW((void) source->plan_remap(plan, target, invalid, schema), std::invalid_argument);
     EXPECT_TRUE(
         std::all_of(source->gas_volumes().begin(), source->gas_volumes().end(), [](double v) { return v == 0; }));
 }

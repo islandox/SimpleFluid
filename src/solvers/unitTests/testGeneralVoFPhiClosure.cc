@@ -76,10 +76,10 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
         return key;
     };
     const auto radius = M::from_value(std::ldexp(1.0, -45));
-    std::vector<detail::GeneralVoFPhiCell> cells;
+    std::vector<detail::Exact::GeneralVoFPhiCell> cells;
     for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
         cells.push_back({mesh->cell_global_id(LO(c)), identity(mesh->cell_centroid(LO(c)), 0), radius.scaled(6)});
-    std::vector<detail::GeneralVoFPhiFace> base;
+    std::vector<detail::Exact::GeneralVoFPhiFace> base;
     GO local_first = std::numeric_limits<GO>::max(), first = 0;
     for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
     {
@@ -102,12 +102,12 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
                 f.volume = f.volume + radius.scaled(multiplier / 8.0);
         if (multiplier == 1024)
         {
-            EXPECT_FALSE(detail::try_close_general_vof_phi(mesh, cells, faces, 4 * 1024 * 1024));
-            EXPECT_THROW((void) detail::close_general_vof_phi(mesh, cells, faces, 4 * 1024 * 1024),
+            EXPECT_FALSE(detail::Exact::try_close_general_vof_phi(mesh, cells, faces, 4 * 1024 * 1024));
+            EXPECT_THROW((void) detail::Exact::close_general_vof_phi(mesh, cells, faces, 4 * 1024 * 1024),
                 detail::GeneralVoFPhiInfeasible);
             continue;
         }
-        const auto result = detail::close_general_vof_phi(mesh, cells, faces, 4 * 1024 * 1024);
+        const auto result = detail::Exact::close_general_vof_phi(mesh, cells, faces, 4 * 1024 * 1024);
         ASSERT_EQ(result.volume.size(), faces.size());
         for (std::size_t i = 0; i < faces.size(); ++i)
         {
@@ -129,7 +129,7 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
     auto precise = base;
     for (auto& face : precise)
         face.volume = (face.volume + tail.scaled(face.volume.sign())).compacted(1024 * 1024);
-    const auto bounded = detail::close_general_vof_bounded_rate(mesh, cells, precise, 4 * 1024 * 1024);
+    const auto bounded = detail::Exact::close_general_vof_bounded_rate(mesh, cells, precise, 4 * 1024 * 1024);
     for (std::size_t i = 0; i < precise.size(); ++i)
     {
         EXPECT_EQ(bounded.volume[i].compare(base[i].volume), 0);
@@ -152,7 +152,7 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
         std::size_t rejected_budget = 0, admitted_budget = 4 * 1024 * 1024;
         try
         {
-            (void) detail::close_general_vof_phi(mesh, cells, framed, admitted_budget);
+            (void) detail::Exact::close_general_vof_phi(mesh, cells, framed, admitted_budget);
         }
         catch (const std::exception&)
         {
@@ -163,7 +163,7 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
             const auto budget = rejected_budget + (admitted_budget - rejected_budget) / 2;
             try
             {
-                (void) detail::close_general_vof_phi(mesh, cells, framed, budget);
+                (void) detail::Exact::close_general_vof_phi(mesh, cells, framed, budget);
                 admitted_budget = budget;
             }
             catch (const std::exception&)
@@ -173,7 +173,7 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
         }
         try
         {
-            const auto boundary = detail::close_general_vof_bounded_rate(mesh, cells, framed, admitted_budget);
+            const auto boundary = detail::Exact::close_general_vof_bounded_rate(mesh, cells, framed, admitted_budget);
             if (!boundary.bounded_resource_fallback)
                 continue;
             found_resource_fallback = true;
@@ -193,7 +193,7 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
     auto strict_cells = cells;
     for (auto& cell : strict_cells)
         cell.arithmetic_radius = {};
-    const auto unchanged = detail::close_general_vof_bounded_rate(mesh, strict_cells, precise, 4 * 1024 * 1024);
+    const auto unchanged = detail::Exact::close_general_vof_bounded_rate(mesh, strict_cells, precise, 4 * 1024 * 1024);
     for (std::size_t i = 0; i < precise.size(); ++i)
     {
         // Positive face capacity cannot authorize spending a zero cell budget.
@@ -204,12 +204,12 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
     const auto below_range = M::from_value(std::numeric_limits<double>::denorm_min()).squared();
     for (auto& face : tiny_faces)
         face.volume = below_range.scaled(face.volume.sign());
-    const auto tiny_closed = detail::close_general_vof_bounded_rate(mesh, cells, tiny_faces, 4 * 1024 * 1024);
+    const auto tiny_closed = detail::Exact::close_general_vof_bounded_rate(mesh, cells, tiny_faces, 4 * 1024 * 1024);
     for (std::size_t i = 0; i < tiny_faces.size(); ++i)
         EXPECT_EQ(tiny_closed.volume[i].compare(tiny_faces[i].volume), 0);
     for (auto& face : precise)
         face.arithmetic_radius = {};
-    const auto immutable = detail::close_general_vof_bounded_rate(mesh, cells, precise, 4 * 1024 * 1024);
+    const auto immutable = detail::Exact::close_general_vof_bounded_rate(mesh, cells, precise, 4 * 1024 * 1024);
     for (std::size_t i = 0; i < precise.size(); ++i)
     {
         EXPECT_EQ(immutable.volume[i].compare(precise[i].volume), 0);
@@ -219,8 +219,9 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
     auto invalid = base;
     for (auto& face : invalid)
         face.identity.clear();
-    EXPECT_THROW((void) detail::try_close_general_vof_phi(mesh, cells, invalid, 4 * 1024 * 1024), std::runtime_error);
-    EXPECT_THROW((void) detail::try_close_general_vof_phi(mesh, cells, base, 1), std::runtime_error);
+    EXPECT_THROW(
+        (void) detail::Exact::try_close_general_vof_phi(mesh, cells, invalid, 4 * 1024 * 1024), std::runtime_error);
+    EXPECT_THROW((void) detail::Exact::try_close_general_vof_phi(mesh, cells, base, 1), std::runtime_error);
 
     // Independent xy layers are connected physically by immutable z faces.
     // A forest built from all faces could select those zero-capacity links and
@@ -246,7 +247,7 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
     for (auto& face : split)
         if (face.face == upper_x)
             face.volume = face.volume + radius.scaled(.125);
-    const auto closed = detail::close_general_vof_phi(mesh, cells, split, 4 * 1024 * 1024);
+    const auto closed = detail::Exact::close_general_vof_phi(mesh, cells, split, 4 * 1024 * 1024);
     for (std::size_t i = 0; i < split.size(); ++i)
         if (!split[i].arithmetic_radius.sign())
             EXPECT_EQ(closed.correction[i].sign(), 0);
@@ -254,8 +255,9 @@ TEST(GeneralVoFPhiClosureTest, CirculationClosureBoundFailureAndRecovery)
     for (auto& face : incompatible)
         if (face.face == cross_z)
             face.volume = face.volume + radius.scaled(.125);
-    EXPECT_THROW((void) detail::close_general_vof_phi(mesh, cells, incompatible, 4 * 1024 * 1024), std::runtime_error);
-    EXPECT_NO_THROW((void) detail::close_general_vof_phi(mesh, cells, split, 4 * 1024 * 1024));
+    EXPECT_THROW(
+        (void) detail::Exact::close_general_vof_phi(mesh, cells, incompatible, 4 * 1024 * 1024), std::runtime_error);
+    EXPECT_NO_THROW((void) detail::Exact::close_general_vof_phi(mesh, cells, split, 4 * 1024 * 1024));
 }
 
 TEST(GeneralVoFPhiClosureTest, ExactRepresentedRateRetainsUnderflowingAreaProduct)
@@ -275,7 +277,7 @@ TEST(GeneralVoFPhiClosureTest, ExactRepresentedRateRetainsUnderflowingAreaProduc
         for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
             values.push_back(arithmetic.leaf(eta * mesh->face_normal(LO(f)).x));
     }
-    const auto result = detail::certify_general_vof_projection_rate(mesh, values, 4 * 1024 * 1024);
+    const auto result = detail::Exact::certify_general_vof_projection_rate(mesh, values, 4 * 1024 * 1024);
     EXPECT_TRUE(result.arithmetic_admitted);
     const auto lease = mesh->acquire_execution_view();
     for (std::size_t f = 0; f < values.size(); ++f)
@@ -354,7 +356,7 @@ TEST(GeneralVoFPhiClosureTest, PacketArenaSeparatesResidentInputsFromExchangePea
         }
     }
     constexpr std::size_t budget = 512 * 1024;
-    const auto accepted = detail::certify_general_vof_projection_rate(mesh, values, budget, &rate, &radius);
+    const auto accepted = detail::Exact::certify_general_vof_projection_rate(mesh, values, budget, &rate, &radius);
     EXPECT_TRUE(accepted.arithmetic_admitted);
     EXPECT_GE(accepted.packet_exchange_cap, 4 * accepted.packet_input_cap);
     EXPECT_LE(accepted.packet_exchange_cap, 4 * accepted.packet_input_cap + 3);
@@ -369,9 +371,9 @@ TEST(GeneralVoFPhiClosureTest, PacketArenaSeparatesResidentInputsFromExchangePea
         EXPECT_GT(accepted.packet_exchange_peak_bytes, accepted.packet_input_cap);
         EXPECT_EQ(accepted.packet_sent_bytes, accepted.packet_received_bytes);
     }
-    EXPECT_THROW(
-        (void) detail::certify_general_vof_projection_rate(mesh, values, 8192, &rate, &radius), std::runtime_error);
-    const auto recovered = detail::certify_general_vof_projection_rate(mesh, values, budget, &rate, &radius);
+    EXPECT_THROW((void) detail::Exact::certify_general_vof_projection_rate(mesh, values, 8192, &rate, &radius),
+        std::runtime_error);
+    const auto recovered = detail::Exact::certify_general_vof_projection_rate(mesh, values, budget, &rate, &radius);
     EXPECT_TRUE(recovered.arithmetic_admitted);
     for (std::size_t f = 0; f < rate.size(); ++f)
         EXPECT_EQ(recovered.owned_rate[f].compare(rate[f]), 0);

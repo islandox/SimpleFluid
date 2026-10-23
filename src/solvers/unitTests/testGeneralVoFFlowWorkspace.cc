@@ -158,7 +158,8 @@ TEST(GeneralVoFFlowWorkspaceTest, NonorthogonalProjectionChecksPhysicalDivergenc
     VoFSolverOptions options;
     options.pressure_absolute_tolerance = 1e-11;
     VoFStepDiagnostics diagnostic;
-    EXPECT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, kappa, .01, 0, options, diagnostic));
+    EXPECT_NO_THROW(detail::Exact::GeneralVoFFlowWorkspace::project(
+        flow, face, velocity, pressure, rho, fraction, kappa, .01, 0, options, diagnostic));
     EXPECT_LT(diagnostic.maximum_divergence, 2e-12);
     EXPECT_GT(diagnostic.pressure_iterations, 0);
     EXPECT_GT(flow.stable_timestep(face, 1000, 1, 0, options), 0);
@@ -185,8 +186,8 @@ TEST(GeneralVoFFlowWorkspaceTest, ProjectionArithmeticRequiresOriginalDefectCorr
     options.pressure_absolute_tolerance = 1e-11;
     VoFStepDiagnostics diagnostics;
     detail::GeneralVoFProjectionProvenance provenance;
-    EXPECT_NO_THROW(
-        flow.project(face, velocity, pressure, rho, fraction, curvature, .01, 0, options, diagnostics, &provenance));
+    EXPECT_NO_THROW(detail::Exact::GeneralVoFFlowWorkspace::project(
+        flow, face, velocity, pressure, rho, fraction, curvature, .01, 0, options, diagnostics, &provenance));
     EXPECT_EQ(provenance.face_velocity.size(), mesh->num_owned_faces());
     EXPECT_LT(diagnostics.maximum_divergence, 2e-12);
     EXPECT_GT(diagnostics.pressure_iterations, 0);
@@ -223,11 +224,12 @@ TEST(GeneralVoFFlowWorkspaceTest, ConstantCurvaturePressureAndWallCapillaryReact
     auto inconsistent = mass;
     if (!inconsistent.empty())
         inconsistent[0] = inconsistent[0].scaled(2);
-    EXPECT_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .01, 1, options, diagnostics,
-                     &provenance, std::span<const Meshes::ExactGeometryMeasure>(inconsistent)),
+    EXPECT_THROW(
+        detail::Exact::GeneralVoFFlowWorkspace::project(flow, face, velocity, pressure, rho, fraction, curvature, .01,
+            1, options, diagnostics, &provenance, std::span<const Meshes::ExactGeometryMeasure>(inconsistent)),
         std::runtime_error);
-    ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .01, 1, options, diagnostics,
-        &provenance, std::span<const Meshes::ExactGeometryMeasure>(mass)));
+    ASSERT_NO_THROW(detail::Exact::GeneralVoFFlowWorkspace::project(flow, face, velocity, pressure, rho, fraction,
+        curvature, .01, 1, options, diagnostics, &provenance, std::span<const Meshes::ExactGeometryMeasure>(mass)));
     const auto gradient = flow.gradient(pressure);
     for (std::size_t c = 0; c < n; ++c)
     {
@@ -298,7 +300,7 @@ TEST(GeneralVoFFlowWorkspaceTest, PrimaryRatePreservesSubUlpPressureCorrectionsA
     const auto n = mesh->num_owned_cells();
     std::vector<double> initial(mesh->num_faces()), rho(n, 1), fraction(n), curvature(n), pressure;
     std::vector<VoF::Vector> velocity(n);
-    detail::GeneralVoFProjectionClosureTopology topology;
+    detail::Exact::GeneralVoFProjectionClosureTopology topology;
     const auto identity = [](const auto& x, char kind)
     {
         std::vector<char> result{kind};
@@ -330,16 +332,16 @@ TEST(GeneralVoFFlowWorkspaceTest, PrimaryRatePreservesSubUlpPressureCorrectionsA
     detail::GeneralVoFProjectionProvenance provenance;
     provenance.face_rate = {M::from_value(17)};
     auto face = initial;
-    EXPECT_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .002, 0, options, diagnostics,
-                     &provenance, std::nullopt, &topology),
+    EXPECT_THROW(detail::Exact::GeneralVoFFlowWorkspace::project(flow, face, velocity, pressure, rho, fraction,
+                     curvature, .002, 0, options, diagnostics, &provenance, std::nullopt, &topology),
         std::runtime_error);
     ASSERT_EQ(provenance.face_rate.size(), 1u);
     EXPECT_EQ(provenance.face_rate[0].compare(M::from_value(17)), 0);
     face = initial;
     velocity.assign(n, {});
     options.max_pressure_iterations = 3000;
-    ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .002, 0, options, diagnostics,
-        &provenance, std::nullopt, &topology));
+    ASSERT_NO_THROW(detail::Exact::GeneralVoFFlowWorkspace::project(flow, face, velocity, pressure, rho, fraction,
+        curvature, .002, 0, options, diagnostics, &provenance, std::nullopt, &topology));
     EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
     EXPECT_GT(diagnostics.pressure_iterations, 1);
     int local_retained = 0, retained = 0;
@@ -373,7 +375,7 @@ TEST(GeneralVoFFlowWorkspaceTest, ZeroRadiusOrthogonalPressureUsesSameExactRateA
     const auto n = mesh->num_owned_cells();
     std::vector<double> face(mesh->num_faces()), rho(n, 1), fraction(n), curvature(n), pressure;
     std::vector<VoF::Vector> velocity(n, {1, 0, 0});
-    detail::GeneralVoFProjectionClosureTopology topology;
+    detail::Exact::GeneralVoFProjectionClosureTopology topology;
     {
         const auto lease = mesh->acquire_execution_view();
         for (std::size_t c = 0; c < n; ++c)
@@ -391,8 +393,8 @@ TEST(GeneralVoFFlowWorkspaceTest, ZeroRadiusOrthogonalPressureUsesSameExactRateA
     options.max_pressure_iterations = 16;
     VoFStepDiagnostics diagnostics;
     detail::GeneralVoFProjectionProvenance provenance;
-    ASSERT_NO_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, 1, 0, options, diagnostics,
-        &provenance, std::nullopt, &topology));
+    ASSERT_NO_THROW(detail::Exact::GeneralVoFFlowWorkspace::project(flow, face, velocity, pressure, rho, fraction,
+        curvature, 1, 0, options, diagnostics, &provenance, std::nullopt, &topology));
     EXPECT_GT(diagnostics.pressure_iterations, 0);
     EXPECT_EQ(diagnostics.maximum_divergence, 0);
     for (const auto& rate : provenance.face_rate)
@@ -554,7 +556,7 @@ TEST(GeneralVoFFlowWorkspaceTest, FiniteProjectionKeepsOriginalPhysicalThreshold
         mass_error[c] = 1e-10L * mass[c];
     }
     ASSERT_NO_THROW(
-        flow.project_finite(face, velocity, pressure, rho, fraction, curvature, .01, 0, options, diagnostics,
+        flow.project(face, velocity, pressure, rho, fraction, curvature, .01, 0, options, diagnostics,
             &provenance, std::span<const long double>(mass), nullptr, std::span<const long double>(mass_error)));
     EXPECT_LE(diagnostics.maximum_divergence, .01 * options.pressure_absolute_tolerance);
     EXPECT_GT(diagnostics.pressure_iterations, 0);
@@ -590,7 +592,7 @@ TEST(GeneralVoFFlowWorkspaceTest, FiniteProjectionKeepsOriginalPhysicalThreshold
     const auto before_face = face, before_pressure = pressure;
     const auto before_velocity = velocity;
     provenance.byte_budget = 1;
-    EXPECT_THROW(flow.project_finite(
+    EXPECT_THROW(flow.project(
                      face, velocity, pressure, rho, fraction, curvature, .01, 0, options, diagnostics, &provenance),
         std::runtime_error);
     EXPECT_EQ(face, before_face);
@@ -599,7 +601,7 @@ TEST(GeneralVoFFlowWorkspaceTest, FiniteProjectionKeepsOriginalPhysicalThreshold
     provenance.byte_budget = 64 * 1024 * 1024;
     mass_error = mass;
     EXPECT_THROW(
-        flow.project_finite(face, velocity, pressure, rho, fraction, curvature, .01, 0, options, diagnostics,
+        flow.project(face, velocity, pressure, rho, fraction, curvature, .01, 0, options, diagnostics,
             &provenance, std::span<const long double>(mass), nullptr, std::span<const long double>(mass_error)),
         std::runtime_error);
     EXPECT_EQ(face, before_face);
