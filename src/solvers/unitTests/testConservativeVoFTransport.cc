@@ -753,33 +753,35 @@ TEST(ConservativeVoFTransportTest, ExactInputNormalizesBeforeNarrowingAndRecover
         }
         if (scenario == 2)
         {
-            EXPECT_THROW((void) transport.solve_exact(old, source, capacity, outgoing, routes, faces, true, 3000),
+            EXPECT_THROW((void) detail::Exact::ConservativeVoFTransport::solve(
+                             transport, old, source, capacity, outgoing, routes, faces, true, 3000),
                 std::runtime_error);
             continue;
         }
         if (scenario == 4)
         {
-            EXPECT_THROW(
-                (void) transport.solve_exact(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-30),
+            EXPECT_THROW((void) detail::Exact::ConservativeVoFTransport::solve(
+                             transport, old, source, capacity, outgoing, routes, faces, true, 3000, 1e-30),
                 std::runtime_error);
-            EXPECT_THROW(
-                (void) transport.solve_exact(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12, 1024),
+            EXPECT_THROW((void) detail::Exact::ConservativeVoFTransport::solve(
+                             transport, old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12, 1024),
                 std::runtime_error);
             const auto comm = mesh->owned_cell_map()->getComm();
             if (comm->getSize() > 1)
             {
-                EXPECT_THROW((void) transport.solve_exact(
+                EXPECT_THROW((void) detail::Exact::ConservativeVoFTransport::solve(transport,
                                  old, source, capacity, outgoing, routes, faces, comm->getRank() == 0, 3000),
                     std::runtime_error);
-                EXPECT_THROW((void) transport.solve_exact(old, source, capacity, outgoing, routes, faces, true,
-                                 comm->getRank() == 0 ? 2999 : 3000),
+                EXPECT_THROW((void) detail::Exact::ConservativeVoFTransport::solve(transport, old, source, capacity,
+                                 outgoing, routes, faces, true, comm->getRank() == 0 ? 2999 : 3000),
                     std::runtime_error);
-                EXPECT_THROW((void) transport.solve_exact(old, source, capacity, outgoing, routes, faces, true, 3000,
-                                 comm->getRank() == 0 ? 1e-11 : 1e-12),
+                EXPECT_THROW((void) detail::Exact::ConservativeVoFTransport::solve(transport, old, source, capacity,
+                                 outgoing, routes, faces, true, 3000, comm->getRank() == 0 ? 1e-11 : 1e-12),
                     std::runtime_error);
             }
         }
-        const auto result = transport.solve_exact(old, source, capacity, outgoing, routes, faces, true, 3000);
+        const auto result = detail::Exact::ConservativeVoFTransport::solve(
+            transport, old, source, capacity, outgoing, routes, faces, true, 3000);
         EXPECT_TRUE(result.exact_input);
         EXPECT_TRUE(result.flux.empty());
         EXPECT_LE(result.physical_relative_residual, 1e-12);
@@ -1092,7 +1094,10 @@ TEST(ConservativeVoFTransportTest, ExactPreparationRequiresSharedProvenanceAndRe
     Transport transport(mesh);
     std::vector<M> old(n, M::from_value(7)), source(n), capacity(n, M::from_value(1)), outgoing(n);
     const auto solve = [&](std::size_t budget = 64 * 1024 * 1024)
-    { return transport.solve_exact(old, source, capacity, outgoing, {}, {}, true, 3000, 1e-12, budget); };
+    {
+        return detail::Exact::ConservativeVoFTransport::solve(
+            transport, old, source, capacity, outgoing, {}, {}, true, 3000, 1e-12, budget);
+    };
     for (double amount : solve().amount)
         EXPECT_NEAR(amount, 7, 32 * std::numeric_limits<double>::epsilon() * 7);
     EXPECT_EQ(transport.preparation_statistics().exact_builds, 1u);
@@ -1166,7 +1171,8 @@ TEST(ConservativeVoFTransportTest, ExactPreparationReusesAuthenticatedNonzeroRou
     {
         for (std::size_t c = 0; c < n; ++c)
             old[c] = M::from_value(component * (mesh->cell_global_id(LO(c)) == ids[0] ? 2 : 6));
-        const auto result = transport.solve_exact(old, source, capacity, outgoing, incoming, faces, true, 3000);
+        const auto result = detail::Exact::ConservativeVoFTransport::solve(
+            transport, old, source, capacity, outgoing, incoming, faces, true, 3000);
         for (std::size_t c = 0; c < n; ++c)
             EXPECT_NEAR(result.amount[c], component * (mesh->cell_global_id(LO(c)) == ids[0] ? 1.5 : 6.5), 2e-12);
         EXPECT_EQ(transport.preparation_statistics().exact_builds, 1u);
@@ -1174,12 +1180,14 @@ TEST(ConservativeVoFTransportTest, ExactPreparationReusesAuthenticatedNonzeroRou
     }
     for (std::size_t c = 0; c < n; ++c)
         old[c] = M::from_value(-1);
-    EXPECT_THROW(
-        (void) transport.solve_exact(old, source, capacity, outgoing, incoming, faces, true, 3000), std::runtime_error);
+    EXPECT_THROW((void) detail::Exact::ConservativeVoFTransport::solve(
+                     transport, old, source, capacity, outgoing, incoming, faces, true, 3000),
+        std::runtime_error);
     EXPECT_EQ(transport.preparation_statistics().exact_hits, 2u);
     for (std::size_t c = 0; c < n; ++c)
         old[c] = M::from_value(mesh->cell_global_id(LO(c)) == ids[0] ? 2 : 6);
-    EXPECT_NO_THROW((void) transport.solve_exact(old, source, capacity, outgoing, incoming, faces, true, 3000));
+    EXPECT_NO_THROW((void) detail::Exact::ConservativeVoFTransport::solve(
+        transport, old, source, capacity, outgoing, incoming, faces, true, 3000));
     EXPECT_EQ(transport.preparation_statistics().exact_hits, 3u);
 }
 } // namespace

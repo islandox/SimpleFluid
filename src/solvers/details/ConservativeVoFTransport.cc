@@ -59,22 +59,6 @@ struct ConservativeVoFTransport::SparseAssembly
     std::unique_ptr<Pack::import_type> donor_import;
 };
 
-struct ConservativeVoFTransport::ExactPreparation
-{
-    using M = Meshes::ExactGeometryMeasure;
-    std::vector<M> capacity, outgoing, diagonal;
-    std::vector<ExactTransfer> incoming;
-    std::vector<ExactFaceContribution> contributions;
-    std::vector<std::map<GO, M>> routes;
-    std::vector<GeneralVoFOriginalRow> original;
-    std::vector<Meshes::CertifiedGeometryValue> coefficient_conversion;
-    Teuchos::RCP<const Pack::map_type> owned_map, overlap_map, owned_face_map, overlap_face_map, donor_map;
-    std::unique_ptr<Pack::import_type> donor_import;
-    Teuchos::RCP<Pack::matrix_type> matrix;
-    MeshHandle<>::MultiRegionPtr native_owner;
-    std::uint64_t geometry_epoch = 0;
-    std::size_t byte_budget = 0, width = 1;
-};
 
 ConservativeVoFTransport::ConservativeVoFTransport(SP<const MeshHandle<>> mesh)
     : mesh_(std::move(mesh)), cell_import_(mesh_->owned_cell_map(), mesh_->overlap_cell_map()),
@@ -601,376 +585,223 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_impl(const std:
     require(*map, valid, "Conservative VoF transport lost inventory positivity or finiteness.");
     return result;
 }
-ConservativeVoFTransport::Result ConservativeVoFTransport::solve_exact(
-    const std::vector<Meshes::ExactGeometryMeasure>& old, const std::vector<Meshes::ExactGeometryMeasure>& source,
-    const std::vector<Meshes::ExactGeometryMeasure>& capacity,
-    const std::vector<Meshes::ExactGeometryMeasure>& outgoing, const std::vector<ExactTransfer>& incoming,
-    const std::vector<ExactFaceContribution>& contributions, bool nonnegative, int maximum_iterations, double tolerance,
-    std::size_t byte_budget)
+ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vector<long double>& old,
+    const std::vector<long double>& source, const std::vector<long double>& capacity,
+    const std::vector<long double>& outgoing, const std::vector<FiniteTransfer>& incoming,
+    const std::vector<FiniteFaceContribution>& contributions, bool nonnegative,
+    int maximum_iterations, double tolerance, std::size_t byte_budget,
+    std::span<const long double> old_error, std::span<const long double> source_error,
+    std::span<const long double> capacity_error, std::span<const long double> outgoing_error)
 {
-    using M = Meshes::ExactGeometryMeasure;
-    namespace E = vof_exact;
+    namespace fp = VoF::finite_detail;
+    using Value = Meshes::BoundedGeometryValue;
     const auto map = mesh_->owned_cell_map();
+    const auto comm = map->getComm();
     const auto n = mesh_->num_owned_cells();
-    require(*map,
-        old.size() == n && source.size() == n && capacity.size() == n && outgoing.size() == n &&
-            maximum_iterations > 0 && std::isfinite(tolerance) && tolerance > 0 && byte_budget > 0,
-        "Exact VoF input dimensions or controls are invalid.");
-    // Semantic controls must agree even on empty owners. Resource budgets may
-    // remain rank-local; their failures are synchronized before communication.
-    int controls[2] = {maximum_iterations, int(nonnegative)}, minimum[2]{}, maximum[2]{};
-    Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MIN, 2, controls, minimum);
-    Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 2, controls, maximum);
-    double minimum_tolerance = 0, maximum_tolerance = 0;
-    Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MIN, 1, &tolerance, &minimum_tolerance);
-    Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 1, &tolerance, &maximum_tolerance);
-    require(*map, minimum[0] == maximum[0] && minimum[1] == maximum[1] && minimum_tolerance == maximum_tolerance,
-        "Exact VoF semantic controls differ across ranks.");
+    const auto safe = [&](auto&& action)
+    {
+        bool ok = true;
+        try { action(); } catch (...) { ok = false; }
+        require(*map, ok, "Finite VoF transport rejected its bounded local arithmetic or metadata.");
+    };
+    require(*map, old.size() == n && source.size() == n && capacity.size() == n && outgoing.size() == n &&
+        maximum_iterations > 0 && std::isfinite(tolerance) && tolerance > 0 && byte_budget > 0,
+        "Finite VoF transport has invalid dimensions or controls.");
+    const auto error_at = [](std::span<const long double> values, std::size_t i)
+    { return values.empty() ? 0.L : values[i]; };
+    require(*map, (old_error.empty() || old_error.size() == n) &&
+        (source_error.empty() || source_error.size() == n) &&
+        (capacity_error.empty() || capacity_error.size() == n) &&
+        (outgoing_error.empty() || outgoing_error.size() == n), "Finite momentum input error shape mismatch.");
+    std::vector<std::map<GO, Value>> routes(n);
+    std::set<GO> donor_ids;
     bool valid = true;
-    const auto guard = [&](auto work)
+    std::size_t bytes = n * (sizeof(long double) * 12 + sizeof(std::map<GO, Value>));
+    safe([&]
     {
-        bool accepted = true;
-        try
+        for (const auto& errors : {old_error, source_error, capacity_error, outgoing_error})
+            for (auto error : errors)
+                valid = valid && std::isfinite(error) && error >= 0;
+        for (std::size_t c = 0; c < n; ++c)
+            valid = valid && std::isfinite(old[c]) && std::isfinite(source[c]) &&
+                std::isfinite(capacity[c]) && capacity[c] > 0 && std::isfinite(outgoing[c]) && outgoing[c] >= 0;
+        for (const auto& route : incoming)
         {
-            work();
+            const auto row = map->getLocalElement(route.recipient);
+            valid = valid && row >= 0 && route.donor != route.recipient && std::isfinite(route.amount) &&
+                route.amount >= 0 && std::isfinite(route.absolute_error) && route.absolute_error >= 0;
+            if (row >= 0)
+                valid = routes[row].emplace(route.donor, Value{route.amount, route.absolute_error}).second && valid;
+            donor_ids.insert(route.donor);
+            bytes += sizeof(route) + sizeof(std::pair<const GO, Value>) + 8 * sizeof(void*);
         }
-        catch (...)
+        for (const auto& face : contributions)
         {
-            accepted = false;
+            valid = valid && face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces() &&
+                std::isfinite(face.amount) && std::isfinite(face.absolute_error) && face.absolute_error >= 0;
+            if (face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces())
+                valid = valid && !mesh_->is_geometry_exterior_face(face.face);
+            donor_ids.insert(face.donor);
+            bytes += sizeof(face) + 128;
         }
-        require(*map, accepted, "Exact VoF collective storage allocation or arithmetic admission failed.");
-    };
-    using Domain = GeneralVoFStorageDomain;
-    GeneralVoFExactStorage storage(byte_budget);
-    std::size_t input_capacity = 0;
-    const auto admit_input_capacity = [&](std::size_t count, std::size_t width)
+        if (bytes > byte_budget)
+            throw std::invalid_argument("Finite VoF momentum input capacity exceeds its unchanged byte budget.");
+    });
+    require(*map, valid, "Finite VoF momentum requires positive routes and canonical internal face streams.");
+    // Route raw signed face coefficients once to their incident owned rows.
+    // The wire is hi/lo significand plus exponent, independent of ABI padding.
+    const auto word = [](std::vector<char>& b, std::uint64_t v)
     {
-        if (width && count > (byte_budget - input_capacity) / width)
-            return false;
-        input_capacity += count * width;
-        return true;
+        for (unsigned a = 0; a < 8; ++a) b.push_back(char(v >> (8 * a)));
     };
-    bool input_fits = true;
-    for (const auto* array : {&old, &source, &capacity, &outgoing})
-        input_fits = input_fits && admit_input_capacity(array->capacity(), sizeof(M));
-    input_fits = input_fits && admit_input_capacity(incoming.capacity(), sizeof(ExactTransfer)) &&
-                 admit_input_capacity(contributions.capacity(), sizeof(ExactFaceContribution));
-    require(*map, input_fits, "Exact VoF input container capacities exceed their byte budget.");
-    // Immutable exact payload identity is a conservative provenance key: equal
-    // freshly recomputed values may miss, but rounded coefficient views never
-    // authenticate a different physical ledger. Compare only after cheap input
-    // container/control admission, then drop misses before auditing new inputs.
-    bool current = false;
-    const void* native_identity = nullptr;
-    std::uint64_t epoch = 0;
-    guard(
-        [&]
+    const auto scalar = [&](std::vector<char>& b, long double v)
+    {
+        int exponent = 0;
+        const auto m = std::frexp(v, &exponent);
+        const auto hi = static_cast<double>(m), lo = static_cast<double>(m - hi);
+        if (!std::isfinite(v) || static_cast<long double>(hi) + lo != m)
+            throw std::invalid_argument("Finite momentum scalar exceeds its fixed wire representation.");
+        word(b, std::bit_cast<std::uint64_t>(hi));
+        word(b, std::bit_cast<std::uint64_t>(lo));
+        word(b, std::bit_cast<std::uint64_t>(static_cast<std::int64_t>(exponent)));
+    };
+    const auto read = [](const std::vector<char>& b, std::size_t& offset)
+    {
+        std::uint64_t v = 0;
+        for (unsigned a = 0; a < 8; ++a) v |= std::uint64_t(static_cast<unsigned char>(b.at(offset++))) << (8 * a);
+        return v;
+    };
+    const auto read_scalar = [&](const std::vector<char>& b, std::size_t& offset)
+    {
+        const auto hi = std::bit_cast<double>(read(b, offset)), lo = std::bit_cast<double>(read(b, offset));
+        const auto exponent = std::bit_cast<std::int64_t>(read(b, offset));
+        if (exponent < std::numeric_limits<int>::min() || exponent > std::numeric_limits<int>::max())
+            throw std::invalid_argument("Finite momentum exponent is malformed.");
+        const auto value = std::scalbn(static_cast<long double>(hi) + lo, int(exponent));
+        if (!std::isfinite(value))
+            throw std::invalid_argument("Finite momentum wire value is nonfinite.");
+        return value;
+    };
+    std::set<GO> endpoints;
+    safe([&]
+    {
+        const auto lease = mesh_->acquire_execution_view();
+        for (const auto& face : contributions)
         {
-            const auto lease = mesh_->acquire_execution_view();
-            const auto* native = std::get_if<MeshHandle<>::MultiRegionPtr>(&mesh_->variant());
-            native_identity = native ? native->get() : nullptr;
-            epoch = mesh_->geometry_epoch();
-            current = mesh_->owned_cell_map().getRawPtr() == cell_owned_.getMap().getRawPtr() &&
-                      mesh_->overlap_cell_map().getRawPtr() == cell_overlap_.getMap().getRawPtr() &&
-                      mesh_->owned_face_map().getRawPtr() == face_owned_.getMap().getRawPtr() &&
-                      mesh_->overlap_face_map().getRawPtr() == face_overlap_.getMap().getRawPtr();
-            for (std::size_t c = 0; c < n; ++c)
-                valid = valid && capacity[c].sign() >= 0 && outgoing[c].sign() >= 0;
-            for (const auto& route : incoming)
-                valid = valid && map->getLocalElement(route.recipient) >= 0 && route.donor != route.recipient &&
-                        route.amount.sign() > 0;
-            for (const auto& face : contributions)
-            {
-                const bool owned = face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces();
-                valid = valid && owned;
-                if (owned)
-                    valid = valid && !mesh_->is_geometry_exterior_face(face.face);
-            }
-        });
-    require(
-        *map, current && valid, "Exact VoF requires current partition, positive routes and owned internal streams.");
-    const auto same_measure = [](const M& a, const M& b) { return a.storage_identity() == b.storage_identity(); };
-    bool same = exact_preparation_ && exact_preparation_->byte_budget == byte_budget &&
-                exact_preparation_->geometry_epoch == epoch &&
-                exact_preparation_->native_owner.get() == native_identity &&
-                exact_preparation_->owned_map.getRawPtr() == map.getRawPtr() &&
-                exact_preparation_->overlap_map.getRawPtr() == mesh_->overlap_cell_map().getRawPtr() &&
-                exact_preparation_->owned_face_map.getRawPtr() == mesh_->owned_face_map().getRawPtr() &&
-                exact_preparation_->overlap_face_map.getRawPtr() == mesh_->overlap_face_map().getRawPtr();
-    if (same)
+            endpoints.insert(mesh_->cell_global_id(mesh_->owner_cell(face.face)));
+            endpoints.insert(mesh_->cell_global_id(mesh_->neighbor_cell(face.face)));
+        }
+    });
+    Teuchos::Array<GO> endpoint_ids(endpoints.begin(), endpoints.end());
+    Teuchos::Array<int> endpoint_owners(endpoint_ids.size(), -1);
+    (void) map->getRemoteIndexList(endpoint_ids(), endpoint_owners());
+    std::map<GO, int> owner;
+    for (std::size_t i = 0; i < std::size_t(endpoint_ids.size()); ++i)
     {
-        const auto& key = *exact_preparation_;
-        same = key.capacity.size() == capacity.size() && key.outgoing.size() == outgoing.size() &&
-               key.incoming.size() == incoming.size() && key.contributions.size() == contributions.size();
-        for (std::size_t c = 0; same && c < n; ++c)
-            same = same_measure(key.capacity[c], capacity[c]) && same_measure(key.outgoing[c], outgoing[c]);
-        for (std::size_t i = 0; same && i < incoming.size(); ++i)
-            same = key.incoming[i].donor == incoming[i].donor && key.incoming[i].recipient == incoming[i].recipient &&
-                   same_measure(key.incoming[i].amount, incoming[i].amount);
-        for (std::size_t i = 0; same && i < contributions.size(); ++i)
-            same = key.contributions[i].face == contributions[i].face &&
-                   key.contributions[i].donor == contributions[i].donor &&
-                   same_measure(key.contributions[i].amount, contributions[i].amount);
+        valid = valid && endpoint_owners[i] >= 0;
+        owner.emplace(endpoint_ids[i], endpoint_owners[i]);
     }
-    int local_same = same, global_same = 0;
-    Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MIN, 1, &local_same, &global_same);
-    const bool cache_hit = global_same;
-    if (!cache_hit)
-        exact_preparation_.reset();
-    guard(
-        [&]
-        {
-            for (const auto* array : {&old, &source, &capacity, &outgoing})
+    require(*map, valid, "Finite momentum face references a foreign endpoint.");
+    std::vector<OwnerPacket> packets;
+    safe([&]
+    {
+        const auto lease = mesh_->acquire_execution_view();
+        for (const auto& face : contributions)
+            for (int sign : {1, -1})
             {
-                storage.capacity(Domain::Input, array->capacity(), sizeof(M));
-                for (const auto& value : *array)
-                    storage.measure(Domain::Input, value);
+                const auto row = mesh_->cell_global_id(sign > 0 ? mesh_->owner_cell(face.face) : mesh_->neighbor_cell(face.face));
+                OwnerPacket packet;
+                packet.peer = owner.at(row);
+                word(packet.bytes, std::uint64_t(row));
+                word(packet.bytes, std::uint64_t(face.donor));
+                word(packet.bytes, std::uint64_t(mesh_->face_global_id(face.face)));
+                scalar(packet.bytes, sign * face.amount);
+                scalar(packet.bytes, face.absolute_error);
+                packets.push_back(std::move(packet));
             }
-            storage.capacity(Domain::Input, incoming.capacity(), sizeof(ExactTransfer));
-            storage.capacity(Domain::Input, contributions.capacity(), sizeof(ExactFaceContribution));
-            for (const auto& route : incoming)
-                storage.measure(Domain::Input, route.amount);
-            for (const auto& face : contributions)
-                storage.measure(Domain::Input, face.amount);
-            storage.capacity(Domain::Scratch, n, sizeof(std::map<GO, M>));
-            storage.capacity(Domain::Scratch, incoming.size(), sizeof(std::pair<const GO, M>) + 4 * sizeof(void*));
-            storage.capacity(Domain::Scratch, incoming.size() + contributions.size(), sizeof(GO) + 4 * sizeof(void*));
-        });
-    const auto arithmetic_budget = [&]
+        if (packets.size() > (byte_budget - std::min(bytes, byte_budget)) / 128)
+            throw std::invalid_argument("Finite momentum packet capacity exceeds its unchanged budget.");
+    });
+    const auto received = exchange_owner_packets(packets, comm, byte_budget - bytes);
+    std::vector<std::map<GO, fp::Sum>> raw_sums(n);
+    safe([&]
     {
-        // Reserve eight simultaneous bounded scalar/codec temporaries, in
-        // addition to all currently retained explicit inputs/work/results.
-        const auto available = storage.remaining() / 8;
-        if (available < 1024)
-            throw std::runtime_error("Exact VoF has no bounded scalar arithmetic reserve.");
-        return available;
-    };
-    std::shared_ptr<ExactPreparation> prepared = exact_preparation_;
-    guard(
-        [&]
+        std::set<std::tuple<int, GO, GO, GO, long double>> seen;
+        for (const auto& packet : received.packets)
         {
-            // Keys retain shared exact payloads; count their real container capacity
-            // and let the storage ledger deduplicate payloads against current inputs.
-            storage.capacity(Domain::Scratch, 1, sizeof(ExactPreparation));
-            storage.capacity(Domain::Scratch, n, 3 * sizeof(M));
-            storage.capacity(Domain::Scratch, incoming.size(), sizeof(ExactTransfer));
-            storage.capacity(Domain::Scratch, contributions.size(), sizeof(ExactFaceContribution));
-            storage.capacity(Domain::Scratch, incoming.size(), sizeof(Meshes::CertifiedGeometryValue));
-            if (!prepared)
-            {
-                prepared = std::make_shared<ExactPreparation>();
-                prepared->capacity = capacity;
-                prepared->outgoing = outgoing;
-                prepared->incoming = incoming;
-                prepared->contributions = contributions;
-                prepared->byte_budget = byte_budget;
-                prepared->geometry_epoch = epoch;
-                if (const auto* native = std::get_if<MeshHandle<>::MultiRegionPtr>(&mesh_->variant()))
-                    prepared->native_owner = *native;
-                prepared->owned_map = map;
-                prepared->overlap_map = mesh_->overlap_cell_map();
-                prepared->owned_face_map = mesh_->owned_face_map();
-                prepared->overlap_face_map = mesh_->overlap_face_map();
-                prepared->routes.resize(n);
-                prepared->diagonal.resize(n);
-                prepared->coefficient_conversion.reserve(incoming.size());
-            }
-            const auto extra_capacity = [&](std::size_t actual, std::size_t reserved, std::size_t width)
-            {
-                if (actual < reserved)
-                    throw std::runtime_error("Exact VoF preparation capacity audit failed.");
-                storage.capacity(Domain::Scratch, actual - reserved, width);
-            };
-            // The size bounds above admit allocations before they occur. Audit
-            // actual retained capacities too, including over-allocation by vectors.
-            for (const auto* array : {&prepared->capacity, &prepared->outgoing, &prepared->diagonal})
-                extra_capacity(array->capacity(), n, sizeof(M));
-            extra_capacity(prepared->incoming.capacity(), incoming.size(), sizeof(ExactTransfer));
-            extra_capacity(prepared->contributions.capacity(), contributions.size(), sizeof(ExactFaceContribution));
-            extra_capacity(prepared->routes.capacity(), n, sizeof(std::map<GO, M>));
-            extra_capacity(
-                prepared->coefficient_conversion.capacity(), incoming.size(), sizeof(Meshes::CertifiedGeometryValue));
-            for (const auto* array : {&prepared->capacity, &prepared->outgoing})
-                for (const auto& value : *array)
-                    storage.measure(Domain::Scratch, value);
-            for (const auto& route : prepared->incoming)
-                storage.measure(Domain::Scratch, route.amount);
-            for (const auto& face : prepared->contributions)
-                storage.measure(Domain::Scratch, face.amount);
-        });
-    const auto account_original = [&]
-    {
-        const auto& original = prepared->original;
-        guard(
-            [&]
-            {
-                storage.capacity(Domain::Scratch, original.capacity(), sizeof(GeneralVoFOriginalRow));
-                for (const auto& row : original)
-                {
-                    storage.capacity(Domain::Scratch, row.faces.capacity(), sizeof(GeneralVoFOriginalFaceTerm));
-                    storage.capacity(
-                        Domain::Scratch, row.coefficients.size(), sizeof(std::pair<const GO, M>) + 4 * sizeof(void*));
-                    storage.capacity(Domain::Scratch, row.faces.size(), sizeof(GO) + 4 * sizeof(void*));
-                    for (const auto& term : row.faces)
-                        storage.measure(Domain::Scratch, term.amount);
-                    for (const auto& [gid, value] : row.coefficients)
-                        storage.measure(Domain::Scratch, value);
-                }
-                for (const auto& value : prepared->diagonal)
-                    storage.measure(Domain::Scratch, value);
-            });
-    };
-    auto& routes = prepared->routes;
-    if (!cache_hit)
-    {
-        std::set<GO> donors;
-        guard(
-            [&]
-            {
-                for (const auto& route : incoming)
-                {
-                    const auto row = map->getLocalElement(route.recipient);
-                    valid = routes[row].emplace(route.donor, route.amount).second && valid;
-                    donors.insert(route.donor);
-                }
-                for (const auto& face : contributions)
-                    donors.insert(face.donor);
-            });
-        require(*map, valid, "Exact VoF requires unique positive routes and owned internal face streams.");
-        std::size_t binding_budget = 0;
-        guard([&] { binding_budget = arithmetic_budget(); });
-        prepared->original =
-            verify_general_vof_exact_transfer_binding(mesh_, outgoing, routes, contributions, binding_budget);
-        account_original();
-        Teuchos::Array<GO> ids;
-        guard(
-            [&]
-            {
-                for (const auto& row : prepared->original)
-                    for (const auto& term : row.faces)
-                        donors.insert(term.donor);
-                storage.capacity(Domain::Scratch, donors.size(), sizeof(GO));
-                ids.assign(donors.begin(), donors.end());
-            });
-        prepared->donor_map = Teuchos::rcp(new Pack::map_type(
-            Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), ids(), map->getIndexBase(), map->getComm()));
-        prepared->donor_import = std::make_unique<Pack::import_type>(map, prepared->donor_map);
-        Pack::vector_type marker(map), donor(prepared->donor_map);
-        marker.putScalar(1);
-        donor.putScalar(0);
-        donor.doImport(marker, *prepared->donor_import, Tpetra::INSERT);
-        for (double value : donor.getData())
-            valid = valid && value == 1;
-        require(*map, valid, "Exact VoF references an absent donor.");
-        for (const auto& row : routes)
-            prepared->width = std::max(prepared->width, row.size() + 1);
-    }
-    else
-    {
-        account_original();
-        guard([&] { storage.capacity(Domain::Scratch, prepared->donor_map->getLocalNumElements(), sizeof(GO)); });
-    }
-    const auto& original = prepared->original;
-    const auto donor_map = prepared->donor_map;
-    const auto& donor_import = *prepared->donor_import;
-    Pack::vector_type donor(donor_map);
-    // Legacy floating/scalar preparation never authenticates an exact operator.
-    numeric_valid_ = false;
-    matrix_ = Teuchos::null;
-    const auto width = prepared->width;
-    std::vector<M> diagonal, right, accumulated, amount, residual, defect;
-    std::vector<double> concentration;
-    std::vector<Meshes::CertifiedGeometryValue> conversion;
-    std::size_t conversion_capacity = 0;
-    guard(
-        [&]
-        {
-            if (n > (std::numeric_limits<std::size_t>::max() - incoming.size()) / 9)
-                throw std::runtime_error("Exact conversion capacity overflow.");
-            conversion_capacity = 9 * n + incoming.size();
-            storage.capacity(Domain::Scratch, n, 6 * sizeof(M) + sizeof(double));
-            storage.capacity(Domain::Result, n, 2 * sizeof(double));
-            storage.capacity(
-                Domain::Result, mesh_->num_owned_faces(), sizeof(M) + sizeof(Meshes::CertifiedGeometryValue));
-            storage.capacity(Domain::Result, conversion_capacity, sizeof(Meshes::CertifiedGeometryValue));
-            if (width && n > std::numeric_limits<std::size_t>::max() / width)
-                throw std::runtime_error("Exact matrix graph capacity overflow.");
-            storage.capacity(Domain::Scratch, n * width, sizeof(double) + sizeof(GO) + sizeof(LO));
-            storage.capacity(Domain::Scratch, n + 1, sizeof(std::size_t));
-            storage.capacity(Domain::Scratch, width, 2 * (sizeof(GO) + sizeof(double)));
-            diagonal.resize(n);
-            right.resize(n);
-            accumulated.resize(n);
-            amount.resize(n);
-            residual.resize(n);
-            defect.resize(n);
-            concentration.resize(n);
-            conversion.reserve(conversion_capacity);
-            for (const auto* array : {&diagonal, &right, &accumulated, &amount, &residual, &defect})
-                for (const auto& value : *array)
-                    storage.measure(Domain::Scratch, value);
-        });
-    if (!cache_hit)
-        prepared->matrix = Teuchos::rcp(new Pack::matrix_type(map, width));
-    auto matrix = prepared->matrix;
-    const auto store = [&](M& target, M value, Domain domain = Domain::Scratch)
-    {
-        storage.measure(domain, value);
-        storage.release(domain, target);
-        target = std::move(value);
-    };
-    try
-    {
-        std::size_t coefficient = 0;
+            std::size_t offset = 0;
+            const auto row_gid = GO(read(packet.bytes, offset)), donor = GO(read(packet.bytes, offset));
+            const auto face = GO(read(packet.bytes, offset));
+            const auto amount = read_scalar(packet.bytes, offset), error = read_scalar(packet.bytes, offset);
+            const auto row = map->getLocalElement(row_gid);
+            if (row < 0 || offset != packet.bytes.size() || error < 0 || !std::isfinite(amount) ||
+                !seen.emplace(packet.peer, row_gid, donor, face, amount).second)
+                throw std::invalid_argument("Finite momentum raw coefficient is duplicate or malformed.");
+            raw_sums[row][donor].add({amount, error});
+            donor_ids.insert(donor);
+        }
         for (std::size_t c = 0; c < n; ++c)
         {
-            store(
-                diagonal[c], cache_hit ? prepared->diagonal[c] : E::add(capacity[c], outgoing[c], arithmetic_budget()));
-            store(right[c], E::add(old[c], source[c], arithmetic_budget()));
-            if (!capacity[c].sign() && !outgoing[c].sign())
+            const auto self = map->getGlobalElement(LO(c));
+            std::set<GO> columns{self};
+            for (const auto& [donor, value] : raw_sums[c]) columns.insert(donor);
+            for (const auto& [donor, value] : routes[c]) columns.insert(donor);
+            for (auto donor : columns)
             {
-                if (!routes[c].empty() || right[c].sign())
-                    throw std::runtime_error("Zero carrier exact row.");
-                if (!cache_hit)
-                    store(diagonal[c], M::from_value(1));
+                const auto observed = raw_sums[c][donor].value();
+                const auto expected = donor == self ? Value{outgoing[c], error_at(outgoing_error, c)} :
+                    routes[c].contains(donor) ? fp::negate(routes[c].at(donor)) : Value{};
+                const auto defect = fp::subtract(observed, expected);
+                if (std::abs(defect.value) > defect.absolute_error)
+                    throw std::invalid_argument("Finite momentum positive routes differ from original raw face coefficients.");
             }
-            if (!cache_hit)
-            {
-                Teuchos::Array<GO> columns;
-                Teuchos::Array<double> coefficients;
-                columns.push_back(map->getGlobalElement(LO(c)));
-                coefficients.push_back(1);
-                for (const auto& [gid, value] : routes[c])
-                {
-                    Meshes::CertifiedGeometryValue enclosure;
-                    coefficients.push_back(
-                        E::view(E::divide(E::scale(value, -1, arithmetic_budget()), diagonal[c], arithmetic_budget()),
-                            enclosure));
-                    columns.push_back(gid);
-                    conversion.push_back(enclosure);
-                    prepared->coefficient_conversion.push_back(enclosure);
-                }
-                matrix->insertGlobalValues(map->getGlobalElement(LO(c)), columns(), coefficients());
-                store(prepared->diagonal[c], diagonal[c]);
-            }
-            else
-                for (std::size_t i = 0; i < routes[c].size(); ++i)
-                    conversion.push_back(prepared->coefficient_conversion[coefficient++]);
-            Meshes::CertifiedGeometryValue enclosure;
-            rhs_.replaceLocalValue(LO(c), E::view(E::divide(right[c], diagonal[c], arithmetic_budget()), enclosure));
-            conversion.push_back(enclosure);
         }
-    }
-    catch (...)
+    });
+    Teuchos::Array<GO> ids(donor_ids.begin(), donor_ids.end());
+    const auto donor_map = Teuchos::rcp(new Pack::map_type(
+        Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), ids(), map->getIndexBase(), comm));
+    Pack::import_type donor_import(map, donor_map);
+    Pack::vector_type marker(map), donor_trace(donor_map);
+    marker.putScalar(1);
+    donor_trace.putScalar(0);
+    donor_trace.doImport(marker, donor_import, Tpetra::INSERT);
+    for (auto value : donor_trace.getData()) valid = valid && value == 1;
+    require(*map, valid, "Finite VoF momentum references an absent geometric donor.");
+    std::vector<std::map<GO, Value>> raw(n);
+    for (std::size_t c = 0; c < n; ++c)
+        for (const auto& [donor, sum] : raw_sums[c]) raw[c].emplace(donor, sum.value());
+    std::size_t width = 1;
+    for (const auto& row : routes) width = std::max(width, row.size() + 1);
+    auto matrix = Teuchos::rcp(new Pack::matrix_type(map, width));
+    std::vector<long double> diagonal(n);
+    safe([&]
     {
-        valid = false;
-    }
-    require(*map, valid, "Exact VoF normalization exceeds its arithmetic or representable inner range.");
-    if (!cache_hit)
-    {
-        matrix->fillComplete();
-        solver_.notify_operator_values_changed();
-    }
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            diagonal[c] = capacity[c] + outgoing[c];
+            if (!(diagonal[c] > 0) || !std::isfinite(diagonal[c]))
+                throw std::invalid_argument("Finite momentum has a nonpositive row diagonal.");
+            Teuchos::Array<GO> columns;
+            Teuchos::Array<double> values;
+            columns.push_back(map->getGlobalElement(LO(c)));
+            values.push_back(1);
+            for (const auto& [donor, amount] : routes[c])
+            {
+                const auto value = static_cast<double>(-amount.value / diagonal[c]);
+                if (!std::isfinite(value) || (amount.value != 0 && value == 0))
+                    throw std::invalid_argument("Finite momentum row coefficient is outside representable range.");
+                columns.push_back(donor);
+                values.push_back(value);
+            }
+            matrix->insertGlobalValues(map->getGlobalElement(LO(c)), columns(), values());
+            const auto value = static_cast<double>((old[c] + source[c]) / diagonal[c]);
+            if (!std::isfinite(value))
+                throw std::invalid_argument("Finite momentum normalized RHS overflows.");
+            rhs_.replaceLocalValue(LO(c), value);
+        }
+    });
+    matrix->fillComplete();
+    solver_.notify_operator_values_changed();
     LinearSolverOptions linear;
     linear.backend = LinearSolverBackend::Gmres;
     linear.preconditioner = LinearPreconditioner::Jacobi;
@@ -979,153 +810,129 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_exact(
     linear.max_iterations = maximum_iterations;
     linear.verbosity = 0;
     Result result;
-    result.exact_input = true;
+    std::vector<double> trace(n);
     const auto solve = [&]
     {
+        linear.max_iterations = maximum_iterations - result.iterations;
         const auto stats = solver_.solve_from_zero_with_statistics(
             Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix), rhs_, solution_, linear);
-        require(*map, stats.converged, "Exact VoF inner solve failed its true residual.");
+        require(*map, stats.converged, "Finite momentum inner solve failed its true residual.");
         result.iterations += stats.iterations;
     };
     solve();
-    guard(
-        [&]
+    std::copy(solution_.getData().begin(), solution_.getData().end(), trace.begin());
+    int local_exponent = std::numeric_limits<int>::min(), exponent = 0;
+    for (std::size_t c = 0; c < n; ++c)
+        if (old[c] + source[c] != 0)
         {
-            const auto values = solution_.getData();
-            for (std::size_t c = 0; c < n; ++c)
-            {
-                concentration[c] = values[c];
-                store(accumulated[c], M::from_value(values[c]));
-            }
-        });
-    guard(
-        [&]
-        {
-            result.exact_flux.resize(mesh_->num_owned_faces());
-            result.flux_enclosure.resize(mesh_->num_owned_faces());
-            result.amount.resize(n);
-            result.cell_trace.resize(n);
-            for (const auto& value : result.exact_flux)
-                storage.measure(Domain::Result, value);
-        });
+            int e = 0;
+            (void) std::frexp(std::abs(old[c] + source[c]), &e);
+            local_exponent = std::max(local_exponent, e);
+        }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_exponent, &exponent);
+    const auto reference_scale = exponent == std::numeric_limits<int>::min() ? 1.L : std::scalbn(1.L, exponent - 1);
+    std::vector<long double> defect(n);
+    std::vector<CompensatedSum<>> accumulated(n);
+    for (std::size_t c = 0; c < n; ++c) accumulated[c] += trace[c];
     for (;;)
     {
         {
-            auto data = cell_owned_.getDataNonConst();
-            std::copy(concentration.begin(), concentration.end(), data.begin());
+            auto values = cell_owned_.getDataNonConst();
+            std::copy(trace.begin(), trace.end(), values.begin());
         }
-        donor.doImport(cell_owned_, donor_import, Tpetra::INSERT);
-        const auto traces = donor.getData();
-
-        try
+        donor_trace.doImport(cell_owned_, donor_import, Tpetra::INSERT);
+        const auto donor_values = donor_trace.getData();
+        double local_norm[2]{}, global_norm[2]{};
+        safe([&]
         {
-            for (auto& value : result.exact_flux)
-                store(value, M{}, Domain::Result);
-            for (const auto& face : contributions)
-                store(result.exact_flux[face.face],
-                    E::add(result.exact_flux[face.face],
-                        E::scale(face.amount, traces[donor_map->getLocalElement(face.donor)], arithmetic_budget()),
-                        arithmetic_budget()),
-                    Domain::Result);
-            for (std::size_t f = 0; f < result.exact_flux.size(); ++f)
-                result.flux_enclosure[f] = result.exact_flux[f].enclosure();
+            fp::Sum residual_squared, reference_squared;
             for (std::size_t c = 0; c < n; ++c)
             {
-                store(amount[c], E::scale(capacity[c], concentration[c], arithmetic_budget()));
-                store(residual[c], E::add(amount[c], E::scale(right[c], -1, arithmetic_budget()), arithmetic_budget()));
-                for (const auto& term : original[c].faces)
-                    store(residual[c],
-                        E::add(residual[c],
-                            E::scale(term.amount, traces[donor_map->getLocalElement(term.donor)], arithmetic_budget()),
-                            arithmetic_budget()));
+                fp::Sum equation;
+                equation.add(fp::multiply({capacity[c], error_at(capacity_error, c)}, {trace[c], 0}));
+                equation.add({-old[c], error_at(old_error, c)});
+                equation.add({-source[c], error_at(source_error, c)});
+                for (const auto& [donor, amount] : raw[c])
+                {
+                    const auto donor_lid = donor_map->getLocalElement(donor);
+                    if (donor_lid < 0)
+                        throw std::invalid_argument("Finite momentum raw row references absent trace.");
+                    equation.add(fp::multiply(amount, {donor_values[donor_lid], 0}));
+                }
+                const auto residual = equation.value();
+                defect[c] = -residual.value;
+                const auto upper = (std::abs(residual.value) + residual.absolute_error) / reference_scale;
+                const auto rhs = (old[c] + source[c]) / reference_scale;
+                residual_squared.add(fp::multiply({upper, 0}, {upper, 0}));
+                reference_squared.add(fp::multiply({rhs, 0}, {rhs, 0}));
             }
-        }
-        catch (...)
-        {
-            valid = false;
-        }
-        require(*map, valid, "Exact VoF original physical ledger exceeds its arithmetic budget.");
-        std::size_t norm_budget = 0;
-        guard([&] { norm_budget = storage.remaining(); });
-        const auto norm = E::leased_physical_norm(residual, right, tolerance, *map, norm_budget);
-        result.physical_relative_residual = norm.relative_residual;
-        if (norm.accepted)
+            local_norm[0] = fp::upper_double(fp::upward(residual_squared.value().value + residual_squared.value().absolute_error));
+            const auto lower = std::max(0.L,
+                reference_squared.value().value - reference_squared.value().absolute_error);
+            local_norm[1] = static_cast<double>(lower);
+            if (static_cast<long double>(local_norm[1]) > lower)
+                local_norm[1] = std::nextafter(local_norm[1], 0.);
+            if (!std::isfinite(local_norm[0]) || !std::isfinite(local_norm[1]))
+                throw std::invalid_argument("Finite momentum physical residual reduction overflows.");
+        });
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_norm, global_norm);
+        const auto reduction_u = (8.L * comm->getSize() + 16) * std::numeric_limits<double>::epsilon();
+        const auto residual_upper = global_norm[0] * (1 + reduction_u);
+        const auto reference_lower = global_norm[1] * (1 - reduction_u);
+        result.physical_relative_residual = std::sqrt(residual_upper / (reference_lower > 0 ? reference_lower : 1));
+        if (std::isfinite(residual_upper) && ((reference_lower > 0 &&
+                residual_upper <= static_cast<long double>(tolerance) * tolerance * reference_lower) ||
+                (reference_lower == 0 && residual_upper == 0)))
             break;
         require(*map, result.physical_refinements < 4 && result.iterations < maximum_iterations,
-            "Exact VoF failed its original physical residual.");
-        try
-        {
-            for (std::size_t c = 0; c < n; ++c)
-                store(defect[c],
-                    E::divide(E::scale(residual[c], -1, arithmetic_budget()), diagonal[c], arithmetic_budget()));
-        }
-        catch (...)
-        {
-            valid = false;
-        }
-        require(*map, valid, "Exact VoF physical defect exceeds its arithmetic budget.");
-        std::size_t maximum_budget = 0;
-        guard([&] { maximum_budget = arithmetic_budget(); });
-        const auto scale = E::maximum_absolute(defect, *map, maximum_budget);
-        require(*map, scale.sign() > 0, "Exact VoF physical defect has no correction.");
-        try
+            "Finite momentum failed its unchanged original physical residual.");
+        int local_defect_exponent = std::numeric_limits<int>::min(), defect_exponent = 0;
+        safe([&]
         {
             for (std::size_t c = 0; c < n; ++c)
             {
-                Meshes::CertifiedGeometryValue enclosure;
-                rhs_.replaceLocalValue(LO(c), E::view(E::divide(defect[c], scale, arithmetic_budget()), enclosure));
-                conversion.push_back(enclosure);
+                defect[c] /= diagonal[c];
+                if (!std::isfinite(defect[c]))
+                    throw std::invalid_argument("Finite momentum defect is outside qualified range.");
+                if (defect[c] != 0)
+                {
+                    int e = 0;
+                    (void) std::frexp(std::abs(defect[c]), &e);
+                    local_defect_exponent = std::max(local_defect_exponent, e);
+                }
             }
-        }
-        catch (...)
-        {
-            valid = false;
-        }
-        require(*map, valid, "Exact VoF correction cannot be normalized.");
-        linear.max_iterations = maximum_iterations - result.iterations;
+        });
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_defect_exponent, &defect_exponent);
+        require(*map, defect_exponent != std::numeric_limits<int>::min(),
+            "Finite momentum arithmetic bound cannot establish the physical residual target.");
+        const auto defect_scale = std::scalbn(1.L, defect_exponent - 1);
+        for (std::size_t c = 0; c < n; ++c)
+            rhs_.replaceLocalValue(LO(c), static_cast<double>(defect[c] / defect_scale));
         solve();
+        const auto correction = solution_.getData();
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            accumulated[c] += correction[c] * defect_scale;
+            trace[c] = static_cast<double>(accumulated[c].value());
+        }
         ++result.physical_refinements;
-        try
-        {
-            const auto correction = solution_.getData();
-            for (std::size_t c = 0; c < n; ++c)
-            {
-                store(accumulated[c],
-                    E::add(accumulated[c], E::scale(scale, correction[c], arithmetic_budget()), arithmetic_budget()));
-                Meshes::CertifiedGeometryValue enclosure;
-                concentration[c] = E::view(accumulated[c], enclosure);
-                conversion.push_back(enclosure);
-            }
-        }
-        catch (...)
-        {
-            valid = false;
-        }
-        require(*map, valid, "Exact VoF corrected trace is unrepresentable.");
     }
-    result.cell_trace = concentration;
-    try
+    result.cell_trace = trace;
+    result.amount.resize(n);
+    safe([&]
     {
         for (std::size_t c = 0; c < n; ++c)
         {
-            if (nonnegative && amount[c].sign() < 0)
-                throw std::runtime_error("Negative exact inventory.");
-            result.amount[c] = amount[c].sign() ? amount[c].certified().as_double() : 0;
+            const auto amount = capacity[c] * trace[c];
+            result.amount[c] = static_cast<double>(amount);
+            if (!std::isfinite(trace[c]) || !std::isfinite(result.amount[c]) ||
+                (amount != 0 && result.amount[c] == 0) || (nonnegative && amount < 0))
+                throw std::invalid_argument("Finite momentum final publication is outside qualified range.");
         }
-    }
-    catch (...)
-    {
-        valid = false;
-    }
-    require(*map, valid, "Exact VoF final owned amount is unrepresentable or negative.");
-    guard([&] { (void) storage.finish(); });
-    result.inner_conversion_enclosures = std::move(conversion);
-    exact_preparation_ = std::move(prepared);
-    if (cache_hit)
-        ++preparation_statistics_.exact_hits;
-    else
-        ++preparation_statistics_.exact_builds;
+    });
+    numeric_valid_ = false;
+    exact_preparation_.reset();
     return result;
 }
-#include "solvers/details/ConservativeVoFFiniteTransport.inc"
+#include "solvers/details/ConservativeVoFExactTransport.inc"
 } // namespace SimpleFluid::detail

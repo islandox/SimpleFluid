@@ -11,6 +11,7 @@
 #include <string>
 namespace SimpleFluid::VoF
 {
+namespace Exact { struct GeneralVoF; }
 class GeneralVoF;
 enum class ExactTransferCarrier
 {
@@ -93,6 +94,7 @@ public:
 
 private:
     friend class GeneralVoF;
+    friend struct Exact::GeneralVoF;
     friend class ExactPhaseTransfer;
     ExactPhaseTransferSource(std::shared_ptr<const Hierarchy>, std::shared_ptr<const void> identity,
         std::uint64_t control, std::vector<ExactPhaseTransferCapsule>, PhaseInventoryPolicy);

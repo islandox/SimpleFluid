@@ -19,6 +19,7 @@
 #include <vector>
 namespace SimpleFluid::VoF
 {
+namespace Exact { struct GeneralVoF; }
 enum class GeneralVoFPhaseGeometry
 {
     Infer,
@@ -292,13 +293,14 @@ public:
 
     private:
         friend GeneralVoF;
+        friend struct Exact::GeneralVoF;
         std::shared_ptr<const Data> source_, candidate_;
         std::vector<GeneralVoFFiniteOwnedChannels> channels_;
         std::vector<GeneralVoFFiniteRemapRoute> routes_;
         std::vector<GeneralVoFFiniteCommonCell> common_cells_;
         bool ownership_only_ = false;
     };
-    [[nodiscard]] FiniteRemapTrial plan_remap_finite(const Hierarchy::Plan&,
+    [[nodiscard]] FiniteRemapTrial plan_remap(const Hierarchy::Plan&,
         std::shared_ptr<const Hierarchy> actual_bound_target,
         std::span<const GeneralVoFFiniteOwnedChannels> owned_channels = {}, GeneralVoFFiniteRemapOptions = {}) const;
 
@@ -321,6 +323,7 @@ public:
 
     private:
         friend GeneralVoF;
+        friend struct Exact::GeneralVoF;
         std::shared_ptr<const Data> source_, candidate_;
         std::uint64_t transaction_ = 0;
         std::vector<GeneralVoFFaceContribution> faces_;
@@ -351,11 +354,10 @@ public:
     [[nodiscard]] std::shared_ptr<const GeneralVoF> apply(const Trial&) const;
 
 private:
+    friend struct Exact::GeneralVoF;
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key>, std::vector<double>, std::vector<double>,
         GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*);
     explicit GeneralVoF(std::shared_ptr<const Data> data) : data_(std::move(data)) {}
-    [[nodiscard]] Trial plan_transport_finite(std::span<const GeneralVoFNodeVelocity>,
-        std::span<const GeneralVoFFaceVolume>, double timestep) const;
     std::shared_ptr<const Data> data_;
 };
 } // namespace SimpleFluid::VoF

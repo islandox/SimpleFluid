@@ -242,7 +242,7 @@ TEST(GeneralVoFFinite, FiniteRefineCoarsenPreservesPhasesWeightedChannelsAndSour
             marks.push_back({source->owned_order()[c], AdaptiveSplit::Isotropic});
     const auto plan = source->hierarchy()->plan_adaptation(marks);
     const auto target = bound_candidate(source->hierarchy(), plan);
-    const auto trial = source->plan_remap_finite(plan, target, initial_channels(*source), channel_options());
+    const auto trial = source->plan_remap(plan, target, initial_channels(*source), channel_options());
     EXPECT_FALSE(trial.ownership_only());
     // The Cartesian provider refines the complete native block containing
     // the mark: all eight original leaves acquire eight children.
@@ -255,7 +255,7 @@ TEST(GeneralVoFFinite, FiniteRefineCoarsenPreservesPhasesWeightedChannelsAndSour
     for (const auto& [key, family] : refined->hierarchy()->families())
         families.push_back(key);
     const auto coarsen = refined->hierarchy()->plan_adaptation({}, families);
-    const auto restored = refined->plan_remap_finite(
+    const auto restored = refined->plan_remap(
         coarsen, bound_candidate(refined->hierarchy(), coarsen), trial.owned_channels(), channel_options());
     check_remap(restored, 8);
 }
@@ -268,7 +268,7 @@ TEST(GeneralVoFFinite, FiniteMigrationCopiesInventoriesAndRejectsForeignSchemaAt
     const auto plan = source.hierarchy()->plan_migration(destinations);
     const auto target = bound_candidate(source.hierarchy(), plan);
     const auto channels = initial_channels(source);
-    const auto trial = source.plan_remap_finite(plan, target, channels, channel_options());
+    const auto trial = source.plan_remap(plan, target, channels, channel_options());
     EXPECT_TRUE(trial.ownership_only());
     check_remap(trial, 8);
     const auto migrated = trial.candidate();
@@ -282,10 +282,10 @@ TEST(GeneralVoFFinite, FiniteMigrationCopiesInventoriesAndRejectsForeignSchemaAt
     }
     auto invalid = channel_options();
     if (comm->getRank() == 0) invalid.channels[0].name.clear();
-    EXPECT_THROW(source.plan_remap_finite(plan, target, channels, invalid), std::invalid_argument);
+    EXPECT_THROW(source.plan_remap(plan, target, channels, invalid), std::invalid_argument);
     invalid = channel_options();
     invalid.byte_budget = 1;
-    EXPECT_THROW(source.plan_remap_finite(plan, target, channels, invalid), std::invalid_argument);
+    EXPECT_THROW(source.plan_remap(plan, target, channels, invalid), std::invalid_argument);
     EXPECT_EQ(source.gas_volumes(), input.gas);
     EXPECT_EQ(source.carrier_volumes(), input.carrier);
 }
