@@ -2,18 +2,65 @@
  * @brief Independent signed sweeps, actual donor partitions and exact pullbacks.
  */
 #include "geometry/ExactSweptGeometry.hh"
+#include "geometry/details/CertifiedSupportFilter.hh"
+#include "geometry/details/ExactSupportSign.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
+#include <array>
+#include <boost/multiprecision/cpp_int.hpp>
+#include <cfenv>
 #include <cmath>
+#include <cstddef>
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
+#include <optional>
+#include <random>
+#include <stdexcept>
 #include <string>
 #include <utility>
 namespace
 {
 using namespace SimpleFluid::Meshes;
+using Q = boost::multiprecision::cpp_rational;
+using QArray = std::array<Q, 3>;
+namespace support_detail = SimpleFluid::Meshes::detail;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+Q rational(boost::multiprecision::cpp_int numerator, boost::multiprecision::cpp_int denominator)
+{
+    Q result(numerator);
+    result /= Q(denominator);
+    return result;
+}
+int rational_support_sign(const QArray& normal, const QArray& anchor, const QArray& point)
+{
+    Q result = 0;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        result += normal[axis] * (point[axis] - anchor[axis]);
+    return result.sign();
+}
+void expect_integer_sign_matches_oracle(const QArray& normal, const QArray& anchor, const QArray& point, int expected)
+{
+    const QArray original_normal = normal, original_anchor = anchor, original_point = point;
+    std::size_t reserve_calls = 0, requested_bytes = 0;
+    const auto result = support_detail::try_integer_support_sign<32768>(
+        normal, anchor, point, [&](std::size_t bytes) {
+            ++reserve_calls;
+            requested_bytes = bytes;
+            return true;
+        });
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(rational_support_sign(normal, anchor, point), expected);
+    EXPECT_EQ(reserve_calls, 1u);
+    EXPECT_EQ(requested_bytes, support_detail::integer_support_workspace_bytes<32768>());
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        EXPECT_TRUE(normal[axis] == original_normal[axis]);
+        EXPECT_TRUE(anchor[axis] == original_anchor[axis]);
+        EXPECT_TRUE(point[axis] == original_point[axis]);
+    }
+}
 ExactPlanarFacePtr face_at(const ConvexGeometryPtr& cell, unsigned axis, double coordinate)
 {
     for (std::size_t f = 0; f < cell->num_faces(); ++f)
@@ -925,6 +972,568 @@ TEST(ExactSweptGeometry, SupportingSignsPreserveObliqueRationalContactsAndSubnor
                     EXPECT_NE(message.find(expected_path), std::string::npos) << message;
                 }
         }
+}
+
+TEST(ExactSweptGeometry, IntegerSupportSignMatchesIndependentRationalOracle)
+{
+    const QArray normal{rational(1, 1), rational(2, 1), rational(-3, 1)};
+    const QArray anchor{rational(1, 2), rational(-1, 3), rational(2, 5)};
+    const QArray point{rational(2, 1), rational(1, 1), rational(-1, 1)};
+    const int expected = rational_support_sign(normal, anchor, point);
+    ASSERT_GT(expected, 0);
+    expect_integer_sign_matches_oracle(normal, anchor, point, expected);
+
+    const QArray reversed{-normal[0], -normal[1], -normal[2]};
+    expect_integer_sign_matches_oracle(reversed, anchor, point, -expected);
+
+    const QArray shift{rational(7, 11), rational(-13, 17), rational(19, 23)};
+    QArray shifted_anchor = anchor, shifted_point = point;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        shifted_anchor[axis] += shift[axis];
+        shifted_point[axis] += shift[axis];
+    }
+    expect_integer_sign_matches_oracle(normal, shifted_anchor, shifted_point, expected);
+
+    const QArray cancelling_normal{rational(1, 1), rational(-1, 1), rational(0, 1)};
+    const QArray cancelling_anchor{rational(0, 1), rational(0, 1), rational(5, 7)};
+    const QArray cancelling_point{rational(5, 7), rational(5, 7), rational(-11, 13)};
+    expect_integer_sign_matches_oracle(cancelling_normal, cancelling_anchor, cancelling_point, 0);
+
+    // Three active terms exercise normal and point denominators with distinct
+    // prime factors while the middle axis remains inactive.
+    const QArray distinct_normal{rational(1, 2), rational(0, 1), rational(-1, 5)};
+    const QArray distinct_anchor{rational(1, 7), rational(2, 11), rational(1, 13)};
+    const QArray distinct_point{rational(1, 11), rational(3, 17), rational(1, 19)};
+    const int distinct_expected = rational_support_sign(distinct_normal, distinct_anchor, distinct_point);
+    ASSERT_NE(distinct_expected, 0);
+    expect_integer_sign_matches_oracle(distinct_normal, distinct_anchor, distinct_point, distinct_expected);
+}
+
+TEST(ExactSweptGeometry, IntegerSupportSignRetainsTinyValuesAndLargeAdversarialInputs)
+{
+    const Q tiny(std::numeric_limits<double>::denorm_min());
+    const QArray tiny_normal{rational(1, 1), rational(1, 1), rational(-1, 1)};
+    const QArray zero{rational(0, 1), rational(0, 1), rational(0, 1)};
+    const QArray tiny_point{tiny, tiny, tiny};
+    expect_integer_sign_matches_oracle(tiny_normal, zero, tiny_point, 1);
+
+    const QArray negative_tiny_normal{rational(-1, 1), rational(1, 1), rational(0, 1)};
+    const QArray negative_tiny_point{tiny, tiny / 2, rational(7, 11)};
+    expect_integer_sign_matches_oracle(negative_tiny_normal, zero, negative_tiny_point, -1);
+
+    using boost::multiprecision::cpp_int;
+    const cpp_int large_numerator = (cpp_int(1) << 4096) + 12345;
+    const cpp_int large_denominator = (cpp_int(1) << 4095) + 67891;
+    const cpp_int other_numerator = (cpp_int(1) << 3072) + 31415;
+    const cpp_int other_denominator = (cpp_int(1) << 3071) + 27183;
+    const Q large = rational(large_numerator, large_denominator);
+    const Q other = rational(other_numerator, other_denominator);
+    const QArray large_normal{rational(1, 3), rational(-2, 5), rational(7, 11)};
+    const QArray large_anchor{rational(1, 7), large, rational(-1, 13)};
+    const QArray large_point{other, rational(2, 17), rational(3, 19)};
+    const int large_expected = rational_support_sign(large_normal, large_anchor, large_point);
+    ASSERT_NE(large_expected, 0);
+    expect_integer_sign_matches_oracle(large_normal, large_anchor, large_point, large_expected);
+
+    std::mt19937_64 generator(0x5eed5f00dULL);
+    std::uniform_int_distribution<long long> nonzero(-((1LL << 22) - 1), (1LL << 22) - 1);
+    std::uniform_int_distribution<long long> positive(1, (1LL << 22) - 1);
+    for (std::size_t sample = 0; sample < 32; ++sample)
+    {
+        QArray random_normal, random_anchor, random_point;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            long long numerator = nonzero(generator);
+            if (axis < 2 && numerator == 0)
+                numerator = 1;
+            random_normal[axis] = rational(numerator, positive(generator));
+            random_anchor[axis] = rational(nonzero(generator), positive(generator));
+            random_point[axis] = rational(nonzero(generator), positive(generator));
+        }
+        const int expected = rational_support_sign(random_normal, random_anchor, random_point);
+        expect_integer_sign_matches_oracle(random_normal, random_anchor, random_point, expected);
+    }
+}
+
+TEST(ExactSweptGeometry, IntegerSupportSignHonorsWorkspaceAndPropagatesReserveExceptions)
+{
+    const QArray zero{rational(0, 1), rational(0, 1), rational(0, 1)};
+    const QArray values{rational(1, 2), rational(-2, 3), rational(5, 7)};
+    std::size_t reserve_calls = 0;
+    const auto trivial_zero = support_detail::try_integer_support_sign<32768>(
+        zero, values, values, [&](std::size_t) {
+            ++reserve_calls;
+            return true;
+        });
+    ASSERT_TRUE(trivial_zero.has_value());
+    EXPECT_EQ(*trivial_zero, 0);
+    EXPECT_EQ(reserve_calls, 0u);
+
+    const QArray single_normal{rational(0, 1), rational(1, 1), rational(0, 1)};
+    const QArray single_anchor{rational(2, 3), rational(5, 7), rational(11, 13)};
+    const QArray single_point{rational(3, 5), rational(7, 11), rational(17, 19)};
+    const auto trivial_single = support_detail::try_integer_support_sign<32768>(
+        single_normal, single_anchor, single_point, [&](std::size_t) {
+            ++reserve_calls;
+            return true;
+        });
+    ASSERT_TRUE(trivial_single.has_value());
+    EXPECT_EQ(*trivial_single, rational_support_sign(single_normal, single_anchor, single_point));
+    EXPECT_EQ(reserve_calls, 0u);
+
+    const QArray normal{rational(1, 2), rational(-1, 3), rational(1, 5)};
+    const QArray anchor{rational(1, 7), rational(1, 11), rational(1, 13)};
+    const QArray point{rational(2, 3), rational(3, 5), rational(5, 7)};
+    reserve_calls = 0;
+    std::size_t requested_bytes = 0;
+    const auto denied = support_detail::try_integer_support_sign<32768>(
+        normal, anchor, point, [&](std::size_t bytes) {
+            ++reserve_calls;
+            requested_bytes = bytes;
+            return false;
+        });
+    EXPECT_FALSE(denied.has_value());
+    EXPECT_EQ(reserve_calls, 1u);
+    EXPECT_EQ(requested_bytes, support_detail::integer_support_workspace_bytes<32768>());
+
+    struct ReserveFailure : std::runtime_error
+    {
+        ReserveFailure()
+            : std::runtime_error("intentional reserve failure")
+        {
+        }
+    };
+    reserve_calls = 0;
+    EXPECT_THROW(
+        (void) support_detail::try_integer_support_sign<32768>(normal, anchor, point, [&](std::size_t) {
+            ++reserve_calls;
+            throw ReserveFailure{};
+            return false;
+        }),
+        ReserveFailure);
+    EXPECT_EQ(reserve_calls, 1u);
+}
+
+TEST(ExactSweptGeometry, IntegerSupportSignReturnsUnavailableOnCheckedCapacityAndRejectsInvalidDenominators)
+{
+    using boost::multiprecision::cpp_int;
+    const Q oversized = rational((cpp_int(1) << 300) + 17, 7);
+    const QArray overflow_normal{oversized, rational(1, 1), rational(0, 1)};
+    const QArray overflow_anchor{rational(0, 1), rational(0, 1), rational(0, 1)};
+    const QArray overflow_point{rational(1, 1), rational(-2, 1), rational(3, 1)};
+    EXPECT_GT(rational_support_sign(overflow_normal, overflow_anchor, overflow_point), 0);
+    const auto conversion_overflow = support_detail::try_integer_support_sign<256>(
+        overflow_normal, overflow_anchor, overflow_point, [](std::size_t) { return true; });
+    EXPECT_FALSE(conversion_overflow.has_value());
+
+    // Inputs fit in 256 bits, but unlike denominators force the first partial
+    // numerator to be scaled by the second denominator. The terms nearly
+    // cancel to the tiny exact result 2/(d0*d1), while their cross-product
+    // exceeds 256 bits.
+    const cpp_int cpp_d0 = (cpp_int(1) << 159) + 37;
+    const cpp_int cpp_d1 = cpp_d0 + 2;
+    const Q near_one_0 = rational(cpp_d0 + 1, cpp_d0);
+    const Q near_one_1 = rational(cpp_d1 + 1, cpp_d1);
+
+    // Equal denominators stay exact without a growing denominator, and a zero
+    // partial sum can be replaced by the next contribution.
+    const QArray common_normal{rational(1, 1), rational(1, 1), rational(0, 1)};
+    const QArray common_point{near_one_0, near_one_0, rational(7, 11)};
+    const auto common_result = support_detail::try_integer_support_sign<256>(
+        common_normal, overflow_anchor, common_point, [](std::size_t) { return true; });
+    ASSERT_TRUE(common_result.has_value());
+    EXPECT_EQ(*common_result, 1);
+
+    const Q common_value = rational(2, cpp_d0);
+    const QArray zero_partial_normal{rational(1, 1), rational(-1, 1), rational(1, 1)};
+    const QArray zero_partial_point{common_value, common_value, rational(1, 3)};
+    const auto zero_partial_result = support_detail::try_integer_support_sign<256>(
+        zero_partial_normal, overflow_anchor, zero_partial_point, [](std::size_t) { return true; });
+    ASSERT_TRUE(zero_partial_result.has_value());
+    EXPECT_EQ(*zero_partial_result, 1);
+
+    const Q intermediate_exact = near_one_0 - near_one_1;
+    ASSERT_EQ(intermediate_exact, rational(2, cpp_d0 * cpp_d1));
+    ASSERT_GT(intermediate_exact.sign(), 0);
+    const QArray intermediate_normal{rational(1, 1), rational(-1, 1), rational(0, 1)};
+    const QArray intermediate_anchor{rational(0, 1), rational(0, 1), rational(0, 1)};
+    const QArray intermediate_point{near_one_0, near_one_1, rational(7, 11)};
+    ASSERT_EQ(rational_support_sign(intermediate_normal, intermediate_anchor, intermediate_point), 1);
+    const auto intermediate_overflow = support_detail::try_integer_support_sign<256>(
+        intermediate_normal, intermediate_anchor, intermediate_point, [](std::size_t) { return true; });
+    EXPECT_FALSE(intermediate_overflow.has_value());
+    const auto wide_result = support_detail::try_integer_support_sign<32768>(
+        intermediate_normal, intermediate_anchor, intermediate_point, [](std::size_t) { return true; });
+    ASSERT_TRUE(wide_result.has_value());
+    EXPECT_EQ(*wide_result, 1);
+
+    const QArray valid_normal{rational(1, 2), rational(-1, 3), rational(1, 5)};
+    const QArray valid_anchor{rational(1, 7), rational(1, 11), rational(1, 13)};
+    const QArray valid_point{rational(2, 3), rational(3, 5), rational(5, 7)};
+    auto expect_invalid = [&](auto mutate) {
+        QArray normal = valid_normal, anchor = valid_anchor, point = valid_point;
+        mutate(normal, anchor, point);
+        EXPECT_THROW(
+            (void) support_detail::try_integer_support_sign<32768>(
+                normal, anchor, point, [](std::size_t) { return true; }),
+            std::logic_error);
+    };
+    for (const int denominator : {-3, 0})
+    {
+        const cpp_int invalid_denominator(denominator);
+        expect_invalid([&](QArray& normal, QArray&, QArray&) {
+            normal[0].backend().denom() = invalid_denominator.backend();
+        });
+        expect_invalid([&](QArray&, QArray& anchor, QArray&) {
+            anchor[1].backend().denom() = invalid_denominator.backend();
+        });
+        expect_invalid([&](QArray&, QArray&, QArray& point) {
+            point[2].backend().denom() = invalid_denominator.backend();
+        });
+    }
+}
+
+TEST(ExactSweptGeometry, CertifiedFilterRationalEnclosuresCoverIndependentExactOracle)
+{
+    if (!support_detail::certified_filter_environment())
+        GTEST_SKIP() << "Certified binary64 arithmetic is unavailable in this compiler/environment.";
+    using boost::multiprecision::cpp_int;
+    auto check = [](const Q& value) {
+        const auto original = value;
+        const auto interval = support_detail::certified_rational_interval(value);
+        if (interval.valid)
+        {
+            // Construction of Q from a binary64 endpoint is exact. This checks
+            // the enclosure against rational order, independently of its proof.
+            EXPECT_LE(Q(interval.lower), value);
+            EXPECT_GE(Q(interval.upper), value);
+            EXPECT_LE(interval.lower, interval.upper);
+            EXPECT_TRUE(interval.lower == 0 || std::isnormal(interval.lower));
+            EXPECT_TRUE(interval.upper == 0 || std::isnormal(interval.upper));
+        }
+        EXPECT_EQ(value, original);
+        return interval.valid;
+    };
+    EXPECT_TRUE(check(Q(0)));
+    for (const unsigned bits : {1u, 52u, 53u, 54u, 63u, 64u, 65u, 127u, 128u, 1023u, 4096u, 16384u})
+    {
+        const cpp_int boundary = cpp_int(1) << bits;
+        for (const int delta : {-1, 0, 1})
+        {
+            const auto numerator = boundary + delta;
+            if (numerator == 0)
+                continue;
+            for (const int denominator_delta : {1, 3, 17})
+            {
+                const auto value = rational(numerator, boundary + denominator_delta);
+                EXPECT_TRUE(check(value));
+                EXPECT_TRUE(check(-value));
+            }
+        }
+    }
+    // Boundaries straddle normal/subnormal and finite/overflow transitions.
+    // Huge common exponents above already exercise cancellation before narrowing.
+    for (const int exponent : {-2000, -1075, -1074, -1023, -1022, -1021, -1020, -700, 0, 700, 1022, 1023, 1024, 2000})
+    {
+        const Q scale = exponent >= 0 ? Q(cpp_int(1) << exponent) : rational(1, cpp_int(1) << -exponent);
+        for (const Q factor : {rational(1, 1), rational(3, 2), rational((cpp_int(1) << 54) - 1, cpp_int(1) << 54)})
+        {
+            check(scale * factor);
+            check(-scale * factor);
+        }
+        if (exponent < -1022 || exponent > 1023)
+            EXPECT_FALSE(support_detail::certified_rational_interval(scale).valid);
+    }
+    EXPECT_FALSE(support_detail::certified_rational_interval(Q(std::numeric_limits<double>::denorm_min())).valid);
+    EXPECT_FALSE(support_detail::certified_rational_interval(Q(std::numeric_limits<double>::max())).valid);
+    const Q just_below_normal = rational((cpp_int(1) << 54) - 1, cpp_int(1) << (1022 + 54));
+    EXPECT_FALSE(support_detail::certified_rational_interval(just_below_normal).valid);
+    for (const int denominator : {-3, 0})
+    {
+        Q malformed = rational(1, 3);
+        const cpp_int invalid_denominator(denominator);
+        malformed.backend().denom() = invalid_denominator.backend();
+        EXPECT_THROW((void) support_detail::certified_rational_interval(malformed), std::logic_error);
+    }
+    std::mt19937_64 random(0xb17b0a4d715ULL);
+    for (unsigned sample = 0; sample < 128; ++sample)
+    {
+        const unsigned bits = 53 + random() % 4000;
+        const cpp_int n = (cpp_int(1) << bits) + (cpp_int(random()) << (bits / 2)) + random();
+        const cpp_int d = (cpp_int(1) << (bits - 1)) + (cpp_int(random()) << (bits / 3)) + 1;
+        EXPECT_TRUE(check(rational(n, d)));
+        EXPECT_TRUE(check(rational(-n, d)));
+    }
+}
+
+TEST(ExactSweptGeometry, CertifiedFilterSignsMatchRationalOracleAndLeaveCancellationInconclusive)
+{
+    if (!support_detail::certified_filter_environment())
+        GTEST_SKIP() << "Certified binary64 arithmetic is unavailable in this compiler/environment.";
+    const QArray zero{0, 0, 0};
+    auto check = [](const QArray& normal, const QArray& anchor, const QArray& point, const Q& offset) {
+        const QArray original_normal = normal, original_anchor = anchor, original_point = point;
+        const Q original_offset = offset;
+        const Q oracle = normal[0] * (point[0] - anchor[0]) + normal[1] * (point[1] - anchor[1]) +
+                         normal[2] * (point[2] - anchor[2]) - offset;
+        const auto plane = support_detail::certified_filter_plane(normal, anchor, offset);
+        const auto result = support_detail::try_certified_support_sign(plane, point);
+        const auto cached_result = support_detail::try_certified_support_sign(plane, support_detail::certified_filter_point(point));
+        EXPECT_EQ(result, cached_result);
+        if (result)
+        {
+            EXPECT_NE(*result, 0);
+            EXPECT_EQ(*result, oracle.sign());
+        }
+        EXPECT_EQ(normal, original_normal);
+        EXPECT_EQ(anchor, original_anchor);
+        EXPECT_EQ(point, original_point);
+        EXPECT_EQ(offset, original_offset);
+        return result;
+    };
+    const QArray normal{rational(7, 11), rational(-13, 17), rational(19, 23)};
+    const QArray anchor{rational(1, 3), rational(-5, 7), rational(2, 9)};
+    const QArray point{rational(17, 3), rational(-23, 7), rational(31, 9)};
+    const Q offset = rational(29, 31);
+    const auto sign = check(normal, anchor, point, offset);
+    ASSERT_TRUE(sign);
+    EXPECT_GT(*sign, 0);
+    const QArray reversed{-normal[0], -normal[1], -normal[2]};
+    EXPECT_EQ(check(reversed, anchor, point, -offset), -*sign);
+    QArray shifted_anchor = anchor, shifted_point = point;
+    const QArray translation{rational(37, 41), rational(-43, 47), rational(53, 59)};
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        shifted_anchor[axis] += translation[axis];
+        shifted_point[axis] += translation[axis];
+    }
+    EXPECT_EQ(check(normal, shifted_anchor, shifted_point, offset), sign);
+    EXPECT_FALSE(check({1, -1, 0}, zero, {rational(1, 3), rational(1, 3), 17}, 0));
+    EXPECT_FALSE(check({1, 0, 0}, {1, 0, 0}, {1, 2, 3}, 0)); // coplanar/tangent
+    EXPECT_FALSE(check({1, 1, 1}, zero, {1, 2, 3}, 6));
+    EXPECT_FALSE(check(zero, zero, zero, 0));
+    using boost::multiprecision::cpp_int;
+    const Q tiny = rational(1, cpp_int(1) << 200);
+    EXPECT_FALSE(check({1, -1, 0}, zero, {Q(1) + tiny, 1, 0}, 0));
+    const Q huge(cpp_int(1) << 2000);
+    // Inactive axes cannot disqualify a decisive active-axis enclosure.
+    ASSERT_EQ(check({1, 0, 0}, {0, huge, tiny}, {2, -huge, -tiny}, 1), 1);
+    EXPECT_FALSE(check({1, 0, 0}, zero, {huge, 0, 0}, 0));
+    EXPECT_FALSE(check({1, 0, 0}, zero, {Q(std::numeric_limits<double>::denorm_min()), 0, 0}, 0));
+    const Q small = rational(1, cpp_int(1) << 700), large(cpp_int(1) << 800);
+    EXPECT_FALSE(check({small, 0, 0}, zero, {small, 0, 0}, 0)); // product underflow
+    EXPECT_FALSE(check({large, 0, 0}, zero, {large, 0, 0}, 0)); // product overflow
+    std::mt19937_64 random(0x7a119f175ULL);
+    std::uniform_int_distribution<int> numerator(-100000, 100000), denominator(1, 100000);
+    unsigned decisive = 0;
+    for (unsigned sample = 0; sample < 128; ++sample)
+    {
+        QArray n, a, p;
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            n[axis] = rational(numerator(random), denominator(random));
+            a[axis] = rational(numerator(random), denominator(random));
+            p[axis] = rational(numerator(random), denominator(random));
+        }
+        decisive += check(n, a, p, rational(numerator(random), denominator(random))).has_value();
+    }
+    EXPECT_GT(decisive, 100u);
+}
+
+TEST(ExactSweptGeometry, CertifiedFilterRejectsChangedRoundingAndSseModesIncludingCachedSummaries)
+{
+    if (!support_detail::certified_filter_environment())
+        GTEST_SKIP() << "Certified binary64 arithmetic is unavailable in this compiler/environment.";
+    const QArray normal{1, 2, 3}, zero{0, 0, 0}, point{1, 2, 3};
+    const auto plane = support_detail::certified_filter_plane(normal, zero, Q(1));
+    const auto cached_point = support_detail::certified_filter_point(point);
+    ASSERT_EQ(support_detail::try_certified_support_sign(plane, cached_point), 1);
+    struct RestoreRounding
+    {
+        int rounding = std::fegetround();
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && defined(__SSE2__)
+        unsigned csr = _mm_getcsr();
+#endif
+        ~RestoreRounding()
+        {
+            std::fesetround(rounding);
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && defined(__SSE2__)
+            _mm_setcsr(csr);
+#endif
+        }
+    } restore;
+    for (const int rounding : {FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO})
+    {
+        ASSERT_EQ(std::fesetround(rounding), 0);
+        EXPECT_FALSE(support_detail::certified_filter_environment());
+        EXPECT_FALSE(support_detail::certified_rational_interval(Q(1)).valid);
+        EXPECT_FALSE(support_detail::try_certified_support_sign(plane, cached_point));
+        EXPECT_FALSE(support_detail::try_certified_support_sign(plane, point));
+    }
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && defined(__SSE2__)
+    const unsigned nearest_csr = _mm_getcsr();
+    for (const unsigned mode : {1u << 15, 1u << 6, 1u << 13, 2u << 13, 3u << 13})
+    {
+        _mm_setcsr(nearest_csr | mode);
+        EXPECT_FALSE(support_detail::certified_filter_environment());
+        EXPECT_FALSE(support_detail::certified_rational_interval(Q(1)).valid);
+        EXPECT_FALSE(support_detail::try_certified_support_sign(plane, cached_point));
+        EXPECT_FALSE(support_detail::try_certified_support_sign(plane, point));
+        _mm_setcsr(nearest_csr);
+    }
+#endif
+    EXPECT_EQ(support_detail::try_certified_support_sign(plane, cached_point), 1);
+}
+
+TEST(ExactSweptGeometry, CertifiedFilterRejectsUnmaskedExceptionsBeforeArithmetic)
+{
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && defined(__SSE2__)
+    if (!support_detail::certified_filter_environment())
+        GTEST_SKIP() << "Certified binary64 arithmetic is unavailable in this compiler/environment.";
+    std::fenv_t original;
+    ASSERT_EQ(std::fegetenv(&original), 0);
+    const unsigned original_csr = _mm_getcsr();
+    unsigned short original_control;
+    __asm__ __volatile__("fnstcw %0" : "=m"(original_control));
+    struct RestoreEnvironment
+    {
+        const std::fenv_t& original;
+        unsigned csr;
+        ~RestoreEnvironment()
+        {
+            std::fesetenv(&original);
+            _mm_setcsr(csr);
+        }
+    } restore{original, original_csr};
+    for (unsigned exception = 0; exception < 6; ++exception)
+    {
+        // Clear pending SSE status before unmasking. Only the read-only guard
+        // runs in this state; restore before assertions or diagnostic formatting.
+        const unsigned unmasked_csr = (original_csr & ~0x3fu) & ~(1u << (7 + exception));
+        _mm_setcsr(unmasked_csr);
+        const bool sse_available = support_detail::certified_filter_environment();
+        _mm_setcsr(original_csr);
+        std::fesetenv(&original);
+        _mm_setcsr(original_csr);
+        EXPECT_FALSE(sse_available) << "SSE exception mask " << exception;
+
+        // fnclex/fldcw are nonwaiting instructions. No pending x87 exception
+        // survives the mask change, and no arithmetic runs before restoration.
+        const unsigned short unmasked_control = original_control & ~(1u << exception);
+        __asm__ __volatile__("fnclex\n\tfldcw %0" : : "m"(unmasked_control) : "memory");
+        const bool x87_available = support_detail::certified_filter_environment();
+        __asm__ __volatile__("fldcw %0" : : "m"(original_control) : "memory");
+        std::fesetenv(&original);
+        _mm_setcsr(original_csr);
+        EXPECT_FALSE(x87_available) << "x87 exception mask " << exception;
+    }
+    EXPECT_TRUE(support_detail::certified_filter_environment());
+#else
+    GTEST_SKIP() << "SSE/x87 exception mask controls are unavailable.";
+#endif
+}
+
+TEST(ExactSweptGeometry, CertifiedFilterCachedConstructionsMatchUncachedExactIntersectionsAndMoments)
+{
+    using M = ExactGeometryMeasure;
+    struct RestoreRounding
+    {
+        int rounding = std::fegetround();
+        ~RestoreRounding() { std::fesetround(rounding); }
+    } restore;
+    ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+    for (const GeometryPoint shift : {GeometryPoint{0, 0, 0}, GeometryPoint{8, -4, 2}})
+    {
+        const auto cube = ConvexCellGeometry::box(shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1});
+        const auto face = face_at(cube, 0, shift[0] + 1);
+        const auto sweep = ExactSweptFace::make(*face, traces(face, {1, 0, 0}, .25), .25);
+        // The split produces represented rational 1/3 cut coordinates and
+        // oblique contacts inside several sweep simplices.
+        const std::array<ExactSweepDonor, 2> donors{{
+            {17, cube->clip({{1, 3, 0}, shift, 1}).inside},
+            {29, cube->clip({{-1, -3, 0}, shift, -1}).inside},
+        }};
+        struct Reference
+        {
+            std::uint64_t donor;
+            int sign;
+            ConvexGeometryPtr geometry;
+        };
+        std::vector<Reference> reference;
+        for (const auto& simplex : sweep->simplices())
+            for (const auto& donor : donors)
+                if (const auto intersection = simplex.geometry->as_geometry()->intersect(*donor.geometry))
+                    reference.push_back({donor.id, simplex.sign, intersection});
+        ASSERT_FALSE(reference.empty());
+        const GeometryHalfspace phase{{1, -.5, .25}, shift, .2};
+        for (const int rounding : {FE_TONEAREST, FE_UPWARD})
+        {
+            ASSERT_EQ(std::fesetround(rounding), 0);
+            auto pieces = sweep->partition(donors);
+            // Restore before publishing/inspecting floating metric enclosures;
+            // the construction and all admission checks ran in the selected mode.
+            ASSERT_EQ(std::fesetround(FE_TONEAREST), 0);
+            ASSERT_EQ(pieces.size(), reference.size());
+            std::vector<bool> matched(reference.size(), false);
+            M total;
+            for (const auto& piece : pieces)
+            {
+                const auto actual = piece.geometry->as_geometry();
+                std::size_t index = 0;
+                for (; index < reference.size(); ++index)
+                    if (!matched[index] && reference[index].donor == piece.donor &&
+                        reference[index].sign == piece.sign && actual->equivalent(*reference[index].geometry))
+                        break;
+                ASSERT_LT(index, reference.size());
+                matched[index] = true;
+                const auto& oracle = reference[index].geometry;
+                EXPECT_EQ(piece.geometry->volume().compare(M::volume(*oracle)), 0);
+                // Fragment publication chooses its own local moment origin.
+                // Apply that same public bridge to the independently clipped
+                // oracle before comparing local first-moment enclosures.
+                const auto aligned_oracle = ExactConvexFragment::from_geometry(*oracle)->as_geometry();
+                const auto actual_moments = actual->moments(), oracle_moments = aligned_oracle->moments();
+                ASSERT_EQ(actual_moments.origin, oracle_moments.origin);
+                EXPECT_EQ(actual_moments.volume.value, oracle_moments.volume.value);
+                EXPECT_EQ(actual_moments.volume.absolute_error, oracle_moments.volume.absolute_error);
+                for (unsigned axis = 0; axis < 3; ++axis)
+                {
+                    EXPECT_EQ(actual_moments.first_moment[axis].value, oracle_moments.first_moment[axis].value);
+                    EXPECT_EQ(actual_moments.first_moment[axis].absolute_error, oracle_moments.first_moment[axis].absolute_error);
+                }
+                const auto phases = piece.geometry->phases(phase);
+                const auto oracle_gas = oracle->clip(phase).inside;
+                EXPECT_EQ(phases.gas.compare(oracle_gas ? M::volume(*oracle_gas) : M{}), 0);
+                EXPECT_EQ((phases.gas + phases.carrier).compare(piece.geometry->volume()), 0);
+                total = total + piece.geometry->volume().scaled(piece.sign);
+            }
+            EXPECT_EQ(total.compare(M::from_value(.25)), 0);
+            // Repeated independent certificates exercise cache destruction and
+            // lease restoration. Exactly admitted payload leaves zero optional
+            // bytes; the second configuration grants room for filter summaries.
+            for (const auto& donor : donors)
+            {
+                std::vector<ExactTransportAtom> column;
+                for (const auto& piece : pieces)
+                    if (piece.donor == donor.id)
+                        column.push_back({donor.id, column.size(), piece.geometry});
+                // These pieces cover only the swept part of the donor. Add its
+                // unswept x<=3/4 portion via the unchanged public exact clip.
+                if (const auto unswept = donor.geometry->clip({{1, 0, 0}, shift, .75}).inside)
+                    column.push_back({donor.id, column.size(), ExactConvexFragment::from_geometry(*unswept)});
+                ExactSweepLimits denied;
+                denied.byte_budget = column.size() * sizeof(ExactConvexFragmentPtr);
+                auto roomy = denied;
+                roomy.byte_budget = 1 << 20;
+                EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, column, denied));
+                EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, column, roomy));
+                std::reverse(column.begin(), column.end());
+                EXPECT_NO_THROW(ExactTransportPartition::certify_donor_cover(donor, column, roomy));
+            }
+        }
+    }
 }
 
 } // namespace
