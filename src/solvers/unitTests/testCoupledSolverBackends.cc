@@ -332,10 +332,8 @@ TEST_P(CoupledSolverBackendsTest, LegacyCurvedGeometry)
         exercise(mesh, GetParam(), false, FVM::NonOrthogonalTreatment::Implicit);
     }
 }
-TEST_P(CoupledSolverBackendsTest, SerialSemiStructuredNonOrthogonal)
+TEST_P(CoupledSolverBackendsTest, SemiStructuredNonOrthogonal)
 {
-    if (Tpetra::getDefaultComm()->getSize() != 1)
-        GTEST_SKIP() << "SemiStructuredXY_Z is serial-only.";
     for (const auto treatment : {FVM::NonOrthogonalTreatment::Explicit, FVM::NonOrthogonalTreatment::Implicit,
              FVM::NonOrthogonalTreatment::Hybrid})
     {

@@ -13,12 +13,84 @@
 
 #include <algorithm>
 #include <exception>
+#include <limits>
+#include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
 namespace SimpleFluid
 {
+
+template<TpetraTypePack Pack>
+auto MeshReorderingFactory<Pack>::partitioned_xy_order(
+    const Meshes::SemiStructMeshTopo& topology, std::span<const std::size_t> xy_owners) -> std::vector<std::size_t>
+{
+    const std::size_t count = topology.indexer().num_cells_per_layer;
+    if (xy_owners.size() != count)
+        throw std::invalid_argument("XY partition owners must match the base-topology cell count.");
+    std::map<std::size_t, std::vector<std::size_t>> partitions;
+    for (std::size_t cell = 0; cell < count; ++cell)
+    {
+        if (xy_owners[cell] == std::numeric_limits<std::size_t>::max())
+            throw std::invalid_argument("XY partition owner is unknown.");
+        partitions[xy_owners[cell]].push_back(cell);
+    }
+    std::vector<std::vector<std::size_t>> adjacency(count);
+    for (const auto& edge : topology.side_faces())
+    {
+        if (edge.owner == Meshes::SemiStructMeshTopo::invalid_ordinal ||
+            edge.neighbor == Meshes::SemiStructMeshTopo::invalid_ordinal)
+            continue;
+        const std::size_t a = edge.owner, b = edge.neighbor;
+        if (a >= count || b >= count)
+            throw std::invalid_argument("XY topology contains an out-of-range adjacent cell.");
+        if (xy_owners[a] == xy_owners[b])
+        {
+            adjacency[a].push_back(b);
+            adjacency[b].push_back(a);
+        }
+    }
+    for (auto& neighbors : adjacency)
+    {
+        std::sort(neighbors.begin(), neighbors.end());
+        neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+    }
+    std::vector<std::size_t> result;
+    result.reserve(count);
+    std::vector<unsigned char> visited(count);
+    for (const auto& [owner, cells] : partitions)
+    {
+        static_cast<void>(owner);
+        std::set<std::pair<std::size_t, std::size_t>> pending;
+        for (const auto cell : cells)
+            pending.emplace(adjacency[cell].size(), cell);
+        while (!pending.empty())
+        {
+            std::vector<std::size_t> component{pending.begin()->second};
+            visited[component.front()] = 1;
+            pending.erase(pending.begin());
+            for (std::size_t head = 0; head < component.size(); ++head)
+            {
+                std::vector<std::size_t> neighbors;
+                for (const auto neighbor : adjacency[component[head]])
+                    if (!visited[neighbor])
+                        neighbors.push_back(neighbor);
+                std::sort(neighbors.begin(), neighbors.end(), [&](std::size_t a, std::size_t b)
+                    { return std::pair{adjacency[a].size(), a} < std::pair{adjacency[b].size(), b}; });
+                for (const auto neighbor : neighbors)
+                {
+                    visited[neighbor] = 1;
+                    pending.erase({adjacency[neighbor].size(), neighbor});
+                    component.push_back(neighbor);
+                }
+            }
+            result.insert(result.end(), component.rbegin(), component.rend());
+        }
+    }
+    return result;
+}
 
 template<TpetraTypePack Pack>
 auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, cell_selector_type selector)

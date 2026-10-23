@@ -12,8 +12,11 @@
 #pragma once
 
 #include "MeshHandle.hh"
+#include "geometry/details/SemiStructuredPartition.hh"
+#include "geometry/MeshReorderingFactory.hh"
 
 #include <array>
+#include <cmath>
 #include <Teuchos_CommHelpers.hpp>
 
 namespace SimpleFluid
@@ -193,21 +196,32 @@ MeshHandle<Pack>::MeshHandle(
 }
 
 /**
- * @brief Construct a serial semi-structured mesh handle.
+ * @brief Construct a compact semi-structured mesh handle with default distribution.
  *
  * @param mesh Semi-structured mesh to wrap.
  */
 template<TpetraTypePack Pack>
-MeshHandle<Pack>::MeshHandle(SemiStructuredPtr mesh)
-    : d_mesh(require_mesh(std::move(mesh)))
+MeshHandle<Pack>::MeshHandle(SemiStructuredPtr mesh) : MeshHandle(std::move(mesh), DistributionOptions{})
 {
-    initialize_semi_structured(std::get<SemiStructuredPtr>(d_mesh));
 }
 
-/** @brief Construct a mutable serial semi-structured mesh handle. */
+/** @brief Preserve the one-argument mutable constructor and geometry identity. */
 template<TpetraTypePack Pack>
-MeshHandle<Pack>::MeshHandle(MutableSemiStructuredPtr mesh)
-    : MeshHandle(SemiStructuredPtr(mesh))
+MeshHandle<Pack>::MeshHandle(MutableSemiStructuredPtr mesh) : MeshHandle(std::move(mesh), DistributionOptions{})
+{
+}
+
+/** @brief Observe compact XY/Z geometry and construct communicator-owned maps. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(SemiStructuredPtr mesh, DistributionOptions options) : d_mesh(std::move(mesh))
+{
+    initialize_semi_structured(std::get<SemiStructuredPtr>(d_mesh), options);
+}
+
+/** @brief Retain the original mutable geometry after collective initialization. */
+template<TpetraTypePack Pack>
+MeshHandle<Pack>::MeshHandle(MutableSemiStructuredPtr mesh, DistributionOptions options)
+    : MeshHandle(SemiStructuredPtr(mesh), options)
 {
     d_mutable_mesh.emplace(std::move(mesh));
 }
@@ -466,23 +480,314 @@ void MeshHandle<Pack>::initialize_orthogonal(
 }
 
 /**
- * @brief Initialize a semi-structured mesh handle in serial.
- *
- * @param mesh Semi-structured mesh to initialize from.
- * @throws std::runtime_error if used with more than one MPI rank.
+ * @brief Build local ownership/halos from compact XY/Z topology without expanded incidence.
+ * @param mesh Shared immutable geometry, identical on every rank.
+ * @param options Communicator-defined ownership, positive halo depth and empty-owner policy.
+ * Geometry/configuration errors are fenced before local layout allocation and
+ * before Tpetra map collectives, including when a rank owns no entities.
  */
 template<TpetraTypePack Pack>
-void MeshHandle<Pack>::initialize_semi_structured(
-    SemiStructuredPtr mesh)
+void MeshHandle<Pack>::initialize_semi_structured(SemiStructuredPtr mesh, DistributionOptions options)
 {
     const auto comm = Tpetra::getDefaultComm();
-    if (comm->getSize() != 1)
+    const size_t rank = static_cast<size_t>(comm->getRank()), ranks = static_cast<size_t>(comm->getSize());
+    const auto collective_error = [&](const std::exception_ptr& error, const char* message)
     {
-        throw std::runtime_error(
-            "SemiStructuredXY_Z does not yet support multi-rank "
-            "distribution.");
+        const int failed = error ? 1 : 0;
+        int any_failed = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
+        if (any_failed)
+        {
+            if (error)
+                std::rethrow_exception(error);
+            throw std::invalid_argument(message);
+        }
+    };
+    std::exception_ptr error;
+    try
+    {
+        if (!mesh || options.ghost_layers == 0 || options.partition.has_value() != options.partitions.has_value() ||
+            (options.partition && (*options.partition != rank || *options.partitions != ranks)))
+            throw std::invalid_argument(
+                "SemiStructuredXY_Z requires live geometry, positive halos and communicator-matching partitions.");
+        if (mesh->num_cells() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max()) ||
+            mesh->num_faces() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max()) ||
+            mesh->num_nodes() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max()))
+            throw std::overflow_error("SemiStructuredXY_Z global IDs exceed the Tpetra ordinal type.");
+        if ((options.xy_partitions && (*options.xy_partitions == 0 || ranks % *options.xy_partitions != 0)) ||
+            (options.z_partitions && (*options.z_partitions == 0 || ranks % *options.z_partitions != 0)) ||
+            (options.xy_partitions && options.z_partitions && *options.xy_partitions != ranks / *options.z_partitions))
+            throw std::invalid_argument(
+                "SemiStructuredXY_Z XY/Z factors must be positive and multiply to communicator size.");
+        if (mesh->num_cells() < ranks && !options.allow_empty_partitions)
+            throw std::invalid_argument(
+                "SemiStructuredXY_Z has fewer cells than ranks; empty partitions are disabled.");
     }
-    initialize_serial(*mesh);
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_error(error, "SemiStructuredXY_Z configuration failed on another rank.");
+    const auto execution = mesh->acquire_geometry_read();
+
+    // Hash only compact descriptors, never expanded 3D incidence. Partition
+    // presence is uniform, but the validated rank value is intentionally not.
+    unsigned long long fingerprint = 14695981039346656037ull;
+    const auto bytes = [&](const void* source, size_t count)
+    {
+        const auto* data = static_cast<const unsigned char*>(source);
+        for (size_t i = 0; i < count; ++i)
+        {
+            fingerprint ^= data[i];
+            fingerprint *= 1099511628211ull;
+        }
+    };
+    const auto ordinal = [&](size_t value)
+    {
+        const auto encoded = static_cast<unsigned long long>(value);
+        bytes(&encoded, sizeof(encoded));
+    };
+    const auto text = [&](const std::string& value)
+    {
+        ordinal(value.size());
+        bytes(value.data(), value.size());
+    };
+    error = {};
+    try
+    {
+        ordinal(options.ghost_layers);
+        ordinal(options.allow_empty_partitions);
+        ordinal(options.partition.has_value());
+        ordinal(options.xy_partitions.has_value());
+        if (options.xy_partitions)
+            ordinal(*options.xy_partitions);
+        ordinal(options.z_partitions.has_value());
+        if (options.z_partitions)
+            ordinal(*options.z_partitions);
+        ordinal(ranks);
+        ordinal(mesh->geometry_epoch());
+        const auto& indexer = mesh->indexer();
+        ordinal(indexer.num_cells_per_layer);
+        ordinal(indexer.num_side_faces_per_layer);
+        ordinal(indexer.num_nodes_per_layer);
+        ordinal(indexer.num_layers);
+        ordinal(indexer.num_node_layers);
+        ordinal(indexer.axial_periodic);
+        ordinal(mesh->xy_nodes().size());
+        for (const auto& node : mesh->xy_nodes())
+            for (size_t axis = 0; axis < 3; ++axis)
+            {
+                const auto value = node.component(axis);
+                if (!std::isfinite(value))
+                    throw std::invalid_argument("SemiStructuredXY_Z coordinates are nonfinite.");
+                bytes(&value, sizeof(value));
+            }
+        ordinal(mesh->xy_cell_nodes().size());
+        for (const auto& row : mesh->xy_cell_nodes())
+        {
+            ordinal(row.size());
+            for (const auto node : row)
+                ordinal(node);
+        }
+        ordinal(mesh->z_edges().size());
+        for (const auto value : mesh->z_edges())
+        {
+            if (!std::isfinite(value))
+                throw std::invalid_argument("SemiStructuredXY_Z axial edges are nonfinite.");
+            bytes(&value, sizeof(value));
+        }
+        for (const auto& face : mesh->topology().side_faces())
+        {
+            ordinal(face.nodes[0]);
+            ordinal(face.nodes[1]);
+            ordinal(face.owner);
+            ordinal(face.neighbor);
+            bytes(&face.boundary_id, sizeof(face.boundary_id));
+        }
+        auto batches = mesh->boundary_batch_ids();
+        std::sort(batches.begin(), batches.end());
+        ordinal(batches.size());
+        for (const auto id : batches)
+        {
+            bytes(&id, sizeof(id));
+            text(mesh->boundary_batch_name(id));
+        }
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_error(error, "SemiStructuredXY_Z descriptor validation failed on another rank.");
+    unsigned long long minimum = 0, maximum = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &fingerprint, &minimum);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &fingerprint, &maximum);
+    if (minimum != maximum)
+        throw std::invalid_argument("SemiStructuredXY_Z geometry, topology or distribution differs across ranks.");
+    const size_t xy_cells = mesh->indexer().num_cells_per_layer, layers = mesh->indexer().num_layers;
+    size_t xy_parts = 1, z_parts = ranks;
+    if (options.xy_partitions || options.z_partitions)
+    {
+        xy_parts = options.xy_partitions.value_or(ranks / options.z_partitions.value_or(ranks));
+        z_parts = ranks / xy_parts;
+    }
+    else
+    {
+        // Score divisors without constructing any extruded graph. Prefer using
+        // all possible owners, then genuine XY/Z coupling when both are useful.
+        size_t best_active = 0, best_load = std::numeric_limits<size_t>::max();
+        bool best_hybrid = false;
+        double best_interface = std::numeric_limits<double>::infinity();
+        for (size_t px = 1; px <= ranks; ++px)
+        {
+            if (ranks % px != 0)
+                continue;
+            const size_t pz = ranks / px;
+            if (!options.allow_empty_partitions && (px > xy_cells || pz > layers))
+                continue;
+            const size_t active_xy = std::min(px, xy_cells), active_z = std::min(pz, layers);
+            const size_t active = active_xy * active_z;
+            const bool hybrid = active == ranks && px > 1 && pz > 1;
+            const size_t load =
+                (xy_cells / active_xy + (xy_cells % active_xy != 0)) * (layers / active_z + (layers % active_z != 0));
+            const double interface = static_cast<double>(layers) * std::sqrt(static_cast<double>(xy_cells)) *
+                                         (std::sqrt(static_cast<double>(active_xy)) - 1.0) +
+                                     static_cast<double>(xy_cells) * static_cast<double>(active_z - 1);
+            if (active > best_active || (active == best_active && hybrid > best_hybrid) ||
+                (active == best_active && hybrid == best_hybrid && load < best_load) ||
+                (active == best_active && hybrid == best_hybrid && load == best_load && interface < best_interface))
+            {
+                best_active = active;
+                best_hybrid = hybrid;
+                best_load = load;
+                best_interface = interface;
+                xy_parts = px;
+                z_parts = pz;
+            }
+        }
+        if (best_active == 0)
+            throw std::invalid_argument("SemiStructuredXY_Z has no nonempty XY/Z factorization for this communicator.");
+    }
+    if (!options.allow_empty_partitions && (xy_parts > xy_cells || z_parts > layers))
+        throw std::invalid_argument("SemiStructuredXY_Z XY/Z factorization creates disabled empty owners.");
+    const std::array<unsigned long long, 2> local_factors{xy_parts, z_parts};
+    std::array<unsigned long long, 2> minimum_factors{}, maximum_factors{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 2, local_factors.data(), minimum_factors.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 2, local_factors.data(), maximum_factors.data());
+    if (minimum_factors != maximum_factors)
+        throw std::invalid_argument("SemiStructuredXY_Z selected XY/Z factors differ across ranks.");
+    d_semi_structured_decomposition = {xy_parts, z_parts};
+    if (ranks == 1)
+    {
+        initialize_serial(*mesh);
+        return;
+    }
+    const auto xy_owners =
+        detail::partition_semi_structured_xy(mesh->topology(), xy_parts, options.allow_empty_partitions, comm);
+    std::vector<size_t> xy_order, xy_position;
+    error = {};
+    try
+    {
+        xy_order = MeshReorderingFactory<Pack>::partitioned_xy_order(mesh->topology(), xy_owners);
+        if (xy_order.size() != xy_cells)
+            throw std::logic_error("SemiStructuredXY_Z graph reordering has the wrong size.");
+        xy_position.assign(xy_cells, xy_cells);
+        for (size_t position = 0; position < xy_cells; ++position)
+        {
+            const auto original = xy_order[position];
+            if (original >= xy_cells || xy_position[original] != xy_cells)
+                throw std::logic_error("SemiStructuredXY_Z graph reordering is not a permutation.");
+            xy_position[original] = position;
+        }
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_error(error, "SemiStructuredXY_Z graph reordering failed on another rank.");
+    const size_t xy_rank = rank % xy_parts, z_rank = rank / xy_parts;
+    const size_t z_begin = layers / z_parts * z_rank + std::min(layers % z_parts, z_rank);
+    const size_t z_count = layers / z_parts + (z_rank < layers % z_parts ? 1 : 0);
+    const auto z_owner = [&](size_t layer)
+    {
+        const size_t width = layers / z_parts, remainder = layers % z_parts;
+        const size_t wide_end = (width + 1) * remainder;
+        return layer < wide_end ? layer / (width + 1) : remainder + (layer - wide_end) / width;
+    };
+
+    error = {};
+    try
+    {
+        std::vector<size_t> owned;
+        for (size_t layer = z_begin; layer < z_begin + z_count; ++layer)
+            for (const auto cell : xy_order)
+                if (xy_owners[cell] == xy_rank)
+                    owned.push_back(cell + xy_cells * layer);
+        std::vector<size_t> ghosts, frontier = owned;
+        std::unordered_set<size_t> seen(owned.begin(), owned.end());
+        for (size_t layer = 0; layer < options.ghost_layers && !frontier.empty(); ++layer)
+        {
+            std::vector<size_t> next;
+            for (const auto cell : frontier)
+                for (const auto neighbor : mesh->topology().neighbor_cells(mesh->cell_id(cell)))
+                {
+                    const auto other = mesh->cell_local_id(neighbor);
+                    if (seen.insert(other).second)
+                    {
+                        ghosts.push_back(other);
+                        next.push_back(other);
+                    }
+                }
+            frontier = std::move(next);
+        }
+        std::sort(ghosts.begin(), ghosts.end(),
+            [&](size_t first, size_t second)
+            {
+                const size_t first_layer = first / xy_cells, second_layer = second / xy_cells;
+                return first_layer != second_layer ? first_layer < second_layer
+                                                   : xy_position[first % xy_cells] < xy_position[second % xy_cells];
+            });
+        d_cells_reordered =
+            !std::is_sorted(owned.begin(), owned.end()) || !std::is_sorted(ghosts.begin(), ghosts.end());
+        initialize_cells(std::move(owned), std::move(ghosts));
+        std::unordered_set<size_t> seen_faces, seen_nodes;
+        std::vector<size_t> owned_faces, overlap_faces;
+        for (const auto geometry : d_indexer.cell_global_ids())
+        {
+            const auto cell = mesh->cell_id(static_cast<size_t>(geometry));
+            for (const auto face : mesh->cell_faces(cell))
+            {
+                const auto global = mesh->face_local_id(face);
+                if (!seen_faces.insert(global).second)
+                    continue;
+                const auto owner = mesh->owner_cell(face);
+                (xy_owners[owner.ij] == xy_rank && z_owner(owner.k) == z_rank ? owned_faces : overlap_faces)
+                    .push_back(global);
+            }
+            for (const auto xy_node : mesh->xy_cell_nodes()[cell.ij])
+            {
+                seen_nodes.insert(mesh->node_local_id(typename SemiStructured::NodeID{xy_node, cell.k}));
+                const auto top = static_cast<typename SemiStructured::Indexer::Ordinal>(
+                    (static_cast<size_t>(cell.k) + 1) % mesh->indexer().num_node_layers);
+                seen_nodes.insert(mesh->node_local_id(typename SemiStructured::NodeID{xy_node, top}));
+            }
+        }
+        std::sort(owned_faces.begin(), owned_faces.end());
+        std::sort(overlap_faces.begin(), overlap_faces.end());
+        initialize_faces(std::move(owned_faces), std::move(overlap_faces));
+        std::vector<size_t> nodes(seen_nodes.begin(), seen_nodes.end());
+        std::sort(nodes.begin(), nodes.end());
+        d_indexer.set_nodes(checked_global_ids(std::move(nodes)));
+        checked_local(d_indexer.num_local_cells());
+        checked_local(d_indexer.num_local_faces());
+        checked_local(d_indexer.num_local_nodes());
+        initialize_boundary_batches(*mesh);
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_error(error, "SemiStructuredXY_Z local layout failed on another rank.");
+    create_maps(comm);
 }
 
 /**
@@ -826,12 +1131,23 @@ template<class MeshType>
 void MeshHandle<Pack>::initialize_boundary_batches(
     const MeshType& mesh)
 {
-    if constexpr (std::same_as<MeshType, MultiRegion>)
+    if constexpr (std::same_as<MeshType, MultiRegion> || std::same_as<MeshType, SemiStructured>)
     {
+        if constexpr (std::same_as<MeshType, SemiStructured>)
+        {
+            // Boundary configuration is global even when this rank has no
+            // incident boundary faces (or owns no cells at all).
+            for (const auto id : mesh.boundary_batch_ids())
+            {
+                d_boundary_names.emplace(id, mesh.boundary_batch_name(id));
+                d_boundary_batches[id].id = id;
+            }
+        }
         for (size_t f = 0; f < num_faces(); ++f)
         {
             const auto local = checked_local(f);
-            const int id = mesh.boundary_id(geometry_face_lid(local));
+            const auto geometry = static_cast<size_t>(geometry_face_lid(local));
+            const int id = mesh.boundary_id(mesh.face_id(geometry));
             if (id == invalid_boundary_id) continue;
             d_boundary_names.emplace(id, mesh.boundary_batch_name(id));
             auto& batch = d_boundary_batches[id]; batch.id = id; batch.face_lids.push_back(local);
@@ -1204,6 +1520,18 @@ template<TpetraTypePack Pack>
 VTUWriter::TopologyHandle MeshHandle<Pack>::semi_structured_vtu_topology(
     const SemiStructured& mesh) const
 {
+    const auto execution = acquire_execution_view();
+    VTUWriter::VectorData points;
+    std::unordered_map<size_t, global_index_t> point_lids;
+    if (d_serial_identity) points = collect_vtu_points(mesh);
+    const auto local_node = [&](SemiStructured::NodeID node) -> global_index_t
+    {
+        const auto global = mesh.node_local_id(node);
+        if (d_serial_identity) return static_cast<global_index_t>(global);
+        const auto [position, inserted] = point_lids.emplace(global, static_cast<global_index_t>(points.size()));
+        if (inserted) points.push_back(mesh.node_coordinates(node));
+        return position->second;
+    };
     VTUWriter::Int64Data connectivity;
     VTUWriter::Int64Data offsets;
     VTUWriter::Int64Data faces;
@@ -1220,15 +1548,11 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::semi_structured_vtu_topology(
         const auto top_layer = (cell.k + 1) % indexer.num_node_layers;
         for (const auto xy_node : xy_nodes)
         {
-            connectivity.push_back(static_cast<global_index_t>(
-                mesh.node_local_id(
-                    SemiStructured::NodeID{xy_node, cell.k})));
+            connectivity.push_back(local_node(SemiStructured::NodeID{xy_node, cell.k}));
         }
         for (const auto xy_node : xy_nodes)
         {
-            connectivity.push_back(static_cast<global_index_t>(
-                mesh.node_local_id(
-                    SemiStructured::NodeID{xy_node, top_layer})));
+            connectivity.push_back(local_node(SemiStructured::NodeID{xy_node, top_layer}));
         }
 
         offsets.push_back(static_cast<global_index_t>(connectivity.size()));
@@ -1247,8 +1571,7 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::semi_structured_vtu_topology(
             cell_types.push_back(42); // VTK_POLYHEDRON
             const auto node = [&](size_t i, auto layer)
             {
-                return static_cast<global_index_t>(mesh.node_local_id(
-                    SemiStructured::NodeID{xy_nodes[i], layer}));
+                return local_node(SemiStructured::NodeID{xy_nodes[i], layer});
             };
             faces.push_back(static_cast<global_index_t>(xy_nodes.size() + 2));
             // Base loops are counter-clockwise; the lower cap points down.
@@ -1268,7 +1591,7 @@ VTUWriter::TopologyHandle MeshHandle<Pack>::semi_structured_vtu_topology(
     if (faces.empty()) face_offsets.clear();
 
     return VTUWriter::make_topology(
-        collect_vtu_points(mesh),
+        std::move(points),
         std::move(connectivity),
         std::move(offsets),
         std::move(cell_types),

@@ -152,8 +152,9 @@ cylindrical-component metric terms and does not alter the parent transport
 operators. Manufactured refinement and transient swirl evidence are recorded
 in [the extension report](sst_sas_extensions.md).
 
-Native `SemiStructuredXY_Z` uses the same planar-face operator directly, with
-its existing serial-only ownership contract. Skewed triangular extrusions have
+Native `SemiStructuredXY_Z` uses the same planar-face operator directly. Its
+mesh ownership now supports MPI; the SAS qualification listed here retains its
+existing serial semi-structured cases. Skewed triangular extrusions have
 manufactured derivative/refinement and transient solver coverage. Slip uses
 zero normal face velocity and zero normal derivative of tangential velocity.
 Its Laplacian boundary flux is the normal projection only. A SAS-only cached

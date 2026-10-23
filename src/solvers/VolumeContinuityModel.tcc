@@ -34,6 +34,11 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
                 throw std::invalid_argument("VolumeContinuityModel material volumes must use local-cell order and "
                                             "previous targets owned order.");
             }
+            for (const auto value : inputs.previous_target)
+            {
+                if (!std::isfinite(value))
+                    throw std::invalid_argument("VolumeContinuityModel previous targets must be finite.");
+            }
             const scalar_type scalar_inputs[]{inputs.old_pool_volume, inputs.new_pool_volume,
                 inputs.bubble_escape_volume_rate, inputs.other_outflow_volume_rate};
             for (const auto value : scalar_inputs)
@@ -50,15 +55,27 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
             }
         });
 
-    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(!inputs.carrier_material_fraction.empty()),
-        "VolumeContinuityModel carrier-material-fraction selection");
+    // Empty ranks have no span entries with which to express optional presence.
+    // Only ranks with applicable rows select the mode; empty ranks are neutral.
+    const auto optional_span_present = [&](bool present, size_t rows, const char* selection)
+    {
+        const int local_modes[]{rows != 0 && present ? 1 : 0, rows != 0 && !present ? 1 : 0};
+        int global_modes[2]{};
+        Teuchos::reduceAll(
+            *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 2, local_modes, global_modes);
+        if (global_modes[0] != 0 && global_modes[1] != 0)
+            throw std::invalid_argument(std::string(selection) + " must agree on ranks with applicable cell rows.");
+        return global_modes[0] != 0;
+    };
+    const bool has_carrier_material_fraction = optional_span_present(!inputs.carrier_material_fraction.empty(),
+        d_mesh->num_local_cells(), "VolumeContinuityModel carrier-material-fraction selection");
     collective_detail::require_uniform_value(*d_mesh,
         static_cast<int>(inputs.carrier_material_volume_flux != nullptr),
         "VolumeContinuityModel exact carrier-flux selection");
     collective_detail::require_uniform_value(*d_mesh, static_cast<int>(inputs.bubble_slip_volume_flux != nullptr),
         "VolumeContinuityModel bubble-slip-flux selection");
-    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(!inputs.previous_target.empty()),
-        "VolumeContinuityModel previous-target selection");
+    const bool has_previous_target = optional_span_present(!inputs.previous_target.empty(),
+        d_mesh->num_owned_cells(), "VolumeContinuityModel previous-target selection");
     collective_detail::require_uniform_value(
         *d_mesh, inputs.old_pool_volume, "VolumeContinuityModel old pool volume");
     collective_detail::require_uniform_value(
@@ -126,7 +143,7 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
                         // carrier transport here; accepted-old W/V fabricates a
                         // source whenever a nonuniform inventory advects.
                         const auto concentration =
-                            inputs.carrier_material_fraction.empty()
+                            !has_carrier_material_fraction
                                 ? inputs.new_material_volume[static_cast<size_t>(upwind)] /
                                       static_cast<scalar_type>(new_volumes[static_cast<size_t>(upwind)])
                                 : inputs.carrier_material_fraction[static_cast<size_t>(upwind)];
@@ -154,7 +171,7 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
             for (size_t local = 0; local < d_mesh->num_local_cells(); ++local)
             {
                 const auto carrier_fraction =
-                    inputs.carrier_material_fraction.empty()
+                    !has_carrier_material_fraction
                         ? inputs.new_material_volume[local] / static_cast<scalar_type>(new_volumes[local])
                         : inputs.carrier_material_fraction[local];
                 local_invalid = local_invalid || !std::isfinite(carrier_fraction) || carrier_fraction < scalar_type{};
@@ -221,7 +238,7 @@ auto VolumeContinuityModel<Pack, MeshType>::preview(const Inputs& inputs, std::u
         if (inputs.mesh_volume_correction_rate != scalar_type{})
             target_values[owned] += inputs.mesh_volume_correction_rate *
                 (static_cast<scalar_type>(old_volumes[owned]) / global_totals[5]);
-        if (!inputs.previous_target.empty())
+        if (has_previous_target)
             local_maximum_target_change = std::max(local_maximum_target_change,
                 std::abs(target_values[owned] - inputs.previous_target[owned]));
     }

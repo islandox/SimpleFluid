@@ -497,7 +497,7 @@ template<TpetraTypePack Pack> void PlanarALEMeshMotion<Pack>::validate_collectiv
     if (any_invalid != 0)
     {
         throw std::invalid_argument("PlanarALEMeshMotion requires valid options and a mutable "
-                                    "Cartesian mesh, axial cylindrical mesh, or serial axial "
+                                    "Cartesian mesh, axial cylindrical mesh, or axial "
                                     "SemiStructuredXY_Z mesh, or a composite axial affine mesh on every rank. "
                                     "Composite motion requires full-height Z deformation and a fixed axial periodic length.");
     }

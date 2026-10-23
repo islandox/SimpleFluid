@@ -38,13 +38,20 @@ consumers.
 Within the native path, Cartesian and cylindrical meshes construct their
 distributed slab views directly. An `UnstructuredMesh` must first be
 partitioned with `MeshPartitioner` and adapted through `PartitionedMesh` on a
-multi-rank communicator. `SemiStructuredXY_Z` is serial-only; its
-`MeshHandle` constructor deliberately rejects multi-rank use until an owned,
-overlap, and ghost-indexing design is implemented for that topology.
-Focused native regressions cover unstructured geometry, operators,
-`FluidSolver`, and `BoussinesqSolver` directly in serial and across partition
-faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
-partitioned-unstructured coverage.
+multi-rank communicator. `SemiStructuredXY_Z` constructs native owned/overlap
+maps from Zoltan2/ParMETIS XY graph partitions crossed with balanced Z slabs.
+`MeshReorderingFactory` orders XY cells within the graph partitions before
+local maps are created; canonical geometry IDs stay unchanged. Every rank
+supplies identical compact XY/Z geometry and boundary metadata. Explicit XY/Z
+factors must multiply to communicator size, and explicit rank/count overrides
+must match the communicator. Set `DistributionOptions::allow_empty_partitions`
+when the chosen factorization leaves owners empty.
+Canonical geometry owners determine face ownership and flux signs. Empty ranks
+retain all boundary names and participate in field, solver and ALE collectives.
+Focused semi-structured geometry, operator, flow and axial-ALE checks are listed
+in [the parallel semi-structured guide](docs/semi_structured_parallel.md).
+Do not infer qualification of every optional physics combination from mesh
+and operator coverage.
 
 `AnnularSemiStructuredMeshFactory` returns a `MultiRegionMesh` that combines
 immutable native XY/Z and optional `SweptRZRegion` children. Its distributed
@@ -133,8 +140,8 @@ This protects the phase inventory until it has an explicit conservative disposit
 
 `PlanarALEMeshMotion` is the sole geometry mutator for the constrained
 solver-integrated `planarALE` path. It supports fixed-topology Cartesian X/Y/Z
-and cylindrical axial motion in serial/MPI plus serial `SemiStructuredXY_Z`
-axial motion. Use its `begin_trial()` and exactly one of `accept_trial()` or
+and cylindrical or `SemiStructuredXY_Z` axial motion in serial/MPI. Use its
+`begin_trial()` and exactly one of `accept_trial()` or
 `rollback_trial()`; never update structured edge arrays directly after fields
 or caches exist. The exclusive controller lease and geometry epoch belong to
 the shared concrete mesh, so every alias `MeshHandle` observes the same

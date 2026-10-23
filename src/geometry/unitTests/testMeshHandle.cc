@@ -260,28 +260,25 @@ TEST(MeshHandleTest, RetainsMutablePartitionGeometry)
     EXPECT_FALSE(Handle(read_only_partition).has_mutable_geometry());
 }
 
-/** @brief Semi-structured handles enforce their documented serial contract. */
-TEST(MeshHandleTest, SemiStructuredConstructionIsSerialOnly)
+/** @brief The preserved one-argument constructor builds default native MPI ownership. */
+TEST(MeshHandleTest, SemiStructuredConstructionPreservesDefaultDistributedOwnership)
 {
+    const auto communicator = Tpetra::getDefaultComm();
+    SimpleFluid::ArrReal z_edges;
+    for (int layer = 0; layer <= communicator->getSize(); ++layer)
+        z_edges.push_back(0.5 * layer);
     const auto mesh = std::make_shared<SemiStructured>(
         SimpleFluid::Arr<SemiStructured::Vec3>{
             {0.0, 0.0, 0.0},
             {1.0, 0.0, 0.0},
             {0.0, 1.0, 0.0}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}},
-        SimpleFluid::ArrReal{0.0, 1.0});
-    const auto communicator = Tpetra::getDefaultComm();
-
-    if (communicator->getSize() == 1)
-    {
-        EXPECT_NO_THROW(static_cast<void>(Handle(mesh)));
-    }
-    else
-    {
-        EXPECT_THROW(
-            static_cast<void>(Handle(mesh)),
-            std::runtime_error);
-    }
+        z_edges);
+    const Handle handle(mesh);
+    EXPECT_EQ(handle.num_owned_cells(), 1U);
+    EXPECT_EQ(handle.cell_global_id(0), communicator->getRank());
+    EXPECT_EQ(handle.owned_cell_map()->getGlobalNumElements(), static_cast<std::size_t>(communicator->getSize()));
+    EXPECT_EQ(handle.visit([](const auto& geometry) -> const void* { return &geometry; }), mesh.get());
 }
 
 /** @brief Existing partitions retain their non-default communicator. */

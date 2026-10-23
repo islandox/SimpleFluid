@@ -35,6 +35,12 @@ CacheType cache_field_stored_velocity_boundary_conditions_impl(
     }
 
     std::unordered_map<int, size_t> local_batch_sizes;
+    // A globally configured batch remains present on ranks with no local
+    // incident faces. Cache keys/types must retain that metadata as well.
+    for (const auto& [batch_id, batch] : mesh->boundary_batches())
+    {
+        local_batch_sizes.emplace(batch_id, batch.face_lids.size());
+    }
     for (const auto& location : boundary_face_locations(*mesh))
     {
         if (location.active)

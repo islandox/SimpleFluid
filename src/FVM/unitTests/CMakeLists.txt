@@ -174,3 +174,9 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;fvm;transport;traverse"
     TIMEOUT 120)
+
+foreach(_semi_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME SemiStructuredDistributedOperators_${_semi_ranks}procs
+        TARGET testSemiStructuredDistributedOperators PROCS ${_semi_ranks}
+        LABELS "mpi;semi_structured;fields;transport;diffusion;conservation;empty_rank" TIMEOUT 120)
+endforeach()

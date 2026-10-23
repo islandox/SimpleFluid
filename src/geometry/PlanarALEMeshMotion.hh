@@ -112,7 +112,7 @@ struct PlanarALEMeshMotionOptions
  * Cartesian meshes support any Cartesian axis. Cylindrical and
  * SemiStructuredXY_Z meshes support only their axial Z direction. Structured
  * Cartesian/cylindrical handles retain their existing MPI partition and maps;
- * SemiStructuredXY_Z retains its established single-region serial-only contract.
+ * SemiStructuredXY_Z uses the native owned/ghost distribution in serial and MPI.
  * MultiRegionMesh supports a common affine Z map in serial/MPI, retaining frozen
  * child providers. Buffered/nonaxial composite motion and changing axial periodic
  * lengths are rejected.
