@@ -10,6 +10,39 @@
 #include <stdexcept>
 namespace SimpleFluid::detail
 {
+/** Finite persistent topology has no exact numeric placeholders. */
+struct GeneralVoFFinitePhiCell
+{
+    DefaultTpetraTypes::global_ordinal_type cell = 0;
+    std::vector<char> identity;
+    long double arithmetic_radius = 0;
+};
+struct GeneralVoFFinitePhiFace
+{
+    DefaultTpetraTypes::global_ordinal_type face = 0, first = 0, second = 0;
+    std::vector<char> identity;
+    long double volume = 0, arithmetic_radius = 0;
+};
+struct GeneralVoFFiniteProjectionClosureTopology
+{
+    std::vector<GeneralVoFFinitePhiCell> cells;
+    std::vector<GeneralVoFFinitePhiFace> faces;
+};
+/** Finite canonical rate closure. Values and independent operation radii are
+ * bounded wide FP; no exact scalar is constructed or serialized. */
+struct GeneralVoFFiniteRateClosure
+{
+    std::vector<long double> rate, correction, cell_radius;
+    std::size_t forest_rounds = 0, admitted_storage_bytes = 0;
+};
+/** Collectively close source-free canonical owned rates within independently
+ * supplied face/cell arithmetic capacities. The authenticated sparse forest is
+ * admitted against byte_budget before exchange; oversized local work rejects.
+ * Empty owners participate, and infeasibility never changes input rates. */
+[[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFiniteRateClosure close_general_vof_finite_rate(
+    const SP<const MeshHandle<>>&, std::span<const long double> owned_rate,
+    std::span<const long double> owned_face_radius, std::span<const long double> owned_cell_radius,
+    std::size_t byte_budget, const GeneralVoFFiniteProjectionClosureTopology* topology = nullptr);
 /** Persistent identities are authenticated geometry-provider certificates,
  * independent of observed global numbering and ownership. */
 struct GeneralVoFPhiCell
@@ -71,8 +104,8 @@ struct GeneralVoFProjectionClosureTopology
  * failures retry the original closure. Invalid metadata still rejects.
  * No physical or arithmetic tolerance is changed. */
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFPhiClosure close_general_vof_bounded_rate(
-    const SP<const MeshHandle<>>&, const std::vector<GeneralVoFPhiCell>&,
-    const std::vector<GeneralVoFPhiFace>&, std::size_t byte_budget);
+    const SP<const MeshHandle<>>&, const std::vector<GeneralVoFPhiCell>&, const std::vector<GeneralVoFPhiFace>&,
+    std::size_t byte_budget);
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL std::optional<GeneralVoFPhiClosure> try_close_general_vof_phi(
     const SP<const MeshHandle<>>&, const std::vector<GeneralVoFPhiCell>&, const std::vector<GeneralVoFPhiFace>&,
     std::size_t byte_budget);

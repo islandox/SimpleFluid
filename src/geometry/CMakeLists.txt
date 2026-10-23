@@ -19,6 +19,8 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/PolyhedralAMR.cc
     mesh/AMR/MixedAMR.cc
     ConvexCellGeometry.cc
+    BoundedConvexGeometry.cc
+    details/BoundedPlanarFace.inc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc
@@ -76,7 +78,7 @@ set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
-    set_source_files_properties(ConvexCellGeometry.cc PROPERTIES
+    set_source_files_properties(ConvexCellGeometry.cc BoundedConvexGeometry.cc PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
 endif()
@@ -106,6 +108,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/AdaptiveOverlap.cc
     mesh/AMR/ExtrudedAMR.cc
     ConvexCellGeometry.cc
+    BoundedConvexGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc

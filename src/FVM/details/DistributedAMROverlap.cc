@@ -189,7 +189,7 @@ std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> catalog(
     return result;
 }
 } // namespace
-std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> build_adaptive_overlap(
+AdaptiveOverlapCatalog build_adaptive_overlap_catalog(
     const Meshes::AMR::DistributedAdaptiveHierarchy& source, const Meshes::AMR::DistributedAdaptiveHierarchy& target,
     std::size_t limit, std::size_t leaf_fetch_budget)
 {
@@ -269,12 +269,21 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> build_ada
                     }
             }
         });
-    std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> result;
-    ::SimpleFluid::Meshes::AMR::adaptive_detail::collective(*comm,
+    return {source.observation(), target.observation(), std::move(from), std::move(to), std::move(relations)};
+}
+
+std::shared_ptr<const Meshes::AMR::AdaptiveOverlapPlan> build_adaptive_overlap(
+    const Meshes::AMR::DistributedAdaptiveHierarchy& source, const Meshes::AMR::DistributedAdaptiveHierarchy& target,
+    std::size_t limit, std::size_t leaf_fetch_budget)
+{
+    auto catalog = build_adaptive_overlap_catalog(source, target, limit, leaf_fetch_budget);
+    std::shared_ptr<const Meshes::AMR::AdaptiveOverlapPlan> result;
+    Meshes::AMR::adaptive_detail::collective(*source.communicator(),
         [&]
         {
-            result = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
-                source.observation(), target.observation(), std::move(from), std::move(to), relations);
+            result = Meshes::AMR::AdaptiveOverlapPlan::build(catalog.source_observation,
+                catalog.target_observation, std::move(catalog.source_cells), std::move(catalog.target_cells),
+                catalog.relations);
         });
     return result;
 }

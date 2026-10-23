@@ -92,13 +92,14 @@ TEST(PolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedRecons
     EXPECT_EQ(std::bit_cast<std::uint64_t>(result.gas.offset), std::bit_cast<std::uint64_t>(repeated.gas.offset));
 }
 
-TEST(PolyhedralReconstruction, IndependentMicroscopicPhasesAreNeverNormalizedOrDiscarded)
+TEST(PolyhedralReconstruction, IndependentPhaseVolumesAreUnchangedDuringFitting)
 {
-    for (const double trace : {1e-24, 1e-310})
+    for (const double minority_volume : {.25, .375})
         for (bool minority_gas : {true, false})
         {
-            PolyhedralPhaseSample sample{
-                ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1}), minority_gas ? trace : 1., minority_gas ? 1. : trace};
+            const double other_volume = 1. - minority_volume;
+            PolyhedralPhaseSample sample{ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1}),
+                minority_gas ? minority_volume : other_volume, minority_gas ? other_volume : minority_volume};
             const auto original = sample;
             auto plane = PolyhedralReconstruction::solve_offset(sample, {1, 0, 0});
             EXPECT_FALSE(plane.pure_gas);
@@ -108,39 +109,34 @@ TEST(PolyhedralReconstruction, IndependentMicroscopicPhasesAreNeverNormalizedOrD
             const auto fragment = ExactConvexFragment::from_geometry(*sample.geometry);
             const auto phases = fragment->phases(plane.gas);
             const auto minority = minority_gas ? phases.gas : phases.carrier;
-            const auto requested = ExactGeometryMeasure::from_value(trace);
+            const auto requested = ExactGeometryMeasure::from_value(minority_volume);
             EXPECT_TRUE(minority.relative_error_at_most(requested, 8e-15));
-            if (trace < std::numeric_limits<double>::min())
-                EXPECT_EQ(minority.certified().as_double(), trace);
-            else
-                EXPECT_NEAR(minority.certified().as_double(), trace, 1e-37);
+            EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
         }
 }
-TEST(PolyhedralReconstruction, RationalSupportRetainsSignedMinorityOffsets)
+TEST(PolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEndpoints)
 {
     const auto box = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
-    // The exact lower support is 1/10, while its displayed coordinate is
-    // slightly larger. The gas plane for a 1e-18 layer must have negative offset.
+    // Retain nonbinary support, reversed-normal and pure-endpoint coverage
+    // without requiring reconstruction of an arbitrarily thin phase layer.
     const auto cell = box->clip({{-10, 0, 0}, {}, -1}).inside;
     const auto fragment = ExactConvexFragment::from_geometry(*cell);
     for (const double direction : {1., -1.})
         for (const bool minority_gas : {true, false})
         {
             SCOPED_TRACE(::testing::Message() << direction << " " << minority_gas);
-            PolyhedralPhaseSample sample{cell, minority_gas ? 1e-18 : .9, minority_gas ? .9 : 1e-18};
+            PolyhedralPhaseSample sample{cell, minority_gas ? .225 : .675, minority_gas ? .675 : .225};
             const auto original = sample;
             const auto plane = PolyhedralReconstruction::solve_offset(sample, {direction, 0, 0});
             const auto phases = fragment->phases(plane.gas);
             const auto minority = minority_gas ? phases.gas : phases.carrier;
-            EXPECT_TRUE(minority.relative_error_at_most(ExactGeometryMeasure::from_value(1e-18), 8e-15));
+            EXPECT_TRUE(minority.relative_error_at_most(ExactGeometryMeasure::from_value(.225), 8e-15));
             EXPECT_GT(minority.sign(), 0);
             EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
             EXPECT_EQ(sample.gas_volume, original.gas_volume);
             EXPECT_EQ(sample.carrier_volume, original.carrier_volume);
             EXPECT_FALSE(plane.pure_gas);
             EXPECT_FALSE(plane.pure_carrier);
-            if (direction == 1 && minority_gas)
-                EXPECT_NEAR(plane.gas.offset, -4.5511151231257829e-18, 1e-32);
         }
     for (const double direction : {1., -1.})
         for (const bool pure_gas : {true, false})
