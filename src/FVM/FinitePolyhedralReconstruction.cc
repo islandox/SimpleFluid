@@ -228,12 +228,12 @@ PolyhedralResolutionRequired::PolyhedralResolutionRequired(PolyhedralResolutionA
 {
 }
 
-void PolyhedralReconstruction::validate_finite(
+void PolyhedralReconstruction::validate(
     const FinitePolyhedralPhaseSample& sample, PolyhedralReconstructionOptions options)
 {
     validate_sample(sample, options);
 }
-PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finite(
+PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution(
     const FinitePolyhedralPhaseSample& target, std::span<const FinitePolyhedralPhaseSample> stencil,
     PolyhedralReconstructionOptions options)
 {
@@ -301,22 +301,22 @@ PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finit
     }
     return result;
 }
-PolyhedralInterface PolyhedralReconstruction::solve_offset_finite(
+PolyhedralInterface PolyhedralReconstruction::solve_offset(
     const FinitePolyhedralPhaseSample& sample, Point normal, PolyhedralReconstructionOptions options)
 {
     validate_sample(sample, options);
     std::size_t evaluations = 0;
     return offset_fit(sample, normal, options, evaluations);
 }
-PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const FinitePolyhedralPhaseSample& target,
+PolyhedralInterface PolyhedralReconstruction::reconstruct(const FinitePolyhedralPhaseSample& target,
     std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions options)
 {
-    auto resolution = assess_resolution_finite(target, stencil, options);
+    auto resolution = assess_resolution(target, stencil, options);
     if (!resolution.admitted())
         throw PolyhedralResolutionRequired(resolution);
     if (target.gas_volume == 0 || target.carrier_volume == 0)
     {
-        auto result = solve_offset_finite(target, {1, 0, 0}, options);
+        auto result = solve_offset(target, {1, 0, 0}, options);
         result.resolution = resolution;
         return result;
     }

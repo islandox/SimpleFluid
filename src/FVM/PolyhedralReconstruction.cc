@@ -11,7 +11,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <vector>
-namespace SimpleFluid::VoF
+namespace SimpleFluid::VoF::Exact
 {
 namespace
 {
@@ -410,4 +410,4 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
         throw std::invalid_argument("PLIC physical plane-model defect exceeds admission bound.");
     return current.plane;
 }
-} // namespace SimpleFluid::VoF
+} // namespace SimpleFluid::VoF::Exact

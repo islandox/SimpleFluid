@@ -1,5 +1,7 @@
 add_library(SimpleFluidFVM SHARED
     GeneralVoF.cc
+    details/GeneralVoFExactTransport.inc
+    details/GeneralVoFExactTransfer.inc
     ExactPhaseTransfer.cc
     ExactFaceTransfer.cc
     PolyhedralReconstruction.cc

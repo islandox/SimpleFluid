@@ -1,14 +1,16 @@
 set(SIMPLEFLUID_SOLVER_SOURCES
     GeneralVoFSolver.cc
+    details/GeneralVoFExactSolver.inc
     VoFSolver.cc
     details/ConservativeVoFTransport.cc
+    details/ConservativeVoFExactTransport.inc
     details/VoFProjectionWorkspace.cc
     details/GeneralVoFPhiClosure.cc
-    details/GeneralVoFFinitePhiClosure.inc
+    details/GeneralVoFExactPhiClosure.inc
     details/GeneralVoFProjectionArithmetic.cc
     details/GeneralVoFExactPressure.cc
     details/GeneralVoFFlowWorkspace.cc
-    details/GeneralVoFFiniteProjection.inc
+    details/GeneralVoFExactProjection.inc
     details/GeneralVoFCurvature.cc
     details/GeneralVoFExactStorage.cc
     details/ConservativeVoFExactArithmetic.cc

@@ -14,6 +14,7 @@
 
 namespace SimpleFluid::detail
 {
+namespace Exact { struct GeneralVoFFlowWorkspace; }
 /** Immutable native geometry with physical-coordinate conditioned stencils.
  * Every operation is collective. It owns numerical workspaces, not accepted state.
  */
@@ -50,16 +51,9 @@ public:
     [[nodiscard]] std::vector<double> interpolate(const std::vector<Vector>& owned_velocity) const;
     [[nodiscard]] std::vector<Vector> viscous_force(
         const std::vector<Vector>& velocity, const std::vector<double>& viscosity) const;
-    /** Mutates caller-private candidates only; physical divergence accepts the solve. */
-    void project(std::vector<double>& face_velocity, std::vector<Vector>& velocity, std::vector<double>& pressure,
-        const std::vector<double>& density, const std::vector<double>& fraction, const std::vector<double>& curvature,
-        double dt, double surface_tension, const VoFSolverOptions& options, VoFStepDiagnostics& diagnostics,
-        GeneralVoFProjectionProvenance* arithmetic = nullptr,
-        std::optional<std::span<const Meshes::ExactGeometryMeasure>> physical_mass = std::nullopt,
-        const GeneralVoFProjectionClosureTopology* closure_topology = nullptr);
-    /** Separate bounded FP route; finite physical masses retain products below
+    /** Default bounded FP route; finite physical masses retain products below
      * binary64 range. No rational construction, measure or ledger fallback. */
-    void project_finite(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
+    void project(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
         std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
         const std::vector<double>& curvature, double dt, double surface_tension, const VoFSolverOptions& options,
         VoFStepDiagnostics& diagnostics, GeneralVoFFiniteProjectionProvenance* arithmetic = nullptr,
@@ -78,6 +72,7 @@ public:
     }
 
 private:
+    friend struct Exact::GeneralVoFFlowWorkspace;
     using Pack = DefaultTpetraTypes;
     using LO = Pack::local_ordinal_type;
     struct Face
@@ -121,4 +116,22 @@ private:
     [[nodiscard]] double maximum(double value) const;
     [[nodiscard]] std::vector<double> divergence(const std::vector<double>& velocity) const;
 };
+namespace Exact
+{
+struct SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFlowWorkspace
+{
+    using Vector = VoF::Vector;
+    using Pack = DefaultTpetraTypes;
+    using LO = Pack::local_ordinal_type;
+    using Face = detail::GeneralVoFFlowWorkspace::Face;
+    /** Mutates caller-private candidates only; physical divergence accepts the solve. */
+    static void project(detail::GeneralVoFFlowWorkspace& self, std::vector<double>& face_velocity,
+        std::vector<Vector>& velocity, std::vector<double>& pressure, const std::vector<double>& density,
+        const std::vector<double>& fraction, const std::vector<double>& curvature, double dt, double surface_tension,
+        const VoFSolverOptions& options, VoFStepDiagnostics& diagnostics,
+        GeneralVoFProjectionProvenance* arithmetic = nullptr,
+        std::optional<std::span<const Meshes::ExactGeometryMeasure>> physical_mass = std::nullopt,
+        const Exact::GeneralVoFProjectionClosureTopology* closure_topology = nullptr);
+};
+} // namespace Exact
 } // namespace SimpleFluid::detail
