@@ -90,6 +90,12 @@ public:
      * to the overlap map. Callback failure is agreed collectively before any
      * rank proceeds to another collective operation.
      *
+     * Native decomposed XY/Z handles retain their compact topology and compose
+     * an optional local permutation. Existing algebraic GIDs stay attached to
+     * physical cells, so owned maps may cease to be contiguous after this
+     * explicit selection; initial partition-time contiguous numbering is not
+     * repeated. Face and node identities/order remain unchanged.
+     *
      * @param parent Source mesh handle. Ownership is consumed; when any rank
      *        needs a permutation, the handle must be uniquely owned on every
      *        rank so existing fields cannot silently retain the old ordering.

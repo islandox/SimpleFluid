@@ -133,6 +133,9 @@ foreach(_region_procs IN ITEMS 2 4)
 endforeach()
 
 foreach(_semi_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME SemiStructuredDecomposedTopology_${_semi_ranks}procs
+        TARGET testDecomposedSemiStructuredTopology PROCS ${_semi_ranks}
+        LABELS "mpi;geometry;semi_structured;topology;empty_rank" TIMEOUT 120)
     simplefluid_add_mpi_test(NAME SemiStructuredDistributed_${_semi_ranks}procs
         TARGET testSemiStructuredDistributed PROCS ${_semi_ranks}
         LABELS "mpi;geometry;semi_structured;empty_rank" TIMEOUT 120)
@@ -141,3 +144,8 @@ foreach(_semi_ranks IN ITEMS 2 4)
         ARGS "--gtest_filter=PlanarALEMeshMotionTest.SemiStructuredAxialMotionPreservesXYTopologyAndSatisfiesGCL"
         LABELS "mpi;geometry;semi_structured;ale;empty_rank" TIMEOUT 120)
 endforeach()
+
+simplefluid_add_mpi_test(NAME SemiStructuredReordering_4procs
+    TARGET testMeshReorderingFactory PROCS 4
+    ARGS "--gtest_filter=MeshReorderingFactoryMultiRankTest.*SemiStructured*"
+    LABELS "mpi;geometry;semi_structured;mesh_reordering;empty_rank" TIMEOUT 120)

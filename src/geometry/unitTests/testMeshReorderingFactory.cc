@@ -5,10 +5,12 @@
 
 #include <gtest/gtest.h>
 
+#include "fields/FieldStored.hh"
 #include "geometry/MeshReorderingFactory.hh"
 #include "geometry/SolidSubdomain.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
+#include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "utils/testing_environment.hh"
 
@@ -147,13 +149,14 @@ void expect_cells_preserved(const std::map<GlobalOrdinal, CellIdentity>& before,
             faces.push_back(reordered.face_global_id(face));
         }
         std::vector<GlobalOrdinal> visited_faces;
-        reordered.visit_cell_faces(cell, [&](auto face, auto native_face, auto native_cell, const auto& native)
-        {
-            visited_faces.push_back(reordered.face_global_id(face));
-            EXPECT_DOUBLE_EQ(native.face_area(native_face), reordered.face_area(face));
-            const auto displacement = native.cell_centroid(native_cell) - expected.centroid;
-            EXPECT_DOUBLE_EQ(displacement.norm(), 0.0);
-        });
+        reordered.visit_cell_faces(cell,
+            [&](auto face, auto native_face, auto native_cell, const auto& native)
+            {
+                visited_faces.push_back(reordered.face_global_id(face));
+                EXPECT_DOUBLE_EQ(native.face_area(native_face), reordered.face_area(face));
+                const auto displacement = native.cell_centroid(native_cell) - expected.centroid;
+                EXPECT_DOUBLE_EQ(displacement.norm(), 0.0);
+            });
         EXPECT_EQ(visited_faces, faces);
         std::ranges::sort(faces);
         EXPECT_EQ(faces, expected.face_gids);
@@ -609,4 +612,121 @@ TEST(MeshReorderingFactoryTest, PartitionedXYOrderRejectsMissingExtraAndUnknownO
     EXPECT_THROW((void) Factory::partitioned_xy_order(topology, unknown), std::invalid_argument);
     const std::vector<std::size_t> valid{7};
     EXPECT_EQ(Factory::partitioned_xy_order(topology, valid), (std::vector<std::size_t>{0}));
+}
+
+TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeometryAlgebraicIDsAndGhostImports)
+{
+    using Native = SimpleFluid::Meshes::SemiStructuredXY_Z;
+    const auto comm = Tpetra::getDefaultComm();
+    for (const bool sparse_slab : {false, true})
+    {
+        SCOPED_TRACE(sparse_slab ? "one Z layer with empty slab owners" : "hybrid graph/slab owners");
+        SimpleFluid::Arr<Native::Vec3> points;
+        for (unsigned y = 0; y < 3; ++y)
+            for (unsigned x = 0; x < 4; ++x)
+                points.push_back({double(x) + .2 * y, double(y) + .05 * x, 0});
+        SimpleFluid::Arr<SimpleFluid::Arr<unsigned>> polygons;
+        for (unsigned x = 0; x < 3; ++x)
+            for (unsigned y = 0; y < 2; ++y)
+            {
+                const unsigned a = x + 4 * y;
+                polygons.push_back({a, a + 1, a + 5, a + 4});
+            }
+        const SimpleFluid::ArrReal z = sparse_slab ? SimpleFluid::ArrReal{0, .8} : SimpleFluid::ArrReal{0, .2, .9, 1.7};
+        const auto geometry = std::make_shared<Native>(points, polygons, z);
+        Handle::DistributionOptions options;
+        options.allow_empty_partitions = true;
+        options.ghost_layers = 1;
+        const auto ranks = std::size_t(comm->getSize());
+        options.xy_partitions = sparse_slab ? 1 : (ranks >= 2 && ranks % 2 == 0 ? 2 : ranks);
+        options.z_partitions = ranks / *options.xy_partitions;
+        auto parent = std::make_shared<Handle>(geometry, options);
+        EXPECT_TRUE(parent->owned_cell_map()->isContiguous());
+        EXPECT_TRUE(parent->owned_face_map()->isContiguous());
+        int local_empty = parent->num_owned_cells() == 0 ? 1 : 0, empty = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+        if (sparse_slab)
+            EXPECT_EQ(empty, comm->getSize() - 1);
+
+        const auto reorder = [&](SimpleFluid::SP<Handle> input)
+        {
+            const auto before = capture_cells(*input);
+            std::vector<GlobalOrdinal> previous_owned_gids;
+            for (std::size_t cell = 0; cell < input->num_owned_cells(); ++cell)
+                previous_owned_gids.push_back(input->owned_cell_map()->getGlobalElement(local(cell)));
+            std::vector<std::array<GlobalOrdinal, 3>> faces;
+            for (std::size_t face = 0; face < input->num_faces(); ++face)
+                faces.push_back({input->face_geometry_global_id(local(face)), input->face_global_id(local(face)),
+                    input->is_owned_face(local(face)) ? 1 : 0});
+            const auto total = geometry->num_cells();
+            std::vector<int> local_selected(total), selected(total);
+            for (std::size_t cell = input->num_owned_cells() / 2; cell < input->num_owned_cells(); ++cell)
+                local_selected[std::size_t(input->cell_geometry_global_id(local(cell)))] = 1;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(total), local_selected.data(), selected.data());
+            const auto owned = input->num_owned_cells();
+            const auto expected_selected = owned - owned / 2;
+            const auto* identity = input.get();
+            // Force a compatibility view before mutation so stale canonical
+            // indexers cannot conceal an incorrectly composed overlay.
+            static_cast<void>(input->indexer());
+            input->materialize_cell_faces();
+            const auto layout = Factory::selected_cells_first(std::move(input),
+                [selected](GlobalOrdinal canonical, const Vec3&) { return selected[std::size_t(canonical)] != 0; });
+            EXPECT_EQ(layout.mesh.get(), identity);
+            EXPECT_FALSE(layout.mesh->legacy_mesh());
+            EXPECT_EQ(layout.selected_owned_cells, expected_selected);
+            expect_cells_preserved(before, *layout.mesh);
+            EXPECT_TRUE(layout.mesh->owned_cell_map()->isOneToOne());
+            EXPECT_EQ(layout.mesh->num_faces(), faces.size());
+            double local_changed = 0, changed = 0;
+            for (std::size_t cell = 0; cell < layout.mesh->num_local_cells(); ++cell)
+            {
+                const auto lid = local(cell);
+                const auto canonical = layout.mesh->cell_geometry_global_id(lid);
+                const bool expected = selected[std::size_t(canonical)] != 0;
+                EXPECT_EQ(expected,
+                    layout.selected_owned_range().contains(cell) || layout.selected_ghost_range().contains(cell));
+                EXPECT_EQ(layout.mesh->indexer().cell_global_id(lid), canonical);
+                EXPECT_EQ(layout.mesh->overlap_cell_map()->getGlobalElement(lid), before.at(canonical).gid);
+                if (cell < layout.mesh->num_owned_cells())
+                    local_changed +=
+                        layout.mesh->owned_cell_map()->getGlobalElement(lid) != previous_owned_gids[cell] ? 1 : 0;
+            }
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_changed, &changed);
+            EXPECT_GT(changed, 0);
+            // Test a real selected-first permutation without requiring the
+            // resulting arbitrary ordered map to retain its initial contiguity.
+            for (std::size_t cell = 0; cell < layout.mesh->num_owned_cells(); ++cell)
+                if (cell < layout.selected_owned_cells)
+                    EXPECT_TRUE(selected[std::size_t(layout.mesh->cell_geometry_global_id(local(cell)))] != 0);
+            for (std::size_t face = 0; face < faces.size(); ++face)
+            {
+                EXPECT_EQ(layout.mesh->face_geometry_global_id(local(face)), faces[face][0]);
+                EXPECT_EQ(layout.mesh->face_global_id(local(face)), faces[face][1]);
+                EXPECT_EQ(layout.mesh->is_owned_face(local(face)), faces[face][2] != 0);
+            }
+            SimpleFluid::ScalarCellFieldStored<Pack> imported(layout.mesh, "algebraic_cell_probe");
+            SimpleFluid::ScalarFaceFieldStored<Pack> face_imported(layout.mesh, "algebraic_face_probe");
+            for (std::size_t cell = 0; cell < layout.mesh->num_owned_cells(); ++cell)
+                imported.set_owned_value(local(cell), double(layout.mesh->cell_global_id(local(cell))) + .125);
+            for (std::size_t face = 0; face < layout.mesh->num_owned_faces(); ++face)
+                face_imported.set_owned_value(local(face), double(layout.mesh->face_global_id(local(face))) + .25);
+            imported.sync_ghosts();
+            face_imported.sync_ghosts();
+            for (std::size_t cell = 0; cell < layout.mesh->num_local_cells(); ++cell)
+                EXPECT_DOUBLE_EQ(imported.local_value(local(cell)),
+                    double(before.at(layout.mesh->cell_geometry_global_id(local(cell))).gid) + .125);
+            for (std::size_t face = 0; face < layout.mesh->num_faces(); ++face)
+                EXPECT_DOUBLE_EQ(face_imported.local_value(local(face)), double(faces[face][1]) + .25);
+            return layout;
+        };
+        const auto original = capture_cells(*parent);
+        const auto first = reorder(std::move(parent));
+        // A fresh mutable handle copy owns the already selected overlay. The
+        // second selection must compose it, while the first handle stays valid.
+        auto repeated = std::make_shared<Handle>(*first.mesh);
+        const auto second = reorder(std::move(repeated));
+        expect_cells_preserved(original, *second.mesh);
+        expect_cells_preserved(original, *first.mesh);
+    }
 }

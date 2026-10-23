@@ -91,7 +91,7 @@ std::vector<int> global_cell_owners(const Handle& handle, const Semi& native)
     std::vector<int> local(native.num_cells()), owners(native.num_cells());
     for (std::size_t row = 0; row < handle.num_owned_cells(); ++row)
     {
-        const auto gid = static_cast<std::size_t>(handle.cell_global_id(static_cast<LO>(row)));
+        const auto gid = static_cast<std::size_t>(handle.cell_geometry_global_id(static_cast<LO>(row)));
         if (gid < local.size())
             local[gid] = comm->getRank() + 1;
     }
@@ -103,6 +103,85 @@ std::vector<int> global_cell_owners(const Handle& handle, const Semi& native)
         --owner;
     }
     return owners;
+}
+
+/** Verify contiguous owned algebraic maps and exact owner-to-ghost allocation by canonical geometry identity. */
+void verify_algebraic_maps(const Handle& handle, const Semi& native)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto ranks = static_cast<std::size_t>(comm->getSize());
+    const auto rank = static_cast<std::size_t>(comm->getRank());
+    EXPECT_TRUE(handle.owned_cell_map()->isContiguous());
+    EXPECT_TRUE(handle.owned_face_map()->isContiguous());
+    EXPECT_TRUE(handle.owned_cell_map()->isOneToOne());
+    EXPECT_TRUE(handle.owned_face_map()->isOneToOne());
+    EXPECT_EQ(handle.owned_cell_map()->getGlobalNumElements(), native.num_cells());
+    EXPECT_EQ(handle.owned_face_map()->getGlobalNumElements(), native.num_faces());
+    std::vector<GO> local_counts(2 * ranks), counts(2 * ranks);
+    local_counts[rank] = static_cast<GO>(handle.num_owned_cells());
+    local_counts[ranks + rank] = static_cast<GO>(handle.num_owned_faces());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, static_cast<int>(counts.size()), local_counts.data(), counts.data());
+    GO cell_prefix = 0, face_prefix = 0;
+    for (std::size_t preceding = 0; preceding < rank; ++preceding)
+    {
+        cell_prefix += counts[preceding];
+        face_prefix += counts[ranks + preceding];
+    }
+    std::vector<GO> local_cell_allocation(native.num_cells()), global_cell_allocation(native.num_cells());
+    std::vector<GO> local_face_allocation(native.num_faces()), global_face_allocation(native.num_faces());
+    for (std::size_t row = 0; row < handle.num_owned_cells(); ++row)
+    {
+        const auto lid = static_cast<LO>(row);
+        const auto algebraic = cell_prefix + static_cast<GO>(row);
+        const auto geometry = static_cast<std::size_t>(handle.cell_geometry_global_id(lid));
+        EXPECT_EQ(handle.cell_global_id(lid), algebraic);
+        EXPECT_EQ(handle.owned_cell_map()->getGlobalElement(lid), algebraic);
+        EXPECT_EQ(handle.overlap_cell_map()->getGlobalElement(lid), algebraic);
+        if (geometry < local_cell_allocation.size())
+            local_cell_allocation[geometry] = algebraic + 1;
+    }
+    for (std::size_t row = 0; row < handle.num_owned_faces(); ++row)
+    {
+        const auto lid = static_cast<LO>(row);
+        const auto algebraic = face_prefix + static_cast<GO>(row);
+        const auto geometry = static_cast<std::size_t>(handle.face_geometry_global_id(lid));
+        EXPECT_EQ(handle.face_global_id(lid), algebraic);
+        EXPECT_EQ(handle.owned_face_map()->getGlobalElement(lid), algebraic);
+        EXPECT_EQ(handle.overlap_face_map()->getGlobalElement(lid), algebraic);
+        if (geometry < local_face_allocation.size())
+            local_face_allocation[geometry] = algebraic + 1;
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, static_cast<int>(native.num_cells()), local_cell_allocation.data(),
+        global_cell_allocation.data());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, static_cast<int>(native.num_faces()), local_face_allocation.data(),
+        global_face_allocation.data());
+    for (const auto allocation : global_cell_allocation)
+        EXPECT_GT(allocation, 0);
+    for (const auto allocation : global_face_allocation)
+        EXPECT_GT(allocation, 0);
+    const auto& indexer = handle.indexer();
+    for (std::size_t row = 0; row < handle.num_local_cells(); ++row)
+    {
+        const auto lid = static_cast<LO>(row);
+        const auto geometry = static_cast<std::size_t>(handle.cell_geometry_global_id(lid));
+        const auto algebraic = handle.cell_global_id(lid);
+        EXPECT_EQ(handle.overlap_cell_map()->getGlobalElement(lid), algebraic);
+        EXPECT_EQ(handle.overlap_cell_map()->getLocalElement(algebraic), lid);
+        EXPECT_EQ(indexer.cell_global_id(lid), static_cast<GO>(geometry));
+        if (geometry < global_cell_allocation.size())
+            EXPECT_EQ(algebraic, global_cell_allocation[geometry] - 1);
+    }
+    for (std::size_t row = 0; row < handle.num_faces(); ++row)
+    {
+        const auto lid = static_cast<LO>(row);
+        const auto geometry = static_cast<std::size_t>(handle.face_geometry_global_id(lid));
+        const auto algebraic = handle.face_global_id(lid);
+        EXPECT_EQ(handle.overlap_face_map()->getGlobalElement(lid), algebraic);
+        EXPECT_EQ(handle.overlap_face_map()->getLocalElement(algebraic), lid);
+        EXPECT_EQ(indexer.face_global_id(lid), static_cast<GO>(geometry));
+        if (geometry < global_face_allocation.size())
+            EXPECT_EQ(algebraic, global_face_allocation[geometry] - 1);
+    }
 }
 
 std::vector<std::size_t> verify_hybrid_ownership(
@@ -160,6 +239,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
     options.ghost_layers = ghost_depth;
     options.allow_empty_partitions = true;
     const Handle handle(native, options);
+    verify_algebraic_maps(handle, *native);
     const auto owners = global_cell_owners(handle, *native);
     const auto xy_owners = verify_hybrid_ownership(handle, *native, owners);
     const auto xy_order = SimpleFluid::MeshReorderingFactory<Pack>::partitioned_xy_order(native->topology(), xy_owners);
@@ -177,7 +257,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
     for (std::size_t local = 0; local < handle.num_owned_cells(); ++local)
     {
         const auto lid = static_cast<LO>(local);
-        const auto gid = static_cast<std::size_t>(handle.cell_global_id(lid));
+        const auto gid = static_cast<std::size_t>(handle.cell_geometry_global_id(lid));
         owned_order.push_back(gid);
         if (gid < count)
         {
@@ -193,7 +273,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
     for (std::size_t local = 0; local < handle.num_local_cells(); ++local)
     {
         const auto lid = static_cast<LO>(local);
-        const auto gid = static_cast<std::size_t>(handle.cell_global_id(lid));
+        const auto gid = static_cast<std::size_t>(handle.cell_geometry_global_id(lid));
         overlap.insert(gid);
         EXPECT_EQ(handle.is_owned_cell(lid), local < owned_count);
         if (gid >= count)
@@ -209,7 +289,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
         Semi::Vec3 sum{};
         for (const auto face_lid : handle.faces(lid))
         {
-            const auto face_gid = static_cast<std::size_t>(handle.face_global_id(face_lid));
+            const auto face_gid = static_cast<std::size_t>(handle.face_geometry_global_id(face_lid));
             actual_faces.insert(face_gid);
             if (face_gid >= native->num_faces())
                 continue;
@@ -242,7 +322,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
         EXPECT_TRUE(std::ranges::is_sorted(owned_order, std::less{}, order_key));
         std::vector<std::size_t> ghost_order;
         for (std::size_t local = handle.num_owned_cells(); local < handle.num_local_cells(); ++local)
-            ghost_order.push_back(static_cast<std::size_t>(handle.cell_global_id(static_cast<LO>(local))));
+            ghost_order.push_back(static_cast<std::size_t>(handle.cell_geometry_global_id(static_cast<LO>(local))));
         EXPECT_TRUE(std::ranges::is_sorted(ghost_order, std::less{}, order_key));
     }
     const auto& indexer = handle.indexer();
@@ -256,7 +336,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
     for (std::size_t local = 0; local < handle.num_faces(); ++local)
     {
         const auto lid = static_cast<LO>(local);
-        const auto gid = static_cast<std::size_t>(handle.face_global_id(lid));
+        const auto gid = static_cast<std::size_t>(handle.face_geometry_global_id(lid));
         EXPECT_LT(gid, native->num_faces());
         if (gid >= native->num_faces())
             continue;
@@ -268,7 +348,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
         const auto neighbor = handle.neighbor_cell(lid);
         const auto native_owner = native->indexer().cell_ordinal(native->owner_cell(face));
         if (owner != Handle::invalid_local_id())
-            EXPECT_EQ(static_cast<std::size_t>(handle.cell_global_id(owner)), native_owner);
+            EXPECT_EQ(static_cast<std::size_t>(handle.cell_geometry_global_id(owner)), native_owner);
         const bool physically_exterior = native->neighbor_cell(face) == Semi::invalid_cell_id();
         EXPECT_EQ(handle.is_geometry_exterior_face(lid), physically_exterior);
         EXPECT_EQ(handle.is_boundary_face(lid), physically_exterior);
@@ -276,7 +356,7 @@ void verify_partition(const std::shared_ptr<Semi>& native, std::size_t ghost_dep
         if (!physically_exterior)
         {
             if (neighbor != Handle::invalid_local_id())
-                EXPECT_EQ(static_cast<std::size_t>(handle.cell_global_id(neighbor)),
+                EXPECT_EQ(static_cast<std::size_t>(handle.cell_geometry_global_id(neighbor)),
                     native->indexer().cell_ordinal(native->neighbor_cell(face)));
             if ((owner != Handle::invalid_local_id() && handle.is_owned_cell(owner)) !=
                 (neighbor != Handle::invalid_local_id() && handle.is_owned_cell(neighbor)))
@@ -392,6 +472,7 @@ TEST(SemiStructuredDistributedTest, MoreRanksThanOneCellRetainsEmptyMapsAndOwned
     EXPECT_EQ(global_sum(handle.num_owned_cells() == 0 ? 1 : 0), ranks - 1);
     EXPECT_EQ(global_sum(static_cast<int>(handle.num_owned_cells())), 1);
     EXPECT_EQ(global_sum(static_cast<int>(handle.num_owned_faces())), 5);
+    verify_algebraic_maps(handle, *native);
     EXPECT_NEAR(global_sum(handle.num_owned_cells() ? handle.cell_volume(0) : 0.), 3., 2e-13);
     const auto output = handle.vtu_topology();
     EXPECT_EQ(output->cell_offsets.size(), handle.num_owned_cells());
@@ -470,6 +551,7 @@ TEST(SemiStructuredDistributedTest, ShuffledXYGraphCutsAndFactoryReorderingPrese
     Handle::DistributionOptions options{.ghost_layers = 2, .xy_partitions = ranks, .z_partitions = 1};
     verify_partition(native, 2, options, 60.);
     const Handle handle(native, options);
+    verify_algebraic_maps(handle, *native);
     const auto owners = global_cell_owners(handle, *native);
     const auto xy_owners = verify_hybrid_ownership(handle, *native, owners);
     const std::size_t nxy = native->indexer().num_cells_per_layer;
@@ -493,9 +575,18 @@ TEST(SemiStructuredDistributedTest, ShuffledXYGraphCutsAndFactoryReorderingPrese
         EXPECT_LE(cut, 2 * (ranks - 1));
         std::vector<GO> owned_order;
         for (std::size_t row = 0; row < handle.num_owned_cells(); ++row)
-            owned_order.push_back(handle.cell_global_id(static_cast<LO>(row)));
+            owned_order.push_back(handle.cell_geometry_global_id(static_cast<LO>(row)));
         EXPECT_GT(global_sum(!std::ranges::is_sorted(owned_order) ? 1 : 0), 0);
         EXPECT_GT(global_sum(handle.has_reordered_cells() ? 1 : 0), 0);
+        int renumbered_cells = 0, renumbered_faces = 0;
+        for (std::size_t row = 0; row < handle.num_owned_cells(); ++row)
+            renumbered_cells +=
+                handle.cell_global_id(static_cast<LO>(row)) != handle.cell_geometry_global_id(static_cast<LO>(row));
+        for (std::size_t row = 0; row < handle.num_owned_faces(); ++row)
+            renumbered_faces +=
+                handle.face_global_id(static_cast<LO>(row)) != handle.face_geometry_global_id(static_cast<LO>(row));
+        EXPECT_GT(global_sum(renumbered_cells), 0);
+        EXPECT_GT(global_sum(renumbered_faces), 0);
     }
 }
 
@@ -563,9 +654,17 @@ TEST(SemiStructuredDistributedTest, RepeatedHybridConstructionHasDeterministicMa
     EXPECT_EQ(first.num_faces(), second.num_faces());
     EXPECT_EQ(first.num_owned_faces(), second.num_owned_faces());
     for (std::size_t row = 0; row < first.num_local_cells(); ++row)
+    {
+        EXPECT_EQ(
+            first.cell_geometry_global_id(static_cast<LO>(row)), second.cell_geometry_global_id(static_cast<LO>(row)));
         EXPECT_EQ(first.cell_global_id(static_cast<LO>(row)), second.cell_global_id(static_cast<LO>(row)));
+    }
     for (std::size_t row = 0; row < first.num_faces(); ++row)
+    {
+        EXPECT_EQ(
+            first.face_geometry_global_id(static_cast<LO>(row)), second.face_geometry_global_id(static_cast<LO>(row)));
         EXPECT_EQ(first.face_global_id(static_cast<LO>(row)), second.face_global_id(static_cast<LO>(row)));
+    }
     EXPECT_EQ(global_cell_owners(first, *native), global_cell_owners(second, *native));
     EXPECT_EQ(first.visit([](const auto& geometry) -> const void* { return &geometry; }), native.get());
 }

@@ -225,6 +225,57 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
     append_group(owned_count, selected.size(), true);
     append_group(owned_count, selected.size(), false);
 
+    if (parent->d_semi_structured_topology)
+    {
+        // The compact decomposition describes the original local XY/Z order.
+        // An explicit later selection composes only an opt-in local overlay;
+        // algebraic GIDs remain attached to the same physical cells.
+        std::vector<std::size_t> permutation(reordered_to_parent.size()), inverse(reordered_to_parent.size());
+        std::vector<global_ordinal_type> owned_gids, overlap_gids;
+        owned_gids.reserve(owned_count);
+        overlap_gids.reserve(reordered_to_parent.size());
+        bool overlay_identity = true;
+        for (std::size_t local = 0; local < reordered_to_parent.size(); ++local)
+        {
+            const auto previous = reordered_to_parent[local];
+            const auto compact = parent->d_semi_cell_permutation.empty()
+                                     ? static_cast<std::size_t>(previous)
+                                     : parent->d_semi_cell_permutation[static_cast<std::size_t>(previous)];
+            permutation[local] = compact;
+            inverse[compact] = local;
+            overlay_identity = overlay_identity && compact == local;
+            const auto algebraic = parent->overlap_cell_map()->getGlobalElement(previous);
+            overlap_gids.push_back(algebraic);
+            if (local < owned_count)
+                owned_gids.push_back(algebraic);
+        }
+        auto owned_map = parent->make_map(comm, owned_gids);
+        auto overlap_map = parent->make_map(comm, overlap_gids);
+        if (overlay_identity)
+        {
+            parent->d_semi_cell_permutation.clear();
+            parent->d_semi_cell_inverse_permutation.clear();
+        }
+        else
+        {
+            parent->d_semi_cell_permutation = std::move(permutation);
+            parent->d_semi_cell_inverse_permutation = std::move(inverse);
+        }
+        parent->d_owned_cell_map = std::move(owned_map);
+        parent->d_overlap_cell_map = std::move(overlap_map);
+        parent->d_serial_identity = false;
+        parent->d_map_indexing = true;
+        if (!local_identity)
+        {
+            parent->d_cells_reordered = true;
+            parent->d_indexer = typename mesh_type::indexer_type{};
+            parent->d_legacy_indexer_materialized = false;
+            if (!parent->d_cell_face_offsets.empty())
+                parent->initialize_cell_faces();
+        }
+        return {std::move(parent), selected_owned, selected_ghost};
+    }
+
     // Arbitrary reordering explicitly opts into a stored permutation/indexer.
     if (parent->d_serial_identity || parent->d_map_indexing)
     {

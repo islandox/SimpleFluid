@@ -99,6 +99,11 @@ foreach(index RANGE ${last_symbol})
     if(name MATCHES "^SimpleFluid::detail::DICPreconditioner<.*>[ ]*::(DICPreconditioner|~DICPreconditioner|apply|getDomainMap|getRangeMap)([(]|$)")
         continue()
     endif()
+    if(name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(view|source_entity|position_in_view|lookup|band_for_local)([(]|$)"
+       OR name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(View|Group)::"
+       OR name MATCHES "^SimpleFluid::MeshHandle<.*>[ ]*::initialize_contiguous_semi_structured_maps([(]|$)")
+        message(FATAL_ERROR "Private mesh implementation exported: ${name}")
+    endif()
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::(FVM::)?detail::")
         message(FATAL_ERROR "Private implementation exported: ${name}")
     endif()
@@ -153,6 +158,17 @@ foreach(mesh IN ITEMS Mesh MeshHandle)
     endif()
     if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::FVM::TransportGeometryCache<SimpleFluid::${mesh}<[^\n]+::refresh[(][^\n]*shared_ptr<SimpleFluid::FVM::TransportGeometryCache<SimpleFluid::${mesh}<[^\n]+::SharedGeometry const>[)](\n|$)")
         message(FATAL_ERROR "Missing compiled shared geometry refresh for ${mesh}")
+    endif()
+endforeach()
+
+# The Mesh archive's decomposition implementation is linked into the FVM DSO.
+# Keep its declared public lookups available to downstream native-mesh users.
+foreach(method IN ITEMS
+        DecomposedSemiStructuredTopology source_cell source_face source_node
+        cell_local_id face_local_id node_local_id cell_faces owner_cell neighbor_cell
+        boundary_id view_source_ids storage_bytes lookup_storage_estimate)
+    if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::Meshes::DecomposedSemiStructuredTopology::${method}([(]|\n|$)")
+        message(FATAL_ERROR "Missing compiled decomposed-topology API: ${method}")
     endif()
 endforeach()
 

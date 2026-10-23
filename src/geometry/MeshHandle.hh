@@ -20,6 +20,7 @@
 #include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/mesh/STKMeshAdapter.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
+#include "geometry/mesh/DecomposedSemiStructuredTopology.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
 #include "geometry/mesh/EntityRange.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -181,6 +182,16 @@ public:
         if (!std::holds_alternative<SemiStructuredPtr>(d_mesh))
             throw std::invalid_argument("XY/Z decomposition requires a SemiStructuredXY_Z handle.");
         return d_semi_structured_decomposition;
+    }
+
+    /** Read-only compact topology in construction order; null for serial identity and other families.
+     * A later selected_cells_first overlay changes field rows; use this handle's
+     * geometry accessors to apply that row permutation.
+     */
+    [[nodiscard]] SP<const Meshes::DecomposedSemiStructuredTopology>
+    decomposed_semi_structured_topology() const noexcept
+    {
+        return d_semi_structured_topology;
     }
 
     static constexpr int invalid_boundary_id = -1;
@@ -387,16 +398,11 @@ public:
      */
     [[nodiscard]] const void* geometry_identity() const noexcept
     {
-        return std::visit(
-            [](const auto& mesh) noexcept -> const void*
-            {
-                return mesh.get();
-            },
-            d_mesh);
+        return std::visit([](const auto& mesh) noexcept -> const void* { return mesh.get(); }, d_mesh);
     }
 
     /**
-     * @brief Return the local/global indexer.
+     * @brief Return the compatibility indexer using canonical geometry IDs.
      *
      * Legacy meshes use their existing ordinal-indexed storage directly.
      * Calling this compatibility accessor materializes the otherwise-unused
@@ -410,7 +416,8 @@ public:
         }
         if (d_serial_identity && d_indexer.num_local_cells() == 0)
         {
-            std::vector<global_ordinal_type> cells(d_serial_counts[0]), faces(d_serial_counts[1]), nodes(d_serial_counts[2]);
+            std::vector<global_ordinal_type> cells(d_serial_counts[0]), faces(d_serial_counts[1]),
+                nodes(d_serial_counts[2]);
             std::iota(cells.begin(), cells.end(), global_ordinal_type{});
             std::iota(faces.begin(), faces.end(), global_ordinal_type{});
             std::iota(nodes.begin(), nodes.end(), global_ordinal_type{});
@@ -420,10 +427,20 @@ public:
         {
             std::vector<global_ordinal_type> owned, ghost, faces, overlap;
             for (size_t c = 0; c < num_local_cells(); ++c)
-                (c < num_owned_cells() ? owned : ghost).push_back(d_overlap_cell_map->getGlobalElement(checked_local(c)));
+                (c < num_owned_cells() ? owned : ghost).push_back(cell_geometry_global_id(checked_local(c)));
             for (size_t f = 0; f < num_faces(); ++f)
-                (f < num_owned_faces() ? faces : overlap).push_back(d_overlap_face_map->getGlobalElement(checked_local(f)));
-            d_indexer = indexer_type(std::move(owned), std::move(ghost), std::move(faces), std::move(overlap), d_node_global_ids);
+                (f < num_owned_faces() ? faces : overlap).push_back(face_geometry_global_id(checked_local(f)));
+            auto nodes = d_node_global_ids;
+            if (d_semi_structured_topology)
+            {
+                nodes.reserve(d_semi_structured_topology->num_local_nodes());
+                const auto& source = d_semi_structured_topology->source_topology().indexer();
+                for (size_t n = 0; n < d_semi_structured_topology->num_local_nodes(); ++n)
+                    nodes.push_back(static_cast<global_ordinal_type>(
+                        source.node_ordinal(d_semi_structured_topology->source_node(n))));
+            }
+            d_indexer = indexer_type(
+                std::move(owned), std::move(ghost), std::move(faces), std::move(overlap), std::move(nodes));
         }
         return d_indexer;
     }
@@ -598,6 +615,7 @@ public:
     size_t spatial_dimension() const noexcept { return 3; }
     size_t num_owned_cells() const noexcept
     {
+        if (d_semi_structured_topology) return d_semi_structured_topology->num_owned_cells();
         if (const auto legacy = legacy_mesh())
         {
             return legacy->num_owned_cells();
@@ -606,6 +624,7 @@ public:
     }
     size_t num_local_cells() const noexcept
     {
+        if (d_semi_structured_topology) return d_semi_structured_topology->num_local_cells();
         if (const auto legacy = legacy_mesh())
         {
             return legacy->num_local_cells();
@@ -615,6 +634,7 @@ public:
     size_t num_cells() const noexcept { return num_local_cells(); }
     size_t num_owned_faces() const noexcept
     {
+        if (d_semi_structured_topology) return d_semi_structured_topology->num_owned_faces();
         if (const auto legacy = legacy_mesh())
         {
             const auto map = legacy->owned_face_map();
@@ -624,6 +644,7 @@ public:
     }
     size_t num_faces() const noexcept
     {
+        if (d_semi_structured_topology) return d_semi_structured_topology->num_local_faces();
         if (const auto legacy = legacy_mesh())
         {
             return legacy->num_faces();
@@ -646,23 +667,23 @@ public:
         check_face(face_lid);
         if (const auto legacy = legacy_mesh())
         {
-            return legacy->is_owned_face(
-                checked_local(static_cast<size_t>(
-                    geometry_face_lid(face_lid))));
+            return legacy->is_owned_face(checked_local(static_cast<size_t>(geometry_face_lid(face_lid))));
         }
         return static_cast<size_t>(face_lid) < num_owned_faces();
     }
 
+    /** Algebraic cell ID in the field maps; distinct from canonical geometry identity. */
     global_ordinal_type cell_global_id(local_ordinal_type cell_lid) const
     {
         check_cell(cell_lid);
         if (const auto legacy = legacy_mesh())
         {
             return legacy->mesh_gid_to_tpetra_gid(
-                legacy->cell_global_id(checked_local(static_cast<size_t>(
-                    geometry_cell_lid(cell_lid)))));
+                legacy->cell_global_id(checked_local(static_cast<size_t>(geometry_cell_lid(cell_lid)))));
         }
-        return d_serial_identity ? static_cast<global_ordinal_type>(cell_lid) : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(cell_lid) : d_indexer.cell_global_id(cell_lid));
+        return d_serial_identity ? static_cast<global_ordinal_type>(cell_lid)
+                                 : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(cell_lid)
+                                                   : d_indexer.cell_global_id(cell_lid));
     }
 
     /**
@@ -672,29 +693,42 @@ public:
      * map ID and remains attached to the same geometric cell after
      * repartitioning.
      */
-    global_ordinal_type cell_geometry_global_id(
-        local_ordinal_type cell_lid) const
+    global_ordinal_type cell_geometry_global_id(local_ordinal_type cell_lid) const
     {
         check_cell(cell_lid);
         if (const auto legacy = legacy_mesh())
         {
-            return legacy->cell_global_id(
-                checked_local(static_cast<size_t>(
-                    geometry_cell_lid(cell_lid))));
+            return legacy->cell_global_id(checked_local(static_cast<size_t>(geometry_cell_lid(cell_lid))));
         }
-        return d_serial_identity ? static_cast<global_ordinal_type>(cell_lid) : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(cell_lid) : d_indexer.cell_global_id(cell_lid));
+        if (d_semi_structured_topology)
+            return geometry_cell_lid(cell_lid);
+        return d_serial_identity ? static_cast<global_ordinal_type>(cell_lid)
+                                 : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(cell_lid)
+                                                   : d_indexer.cell_global_id(cell_lid));
     }
 
+    /** Algebraic face ID in the field maps. Initial distributed XY/Z owned
+     * IDs are rank-contiguous; later explicit local reordering preserves IDs.
+     */
     global_ordinal_type face_global_id(local_ordinal_type face_lid) const
     {
         check_face(face_lid);
         if (const auto legacy = legacy_mesh())
         {
-            return legacy->face_global_id(
-                checked_local(static_cast<size_t>(
-                    geometry_face_lid(face_lid))));
+            return legacy->face_global_id(checked_local(static_cast<size_t>(geometry_face_lid(face_lid))));
         }
-        return d_serial_identity ? static_cast<global_ordinal_type>(face_lid) : (d_map_indexing ? d_overlap_face_map->getGlobalElement(face_lid) : d_indexer.face_global_id(face_lid));
+        return d_serial_identity ? static_cast<global_ordinal_type>(face_lid)
+                                 : (d_map_indexing ? d_overlap_face_map->getGlobalElement(face_lid)
+                                                   : d_indexer.face_global_id(face_lid));
+    }
+
+    /** @brief Partition-independent source topology identifier of a face. */
+    global_ordinal_type face_geometry_global_id(local_ordinal_type face_lid) const
+    {
+        check_face(face_lid);
+        if (const auto legacy = legacy_mesh())
+            return legacy->face_global_id(checked_local(static_cast<size_t>(geometry_face_lid(face_lid))));
+        return d_semi_structured_topology ? geometry_face_lid(face_lid) : face_global_id(face_lid);
     }
 
     real_t cell_volume(local_ordinal_type cell_lid) const;
@@ -729,42 +763,60 @@ public:
     }
     size_t connectivity_storage_bytes() const noexcept
     {
-        return d_cell_face_offsets.capacity() * sizeof(size_t)
-            + d_cell_face_lids.capacity() * sizeof(local_ordinal_type);
+        return d_cell_face_offsets.capacity() * sizeof(size_t) +
+               d_cell_face_lids.capacity() * sizeof(local_ordinal_type);
     }
     bool has_materialized_connectivity() const noexcept { return !d_cell_face_offsets.empty(); }
     /** @brief Mesh capacities and separate map/tree estimates; field/operator storage excluded. */
     Meshes::MeshStorageReport storage_report() const
     {
-        auto report = visit([](const auto& mesh) -> Meshes::MeshStorageReport
-        {
-            if constexpr (requires { mesh.storage_report(); }) return mesh.storage_report();
-            else if constexpr (requires { mesh.topology_storage_bytes(); mesh.geometry_storage_bytes(); })
+        auto report = visit(
+            [](const auto& mesh) -> Meshes::MeshStorageReport
             {
-                size_t object_bytes = sizeof(mesh);
-                // Native topology reports already count their embedded template.
-                if constexpr (requires { mesh.topology(); }) object_bytes -= sizeof(mesh.topology());
-                return {.topology = mesh.topology_storage_bytes(), .geometry = mesh.geometry_storage_bytes(), .objects = object_bytes};
-            }
-            else return {};
-        });
+                if constexpr (requires { mesh.storage_report(); })
+                    return mesh.storage_report();
+                else if constexpr (requires {
+                                       mesh.topology_storage_bytes();
+                                       mesh.geometry_storage_bytes();
+                                   })
+                {
+                    size_t object_bytes = sizeof(mesh);
+                    // Native topology reports already count their embedded template.
+                    if constexpr (requires { mesh.topology(); })
+                        object_bytes -= sizeof(mesh.topology());
+                    return {.topology = mesh.topology_storage_bytes(),
+                        .geometry = mesh.geometry_storage_bytes(),
+                        .objects = object_bytes};
+                }
+                else
+                    return {};
+            });
         report.objects += sizeof(*this);
         report.compatibility += connectivity_storage_bytes();
-        report.indexing += d_indexer.vector_storage_bytes() + d_node_global_ids.capacity() * sizeof(global_ordinal_type)
-            + d_cell_geometry_lids.capacity() * sizeof(global_ordinal_type)
-            + (d_cell_local_lids_by_geometry.capacity() + d_legacy_face_geometry_lids.capacity() + d_legacy_face_local_lids.capacity()) * sizeof(local_ordinal_type);
+        report.indexing += d_indexer.vector_storage_bytes() +
+                           d_node_global_ids.capacity() * sizeof(global_ordinal_type) +
+                           d_cell_geometry_lids.capacity() * sizeof(global_ordinal_type) +
+                           (d_cell_local_lids_by_geometry.capacity() + d_legacy_face_geometry_lids.capacity() +
+                               d_legacy_face_local_lids.capacity()) *
+                               sizeof(local_ordinal_type);
         report.indexing_estimate += d_indexer.lookup_storage_estimate();
-        for (const auto& [id, batch] : d_boundary_batches) report.boundaries += batch.face_lids.capacity() * sizeof(local_ordinal_type);
+        for (const auto& [id, batch] : d_boundary_batches)
+            report.boundaries += batch.face_lids.capacity() * sizeof(local_ordinal_type);
         // ID-payload estimate only. Contiguous maps may represent these IDs
         // arithmetically; Tpetra allocations and hash overhead are opaque here.
-        report.required_maps_estimate = (num_owned_cells() + num_local_cells() + num_owned_faces() + num_faces()
-            + d_boundary_face_map->getLocalNumElements()) * sizeof(global_ordinal_type);
+        report.required_maps_estimate = (num_owned_cells() + num_local_cells() + num_owned_faces() + num_faces() +
+                                            d_boundary_face_map->getLocalNumElements()) *
+                                        sizeof(global_ordinal_type);
+        if (d_semi_structured_topology)
+        {
+            report.topology += d_semi_structured_topology->storage_bytes();
+            report.indexing_estimate += d_semi_structured_topology->lookup_storage_estimate();
+        }
+        report.compatibility +=
+            (d_semi_cell_permutation.capacity() + d_semi_cell_inverse_permutation.capacity()) * sizeof(size_t);
         return report;
     }
-    bool has_materialized_indexer() const noexcept
-    {
-        return d_indexer.num_local_cells() != 0;
-    }
+    bool has_materialized_indexer() const noexcept { return d_indexer.num_local_cells() != 0; }
     local_ordinal_type owner_cell(local_ordinal_type face_lid) const;
     local_ordinal_type neighbor_cell(local_ordinal_type face_lid) const;
     local_ordinal_type opposite_cell(local_ordinal_type face_lid,
@@ -912,65 +964,68 @@ private:
         return result;
     }
 
-    SIMPLEFLUID_LOCAL std::string local_output_filename(
-        const std::string& filename) const;
+    SIMPLEFLUID_LOCAL std::string local_output_filename(const std::string& filename) const;
 
     SIMPLEFLUID_LOCAL void add_geometry_cell_data(VTUWriter& writer) const;
 
-    template<class MeshType>
-    SIMPLEFLUID_LOCAL VTUWriter::VectorData collect_vtu_points(
-        const MeshType& mesh) const;
+    template<class MeshType> SIMPLEFLUID_LOCAL VTUWriter::VectorData collect_vtu_points(const MeshType& mesh) const;
 
-    SIMPLEFLUID_LOCAL void write_vtu(
-        const std::string& filename,
-        VTUWriter::TopologyHandle topology) const;
+    SIMPLEFLUID_LOCAL void write_vtu(const std::string& filename, VTUWriter::TopologyHandle topology) const;
 
-    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle legacy_vtu_topology(
-        const STKAdapter& mesh) const;
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle legacy_vtu_topology(const STKAdapter& mesh) const;
 
     template<class MeshType>
-    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle orthogonal_vtu_topology(
-        const MeshType& mesh) const;
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle orthogonal_vtu_topology(const MeshType& mesh) const;
 
-    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle semi_structured_vtu_topology(
-        const SemiStructured& mesh) const;
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle semi_structured_vtu_topology(const SemiStructured& mesh) const;
 
-    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle unstructured_vtu_topology(
-        const Unstructured& mesh) const;
+    SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle unstructured_vtu_topology(const Unstructured& mesh) const;
 
-    SIMPLEFLUID_LOCAL global_ordinal_type geometry_cell_lid(
-        local_ordinal_type local_id) const
+    SIMPLEFLUID_LOCAL global_ordinal_type geometry_cell_lid(local_ordinal_type local_id) const
     {
         check_cell(local_id);
         if (!d_cell_geometry_lids.empty())
         {
             return d_cell_geometry_lids[static_cast<size_t>(local_id)];
         }
-        if (d_serial_identity || std::holds_alternative<UnstructuredPtr>(d_mesh)
-            || is_stk())
+        if (d_serial_identity || std::holds_alternative<UnstructuredPtr>(d_mesh) || is_stk())
         {
             return static_cast<global_ordinal_type>(local_id);
         }
-        return d_serial_identity ? static_cast<global_ordinal_type>(local_id) : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(local_id) : d_indexer.cell_global_id(local_id));
+        if (d_semi_structured_topology)
+        {
+            const size_t local = static_cast<size_t>(local_id);
+            const auto base = d_semi_cell_permutation.empty() ? local : d_semi_cell_permutation[local];
+            return static_cast<global_ordinal_type>(
+                d_semi_structured_topology->source_topology().indexer().cell_ordinal(
+                    d_semi_structured_topology->source_cell(base)));
+        }
+        return d_serial_identity ? static_cast<global_ordinal_type>(local_id)
+                                 : (d_map_indexing ? d_overlap_cell_map->getGlobalElement(local_id)
+                                                   : d_indexer.cell_global_id(local_id));
     }
 
-    SIMPLEFLUID_LOCAL global_ordinal_type geometry_face_lid(
-        local_ordinal_type local_id) const
+    SIMPLEFLUID_LOCAL global_ordinal_type geometry_face_lid(local_ordinal_type local_id) const
     {
         check_face(local_id);
         if (is_stk())
         {
             const auto local = static_cast<size_t>(local_id);
             return d_legacy_face_geometry_lids.empty()
-                ? static_cast<global_ordinal_type>(local)
-                : static_cast<global_ordinal_type>(
-                      d_legacy_face_geometry_lids[local]);
+                       ? static_cast<global_ordinal_type>(local)
+                       : static_cast<global_ordinal_type>(d_legacy_face_geometry_lids[local]);
         }
         if (d_serial_identity || std::holds_alternative<UnstructuredPtr>(d_mesh))
         {
             return static_cast<global_ordinal_type>(local_id);
         }
-        return d_serial_identity ? static_cast<global_ordinal_type>(local_id) : (d_map_indexing ? d_overlap_face_map->getGlobalElement(local_id) : d_indexer.face_global_id(local_id));
+        if (d_semi_structured_topology)
+            return static_cast<global_ordinal_type>(
+                d_semi_structured_topology->source_topology().indexer().face_ordinal(
+                    d_semi_structured_topology->source_face(static_cast<size_t>(local_id))));
+        return d_serial_identity ? static_cast<global_ordinal_type>(local_id)
+                                 : (d_map_indexing ? d_overlap_face_map->getGlobalElement(local_id)
+                                                   : d_indexer.face_global_id(local_id));
     }
 
     template<class Function>
@@ -1042,6 +1097,8 @@ private:
         SP<const MeshType> mesh, DistributionOptions options);
 
     SIMPLEFLUID_LOCAL void initialize_semi_structured(SemiStructuredPtr mesh, DistributionOptions options);
+    SIMPLEFLUID_LOCAL void initialize_contiguous_semi_structured_maps(
+        const Teuchos::RCP<const typename Pack::comm_type>& comm);
     SIMPLEFLUID_LOCAL void initialize_composite(MultiRegionPtr mesh, DistributionOptions options);
     SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle composite_vtu_topology(const MultiRegion& mesh) const;
 
@@ -1197,29 +1254,36 @@ private:
      * @returns The local ordinal, or invalid_local_id() if not locally
      *          available.
      */
-    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_cell(
-        size_t geometry_lid) const noexcept
+    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_cell(size_t geometry_lid) const noexcept
     {
         if (!d_cell_local_lids_by_geometry.empty())
         {
-            return geometry_lid < d_cell_local_lids_by_geometry.size()
-                ? d_cell_local_lids_by_geometry[geometry_lid]
-                : invalid_local_id();
+            return geometry_lid < d_cell_local_lids_by_geometry.size() ? d_cell_local_lids_by_geometry[geometry_lid]
+                                                                       : invalid_local_id();
         }
-        if (d_serial_identity || std::holds_alternative<UnstructuredPtr>(d_mesh)
-            || is_stk())
+        if (d_serial_identity || std::holds_alternative<UnstructuredPtr>(d_mesh) || is_stk())
         {
-            if (geometry_lid >= num_local_cells()
-                || geometry_lid > static_cast<size_t>(
-                    std::numeric_limits<local_ordinal_type>::max()))
+            if (geometry_lid >= num_local_cells() ||
+                geometry_lid > static_cast<size_t>(std::numeric_limits<local_ordinal_type>::max()))
             {
                 return invalid_local_id();
             }
             return static_cast<local_ordinal_type>(geometry_lid);
         }
-        if (d_map_indexing) return d_overlap_cell_map->getLocalElement(static_cast<global_ordinal_type>(geometry_lid));
-        return d_indexer.cell_local_id(
-            static_cast<global_ordinal_type>(geometry_lid));
+        if (d_semi_structured_topology)
+        {
+            const auto& source = d_semi_structured_topology->source_topology().indexer();
+            if (geometry_lid >= source.total_cells())
+                return invalid_local_id();
+            const auto base = d_semi_structured_topology->cell_local_id(source.cell_id(geometry_lid));
+            if (base == Meshes::DecomposedSemiStructuredTopology::invalid_local_id())
+                return invalid_local_id();
+            return static_cast<local_ordinal_type>(
+                d_semi_cell_inverse_permutation.empty() ? base : d_semi_cell_inverse_permutation[base]);
+        }
+        if (d_map_indexing)
+            return d_overlap_cell_map->getLocalElement(static_cast<global_ordinal_type>(geometry_lid));
+        return d_indexer.cell_local_id(static_cast<global_ordinal_type>(geometry_lid));
     }
 
     /**
@@ -1227,30 +1291,34 @@ private:
      * @returns The local ordinal, or invalid_local_id() if not locally
      *          available.
      */
-    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_face(
-        size_t geometry_lid) const noexcept
+    SIMPLEFLUID_LOCAL local_ordinal_type geometry_to_local_face(size_t geometry_lid) const noexcept
     {
         if (is_stk())
         {
-            if (geometry_lid >= num_faces()
-                || geometry_lid > static_cast<size_t>(
-                    std::numeric_limits<local_ordinal_type>::max()))
+            if (geometry_lid >= num_faces() ||
+                geometry_lid > static_cast<size_t>(std::numeric_limits<local_ordinal_type>::max()))
             {
                 return invalid_local_id();
             }
-            return d_legacy_face_local_lids.empty()
-                ? static_cast<local_ordinal_type>(geometry_lid)
-                : d_legacy_face_local_lids[geometry_lid];
+            return d_legacy_face_local_lids.empty() ? static_cast<local_ordinal_type>(geometry_lid)
+                                                    : d_legacy_face_local_lids[geometry_lid];
         }
         if (d_serial_identity || std::holds_alternative<UnstructuredPtr>(d_mesh))
         {
-            if (geometry_lid >= num_faces()
-                || geometry_lid > static_cast<size_t>(
-                    std::numeric_limits<local_ordinal_type>::max()))
+            if (geometry_lid >= num_faces() ||
+                geometry_lid > static_cast<size_t>(std::numeric_limits<local_ordinal_type>::max()))
             {
                 return invalid_local_id();
             }
             return static_cast<local_ordinal_type>(geometry_lid);
+        }
+        if (d_semi_structured_topology)
+        {
+            const auto& source = d_semi_structured_topology->source_topology().indexer();
+            if (geometry_lid >= source.total_faces()) return invalid_local_id();
+            const auto local = d_semi_structured_topology->face_local_id(source.face_id(geometry_lid));
+            return local == Meshes::DecomposedSemiStructuredTopology::invalid_local_id() ? invalid_local_id() :
+                static_cast<local_ordinal_type>(local);
         }
         if (d_map_indexing) return d_overlap_face_map->getLocalElement(static_cast<global_ordinal_type>(geometry_lid));
         return d_indexer.face_local_id(
@@ -1275,6 +1343,8 @@ private:
     std::vector<local_ordinal_type> d_cell_face_lids;
     std::unordered_map<int, std::string> d_boundary_names;
     std::unordered_map<int, BoundaryFaceBatch> d_boundary_batches;
+    SP<const Meshes::DecomposedSemiStructuredTopology> d_semi_structured_topology;
+    std::vector<size_t> d_semi_cell_permutation, d_semi_cell_inverse_permutation;
     Teuchos::RCP<const map_type> d_owned_cell_map;
     Teuchos::RCP<const map_type> d_overlap_cell_map;
     Teuchos::RCP<const map_type> d_owned_face_map;

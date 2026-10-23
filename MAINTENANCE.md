@@ -41,12 +41,15 @@ partitioned with `MeshPartitioner` and adapted through `PartitionedMesh` on a
 multi-rank communicator. `SemiStructuredXY_Z` constructs native owned/overlap
 maps from Zoltan2/ParMETIS XY graph partitions crossed with balanced Z slabs.
 `MeshReorderingFactory` orders XY cells within the graph partitions before
-local maps are created; canonical geometry IDs stay unchanged. Every rank
+local maps are created. A decomposed XY/Z topology supplies local geometry
+lookup; owned cell and face Tpetra GIDs are then numbered contiguously on each
+rank. Source topology indices remain available through the geometry-ID accessors.
+Every rank
 supplies identical compact XY/Z geometry and boundary metadata. Explicit XY/Z
 factors must multiply to communicator size, and explicit rank/count overrides
 must match the communicator. Set `DistributionOptions::allow_empty_partitions`
 when the chosen factorization leaves owners empty.
-Canonical geometry owners determine face ownership and flux signs. Empty ranks
+Face ownership and flux orientation retain the source owner/neighbor relation. Empty ranks
 retain all boundary names and participate in field, solver and ALE collectives.
 Focused semi-structured geometry, operator, flow and axial-ALE checks are listed
 in [the parallel semi-structured guide](docs/semi_structured_parallel.md).

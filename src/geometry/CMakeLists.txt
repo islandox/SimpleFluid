@@ -21,6 +21,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/FrontalDelaunay2D.cc
     mesh/PredicateSigns2D.cc
     mesh/SemiStructMeshTopo.cc
+    mesh/DecomposedSemiStructuredTopology.cc
     mesh/SemiStructuredXY_Z.cc
     mesh/UnstructuredMesh.cc
     mesh/RegionProviders.cc
@@ -55,6 +56,7 @@ endif()
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
+    mesh/DecomposedSemiStructuredTopology.cc
     details/SemiStructuredPartition.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc

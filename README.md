@@ -191,7 +191,8 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
     `MeshPartitioner`/`PartitionedMesh` adaptation
   - **Semi-structured XY×Z** — polygonal XY × structured Z prisms with native
     serial/MPI ownership through XY graph partitions crossed with Z slabs,
-    partition-local XY reordering, ghost layers, and axial ALE through `MeshHandle`;
+    shared XY reordering, compact local topology, contiguous owned Tpetra maps,
+    ghost layers, and axial ALE through `MeshHandle`;
     see [distribution and support](docs/semi_structured_parallel.md)
   - **Compact multi-region** — conforming/coarse-fine composition, including
     distributed extruded and swept R–Z providers with common affine Z motion
