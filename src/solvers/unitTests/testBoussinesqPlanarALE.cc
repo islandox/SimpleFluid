@@ -1754,6 +1754,7 @@ struct MatrixCase
     SimpleFluid::Dimension axis = SimpleFluid::Dimension::Z;
     const char* moving_boundary = "zmax";
     double cross_section_area = 1.0;
+    bool single_layer_xy_partition = false;
 };
 
 SimpleFluid::SP<Handle> make_matrix_mesh(const MatrixCase& test_case)
@@ -1777,11 +1778,21 @@ SimpleFluid::SP<Handle> make_matrix_mesh(const MatrixCase& test_case)
                     SimpleFluid::Meshes::cartesian_region("right",{{{0.5,1},{0,1},{0,0.5,1}}})},
                 std::vector<SimpleFluid::Meshes::MultiRegionMesh::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0,1},{1,0}}},
                 SimpleFluid::Meshes::InterfaceTolerance{}, SimpleFluid::Meshes::MultiRegionMesh::BoundaryNamePolicy::MergeMatchingNames));
-        case MatrixMeshFamily::SemiStructured:
+        case MatrixMeshFamily::SemiStructured: {
+            Handle::DistributionOptions distribution;
+            distribution.allow_empty_partitions = true;
+            if (test_case.single_layer_xy_partition)
+                return std::make_shared<Handle>(std::make_shared<SimpleFluid::Meshes::SemiStructuredXY_Z>(
+                    SimpleFluid::Arr<SimpleFluid::Meshes::SemiStructuredXY_Z::Vec3>{
+                        {0., 0., 0.}, {.45, 0., 0.}, {1., 0., 0.}, {0., 1., 0.}, {.55, 1., 0.}, {1., 1., 0.}},
+                    SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 4, 3}, {1, 2, 5, 4}},
+                    SimpleFluid::ArrReal{0., 1.}), distribution);
             return std::make_shared<Handle>(std::make_shared<SimpleFluid::Meshes::SemiStructuredXY_Z>(
                 SimpleFluid::Arr<SimpleFluid::Meshes::SemiStructuredXY_Z::Vec3>{
                     {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0}, {0.0, 1.0, 0.0}},
-                SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2, 3}}, SimpleFluid::ArrReal{0.0, 0.5, 1.0}));
+                SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2, 3}}, SimpleFluid::ArrReal{0.0, 0.5, 1.0}),
+                distribution);
+        }
     }
     throw std::logic_error("Unknown planar-ALE support-matrix mesh family.");
 }
@@ -1956,15 +1967,17 @@ void exercise_supported_matrix_case(const MatrixCase& test_case, Coupling coupli
     SimpleFluid::test::CoupledBackendSelection selection = {},
     SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares)
 {
-    if (test_case.family == MatrixMeshFamily::SemiStructured && Tpetra::getDefaultComm()->getSize() != 1)
-    {
-        GTEST_SKIP() << "SemiStructuredXY_Z planar ALE is intentionally "
-                        "serial-only.";
-    }
-
     constexpr double power_density = 1.0e-3;
     constexpr double time_step = 1.0e-2;
     auto state = configure_matrix_case(test_case, power_density, coupling, selection, gradient);
+    if (test_case.family == MatrixMeshFamily::SemiStructured)
+    {
+        const auto comm = state.mesh->owned_cell_map()->getComm();
+        const int local_empty = state.mesh->num_owned_cells() == 0 ? 1 : 0;
+        int empty = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+        EXPECT_EQ(empty, std::max(0, comm->getSize() - 2));
+    }
     const auto old_epoch = state.mesh->geometry_epoch();
     const auto old_surface = boundary_elevation(*state.mesh, test_case);
     const auto old_volume = global_mesh_volume(*state.mesh);
@@ -2020,10 +2033,8 @@ TEST(BoussinesqPlanarALESupportMatrixTest, CoupledBackendsCoverSupportedMotionAx
             }
 }
 
-TEST(BoussinesqPlanarALESupportMatrixTest, CoupledBackendsCoverSerialSemiStructuredMotion)
+TEST(BoussinesqPlanarALESupportMatrixTest, CoupledBackendsCoverSemiStructuredMotion)
 {
-    if (Tpetra::getDefaultComm()->getSize() != 1)
-        GTEST_SKIP() << "SemiStructuredXY_Z is serial-only.";
     for (const auto selection : SimpleFluid::test::coupled_backend_selections)
         for (const auto gradient :
             {SimpleFluid::FVM::CellGradientScheme::LeastSquares, SimpleFluid::FVM::CellGradientScheme::GaussLinear})
@@ -2057,19 +2068,48 @@ TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsCylindricalAxialMotionAndGravi
     exercise_supported_matrix_case({MatrixMeshFamily::Cylindrical, SimpleFluid::Dimension::Z, "zmax", area});
 }
 
-TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsSerialSemiStructuredAxialMotionAndGravityAlongZ)
+TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsSemiStructuredAxialMotionAndGravityAlongZ)
 {
     exercise_supported_matrix_case({MatrixMeshFamily::SemiStructured, SimpleFluid::Dimension::Z, "zmax", 1.0});
 }
 
+TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsSemiStructuredSingleLayerXYPartition)
+{
+    exercise_supported_matrix_case(
+        {MatrixMeshFamily::SemiStructured, SimpleFluid::Dimension::Z, "zmax", 1.0, true});
+}
+
+TEST(BoussinesqPlanarALESupportMatrixTest, SemiStructuredTrialFailureRestoresGeometryFieldsAndCanRetry)
+{
+    auto state = configure_matrix_case(
+        {MatrixMeshFamily::SemiStructured, SimpleFluid::Dimension::Z, "zmax", 1.0, true}, 1.e-3);
+    const auto geometry = capture_geometry(*state.mesh);
+    const auto primary = capture_primary(*state.solver);
+    const auto initial_epoch = state.mesh->geometry_epoch();
+    const auto initial_time = state.solver->time();
+    const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
+    const auto initial_history = state.coupling->free_surface_history().size();
+    const auto valid = state.solver->pressure_linear_solver_options();
+    auto invalid = valid;
+    invalid.max_iterations = 0;
+    state.solver->set_pressure_linear_solver_options(invalid);
+    EXPECT_THROW(state.coupling->step(), std::invalid_argument);
+    EXPECT_GT(state.mesh->geometry_epoch(), initial_epoch);
+    expect_geometry_restored(*state.mesh, geometry);
+    expect_primary_restored(*state.solver, primary);
+    EXPECT_DOUBLE_EQ(state.solver->time(), initial_time);
+    EXPECT_DOUBLE_EQ(state.coupling->liquid_mass_inventory().totalMass(), initial_mass);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history);
+    state.solver->set_pressure_linear_solver_options(valid);
+    ASSERT_NO_THROW(state.coupling->step());
+    EXPECT_EQ(state.solver->step_index(), 1);
+    EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history + 1);
+    EXPECT_NEAR(state.coupling->liquid_mass_inventory().totalMass(), initial_mass, 2.e-11);
+    EXPECT_LE(state.coupling->planar_ale_diagnostics().continuity.maximum, 5.e-10);
+}
+
 void expect_nonaxial_family_rejected(MatrixCase test_case)
 {
-    if (test_case.family == MatrixMeshFamily::SemiStructured && Tpetra::getDefaultComm()->getSize() != 1)
-    {
-        GTEST_SKIP() << "The separate multi-rank test covers the earlier "
-                        "SemiStructuredXY_Z distribution rejection.";
-    }
-
     auto mesh = make_matrix_mesh(test_case);
     SimpleFluid::LinearSolverOptions linear_options;
     auto solver = std::make_shared<Solver>(mesh, matrix_boundaries(*mesh, test_case.moving_boundary),
@@ -2353,28 +2393,6 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsDivergentMomentumPolicyBeforeM
         static_cast<void>(solver_coupling.configure_free_surface(free_surface_options(4))), std::invalid_argument);
     EXPECT_FALSE(solver_coupling.planar_ale_enabled());
 }
-
-TEST(BoussinesqPlanarALESupportMatrixTest, RejectsMultiRankSemiStructuredBeforeSolverConfiguration)
-{
-    if (Tpetra::getDefaultComm()->getSize() == 1)
-    {
-        GTEST_SKIP() << "This rejection requires a multi-rank communicator.";
-    }
-
-    const MatrixCase test_case{MatrixMeshFamily::SemiStructured, SimpleFluid::Dimension::Z, "zmax", 1.0};
-    std::string diagnostic;
-    try
-    {
-        static_cast<void>(make_matrix_mesh(test_case));
-        FAIL() << "Expected multi-rank SemiStructuredXY_Z construction to fail.";
-    }
-    catch (const std::runtime_error& error)
-    {
-        diagnostic = error.what();
-    }
-    EXPECT_NE(diagnostic.find("does not yet support multi-rank"), std::string::npos) << diagnostic;
-}
-
 
 /** Integrate physical liquid sensible energy independently of the solver report. */
 double coupling_sensible_energy(const ConfiguredCase& state)

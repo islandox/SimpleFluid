@@ -197,12 +197,19 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   - **Unstructured mesh** — STK-free hexahedral and triangular-prism
     connectivity; serial directly and distributed after
     `MeshPartitioner`/`PartitionedMesh` adaptation
-  - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms,
-    currently serial-only
+  - **Semi-structured XY×Z** — polygonal XY × structured Z prisms with native
+    serial/MPI ownership through XY graph partitions crossed with Z slabs,
+    shared XY reordering, compact local topology, initially contiguous owned
+    cell/face Tpetra maps, ghost layers, and axial ALE through `MeshHandle`;
+    see [distribution and support](docs/semi_structured_parallel.md)
   - **Compact multi-region** — conforming/coarse-fine composition, including
     distributed extruded and swept R–Z providers with common affine Z motion
   - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
     other volume topologies are rejected during assembly
+- Cartesian/cylindrical [multidimensional decomposition](docs/architecture/orthogonal_decomposition.md)
+  balances cell counts first, uses geometric widths for rank-grid/cut selection,
+  and creates contiguous owned cell/face Tpetra maps with compact halo topology
+  and arithmetic owned-cell/face geometry lookup
 - Owned + ghost cell decomposition for distributed-memory assembly
 - CRS-style neighbor connectivity for FVM stencil construction
 - Kokkos-based geometry storage — portable across CPU and GPU backends
@@ -377,7 +384,7 @@ short-running physical smoke cases:
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with an authenticated fail-closed comparator; the physical acceptance manifest remains pending qualification |
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
-| Native mesh path | Cartesian, cylindrical, serial semi-structured, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
+| Native mesh path | Cartesian, cylindrical, serial/MPI semi-structured flow and axial ALE, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
 | Fixed-grid planar volume budget | Analytic/component, global/cellwise inventory, Boussinesq integration, and two-rank conservation checks; no moving-surface claim |
 | Planar geometry/GCL substrate | Structured/extruded motion, transactions, epoch/cache staleness, quality, and serial/two-rank GCL/shared-face checks |
 | Constrained planar ALE | Old/new-volume transport, mesh-relative flux, generalized continuity, moving-boundary, rollback, and conservation component/integration checks; no quantitative pool-dynamics validation |
@@ -789,8 +796,9 @@ temperature transport, thermal-only pure-liquid density feedback,
 Sheng two-population implementation with uniform geometry-invariant prescribed
 power, advective dissolved H2, general bubble transport, and exactly the
 moving-top escape patch. General reaction providers are not admitted by this
-support matrix. Cartesian X/Y/Z and cylindrical axial-Z motion are supported in
-serial/MPI; semi-structured axial-Z motion is serial only.
+support matrix. Cartesian X/Y/Z, cylindrical axial-Z, and semi-structured
+axial-Z motion are supported in serial/MPI. Semi-structured runs retain
+canonical partition faces and support explicit empty owners.
 
 The ALE path retains absolute projected fluid flux for pressure and continuity
 diagnostics, and uses a distinct mesh-relative flux for transport and its

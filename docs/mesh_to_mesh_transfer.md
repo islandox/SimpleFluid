@@ -63,9 +63,10 @@ native cylindrical handle. Interpolation still supports all handle families.
 A cylindrical endpoint may be paired in either direction with a direct
 `SemiStructuredXY_Z` handle or a `MultiRegionMesh` containing only
 `NativeIsoRegion<SemiStructuredXY_Z>`, `ExtrudedRegion`, and/or `SweptRZRegion`
-providers. Direct semi-structured handles retain their serial-only contract;
-composite extrusions support distributed maps. Each XY polygon must be convex
-and counter-clockwise.
+providers. Direct semi-structured handles now have native distributed maps;
+this does not by itself extend the transfer qualification evidence described
+below. Composite extrusions retain their established distributed transfer path.
+Each XY polygon must be convex and counter-clockwise.
 Curved cylindrical providers inside a composite and general unstructured
 providers are rejected, even if they report a hexahedron or prism cell type.
 
