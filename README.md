@@ -143,7 +143,7 @@ sparse products component by component. Both choices preserve the assembled
 momentum/Schur preconditioners. See the [architecture, supported scope and
 measured tradeoffs](docs/architecture/coupled_operator_backends.md).
 These options do not implement scalar matrix-free transport. The
-[supported-solver validation report](docs/architecture/coupled_solver_backend_validation.md)
+[supported-solver qualification contract](docs/architecture/coupled_operator_backends.md#numerical-consistency-and-qualification)
 covers all four coupled choices, both pressure-gradient schemes, mesh families,
 physical-model regressions, and constrained ALE. Coupled MueLu reuse refreshes
 numeric state, and timestepper continuity assembly uses the same interpolation
@@ -280,9 +280,9 @@ velocity patch; explicit names augment that set and must also be no-slip.
 
 The opt-in `SSTKOmegaSAS` selection adds a SAS omega source to the existing
 **SST-1994** parent. See [the mathematical contract, configuration and supported
-scope](docs/modeling/sst_sas.md) and [verification evidence](docs/modeling/sst_sas_verification.md).
+scope](docs/modeling/sst_sas.md) and [qualification status](docs/modeling/sst_sas.md#qualification-status).
 The `sst_sas_activation` example is a small, isothermal transient source check
-with optional diagnostics. The [tested support extensions](docs/modeling/sst_sas_extensions.md)
+with optional diagnostics. The [supported model paths](docs/modeling/sst_sas.md)
 cover cylindrical and serial semi-structured meshes, mixed slip and translational
 periodicity, corrected Gauss-linear gradients, and accepted-state transactions
 for compatible fixed-grid multiphysics models. Isothermal and physical Boussinesq
@@ -914,10 +914,10 @@ example and storage accounting](docs/region_meshes.md).
 | Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
 | Uniform-mesh geometric VoF | [Solver and numerical verification](docs/modeling/vof.md) |
 | Adaptive Cartesian VoF | [Conservative refinement and distributed flow](docs/modeling/adaptive_vof.md) |
-| Proposed general native AMR | [XY/Z, polyhedral, and mixed-region design](docs/architecture/general_amr.md) |
+| General native AMR and flow qualification | [XY/Z, polyhedral, and mixed-region design](docs/architecture/general_amr.md) |
 | Radiolytic resolved/dispersed coupling | [Low-Mach inventories, interface transfer, and capture](docs/modeling/radiolytic_vof.md) |
 | Bubble representation changes | [Birth registry, promotion, demotion, and pressure history](docs/modeling/bubble_representation.md) |
-| SST-SAS configuration and supported paths | [Model contract](docs/modeling/sst_sas.md) and [extensions](docs/modeling/sst_sas_extensions.md) |
+| SST-SAS configuration and supported paths | [Model contract and qualification](docs/modeling/sst_sas.md) |
 | Radiolysis, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/radiolytic_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
 | External reference comparisons | [OpenFOAM workflows](verification/openfoam/README.md) |
 

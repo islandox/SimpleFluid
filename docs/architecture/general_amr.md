@@ -5,33 +5,54 @@ AMR hierarchy, ancestry, overlap and adaptation modules live in
 Generic exact geometry and native mesh providers remain in `SimpleFluid::Meshes`;
 FVM transport and solver consumers remain in their own modules.
 
-**Status: Stages 1–6 are implemented and verified within the stated scope; Stage 7 implementation is in progress and under qualification; Stages 8–9 remain proposed.** This document
-defines the implemented hierarchy, certified geometry and sparse remap boundaries and the remaining
-implementation sequence and acceptance contracts. It does not extend the
-supported mesh families of the existing solvers or record dated validation results.
-Geometry adaptation and numerical VoF qualification are separate deliverables.
+**Status: Stages 1–6 are implemented with bounded numerical verification;
+Stage 7 is implemented with focused flow verification and incomplete overall
+qualification; Stages 8–9 remain proposed.** This document owns the design and
+qualification boundaries. The [roadmap](../../TODO.md#phase-23--amr-for-native-extruded-polyhedral-and-mixed-region-meshes)
+tracks remaining work. Geometry adaptation and physical-flow qualification are
+separate deliverables.
 
-The existing [VoF transport and state-ownership contract](vof_transport.md) is
-the numerical baseline for these extensions. Its corrected mass-compatible
-momentum, microscopic carrier budgets, physical-residual acceptance, and
-population identity rules are requirements to preserve, not work deferred until
-the new geometry is available. The [durable verification contracts](../verification/vof_solver_contracts.md)
-identify the retained regressions; [review follow-up evidence](../verification/vof_review_followup.md)
-records measured results and qualification limits separately from this design.
-The [Stage 1 verification record](../verification/general_amr.md) covers hierarchy
-observations, native partition bindings, cache isolation and solver transactions.
-The [Stage 2 verification record](../verification/general_amr_stage2.md) covers
-certified convex queries and sparse conservative amount transfer.
-The [Stage 3 verification record](../verification/general_amr_stage3.md) identifies
-the product-provider implementation, focused evidence and qualification limits.
-The [Stage 4 verification record](../verification/general_amr_stage4.md) identifies
-the convex hierarchy/exact explicit-provider scope, focused evidence and limits.
-The [Stage 5 verification record](../verification/general_amr_stage5.md) tracks
-local/mixed provider evidence and its explicit qualification limits.
-The [Stage 6 verification record](../verification/general_amr_stage6.md) separates
-distributed migration evidence and remaining qualification gates from this design.
-The [Stage 7 verification record](../verification/general_amr_stage7.md) separates
-helper evidence from integrated general-flow qualification and its remaining gates.
+The [VoF transport and state-ownership contract](vof_transport.md) remains the
+numerical baseline: mass-compatible momentum, microscopic carrier budgets,
+physical-residual acceptance and population identity must survive every
+extension. The [verification contracts](../verification/vof_solver_contracts.md)
+identify reproducible checks. Status below summarizes recorded campaigns;
+documentation consolidation is not a new execution of those tests.
+
+## Qualification status
+
+| Stage | Implemented and covered by focused checks | Remaining boundary |
+| --- | --- | --- |
+| 1. Common hierarchy | Independent topology/partition/geometry/state observations, native partition binding, stale-plan rejection and immutable trial/cache isolation; serial/MPI including asserted empty owners | Construction binding alone does not migrate an accepted solver state |
+| 2. Geometry and remap | Actual convex clips, moments, represented coverage, native-owner authentication, sparse conservative paired amounts and tiny positive phases | Utility coverage alone does not qualify a flow solver; complete-family catalogs remain a bounded bootstrap |
+| 3. Whole products | Exact XY/Z construction, split-order identity, complete inverse families, native MPI and conservative remap | Nonperiodic initial extrusions; factored storage is not distributed planner/RSS scaling |
+| 4. Convex polyhedra | Actual occupied octants, shared face/edge overlays, saved-parent recovery, sparse exact native providers and physical remap | Canonical planning remains bounded and replicated; nonconvex cells are excluded |
+| 5. Local/mixed products | Shared base/run storage, typed participants, closed face/edge/vertex grading, native tiles and conservative remap | Unsupported crossed patch groupings reject; contacts have separate domains and no implicit exchange law; storage reports are nonadditive |
+| 6. Distributed state | Detached owner-local closure, typed ancestry, sparse native/state migration, accepted/history frames, final packet-cost admission and asserted empty owners | Initial complete-source bootstrap, unsupported topology changes, sparse ALE and production scaling remain outside qualification |
+| 7. General flow | Finite-default inventories; explicit experimental exact policy; PLIC, unsplit transport, physical-residual pressure/momentum, rollback/regrid and selected serial/MPI flow checks | Complete physical, long-horizon, high-contrast curved-seam and production-scale qualification remains open |
+| 8–9 | No general-mesh radiolytic/representation integration or certified nonconvex flow is claimed | Implement and qualify the separate stages below |
+
+The finite-default ten-step skew coarse/fine passage fixture has completed its
+original 0.02 s endpoint and unchanged inventory, momentum, positivity and
+divergence gates in serial and at two/four ranks. This supersedes the early
+resource failures for that fixture. Selected hydrostatic and solver transaction
+checks also have passing recorded coverage. The latest geometry-optimization
+campaigns excluded the long reflected-cylinder and viscous methods; earlier
+bounded passes and timeouts do not establish their qualification on every later
+source. The optional exact policy has focused policy/API/history/remap coverage,
+but no full physical, long-horizon, storage/RSS or scaling qualification.
+
+The separate Release balance fixture
+`DistributedAdaptiveBalance.MeasuredOperationsDrivePinnedHierarchyMigration`
+has a recorded topology/geometry numbering failure before balancing. It was
+excluded explicitly from the later six-method balance selection. Passing
+migration checks do not close this unresolved fixture.
+
+The separately staged integer-sign and certified floating-point filter candidate
+has recorded focused correctness and complete coarse/fine runs in serial/MPI2/MPI4.
+It remains a pending integration, distinct from the committed support-plane
+cache. Its design is specified below; those candidate results are not a claim
+that its source is already part of the committed backend.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -291,7 +312,7 @@ source/target coverage checks. The separate [detached Stage 6 path](#distributed
 provides owner lookup, complete-family authority and variable-length packets;
 this does not remove the original bootstrap API's bounded-catalog boundary. Repeated
 refine/coarsen histories and layer-count changes have dedicated storage tests;
-the verification record identifies their observed outcomes and limits.
+the qualification summary above retains their scope and limits.
 
 Across two snapshots, product ancestry has a factor partial order: refinement
 requires each base/Z factor to remain equal or descend, with at least one strict
@@ -627,8 +648,8 @@ exclude private planner ancestry. Resident partition geometry is separate, and
 partition maps/control-block/allocator overhead are not a complete accounting.
 These are capacity estimates, not a whole-process retained-memory total or RSS
 measurement. The separate Stage 6 reports distinguish actual distributed
-payload, capacity estimates and normalized process RSS; focused evidence belongs
-in its verification record.
+payload, capacity estimates and normalized process RSS; the qualification
+summary above retains that bounded scope.
 
 ## Conservative remap and physical resolution
 
@@ -807,10 +828,9 @@ The retained exact implementation is experimental: focused policy/API/remap
 contracts do not qualify general physical use, performance or total storage. Normalized history denominators, rational arithmetic and packets
 can grow with accepted steps even after allocation slack and duplicate retention
 are removed. It has no long-horizon, centimetric-bubble or production-scaling
-qualification. Preserved prototype tests do not qualify this new opt-in
-integration. Commit the implementation separately after the finite-default
-implementation commit, while keeping pending physical qualification explicit,
-with an assistance/provenance and limitations note.
+qualification. The finite and experimental policies were delivered separately. Prototype
+results do not qualify the integrated opt-in path; its focused policy tests
+must remain distinct from its pending physical and performance gates.
 
 A multi-plan transfer names each actual native-bound candidate explicitly. The
 next plan must originate from that candidate's observed maps and geometry;
@@ -1179,8 +1199,7 @@ reported separately from process RSS; partial peak-buffer reports are not a
 whole-transaction allocator bound. Sparse ALE is not supported. These bounded
 correctness and memory/work-accounting gates leave production scaling open.
 This capability makes no application,
-centimeter-bubble, general-flow or scalable speedup claim. Final focused validation belongs in the
-[Stage 6 verification record](../verification/general_amr_stage6.md).
+centimeter-bubble, general-flow or scalable speedup claim. The qualification table above and focused gates below define its support boundary.
 
 ## Certified nonconvex extension
 
@@ -1224,8 +1243,8 @@ shell without boundary projection or domain renormalization.
 
 ## Implementation stages and focused acceptance
 
-Stages 1–6 are verified within their stated boundaries; Stage 7 awaits integrated
-qualification; Stages 8–9 remain proposed. Distributed correctness and memory/work accounting do not establish
+Stages 1–6 have bounded verification; Stage 7 has focused flow coverage with
+complete physical qualification still open; Stages 8–9 remain proposed. Distributed correctness and memory/work accounting do not establish
 production scaling, which remains open. Existing tests are starting points for later extensions, not evidence
 that they work. Run focused Debug serial tests,
 then affected MPI cases at 2 and 4 ranks where they establish the intended seam
@@ -1261,5 +1280,71 @@ for native topology and ownership contracts. Numerical references include
 [`testRadiolyticVoFCoupler`](../../src/solvers/unitTests/testRadiolyticVoFCoupler.cc),
 and [`testBubbleRepresentation`](../../src/solvers/unitTests/testBubbleRepresentation.cc).
 Retain the Phase 22 Stage 4 positive-surface-tension pressure-history oracle
-when extending representation geometry. Keep dated results in validation records;
-support claims change only after the corresponding stage gates pass.
+when extending representation geometry. Keep raw commands, manifests and results in local validation artifacts;
+maintain qualification scope and unresolved gates here. Support claims change
+only after the corresponding stage gates pass.
+
+## General-flow preparation and exact geometry costs
+
+The committed backend shares immutable native topology between accepted and
+trial states, with indexed cell/node incidence. Mutable phase arrays and cell
+state remain private. PLIC prepares geometry once per reconstruction call;
+flow workspaces reuse geometry-only least-squares stencils while refreshing
+field values and boundary data. Native identity, epoch and maps invalidate
+preparation. Unsampled coordinate directions have zero derivative; nonconstant
+fields still need conditioned stencils in sampled directions. Constant finite
+fields have exactly zero gradient, and nonfinite inputs reject collectively.
+
+PLIC support extrema use exact vertices, retain the signed displacement from
+the displayed anchor, and round search endpoints outward. Acceptance uses the
+original exact minority-volume residual. Rounded pure fractions never authorize
+discarding a positive phase.
+
+Momentum preparation authenticates exact ledger payloads, capacities, routes,
+face identities, donors, amounts, maps and budgets. Identical rounded views do
+not identify identical ledgers. Cache hits rerun RHS, physical-residual,
+iteration, positivity and final-publication gates; rejected preparation cannot
+leave a partially valid cache. Pressure proposes bounded-significand dyadic
+rates within existing arithmetic allowances, followed by exact closure or the
+original exact fallback. Final exact width also depends on exponent span and
+closure structure. A small dyadic inner normalization does not change the
+original physical residual or shared iteration budget.
+
+Exact volume-only queries omit unused first moments while using the same
+oriented determinants. Admission and coverage proofs still calculate all three
+moments. Exactly zero determinants and inactive normal axes can be skipped;
+no positive piece is removed by a tolerance. Certification-local support planes
+use the first nonzero exact outward fan normal, including collinear prefixes.
+Optional caches account planes, ranges and rational limb capacities under live
+scratch leases. Only typed optional-cache exhaustion selects the uncached path;
+geometry, incidence and allocation failures propagate. Independent containment,
+pairwise disjointness, volume and first-moment proofs remain mandatory.
+
+### Predicate acceleration candidate
+
+The pending private integer helper evaluates rational support signs with checked
+fraction-free integer sums and positive denominators. Its bounded 32,768-bit
+workspace is leased before allocation. Unavailable capacity or checked overflow
+releases that lease and uses the original rational expression. Reserve-callback
+exceptions propagate. The result supplies only a sign, never approximate geometry.
+
+The pending floating-point helper encloses rational plane distances with outward
+binary64 intervals. Only an interval strictly on one side of zero certifies a
+sign; contact, cancellation, subnormal/overflow or unsupported arithmetic falls
+back to integer/rational evaluation. It is enabled only for guarded strict GCC
+on x86-64 SSE2 with round-to-nearest, masked exceptions and FTZ/DAZ disabled.
+Clang uses exact fallback. Every query rechecks the floating-point environment;
+cached intervals cannot bypass that check. Control bits are never changed.
+
+Lazy clipping materializes the original exact distance when a sign is uncertain
+or an edge crosses. Exact intersection coordinates, equality, vertex identity,
+incidence and moments therefore remain rational constructions. Scratch denial
+releases optional storage before uncached retry. Neither helper changes physical
+tolerances, mandatory resource limits, finite/exact policy or atomic rejection.
+
+Recorded matched runs show bounded workload improvements, not universal speedups.
+The coarse/fine case still costs hundreds of seconds for 50 cells. Exact clipping,
+moments and rational normalization remain substantial costs. Inclusive profile
+rows overlap; sample shares are not operation counts, fallback rates or elapsed
+time. Payload admission excludes backend/allocator/Krylov internals and is not
+an RSS cap. Large migration and process-memory costs still need qualification.

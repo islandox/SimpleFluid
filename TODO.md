@@ -1,6 +1,6 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
-**Documentation review date:** September 22, 2026
+**Documentation review date:** October 23, 2026
 
 This refresh reconciles the current source, public APIs, and checked-in test
 coverage. It does not represent a new runtime qualification or full-suite run.
@@ -67,7 +67,7 @@ coupling and nonconvex extensions remain proposed in Stages 8–9.
 | Phase 20.1, planar free surface | Fixed-grid path plus constrained solver-integrated planar ALE | Physical validation, steam/composition transport, wider model support, geometric occupancy, and coupled inventory mapping remain open |
 | Phase 21, Euler–Euler | Deferred | Requires validated lower-order models first |
 | Phase 22, resolved/dispersed bubbles | Uniform/Cartesian AMR, numerical radiolytic coupling, and representation trials implemented and focused-tested | Physical closure calibration and centimetric-bubble application convergence |
-| Phase 23, general native AMR | Stages 1–6 implemented and verified; Stage 7 implemented/under qualification; Stages 8–9 proposed | Local/mixed providers and detached distributed migration meet bounded correctness, memory and work-accounting gates; production scaling and general VoF remain open |
+| Phase 23, general native AMR | Stages 1–6 implemented and verified; Stage 7 implemented/under qualification; Stages 8–9 proposed | Local/mixed providers and detached distributed migration meet bounded correctness, memory and work-accounting gates; production scaling and complete general-flow physical qualification remain open |
 
 ### Checklist conventions
 
@@ -203,8 +203,9 @@ pool-flow validation.
 - [x] Replace normal implicit cell-face materialization with independent ranges;
       retain explicit compatibility CSR and preserve native ownership/halo queries.
 - [x] Add assembled FVM/flow regressions, diffusion example, VTU region metadata,
-      and an opt-in capacity/timing benchmark. Validation is recorded in
-      `docs/region_mesh_implementation.md`; no new physical-validation claim.
+      and an opt-in capacity/timing benchmark. Support and numerical gates are
+      maintained in [region mesh contracts](docs/region_meshes.md); physical
+      validation remains separate.
 - [x] Verify the merged coupled block-composite backend on Cartesian and mixed
       HEX/prism regions, including all operator/workspace choices, both pressure
       gradients, backend switching and zero mesh-connectivity materialization.
@@ -318,8 +319,7 @@ mistaken for foundation or Phase 9 completion.
 - [ ] Perform qualified whole-flow external comparisons with explicit parent-SST
       and discretization differences, then quantitative physical validation.
 
-The [SAS model document](docs/modeling/sst_sas.md) and
-[verification record](docs/modeling/sst_sas_verification.md) distinguish
+The [SAS model document](docs/modeling/sst_sas.md) distinguishes
 implemented, component-tested, solver-regression-tested, externally compared
 and physically validated status. The parent closure and pending pitzDaily gates
 are unchanged.
@@ -1869,7 +1869,7 @@ ownership/API contracts, admission rules, and focused acceptance matrix.
 Geometry refinement and VoF/physical-coupling qualification are separate gates.
 Preserve the corrected Cartesian [transport/state contracts](docs/architecture/vof_transport.md)
 and [numerical verification gates](docs/verification/vof_solver_contracts.md)
-throughout; they do not qualify the proposed non-Cartesian algorithms.
+throughout; each non-Cartesian algorithm also needs its own focused and physical gates.
 
 ### Stage 1 — Common hierarchy contracts and Cartesian adapter
 
@@ -1888,8 +1888,8 @@ throughout; they do not qualify the proposed non-Cartesian algorithms.
       independent repartition stamps, retained-trial isolation after failure,
       cache refresh/reuse, and rollback without compatibility CSR.
 
-Stage 1 evidence and qualification limits are recorded in
-[general AMR verification](docs/verification/general_amr.md). Native partition
+Stage 1 support and qualification limits are maintained in
+[general AMR qualification summary](docs/architecture/general_amr.md#qualification-status). Native partition
 bindings qualify hierarchy, FVM and solver construction; live accepted-state
 repartition/migration uses the separate detached Stage 6 path.
 
@@ -1911,8 +1911,8 @@ repartition/migration uses the separate detached Stage 6 path.
       retained phase volume lies within its consistency bound; reject material
       carrier mismatches.
 
-Stage 2 evidence and qualification limits are recorded in
-[certified geometry and remap verification](docs/verification/general_amr_stage2.md).
+Stage 2 support and qualification limits are maintained in
+[certified geometry and remap scope](docs/architecture/general_amr.md#qualification-status).
 This utility stage does not enable general-mesh VoF or a new refinement provider.
 
 ### Stage 3 — Whole-product XY/Z refinement
@@ -1927,8 +1927,8 @@ This utility stage does not enable general-mesh VoF or a new refinement provider
       storage, and the native composite serial/MPI route. Initial extrusions
       are nonperiodic; new periodic descriptors need separate qualification.
 
-Stage 3 evidence and limits are recorded in
-[whole-product construction and remap verification](docs/verification/general_amr_stage3.md).
+Stage 3 support and limits are maintained in
+[whole-product construction and remap scope](docs/architecture/general_amr.md#qualification-status).
 Compact provider/hierarchy storage does not imply scalable distributed remap
 catalog construction; bounded complete-family catalogs remain a bootstrap.
 General-mesh VoF/flow and local/mixed product adaptation remain later stages.
@@ -1946,8 +1946,8 @@ General-mesh VoF/flow and local/mixed product adaptation remain later stages.
       closure, signed incidence, volume/first moments, sliver rejection,
       transactional failure, and exact parent-shell recovery.
 
-Stage 4 evidence and limits are recorded in
-[convex hierarchy and exact explicit-provider verification](docs/verification/general_amr_stage4.md).
+Stage 4 support and limits are maintained in
+[convex hierarchy and exact explicit-provider scope](docs/architecture/general_amr.md#qualification-status).
 This is bounded replicated canonical planning with sparse native resident
 providers, not scalable distributed hierarchy storage. The separate detached Stage 6 path qualifies exact sparse shard reassembly. Stage 4 alone does not qualify mixed-region closure
 (Stage 5) or general VoF/flow.
@@ -1955,7 +1955,7 @@ providers, not scalable distributed hierarchy storage. The separate detached Sta
 ### Stage 5 — Mixed-region closure and local XY/Z products
 
 Implemented and verified within the scope recorded in
-[Stage 5 verification](docs/verification/general_amr_stage5.md). The boundary includes
+[local/mixed qualification scope](docs/architecture/general_amr.md#qualification-status). The boundary includes
 shared exact base/axis/run views, typed multiple adaptive/static participants,
 stable physical-patch joins, bounded physical-span closure and closed face/edge/
 vertex admission (including one-generation comparable factor traces), exact multi-provider
@@ -1981,7 +1981,7 @@ field/remap qualification does not enable a general VoF/flow solver.
 
 ### Stage 6 — Distributed planning and migration
 
-Implemented and verified within the bounded scope of the separate record. Detached
+Implemented and verified within the bounded scope of the design. Detached
 owner-local Cartesian/product/convex/Mixed kernels use typed ancestry and exact
 registered face/edge/node contact authorities, sparse actual native maps,
 full requested ghosts and outer metric neighbors. Named accepted/history frames
@@ -1991,7 +1991,7 @@ accepted geometry; any topology request on that route rejects globally.
 Measured compute work and final prepared native-plus-state application packet
 bytes govern balance acceptance before owner exchange. Payload, capacity
 estimates, packet scratch and normalized process RSS are separate reports.
-Final evidence belongs in [Stage 6 verification](docs/verification/general_amr_stage6.md).
+Qualification limits are maintained in [the general AMR design](docs/architecture/general_amr.md#qualification-status).
 The initial complete-source bootstrap remains bounded; this stage does not
 qualify general VoF, sparse ALE, production scaling or physical applications.
 
@@ -2015,62 +2015,55 @@ qualify general VoF, sparse ALE, production scaling or physical applications.
 
 ### Stage 7 — General VoF and flow qualification
 
-Implementation exists and is under qualification; capability checkboxes remain
-pending integrated physical-solver evidence. See [Stage 7 verification](docs/verification/general_amr_stage7.md)
-for the source-bound campaign, reproducible focused commands and limits.
-The default native backend is being revised to independent finite-precision
-gas/carrier inventories and finite accepted histories; no rational physical
-remainder is carried across default-path steps or regrid. Exact native geometry predicates/certificates,
-bounded geometric labels, shared-node unsplit sweeps, positive donor transfers
-and physical-coordinate pressure/capillary/viscous operators remain distinct.
-The exact-history prototype is retained as an explicit opt-in experimental
-policy, not the default. Historical source-bound evidence qualifies neither the
-finite default nor the new optional integration. General physical qualification
-and production performance remain open. Configurable rank-local
-memory guards are engineering admission limits, not physical constraints.
-Source-free closed nonperiodic flow is the intended bounded scope. Periodic
-images, low-Mach/material/species sources and drift remain unsupported here.
+Implementation has focused numerical coverage for the bounded source-free,
+closed, nonperiodic convex-native backend. Overall Stage 7 physical
+qualification remains incomplete. The [general AMR design](docs/architecture/general_amr.md#qualification-status)
+maintains the scope and limits. Checked items below mean implementation plus
+the specified focused coverage, not production or application qualification.
 
+- [x] Implement polyhedral PLIC, canonical unsplit swept-volume transport,
+      independent complementary phase ledgers and finite accepted histories.
+      Publish independent binary64 gas/carrier amounts once per step/remap with
+      counted roundoff bounds; retain representable tiny phases without clipping.
+- [x] Implement source-free compatible implicit momentum, physical-coordinate
+      pressure/capillary/viscous operators, geometry-based timestep controls,
+      attainable inner solves and original physical-residual acceptance under
+      shared iteration/resource limits.
+- [x] Verify focused reconstruction, donor budgets, microscopic/subnormal
+      inventories, stale identity, rejection, rollback, regrid, policy and
+      empty-owner contracts in serial and MPI.
+- [x] Complete the original ten-step skew coarse/fine phase passage to 0.02 s
+      in serial/MPI2/MPI4 with its original physical gates. Earlier resource
+      failures are superseded for this fixture only.
+- [x] Retain `ExperimentalExact` as a separately delivered, explicit opt-in
+      policy with source/result/capsule pins and same-mode remap. Reject
+      cross-policy adoption and silent fallback; finite history remains default.
+- [x] Reuse authenticated preparation, immutable topology, volume-only queries
+      and certification-local exact support planes without weakening proofs.
+- [ ] Integrate the separately staged bounded integer signs and certified
+      binary64/lazy-distance candidate. Its recorded focused matrix and full
+      coarse/fine runs pass; preserve exact fallback and compiler/mode guards.
+- [ ] Complete a coherent physical campaign on the integrated source, including
+      reflected-cylinder capillarity and finite-duration viscous decay. Later
+      optimization campaigns did not repeat those two long methods.
+- [ ] Qualify high-contrast curved interfaces directly on refinement seams,
+      nonzero-time regrid momentum across the intended mesh families, and
+      long-horizon spatial/time convergence before claiming general physical use.
+- [ ] Resolve the recorded Release failure in
+      `DistributedAdaptiveBalance.MeasuredOperationsDrivePinnedHierarchyMigration`;
+      the later selected balance matrix excluded it explicitly.
+- [ ] Qualify optional exact-history physical accuracy, rational-history growth,
+      storage/RSS, long-horizon performance and scaling. Focused policy tests
+      do not close these gates.
+- [ ] Qualify production runtime and distributed scaling with matched source,
+      runtime and complete physical horizons. Small-case speedups and operation
+      counts do not establish bounded rational width or whole-process memory.
 
-- [ ] Add polyhedral PLIC reconstruction and canonical unsplit swept-volume
-      transport with complementary gas/carrier fluxes matching projected face
-      volume. Retain the Cartesian implementation as a specialized backend.
-- [ ] Publish independent finite phase volumes and histories once per accepted
-      step/remap; remove persistent rational remainders. Preserve representable
-      tiny phases with cancellation-resistant arithmetic and scale-aware counted
-      conservation/positivity/rounding bounds, without cell-volume phase floors.
-- [x] Implement an explicit experimental exact-inventory policy with a cold
-      optional phase/provenance payload, source/result/policy pins and same-mode
-      remap. Keep finite authoritative phase storage as the default and reject
-      cross-policy adoption or silent fallback. This is implementation only.
-- [x] Preserve the experimental policy in a separate implementation commit after
-      the finite-default commit, with a structured assistance/provenance note.
-      Focused policy/API/rollback/remap checks are recorded separately; this
-      preservation does not claim complete Stage 7 qualification.
-- [ ] Qualify the optional exact integration's physical accuracy, storage/RSS,
-      performance, long-horizon and scaling behavior. Retain documented rational
-      history growth and unresolved resource/physical boundaries.
-- [ ] Derive unsplit donor budgets that preserve microscopic gas/carrier tails;
-      allow only bounded canonical-face roundoff repair, with collective donor
-      rechecks and no cell clipping. Cartesian directional helpers alone do not
-      establish this contract for general polyhedra.
-- [ ] Qualify compatible implicit momentum with final mass storage and actual
-      source-free phase-mass fluxes. Species/population mass-flux integration
-      and separate drift impulses remain Stage 8; preserve
-      first-order accuracy limits, and force-free passive-bound scope.
-- [ ] Retain attainable equilibrated solves plus the original physical residual,
-      positivity/conservation gates, bounded physical-defect corrections and
-      shared iteration budget. Verify microscopic/subnormal carrier oracles,
-      correction exhaustion/recovery and numerical-operator invalidation.
-- [ ] Add physical-coordinate curvature, nonorthogonal pressure/capillary
-      balance, viscous transport, and geometry-based timestep/resolution
-      criteria. Use physical spans, not cube-root volume, for bubble resolution.
-- [ ] Verify inferred oblique planes, transport/deformation across skew,
-      coarse/fine and MPI faces, phase budgets and passive momentum bounds,
-      hydrostatics, finite-duration capillarity from independent mixed fractions,
-      viscous modes, and regrid momentum. Keep high-contrast curved interfaces
-      directly on refinement seams as an open strict qualification gate.
-      Qualify source-free flow before nonzero material-volume sources.
+Periodic images, material-volume/species sources, low-Mach thermodynamics,
+population drift and representation coupling remain outside this backend;
+Stages 8–9 retain their separate gates. Per-rank memory guards are engineering
+admission limits, not physical constraints.
+
 
 ### Stage 8 — Radiolytic and representation integration
 
@@ -2111,8 +2104,9 @@ images, low-Mach/material/species sources and drift remain unsupported here.
 Every stage requires focused affected checks; serial/MPI correctness evidence
 does not establish scaling or physical application accuracy. Assert actual
 ownership in empty-rank fixtures; choose rank counts from global cell counts or
-deliberate sparse partitions, not root-block counts. Keep dated
-commands/results in separate validation records. Level subcycling, simultaneous
+deliberate sparse partitions, not root-block counts. Keep dated commands/results
+in local validation artifacts and maintain support status and remaining gates in
+the design and modeling documents. Level subcycling, simultaneous
 ALE/regridding, curved-cell refinement, and rotated periodic transformations
 remain outside this design.
 

@@ -382,3 +382,20 @@ properties, and diagnostic rates.
   <https://doi.org/10.1016/j.anucene.2021.108614>.
 - G. P. Celata et al., Experimental Thermal and Fluid Science (2007),
   <https://doi.org/10.1016/j.expthermflusci.2006.06.006>.
+
+## Numerical and performance qualification
+
+The strict auxiliary-transport policy has recorded serial/MPI coverage for exact
+global-zero skipping, rank-local activation, paired transport preparation and
+rank-divergent selection rejection. Matched fixed-grid reduced-fixture exports
+were unchanged by skipping inactive equations. That fixture aligns active gas
+equations with its external comparison; it does not equate matrix formats,
+iteration work, carriers or all model bookkeeping between solvers.
+
+Kinetics reuses the unchanged subcycle schedule and exponential coefficients per
+advance and frozen production/pressure/liquid-fraction factors per cell. Evolving
+concentration, supersaturation, conversion, radius, slip and transfer are still
+recomputed within each subcycle. Scoped field views end before synchronization
+or solves. Recorded gas/ALE replay fixtures preserve owned fields, histories and
+physical budgets. Their short CPU timings do not qualify a full coupled reactor,
+IF97/device path, large-rank scaling or long-duration physical behavior.

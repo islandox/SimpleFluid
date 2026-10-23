@@ -68,13 +68,9 @@ convergence, and preservation of relative residual checks for tiny nonzero
 loads. CTest registers its distributed cases at two and four ranks in addition to serial discovery.
 These are solver regression checks, not a physical validation claim.
 
-On September 11, 2026, LLVM Debug and GCC Release each passed all nine tests in
-serial and at two and four MPI ranks. Every participating rank reported zero
-failures. The runs used the default OpenMPI transports with host networking.
-The [LLVM manifest](qualification/region_production/llvm_debug/testSteadyDiffusionConvergence_physical_rhs_manifest.json)
-and [GCC manifest](qualification/region_production/gcc_release/testSteadyDiffusionConvergence_physical_rhs_manifest.json)
-record the exact commands and binary/library hashes; adjacent logs and
-per-rank GoogleTest XML retain the results. The
-[native symbol audit](qualification/region_production/llvm_debug/steady_diffusion_native_symbols.txt)
-confirms that the FVM static archive defines both original native helper
-signatures and both overloads accepting explicit convergence controls.
+Recorded GCC Release and LLVM Debug campaigns passed the public-helper
+regressions in serial and at two/four ranks, including homogeneous and tiny
+nonzero physical loads. This is consolidated numerical coverage, not a new run.
+Rebuild `testSteadyDiffusionConvergence` and run its affected serial and MPI
+registrations when changing this contract. Public overload/source compatibility
+and fresh equation residuals remain separate checks.

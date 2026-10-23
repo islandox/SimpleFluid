@@ -777,3 +777,19 @@ evidence requirements above to the final diff, so the handoff is scoped and revi
 When a full suite cannot run, record exactly what was built and tested, the
 reason for omissions, and the command another maintainer should run.
 This makes incomplete validation visible and reproducible.
+
+## Documentation ownership
+
+Maintain algorithms and ownership/API contracts in `docs/architecture/` and the
+relevant code guides, physical assumptions and applicability in `docs/modeling/`,
+and implementation/qualification tasks in `TODO.md`. Reproducible numerical
+assertions may have a durable verification index; benchmark guides describe the
+measurement contract rather than accumulating dated run reports.
+
+When consolidating a campaign, preserve implemented behavior, independent test
+oracles, superseding results, known failures, exclusions and remaining physical
+or scaling gates. Distinguish implemented, component-tested,
+solver-regression-tested, externally compared and physically validated states.
+Recorded evidence is not a fresh run. Keep raw commands, source/runtime hashes,
+logs, XML, profiles and timing samples in local build artifacts. Do not create
+another versioned implementation/review diary for each iteration.

@@ -217,11 +217,11 @@ Cartesian blocks, periodic directions and impermeable slip walls are the
 supported geometry. Prism subdivision, curved vessel boundaries, contact angles,
 and moving mesh/ALE retain their own roadmap gates.
 
-The proposed [general AMR design](../architecture/general_amr.md) extends native
-XY/Z products, polyhedra, and mixed regions through separate geometry, migration,
-and VoF qualification stages. The common hierarchy seam and Cartesian adapter are separate from these future
-mesh extensions; native mesh support alone does not qualify the Cartesian
-transport algorithm on those cells. No additional mesh family gains adaptive VoF
+The [general AMR design](../architecture/general_amr.md) describes implemented
+XY/Z, convex-polyhedral and mixed-region adaptation and a separate general-flow
+backend under qualification. The common hierarchy seam and Cartesian adapter
+retain their specialized numerical path; native mesh support alone does not
+qualify the Cartesian transport algorithm on those cells. No additional mesh family gains adaptive VoF
 support through the hierarchy seam.
 [Bidirectional representation trials](bubble_representation.md) have separate
 birth, resolution, component and thermodynamic-history guards.
@@ -240,5 +240,5 @@ defines compatible implicit momentum transport, canonical inventories and cache
 lifetimes. The verification index lists reproducible assertions; local dated
 measurements are not available as tracked qualification reports.
 
-The [general AMR Stage 1 verification record](../verification/general_amr.md)
+The [general AMR qualification summary](../architecture/general_amr.md#qualification-status)
 lists the focused observation, partition, cache and transaction gates.

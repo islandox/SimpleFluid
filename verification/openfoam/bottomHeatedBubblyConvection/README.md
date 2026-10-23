@@ -190,8 +190,8 @@ and gas-update timers. Solver-call time includes preconditioning. Exported
 times are maximum-rank local durations; sums of these maxima are not an
 exclusive phase profile. The SimpleFluid number/moles pair shares one matrix;
 OpenFOAM assembles its two equations separately.
-See the [strict gas comparison](../../../docs/benchmarks/strict_gas_20260914.md)
-for matched 10k/98k timings and full/strict numerical equivalence checks.
+See the [gas qualification contract](../../../docs/radiolytic-gas-models.md#numerical-and-performance-qualification)
+for full/strict numerical equivalence and the limits of the reduced fixture.
 
 The optional NOX build supports this fixed-mesh physical Boussinesq case with
 temperature, material properties, SST coefficients, and gas state frozen during
