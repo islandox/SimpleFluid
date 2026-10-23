@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <memory>
 #include <numbers>
@@ -530,4 +531,82 @@ TEST(MeshReorderingFactoryMultiRankTest, SupportsRankWithoutSelectedOwnedOrGhost
         EXPECT_TRUE(layout.selected_ghost_range().empty());
         EXPECT_EQ(solid.num_faces(), 0U);
     }
+}
+
+TEST(MeshReorderingFactoryTest, PartitionedXYOrderIsBijectiveGroupedAndAdjacencyBased)
+{
+    using Topology = SimpleFluid::Meshes::SemiStructMeshTopo;
+    // Two three-cell rows, interleaved in original cell numbering.
+    // Within each partition the geometric graph is a path with ordinal stride2.
+    const SimpleFluid::Arr<SimpleFluid::Arr<unsigned>> polygons{
+        {0, 1, 5, 4}, {4, 5, 9, 8}, {1, 2, 6, 5}, {5, 6, 10, 9}, {2, 3, 7, 6}, {6, 7, 11, 10}};
+    const Topology topology(12, polygons, 5);
+    const auto original_faces = topology.side_faces();
+    const std::vector<std::size_t> owners{9, 2, 9, 2, 9, 2};
+    const auto order = Factory::partitioned_xy_order(topology, owners);
+    EXPECT_EQ(order, (std::vector<std::size_t>{5, 3, 1, 4, 2, 0}));
+    EXPECT_EQ(Factory::partitioned_xy_order(topology, owners), order);
+    const Topology different_z_count(12, polygons, 1);
+    EXPECT_EQ(Factory::partitioned_xy_order(different_z_count, owners), order);
+
+    auto sorted = order;
+    std::ranges::sort(sorted);
+    EXPECT_EQ(sorted, (std::vector<std::size_t>{0, 1, 2, 3, 4, 5}));
+    std::vector<std::size_t> inverse(order.size());
+    for (std::size_t i = 0; i < order.size(); ++i)
+    {
+        inverse[order[i]] = i;
+        if (i > 0)
+            EXPECT_LE(owners[order[i - 1]], owners[order[i]]);
+    }
+    std::size_t original_bandwidth = 0, reordered_bandwidth = 0;
+    for (const auto& edge : topology.side_faces())
+    {
+        if (edge.neighbor == Topology::invalid_ordinal || owners[edge.owner] != owners[edge.neighbor])
+            continue;
+        const auto a = std::size_t(edge.owner), b = std::size_t(edge.neighbor);
+        original_bandwidth = std::max(original_bandwidth, a > b ? a - b : b - a);
+        reordered_bandwidth =
+            std::max(reordered_bandwidth, inverse[a] > inverse[b] ? inverse[a] - inverse[b] : inverse[b] - inverse[a]);
+    }
+    EXPECT_EQ(original_bandwidth, 2U);
+    EXPECT_EQ(reordered_bandwidth, 1U);
+    ASSERT_EQ(topology.side_faces().size(), original_faces.size());
+    for (std::size_t face = 0; face < original_faces.size(); ++face)
+    {
+        const auto& before = original_faces[face];
+        const auto& after = topology.side_faces()[face];
+        EXPECT_EQ(after.nodes, before.nodes);
+        EXPECT_EQ(after.owner, before.owner);
+        EXPECT_EQ(after.neighbor, before.neighbor);
+        EXPECT_EQ(after.boundary_id, before.boundary_id);
+    }
+}
+
+TEST(MeshReorderingFactoryTest, PartitionedXYOrderRetainsDisconnectedAndIsolatedCells)
+{
+    using Topology = SimpleFluid::Meshes::SemiStructMeshTopo;
+    const Topology topology(15, {{0, 1, 4, 3}, {6, 7, 10, 9}, {1, 2, 5, 4}, {7, 8, 11, 10}, {12, 13, 14}}, 3);
+    const std::vector<std::size_t> owners(5, 42);
+    const auto order = Factory::partitioned_xy_order(topology, owners);
+    EXPECT_EQ(order, (std::vector<std::size_t>{4, 2, 0, 3, 1}));
+    EXPECT_EQ(Factory::partitioned_xy_order(topology, owners), order);
+    auto sorted = order;
+    std::ranges::sort(sorted);
+    EXPECT_EQ(sorted, (std::vector<std::size_t>{0, 1, 2, 3, 4}));
+
+    const Topology empty;
+    EXPECT_TRUE(Factory::partitioned_xy_order(empty, {}).empty());
+}
+
+TEST(MeshReorderingFactoryTest, PartitionedXYOrderRejectsMissingExtraAndUnknownOwners)
+{
+    using Topology = SimpleFluid::Meshes::SemiStructMeshTopo;
+    const Topology topology(4, {{0, 1, 2, 3}}, 2);
+    const std::vector<std::size_t> extra{0, 0}, unknown{std::numeric_limits<std::size_t>::max()};
+    EXPECT_THROW((void) Factory::partitioned_xy_order(topology, {}), std::invalid_argument);
+    EXPECT_THROW((void) Factory::partitioned_xy_order(topology, extra), std::invalid_argument);
+    EXPECT_THROW((void) Factory::partitioned_xy_order(topology, unknown), std::invalid_argument);
+    const std::vector<std::size_t> valid{7};
+    EXPECT_EQ(Factory::partitioned_xy_order(topology, valid), (std::vector<std::size_t>{0}));
 }

@@ -326,7 +326,6 @@ foreach(_backend_procs IN ITEMS 2 4)
       NAME CoupledSolverBackends_${_backend_procs}procs
       TARGET testCoupledSolverBackends
       PROCS ${_backend_procs}
-      ARGS "--gtest_filter=-*SerialSemiStructured*"
       LABELS "mpi;pressure_velocity;composite;solver_backends"
       TIMEOUT 300)
 endforeach()
@@ -388,3 +387,20 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;ale;continuity;validation"
     TIMEOUT 60)
+
+foreach(_semi_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME SemiStructuredFlow_${_semi_ranks}procs
+        TARGET testCoupledSolverBackends PROCS ${_semi_ranks}
+        ARGS "--gtest_filter=*SemiStructuredNonOrthogonal*"
+        LABELS "mpi;semi_structured;pressure_velocity;non_orthogonal" TIMEOUT 180)
+    simplefluid_add_mpi_test(NAME SemiStructuredSolverALE_${_semi_ranks}procs
+        TARGET testBoussinesqPlanarALE PROCS ${_semi_ranks}
+        ARGS "--gtest_filter=BoussinesqPlanarALESupportMatrixTest.*SemiStructured*"
+        LABELS "mpi;semi_structured;ale;conservation;transaction;empty_rank" TIMEOUT 180)
+endforeach()
+
+foreach(_semi_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME SemiStructuredVolumeContinuity_${_semi_ranks}procs
+        TARGET testVolumeContinuityModel PROCS ${_semi_ranks}
+        LABELS "mpi;semi_structured;ale;continuity;transaction;empty_rank" TIMEOUT 120)
+endforeach()

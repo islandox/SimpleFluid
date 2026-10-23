@@ -83,6 +83,8 @@ public:
      *
      * Material-volume and carrier-fraction spans follow local cell order,
      * including ghost cells; `previous_target` alone follows owned-cell order.
+     * Optional span presence must agree among ranks with applicable rows;
+     * zero-row ranks supply empty spans and remain neutral in that selection.
      * Optional exact carrier and bubble-slip fluxes override their documented
      * fallbacks, and the ALE state supplies current and trial geometry.
      */

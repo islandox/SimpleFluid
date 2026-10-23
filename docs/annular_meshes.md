@@ -3,8 +3,9 @@
 `AnnularSemiStructuredMeshFactory` builds a polygonal annular fluid domain
 with triangular-prism bulk cells and hexahedral radial-wall cells. The result
 is a `Meshes::MultiRegionMesh`, usable through `MeshHandle` in serial or MPI.
-It also supports the composite's common affine Z motion. This does not change
-the serial-only contract of a direct `SemiStructuredXY_Z` handle.
+It also supports the composite's common affine Z motion. Direct
+`SemiStructuredXY_Z` handles provide their own [native MPI distribution and
+axial motion](semi_structured_parallel.md), independently of composite ownership.
 
 Include `geometry/AnnularSemiStructuredMeshFactory.hh` and link
 `SimpleFluid::Mesh`. Construct the mesh collectively on the default Tpetra

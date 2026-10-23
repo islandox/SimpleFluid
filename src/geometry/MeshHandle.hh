@@ -81,9 +81,9 @@ concept mesh_has_face_local_id = requires(const Mesh& m, ID id) {
  *
  * MeshHandle normalizes structured, semi-structured, unstructured, and legacy
  * STK meshes into one FVM-facing API. Cartesian and cylindrical meshes are
- * distributed automatically. Unstructured meshes require explicit
- * partitioning before multi-rank construction, while SemiStructuredXY_Z is
- * currently serial-only and rejects construction on a multi-rank communicator.
+ * distributed automatically. SemiStructuredXY_Z combines base-XY graph partitions
+ * with balanced Z slabs and adjacency halos, retaining compact polygonal geometry.
+ * Unstructured meshes require explicit partitioning before multi-rank construction.
  * The handle builds owned/overlap maps and translates compact local IDs to each
  * concrete mesh's geometry IDs. Construction from a mutable mesh retains that
  * exact object for controlled mutable visitation while the established
@@ -154,15 +154,34 @@ public:
         std::vector<local_ordinal_type> face_lids;
     };
 
+    /** @brief Tensor decomposition of compact XY graph parts and contiguous Z slabs. */
+    struct SemiStructuredDecomposition
+    {
+        size_t xy_partitions = 1, z_partitions = 1;
+    };
+
     /** @brief Partition selection and ghost depth for structured meshes. */
     struct DistributionOptions
     {
         size_t ghost_layers = 1;
         std::optional<size_t> partition;
         std::optional<size_t> partitions;
-        /** @brief Allow empty orthogonal partitions; must agree on all ranks. */
+        /** @brief Allow empty structured partitions; must agree on all ranks. */
         bool allow_empty_partitions = false;
+        /** SemiStructured only: either factor infers the other from communicator size.
+         * Both omitted selects maximum nonempty owners, then a true hybrid if
+         * feasible, then minimum estimated block load and interface cost.
+         */
+        std::optional<size_t> xy_partitions, z_partitions;
     };
+
+    /** @brief Selected compact XY-graph/Z-slab factors; throws for another mesh family. */
+    [[nodiscard]] const SemiStructuredDecomposition& semi_structured_decomposition() const
+    {
+        if (!std::holds_alternative<SemiStructuredPtr>(d_mesh))
+            throw std::invalid_argument("XY/Z decomposition requires a SemiStructuredXY_Z handle.");
+        return d_semi_structured_decomposition;
+    }
 
     static constexpr int invalid_boundary_id = -1;
 
@@ -219,23 +238,31 @@ public:
     {
     }
 
-    /**
-     * @brief Build a serial-only handle for a semi-structured mesh.
-     * @throws std::runtime_error On a communicator containing multiple ranks.
-     */
+    /** @brief Collectively build a balanced distributed compact XY/Z mesh view. */
     explicit MeshHandle(SemiStructuredPtr mesh);
-
-    /** @brief Retain mutable ownership of a serial semi-structured mesh. */
+    /** @brief Retain the exact mutable XY/Z geometry with default distribution. */
     explicit MeshHandle(MutableSemiStructuredPtr mesh);
+    /**
+     * @brief Distribute a compact XY adjacency graph crossed with balanced Z slabs.
+     * Canonical geometry IDs remain k-major. Rank is z_slab*xy_partitions+xy_part.
+     * XY graph labels are canonicalized by minimum base-cell ID and reused by
+     * every Z slab. No expanded 3D graph is partitioned. Ghost depth must be
+     * positive. Empty tensor-product owners require allow_empty_partitions.
+     * Explicit partition/partitions must both be present and equal the default
+     * communicator rank/size; virtual partitions are not supported. Geometry,
+     * topology and distribution metadata must agree collectively. Geometry is
+     * retained without expanding its polygonal XY connectivity through Z.
+     */
+    explicit MeshHandle(SemiStructuredPtr mesh, DistributionOptions options);
+    /** @brief Retain mutable XY/Z ownership with the same collective distribution contract. */
+    explicit MeshHandle(MutableSemiStructuredPtr mesh, DistributionOptions options);
 
     /** @brief Retain mutable ownership supplied through a semi-structured subtype. */
     template<class Derived>
-        requires (!std::is_const_v<Derived>
-                  && !std::same_as<Derived, SemiStructured>
-                  && std::derived_from<Derived, SemiStructured>)
-    explicit MeshHandle(SP<Derived> mesh)
-        : MeshHandle(std::static_pointer_cast<SemiStructured>(
-              std::move(mesh)))
+        requires(!std::is_const_v<Derived> && !std::same_as<Derived, SemiStructured> &&
+                 std::derived_from<Derived, SemiStructured>)
+    explicit MeshHandle(SP<Derived> mesh, DistributionOptions options = {})
+        : MeshHandle(std::static_pointer_cast<SemiStructured>(std::move(mesh)), options)
     {
     }
 
@@ -1014,7 +1041,7 @@ private:
     SIMPLEFLUID_LOCAL void initialize_orthogonal(
         SP<const MeshType> mesh, DistributionOptions options);
 
-    SIMPLEFLUID_LOCAL void initialize_semi_structured(SemiStructuredPtr mesh);
+    SIMPLEFLUID_LOCAL void initialize_semi_structured(SemiStructuredPtr mesh, DistributionOptions options);
     SIMPLEFLUID_LOCAL void initialize_composite(MultiRegionPtr mesh, DistributionOptions options);
     SIMPLEFLUID_LOCAL VTUWriter::TopologyHandle composite_vtu_topology(const MultiRegion& mesh) const;
 
@@ -1234,6 +1261,7 @@ private:
     std::vector<global_ordinal_type> d_node_global_ids;
     bool d_serial_identity = false;
     std::array<size_t, 3> d_serial_counts{};
+    SemiStructuredDecomposition d_semi_structured_decomposition;
     variant_type d_mesh;
     std::optional<mutable_variant_type> d_mutable_mesh;
     mutable indexer_type d_indexer;

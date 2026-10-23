@@ -280,7 +280,9 @@ TEST(PlanarALEMeshMotionTest, SemiStructuredAxialMotionPreservesXYTopologyAndSat
     auto geometry = std::make_shared<SemiStructured>(
         SimpleFluid::Arr<SemiStructured::Vec3>{{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}}},
         SimpleFluid::Arr<SimpleFluid::Arr<unsigned>>{{0, 1, 2}}, SimpleFluid::ArrReal{0.0, 1.0, 2.0});
-    auto mesh = std::make_shared<Handle>(geometry);
+    Handle::DistributionOptions distribution;
+    distribution.allow_empty_partitions = true;
+    auto mesh = std::make_shared<Handle>(geometry, distribution);
     const auto xy_nodes = geometry->xy_nodes();
     const auto xy_cells = geometry->xy_cell_nodes();
     Motion motion(mesh);

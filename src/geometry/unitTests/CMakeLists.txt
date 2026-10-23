@@ -76,10 +76,10 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
-    NAME SemiStructuredMeshHandleSerialOnly_2procs
+    NAME SemiStructuredMeshHandle_2procs
     TARGET testMeshHandle
     PROCS 2
-    ARGS "--gtest_filter=MeshHandleTest.SemiStructuredConstructionIsSerialOnly"
+    ARGS "--gtest_filter=MeshHandleTest.SemiStructuredConstructionPreservesDefaultDistributedOwnership"
     LABELS "mpi;mesh_handle;semi_structured"
     TIMEOUT 120)
 
@@ -130,4 +130,14 @@ foreach(_region_procs IN ITEMS 2 4)
         PROCS ${_region_procs}
         LABELS "mpi;multi_region"
         TIMEOUT 120)
+endforeach()
+
+foreach(_semi_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME SemiStructuredDistributed_${_semi_ranks}procs
+        TARGET testSemiStructuredDistributed PROCS ${_semi_ranks}
+        LABELS "mpi;geometry;semi_structured;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME SemiStructuredALEGeometry_${_semi_ranks}procs
+        TARGET testPlanarALEMeshMotion PROCS ${_semi_ranks}
+        ARGS "--gtest_filter=PlanarALEMeshMotionTest.SemiStructuredAxialMotionPreservesXYTopologyAndSatisfiesGCL"
+        LABELS "mpi;geometry;semi_structured;ale;empty_rank" TIMEOUT 120)
 endforeach()

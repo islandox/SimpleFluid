@@ -162,10 +162,11 @@ Global compact axis/base/interface descriptions are replicated. Expanded 3D
 geometry, connectivity, fields and operators are not replicated as a substitute
 for distribution. Global explicit `UnstructuredMesh` constituents are therefore
 rejected by the automatic multi-rank composite constructor; existing single-region partitioned-unstructured
-MPI remains supported. The direct `SemiStructuredXY_Z` handle keeps its serial
-contract; wrap it in a composite to use compact MPI.
+MPI remains supported. Direct `SemiStructuredXY_Z` handles also provide
+[XY graph partitions crossed with Z slabs and ghost maps](semi_structured_parallel.md);
+composite wrapping remains a separate region-composition choice.
 
-For topology-aware graph ownership or mixed explicit polyhedral regions, use
+For graph ownership across composite regions or mixed explicit polyhedral regions, use
 [`MeshPartitioner` and `CompositeMeshSource`](composite_partitioning.md).
 That path accepts a root-owned source or distributed native fragments, builds a
 validated ownership plan, and transfers only local explicit connectivity and

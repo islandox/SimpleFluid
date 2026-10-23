@@ -141,8 +141,11 @@ verification items below mean the foundation as a whole is not yet complete.
         focused regressions
   - [x] Cover native unstructured execution directly in serial and through
         `MeshPartitioner`/`PartitionedMesh` in MPI
-  - [x] Cover `SemiStructuredXY_Z` in serial and explicitly reject its
-        unsupported multi-rank construction
+  - [x] Support native `SemiStructuredXY_Z` serial/MPI ownership with Zoltan2
+        XY graph partitions crossed with Z slabs, `MeshReorderingFactory` XY
+        ordering, adjacency ghosts, canonical face maps and axial ALE, including
+        empty owners
+        (see [scope and checks](docs/semi_structured_parallel.md))
 - [x] I/O and utilities
   - [x] VTU output for ParaView
   - [x] STK Exodus II mesh input for `HEX_8` and `WEDGE_6` volume elements

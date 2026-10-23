@@ -7,11 +7,14 @@
 
 #include "SimpleFluidExport.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/mesh/SemiStructMeshTopo.hh"
 
 #include <compare>
 #include <cstddef>
 #include <functional>
+#include <span>
 #include <utility>
+#include <vector>
 
 namespace SimpleFluid
 {
@@ -99,6 +102,25 @@ public:
      * @throws std::runtime_error On ranks where another rank's callback fails.
      */
     static SelectedCellLayout selected_cells_first(SP<mesh_type>&& parent, cell_selector_type selector);
+
+    /**
+     * @brief Group XY cells by partition, then order each induced graph by deterministic reverse Cuthill-McKee.
+     *
+     * This pure base-topology operation returns new-to-original XY ordinals.
+     * Partition labels are ordered numerically; traversal seeds and neighbors
+     * use induced degree then original ordinal as their deterministic tie break.
+     * Disconnected components are reversed separately in their seed order.
+     * Geometry, canonical global IDs and input topology are never modified.
+     * Callers apply this permutation to local ordering before fields/caches exist.
+     *
+     * @param topology Immutable polygonal XY adjacency; Z repetitions are ignored.
+     * @param xy_owners One partition label per original XY cell; labels may be sparse.
+     * @return A bijection of [0, number of XY cells), grouped by partition label.
+     * @throws std::invalid_argument If owner count differs from XY cell count or
+     *         a label is the unknown-owner sentinel size_t::max().
+     */
+    static std::vector<std::size_t> partitioned_xy_order(
+        const Meshes::SemiStructMeshTopo& topology, std::span<const std::size_t> xy_owners);
 };
 
 } // namespace SimpleFluid
