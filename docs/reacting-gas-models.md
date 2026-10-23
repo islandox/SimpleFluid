@@ -6,12 +6,12 @@ heat release from conservative dissolved, dispersed, and resolved gas
 transport. A particular energy source or solution composition is not a
 required part of that design.
 
-This document retains its historical path for existing links. The
-`Reacting*`, `PrescribedHeat*`, and hydrogen-specific API names below describe the
-current implementation. They do not provide a general reaction-network or
-arbitrary-species interface; those interfaces remain planned. In particular,
-changing supplied material properties does not generalize the implemented H2
-chemistry or its energy-yield production closure.
+The neutral `Reacting*`, `PrescribedHeat*`, and `BubblePopulationKinetics`
+interfaces replace the retired application-specific names without aliases.
+The runtime two-population selector is `twoPopulation`. Existing H2 fields
+and the energy-yield source closure remain transitional; this migration does
+not establish arbitrary-species transport or a general chemistry interface.
+See the [migration table](modeling/reacting_gas_sources.md) for exact API and key changes.
 
 ## General source boundary
 
@@ -31,21 +31,21 @@ rollback contracts documented below. Generic chemistry is not implemented by
 renaming the legacy options or interpreting an arbitrary reaction rate as
 power.
 
-## Legacy implementation: available modes and ownership
+## Current single-gas implementation: available modes and ownership
 
 The existing runtime-selectable source subsystem has three modes:
 
 - `disabled`
 - `idealGasSource`
-- `sheng2024TwoPopulation`
+- `twoPopulation`
 
-This legacy subsystem is owned by an external `MultiphysicsSolverCoupler` after
+This transitional subsystem is owned by an external `MultiphysicsSolverCoupler` after
 `configure_reacting_gas(...)` is called. Construct the coupler with a
 `SP<BoussinesqSolver<Pack>>` and use `coupling.step()` or `coupling.run()` for
 advancement. The standalone Boussinesq solver owns no reacting model. See
 [the controller ownership and migration guide](architecture/multiphysics_solver_coupler.md).
 
-## Legacy implementation: public units
+## Current single-gas implementation: public units
 
 All public options and fields use SI:
 
@@ -62,7 +62,7 @@ All public options and fields use SI:
 | Density | kg/m3 |
 | Henry coefficient, `C = H p` | mol/(m3 Pa) |
 
-## Legacy implementation: external material properties
+## Current single-gas implementation: external material properties
 
 Application-specific property correlations belong to the supplied material
 model. Density, heat capacity, viscosity and thermal conductivity can be
@@ -97,7 +97,7 @@ Removed application-specific property and alternate-yield keys remain
 rejected. The legacy source yield `hydrogen_yield_mol_per_j` remains a solver
 input; it is not a general reaction-rate interface.
 
-## Legacy implementation: low-order ideal-gas source
+## Current single-gas implementation: low-order ideal-gas source
 
 The current energy-yield specialization computes
 
@@ -111,18 +111,18 @@ documents that specialization rather than defining the general source
 provider. The source is zero at zero supplied power and when
 `alpha_g >= alpha_max`. It is limited by both `max_source_alpha_rate` and
 `(alpha_max - alpha_g) / dt`. In the Boussinesq solver, the Phase 14 scalar
-model owns the authoritative `alpha_g` field and bound; ideal supplied reaction sources reads
+model owns the authoritative `alpha_g` field and bound; ideal reacting_gas reads
 that state and mirrors it only for its model-local diagnostics.
 
-When no scalar-void model was explicitly configured, ideal-supplied reaction sources bounds
+When no scalar-void model was explicitly configured, ideal-reacting_gas bounds
 seed the solver's implicit scalar model before the first step. Explicit
-`ScalarVoidFractionOptions` take precedence. Reconfiguring supplied reaction sources after
+`ScalarVoidFractionOptions` take precedence. Reconfiguring reacting_gas after
 time advancement never resets the evolved scalar state or its bounds.
 Standalone ideal-mode calls likewise must use the `advance` overload that
 supplies authoritative `alpha_g` and `alpha_max`; the shorter overload is
 reserved for disabled and two-population modes.
 
-## Legacy implementation: two-population state
+## Current single-gas implementation: two-population state
 
 The advanced model stores dissolved hydrogen conservatively as
 
@@ -140,12 +140,12 @@ It transports and reacts the following bulk quantities:
 zero radius and zero void diagnostics; population floors are never used as
 divisors.
 
-In this two-population mode, the supplied reaction sources inventories own the reconstructed
+In this two-population mode, the reacting_gas inventories own the reconstructed
 void state and the scalar model is only a common publication mirror. Their
 configured alpha bounds must match so mirroring cannot clip conserved bubble
 state.
 
-The `sheng2024TwoPopulation` selector retains its specific production,
+The `twoPopulation` selector retains its specific production,
 conversion, dissolution, and experimental inertial-pressure closures. These
 are compatibility behavior, not universal reaction or nucleation laws. The
 reusable thermodynamic pieces include Henry equilibrium, the Laplace
@@ -160,7 +160,7 @@ Bubble radii are positive roots of
 The solver uses bracketed bisection over the configured radius interval and
 reports failed brackets or iterations.
 
-## Legacy implementation: numerical ordering
+## Current single-gas implementation: numerical ordering
 
 For each configured two-population solver step:
 
@@ -260,7 +260,7 @@ face for one-dimensional compatibility. Rise velocity is added
 in the positive z direction in both modes. Configured free-surface patches
 are outflow-only for hydrogen and bubble-count escape.
 
-## Legacy implementation: bubble rise velocity
+## Current single-gas implementation: bubble rise velocity
 
 `celata2007` retains the following implemented drag/rise relation:
 
@@ -281,7 +281,7 @@ reports whether a point lies inside that envelope, but the runtime model
 allows explicit extrapolation for much smaller populations. Such extrapolation
 requires application qualification and is not a general default for reacting gas.
 
-## Legacy implementation: pressure
+## Current single-gas implementation: pressure
 
 Pressure modes are:
 
@@ -296,7 +296,7 @@ The incompressible pressure-correction field is never interpreted directly as
 absolute pressure. The inertial option does not change the projection
 equation. Pressure-floor events are reported in step statistics.
 
-## Legacy implementation: conservation
+## Current single-gas implementation: conservation
 
 The per-step hydrogen balance is
 
@@ -320,13 +320,13 @@ remain unchanged. `alpha_g_raw`, `alpha_g_excess`, and bounded `alpha_g`
 publish the distinction. A concentration publication ceiling similarly does
 not modify `I_H2`; excluded dissolved inventory is reported separately.
 
-## Legacy implementation: configuration
+## Current single-gas implementation: configuration
 
 Options are parsed from flat snake-case `Database` keys. The principal keys
 are:
 
 ```text
-enable_reaction_source
+enable_reacting_gas
 reacting_bubble_model
 reacting_pressure_mode
 dissolved_hydrogen_transport_mode
@@ -383,7 +383,7 @@ Advanced mode reconstructs void from conserved bubble inventories. It is
 therefore rejected with active boiling or finite scalar collapse until those
 mechanisms can add or remove the corresponding inventories conservatively.
 
-## Legacy implementation: output
+## Current single-gas implementation: output
 
 `SolutionOutputOptions::include_sources` writes `S_alpha_reaction`.
 
@@ -391,7 +391,7 @@ mechanisms can add or remove the corresponding inventories conservatively.
 `alpha_l`, absolute pressure, all advanced state fields, reconstructed
 properties, and diagnostic rates.
 
-## Legacy implementation: limitations
+## Current single-gas implementation: limitations
 
 - Chemistry is H2-only; arbitrary species, reaction networks, and generic
   finite-reactant inventories remain planned.
@@ -411,7 +411,7 @@ properties, and diagnostic rates.
 
 <a id="numerical-and-performance-qualification"></a>
 
-## Legacy implementation: numerical and performance qualification
+## Current single-gas implementation: numerical and performance qualification
 
 The strict auxiliary-transport policy has recorded serial/MPI coverage for exact
 global-zero skipping, rank-local activation, paired transport preparation and

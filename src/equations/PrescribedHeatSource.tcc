@@ -13,24 +13,24 @@ template<TpetraTypePack Pack, class MeshType>
 void PrescribedHeatSource<Pack, MeshType>::set_interval_energy(
     std::span<const scalar_type> owned_energy, scalar_type start, scalar_type duration)
 {
-    collective_detail::collective_local_validation(*d_mesh, "PrescribedHeat interval energy", [&]
+    collective_detail::collective_local_validation(*d_mesh, "Prescribed heat interval energy", [&]
     {
         const auto end = start + duration;
         if (owned_energy.size() != d_mesh->num_owned_cells() || !std::isfinite(start) ||
             !std::isfinite(duration) || duration <= scalar_type{} ||
             !std::isfinite(end) || end <= start || d_time_multiplier)
-            throw std::invalid_argument("PrescribedHeat interval energy requires owned-cell joules, finite time, "
+            throw std::invalid_argument("Prescribed heat interval energy requires owned-cell joules, finite time, "
                                         "positive duration, and no user multiplier.");
         const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() * duration;
         if (std::abs((end - start) - duration) > tolerance)
-            throw std::invalid_argument("PrescribedHeat interval duration is not resolved by the source clock.");
+            throw std::invalid_argument("Prescribed heat interval duration is not resolved by the source clock.");
         for (size_t owned = 0; owned < owned_energy.size(); ++owned)
         {
             require_non_negative(owned_energy[owned], "interval joules");
             const auto volume = d_mesh->cell_volume(static_cast<local_ordinal_type>(owned));
             if (!std::isfinite(volume) || volume <= scalar_type{} ||
                 !std::isfinite(owned_energy[owned] / duration / volume))
-                throw std::invalid_argument("PrescribedHeat interval source requires finite positive cell volumes.");
+                throw std::invalid_argument("Prescribed heat interval source requires finite positive cell volumes.");
         }
     });
     require_uniform_value(start, "interval start");
@@ -46,7 +46,7 @@ void PrescribedHeatSource<Pack, MeshType>::set_interval_energy(
 template<TpetraTypePack Pack, class MeshType>
 void PrescribedHeatSource<Pack, MeshType>::refresh_interval_energy(scalar_type time, scalar_type time_step)
 {
-    collective_detail::collective_local_validation(*d_mesh, "PrescribedHeat interval source refresh", [&]
+    collective_detail::collective_local_validation(*d_mesh, "Prescribed heat interval source refresh", [&]
     {
         const auto tolerance = scalar_type{32} * std::numeric_limits<scalar_type>::epsilon() * d_interval_duration;
         const auto next = time + time_step;
@@ -55,15 +55,15 @@ void PrescribedHeatSource<Pack, MeshType>::refresh_interval_energy(scalar_type t
             !std::isfinite(time) || !std::isfinite(time_step) || time_step <= scalar_type{} ||
             !std::isfinite(next) || next <= time || time >= end ||
             time < d_interval_start - tolerance || next > end + tolerance)
-            throw std::invalid_argument("PrescribedHeat substep lies outside the configured energy interval.");
+            throw std::invalid_argument("Prescribed heat substep lies outside the configured energy interval.");
         if (std::abs((next - time) - time_step) > tolerance)
-            throw std::invalid_argument("PrescribedHeat substep duration is not resolved by the source clock.");
+            throw std::invalid_argument("Prescribed heat substep duration is not resolved by the source clock.");
         for (size_t owned = 0; owned < d_interval_energy.size(); ++owned)
         {
             const auto volume = d_mesh->cell_volume(static_cast<local_ordinal_type>(owned));
             if (!std::isfinite(volume) || volume <= scalar_type{} ||
                 !std::isfinite(d_interval_energy[owned] / d_interval_duration / volume))
-                throw std::invalid_argument("PrescribedHeat interval source produced invalid power density.");
+                throw std::invalid_argument("Prescribed heat interval source produced invalid power density.");
         }
     });
     require_uniform_value(time, "substep start");
@@ -80,7 +80,7 @@ void PrescribedHeatSource<Pack, MeshType>::refresh_interval_energy(scalar_type t
 template<TpetraTypePack Pack, class MeshType>
 auto PrescribedHeatSource<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
-    collective_detail::collective_local_validation(*d_mesh, "PrescribedHeat source checkpoint", [&]
+    collective_detail::collective_local_validation(*d_mesh, "Prescribed heat source checkpoint", [&]
     {
         if (d_time_multiplier) throw std::logic_error("Cannot checkpoint a user prescribed_heat multiplier.");
     });
@@ -102,11 +102,11 @@ auto PrescribedHeatSource<Pack, MeshType>::snapshot() const -> StateSnapshot
 template<TpetraTypePack Pack, class MeshType>
 void PrescribedHeatSource<Pack, MeshType>::restore(const StateSnapshot& saved)
 {
-    collective_detail::collective_local_validation(*d_mesh, "PrescribedHeat source restore", [&]
+    collective_detail::collective_local_validation(*d_mesh, "Prescribed heat source restore", [&]
     {
         if (saved.owner != this || saved.base.size() != d_mesh->num_owned_cells() ||
             saved.applied.size() != saved.base.size() || d_time_multiplier)
-            throw std::invalid_argument("PrescribedHeat checkpoint is foreign or incompatible.");
+            throw std::invalid_argument("Prescribed heat checkpoint is foreign or incompatible.");
     });
     d_interval_energy = saved.interval_energy;
     d_interval_start = saved.interval_start;
@@ -128,10 +128,10 @@ void PrescribedHeatSource<Pack, MeshType>::configure(const PrescribedHeatSourceO
 {
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat power configuration",
+        "Prescribed heat power configuration",
         [&]
         {
-            detail::validate_prescribed_heat_power_options(options);
+            detail::validate_prescribed_heat_options(options);
         });
     require_uniform_configuration(options);
     switch (options.profile)
@@ -156,7 +156,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_constant(scalar_type power
 {
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat constant-power initialization",
+        "Prescribed heat constant-power initialization",
         [&]
         {
             require_non_negative(
@@ -177,7 +177,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
 {
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat Gaussian configuration",
+        "Prescribed heat Gaussian configuration",
         [&]
         {
             require_non_negative(total_power, "total power");
@@ -188,7 +188,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
                 if (!std::isfinite(center.component(component)))
                 {
                     throw std::invalid_argument(
-                        "PrescribedHeat Gaussian center must be finite.");
+                        "Prescribed heat Gaussian center must be finite.");
                 }
                 const auto width =
                     standard_deviation.component(component);
@@ -196,7 +196,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
                     || width <= scalar_type{})
                 {
                     throw std::invalid_argument(
-                        "PrescribedHeat Gaussian standard deviations must be "
+                        "Prescribed heat Gaussian standard deviations must be "
                         "finite and positive.");
                 }
             }
@@ -238,7 +238,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
     scalar_type scale{};
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat Gaussian normalization",
+        "Prescribed heat Gaussian normalization",
         [&]
         {
             if (total_power > scalar_type{}
@@ -257,7 +257,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
 
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat Gaussian field initialization",
+        "Prescribed heat Gaussian field initialization",
         [&]
         {
             for (size_t owned = 0;
@@ -300,7 +300,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_shape(
 {
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat shape initialization",
+        "Prescribed heat shape initialization",
         [&]
         {
             require_same_mesh(shape);
@@ -313,7 +313,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_shape(
     scalar_type scale{};
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat shape normalization",
+        "Prescribed heat shape normalization",
         [&]
         {
             if (total_power > scalar_type{}
@@ -343,7 +343,7 @@ void PrescribedHeatSource<Pack, MeshType>::set_time_multiplier(multiplier_type m
     if (!multiplier)
     {
         throw std::invalid_argument(
-            "PrescribedHeat power time multiplier must be callable.");
+            "Prescribed heat power time multiplier must be callable.");
     }
     d_source->set_updater(
         [this](const context_type& context, field_type& field)
@@ -376,7 +376,7 @@ void PrescribedHeatSource<Pack, MeshType>::require_uniform_value(
     if (minimum_value != maximum_value)
     {
         throw std::invalid_argument(
-            "PrescribedHeat " + label + " must agree on every rank.");
+            "Prescribed heat " + label + " must agree on every rank.");
     }
 }
 
@@ -403,7 +403,7 @@ void PrescribedHeatSource<Pack, MeshType>::require_uniform_configuration(
     if (minimum_profile != maximum_profile)
     {
         throw std::invalid_argument(
-            "PrescribedHeat power profile must agree on every rank.");
+            "Prescribed heat power profile must agree on every rank.");
     }
 
     switch (options.profile)
@@ -437,7 +437,7 @@ void PrescribedHeatSource<Pack, MeshType>::copy_scaled_field(
 {
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat field copy",
+        "Prescribed heat field copy",
         [&]
         {
             for (size_t owned = 0;
@@ -481,7 +481,7 @@ void PrescribedHeatSource<Pack, MeshType>::apply_base_profile(scalar_type multip
     auto& applied = d_source->field();
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat applied-field update",
+        "Prescribed heat applied-field update",
         [&]
         {
             for (size_t owned = 0;
@@ -529,7 +529,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_power_density(const f
 {
     collective_detail::collective_local_validation(
         *d_mesh,
-        "PrescribedHeat power-density initialization",
+        "Prescribed heat power-density initialization",
         [&] { require_same_mesh(power_density); });
     d_interval_energy.clear();
     d_interval_duration = {};

@@ -126,7 +126,7 @@ namespace
     const LinearSolverOptions& momentum_linear, const BoussinesqModelOptions& model,
     const MaterialFeedbackOptions* feedback, const ReactingGasOptions* gas, const BoundaryConditionSet& boundaries,
     const std::vector<std::pair<std::string, bool>>& temperature_sources, bool mutable_mesh, bool legacy_backend,
-    bool physical_transport, bool turbulence_enabled, bool boiling_enabled, bool scalar_group_enabled,
+    bool physical_transport, bool turbulence_enabled, bool boiling_enabled,
     bool scalar_void_explicit, bool material_updater, bool dynamic_temperature_sources)
 {
     std::ostringstream encoded;
@@ -330,7 +330,6 @@ namespace
     scalar(physical_transport);
     scalar(turbulence_enabled);
     scalar(boiling_enabled);
-    scalar(scalar_group_enabled);
     scalar(scalar_void_explicit);
     scalar(material_updater);
     scalar(dynamic_temperature_sources);
@@ -411,12 +410,12 @@ auto MultiphysicsSolverCoupler<Pack>::add_prescribed_heat_source() -> prescribed
  * @brief Configure or disable the reserved prescribed_heat power source.
  *
  * @tparam Pack Tpetra type pack.
- * @param options PrescribedHeat source profile and normalization options.
+ * @param options Prescribed heat source profile and normalization options.
  */
 template<TpetraTypePack Pack>
 void MultiphysicsSolverCoupler<Pack>::configure_prescribed_heat_source(const PrescribedHeatSourceOptions& options)
 {
-    detail::validate_prescribed_heat_power_options(options);
+    detail::validate_prescribed_heat_options(options);
     if (options.profile == PrescribedHeatProfile::Disabled)
     {
         remove_prescribed_heat_source();
@@ -471,7 +470,7 @@ auto MultiphysicsSolverCoupler<Pack>::find_prescribed_heat_source() const noexce
  * @brief Configure the optional reacting-gas model from explicit options.
  *
  * @tparam Pack Tpetra type pack.
- * @param options ReactionSource mode, kinetics, and void-fraction bounds.
+ * @param options ReactingGas mode, kinetics, and void-fraction bounds.
  * @return Configured reacting-gas model.
  * @throws std::invalid_argument if options or coupled-model combinations are invalid.
  */
@@ -488,20 +487,19 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
     if (d_free_surface_model && options.mode == ReactingGasMode::IdealGasSource)
     {
         throw std::invalid_argument("The planar free-surface budget cannot use idealGasSource "
-                                    "reaction_source because it does not own a conservative gas inventory.");
+                                    "reacting_gas because it does not own a conservative gas inventory.");
     }
-    if (d_free_surface_model && options.mode == ReactingGasMode::Sheng2024TwoPopulation &&
+    if (d_free_surface_model && options.mode == ReactingGasMode::TwoPopulation &&
         options.pressure_mode != ReactingPressureMode::Constant &&
         options.pressure_mode != ReactingPressureMode::Reconstructed)
     {
         throw std::invalid_argument("Planar free-surface coupling requires constant or reconstructed "
                                     "reacting absolute pressure.");
     }
-    bool scalar_void_was_reset = false;
-    if (options.mode == ReactingGasMode::Sheng2024TwoPopulation && d_boiling_source_model &&
+    if (options.mode == ReactingGasMode::TwoPopulation && d_boiling_source_model &&
         d_boiling_source_model->enabled())
     {
-        throw std::invalid_argument("Sheng two-population reaction_source cannot be combined with "
+        throw std::invalid_argument("Sheng two-population reacting_gas cannot be combined with "
                                     "boiling until vapor mass is coupled to bubble inventories.");
     }
     d_solver->d_physical_model_enabled = true;
@@ -522,23 +520,22 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
         {
             d_scalar_void_fraction_model->configure(void_options);
         }
-        scalar_void_was_reset = true;
     }
     else
     {
         ensure_scalar_void_fraction_model();
     }
-    if (options.mode == ReactingGasMode::Sheng2024TwoPopulation)
+    if (options.mode == ReactingGasMode::TwoPopulation)
     {
         const auto& void_options = d_scalar_void_fraction_model->options();
         if (void_options.alpha_min != options.alpha_min || void_options.alpha_max != options.alpha_max)
         {
-            throw std::invalid_argument("Sheng reaction_source and its scalar mirror require identical "
+            throw std::invalid_argument("Sheng reacting_gas and its scalar mirror require identical "
                                         "void-fraction bounds.");
         }
         if (std::isfinite(void_options.alpha_collapse_time))
         {
-            throw std::invalid_argument("Sheng reaction_source cannot use scalar void collapse until "
+            throw std::invalid_argument("Sheng reacting_gas cannot use scalar void collapse until "
                                         "bubble inventory removal is coupled conservatively.");
         }
     }
@@ -550,13 +547,9 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
     {
         d_reacting_gas_model->configure(options);
     }
-    if (options.mode == ReactingGasMode::Sheng2024TwoPopulation && d_solver->d_primary_fields_initialized)
+    if (options.mode == ReactingGasMode::TwoPopulation && d_solver->d_primary_fields_initialized)
     {
         initialize_reacting_gas_state();
-    }
-    else if (scalar_void_was_reset && d_scalar_group_model && d_solver->d_step_index == 0)
-    {
-        d_scalar_group_model->initialize_inventory(d_scalar_void_fraction_model->alpha_l());
     }
     return *d_reacting_gas_model;
 }
@@ -565,13 +558,16 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
  * @brief Configure the optional reacting-gas model from database keys.
  *
  * @tparam Pack Tpetra type pack.
- * @param database Database containing reaction_source options.
+ * @param database Database containing reacting_gas options.
  * @return Configured reacting-gas model.
  */
 template<TpetraTypePack Pack>
 auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const Database& database) -> reacting_gas_model_type&
 {
-    return configure_reacting_gas(reacting_gas_options_from_database(database));
+    ReactingGasOptions options;
+    collective_detail::collective_local_validation(*d_solver->d_mesh, "Reacting gas database options", [&]
+        { options = reacting_gas_options_from_database(database); });
+    return configure_reacting_gas(options);
 }
 
 /**
@@ -622,7 +618,7 @@ auto MultiphysicsSolverCoupler<Pack>::find_reacting_gas_model() const noexcept -
  * @tparam Pack Tpetra type pack.
  * @param options Bulk and wall boiling configuration.
  * @return Configured boiling source model.
- * @throws std::invalid_argument if options conflict with active reaction_source.
+ * @throws std::invalid_argument if options conflict with active reacting_gas.
  */
 template<TpetraTypePack Pack>
 auto MultiphysicsSolverCoupler<Pack>::configure_boiling_source(const BoilingSourceOptions& options)
@@ -645,7 +641,7 @@ auto MultiphysicsSolverCoupler<Pack>::configure_boiling_source(const BoilingSour
         d_reacting_gas_model->supplies_void_fraction())
     {
         throw std::invalid_argument("Boiling cannot be combined with Sheng two-population "
-                                    "reaction_source until vapor mass is coupled to bubble inventories.");
+                                    "reacting_gas until vapor mass is coupled to bubble inventories.");
     }
     d_solver->d_physical_model_enabled = true;
     ensure_scalar_void_fraction_model();
@@ -721,7 +717,7 @@ auto MultiphysicsSolverCoupler<Pack>::find_boiling_source_model() const noexcept
  * @tparam Pack Tpetra type pack.
  * @param options Void bounds, initial value, and collapse options.
  * @return Configured scalar void-fraction model.
- * @throws std::invalid_argument if options conflict with Sheng reaction_source.
+ * @throws std::invalid_argument if options conflict with Sheng reacting_gas.
  */
 template<TpetraTypePack Pack>
 auto MultiphysicsSolverCoupler<Pack>::configure_scalar_void_fraction(const ScalarVoidFractionOptions& options)
@@ -743,12 +739,12 @@ auto MultiphysicsSolverCoupler<Pack>::configure_scalar_void_fraction(const Scala
         (options.alpha_min != d_reacting_gas_model->options().alpha_min ||
             options.alpha_max != d_reacting_gas_model->options().alpha_max))
     {
-        throw std::invalid_argument("A Sheng reaction_source mirror requires its scalar void bounds.");
+        throw std::invalid_argument("A Sheng reacting_gas mirror requires its scalar void bounds.");
     }
     if (d_reacting_gas_model && d_reacting_gas_model->supplies_void_fraction() &&
         std::isfinite(options.alpha_collapse_time))
     {
-        throw std::invalid_argument("Sheng reaction_source cannot use scalar void collapse until "
+        throw std::invalid_argument("Sheng reacting_gas cannot use scalar void collapse until "
                                     "bubble inventory removal is coupled conservatively.");
     }
     d_solver->d_physical_model_enabled = true;
@@ -765,10 +761,6 @@ auto MultiphysicsSolverCoupler<Pack>::configure_scalar_void_fraction(const Scala
         d_reacting_gas_model->initial_state_initialized())
     {
         d_scalar_void_fraction_model->initialize_from(d_reacting_gas_model->alpha_g());
-    }
-    if (d_scalar_group_model && d_solver->d_step_index == 0)
-    {
-        d_scalar_group_model->initialize_inventory(d_scalar_void_fraction_model->alpha_l());
     }
     return *d_scalar_void_fraction_model;
 }
@@ -899,110 +891,6 @@ auto MultiphysicsSolverCoupler<Pack>::find_material_feedback_model() const noexc
     -> const material_feedback_model_type*
 {
     return d_material_feedback_model.get();
-}
-
-/**
- * @brief Configure delayed-neutron scalar_group groups from explicit options.
- *
- * @tparam Pack Tpetra type pack.
- * @param options ScalarGroup group and transport configuration.
- * @return Configured scalar_group model.
- */
-template<TpetraTypePack Pack>
-auto MultiphysicsSolverCoupler<Pack>::configure_scalar_groups(const ScalarSourceDecayOptions& options)
-    -> scalar_group_model_type&
-{
-    d_solver->d_physical_model_enabled = true;
-    if (d_solver->d_primary_fields_initialized)
-    {
-        initialize_reacting_gas_state();
-    }
-    ensure_scalar_void_fraction_model();
-    if (!d_scalar_group_model)
-    {
-        d_scalar_group_model = std::make_unique<scalar_group_model_type>(d_solver->d_mesh, options);
-    }
-    else
-    {
-        d_scalar_group_model->configure(options);
-    }
-    d_scalar_group_model->initialize_inventory(*active_alpha_l_field());
-    return *d_scalar_group_model;
-}
-
-/**
- * @brief Configure delayed-neutron scalar_group groups from database keys.
- *
- * @tparam Pack Tpetra type pack.
- * @param database Database containing scalar_group options.
- * @return Configured scalar_group model.
- */
-template<TpetraTypePack Pack>
-auto MultiphysicsSolverCoupler<Pack>::configure_scalar_groups(const Database& database) -> scalar_group_model_type&
-{
-    ScalarSourceDecayOptions options;
-    int local_parse_failed = 0;
-    std::string local_error;
-    try
-    {
-        options = scalar_source_decay_options_from_database(database);
-    }
-    catch (const std::invalid_argument& error)
-    {
-        local_parse_failed = 1;
-        local_error = error.what();
-    }
-
-    int any_parse_failed = 0;
-    Teuchos::reduceAll(
-        *d_solver->d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_parse_failed, &any_parse_failed);
-    if (any_parse_failed != 0)
-    {
-        if (d_solver->d_mesh->owned_cell_map()->getComm()->getSize() == 1 && !local_error.empty())
-        {
-            throw std::invalid_argument(local_error);
-        }
-        throw std::invalid_argument("ScalarGroup database options must be valid on every rank.");
-    }
-    return configure_scalar_groups(options);
-}
-
-/**
- * @brief Remove the optional scalar_group model.
- *
- * @tparam Pack Tpetra type pack.
- * @return true if a model was removed.
- */
-template<TpetraTypePack Pack> bool MultiphysicsSolverCoupler<Pack>::remove_scalar_group_model() noexcept
-{
-    if (!d_scalar_group_model)
-        return false;
-    d_scalar_group_model.reset();
-    return true;
-}
-
-/**
- * @brief Find the mutable scalar_group model.
- *
- * @tparam Pack Tpetra type pack.
- * @return Configured model, or nullptr when absent.
- */
-template<TpetraTypePack Pack>
-auto MultiphysicsSolverCoupler<Pack>::find_scalar_group_model() noexcept -> scalar_group_model_type*
-{
-    return d_scalar_group_model.get();
-}
-
-/**
- * @brief Find the immutable scalar_group model.
- *
- * @tparam Pack Tpetra type pack.
- * @return Configured model, or nullptr when absent.
- */
-template<TpetraTypePack Pack>
-auto MultiphysicsSolverCoupler<Pack>::find_scalar_group_model() const noexcept -> const scalar_group_model_type*
-{
-    return d_scalar_group_model.get();
 }
 
 /** @brief Configure optional fixed-grid or solver-integrated planar free-surface coupling. */
@@ -1521,7 +1409,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::refresh_phys
 }
 
 /**
- * @brief Initialize Sheng reaction_source inventories and dependent liquid fractions.
+ * @brief Initialize Sheng reacting_gas inventories and dependent liquid fractions.
  *
  * @tparam Pack Tpetra type pack.
  * @param force Whether to reinitialize an already initialized model.
@@ -1539,10 +1427,6 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::initialize_r
     if (d_scalar_void_fraction_model)
     {
         d_scalar_void_fraction_model->initialize_from(d_reacting_gas_model->alpha_g());
-    }
-    if (d_scalar_group_model && d_solver->d_step_index == 0)
-    {
-        d_scalar_group_model->initialize_inventory(*active_alpha_l_field());
     }
 }
 
@@ -1568,7 +1452,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_col
 {
     const auto communicator = d_solver->d_mesh->owned_cell_map()->getComm();
     constexpr int absent = -1;
-    const std::array<int, 28> local_model_state{static_cast<int>(d_free_surface_model != nullptr),
+    const std::array<int, 26> local_model_state{static_cast<int>(d_free_surface_model != nullptr),
         d_free_surface_model ? static_cast<int>(d_free_surface_model->initialized()) : absent,
         d_free_surface_model ? static_cast<int>(d_free_surface_options.enabled) : absent,
         d_free_surface_model ? static_cast<int>(d_free_surface_options.mode) : absent,
@@ -1587,14 +1471,12 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_col
         static_cast<int>(d_scalar_void_fraction_model != nullptr),
         static_cast<int>(d_material_feedback_model != nullptr),
         d_material_feedback_model ? static_cast<int>(d_material_feedback_model->options().density_mode) : absent,
-        static_cast<int>(d_scalar_group_model != nullptr),
-        d_scalar_group_model ? static_cast<int>(d_scalar_group_model->enabled()) : absent,
         static_cast<int>(d_prescribed_heat_source != nullptr),
         static_cast<int>(d_solver->stored_turbulence_model().enabled()),
         static_cast<int>(d_solver->d_physical_model_enabled), static_cast<int>(d_solver->d_primary_fields_initialized),
         static_cast<int>(d_free_surface_step_failed)};
-    std::array<int, 28> minimum_model_state{};
-    std::array<int, 28> maximum_model_state{};
+    std::array<int, 26> minimum_model_state{};
+    std::array<int, 26> maximum_model_state{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_model_state.size()),
         local_model_state.data(), minimum_model_state.data());
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_model_state.size()),
@@ -1611,7 +1493,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_col
  * @brief Validate free-surface ownership and pressure-coupling seams.
  *
  * Scalar void is accepted only when a conservative model owns it.  The
- * two-population reaction_source model owns its bounded mirror; boiling owns only
+ * two-population reacting_gas model owns its bounded mirror; boiling owns only
  * the globally tracked submerged-steam volume.
  */
 template<TpetraTypePack Pack>
@@ -1632,9 +1514,9 @@ void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(const 
     if (d_reacting_gas_model && d_reacting_gas_model->mode() == ReactingGasMode::IdealGasSource)
     {
         throw std::invalid_argument("The planar free-surface budget cannot use idealGasSource "
-                                    "reaction_source because it does not own a conservative gas inventory.");
+                                    "reacting_gas because it does not own a conservative gas inventory.");
     }
-    if (d_reacting_gas_model && d_reacting_gas_model->mode() == ReactingGasMode::Sheng2024TwoPopulation &&
+    if (d_reacting_gas_model && d_reacting_gas_model->mode() == ReactingGasMode::TwoPopulation &&
         d_reacting_gas_model->options().pressure_mode != ReactingPressureMode::Constant &&
         d_reacting_gas_model->options().pressure_mode != ReactingPressureMode::Reconstructed)
     {
@@ -1686,7 +1568,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_pla
         d_solver->d_problem.boundary_conditions(), temperature_sources, d_solver->has_mutable_mesh_handle(),
         d_solver->uses_legacy_backend(), d_solver->physical_transport_enabled(),
         d_solver->stored_turbulence_model().enabled(), d_boiling_source_model && d_boiling_source_model->enabled(),
-        d_scalar_group_model && d_scalar_group_model->enabled(), d_scalar_void_fraction_explicitly_configured,
+        d_scalar_void_fraction_explicitly_configured,
         d_solver->stored_material_properties().has_updater(),
         d_solver->stored_temperature_sources().has_dynamic_updates());
 
@@ -1747,11 +1629,10 @@ void MultiphysicsSolverCoupler<Pack>::validate_planar_ale_support(const FreeSurf
     {
         throw std::invalid_argument("planarALE does not yet support RANS transports, wall distance, or wall laws.");
     }
-    if ((d_boiling_source_model && d_boiling_source_model->enabled()) ||
-        (d_scalar_group_model && d_scalar_group_model->enabled()))
+    if (d_boiling_source_model && d_boiling_source_model->enabled())
     {
         throw std::invalid_argument(
-            "planarALE initially rejects boiling/steam and delayed-neutron scalar_group transport.");
+            "planarALE initially rejects boiling/steam transport.");
     }
     if (d_scalar_void_fraction_explicitly_configured &&
         (!d_reacting_gas_model || !d_reacting_gas_model->supplies_void_fraction()))
@@ -1790,7 +1671,7 @@ void MultiphysicsSolverCoupler<Pack>::validate_planar_ale_support(const FreeSurf
 
     // A spatially anchored prescribed_heat profile would retain stale cell values after
     // the mesh moves.  Until that source owns an epoch-aware refresh contract,
-    // every ALE heat/reaction_source use must be geometry-invariant.
+    // every ALE heat/reacting_gas use must be geometry-invariant.
     if (d_prescribed_heat_source && !d_prescribed_heat_source->has_interval_energy())
     {
         scalar_type local_minimum_prescribed_heat = std::numeric_limits<scalar_type>::infinity();
@@ -1819,15 +1700,15 @@ void MultiphysicsSolverCoupler<Pack>::validate_planar_ale_support(const FreeSurf
         if (!d_prescribed_heat_source)
         {
             throw std::invalid_argument(
-                "planarALE Sheng reaction_source requires an authoritative prescribed_heat-power source before setup.");
+                "planarALE Sheng reacting_gas requires an authoritative prescribed_heat-power source before setup.");
         }
         if (options.ale.maximum_correctors < 2)
         {
             throw std::invalid_argument(
-                "planarALE Sheng reaction_source requires at least two outer correctors to couple gas state and geometry.");
+                "planarALE Sheng reacting_gas requires at least two outer correctors to couple gas state and geometry.");
         }
         const auto& gas = d_reacting_gas_model->options();
-        if (gas.mode != ReactingGasMode::Sheng2024TwoPopulation ||
+        if (gas.mode != ReactingGasMode::TwoPopulation ||
             gas.dissolved_transport != ReactingTransportMode::Advective ||
             gas.bubble_transport != BubbleTransportMode::General ||
             (gas.pressure_mode != ReactingPressureMode::Constant &&
@@ -1835,7 +1716,7 @@ void MultiphysicsSolverCoupler<Pack>::validate_planar_ale_support(const FreeSurf
             gas.free_surface_patches != std::vector<std::string>{options.ale.top_boundary})
         {
             throw std::invalid_argument(
-                "planarALE reaction_source requires Sheng2024TwoPopulation, advective dissolved H2, general bubble "
+                "planarALE reacting_gas requires TwoPopulation, advective dissolved H2, general bubble "
                 "transport, constant/reconstructed pressure, and exactly the configured moving-top escape patch.");
         }
     }
@@ -2656,8 +2537,8 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
         {
             if (d_solver->d_problem.time_options().pressure_velocity_coupling ==
                     PressureVelocityCoupling::CoupledNonlinear &&
-                (d_free_surface_model || d_boiling_source_model || d_scalar_group_model))
-                throw std::invalid_argument("coupledNonlinear does not support free surface, boiling, or scalar_groups.");
+                (d_free_surface_model || d_boiling_source_model))
+                throw std::invalid_argument("coupledNonlinear does not support free surface or boiling.");
         });
     if (d_thermal_participant)
         collective_detail::collective_local_validation(*d_solver->d_mesh, "Thermal participant step support",
@@ -2677,7 +2558,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
         d_reacting_gas_model->supplies_void_fraction() && d_boiling_source_model && d_boiling_source_model->enabled())
     {
-        throw std::logic_error("Sheng two-population reaction_source cannot advance with boiling "
+        throw std::logic_error("Sheng two-population reacting_gas cannot advance with boiling "
                                "until vapor mass is coupled to bubble inventories.");
     }
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
@@ -2685,14 +2566,14 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
         (d_scalar_void_fraction_model->options().alpha_min != d_reacting_gas_model->options().alpha_min ||
             d_scalar_void_fraction_model->options().alpha_max != d_reacting_gas_model->options().alpha_max))
     {
-        throw std::logic_error("Sheng reaction_source cannot advance with mismatched scalar mirror "
+        throw std::logic_error("Sheng reacting_gas cannot advance with mismatched scalar mirror "
                                "void-fraction bounds.");
     }
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
         d_reacting_gas_model->supplies_void_fraction() && d_scalar_void_fraction_model &&
         std::isfinite(d_scalar_void_fraction_model->options().alpha_collapse_time))
     {
-        throw std::logic_error("Sheng reaction_source cannot advance with scalar void collapse "
+        throw std::logic_error("Sheng reacting_gas cannot advance with scalar void collapse "
                                "until bubble inventory removal is coupled conservatively.");
     }
     if (d_free_surface_model)
@@ -2706,20 +2587,20 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
  *
  * @tparam Pack Tpetra type pack.
  * @param time_step Physical time-step size.
- * @return true when Sheng reaction_source must be advanced after temperature.
+ * @return true when Sheng reacting_gas must be advanced after temperature.
  */
 template<TpetraTypePack Pack>
 bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type time_step)
 {
     const auto phase_timing = d_solver->d_solver_timings.scope(SolverPhase::PreTemperatureModels);
-    const auto sheng_after_temperature =
+    const auto two_population_after_temperature =
         d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->supplies_void_fraction();
 
-    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && !sheng_after_temperature)
+    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && !two_population_after_temperature)
     {
         if (!d_scalar_void_fraction_model)
         {
-            throw std::runtime_error("Ideal reaction_source requires the authoritative scalar void model.");
+            throw std::runtime_error("Ideal reacting_gas requires the authoritative scalar void model.");
         }
         {
             const auto gas_timing = d_solver->d_solver_timings.scope(SolverPhase::Gas);
@@ -2731,7 +2612,7 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
         }
     }
 
-    if (!sheng_after_temperature)
+    if (!two_population_after_temperature)
     {
         if (d_boiling_source_model)
         {
@@ -2748,7 +2629,7 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
         update_void_fraction_models(time_step);
     }
 
-    return sheng_after_temperature;
+    return two_population_after_temperature;
 }
 
 /**
@@ -2759,14 +2640,14 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
  *
  * @tparam Pack Tpetra type pack.
  * @param time_step Physical time-step size.
- * @param sheng_after_temperature Whether Sheng reaction_source advances in this phase.
+ * @param two_population_after_temperature Whether Sheng reacting_gas advances in this phase.
  */
 template<TpetraTypePack Pack>
 void MultiphysicsSolverCoupler<Pack>::advance_post_temperature_models(
-    scalar_type time_step, bool sheng_after_temperature)
+    scalar_type time_step, bool two_population_after_temperature)
 {
     const auto phase_timing = d_solver->d_solver_timings.scope(SolverPhase::PostTemperatureModels);
-    if (sheng_after_temperature)
+    if (two_population_after_temperature)
     {
         {
             const auto gas_timing = d_solver->d_solver_timings.scope(SolverPhase::Gas);
@@ -2778,16 +2659,6 @@ void MultiphysicsSolverCoupler<Pack>::advance_post_temperature_models(
         update_void_fraction_models(time_step);
     }
 
-    if (d_scalar_group_model)
-    {
-        const auto* alpha_l = active_alpha_l_field();
-        if (alpha_l == nullptr)
-        {
-            throw std::runtime_error("ScalarGroup model requires a liquid fraction field.");
-        }
-        d_scalar_group_model->advance(time_step, *alpha_l,
-            d_prescribed_heat_source ? &d_prescribed_heat_source->field() : nullptr, &d_solver->projected_face_fluxes());
-    }
 
     refresh_material_feedback(d_solver->d_time + time_step);
     advance_free_surface(time_step);
@@ -2894,7 +2765,7 @@ template<TpetraTypePack Pack> std::string MultiphysicsSolverCoupler<Pack>::coupl
                d_solver->uses_legacy_backend(), d_solver->physical_transport_enabled(),
                d_solver->stored_turbulence_model().enabled(),
                d_boiling_source_model && d_boiling_source_model->enabled(),
-               d_scalar_group_model && d_scalar_group_model->enabled(), d_scalar_void_fraction_explicitly_configured,
+               d_scalar_void_fraction_explicitly_configured,
                d_solver->stored_material_properties().has_updater(),
                d_solver->stored_temperature_sources().has_dynamic_updates());
 }
@@ -3106,7 +2977,7 @@ void MultiphysicsSolverCoupler<Pack>::set_coupling_interval_energy(
  * after the updates.
  *
  * @tparam Pack Tpetra type pack.
- * @throws std::logic_error if incompatible Sheng reaction_source coupling is active.
+ * @throws std::logic_error if incompatible Sheng reacting_gas coupling is active.
  * @throws std::runtime_error if an enabled model lacks its required fraction field.
  */
 template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
@@ -3149,8 +3020,6 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
             sas_rollback.capture_model(*d_material_feedback_model);
         if (d_scalar_void_fraction_model)
             sas_rollback.capture_model(*d_scalar_void_fraction_model);
-        if (d_scalar_group_model)
-            sas_rollback.capture_model(*d_scalar_group_model);
         if (d_reacting_gas_model)
             sas_rollback.capture_model(*d_reacting_gas_model);
         if (d_boiling_source_model)
@@ -3245,9 +3114,9 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
         flow_accepted = true;
         const auto time_step = d_solver->d_problem.time_options().time_step;
         d_solver->advance_turbulence(time_step);
-        const auto sheng_after_temperature = advance_pre_temperature_models(time_step);
+        const auto two_population_after_temperature = advance_pre_temperature_models(time_step);
         advance_temperature_transport(time_step);
-        advance_post_temperature_models(time_step, sheng_after_temperature);
+        advance_post_temperature_models(time_step, two_population_after_temperature);
 
         if (d_solver->uses_legacy_backend())
         {
@@ -3324,7 +3193,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::initialize_p
     initialize_free_surface_if_needed();
 }
 
-/** @brief Append configured source, gas, void, scalar_group, and surface fields. */
+/** @brief Append configured source, gas, void, and surface fields. */
 template<TpetraTypePack Pack>
 void MultiphysicsSolverCoupler<Pack>::append_solution_fields(
     VTUWriter& writer, const SolutionOutputOptions& output_options) const
@@ -3373,13 +3242,6 @@ void MultiphysicsSolverCoupler<Pack>::append_solution_fields(
             {
                 continue;
             }
-            writer.add_scalar_cell_data(name, d_solver->collect_scalar_field(*field));
-        }
-    }
-    if (output_options.include_scalar_group_fields && d_scalar_group_model)
-    {
-        for (const auto& [name, field] : d_scalar_group_model->output_fields())
-        {
             writer.add_scalar_cell_data(name, d_solver->collect_scalar_field(*field));
         }
     }
@@ -3596,7 +3458,6 @@ void MultiphysicsSolverCoupler<Pack>::write_parallel_solution_vtu(
         const auto option_mask = static_cast<int>(output_options.include_sources) |
                                  (static_cast<int>(output_options.include_material_properties) << 1) |
                                  (static_cast<int>(output_options.include_reacting_gas_fields) << 2) |
-                                 (static_cast<int>(output_options.include_scalar_group_fields) << 3) |
                                  (static_cast<int>(output_options.include_turbulence_fields) << 4) |
                                  (static_cast<int>(output_options.include_free_surface_fields) << 5);
         std::array<long long, 2> root_arguments{rank == 0 ? static_cast<long long>(filename.size()) : 0LL,

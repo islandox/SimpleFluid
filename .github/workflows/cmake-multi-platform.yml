@@ -127,7 +127,7 @@ jobs:
         ${{ matrix.cmake_platform_options }}
         -DTrilinos_DIR=${{ github.workspace }}/_deps/trilinos_install/lib/cmake/Trilinos
         -DSIMPLEFLUID_MAX_TEST_PROCS=2
-        -DSIMPLEFLUID_REACTING_MATERIAL_LIBRARY:FILEPATH=
+        -DSIMPLEFLUID_RADIOLYTIC_MATERIAL_LIBRARY:FILEPATH=
         -G"Ninja Multi-Config"
         -S ${{ github.workspace }}
 

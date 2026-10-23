@@ -35,7 +35,7 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Supported prescribed prescribed_heat power-density profiles.
+ * @brief Supported prescribed heat-density profiles.
  */
 enum class PrescribedHeatProfile
 {
@@ -71,7 +71,7 @@ prescribed_heat_profile_from_string(std::string_view value)
 }
 
 /**
- * @brief Runtime controls for the prescribed prescribed_heat power source.
+ * @brief Runtime controls for the prescribed heat source.
  */
 struct PrescribedHeatSourceOptions
 {
@@ -86,7 +86,7 @@ namespace detail
 {
 
 /**
- * @brief Validate a non-negative prescribed_heat-source scalar.
+ * @brief Validate a non-negative prescribed heat-source scalar.
  * @param value Value to validate.
  * @param name Option name used in diagnostics.
  * @throws std::invalid_argument If @p value is negative or not finite.
@@ -98,13 +98,13 @@ inline void validate_non_negative_prescribed_heat_value(
     if (!std::isfinite(value) || value < 0.0)
     {
         throw std::invalid_argument(
-            "PrescribedHeat power option '" + name
+            "Prescribed heat option '" + name
             + "' must be finite and non-negative.");
     }
 }
 
 /**
- * @brief Read a finite three-component prescribed_heat-source option.
+ * @brief Read a finite three-component prescribed heat-source option.
  * @param reader Database-backed source-option reader.
  * @param key Required array option name.
  * @return The option converted to a three-component vector.
@@ -118,7 +118,7 @@ inline vec3<real_t> prescribed_heat_vec3(
     if (values.size() != 3)
     {
         throw std::invalid_argument(
-            "PrescribedHeat power option '" + key
+            "Prescribed heat option '" + key
             + "' must contain exactly three values.");
     }
     for (const auto value : values)
@@ -126,7 +126,7 @@ inline vec3<real_t> prescribed_heat_vec3(
         if (!std::isfinite(value))
         {
             throw std::invalid_argument(
-                "PrescribedHeat power option '" + key
+                "Prescribed heat option '" + key
                 + "' must contain finite values.");
         }
     }
@@ -138,7 +138,7 @@ inline vec3<real_t> prescribed_heat_vec3(
  * @param options Options to validate.
  * @throws std::invalid_argument If an active profile contains invalid parameters.
  */
-inline void validate_prescribed_heat_power_options(
+inline void validate_prescribed_heat_options(
     const PrescribedHeatSourceOptions& options)
 {
     switch (options.profile)
@@ -147,7 +147,7 @@ inline void validate_prescribed_heat_power_options(
             return;
         case PrescribedHeatProfile::Constant:
             validate_non_negative_prescribed_heat_value(
-                options.power_density, "prescribed_heat_power_density");
+                options.power_density, "prescribed_heat_density");
             return;
         case PrescribedHeatProfile::Gaussian:
             validate_non_negative_prescribed_heat_value(
@@ -157,14 +157,14 @@ inline void validate_prescribed_heat_power_options(
                 if (!std::isfinite(options.center.component(component)))
                 {
                     throw std::invalid_argument(
-                        "PrescribedHeat Gaussian center must be finite.");
+                        "Prescribed heat Gaussian center must be finite.");
                 }
                 if (!std::isfinite(
                         options.standard_deviation.component(component))
                     || options.standard_deviation.component(component) <= 0.0)
                 {
                     throw std::invalid_argument(
-                        "PrescribedHeat Gaussian standard deviations must be finite "
+                        "Prescribed heat Gaussian standard deviations must be finite "
                         "and positive.");
                 }
             }
@@ -180,23 +180,43 @@ inline void validate_prescribed_heat_power_options(
 inline PrescribedHeatSourceOptions
 prescribed_heat_source_options_from_database(const Database& database)
 {
+    for (const auto* key : {
+             "fission_power_mode",
+             "fission_power_density",
+             "fission_total_power",
+             "fission_center",
+             "fission_standard_deviation",
+             "precursor_group_count",
+             "precursor_decay_constants",
+             "precursor_initial_concentrations",
+             "precursor_source_terms",
+             "precursor_power_yields",
+             "precursor_effective_diffusivity"})
+    {
+        if (database.contains(key))
+        {
+            throw std::invalid_argument(
+                std::string(key) + " is retired; use prescribed_heat_* controls and standalone scalar source-decay transport.");
+        }
+    }
+
     PrescribedHeatSourceOptions options;
     const detail::DatabaseOptionReader reader(
-        database, "PrescribedHeat power model");
-    if (!reader.contains("prescribed_heat_power_mode"))
+        database, "Prescribed heat model");
+    if (!reader.contains("prescribed_heat_mode"))
     {
         return options;
     }
 
     options.profile = prescribed_heat_profile_from_string(
-        reader.required<std::string>("prescribed_heat_power_mode"));
+        reader.required<std::string>("prescribed_heat_mode"));
     switch (options.profile)
     {
         case PrescribedHeatProfile::Disabled:
             break;
         case PrescribedHeatProfile::Constant:
             options.power_density =
-                reader.required<real_t>("prescribed_heat_power_density");
+                reader.required<real_t>("prescribed_heat_density");
             break;
         case PrescribedHeatProfile::Gaussian:
             options.total_power =
@@ -209,7 +229,7 @@ prescribed_heat_source_options_from_database(const Database& database)
             break;
     }
 
-    detail::validate_prescribed_heat_power_options(options);
+    detail::validate_prescribed_heat_options(options);
     return options;
 }
 
@@ -390,7 +410,7 @@ private:
         if (!std::isfinite(value) || value < scalar_type{})
         {
             throw std::invalid_argument(
-                "PrescribedHeat " + label
+                "Prescribed heat " + label
                 + " must be finite and non-negative.");
         }
     }
@@ -400,7 +420,7 @@ private:
         if (&field.mesh() != d_mesh.get())
         {
             throw std::invalid_argument(
-                "PrescribedHeat power field must use the solver mesh.");
+                "Prescribed heat power field must use the solver mesh.");
         }
     }
 
@@ -451,7 +471,7 @@ private:
         if (!std::isfinite(scale))
         {
             throw std::invalid_argument(
-                "PrescribedHeat profile normalization produced a non-finite scale.");
+                "Prescribed heat profile normalization produced a non-finite scale.");
         }
         return scale;
     }

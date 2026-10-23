@@ -52,14 +52,14 @@ ReactingGasMode parse_mode(std::string value)
         return ReactingGasMode::Disabled;
     if (value == "idealgassource" || value == "ideal_gas_source")
         return ReactingGasMode::IdealGasSource;
-    if (value == "sheng2024twopopulation"
-        || value == "sheng2024_two_population")
+    if (value == "twopopulation"
+        || value == "two_population")
     {
-        return ReactingGasMode::Sheng2024TwoPopulation;
+        return ReactingGasMode::TwoPopulation;
     }
     throw std::invalid_argument(
         "Unknown reacting_bubble_model; expected disabled, "
-        "idealGasSource, or sheng2024TwoPopulation.");
+        "idealGasSource, or twoPopulation.");
 }
 
 /**
@@ -262,11 +262,34 @@ void require_history(const ReactingGasOptions& options)
 ReactingGasOptions reacting_gas_options_from_database(
     const Database& database)
 {
+    for (const auto* key : {
+             "enable_radiolysis",
+             "radiolytic_bubble_model",
+             "radiolytic_pressure_mode",
+             "radiolytic_heaviside_mode",
+             "radiolytic_kinetics_mode",
+             "radiolytic_transport_solver_tolerance",
+             "max_radiolytic_subcycles",
+             "radiolytic_free_surface_patches",
+             "precursor_group_count",
+             "precursor_decay_constants",
+             "precursor_initial_concentrations",
+             "precursor_source_terms",
+             "precursor_power_yields",
+             "precursor_effective_diffusivity"})
+    {
+        if (database.contains(key))
+        {
+            throw std::invalid_argument(
+                std::string(key) + " is retired; use reacting_* controls and standalone scalar source-decay transport.");
+        }
+    }
+
     ReactingGasOptions options;
     const detail::DatabaseOptionReader reader(
         database, "Reacting gas model");
     const auto enabled =
-        reader.value_or<bool>("enable_reaction_source", false);
+        reader.value_or<bool>("enable_reacting_gas", false);
     if (reader.contains("reacting_bubble_model"))
     {
         options.mode = parse_mode(reader.required<std::string>(

@@ -22,7 +22,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       PROPERTIES LABELS "slow\\;analytical")
   elseif(TEST_NAME STREQUAL "testBubblePopulationKinetics")
     simplefluid_discover_tests(${TEST_NAME}
-      PROPERTIES LABELS "reaction_source\\;kinetics\\;conservation")
+      PROPERTIES LABELS "reacting_gas\\;kinetics\\;conservation")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()

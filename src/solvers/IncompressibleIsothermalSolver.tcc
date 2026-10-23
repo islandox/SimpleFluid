@@ -402,7 +402,6 @@ void IncompressibleIsothermalSolver<Pack>::write_parallel_solution_vtu(
         const auto option_mask = static_cast<int>(output_options.include_sources) |
                                  (static_cast<int>(output_options.include_material_properties) << 1) |
                                  (static_cast<int>(output_options.include_reacting_gas_fields) << 2) |
-                                 (static_cast<int>(output_options.include_scalar_group_fields) << 3) |
                                  (static_cast<int>(output_options.include_turbulence_fields) << 4);
         std::array<long long, 2> root_arguments{rank == 0 ? static_cast<long long>(filename.size()) : 0LL,
             rank == 0 ? static_cast<long long>(option_mask) : 0LL};

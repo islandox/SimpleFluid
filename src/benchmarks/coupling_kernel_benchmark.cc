@@ -191,7 +191,7 @@ void run_gas(const Options& options)
         edges(0, 1, options.nx), edges(0, 1, options.ny), edges(0, 1, options.nz)}});
     auto mesh = std::make_shared<Mesh>(geometry, distribution());
     SimpleFluid::ReactingGasOptions settings;
-    settings.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    settings.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     settings.hydrogen_yield_mol_per_j = 2.e-7;
     settings.max_source_alpha_rate = 1.0;
     settings.reference_pressure = 1.e5;
@@ -308,7 +308,7 @@ void run_ale(const Options& options)
     solver_coupling.configure_material_feedback(thermal);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
     SimpleFluid::ReactingGasOptions gas_options;
-    gas_options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    gas_options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     gas_options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     gas_options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
     gas_options.bubble_transport = SimpleFluid::BubbleTransportMode::General;

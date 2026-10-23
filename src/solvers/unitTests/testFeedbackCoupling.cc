@@ -90,7 +90,7 @@ TEST(FeedbackFieldRegistryTest, ExportsCanonicalFieldsDeterministically)
     LegacyField temperature(mesh, 0.0, "temperature");
     LegacyField gas_fraction(mesh, 0.0, "alpha_g");
     LegacyField density(mesh, 0.0, "rhoFeedback");
-    LegacyField scalar_group(mesh, 0.0, "C_1");
+    LegacyField scalar_group(mesh, 0.0, "scalar_1");
 
     const std::array<double, 2> temperature_values{300.0, 340.0};
     const std::array<double, 2> gas_values{0.1, 0.3};
@@ -107,12 +107,12 @@ TEST(FeedbackFieldRegistryTest, ExportsCanonicalFieldsDeterministically)
 
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
     registry.register_density_feedback(density);
-    registry.register_scalar_group_group(1, scalar_group);
+    registry.register_scalar_group(1, scalar_group);
     registry.register_liquid_temperature(temperature);
     registry.register_gas_fraction(gas_fraction);
     ASSERT_NO_THROW(registry.require_standard_fields(1));
 
-    const std::vector<std::string> expected_names{"C_1", "T_liquid", "alpha_g", "rhoFeedback"};
+    const std::vector<std::string> expected_names{"T_liquid", "alpha_g", "rhoFeedback", "scalar_1"};
     EXPECT_EQ(registry.field_names(), expected_names);
 
     const std::vector<FeedbackCell> feedback_cells{{"whole_core", {0, 1}}, {"inlet_cell", {0}}};
@@ -121,7 +121,7 @@ TEST(FeedbackFieldRegistryTest, ExportsCanonicalFieldsDeterministically)
     EXPECT_EQ(snapshot.feedback_cell_names(), (std::vector<std::string>{"whole_core", "inlet_cell"}));
 
     for (const auto& [name, field] : std::vector<std::pair<std::string, const LegacyField*>>{
-             {"C_1", &scalar_group}, {"T_liquid", &temperature}, {"alpha_g", &gas_fraction}, {"rhoFeedback", &density}})
+             {"scalar_1", &scalar_group}, {"T_liquid", &temperature}, {"alpha_g", &gas_fraction}, {"rhoFeedback", &density}})
     {
         const auto expected = SimpleFluid::FeedbackMap::volume_weighted_average<Pack>(*field, feedback_cells);
         EXPECT_EQ(snapshot.field(name), expected);
@@ -163,14 +163,14 @@ TEST(FeedbackFieldRegistryTest, SupportsNativeFieldStoredAndMeshHandle)
     NativeField temperature(mesh, 315.0, "temperature");
     NativeField gas_fraction(mesh, 0.02, "alpha_g");
     NativeField density(mesh, 980.0, "rhoFeedback");
-    NativeField scalar_group(mesh, 4.0, "C_1");
+    NativeField scalar_group(mesh, 4.0, "scalar_1");
     NativeField power(mesh, 0.0, "qdot_external");
 
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
     registry.register_liquid_temperature(temperature);
     registry.register_gas_fraction(gas_fraction);
     registry.register_density_feedback(density);
-    registry.register_scalar_group_group(1, scalar_group);
+    registry.register_scalar_group(1, scalar_group);
 
     const std::vector<FeedbackCell> feedback_cells{{"core", {0}}};
     const auto snapshot = registry.export_snapshot(feedback_cells);
@@ -178,7 +178,7 @@ TEST(FeedbackFieldRegistryTest, SupportsNativeFieldStoredAndMeshHandle)
     EXPECT_DOUBLE_EQ(snapshot.field("T_liquid")[0], 315.0);
     EXPECT_DOUBLE_EQ(snapshot.field("alpha_g")[0], 0.02);
     EXPECT_DOUBLE_EQ(snapshot.field("rhoFeedback")[0], 980.0);
-    EXPECT_DOUBLE_EQ(snapshot.field("C_1")[0], 4.0);
+    EXPECT_DOUBLE_EQ(snapshot.field("scalar_1")[0], 4.0);
 
     SimpleFluid::FeedbackMap::import_power_density<Pack>(power, {25.0});
     EXPECT_DOUBLE_EQ(power.value(0), 25.0);
@@ -224,22 +224,22 @@ TEST(PlaceholderOuterCouplingDriverTest, RunsDeterministicExchangeLoop)
     LegacyField temperature(mesh, 0.0, "temperature");
     LegacyField gas_fraction(mesh, 0.1, "alpha_g");
     LegacyField density(mesh, 950.0, "rhoFeedback");
-    LegacyField scalar_group(mesh, 3.0, "C_1");
+    LegacyField scalar_group(mesh, 3.0, "scalar_1");
 
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
     registry.register_liquid_temperature(temperature);
     registry.register_gas_fraction(gas_fraction);
     registry.register_density_feedback(density);
-    registry.register_scalar_group_group(1, scalar_group);
+    registry.register_scalar_group(1, scalar_group);
 
     SimpleFluid::FeedbackMap::PlaceholderOuterCouplingOptions options;
     options.outer_iterations = 3;
     options.thermal_hydraulic_subcycles = 2;
-    options.scalar_group_group_count = 1;
+    options.scalar_group_count = 1;
     SimpleFluid::FeedbackMap::PlaceholderOuterCouplingDriver<Pack> driver(registry, {{"core", {0}}}, options);
 
     size_t thermal_hydraulic_calls = 0;
-    size_t neutronics_calls = 0;
+    size_t external_source_calls = 0;
     const auto records = driver.run(
         power, {1.0},
         [&](size_t iteration, size_t subcycle)
@@ -251,14 +251,14 @@ TEST(PlaceholderOuterCouplingDriverTest, RunsDeterministicExchangeLoop)
         },
         [&](const auto& feedback)
         {
-            EXPECT_EQ(feedback.sequence_index(), neutronics_calls);
-            ++neutronics_calls;
-            return std::vector<double>{static_cast<double>(neutronics_calls + 1)};
+            EXPECT_EQ(feedback.sequence_index(), external_source_calls);
+            ++external_source_calls;
+            return std::vector<double>{static_cast<double>(external_source_calls + 1)};
         });
 
     ASSERT_EQ(records.size(), 3u);
     EXPECT_EQ(thermal_hydraulic_calls, 6u);
-    EXPECT_EQ(neutronics_calls, 3u);
+    EXPECT_EQ(external_source_calls, 3u);
     const std::array<double, 3> expected_temperature{2.0, 6.0, 12.0};
     for (size_t iteration = 0; iteration < records.size(); ++iteration)
     {
@@ -268,7 +268,7 @@ TEST(PlaceholderOuterCouplingDriverTest, RunsDeterministicExchangeLoop)
         EXPECT_DOUBLE_EQ(records[iteration].power_applied[0], static_cast<double>(iteration + 1));
         EXPECT_DOUBLE_EQ(records[iteration].power_returned[0], static_cast<double>(iteration + 2));
         EXPECT_DOUBLE_EQ(records[iteration].feedback.field("T_liquid")[0], expected_temperature[iteration]);
-        EXPECT_DOUBLE_EQ(records[iteration].feedback.field("C_1")[0], 3.0);
+        EXPECT_DOUBLE_EQ(records[iteration].feedback.field("scalar_1")[0], 3.0);
     }
     EXPECT_DOUBLE_EQ(power.value(0), 4.0);
 }
@@ -282,7 +282,7 @@ TEST(PlaceholderOuterCouplingDriverTest, RequiresCanonicalFeedbackFields)
     registry.register_liquid_temperature(temperature);
 
     SimpleFluid::FeedbackMap::PlaceholderOuterCouplingOptions options;
-    options.scalar_group_group_count = 1;
+    options.scalar_group_count = 1;
     EXPECT_THROW((SimpleFluid::FeedbackMap::PlaceholderOuterCouplingDriver<Pack>(registry, {{"core", {0}}}, options)),
         std::invalid_argument);
 }

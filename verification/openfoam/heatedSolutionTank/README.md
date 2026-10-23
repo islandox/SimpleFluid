@@ -2,7 +2,7 @@
 
 This case compares SimpleFluid with OpenFOAM.com v2606 for a prescribed,
 Gaussian-heated cylindrical tank. It is a single-phase thermal-hydraulics
-verification case: supplied reaction sources, boiling, void feedback, and external-source physics feedback
+verification case: reacting gas, boiling, void feedback, and external-source feedback
 are disabled on both sides.
 
 ## Matched definition
@@ -10,7 +10,7 @@ are disabled on both sides.
 | Quantity | Value |
 | --- | --- |
 | Tank | radius `0.1 m`, height `0.3 m` |
-| prescribed heat power | `1000 W` over the full tank |
+| Prescribed heat power | `1000 W` over the full tank |
 | Gaussian center | `R=0`, `Z=0.15 m` |
 | Gaussian widths | `sigma_R=0.03 m`, `sigma_Z=0.075 m` |
 | Initial and wall temperature | `300 K` |
@@ -87,7 +87,7 @@ comparison maps both solutions to identical R-Z bins and writes:
 - `profiles/rz/rz_matched.csv`
 - temperature-rise distribution and signed/absolute-error figures
 - velocity-magnitude distribution and signed/absolute-error figures
-- prescribed heat-power-density distribution and signed/absolute-error figures
+- prescribed_heat-power-density distribution and signed/absolute-error figures
 
 Each figure is emitted as SVG and, when `rsvg-convert` is installed, PNG and
 PDF.

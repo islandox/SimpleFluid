@@ -184,7 +184,7 @@ int run(int argc, char** argv)
     require(std::abs(prescribed_heat.integrated_power() - expected_power) < 1e-12 * volume_scale,
         "Mesh must align with source boundaries and preserve integrated heating");
     SimpleFluid::ReactingGasOptions gas;
-    gas.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    gas.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     gas.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     gas.reference_pressure = water.absolute_pressure;
     gas.bubble_transport = SimpleFluid::BubbleTransportMode::General;

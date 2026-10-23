@@ -6,7 +6,6 @@
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "equations/BoilingSourceModel.hh"
-#include "equations/ScalarSourceDecayTransport.hh"
 #include "equations/PrescribedHeatSource.hh"
 #include "equations/MaterialFeedbackModel.hh"
 #include "equations/ReactingGasModel.hh"
@@ -33,7 +32,7 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Coordinate flow, heat, reaction_source, and constrained planar mesh motion.
+ * @brief Coordinate flow, heat, reacting_gas, and constrained planar mesh motion.
  *
  * The bound Boussinesq solver owns the mesh, equations, primary fields, clocks,
  * and linear solvers. This coupler owns optional models and their accepted
@@ -76,7 +75,6 @@ public:
     using boiling_source_model_type = BoilingSourceModel<Pack, mesh_type>;
     using scalar_void_fraction_model_type = ScalarVoidFractionModel<Pack, mesh_type>;
     using material_feedback_model_type = MaterialFeedbackModel<Pack, mesh_type>;
-    using scalar_group_model_type = ScalarSourceDecayTransport<Pack, mesh_type>;
     using free_surface_model_type = PlanarFreeSurfaceModel;
     using liquid_mass_inventory_type = LiquidMassInventory<Pack, mesh_type>;
     using free_surface_diagnostics_type = FreeSurfaceDiagnostics;
@@ -180,7 +178,7 @@ public:
      * `step_planar_ale()`, whose geometry-trial correctors and rollback contract
      * are separate from this fixed-grid ordering. A configured
      * PrescribedHeatSource supplies a local power-density field or interval
-     * energy budget; the coupler does not execute an external neutronics code.
+     * energy budget; the coupler does not execute an external external-source code.
      *
      * @par Algorithm
      * @if SIMPLEFLUID_DIAGRAMS
@@ -392,31 +390,6 @@ public:
     const material_feedback_model_type* find_material_feedback_model() const noexcept;
 
     /**
-     * @brief Configure delayed-neutron scalar_group groups from explicit options.
-     * @note Invoke collectively on every mesh rank.
-     */
-    scalar_group_model_type& configure_scalar_groups(const ScalarSourceDecayOptions& options);
-    /**
-     * @brief Configure delayed-neutron scalar_group groups from database keys.
-     * @note Invoke collectively on every mesh rank.
-     */
-    scalar_group_model_type& configure_scalar_groups(const Database& database);
-    /**
-     * @brief Remove the optional scalar_group model, if present.
-     * @note Invoke consistently on every mesh rank. A later step rejects a
-     *       rank-divergent scalar_group state collectively.
-     */
-    bool remove_scalar_group_model() noexcept;
-    /**
-     * @brief Return the mutable scalar_group model, or nullptr when absent.
-     */
-    scalar_group_model_type* find_scalar_group_model() noexcept;
-    /**
-     * @brief Return the scalar_group model, or nullptr when absent.
-     */
-    const scalar_group_model_type* find_scalar_group_model() const noexcept;
-
-    /**
      * @brief Configure optional fixed-grid or solver-integrated planar free-surface coupling.
      *
      * Disabled options remove any existing model and return nullptr.  The
@@ -527,8 +500,8 @@ private:
      * @brief Order optional model updates around temperature transport.
      *
      * This diagram combines this helper, the bound temperature transport, and
-     * advance_post_temperature_models(). Ideal reaction_source and boiling consume
-     * the temperature accepted at the start of the step. Sheng reaction_source is
+     * advance_post_temperature_models(). Ideal reacting_gas and boiling consume
+     * the temperature accepted at the start of the step. Sheng reacting_gas is
      * intentionally delayed until after temperature transport because it owns
      * the authoritative gas void fraction. All branches are sequential.
      *
@@ -559,9 +532,6 @@ private:
      *   :ReactingGasModel::advance()\nwith updated temperature;
      *   :Mirror authoritative alpha_g into scalar void model;
      * endif
-     * if (ScalarSourceDecayTransport configured?) then (yes)
-     *   :Advance scalar_groups with liquid fraction,\nprojected flux, and optional prescribed_heat field;
-     * endif
      * if (MaterialFeedbackModel configured?) then (yes)
      *   :Apply feedback at time + time_step\nusing updated temperature/void state;
      * endif
@@ -577,7 +547,7 @@ private:
      */
     bool advance_pre_temperature_models(scalar_type time_step);
     SIMPLEFLUID_SOLVERS_LOCAL
-    void advance_post_temperature_models(scalar_type time_step, bool sheng_after_temperature);
+    void advance_post_temperature_models(scalar_type time_step, bool two_population_after_temperature);
     SIMPLEFLUID_SOLVERS_LOCAL
     void validate_collective_model_state() const;
     SIMPLEFLUID_SOLVERS_LOCAL
@@ -640,7 +610,6 @@ private:
     std::unique_ptr<scalar_void_fraction_model_type> d_scalar_void_fraction_model;
     bool d_scalar_void_fraction_explicitly_configured = false;
     std::unique_ptr<material_feedback_model_type> d_material_feedback_model;
-    std::unique_ptr<scalar_group_model_type> d_scalar_group_model;
     std::unique_ptr<free_surface_model_type> d_free_surface_model;
     std::unique_ptr<liquid_mass_inventory_type> d_liquid_mass_inventory;
     std::unique_ptr<field_type> d_clear_level;

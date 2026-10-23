@@ -124,13 +124,13 @@ int main(int argc, char** argv)
             prescribed_heat.power_density = 2.5e3;
             coupling.configure_prescribed_heat_source(prescribed_heat);
 
-            SimpleFluid::ReactingGasOptions reaction_source;
-            reaction_source.mode =
+            SimpleFluid::ReactingGasOptions reacting_gas;
+            reacting_gas.mode =
                 SimpleFluid::ReactingGasMode::IdealGasSource;
-            reaction_source.hydrogen_yield_mol_per_j = 2.0e-7;
-            reaction_source.max_source_alpha_rate = 10.0;
-            reaction_source.reference_pressure = 101325.0;
-            coupling.configure_reacting_gas(reaction_source);
+            reacting_gas.hydrogen_yield_mol_per_j = 2.0e-7;
+            reacting_gas.max_source_alpha_rate = 10.0;
+            reacting_gas.reference_pressure = 101325.0;
+            coupling.configure_reacting_gas(reacting_gas);
 
             SimpleFluid::ScalarVoidFractionOptions alpha_options;
             alpha_options.alpha_max = 0.5;

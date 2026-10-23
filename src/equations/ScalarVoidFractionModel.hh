@@ -252,7 +252,7 @@ public:
     void initialize_from(const field_type& alpha_g);
 
     /**
-     * @brief Apply explicit reaction_source and boiling alpha sources.
+     * @brief Apply explicit reacting_gas and boiling alpha sources.
      */
     void update_explicit(
         scalar_type time_step,

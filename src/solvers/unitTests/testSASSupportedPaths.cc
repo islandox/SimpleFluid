@@ -208,7 +208,6 @@ struct SavedSASFields
         model(solver.find_turbulence_model());
         model(coupling.find_material_feedback_model());
         model(coupling.find_scalar_void_fraction_model());
-        model(coupling.find_scalar_group_model());
         model(coupling.find_reacting_gas_model());
         model(coupling.find_boiling_source_model());
         if (coupling.find_free_surface_model())
@@ -235,7 +234,7 @@ struct SavedSASFields
     }
 };
 
-// Feedback runs after temperature, reaction_source and scalar_groups. Inputs remain finite
+// Feedback runs after temperature and reacting gas. Inputs remain finite
 // until this final feedback stage; overflow rejects the trial after upstream work.
 void expect_late_multiphysics_rollback(
     MultiphysicsSolverCoupler<Pack>& coupling, std::function<void()> after_restore = {})
@@ -325,41 +324,10 @@ TEST(SASSupportedPathsTest, ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSA
     expect_late_multiphysics_rollback(solver_coupling);
 }
 
-TEST(SASSupportedPathsTest, ScalarGroupInventoryAndDiagnosticsRollBackWithSAS)
-{
-    auto mesh = box_mesh();
-    auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
-    auto& solver = *solver_shared;
-    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-    solver_coupling.initialize_heated_box(300, 300);
-    solver.configure_turbulence(sas_options());
-    initialize_circulation(solver);
-    ScalarVoidFractionOptions phase; phase.initial_alpha=.2;
-    solver_coupling.configure_scalar_void_fraction(phase);
-    ScalarSourceDecayOptions options;
-    options.group_count=2; options.initial_concentrations={1,2}; options.decay_constants={.1,.2};
-    options.source_terms={.2,.1}; options.effective_diffusivity=.01;
-    auto& scalar_groups = solver_coupling.configure_scalar_groups(options);
-    expect_active_bounded_step(solver, &solver_coupling);
-    const auto before=scalar_groups.last_inventory_diagnostics(0);
-    const double expected=.8*std::exp(-.1*.001)+.2*(-std::expm1(-.1*.001))/.1;
-    EXPECT_NEAR(before.inventory_after,expected,1e-11);
-    EXPECT_NEAR(before.balance_error,0,1e-11);
-    expect_late_multiphysics_rollback(solver_coupling,
-        [&]
-        {
-            const auto& restored = scalar_groups.last_inventory_diagnostics(0);
-            EXPECT_DOUBLE_EQ(restored.inventory_after, before.inventory_after);
-            EXPECT_DOUBLE_EQ(restored.source_added, before.source_added);
-            EXPECT_DOUBLE_EQ(restored.balance_error, before.balance_error);
-        });
-    const auto stale=scalar_groups.snapshot(); scalar_groups.configure(options);
-    EXPECT_ANY_THROW(scalar_groups.restore(stale));
-}
 
 namespace
 {
-ReactingGasOptions seeded_reaction_source_options(ReactingGasMode mode)
+ReactingGasOptions seeded_reacting_gas_options(ReactingGasMode mode)
 {
     ReactingGasOptions options; options.mode=mode; options.max_source_alpha_rate=1.;
     options.hydrogen_yield_mol_per_j=2e-7; options.reference_pressure=1e5;
@@ -377,9 +345,9 @@ ReactingGasOptions seeded_reaction_source_options(ReactingGasMode mode)
 }
 }
 
-TEST(SASSupportedPathsTest, ReactionSourceAndHydrogenLedgersRollBackWithSAS)
+TEST(SASSupportedPathsTest, ReactingGasAndHydrogenLedgersRollBackWithSAS)
 {
-    for(auto mode:{ReactingGasMode::IdealGasSource,ReactingGasMode::Sheng2024TwoPopulation})
+    for(auto mode:{ReactingGasMode::IdealGasSource,ReactingGasMode::TwoPopulation})
     {
         auto mesh = box_mesh();
         auto solver_shared =
@@ -391,10 +359,10 @@ TEST(SASSupportedPathsTest, ReactionSourceAndHydrogenLedgersRollBackWithSAS)
         initialize_circulation(solver);
         PrescribedHeatSourceOptions power; power.profile=PrescribedHeatProfile::Constant; power.power_density=1.;
         solver_coupling.configure_prescribed_heat_source(power);
-        auto options=seeded_reaction_source_options(mode);
+        auto options=seeded_reacting_gas_options(mode);
         auto& gas = solver_coupling.configure_reacting_gas(options);
         expect_active_bounded_step(solver, &solver_coupling);
-        if(mode==ReactingGasMode::Sheng2024TwoPopulation)
+        if(mode==ReactingGasMode::TwoPopulation)
         {
             EXPECT_GT(gas.last_statistics().hydrogen_produced,0);
             EXPECT_NEAR(gas.last_statistics().inventory_error,0,1e-14);
@@ -544,7 +512,7 @@ TEST(SASSupportedPathsTest, LazyFreeSurfaceInitializationRemainsOwnedAfterReject
     EXPECT_EQ(solver_coupling.free_surface_history().size(), 2U);
 }
 
-TEST(SASSupportedPathsTest, FixedFreeSurfaceReactionSourceRestoresClosedHeadspaceAndEscape)
+TEST(SASSupportedPathsTest, FixedFreeSurfaceReactingGasRestoresClosedHeadspaceAndEscape)
 {
     auto mesh = box_mesh();
     auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
@@ -553,7 +521,7 @@ TEST(SASSupportedPathsTest, FixedFreeSurfaceReactionSourceRestoresClosedHeadspac
     solver_coupling.initialize_heated_box(300, 300);
     solver.configure_turbulence(sas_options());
     initialize_circulation(solver);
-    auto gas_options=seeded_reaction_source_options(ReactingGasMode::Sheng2024TwoPopulation);
+    auto gas_options=seeded_reacting_gas_options(ReactingGasMode::TwoPopulation);
     gas_options.free_surface_patches={"zmax"};
     auto& gas = solver_coupling.configure_reacting_gas(gas_options);
     solver_coupling.add_prescribed_heat_source().initialize_constant(1.);
@@ -757,7 +725,7 @@ TEST(SASSupportedPathsTest, NoxBoussinesqRestoresActiveSourceAndMultiphysicsAfte
     solver_coupling.configure_scalar_void_fraction(phase);
     MaterialFeedbackOptions feedback; feedback.reference_dynamic_viscosity=.001;
     solver_coupling.configure_material_feedback(feedback);
-    auto options=seeded_reaction_source_options(ReactingGasMode::IdealGasSource);
+    auto options=seeded_reacting_gas_options(ReactingGasMode::IdealGasSource);
     auto& gas = solver_coupling.configure_reacting_gas(options);
     solver_coupling.add_prescribed_heat_source().initialize_constant(1.);
     ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver, &solver_coupling));

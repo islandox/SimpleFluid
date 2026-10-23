@@ -82,7 +82,7 @@ Ownership is deliberately split along existing model boundaries:
 calls its retained `BoussinesqSolver` for flow and heat. In fixed-grid
 mode its accepted post-temperature order is: advance the Sheng bubble/void
 state when selected;
-advance scalar source-decay groups; refresh material properties and pure-liquid density;
+refresh material properties and pure-liquid density;
 preview accepted boiling mass and condensate without committing the liquid
 ledger, including a conservative cellwise transport solve when selected; read
 the legacy gas model's authoritative cumulative H2 ledgers; solve
@@ -323,7 +323,7 @@ lose the transfer ledger: the pending amount remains the legacy gas model's
 authoritative cumulative submerged-bubble escape minus the planar model's
 committed-transfer watermark. Every positive decrement is retained, including
 values small relative to a large remaining inventory. Because upstream flow,
-temperature, gas, boiling, void, and scalar source-decay states are not generally
+temperature, gas, boiling, and void states are not generally
 transactional in the fixed-grid path, `MultiphysicsSolverCoupler` fail-stops after such a
 step error and rejects a full-step retry; reconstruct the solver from an
 accepted state instead. The constrained ALE path instead snapshots its complete
@@ -822,9 +822,9 @@ fixed-flux boundary supplies the exact mesh-normal volume flux.
 | Time/flow | Backward Euler; laminar dimensional Boussinesq; SIMPLE, PISO, PIMPLE, or coupled Krylov using the common target; gravity zero or inward along the top axis | BDF2/other moving-volume histories, transverse/outward gravity, and RANS/wall-distance/wall-law paths |
 | Thermal/material | Physical temperature transport with accepted/trial $V m_l^*c_pT$ storage; nonzero `BoussinesqTemperatureOnly` pure-liquid expansion; adiabatic boundaries; rollback-safe static volumetric sources or extensive interval energy budgets through `PrescribedHeatSource` | Legacy nondimensional temperature, solids/conjugate heat transfer, nonadiabatic boundaries, pressure/composition material laws, dynamic material or source callbacks |
 | Liquid | `cellMassInventory`; every nonmoving patch has a closed velocity condition and absent or homogeneous-Neumann pressure, giving zero physical-boundary liquid flux | `globalConstantMass`, liquid inlet/outlet composition, separate solvent/solute/reactant inventories |
-| Gas/void | No gas model, or `sheng2024TwoPopulation` with a uniform geometry-invariant source or an extensive interval energy budget through `PrescribedHeatSource`, advective dissolved H2, general bubble transport/slip, constant or reconstructed absolute pressure, and exactly the moving top as escape patch | `sheng2024TwoPopulation` without `PrescribedHeatSource`, unmapped Gaussian/spatial source profiles, `idealGasSource`, axial compatibility transport, prescribed/inertial pressure, scalar-void-only evolution, any unowned gas volume |
+| Gas/void | No gas model, or `twoPopulation` with a uniform geometry-invariant source or an extensive interval energy budget through `PrescribedHeatSource`, advective dissolved H2, general bubble transport/slip, constant or reconstructed absolute pressure, and exactly the moving top as escape patch | `twoPopulation` without `PrescribedHeatSource`, unmapped Gaussian/spatial source profiles, `idealGasSource`, axial compatibility transport, prescribed/inertial pressure, scalar-void-only evolution, any unowned gas volume |
 | Headspace/phase change | Fixed-temperature vented headspace with prescribed positive ambient absolute pressure | Closed/restricted headspace, non-fixed headspace-temperature policies, boiling, steam/condensation transport or escape |
-| Other transported physics | None beyond the supported liquid, temperature, momentum, and optional H2 equations | scalar source-decay groups and any optional extensive equation without ALE storage/flux/cache/rollback tests |
+| Other transported physics | None beyond the supported liquid, temperature, momentum, and optional H2 equations | Any optional extensive equation without ALE storage/flux/cache/rollback tests |
 
 Setup and step preflight validate the applicable choices collectively. An
 unsupported mixture fails before rank-divergent assembly rather than running
@@ -1191,7 +1191,7 @@ In particular, the current ALE path does not:
   composition-preserving evaporation or boundary flow;
 - transport steam conservatively or transfer steam across the moving surface;
 - support closed-headspace pressure coupling, pressure-dependent boiling
-  saturation, RANS/wall laws, scalar source-decay transport, solids, or another optional
+  saturation, RANS/wall laws, standalone scalar transport, solids, or another optional
   extensive equation outside the listed matrix;
 - make the cell-centre `poolOccupancy` indicator a cut-cell volume fraction or
   use it to modify the ALE equations; or

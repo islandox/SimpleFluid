@@ -27,8 +27,6 @@ void ScalarSourceDecayTransport<Pack, MeshType>::configure(const ScalarSourceDec
         d_options.decay_constants, count, 0.0);
     d_source_terms = complete_vector(
         d_options.source_terms, count, 0.0);
-    d_power_yields = complete_vector(
-        d_options.power_yields, count, 0.0);
     d_initial_concentrations = complete_vector(
         d_options.initial_concentrations, count, 0.0);
 
@@ -36,11 +34,11 @@ void ScalarSourceDecayTransport<Pack, MeshType>::configure(const ScalarSourceDec
     {
         const auto suffix = std::to_string(group + 1);
         auto field = std::make_unique<field_type>(
-            d_mesh, d_initial_concentrations[group], "C_" + suffix);
+            d_mesh, d_initial_concentrations[group], "scalar_" + suffix);
         auto inventory = std::make_unique<field_type>(
-            d_mesh, 0.0, "alpha_l_C_" + suffix);
+            d_mesh, 0.0, "alpha_l_scalar_" + suffix);
         auto source = std::make_unique<field_type>(
-            d_mesh, 0.0, "S_C_" + suffix);
+            d_mesh, 0.0, "S_scalar_" + suffix);
         d_output_fields.emplace(field->name(), field.get());
         d_output_fields.emplace(source->name(), source.get());
         d_fields.push_back(std::move(field));
@@ -79,11 +77,11 @@ template<TpetraTypePack Pack, class MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::advance(
     scalar_type time_step,
     const field_type& alpha_l,
-    const field_type* prescribed_heat_power_density,
+    const field_type* additional_source,
     const face_flux_field_type* liquid_face_flux)
 {
     validate_collective_advance_selection(
-        time_step, prescribed_heat_power_density, liquid_face_flux);
+        time_step, additional_source, liquid_face_flux);
     if (!enabled())
     {
         return;
@@ -91,26 +89,26 @@ void ScalarSourceDecayTransport<Pack, MeshType>::advance(
     int local_invalid_input =
         !std::isfinite(time_step) || time_step <= scalar_type{}
         || &alpha_l.mesh() != d_mesh.get()
-        || (prescribed_heat_power_density != nullptr
-            && &prescribed_heat_power_density->mesh() != d_mesh.get())
+        || (additional_source != nullptr
+            && &additional_source->mesh() != d_mesh.get())
         || (liquid_face_flux != nullptr
             && &liquid_face_flux->mesh() != d_mesh.get());
     const auto invalid_input = global_max(local_invalid_input);
     if (invalid_input != 0)
     {
         throw std::invalid_argument(
-            "ScalarGroup update requires a positive finite time step and "
+            "Scalar group update requires a positive finite time step and "
             "fields on the model mesh.");
     }
     validate_liquid_fraction_field(alpha_l);
     int local_invalid_source = 0;
-    if (prescribed_heat_power_density != nullptr)
+    if (additional_source != nullptr)
     {
         for (size_t owned = 0;
              owned < d_mesh->num_owned_cells();
              ++owned)
         {
-            const auto value = prescribed_heat_power_density->value(
+            const auto value = additional_source->value(
                 static_cast<local_ordinal_type>(owned));
             if (!std::isfinite(value) || value < scalar_type{})
             {
@@ -129,10 +127,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::advance(
                 static_cast<local_ordinal_type>(owned);
             const auto source =
                 d_source_terms[group]
-              + (prescribed_heat_power_density
-                     ? d_power_yields[group]
-                     * prescribed_heat_power_density->value(cell_lid)
-                     : scalar_type{});
+              + (additional_source ? additional_source->value(cell_lid) : scalar_type{});
             const auto old_inventory = inventory.value(cell_lid);
             if (!std::isfinite(source) || source < scalar_type{}
                 || !std::isfinite(old_inventory)
@@ -155,7 +150,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::advance(
     if (global_max(local_invalid_source) != 0)
     {
         throw std::invalid_argument(
-            "ScalarGroup inventories, sources, prescribed_heat power, and liquid "
+            "Scalar group inventories, sources, additional source, and liquid "
             "fluxes must be finite and non-negative where applicable.");
     }
     if (!d_inventory_initialized)
@@ -185,10 +180,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::advance(
                 static_cast<local_ordinal_type>(owned);
             const auto source =
                 d_source_terms[group]
-              + (prescribed_heat_power_density
-                     ? d_power_yields[group]
-                     * prescribed_heat_power_density->value(cell_lid)
-                     : scalar_type{});
+              + (additional_source ? additional_source->value(cell_lid) : scalar_type{});
             const auto old_inventory = inventory.value(cell_lid);
             const auto volume = d_mesh->cell_volume(cell_lid);
             scalar_type new_inventory{};
@@ -289,7 +281,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_configurati
             throw std::invalid_argument(local_error);
         }
         throw std::invalid_argument(
-            "ScalarGroup options must be valid on every rank.");
+            "Scalar group options must be valid on every rank.");
     }
 
     const auto local_group_count = options.group_count;
@@ -310,7 +302,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_configurati
     if (minimum_group_count != maximum_group_count)
     {
         throw std::invalid_argument(
-            "ScalarGroup group count must match on every rank.");
+            "Scalar group count must match on every rank.");
     }
 
     const auto count = static_cast<size_t>(minimum_group_count);
@@ -320,17 +312,14 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_configurati
         options.initial_concentrations, count, 0.0);
     const auto source_terms = complete_vector(
         options.source_terms, count, 0.0);
-    const auto power_yields = complete_vector(
-        options.power_yields, count, 0.0);
     std::vector<real_t> local_configuration;
-    local_configuration.reserve(1 + 4 * count);
+    local_configuration.reserve(1 + 3 * count);
     local_configuration.push_back(options.effective_diffusivity);
     for (size_t group = 0; group < count; ++group)
     {
         local_configuration.push_back(decay_constants[group]);
         local_configuration.push_back(initial_concentrations[group]);
         local_configuration.push_back(source_terms[group]);
-        local_configuration.push_back(power_yields[group]);
     }
 
     std::vector<real_t> minimum_configuration(
@@ -352,7 +341,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_configurati
     if (minimum_configuration != maximum_configuration)
     {
         throw std::invalid_argument(
-            "ScalarGroup decay, initial concentration, source, yield, and "
+            "Scalar group decay, initial concentration, source and "
             "diffusivity options must match on every rank.");
     }
 }
@@ -360,14 +349,14 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_configurati
 template<TpetraTypePack Pack, class MeshType>
 void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_advance_selection(
     scalar_type time_step,
-    const field_type* prescribed_heat_power_density,
+    const field_type* additional_source,
     const face_flux_field_type* liquid_face_flux) const
 {
     const auto communicator = d_mesh->owned_cell_map()->getComm();
     const std::array<int, 7> local_state{{
         enabled() ? 1 : 0,
         static_cast<int>(d_fields.size()),
-        prescribed_heat_power_density != nullptr ? 1 : 0,
+        additional_source != nullptr ? 1 : 0,
         liquid_face_flux != nullptr ? 1 : 0,
         d_inventory_initialized ? 1 : 0,
         d_options.effective_diffusivity > scalar_type{} ? 1 : 0,
@@ -389,12 +378,12 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_advance_sel
     if (minimum_state != maximum_state)
     {
         throw std::invalid_argument(
-            "ScalarGroup enabled state, group count, optional fields, and "
+            "Scalar group enabled state, group count, optional fields, and "
             "valid timestep selection must agree on every rank.");
     }
 
     std::vector<scalar_type> local_configuration;
-    local_configuration.reserve(2 + 4 * d_fields.size());
+    local_configuration.reserve(2 + 3 * d_fields.size());
     local_configuration.push_back(d_options.effective_diffusivity);
     if (minimum_state.back() != 0)
     {
@@ -406,7 +395,6 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_advance_sel
         local_configuration.push_back(
             d_initial_concentrations[group]);
         local_configuration.push_back(d_source_terms[group]);
-        local_configuration.push_back(d_power_yields[group]);
     }
     std::vector<scalar_type> minimum_configuration(
         local_configuration.size());
@@ -427,8 +415,8 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_collective_advance_sel
     if (minimum_configuration != maximum_configuration)
     {
         throw std::invalid_argument(
-            "ScalarGroup timestep, decay, initial concentration, source, "
-            "yield, and diffusivity options must agree on every rank.");
+            "Scalar group timestep, decay, initial concentration, source, "
+            "and diffusivity options must agree on every rank.");
     }
 }
 
@@ -454,7 +442,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::validate_liquid_fraction_field(
     if (global_max(local_invalid) != 0)
     {
         throw std::invalid_argument(
-            "ScalarGroup liquid fractions must be on the model mesh, "
+            "Scalar group liquid fractions must be on the model mesh, "
             "finite, and in (0, 1].");
     }
 }
@@ -581,7 +569,7 @@ void ScalarSourceDecayTransport<Pack, MeshType>::transport(
         if (global_max(statistics.converged ? 0 : 1) != 0)
         {
             throw std::runtime_error(
-                "ScalarGroup transport solve did not converge.");
+                "Scalar group transport solve did not converge.");
         }
 
         const auto negative_tolerance =
@@ -609,12 +597,12 @@ void ScalarSourceDecayTransport<Pack, MeshType>::transport(
         if (global_max(local_nonfinite) != 0)
         {
             throw std::runtime_error(
-                "ScalarGroup transport produced a non-finite value.");
+                "Scalar group transport produced a non-finite value.");
         }
         if (global_max(local_too_negative) != 0)
         {
             throw std::runtime_error(
-                "ScalarGroup transport produced a negative value.");
+                "Scalar group transport produced a negative value.");
         }
 
         scalar_type local_positivity_adjustment{};

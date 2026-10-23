@@ -1550,7 +1550,7 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     solver.temperature().put_value(300.);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.);
     ReactingGasOptions gas_options;
-    gas_options.mode = ReactingGasMode::Sheng2024TwoPopulation;
+    gas_options.mode = ReactingGasMode::TwoPopulation;
     gas_options.hydrogen_yield_mol_per_j = 2.e-7;
     gas_options.max_source_alpha_rate = 1.;
     gas_options.dissolved_transport = ReactingTransportMode::Advective;

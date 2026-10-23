@@ -66,7 +66,7 @@ testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /**
- * @brief Build the one-cell mesh used by local reaction_source checks.
+ * @brief Build the one-cell mesh used by local reacting_gas checks.
  *
  * @return Assembled single-cell mesh.
  */
@@ -138,7 +138,7 @@ double gas_diffusivity_with_gcl_fault(double)
 }
 
 /**
- * @brief Create water-like material fields for the reaction_source tests.
+ * @brief Create water-like material fields for the reacting_gas tests.
  *
  * @param mesh Mesh owning the material fields.
  * @return Initialized water-property fields.
@@ -171,7 +171,7 @@ make_ale_water_properties(const SimpleFluid::SP<ALEMeshType>& mesh)
 }
 
 /**
- * @brief Baseline ideal-gas reaction_source options with bounded alpha source.
+ * @brief Baseline ideal-gas reacting_gas options with bounded alpha source.
  *
  * @return Configured ideal-gas source options.
  */
@@ -194,7 +194,7 @@ SimpleFluid::ReactingGasOptions sheng_options()
 {
     auto options = ideal_options();
     options.mode =
-        SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+        SimpleFluid::ReactingGasMode::TwoPopulation;
     options.henry_coefficient = 1.0e-5;
     options.surface_tension = 0.07;
     options.hydrogen_diffusivity = 1.0e-8;
@@ -416,7 +416,7 @@ void expect_state_fields_finite_bounded(
 /**
  * @brief Evaluate the pressure-dependent critical H2 concentration.
  *
- * @param options ReactionSource correlation options.
+ * @param options ReactingGas correlation options.
  * @param pressure Absolute pressure.
  * @param temperature Liquid temperature.
  * @return Critical dissolved-hydrogen concentration.
@@ -444,7 +444,7 @@ double critical_concentration(
  * @param time_step Physical time-step size.
  * @param temperature Temperature field.
  * @param pressure Gauge-pressure field.
- * @param power PrescribedHeat power-density field.
+ * @param power Prescribed heat power-density field.
  * @param velocity Liquid velocity field.
  * @param flux Liquid face-flux field.
  * @param material Material-property fields.
@@ -2940,7 +2940,7 @@ TEST(ReactingGasModelTest, StateFieldsRemainFiniteNonNegativeAndBoundedAcrossPre
 }
 
 /**
- * @brief Solver startup publishes Sheng void before scalar_group initialization.
+ * @brief Solver startup publishes initial bubble void and the scalar mirror.
  */
 TEST(ReactingGasModelTest,
      SolverPublishesInitialShengStateInEitherConfigurationOrder)
@@ -2961,39 +2961,29 @@ TEST(ReactingGasModelTest,
     model_options.specific_heat_capacity = 4200.0;
     model_options.dynamic_viscosity = 1.0e-3;
     model_options.thermal_conductivity = 0.6;
-    SimpleFluid::ScalarSourceDecayOptions scalar_group_options;
-    scalar_group_options.group_count = 1;
-    scalar_group_options.initial_concentrations = {4.0};
 
     const auto expect_published =
-        [&](const auto& reaction_source,
-            const auto& scalar_void,
-            const auto& scalar_groups)
+        [&](const auto& reacting_gas,
+            const auto& scalar_void)
     {
-        ASSERT_TRUE(reaction_source.initial_state_initialized());
-        const auto alpha_g = reaction_source.alpha_g().value(0);
+        ASSERT_TRUE(reacting_gas.initial_state_initialized());
+        const auto alpha_g = reacting_gas.alpha_g().value(0);
         ASSERT_GT(alpha_g, options.alpha_min);
         EXPECT_NEAR(
             scalar_void.alpha_g().value(0), alpha_g, 1.0e-14);
         EXPECT_NEAR(
             scalar_void.alpha_l().value(0), 1.0 - alpha_g, 1.0e-14);
         EXPECT_DOUBLE_EQ(
-            reaction_source.source_alpha_reaction().value(0), 0.0);
+            reacting_gas.source_alpha_reaction().value(0), 0.0);
         EXPECT_DOUBLE_EQ(
             scalar_void.source_alpha_total().value(0), 0.0);
         EXPECT_NEAR(
-            reaction_source.dissolved_hydrogen().value(0),
+            reacting_gas.dissolved_hydrogen().value(0),
             options.initial_dissolved_hydrogen,
             1.0e-14);
         EXPECT_NEAR(
-            reaction_source.dissolved_hydrogen_inventory().value(0),
+            reacting_gas.dissolved_hydrogen_inventory().value(0),
             (1.0 - alpha_g) * options.initial_dissolved_hydrogen,
-            1.0e-14);
-        EXPECT_NEAR(
-            scalar_groups.concentration(0).value(0), 4.0, 1.0e-14);
-        EXPECT_NEAR(
-            scalar_groups.liquid_inventory(0).value(0),
-            (1.0 - alpha_g) * 4.0,
             1.0e-14);
     };
 
@@ -3004,11 +2994,10 @@ TEST(ReactingGasModelTest,
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         solver_coupling.initialize_heated_box(300.0, 300.0);
-        const auto& reaction_source = solver_coupling.configure_reacting_gas(options);
-        const auto& scalar_groups = solver_coupling.configure_scalar_groups(scalar_group_options);
+        const auto& reacting_gas = solver_coupling.configure_reacting_gas(options);
         const auto* scalar_void = solver_coupling.find_scalar_void_fraction_model();
         ASSERT_NE(scalar_void, nullptr);
-        expect_published(reaction_source, *scalar_void, scalar_groups);
+        expect_published(reacting_gas, *scalar_void);
     }
 
     {
@@ -3017,15 +3006,14 @@ TEST(ReactingGasModelTest,
             mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        const auto& reaction_source = solver_coupling.configure_reacting_gas(options);
-        ASSERT_FALSE(reaction_source.initial_state_initialized());
-        const auto& scalar_groups = solver_coupling.configure_scalar_groups(scalar_group_options);
+        const auto& reacting_gas = solver_coupling.configure_reacting_gas(options);
+        ASSERT_FALSE(reacting_gas.initial_state_initialized());
 
         solver_coupling.initialize_heated_box(300.0, 300.0);
 
         const auto* scalar_void = solver_coupling.find_scalar_void_fraction_model();
         ASSERT_NE(scalar_void, nullptr);
-        expect_published(reaction_source, *scalar_void, scalar_groups);
+        expect_published(reacting_gas, *scalar_void);
     }
 }
 
@@ -3066,8 +3054,8 @@ TEST(ReactingGasModelTest,
     options.initial_micro_moles = 5.0;
     options.microbubble_lifetime = 1.0e30;
     options.micro_to_large_conversion_coefficient = 0.0;
-    const auto& reaction_source = solver_coupling.configure_reacting_gas(options);
-    const auto initial_alpha = reaction_source.alpha_g().value(0);
+    const auto& reacting_gas = solver_coupling.configure_reacting_gas(options);
+    const auto initial_alpha = reacting_gas.alpha_g().value(0);
     ASSERT_GT(initial_alpha, 0.05);
 
     SimpleFluid::MaterialFeedbackOptions feedback;
@@ -3120,7 +3108,7 @@ TEST(ReactingGasModelTest, SolverOwnsAndPublishesOptionalModel)
         std::chrono::steady_clock::now().time_since_epoch().count();
     const auto output =
         std::filesystem::temp_directory_path()
-        / ("SimpleFluid_reaction_source_" + std::to_string(unique_id)
+        / ("SimpleFluid_reacting_gas_" + std::to_string(unique_id)
            + ".vtu");
     solver_coupling.write_solution_vtu(output.string(),
         SimpleFluid::SolutionOutputOptions{.include_sources = true, .include_reacting_gas_fields = true});

@@ -189,7 +189,7 @@ SimpleFluid::FreeSurfaceOptions surface_options(int maximum_correctors)
 SimpleFluid::ReactingGasOptions gas_options(scalar_type slip_velocity)
 {
     SimpleFluid::ReactingGasOptions result;
-    result.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    result.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     result.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     result.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
     result.bubble_transport = SimpleFluid::BubbleTransportMode::General;

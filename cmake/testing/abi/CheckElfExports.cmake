@@ -373,6 +373,62 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
+# The standalone reacting schema adds exactly 21 reviewed definitions across
+# 18 signatures: SpeciesCatalog (7), ReactionMechanism (6), CellSpeciesState
+# (6), SpeciesSourceLedger::thermal_energy (1), and advance_reactions (1).
+# Constructors contribute both complete-object and base-object ABI entries.
+# Match their complete argument lists, including libc++ inline namespaces.
+set(simplefluid_reacting_schema_public_symbol_budget 21)
+set(simplefluid_reviewed_reacting_api_patterns)
+macro(simplefluid_require_reacting_schema_api simplefluid_pattern simplefluid_count)
+    list(APPEND simplefluid_reviewed_reacting_api_patterns "${simplefluid_pattern}")
+    simplefluid_require_exact_api("${simplefluid_pattern}" "${simplefluid_count}")
+endmacro()
+set(simplefluid_reacting_catalog_vector_pattern
+    "std::(__[0-9]+::)?vector<SimpleFluid::Reacting::SpeciesDefinition, std::(__[0-9]+::)?allocator<SimpleFluid::Reacting::SpeciesDefinition>[ ]*>")
+set(simplefluid_reacting_reaction_vector_pattern
+    "std::(__[0-9]+::)?vector<SimpleFluid::Reacting::ReactionDefinition, std::(__[0-9]+::)?allocator<SimpleFluid::Reacting::ReactionDefinition>[ ]*>")
+set(simplefluid_reacting_catalog_pointer_pattern
+    "std::(__[0-9]+::)?shared_ptr<SimpleFluid::Reacting::SpeciesCatalog const>")
+set(simplefluid_reacting_string_view_pattern
+    "std::(__[0-9]+::)?basic_string_view<char, std::(__[0-9]+::)?char_traits<char>[ ]*>")
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::SpeciesCatalog::SpeciesCatalog[(]${simplefluid_reacting_catalog_vector_pattern}, (unsigned long|unsigned long long)[)]$" 2)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::SpeciesCatalog::species[(][)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::SpeciesCatalog::index[(]unsigned int[)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::SpeciesCatalog::revision[(][)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::SpeciesCatalog::fingerprint[(][)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::SpeciesCatalog::allows[(]unsigned int, SimpleFluid::Reacting::SpeciesPhase[)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::ReactionMechanism::ReactionMechanism[(]${simplefluid_reacting_catalog_pointer_pattern}, ${simplefluid_reacting_reaction_vector_pattern}, SimpleFluid::Reacting::EnergyConvention[)]$" 2)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::ReactionMechanism::catalog[(][)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::ReactionMechanism::reactions[(][)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::ReactionMechanism::index[(]unsigned int[)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::ReactionMechanism::energy_convention[(][)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::CellSpeciesState::CellSpeciesState[(]SimpleFluid::Reacting::SpeciesCatalog const&[)]$" 2)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::CellSpeciesState::amount[(]SimpleFluid::Reacting::SpeciesCatalog const&, unsigned int, SimpleFluid::Reacting::SpeciesPhase, ${simplefluid_reacting_string_view_pattern}[)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::CellSpeciesState::phase_amount[(]SimpleFluid::Reacting::SpeciesCatalog const&, unsigned int, SimpleFluid::Reacting::SpeciesPhase[)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::CellSpeciesState::set_amount[(]SimpleFluid::Reacting::SpeciesCatalog const&, unsigned int, SimpleFluid::Reacting::SpeciesPhase, double, ${simplefluid_reacting_string_view_pattern}[)]$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::CellSpeciesState::validate[(]SimpleFluid::Reacting::SpeciesCatalog const&[)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::SpeciesSourceLedger::thermal_energy[(][)] const$" 1)
+simplefluid_require_reacting_schema_api(
+    "^SimpleFluid::Reacting::advance_reactions[(]SimpleFluid::Reacting::ReactionMechanism const&, SimpleFluid::Reacting::CellSpeciesState const&, SimpleFluid::Reacting::ReactionEnvironment const&, double, SimpleFluid::Reacting::ReactionSourceInput const&, SimpleFluid::Reacting::ReactionAdvanceOptions const&[)]$" 1)
+
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
 # two virtual hooks. Even private overrides must remain exported: downstream
 # derived-driver vtables refer to them. The custom-driver link test covers this.
@@ -763,6 +819,24 @@ if(simplefluid_forbidden_api_symbols)
         "SimpleFluid definitions:\n  "
         "${simplefluid_forbidden_api_symbol_sample}")
 endif()
+# Reject any extra reacting-schema definition, including implementation helpers;
+# the namespace itself is not an export allowlist.
+foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
+    if(simplefluid_demangled_symbol MATCHES "^SimpleFluid::Reacting::")
+        set(simplefluid_reviewed_reacting_api FALSE)
+        foreach(simplefluid_reacting_api_pattern IN LISTS simplefluid_reviewed_reacting_api_patterns)
+            if(simplefluid_demangled_symbol MATCHES "${simplefluid_reacting_api_pattern}")
+                set(simplefluid_reviewed_reacting_api TRUE)
+                break()
+            endif()
+        endforeach()
+        if(NOT simplefluid_reviewed_reacting_api)
+            message(FATAL_ERROR
+                "Unreviewed reacting-schema dynamic definition: ${simplefluid_demangled_symbol}")
+        endif()
+    endif()
+endforeach()
+
 # The isothermal/adaptive, solid-conduction, and fixed-grid planar free-surface
 # APIs extend the reviewed library shape without widening the export map to
 # vendor or implementation-detail namespaces.
@@ -792,7 +866,15 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # GCC Debug has 1513 exports versus the Stage 2 record's 1468. Extend the
 # previous ceiling by those APIs, keeping the existing toolchain headroom.
 # Required anchors and forbidden implementation families remain unchanged.
-set(simplefluid_api_symbol_upper_bound 1550)
+# Neutral source migration preserves all other exports one-for-one and removes
+# five precursor coupler lifecycle definitions. The measured GCC Debug baseline
+# has 1552 definitions; 1552 + 21 reviewed schema entries - 5 removals = 1568.
+# The remaining preexisting substrate has 1547 entries and fits its unchanged
+# 1550 ceiling. Add only the separately anchored schema budget, retaining three
+# substrate headroom entries; do not absorb unrelated exports or widen any map.
+set(simplefluid_preexisting_api_symbol_upper_bound 1550)
+math(EXPR simplefluid_api_symbol_upper_bound
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

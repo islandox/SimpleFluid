@@ -62,7 +62,7 @@ SimpleFluid::ReactingGasOptions sheng_options()
 {
     SimpleFluid::ReactingGasOptions options;
     options.mode =
-        SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+        SimpleFluid::ReactingGasMode::TwoPopulation;
     options.hydrogen_yield_mol_per_j = 2.0e-7;
     options.gas_release_efficiency = 1.0;
     options.max_source_alpha_rate = 1.0;
@@ -507,7 +507,7 @@ TEST(ReactingGasModelMultiRankTest, ExternalMaterialFailureIsCollective)
 }
 
 /**
- * @brief Two-rank reaction_source update conserves global H2 and void diagnostics.
+ * @brief Two-rank reacting_gas update conserves global H2 and void diagnostics.
  */
 TEST(ReactingGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
 {

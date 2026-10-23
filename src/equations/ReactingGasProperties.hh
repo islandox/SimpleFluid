@@ -24,17 +24,17 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Top-level reaction_source model selection.
+ * @brief Top-level reacting_gas model selection.
  */
 enum class ReactingGasMode
 {
     Disabled,
     IdealGasSource,        ///< Convert hydrogen production directly to void source.
-    Sheng2024TwoPopulation ///< Evolve dissolved, micro-, and large-bubble inventories.
+    TwoPopulation ///< Evolve dissolved, micro-, and large-bubble inventories.
 };
 
 /**
- * @brief Strategy used to provide absolute pressure to reaction_source physics.
+ * @brief Strategy used to provide absolute pressure to reacting_gas physics.
  */
 enum class ReactingPressureMode
 {
@@ -123,7 +123,7 @@ enum class NucleationRadiusMode
 };
 
 /**
- * @brief Runtime configuration for ideal and two-population reaction_source.
+ * @brief Runtime configuration for ideal and two-population reacting_gas.
  */
 struct ReactingGasOptions
 {

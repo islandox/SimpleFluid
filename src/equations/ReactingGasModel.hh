@@ -1,7 +1,7 @@
 /**
  * @file ReactingGasModel.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Runtime-selectable ideal-gas and two-population reaction_source model.
+ * @brief Runtime-selectable ideal-gas and two-population reacting_gas model.
  * @version 0.1
  * @date 2026-07-21
  *
@@ -138,7 +138,7 @@ public:
     };
 
     /**
-     * @brief Construct a reaction_source model on a mesh.
+     * @brief Construct a reacting_gas model on a mesh.
      */
     explicit ReactingGasModel(
         SP<const mesh_type> mesh,
@@ -162,7 +162,7 @@ public:
      */
     void set_skip_zero_auxiliary_transport(bool enabled);
     /**
-     * @brief Return the active reaction_source options.
+     * @brief Return the active reacting_gas options.
      */
     const ReactingGasOptions& options() const noexcept
     {
@@ -183,11 +183,11 @@ public:
      */
     void set_transport_linear_solver_options(LinearSolverOptions options);
     /**
-     * @brief Return the selected reaction_source model family.
+     * @brief Return the selected reacting_gas model family.
      */
     ReactingGasMode mode() const noexcept { return d_options.mode; }
     /**
-     * @brief True when the model is configured to produce reaction_source fields.
+     * @brief True when the model is configured to produce reacting_gas fields.
      */
     bool enabled() const noexcept
     {
@@ -198,7 +198,7 @@ public:
      */
     bool supplies_void_fraction() const noexcept
     {
-        return mode() == ReactingGasMode::Sheng2024TwoPopulation;
+        return mode() == ReactingGasMode::TwoPopulation;
     }
 
     /**
@@ -230,7 +230,7 @@ public:
     }
 
     /**
-     * @brief Advance disabled or two-population reaction_source state.
+     * @brief Advance disabled or two-population reacting_gas state.
      *
      * Reconstructed pressure mode uses the supplied physical gauge-pressure
      * variation in Pa.
@@ -245,7 +245,7 @@ public:
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material,
-        const field_type* prescribed_heat_power_density,
+        const field_type* prescribed_heat_density,
         const FVM::ALEControlVolumeState* ale = nullptr,
         Dimension slip_axis = Dimension::Z);
 
@@ -264,7 +264,7 @@ public:
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material,
-        const field_type* prescribed_heat_power_density,
+        const field_type* prescribed_heat_density,
         const field_type& alpha_g,
         scalar_type alpha_max,
         const FVM::ALEControlVolumeState* ale = nullptr,
@@ -274,7 +274,7 @@ public:
      * @brief Synchronize ideal-mode diagnostics with canonical scalar void.
      *
      * The solver calls this after applying the aggregate scalar-void update so
-     * the legacy reaction_source alpha fields remain current without owning the
+     * the legacy reacting_gas alpha fields remain current without owning the
      * evolving ideal-mode state.
      */
     void synchronize_void_fraction(
@@ -297,7 +297,7 @@ public:
         return d_source_alpha_reaction;
     }
     /**
-     * @brief Absolute pressure field used by reaction_source correlations.
+     * @brief Absolute pressure field used by reacting_gas correlations.
      */
     const field_type& absolute_pressure() const noexcept
     {
@@ -546,7 +546,7 @@ private:
     void update_ideal_gas_source(
         scalar_type time_step,
         const field_type& temperature,
-        const field_type* prescribed_heat_power_density,
+        const field_type* prescribed_heat_density,
         const field_type& alpha_g,
         scalar_type alpha_max);
     SIMPLEFLUID_EQUATIONS_LOCAL
@@ -556,7 +556,7 @@ private:
         const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux,
         const material_type& material,
-        const field_type* prescribed_heat_power_density,
+        const field_type* prescribed_heat_density,
         const FVM::ALEControlVolumeState* ale,
         Dimension slip_axis);
     SIMPLEFLUID_EQUATIONS_LOCAL

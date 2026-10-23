@@ -8,18 +8,53 @@ application supplies the reaction mechanism, material properties, and closure
 validity ranges. No particular energy-deposition mechanism, gas species,
 solution composition, or vessel application defines the model.
 
-This is the target design. The current implementation provides useful
-single-species transport, bubble-population, thermodynamic, and transaction
-machinery, but does not expose an arbitrary reaction network or a general
-multispecies source interface. The present gas and heat-source models,
-hydrogen fields, and configuration retain specialized single-gas semantics.
-This target design does not expand their implemented support. Resolved/dispersed
-coupling is deferred and has no implementation in this source snapshot.
+The current neutral API is a transitional substrate. `ReactingGasModel`
+still implements the existing H2 energy-yield
+specialization, micro/large bubble populations, transport, and transaction
+machinery. Hydrogen inventories and the reduced donor ledger remain explicit.
+Neutral names do not establish arbitrary species, reaction-network transport,
+nonideal mixture thermodynamics, or general variable-density coupling.
+
+`PrescribedHeatSource` supplies independent external thermal deposition as
+`qdot_external`. Its profiles use `PrescribedHeatProfile` and
+`PrescribedHeatSourceOptions`, with `prescribed_heat_*` database keys.
+The current H2 gas implementation can still use that energy field as a
+specialized reaction driver; general mechanisms must supply their own species
+and energy budgets under the contract below.
+
+This migration is a deliberate source and configuration break, with no legacy
+aliases. Downstream applications must update includes, types, method calls,
+database keys, output-field consumers, and executable paths, then rebuild.
+
+| Retired interface | Neutral interface |
+| --- | --- |
+| `PrescribedHeatSource` / `PrescribedHeatSourceOptions` / `PrescribedHeatProfile` | `PrescribedHeatSource` / `PrescribedHeatSourceOptions` / `PrescribedHeatProfile` |
+| `ReactingGasModel` / `ReactingGasOptions` | `ReactingGasModel` / `ReactingGasOptions` |
+| `ReactingGasProperties.hh` / `BubbleGasPhysics` | `ReactingGasProperties.hh` / `BubbleGasPhysics` |
+| `BubblePopulationKinetics` | `BubblePopulationKinetics` |
+| `configure_prescribed_heat_source` / `configure_reacting_gas` | `configure_prescribed_heat_source` / `configure_reacting_gas` |
+| `prescribed_heat_power_mode` / `prescribed_heat_power_density` | `prescribed_heat_mode` / `prescribed_heat_density` |
+| `prescribed_heat_total_power` / `prescribed_heat_center` / `prescribed_heat_standard_deviation` | `prescribed_heat_total_power` / `prescribed_heat_center` / `prescribed_heat_standard_deviation` |
+| `enable_reaction_source` / `reacting_*` / `max_reacting_subcycles` | `enable_reacting_gas` / `reacting_*` / `max_reacting_subcycles` |
+| `sheng2024TwoPopulation` | `twoPopulation` (same two-population arithmetic) |
+| Heat and gas-source outputs | `qdot_external` / `source_alpha_reaction()` / `S_alpha_reaction` |
+| `absorbed_radiation_energy` | `reaction_driver_energy` (J/cell, still the transitional energy-yield driver) |
+| `reacting_solution_tank_demo` / `heated_solution_tank_sst` | `reacting_solution_tank_demo` / `heated_solution_tank_sst` |
+| `verification/openfoam/heatedSolutionTank` | `verification/openfoam/heatedSolutionTank` |
+
+Explicit retired source/gas keys and `scalar_group_*` controls reject before a
+parser can silently select disabled defaults. The delayed-external-source model,
+its coupler configuration, and its output/checkpoint hooks have been removed.
+`ScalarSourceDecayTransport` preserves reusable analytic source/decay and
+conservative scalar advection/diffusion as a standalone utility. Its supplied
+scalar sources have no external-source or heat-yield coupling; it is not a species
+reaction mechanism.
 
 The [roadmap](../../TODO.md) tracks implementation and qualification separately.
-The existing [gas transport guide](../reacting-gas-models.md) and
-[bubble/boiling guide](reacting_bubble_boiling.md) record the numerical
-foundation and the limits of the current specialization.
+The [gas transport guide](../reacting-gas-models.md) and
+[bubble/boiling guide](reacting_bubble_boiling.md) document the retained
+numerical foundation and the limits of the current specialization.
+Resolved/dispersed interface coupling is excluded from this source snapshot.
 
 ## Source ownership and inputs
 
@@ -213,9 +248,10 @@ support matrix; each backend must qualify the new source interface separately.
    a declared single-gas mechanism and retain explicit limits until each new
    species/phase capability is qualified.
 2. Adapt the existing transport and population machinery behind that contract.
-   Keep legacy keys and numerical behavior under a documented compatibility
-   path; introduce neutral public names only with a source/configuration
-   migration plan. Retire application-specific defaults from general examples.
+   The neutral source/configuration migration above is a deliberate break;
+   retired keys reject and no aliases remain. Retain numerical behavior until
+   the general species path is qualified. Retire application-specific defaults
+   from general examples.
 3. Verify a closed-cell analytic reaction such as `A_l -> B_l + G_d` with
    `W_A = W_B + W_G`. For a first-order law check
    `n_A(t)=n_A(0) exp(-k t)`, product stoichiometry, and total mass/element balance.

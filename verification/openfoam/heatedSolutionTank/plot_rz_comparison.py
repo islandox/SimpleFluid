@@ -1368,7 +1368,7 @@ def main() -> int:
         (
             "prescribed_heat_source",
             lambda row: row["qdot_external"],
-            "PrescribedHeat power density",
+            "Prescribed heat power density",
             "W/m3",
             source_statistics,
         ),

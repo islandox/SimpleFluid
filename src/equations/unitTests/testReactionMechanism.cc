@@ -1,0 +1,488 @@
+/** @file testReactionMechanism.cc
+ * @brief Independent analytic and transactional checks for supplied multispecies chemistry.
+ */
+#include "equations/ReactionMechanism.hh"
+
+#include <gtest/gtest.h>
+
+#include <cmath>
+#include <limits>
+#include <stdexcept>
+
+namespace
+{
+namespace R = SimpleFluid::Reacting;
+constexpr R::SpeciesId A = 11, B = 22, G1 = 51, G2 = 73;
+constexpr R::ReactionId split = 8;
+
+std::shared_ptr<const R::SpeciesCatalog> catalog()
+{
+    using P = R::SpeciesPhase;
+    return std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{A, "donor", 0.010, {{"X", 5}}, {P::Liquid}},
+            {B, "liquid product", 0.004, {{"X", 2}}, {P::Liquid}},
+            {G1, "gas one", 0.002, {{"X", 1}}, {P::Dissolved, P::Dispersed, P::Resolved}},
+            {G2, "gas two", 0.004, {{"X", 2}}, {P::Dissolved, P::Dispersed, P::Resolved}}},
+        19);
+}
+
+R::ReactionDefinition split_reaction(double heat = 0.0)
+{
+    using P = R::SpeciesPhase;
+    return {split, "A to B plus two different gases",
+        {{A, P::Liquid, -1}, {B, P::Liquid, 1}, {G1, P::Dissolved, 1}, {G2, P::Dissolved, 1}}, heat};
+}
+
+R::ReactionEnvironment environment()
+{
+    return {0.0, 300.0, 100000.0, 0.2, 0.5};
+}
+
+R::CellSpeciesState state(const R::SpeciesCatalog& schema, double donor = 1.0)
+{
+    R::CellSpeciesState result(schema);
+    result.set_amount(schema, A, R::SpeciesPhase::Liquid, donor);
+    return result;
+}
+
+R::ReactionRateProvider constant_rate(
+    const R::SpeciesCatalog& schema, double value, R::SourceVolumeBasis basis = R::SourceVolumeBasis::LiquidVolume)
+{
+    R::ReactionRateProvider result;
+    result.identity = "constant verification source";
+    result.schemaRevision = schema.revision();
+    result.schemaFingerprint = schema.fingerprint();
+    result.validityDescription = "Positive absolute pressure and temperature; prescribed manufactured rates.";
+    result.parameterUnits = "mol/(m3 s)";
+    result.validate = [](const R::ReactionContext&) {};
+    result.evaluate = [value, basis](const R::ReactionContext&)
+    { return std::vector<R::ReactionRate>{{split, value, basis}}; };
+    return result;
+}
+
+R::ReactionSourceInput decay(const R::SpeciesCatalog& schema, double k)
+{
+    R::ReactionSourceInput result;
+    auto provider = constant_rate(schema, 0.0);
+    provider.identity = "first-order analytical batch fixture";
+    provider.parameterUnits = "k in 1/s";
+    provider.evaluate = [k](const R::ReactionContext& context)
+    {
+        const auto volume = context.environment.liquidVolume;
+        const auto concentration =
+            volume == 0.0 ? 0.0 : context.state.amount(context.catalog, A, R::SpeciesPhase::Liquid) / volume;
+        return std::vector<R::ReactionRate>{{split, k * concentration, R::SourceVolumeBasis::LiquidVolume}};
+    };
+    result.rates = std::move(provider);
+    return result;
+}
+
+long double mass(const R::SpeciesCatalog& schema, const R::CellSpeciesState& values)
+{
+    long double result = 0.0;
+    for (const auto& species : schema.species())
+        for (std::size_t phase = 0; phase < 4; ++phase)
+            result += static_cast<long double>(species.molarMass) *
+                      values.phase_amount(schema, species.id, static_cast<R::SpeciesPhase>(phase));
+    return result;
+}
+
+TEST(ReactionMechanismTest, IntegratedMultigasStoichiometryAndIndependentHeat)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction(20.0)});
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{split, 0.25}};
+    input.heat.integratedEnergy = -3.0;
+    const auto initial = state(*schema);
+    const auto result = R::advance_reactions(mechanism, initial, environment(), 7.0, input);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), 0.75);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, B, R::SpeciesPhase::Liquid), 0.25);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, R::SpeciesPhase::Dissolved), 0.25);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G2, R::SpeciesPhase::Dissolved), 0.25);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionHeat, 5.0);
+    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, -3.0);
+    EXPECT_DOUBLE_EQ(result.ledger.thermal_energy(), 2.0);
+    EXPECT_NEAR(static_cast<double>(mass(*schema, result.state) - mass(*schema, initial)), 0.0, 1e-17);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, A, R::SpeciesPhase::Liquid), 1.0);
+}
+
+TEST(ReactionMechanismTest, AnalyticalBatchAndSecondOrderTimeConvergence)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    const auto input = decay(*schema, 1.0);
+    const auto coarse = R::advance_reactions(mechanism, state(*schema), environment(), 1.0, input, {0.1});
+    const auto fine = R::advance_reactions(mechanism, state(*schema), environment(), 1.0, input, {0.05});
+    const auto exact = std::exp(-1.0);
+    const auto coarseError = std::abs(coarse.state.amount(*schema, A, R::SpeciesPhase::Liquid) - exact);
+    const auto fineError = std::abs(fine.state.amount(*schema, A, R::SpeciesPhase::Liquid) - exact);
+    EXPECT_GT(coarseError / fineError, 3.8);
+    EXPECT_LT(coarseError / fineError, 4.3);
+    EXPECT_LT(fineError, 2e-4);
+    EXPECT_NEAR(fine.state.amount(*schema, G1, R::SpeciesPhase::Dissolved), 1.0 - exact, 2e-4);
+    EXPECT_DOUBLE_EQ(fine.state.amount(*schema, G1, R::SpeciesPhase::Dissolved),
+        fine.state.amount(*schema, G2, R::SpeciesPhase::Dissolved));
+    EXPECT_NEAR(static_cast<double>(mass(*schema, fine.state)), 0.01, 2e-17);
+}
+
+TEST(ReactionMechanismTest, LiquidBulkAndIntegratedInputsScaleExactlyOnce)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    const auto initial = state(*schema, 100.0);
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, 2.0, R::SourceVolumeBasis::LiquidVolume);
+    auto result = R::advance_reactions(mechanism, initial, environment(), 0.25, input);
+    EXPECT_NEAR(result.ledger.reactionExtents[0], 0.1, 1e-16);
+    input.rates = constant_rate(*schema, 2.0, R::SourceVolumeBasis::BulkVolume);
+    result = R::advance_reactions(mechanism, initial, environment(), 0.25, input);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], 0.25);
+    input.rates.reset();
+    input.integratedExtents = {{split, 0.4}};
+    result = R::advance_reactions(mechanism, initial, environment(), 20.0, input);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], 0.4);
+}
+
+TEST(ReactionMechanismTest, CompetingReactionsReserveSharedDonorAtomically)
+{
+    const auto schema = catalog();
+    auto alternate = split_reaction();
+    alternate.id = 99;
+    alternate.name = "competing channel";
+    const R::ReactionMechanism mechanism(schema, {split_reaction(), alternate});
+    const auto initial = state(*schema);
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{split, 0.6}, {99, 0.6}};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::runtime_error);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, A, R::SpeciesPhase::Liquid), 1.0);
+    input.integratedExtents = {{split, 0.5}, {99, 0.5}};
+    const auto result = R::advance_reactions(mechanism, initial, environment(), 1.0, input);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), 0.0);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G2, R::SpeciesPhase::Dissolved), 1.0);
+}
+
+TEST(ReactionMechanismTest, ReverseReactionConsumesEveryProductReservoir)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction(12.0)});
+    auto initial = state(*schema, 0.0);
+    initial.set_amount(*schema, B, R::SpeciesPhase::Liquid, 0.5);
+    initial.set_amount(*schema, G1, R::SpeciesPhase::Dissolved, 0.5);
+    initial.set_amount(*schema, G2, R::SpeciesPhase::Dissolved, 0.4);
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{split, -0.5}};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::runtime_error);
+    input.integratedExtents = {{split, -0.4}};
+    const auto result = R::advance_reactions(mechanism, initial, environment(), 1.0, input);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), 0.4);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G2, R::SpeciesPhase::Dissolved), 0.0);
+    EXPECT_NEAR(result.ledger.reactionHeat, -4.8, 1e-15);
+}
+
+TEST(ReactionMechanismTest, SimultaneousProductionCannotMaskMissingGrossDonors)
+{
+    const auto schema = catalog();
+    auto duplicate = split_reaction();
+    duplicate.id = 99;
+    duplicate.name = "opposite channel";
+    const R::ReactionMechanism mechanism(schema, {split_reaction(), duplicate});
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{split, 1.0}, {99, -1.0}};
+    EXPECT_THROW(
+        (void) R::advance_reactions(mechanism, state(*schema, 0.0), environment(), 1.0, input), std::runtime_error);
+}
+
+TEST(ReactionMechanismTest, BoundedSubcyclingRetriesJointDonorsWithoutClipping)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    const auto result = R::advance_reactions(mechanism, state(*schema), environment(), 1.0, decay(*schema, 10.0));
+    EXPECT_GT(result.ledger.retries, 0u);
+    EXPECT_GT(result.ledger.substeps, 1u);
+    EXPECT_GE(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), 0.0);
+    EXPECT_NEAR(static_cast<double>(mass(*schema, result.state)), 0.01, 2e-17);
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, 1.0);
+    EXPECT_THROW((void) R::advance_reactions(mechanism, state(*schema, 0.0), environment(), 1.0, input, {1.0, 10, 3}),
+        std::runtime_error);
+}
+
+TEST(ReactionMechanismTest, SeparateDispersedPopulationsCarryTwoGasDonors)
+{
+    const auto schema = catalog();
+    using P = R::SpeciesPhase;
+    const R::ReactionMechanism mechanism(
+        schema, {{1, "micro gas one dissolution", {{G1, P::Dispersed, -1, "micro"}, {G1, P::Dissolved, 1}}},
+                    {2, "large gas two dissolution", {{G2, P::Dispersed, -1, "large:7"}, {G2, P::Dissolved, 1}}}});
+    auto initial = state(*schema, 0.0);
+    initial.dispersedPopulations = {{"micro", {0.0, 0.0, 0.3, 0.1}}, {"large:7", {0.0, 0.0, 0.2, 0.5}}};
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{1, 0.2}, {2, 0.4}};
+    const auto result = R::advance_reactions(mechanism, initial, environment(), 1.0, input);
+    EXPECT_NEAR(result.state.amount(*schema, G1, P::Dispersed, "micro"), 0.1, 1e-16);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, P::Dispersed, "large:7"), 0.2);
+    EXPECT_NEAR(result.state.phase_amount(*schema, G2, P::Dispersed), 0.2, 1e-16);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G2, P::Dissolved), 0.4);
+    EXPECT_NEAR(static_cast<double>(mass(*schema, result.state) - mass(*schema, initial)), 0.0, 1e-17);
+    input.integratedExtents = {{1, 0.4}}; // Other populations cannot lend their gas to micro.
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::runtime_error);
+}
+
+TEST(ReactionMechanismTest, ZeroLiquidVolumeHasZeroLiquidBasedProduction)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    auto context = environment();
+    context.liquidVolume = 0.0;
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, 17.0);
+    const auto result = R::advance_reactions(mechanism, state(*schema, 0.0), context, 2.0, input);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], 0.0);
+    EXPECT_DOUBLE_EQ(result.state.phase_amount(*schema, G1, R::SpeciesPhase::Dissolved), 0.0);
+    context.bulkVolume = 0.0;
+    input.rates = constant_rate(*schema, 17.0, R::SourceVolumeBasis::BulkVolume);
+    EXPECT_NO_THROW((void) R::advance_reactions(mechanism, state(*schema, 0.0), context, 2.0, input));
+}
+
+TEST(ReactionMechanismTest, HeatOnlyAndReactionOnlyAreIndependent)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    R::ReactionSourceInput input;
+    input.heat.rate = R::VolumetricHeatRate{10.0, R::SourceVolumeBasis::LiquidVolume};
+    auto result = R::advance_reactions(mechanism, state(*schema), environment(), 0.5, input);
+    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, 1.0);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], 0.0);
+    input.heat.rate->basis = R::SourceVolumeBasis::BulkVolume;
+    result = R::advance_reactions(mechanism, state(*schema), environment(), 0.5, input);
+    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, 2.5);
+    input = decay(*schema, 1.0);
+    result = R::advance_reactions(mechanism, state(*schema), environment(), 0.5, input, {0.01});
+    EXPECT_GT(result.ledger.reactionExtents[0], 0.0);
+    EXPECT_DOUBLE_EQ(result.ledger.thermal_energy(), 0.0);
+}
+
+TEST(ReactionMechanismTest, FormationEnergyRejectsDuplicateReactionHeat)
+{
+    const auto schema = catalog();
+    EXPECT_THROW(R::ReactionMechanism(schema, {split_reaction(1.0)}, R::EnergyConvention::IncludesFormationEnergy),
+        std::invalid_argument);
+    EXPECT_NO_THROW(R::ReactionMechanism(schema, {split_reaction()}, R::EnergyConvention::IncludesFormationEnergy));
+}
+
+TEST(ReactionMechanismTest, ExternalReservoirRequiresMassAndDebitsWithdrawals)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {});
+    R::ReactionSourceInput input;
+    input.externalTransfers = {{"supply", G1, R::SpeciesPhase::Resolved, 2.0, 0.004, -5.0, {1.0, 2.0, 3.0}}};
+    const auto initial = state(*schema, 0.0);
+    auto result = R::advance_reactions(mechanism, initial, environment(), 0.1, input);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, R::SpeciesPhase::Resolved), 2.0);
+    EXPECT_DOUBLE_EQ(result.ledger.externalMass, 0.004);
+    EXPECT_DOUBLE_EQ(result.ledger.transferEnergy, -5.0);
+    EXPECT_DOUBLE_EQ(result.ledger.externalMomentum[1], 2.0);
+    input.externalTransfers[0].mass = 0.0;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 0.1, input), std::invalid_argument);
+    input.externalTransfers[0].moles = -2.0;
+    input.externalTransfers[0].mass = -0.004;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 0.1, input), std::runtime_error);
+    input.externalTransfers[0].reservoir.clear();
+    EXPECT_THROW(
+        (void) R::advance_reactions(mechanism, result.state, environment(), 0.1, input), std::invalid_argument);
+}
+
+TEST(ReactionMechanismTest, SchemaRejectsMassElementAndArbitrarySpeciesCreation)
+{
+    const auto original = catalog();
+    auto species = original->species();
+    species[1].molarMass = 0.005;
+    auto schema = std::make_shared<const R::SpeciesCatalog>(species);
+    EXPECT_THROW(R::ReactionMechanism(schema, {split_reaction()}), std::invalid_argument);
+    species = original->species();
+    species[1].elements["X"] = 3.0;
+    schema = std::make_shared<const R::SpeciesCatalog>(species);
+    EXPECT_THROW(R::ReactionMechanism(schema, {split_reaction()}), std::invalid_argument);
+    EXPECT_THROW(R::ReactionMechanism(original, {{1, "creation", {{G1, R::SpeciesPhase::Dissolved, 1}}}}),
+        std::invalid_argument);
+    species = original->species();
+    species[1].id = A;
+    EXPECT_THROW((void) R::SpeciesCatalog(species), std::invalid_argument);
+    species = original->species();
+    species[0].molarMass = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW((void) R::SpeciesCatalog(species), std::invalid_argument);
+}
+
+TEST(ReactionMechanismTest, NonfiniteSourceSchemaAndMixedFormsRejectAtomically)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    auto initial = state(*schema);
+    auto input = decay(*schema, 1.0);
+    input.rates->schemaRevision = 18;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::invalid_argument);
+    input.rates = constant_rate(*schema, std::numeric_limits<double>::quiet_NaN());
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::invalid_argument);
+    input.rates = constant_rate(*schema, 0.0);
+    input.integratedExtents = {{split, 0.1}};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::invalid_argument);
+    input.rates.reset();
+    input.integratedExtents[0].moles = std::numeric_limits<double>::infinity();
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::invalid_argument);
+    input = {};
+    input.heat.rate = R::VolumetricHeatRate{1.0};
+    input.heat.integratedEnergy = 1.0;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::invalid_argument);
+    initial.schemaRevision = 18;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0), std::invalid_argument);
+}
+
+TEST(ReactionMechanismTest, CompensatedEventLedgersKeepTransfersSmallerThanInventoryUlp)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{split, 1.0}};
+    input.externalTransfers = {{"energy 1", G1, R::SpeciesPhase::Resolved, 0.0, 0.0, 1e18},
+        {"small transfer", G1, R::SpeciesPhase::Resolved, 0.0, 0.0, 1.0},
+        {"energy 2", G1, R::SpeciesPhase::Resolved, 0.0, 0.0, -1e18}};
+    const auto result = R::advance_reactions(mechanism, state(*schema, 1e20), environment(), 1.0, input);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), 1e20);
+    EXPECT_DOUBLE_EQ(result.ledger.chemicalChange.amount(*schema, A, R::SpeciesPhase::Liquid), -1.0);
+    EXPECT_DOUBLE_EQ(result.ledger.transferEnergy, 1.0);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, R::SpeciesPhase::Dissolved), 1.0);
+}
+
+TEST(ReactionMechanismTest, DeterministicReplayPreservesStateAndEventHistory)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction(13.0)});
+    const auto initial = state(*schema);
+    const auto input = decay(*schema, 0.7);
+    const auto first = R::advance_reactions(mechanism, initial, environment(), 1.0, input, {0.03});
+    const auto second = R::advance_reactions(mechanism, initial, environment(), 1.0, input, {0.03});
+    EXPECT_EQ(first.state.amounts, second.state.amounts);
+    EXPECT_EQ(first.ledger.chemicalChange.amounts, second.ledger.chemicalChange.amounts);
+    EXPECT_EQ(first.ledger.reactionExtents, second.ledger.reactionExtents);
+    EXPECT_DOUBLE_EQ(first.ledger.reactionHeat, second.ledger.reactionHeat);
+    EXPECT_EQ(first.ledger.substeps, second.ledger.substeps);
+}
+
+TEST(ReactionMechanismTest, SameRevisionForeignOrReorderedSchemasRejectState)
+{
+    const auto schema = catalog();
+    const auto initial = state(*schema);
+    auto species = schema->species();
+    std::swap(species[0], species[1]);
+    const auto reordered = std::make_shared<const R::SpeciesCatalog>(species, schema->revision());
+    EXPECT_NE(reordered->fingerprint(), schema->fingerprint());
+    EXPECT_THROW(initial.validate(*reordered), std::invalid_argument);
+    const R::ReactionMechanism mechanism(reordered, {split_reaction()});
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0), std::invalid_argument);
+    species = schema->species();
+    species[0].name = "foreign donor";
+    const R::SpeciesCatalog foreign(species, schema->revision());
+    EXPECT_THROW(initial.validate(foreign), std::invalid_argument);
+    const R::SpeciesCatalog equivalent(schema->species(), schema->revision());
+    EXPECT_EQ(equivalent.fingerprint(), schema->fingerprint());
+    EXPECT_NO_THROW(initial.validate(equivalent));
+}
+
+TEST(ReactionMechanismTest, InvalidEnumInputsRejectBeforeStorageAccess)
+{
+    const auto schema = catalog();
+    auto initial = state(*schema);
+    EXPECT_THROW((void) initial.amount(*schema, A, static_cast<R::SpeciesPhase>(999)), std::invalid_argument);
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, 1.0, static_cast<R::SourceVolumeBasis>(999));
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::invalid_argument);
+}
+TEST(ReactionMechanismTest, ProviderRejectsSameRevisionForeignOrderedSchema)
+{
+    const auto original = catalog();
+    auto species = original->species();
+    std::swap(species[0], species[1]);
+    const auto reordered = std::make_shared<const R::SpeciesCatalog>(species, original->revision());
+    const R::ReactionMechanism mechanism(reordered, {split_reaction()});
+    const auto input = decay(*original, 1.0);
+    EXPECT_THROW(
+        (void) R::advance_reactions(mechanism, state(*reordered), environment(), 1.0, input), std::invalid_argument);
+}
+
+TEST(ReactionMechanismTest, AbsoluteIntervalAndEveryCallbackStageMustAdvanceRepresentableTime)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    auto context = environment();
+    context.time = 1e20;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, state(*schema), context, 1.0), std::invalid_argument);
+    EXPECT_THROW((void) R::advance_reactions(mechanism, state(*schema), context, 32768.0, decay(*schema, 1.0), {1.0}),
+        std::invalid_argument);
+    EXPECT_NO_THROW((void) R::advance_reactions(mechanism, state(*schema), context, 0.0));
+}
+
+TEST(ReactionMechanismTest, InitialOccupiedSpeciesNeedTheirPhysicalCarrierVolume)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    auto context = environment();
+    context.liquidVolume = 0.0;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, state(*schema), context, 1.0), std::invalid_argument);
+    auto initial = state(*schema, 0.0);
+    initial.set_amount(*schema, G1, R::SpeciesPhase::Dissolved, 1.0);
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, 1.0), std::invalid_argument);
+    initial.set_amount(*schema, G1, R::SpeciesPhase::Dissolved, 0.0);
+    initial.set_amount(*schema, G1, R::SpeciesPhase::Resolved, 1.0);
+    context.bulkVolume = 0.0;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, 1.0), std::invalid_argument);
+}
+
+TEST(ReactionMechanismTest, PhaseTransferCanCreatePreviouslyAbsentLiquidForOuterEOSRecovery)
+{
+    const auto schema = catalog();
+    using P = R::SpeciesPhase;
+    const R::ReactionMechanism mechanism(schema, {{1, "condensation", {{G1, P::Resolved, -1}, {G1, P::Dissolved, 1}}}});
+    auto context = environment();
+    context.liquidVolume = 0.0;
+    auto initial = state(*schema, 0.0);
+    initial.set_amount(*schema, G1, P::Resolved, 1.0);
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{1, 0.5}};
+    const auto result = R::advance_reactions(mechanism, initial, context, 1.0, input);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, P::Dissolved), 0.5);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, P::Resolved), 0.5);
+}
+
+TEST(ReactionMechanismTest, NonrepresentableProductsRejectInsteadOfDiscardingMassByUnderflow)
+{
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {A, "A", 1.0, {{"X", 1}}, {R::SpeciesPhase::Liquid}}, {B, "B", 1.0, {{"X", 1}}, {R::SpeciesPhase::Liquid}},
+        {G1, "G", 1.0, {{"X", 1}}, {R::SpeciesPhase::Dissolved}}});
+    const R::ReactionMechanism mechanism(
+        schema, {{1, "half-size products",
+                    {{A, R::SpeciesPhase::Liquid, -1}, {B, R::SpeciesPhase::Liquid, 0.5},
+                        {G1, R::SpeciesPhase::Dissolved, 0.5}}}});
+    const auto initial = state(*schema, std::numeric_limits<double>::denorm_min());
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{1, std::numeric_limits<double>::denorm_min()}};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, environment(), 1.0, input), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, A, R::SpeciesPhase::Liquid), std::numeric_limits<double>::denorm_min());
+}
+TEST(ReactionMechanismTest, RepeatedSubUlpConsumptionAccumulatesIntoRepresentableStoredChange)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, 5.0); // 5 mol/(m3 s) * .2 m3 = 1 mol/s.
+    const auto initial = state(*schema, 1e20);
+    const auto result = R::advance_reactions(mechanism, initial, environment(), 10000.0, input, {1.0, 10000});
+    EXPECT_DOUBLE_EQ(result.ledger.chemicalChange.amount(*schema, A, R::SpeciesPhase::Liquid), -10000.0);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, A, R::SpeciesPhase::Liquid),
+        static_cast<double>(static_cast<long double>(1e20) - 10000.0L));
+    EXPECT_LT(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), 1e20);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, R::SpeciesPhase::Dissolved), 10000.0);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, G2, R::SpeciesPhase::Dissolved), 10000.0);
+}
+} // namespace

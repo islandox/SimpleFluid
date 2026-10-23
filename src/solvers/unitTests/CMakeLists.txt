@@ -151,7 +151,7 @@ simplefluid_add_mpi_test(
     NAME ReactingGasModel_2procs
     TARGET testReactingGasModelMultiRank
     PROCS 2
-    LABELS "mpi;reaction_source"
+    LABELS "mpi;reacting_gas"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
@@ -226,11 +226,19 @@ simplefluid_add_mpi_test(
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
-    NAME CombinedTurbulentReactionSource_2procs
+    NAME CombinedTurbulentReactingGas_2procs
     TARGET testTurbulentBoussinesqSolver
     PROCS 2
     ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CouplesShearedRansShengTransportPrescribedHeatAndDensityFeedbackOnTwoRanks"
-    LABELS "mpi;turbulence;reaction_source;physical_models;pressure_velocity;acceptance"
+    LABELS "mpi;turbulence;reacting_gas;physical_models;pressure_velocity;acceptance"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME ScalarSourceDecayConfiguration_2procs
+    TARGET testPhase13PlusModels
+    PROCS 2
+    ARGS "--gtest_filter=ScalarSourceDecayTransportTest.CollectivelyRejectsRankDivergentConfigurationAndSource"
+    LABELS "mpi;scalar_source_decay;validation"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
@@ -238,7 +246,7 @@ simplefluid_add_mpi_test(
     TARGET testPhase13PlusModels
     PROCS 2
     ARGS "--gtest_filter=ScalarSourceDecayTransportTest.EffectiveDiffusivityIncludesExplicitNonOrthogonalCorrection"
-    LABELS "mpi;scalar_groups"
+    LABELS "mpi;scalar_source_decay"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
@@ -246,15 +254,7 @@ simplefluid_add_mpi_test(
     TARGET testPhase13PlusModels
     PROCS 2
     ARGS "--gtest_filter=ScalarSourceDecayTransportTest.LiquidAdvectionConservesDistributedInventory:ScalarSourceDecayTransportTest.CollectivelyRejectsRankDivergentAdvanceSelection"
-    LABELS "mpi;scalar_groups;transport"
-    TIMEOUT 120)
-
-simplefluid_add_mpi_test(
-    NAME ScalarGroupCollectiveConfiguration_2procs
-    TARGET testPhase13PlusModels
-    PROCS 2
-    ARGS "--gtest_filter=ScalarSourceDecayTransportTest.CollectivelyRejectsRankDivergentConfigurationAndPower:ScalarSourceDecayTransportTest.SolverRejectsRankDivergentScalarGroupPresenceBeforeStep"
-    LABELS "mpi;scalar_groups;validation"
+    LABELS "mpi;scalar_source_decay;transport"
     TIMEOUT 120)
 
 simplefluid_add_mpi_test(
@@ -349,8 +349,8 @@ simplefluid_add_mpi_test(
     NAME CoupledBackendsCombinedPhysics_2procs
     TARGET testTurbulentBoussinesqSolver
     PROCS 2
-    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CoupledBackendsAdvanceCombinedRansReactionSourceAndFeedback:TurbulentBoussinesqSolverTest.AdvancesWallTreatmentClosurePairingsThroughSegregatedAndCoupledSolvers"
-    LABELS "mpi;pressure_velocity;composite;turbulence;reaction_source"
+    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CoupledBackendsAdvanceCombinedRansReactingGasAndFeedback:TurbulentBoussinesqSolverTest.AdvancesWallTreatmentClosurePairingsThroughSegregatedAndCoupledSolvers"
+    LABELS "mpi;pressure_velocity;composite;turbulence;reacting_gas"
     TIMEOUT 180)
 
 foreach(_region_procs IN ITEMS 2 4)
@@ -380,13 +380,9 @@ simplefluid_add_mpi_test(NAME SASScalarVoid_2procs TARGET testSASSupportedPaths 
     ARGS "--gtest_filter=SASSupportedPathsTest.ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSAS"
     LABELS "mpi;turbulence;sas;void;small_fixture" TIMEOUT 120)
 
-simplefluid_add_mpi_test(NAME SASScalarGroups_2procs TARGET testSASSupportedPaths PROCS 2
-    ARGS "--gtest_filter=SASSupportedPathsTest.ScalarGroupInventoryAndDiagnosticsRollBackWithSAS"
-    LABELS "mpi;turbulence;sas;scalar_groups;small_fixture" TIMEOUT 120)
-
-simplefluid_add_mpi_test(NAME SASReactionSource_2procs TARGET testSASSupportedPaths PROCS 2
-    ARGS "--gtest_filter=SASSupportedPathsTest.ReactionSourceAndHydrogenLedgersRollBackWithSAS"
-    LABELS "mpi;turbulence;sas;reaction_source;small_fixture" TIMEOUT 120)
+simplefluid_add_mpi_test(NAME SASReactingGas_2procs TARGET testSASSupportedPaths PROCS 2
+    ARGS "--gtest_filter=SASSupportedPathsTest.ReactingGasAndHydrogenLedgersRollBackWithSAS"
+    LABELS "mpi;turbulence;sas;reacting_gas;small_fixture" TIMEOUT 120)
 
 simplefluid_add_mpi_test(NAME SASBoiling_2procs TARGET testSASSupportedPaths PROCS 2
     ARGS "--gtest_filter=SASSupportedPathsTest.BoilingSourcesAndPendingStateRollBackWithSAS"

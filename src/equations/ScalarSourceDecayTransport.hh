@@ -1,7 +1,7 @@
 /**
  * @file ScalarSourceDecayTransport.hh
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Liquid-phase delayed-neutron scalar_group scalar model.
+ * @brief Liquid-phase scalar source-decay scalar model.
  * @version 0.1
  * @date 2026-07-21
  *
@@ -37,15 +37,14 @@ namespace SimpleFluid
 {
 
 /**
- * @brief Runtime controls for delayed-neutron scalar_group groups.
+ * @brief Runtime controls for scalar source-decay groups.
  */
 struct ScalarSourceDecayOptions
 {
     int group_count = 0;
     ArrReal decay_constants;
     ArrReal initial_concentrations;
-    ArrReal source_terms;
-    ArrReal power_yields; ///< Production per unit prescribed_heat power density.
+    ArrReal source_terms; ///< Scalar amount/(bulk m3 s), independently supplied for each group.
     real_t effective_diffusivity = 0.0; ///< Shared liquid-phase diffusivity.
 };
 
@@ -77,7 +76,7 @@ inline void validate_scalar_source_decay_options(
     if (options.group_count < 0)
     {
         throw std::invalid_argument(
-            "ScalarGroup group count cannot be negative.");
+            "Scalar group group count cannot be negative.");
     }
     const auto count = static_cast<size_t>(options.group_count);
     auto check_size =
@@ -86,7 +85,7 @@ inline void validate_scalar_source_decay_options(
         if (!values.empty() && values.size() != count)
         {
             throw std::invalid_argument(
-                label + " must be empty or match scalar_group_group_count.");
+                label + " must be empty or match scalar_group_count.");
         }
         for (const auto value : values)
         {
@@ -102,13 +101,12 @@ inline void validate_scalar_source_decay_options(
         options.initial_concentrations,
         "scalar_group_initial_concentrations");
     check_size(options.source_terms, "scalar_group_source_terms");
-    check_size(options.power_yields, "scalar_group_power_yields");
     for (const auto value : options.decay_constants)
     {
         if (value < 0.0)
         {
             throw std::invalid_argument(
-                "ScalarGroup decay constants cannot be negative.");
+                "Scalar group decay constants cannot be negative.");
         }
     }
     for (const auto value : options.initial_concentrations)
@@ -116,7 +114,7 @@ inline void validate_scalar_source_decay_options(
         if (value < 0.0)
         {
             throw std::invalid_argument(
-                "ScalarGroup initial concentrations cannot be negative.");
+                "Scalar group initial concentrations cannot be negative.");
         }
     }
     for (const auto value : options.source_terms)
@@ -124,27 +122,19 @@ inline void validate_scalar_source_decay_options(
         if (value < 0.0)
         {
             throw std::invalid_argument(
-                "ScalarGroup source terms cannot be negative.");
-        }
-    }
-    for (const auto value : options.power_yields)
-    {
-        if (value < 0.0)
-        {
-            throw std::invalid_argument(
-                "ScalarGroup power yields cannot be negative.");
+                "Scalar group source terms cannot be negative.");
         }
     }
     if (!std::isfinite(options.effective_diffusivity)
         || options.effective_diffusivity < 0.0)
     {
         throw std::invalid_argument(
-            "ScalarGroup effective diffusivity must be finite and non-negative.");
+            "Scalar group effective diffusivity must be finite and non-negative.");
     }
 }
 
 /**
- * @brief Parse delayed-neutron scalar_group options from a flat database.
+ * @brief Parse scalar source-decay options from a flat database.
  *
  * @param database Database containing optional scalar_group keys.
  * @return Validated scalar_group options.
@@ -153,11 +143,26 @@ inline ScalarSourceDecayOptions
 scalar_source_decay_options_from_database(
     const Database& database)
 {
+    for (const auto* key : {
+             "precursor_group_count",
+             "precursor_decay_constants",
+             "precursor_initial_concentrations",
+             "precursor_source_terms",
+             "precursor_power_yields",
+             "precursor_effective_diffusivity"})
+    {
+        if (database.contains(key))
+        {
+            throw std::invalid_argument(
+                std::string(key) + " is retired; configure scalar_group_* inventory sources and transport explicitly.");
+        }
+    }
+
     ScalarSourceDecayOptions options;
     const detail::DatabaseOptionReader reader(
-        database, "Delayed-neutron scalar_group model");
+        database, "Scalar source-decay model");
     options.group_count = reader.value_or<int>(
-        "scalar_group_group_count", options.group_count);
+        "scalar_group_count", options.group_count);
     options.decay_constants = reader.value_or<ArrReal>(
         "scalar_group_decay_constants", options.decay_constants);
     options.initial_concentrations = reader.value_or<ArrReal>(
@@ -165,8 +170,6 @@ scalar_source_decay_options_from_database(
         options.initial_concentrations);
     options.source_terms = reader.value_or<ArrReal>(
         "scalar_group_source_terms", options.source_terms);
-    options.power_yields = reader.value_or<ArrReal>(
-        "scalar_group_power_yields", options.power_yields);
     options.effective_diffusivity = reader.value_or<real_t>(
         "scalar_group_effective_diffusivity",
         options.effective_diffusivity);
@@ -175,13 +178,17 @@ scalar_source_decay_options_from_database(
 }
 
 /**
- * @brief Conservative liquid-phase delayed-neutron scalar_group model.
+ * @brief Conservative liquid-phase scalar source-decay transport.
  *
  * The persistent state is the mixture-volume inventory @f$\alpha_l C_i@f$.
  * Source and decay are integrated exactly over each step, then conservative
  * liquid advection and optional diffusion solve for @f$C_i@f$ with storage
  * and advection weight @f$\alpha_l@f$, diffusion coefficient
  * @f$\alpha_l D_i^{eff}@f$, and homogeneous zero-flux diffusion boundaries.
+ *
+ * Amount units are declared by the caller and must be identical in concentration,
+ * bulk-volume sources, and the optional spatial source field. This utility does
+ * not define species stoichiometry, thermal coupling, or a reaction mechanism.
  *
  * @tparam Pack Tpetra type pack used for mesh and field storage.
  */
@@ -229,10 +236,10 @@ public:
 
     void restore(const StateSnapshot& saved)
     {
-        collective_detail::collective_local_validation(*d_mesh,"ScalarGroup snapshot restore",[&]
+        collective_detail::collective_local_validation(*d_mesh,"Scalar group snapshot restore",[&]
         {
             if(saved.owner!=this || saved.configuration!=d_snapshot_configuration || saved.epoch!=mesh_geometry_epoch(*d_mesh))
-                throw std::invalid_argument("ScalarGroup snapshot is foreign or stale.");
+                throw std::invalid_argument("Scalar group snapshot is foreign or stale.");
         });
         const std::array groups{&d_fields,&d_inventories,&d_sources};
         for(size_t kind=0;kind<groups.size();++kind)
@@ -331,23 +338,22 @@ public:
     /**
      * @brief Initialize conserved inventories from the current liquid fraction.
      *
-     * This is called by the coupled solver when the model is configured so
-     * that configured concentrations correspond to the initial void state.
-     * Direct model users may omit it; the first advance initializes lazily.
+     * Call before transport to bind concentrations to the initial liquid fraction.
+     * The first advance initializes lazily when this call is omitted.
      */
     void initialize_inventory(const field_type& alpha_l);
 
     /**
      * @brief Advance reaction and diffusion without an advecting face flux.
      *
-     * This compatibility overload retains the original public entry point.
+     * The optional source is a scalar inventory rate, independent of thermal input.
      */
     void advance(
         scalar_type time_step,
         const field_type& alpha_l,
-        const field_type* prescribed_heat_power_density)
+        const field_type* additional_source)
     {
-        advance(time_step, alpha_l, prescribed_heat_power_density, nullptr);
+        advance(time_step, alpha_l, additional_source, nullptr);
     }
 
     /**
@@ -355,14 +361,15 @@ public:
      *
      * @param time_step Positive physical timestep in seconds.
      * @param alpha_l Current liquid volume fraction.
-     * @param prescribed_heat_power_density Optional prescribed_heat power-density source field.
+     * @param additional_source Optional nonnegative scalar inventory source per bulk volume per second,
+     *        added directly to every configured scalar group; no heat/yield conversion.
      * @param liquid_face_flux Optional owner-oriented volumetric liquid flux.
      *        When absent, the transport solve contains diffusion only.
      */
     void advance(
         scalar_type time_step,
         const field_type& alpha_l,
-        const field_type* prescribed_heat_power_density,
+        const field_type* additional_source,
         const face_flux_field_type* liquid_face_flux);
 
 private:
@@ -375,7 +382,7 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_collective_advance_selection(
         scalar_type time_step,
-        const field_type* prescribed_heat_power_density,
+        const field_type* additional_source,
         const face_flux_field_type* liquid_face_flux) const;
 
     /** @brief Require a finite liquid fraction in the interval (0, 1]. */
@@ -386,7 +393,7 @@ private:
             || value > scalar_type{1})
         {
             throw std::invalid_argument(
-                "ScalarGroup liquid fractions must be finite and in (0, 1].");
+                "Scalar group liquid fractions must be finite and in (0, 1].");
         }
         return value;
     }
@@ -478,7 +485,6 @@ private:
     ArrReal d_decay_constants;
     ArrReal d_initial_concentrations;
     ArrReal d_source_terms;
-    ArrReal d_power_yields;
     std::vector<std::unique_ptr<field_type>> d_fields;
     std::vector<std::unique_ptr<field_type>> d_inventories;
     std::vector<std::unique_ptr<field_type>> d_sources;

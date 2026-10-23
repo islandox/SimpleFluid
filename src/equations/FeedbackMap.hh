@@ -585,17 +585,17 @@ inline constexpr std::string_view headspace_pressure_name = "headspacePressure";
 inline constexpr std::string_view pool_occupancy_name = "poolOccupancy";
 
 /**
- * @brief Return the canonical one-based delayed-scalar_group field name.
- * @param one_based_group Delayed-neutron group number, starting at one.
+ * @brief Return the canonical one-based scalar-group field name.
+ * @param one_based_group Scalar group number, starting at one.
  */
 inline std::string scalar_group_name(size_t one_based_group)
 {
     if (one_based_group == 0)
     {
         throw std::invalid_argument(
-            "Feedback scalar_group group numbers start at one.");
+            "Feedback scalar group numbers start at one.");
     }
-    return "C_" + std::to_string(one_based_group);
+    return "scalar_" + std::to_string(one_based_group);
 }
 
 /**
@@ -668,7 +668,7 @@ private:
 };
 
 /**
- * @brief Type-erased registry of scalar fields exported to neutronics.
+ * @brief Type-erased registry of scalar fields exported to external-source.
  *
  * Registration accepts either legacy CellField or native FieldStored scalar
  * cell fields. Registered fields are referenced, not owned, and therefore must
@@ -796,7 +796,7 @@ public:
 
     template<class Field>
         requires detail::ScalarFeedbackField<Field, Pack>
-    void register_scalar_group_group(
+    void register_scalar_group(
         size_t one_based_group,
         const Field& field)
     {
@@ -820,14 +820,14 @@ public:
         return names;
     }
 
-    /** @brief Require the standard TH fields and requested scalar_group groups. */
-    void require_standard_fields(size_t scalar_group_group_count = 0) const
+    /** @brief Require the standard TH fields and requested scalar groups. */
+    void require_standard_fields(size_t scalar_group_count = 0) const
     {
-        const auto collective_scalar_group_group_count =
+        const auto collective_scalar_group_count =
             detail::validate_collective_size(
                 *d_comm,
-                scalar_group_group_count,
-                "Feedback scalar_group group count");
+                scalar_group_count,
+                "Feedback scalar group count");
         const auto names = field_names();
         detail::validate_collective_names(
             *d_comm,
@@ -846,7 +846,7 @@ public:
             }
         }
         for (size_t group = 1;
-             group <= collective_scalar_group_group_count;
+             group <= collective_scalar_group_count;
              ++group)
         {
             const auto name = scalar_group_name(group);
@@ -969,7 +969,7 @@ struct PlaceholderOuterCouplingOptions
 {
     size_t outer_iterations = 1;
     size_t thermal_hydraulic_subcycles = 1;
-    size_t scalar_group_group_count = 0;
+    size_t scalar_group_count = 0;
 };
 
 /** @brief Observable record from one placeholder outer iteration. */
@@ -983,11 +983,11 @@ struct PlaceholderOuterCouplingRecord
 };
 
 /**
- * @brief Minimal callback-driven thermal-hydraulic/neutronics coupling loop.
+ * @brief Minimal callback-driven thermal-hydraulic/external-source coupling loop.
  *
  * The driver imports initial owned-cell prescribed_heat power, advances the caller's
  * TH callback for a fixed number of subcycles, exports a coarse feedback
- * snapshot, calls a placeholder neutronics update, imports its returned power,
+ * snapshot, calls a placeholder external-source update, imports its returned power,
  * and repeats. It deliberately owns neither solver so a production transport
  * interface can replace either callback without changing the exchange order.
  */
@@ -1017,11 +1017,11 @@ public:
                 d_registry.communicator(),
                 d_options.thermal_hydraulic_subcycles,
                 "Outer coupling TH subcycle count");
-        const auto scalar_group_group_count =
+        const auto scalar_group_count =
             detail::validate_collective_size(
                 d_registry.communicator(),
-                d_options.scalar_group_group_count,
-                "Outer coupling scalar_group group count");
+                d_options.scalar_group_count,
+                "Outer coupling scalar group count");
         if (outer_iterations == 0)
         {
             throw std::invalid_argument(
@@ -1032,7 +1032,7 @@ public:
             throw std::invalid_argument(
                 "Outer coupling requires at least one TH subcycle.");
         }
-        d_registry.require_standard_fields(scalar_group_group_count);
+        d_registry.require_standard_fields(scalar_group_count);
     }
 
     /**
@@ -1125,7 +1125,7 @@ public:
             detail::throw_if_collective_callback_failed(
                 d_registry.communicator(),
                 local_callback_failed,
-                "neutronics callback");
+                "external-source callback");
             auto next_power = std::move(*next_power_result);
             import_power_density<Pack>(power_density, next_power);
 

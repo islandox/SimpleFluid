@@ -163,7 +163,7 @@ SimpleFluid::FreeSurfaceOptions free_surface_options(int maximum_correctors)
 SimpleFluid::ReactingGasOptions gas_options()
 {
     SimpleFluid::ReactingGasOptions options;
-    options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
     options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
@@ -2141,13 +2141,6 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsUnmigratedOptionalTransportMod
     expect_active_model_rejected(
         [](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
         {
-            SimpleFluid::ScalarSourceDecayOptions options;
-            options.group_count = 1;
-            coupling.configure_scalar_groups(options);
-        });
-    expect_active_model_rejected(
-        [](SimpleFluid::MultiphysicsSolverCoupler<Pack>& coupling)
-        {
             SimpleFluid::TurbulenceModelOptions options;
             options.model = SimpleFluid::TurbulenceModelType::StandardKEpsilon;
             coupling.boussinesq_solver().configure_turbulence(options);
@@ -2184,7 +2177,7 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsNonadiabaticAndOpenNonmovingBo
     }
 }
 
-TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactionSourceWithoutPrescribedHeatSourceAtSetup)
+TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactingGasWithoutPrescribedHeatSourceAtSetup)
 {
     auto mesh = make_column();
     auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
@@ -2199,7 +2192,7 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactionSourceWithoutPres
     EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
 }
 
-TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactionSourceWithOnlyOneOuterCorrector)
+TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactingGasWithOnlyOneOuterCorrector)
 {
     auto mesh = make_column();
     auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
@@ -2231,7 +2224,7 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsGeometryDependentPrescribedHea
     expect_primary_restored(*state.solver, primary);
 }
 
-TEST(BoussinesqPlanarALESupportMatrixTest, RejectsGeometryDependentThermalPrescribedHeatProfileWithoutReactionSource)
+TEST(BoussinesqPlanarALESupportMatrixTest, RejectsGeometryDependentThermalPrescribedHeatProfileWithoutReactingGas)
 {
     auto state = make_case(Coupling::PISO, 0.0, 5);
     auto& prescribed_heat = state.coupling->add_prescribed_heat_source();
@@ -2867,7 +2860,7 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     solver_coupling.configure_material_feedback(thermal);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
     SimpleFluid::ReactingGasOptions gas_options;
-    gas_options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    gas_options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     gas_options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     gas_options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
     gas_options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
@@ -3048,7 +3041,7 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     solver_coupling.configure_material_feedback(thermal);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
     SimpleFluid::ReactingGasOptions gas_options;
-    gas_options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    gas_options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     gas_options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     gas_options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
     gas_options.bubble_transport = SimpleFluid::BubbleTransportMode::General;

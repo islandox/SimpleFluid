@@ -1,6 +1,6 @@
 # Liquid-side bubble mass transfer
 
-The `sheng2024TwoPopulation` kinetics uses a selected liquid-side coefficient
+The `twoPopulation` kinetics uses a selected liquid-side coefficient
 for the exchange between dissolved H2 and **active large bubbles**. The
 selector `bubble_mass_transfer_model` defaults to `legacyHughmark` and also
 accepts `sphericalDiffusion`, `fengMichaelidesClean`, and
@@ -39,7 +39,7 @@ and applicability checks; the Feng low/high Pe branch remains state-dependent.
 | `fengMichaelidesRigid` | Low Pe: `Sh = 2 + Pe/2 + (Pe² ln Pe)/8`; high Pe: `Sh = 1.49 (Pe/2)^0.322` | Rigid/immobilized endpoint, with the same disjoint gates. |
 
 The legacy expression and `Sc` guard reproduce the existing
-`RadiolyticGasPhysics::hughmark_sherwood` implementation. Its historical
+`BubbleGasPhysics::hughmark_sherwood` implementation. Its historical
 reference is G. A. Hughmark, “Mass and heat transfer from rigid spheres,”
 *AIChE Journal* **13** (1967), 1219–1221,
 <https://doi.org/10.1002/aic.690130638>. The publisher preview identifies

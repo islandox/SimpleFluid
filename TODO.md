@@ -467,16 +467,19 @@ reaction extent can release or absorb heat without requiring a power-yield law.
 
 **Status:** prescribed non-negative profiles, imported cell fields, normalized
 total power, time multipliers, energy-equation coupling, and VTU output exist.
-The current specialized provider retains the legacy compatibility identifiers
-`PrescribedHeatSource` and `qdot_external`; general reaction-energy coupling is
-proposed, not implemented by renaming that provider.
+The neutral `PrescribedHeatSource` publishes `qdot_external` under
+`prescribed_heat_*` controls. Retired source names and keys have no aliases
+and explicit old keys reject. Standalone reaction/source kernels provide
+separate chemical and external thermal ledgers; solver-field energy coupling
+and full coupled qualification remain open.
 
 - [x] Support constant and Gaussian prescribed heating and caller-supplied
       non-negative cell fields.
 - [x] Normalize spatial profiles to configured total power on Cartesian and
       cylindrical meshes and couple the result to the temperature equation.
 - [x] Cover zero heating and analytic one-cell temperature rise in focused tests.
-- [ ] Add general source names and an explicit compatibility adapter.
+- [x] Introduce neutral source names and controls as a deliberate API break,
+      with no aliases and explicit rejection of retired keys.
 - [ ] Evaluate reaction heat from the same accepted extents used for species
       production and donor consumption, matched to the stored thermal potential
       and its excluded chemical/formation-energy terms.
@@ -496,10 +499,11 @@ solve a separate gas momentum equation or establish general chemistry support.
 
 **Status:** the existing single-gas, prescribed-energy-yield source supplies
 ideal-gas volume conversion, bounded scalar source application, and focused
-temperature/pressure/zero-source checks. The implementation retains
-`ReactingGasModel` and `S_alpha_reaction` as legacy compatibility identifiers.
-Arbitrary species, stoichiometry, reaction-rate providers, and coupled donor/
-energy acceptance remain open.
+temperature/pressure/zero-source checks under neutral `ReactingGasModel`
+and `S_alpha_reaction` names. Standalone species, stoichiometry, supplied-rate,
+and integrated-extent source APIs exist. Their integration into transported
+fields, coupled donor/energy acceptance, and general flow qualification remain
+open; neutral naming alone does not close those gates.
 
 #### Proposed source contract
 
@@ -686,8 +690,9 @@ $$
 S_{\alpha,\mathrm{total}} = S_{\alpha,\mathrm{reaction}} + S_{\alpha,\mathrm{boil}} + S_{\alpha,\mathrm{wall}} - S_{\alpha,\mathrm{collapse}}
 $$
 
-Here the subscript `rad` is the legacy source identifier, not the general
-reaction-rate contract. The generalized path must admit a consistent source
+Here `reaction` identifies the neutral gas-source output. The current
+field-coupled source still uses the transitional H2 energy-yield closure;
+it does not yet implement the general species reaction-rate contract. The generalized path must admit a consistent source
 before updating void; bounding void alone cannot conserve species or energy.
 Any gas removed by collapse needs an explicit dissolved, headspace or external
 sink ledger. Implementing those contracts remains open.
@@ -754,9 +759,11 @@ growth/dissolution, rise and escape. The general design is specified in
 **Status:** a specialized single-gas two-population implementation has focused
 conservation, transport and serial/MPI coverage, including permanent serial
 and exact-two-rank RANS-plus-bubble regressions. Its runtime selector
-`reactingBubbleModel`, value `sheng2024TwoPopulation`, and dissolved field
-`C_H2` remain legacy compatibility identifiers. These tests do not establish
-generic species support, general reaction kinetics or physical validation.
+`reacting_bubble_model` and value `twoPopulation` are neutral controls
+with no legacy aliases; retired selectors reject. The dissolved field
+`C_H2` remains an explicit single-gas limitation until species integration.
+These tests do not establish general species transport, coupled reaction
+kinetics, or physical validation.
 
 #### Implemented numerical foundation
 
@@ -808,7 +815,7 @@ uses accepted-old/trial-new volumes and mesh-relative transport in the
 explicitly supported solver matrix.
 
 - [ ] Generalize species fields, rates, property selection and output names
-      without presenting legacy aliases as an implemented new API.
+      with no legacy aliases and explicit rejection of retired runtime keys.
 - [ ] Supply species-specific solubility, diffusivity, molar mass, caloric
       properties and validity bounds; reject unsupported mixtures/conditions.
 - [ ] Introduce configurable nucleation and growth/dissolution closures with
@@ -902,7 +909,7 @@ rates and heating, an explicit solution composition, gas release, optional
 boiling, and complete accepted species/mass/energy diagnostics.
 
 **Status:** the existing prescribed-source examples build and have short-run
-coverage. `reacting_solution_tank_demo` is a legacy executable name, and
+coverage. `reacting_solution_tank_demo` is the neutral smoke executable, and
 `constant_power_cylinder_vessel` also uses the specialized source path; neither
 is an implemented general reacting-solution demo.
 
@@ -971,15 +978,17 @@ population path separately from a full Euler–Euler formulation.
 
 **Status:** the general design is documented in
 [reacting gas sources in solution](docs/modeling/reacting_gas_sources.md).
-Current code still exposes legacy single-gas names and closures; a complete
-key/default/unit/validity reference and implementation migration remain open.
+Neutral API/configuration names and the explicit migration table are
+implemented without aliases. The coupled gas fields retain single-gas
+closures; complete species integration and a full key/default/unit/validity
+reference remain open.
 
 - [x] Document governing quantities, storage bases, conservation gates and
       limitations of the existing numerical foundation.
 - [x] Separate weak RANS-plus-bubble coupling from phase-aware turbulent
       Euler–Euler flow and distinguish proposed design from current APIs.
 - [ ] Document every supported configuration key with default, SI unit,
-      validity range and compatibility mapping.
+      validity range and migration mapping; retired source keys must reject.
 - [ ] Document supplied rate/stoichiometry/property interfaces, coupled donor
       limits, heat/phase-change accounting, restart state and rejection behavior.
 - [ ] Provide runnable zero-reaction, closed-batch and convecting-solution
@@ -995,10 +1004,13 @@ Use conservative liquid-fraction-weighted transport as the basis for solution
 composition and reaction donors/products.
 
 **Status:** linear source/decay scalar transport is implemented and focused-tested
-under the legacy compatibility class `ScalarSourceDecayTransport`. It supplies
-configurable groups, projected-liquid-flux advection, optional diffusion,
-analytic local source/decay integration, globally reduced balance diagnostics
-and collective validation. It is not a general stoichiometric chemistry solver.
+under the standalone neutral `ScalarSourceDecayTransport` utility. It
+supplies configurable scalar groups, projected-liquid-flux advection, optional
+diffusion, direct scalar source rates, analytic local source/decay integration,
+globally reduced balance diagnostics, and collective validation. The
+delayed-external-source model and all coupler configuration, advancement, output, and
+checkpoint hooks are removed. This utility has no power-yield conversion
+and is not a general stoichiometric chemistry solver.
 
 For species $s$, the target equation is:
 
@@ -1010,7 +1022,7 @@ $$
 $$
 
 - [x] Preserve existing zero-source, exact source/decay, transport conservation
-      and bounded-concentration regression coverage for the legacy scalar path.
+      and bounded-concentration regression coverage for the standalone neutral scalar path.
 - [x] Retain source, boundary-outflow, positivity-adjustment and before/after
       inventory diagnostics with collective input and rank-consistency checks.
 - [ ] Add general species identities, composition-dependent property hooks and
@@ -1037,7 +1049,7 @@ snapshots and placeholder outer loop exist. Reusable cell transfer supports
 nearest/inverse-distance interpolation and conservative supported overlaps,
 including explicit partial coverage and intensive/extensive quantities; see
 [mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md).
-The scaffold's legacy heat field is `qdot_external`; general reaction-rate
+The scaffold's neutral external-heat field is `qdot_external`; general reaction-rate
 exchange and a production external-provider protocol remain proposed.
 
 - [x] Retain volume-averaging utilities, deterministic feedback snapshots and
@@ -1118,7 +1130,7 @@ cross-mesh mapping.
       `clearLevel`, `poolLevel`, `headspacePressure`, and `poolOccupancy` while
       preserving the disabled/legacy field contract.
 - [x] Wire one authoritative accepted-step sequence through
-      `BoussinesqSolver`: post-temperature bubble/void and legacy source/decay scalar updates,
+      `BoussinesqSolver`: post-temperature bubble/void updates,
       material refresh, accepted boiling mass/condensate once, pure-density
       refresh, exact single-gas escape transfer, level/headspace closure, next-step
       pressure offset, and diagnostic publication.
@@ -1208,7 +1220,7 @@ void-reduced mixture density does not own sensible-energy storage.
 - [x] Add constant-field, nonzero-divergence, and conservative ALE liquid/gas/
       energy tests with the solver-integrated operators, including
       liquid-mass-weighted sensible energy and a checked-in solver-integrated
-      verification driver; verify that legacy source/decay scalars and other unmigrated
+      verification driver; verify that standalone source/decay scalars and other unmigrated
       transports fail closed.
 - [x] Snapshot and restore supported fields, model ledgers, geometry, time,
       history, and output state so a rejected outer trial leaves one accepted

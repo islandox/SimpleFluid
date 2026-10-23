@@ -180,6 +180,6 @@ solver or the comparison fails.
 - [Cavity flow](cavityFlow/README.md)
 - [pitzDaily](pitzDaily/README.md)
 - [Natural convection](naturalConvection/README.md)
-- [Fissile solution tank](heatedSolutionTank/README.md)
+- [Heated solution tank](heatedSolutionTank/README.md)
 
 These older workflows have their own convergence and interpretation limits.

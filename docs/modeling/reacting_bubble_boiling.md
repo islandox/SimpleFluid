@@ -6,13 +6,12 @@ species, stoichiometry, finite reactants, and heat accounting. Chemical gas
 production and liquid-to-vapor phase change have separate inventory and
 energy ledgers, even when both contribute to the same occupied volume.
 
-This historical documentation path remains valid for existing links. The
-`Reacting*`, `PrescribedHeat*`, and H2-specific names below are current
-implementation identifiers. General reaction providers and arbitrary species
-remain planned; the existing energy-yield specialization cannot be made
-generic through material callbacks alone. The current source-driven models
-are coupled by `MultiphysicsSolverCoupler` to a shared Boussinesq solver.
-They are not a full Euler-Euler two-fluid method.
+The neutral `Reacting*`, `PrescribedHeat*`, and `BubblePopulationKinetics`
+interfaces replace the retired application-specific names without aliases.
+The runtime two-population selector is `twoPopulation`. Existing H2 fields
+and the energy-yield source closure remain transitional; this migration does
+not establish arbitrary-species transport or a general chemistry interface.
+See the [migration table](reacting_gas_sources.md) for exact API and key changes.
 
 ## General coupling design
 
@@ -39,11 +38,11 @@ and pressure with supplied validity-bounded properties. The design requires
 no particular source of reaction energy or external application model. General
 source/feedback adapters remain planned.
 
-## Legacy implementation: model choices
+## Current single-gas implementation: model choices
 
 - `idealGasSource`: computes `S_alpha_reaction` from the legacy power-density
   input, temperature, pressure, gas yield, and release efficiency.
-- `sheng2024TwoPopulation`: reconstructs void fraction from dissolved
+- `twoPopulation`: reconstructs void fraction from dissolved
   hydrogen plus microbubble and large-bubble inventories.
 - Low-order scalar `alpha_g`: aggregates `S_alpha_reaction`, `S_alpha_boil`, and
   optional collapse into `S_alpha_total`, then applies an explicit bounded
@@ -71,7 +70,7 @@ S_alpha_collapse = min(alpha_g / tau_c,
 Boiling can reuse that realizable capacity, but cannot claim collapse that the
 bounded scalar update would otherwise discard.
 
-## Legacy implementation: configuration keys
+## Current single-gas implementation: configuration keys
 
 `reacting_transport_solver_tolerance` optionally sets the relative linear
 solve tolerance for the existing gas finite-volume inventory transport (default
@@ -123,7 +122,7 @@ min_viscosity
 gas_density
 ```
 
-## Legacy implementation: numerical ordering
+## Current single-gas implementation: numerical ordering
 
 For each Boussinesq step:
 
@@ -144,7 +143,7 @@ For each Boussinesq step:
 Other independently enabled legacy physics stages are outside this gas and
 boiling contract; this ordering is not a generic reaction-network API.
 
-## Legacy implementation: output fields
+## Current single-gas implementation: output fields
 
 Use `SolutionOutputOptions`:
 
@@ -155,7 +154,7 @@ Use `SolutionOutputOptions`:
 - `include_material_properties`: writes material fields plus `rhoFeedback`
   and `muFeedback` when feedback is configured.
 
-## Legacy implementation: feedback mapping
+## Current single-gas implementation: feedback mapping
 
 `FeedbackMap::volume_weighted_average` maps owned CFD cells into named
 feedback cells. Multiplying a mapped average by its mapped volume preserves
@@ -170,7 +169,7 @@ scaffold; the imported field retains the name `qdot_external`. They are not a
 general species-source adapter and do not establish reaction/heat convergence
 or an external communication protocol.
 
-## Legacy implementation: OpenFOAM transport verification
+## Current single-gas implementation: OpenFOAM transport verification
 
 The paired [`dispersedBubbleFlow` verification cases](../../verification/openfoam/dispersedBubbleFlow/README.md)
 compare production microbubble transport with an independent OpenFOAM
@@ -186,7 +185,7 @@ properties and surface tension at 300 K and 101325 Pa absolute. OpenFOAM
 uses the same material snapshot. The fixture gas remains hydrogen; water
 vapor density is not substituted for its ideal-gas/capillary bubble model.
 
-## Legacy implementation: limitations
+## Current single-gas implementation: limitations
 
 - No separate gas momentum equation is solved.
 - The scalar `alpha_g` path has no population balance.

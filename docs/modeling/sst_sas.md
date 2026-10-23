@@ -251,15 +251,13 @@ after its physical acceptance gates, using the physical timestep for SAS.
 It supports the native isothermal and physical Boussinesq drivers within the
 [NOX scope](../architecture/coupled_nonlinear_solver.md): fixed orthogonal
 geometry, prescribed or axis-aligned slip velocity, Neumann pressure and
-mesh periodic interfaces. Its existing free-surface, boiling, scalar source-decay,
+mesh periodic interfaces. Its existing free-surface, boiling,
 legacy-driver and moving-grid restrictions remain. The accepted nonlinear
 report participates in SAS rollback; a rejected downstream update can retry.
 Material feedback is included in the SAS transaction, restoring its mirrors
 as well as material and turbulence fields on failure. Scalar void diffusion
 and collapse also participate, including alpha_g, alpha_l and source mirrors;
-the RANS/SAS equations remain full-cell rather than phase weighted. Active SAS
-also supports existing scalar source-decay reaction/advection/diffusion, with complete
-concentration, inventory, source and diagnostic snapshots. Legacy ideal-gas and two-population model snapshots cover
+the RANS/SAS equations remain full-cell rather than phase weighted. Legacy ideal-gas and two-population model snapshots cover
 transport histories, slip fluxes, populations and hydrogen ledgers. Bulk/wall
 boiling also restores its source fields, steam/condensate ledger and pending
 phase-change state. Fixed-grid planar volume budgets capture the free-surface
@@ -307,7 +305,7 @@ NOX disabled and do not establish enabled LLVM NOX support qualification.
 Supported non-NOX extensions include cylindrical Cartesian components with
 integrated radial normals, serial semi-structured prisms, mixed slip conditions,
 translational periodic images, corrected Gauss-linear gradients and the existing
-compatible material, void, scalar source-decay, gas-source, boiling and fixed-grid surface
+compatible material, void, gas-source, boiling and fixed-grid surface
 transactions described above. The initial record's narrower support limits are
 superseded by these implemented paths. Active tests require a nonzero source;
 zero-source equivalence alone cannot qualify SAS integration.

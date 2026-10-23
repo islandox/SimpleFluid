@@ -1,7 +1,7 @@
 /**
  * @file testPrescribedHeatSource.cc
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Tests prescribed prescribed_heat power profiles and source registration.
+ * @brief Tests prescribed heat profiles and source registration.
  * @version 0.1
  * @date 2026-07-21
  *
@@ -60,7 +60,7 @@ SimpleFluid::SP<MeshType> make_cylinder()
     return SimpleFluid::test::build_mesh<Pack>(database);
 }
 
-/** @brief Verifies parsing of disabled, constant, and Gaussian prescribed_heat-source options. */
+/** @brief Verifies parsing of disabled, constant, and Gaussian prescribed heat-source options. */
 TEST(PrescribedHeatSourceTest, ParsesDisabledConstantAndGaussianOptions)
 {
     SimpleFluid::Database empty;
@@ -69,9 +69,9 @@ TEST(PrescribedHeatSourceTest, ParsesDisabledConstantAndGaussianOptions)
         SimpleFluid::PrescribedHeatProfile::Disabled);
 
     SimpleFluid::Database constant;
-    constant.set("prescribed_heat_power_mode", std::string{"constant"});
+    constant.set("prescribed_heat_mode", std::string{"constant"});
     constant.set(
-        "prescribed_heat_power_density", SimpleFluid::real_t{12.5});
+        "prescribed_heat_density", SimpleFluid::real_t{12.5});
     const auto constant_options =
         SimpleFluid::prescribed_heat_source_options_from_database(
             constant);
@@ -81,7 +81,7 @@ TEST(PrescribedHeatSourceTest, ParsesDisabledConstantAndGaussianOptions)
     EXPECT_DOUBLE_EQ(constant_options.power_density, 12.5);
 
     SimpleFluid::Database gaussian;
-    gaussian.set("prescribed_heat_power_mode", std::string{"GAUSSIAN"});
+    gaussian.set("prescribed_heat_mode", std::string{"GAUSSIAN"});
     gaussian.set("prescribed_heat_total_power", SimpleFluid::real_t{40.0});
     gaussian.set(
         "prescribed_heat_center",
@@ -103,7 +103,7 @@ TEST(PrescribedHeatSourceTest, ParsesDisabledConstantAndGaussianOptions)
         (SimpleFluid::vec3<>{0.5, 1.0, 2.0}));
 }
 
-/** @brief Verifies rejection of invalid prescribed_heat-source database options. */
+/** @brief Verifies rejection of invalid prescribed heat-source database options. */
 TEST(PrescribedHeatSourceTest, RejectsInvalidDatabaseOptions)
 {
     auto expect_invalid =
@@ -116,38 +116,38 @@ TEST(PrescribedHeatSourceTest, RejectsInvalidDatabaseOptions)
     };
 
     SimpleFluid::Database unknown;
-    unknown.set("prescribed_heat_power_mode", std::string{"point"});
+    unknown.set("prescribed_heat_mode", std::string{"point"});
     expect_invalid(unknown);
 
     SimpleFluid::Database missing_constant;
     missing_constant.set(
-        "prescribed_heat_power_mode", std::string{"constant"});
+        "prescribed_heat_mode", std::string{"constant"});
     expect_invalid(missing_constant);
 
     SimpleFluid::Database wrong_type;
     wrong_type.set(
-        "prescribed_heat_power_mode", std::string{"constant"});
+        "prescribed_heat_mode", std::string{"constant"});
     wrong_type.set(
-        "prescribed_heat_power_density", std::string{"high"});
+        "prescribed_heat_density", std::string{"high"});
     expect_invalid(wrong_type);
 
     SimpleFluid::Database negative;
     negative.set(
-        "prescribed_heat_power_mode", std::string{"constant"});
+        "prescribed_heat_mode", std::string{"constant"});
     negative.set(
-        "prescribed_heat_power_density", SimpleFluid::real_t{-1.0});
+        "prescribed_heat_density", SimpleFluid::real_t{-1.0});
     expect_invalid(negative);
 
     SimpleFluid::Database missing_gaussian;
     missing_gaussian.set(
-        "prescribed_heat_power_mode", std::string{"gaussian"});
+        "prescribed_heat_mode", std::string{"gaussian"});
     missing_gaussian.set(
         "prescribed_heat_total_power", SimpleFluid::real_t{1.0});
     expect_invalid(missing_gaussian);
 
     SimpleFluid::Database malformed_center;
     malformed_center.set(
-        "prescribed_heat_power_mode", std::string{"gaussian"});
+        "prescribed_heat_mode", std::string{"gaussian"});
     malformed_center.set(
         "prescribed_heat_total_power", SimpleFluid::real_t{1.0});
     malformed_center.set(
@@ -159,7 +159,7 @@ TEST(PrescribedHeatSourceTest, RejectsInvalidDatabaseOptions)
 
     SimpleFluid::Database invalid_width;
     invalid_width.set(
-        "prescribed_heat_power_mode", std::string{"gaussian"});
+        "prescribed_heat_mode", std::string{"gaussian"});
     invalid_width.set(
         "prescribed_heat_total_power", SimpleFluid::real_t{1.0});
     invalid_width.set(
@@ -172,7 +172,7 @@ TEST(PrescribedHeatSourceTest, RejectsInvalidDatabaseOptions)
 
     SimpleFluid::Database non_finite;
     non_finite.set(
-        "prescribed_heat_power_mode", std::string{"gaussian"});
+        "prescribed_heat_mode", std::string{"gaussian"});
     non_finite.set(
         "prescribed_heat_total_power",
         std::numeric_limits<SimpleFluid::real_t>::infinity());
@@ -189,7 +189,7 @@ TEST(PrescribedHeatSourceTest, RejectsInvalidDatabaseOptions)
 TEST(PrescribedHeatSourceTest, ReportsRequiredOptionContext)
 {
     SimpleFluid::Database missing;
-    missing.set("prescribed_heat_power_mode", std::string{"constant"});
+    missing.set("prescribed_heat_mode", std::string{"constant"});
     try
     {
         SimpleFluid::prescribed_heat_source_options_from_database(missing);
@@ -198,14 +198,14 @@ TEST(PrescribedHeatSourceTest, ReportsRequiredOptionContext)
     catch (const std::invalid_argument& error)
     {
         const std::string message(error.what());
-        EXPECT_NE(message.find("PrescribedHeat power model"), std::string::npos);
-        EXPECT_NE(message.find("prescribed_heat_power_density"), std::string::npos);
+        EXPECT_NE(message.find("Prescribed heat model"), std::string::npos);
+        EXPECT_NE(message.find("prescribed_heat_density"), std::string::npos);
         EXPECT_NE(message.find("required"), std::string::npos);
     }
 
     SimpleFluid::Database wrong_type;
-    wrong_type.set("prescribed_heat_power_mode", std::string{"constant"});
-    wrong_type.set("prescribed_heat_power_density", std::string{"high"});
+    wrong_type.set("prescribed_heat_mode", std::string{"constant"});
+    wrong_type.set("prescribed_heat_density", std::string{"high"});
     try
     {
         SimpleFluid::prescribed_heat_source_options_from_database(wrong_type);
@@ -214,8 +214,8 @@ TEST(PrescribedHeatSourceTest, ReportsRequiredOptionContext)
     catch (const std::invalid_argument& error)
     {
         const std::string message(error.what());
-        EXPECT_NE(message.find("PrescribedHeat power model"), std::string::npos);
-        EXPECT_NE(message.find("prescribed_heat_power_density"), std::string::npos);
+        EXPECT_NE(message.find("Prescribed heat model"), std::string::npos);
+        EXPECT_NE(message.find("prescribed_heat_density"), std::string::npos);
         EXPECT_NE(message.find("wrong type"), std::string::npos);
     }
 }
@@ -442,3 +442,21 @@ TEST(PrescribedHeatSourceTest, SpecializedNameCannotUseGenericOperations)
 }
 
 } // namespace
+
+
+/** Explicit retired controls must fail even when no neutral model is enabled. */
+TEST(PrescribedHeatSourceTest, RejectsRetiredControlsBeforeDefaultingToDisabled)
+{
+    for (const auto* key : {
+             "fission_power_mode", "fission_power_density", "fission_total_power",
+             "fission_center", "fission_standard_deviation", "precursor_group_count",
+             "precursor_decay_constants", "precursor_initial_concentrations",
+             "precursor_source_terms", "precursor_power_yields", "precursor_effective_diffusivity"})
+    {
+        SimpleFluid::Database database;
+        database.set(key, std::string{"disabled"});
+        EXPECT_THROW(SimpleFluid::prescribed_heat_source_options_from_database(database), std::invalid_argument);
+        database.set("prescribed_heat_mode", std::string{"disabled"});
+        EXPECT_THROW(SimpleFluid::prescribed_heat_source_options_from_database(database), std::invalid_argument);
+    }
+}

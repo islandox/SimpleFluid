@@ -130,10 +130,13 @@ the concentration and yield metadata. Both initial moments use the same
 transport and production. OpenFOAM derives its own molar/number source
 and void from the shared physical parameters, without reading any
 SimpleFluid result. Its dimensioned fields represent mol/m³ and 1/m³.
-The retained uranium-concentration and yield parameters define the
-prescribed Sheng/Winter source for this numerical verification. IF97
+The retained `uranium_concentration` (the reference's `C_U`, in mol/m³) and
+`yield_molecules_per_100_ev` parameters record the application-specific
+Sheng/Winter provenance of that radius. They are not generic material inputs
+or a claim that the correlation applies to arbitrary solutes. In contrast,
+`yield_mol_per_j` is consumed by the explicit production law above. IF97
 supplies a pure-water carrier reference; this is not a physical material
-model for uranyl-nitrate solution and does not validate supplied reaction sources yields.
+model for uranyl-nitrate solution and does not validate reacting_gas yields.
 
 ## Steady production and escape
 

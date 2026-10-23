@@ -117,12 +117,12 @@ ReactingGasModel<Pack, MeshType>::ReactingGasModel(
     validate_reacting_gas_options(d_options);
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
     if (d_options.mode
-            == ReactingGasMode::Sheng2024TwoPopulation
+            == ReactingGasMode::TwoPopulation
         && d_options.micro_to_large_conversion_coefficient == 1.0e-4
         && d_mesh->owned_cell_map()->getComm()->getRank() == 0)
     {
         std::clog
-            << "SimpleFluid reaction_source: F=1e-4 Pa^-1 s^-1 is "
+            << "SimpleFluid reacting_gas: F=1e-4 Pa^-1 s^-1 is "
                "SILENE-calibrated and requires case-specific validation.\n";
     }
     register_output_fields();
@@ -149,12 +149,12 @@ void ReactingGasModel<Pack, MeshType>::configure(
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
     d_transport_solver.reset();
     if (d_options.mode
-            == ReactingGasMode::Sheng2024TwoPopulation
+            == ReactingGasMode::TwoPopulation
         && d_options.micro_to_large_conversion_coefficient == 1.0e-4
         && d_mesh->owned_cell_map()->getComm()->getRank() == 0)
     {
         std::clog
-            << "SimpleFluid reaction_source: F=1e-4 Pa^-1 s^-1 is "
+            << "SimpleFluid reacting_gas: F=1e-4 Pa^-1 s^-1 is "
                "SILENE-calibrated and requires case-specific validation.\n";
     }
     d_history_initialized = false;
@@ -173,7 +173,7 @@ void ReactingGasModel<Pack, MeshType>::enable_donor_hydrogen_deficit_tracking()
     collective_detail::collective_local_validation(*d_mesh, "Reacting donor tracking setup", [&]
     {
         if (d_initial_state_initialized || d_history_initialized ||
-            d_options.mode != ReactingGasMode::Sheng2024TwoPopulation)
+            d_options.mode != ReactingGasMode::TwoPopulation)
             throw std::logic_error("Donor-H tracking requires Sheng mode before state initialization.");
     });
     d_donor_tracking_enabled = true;
@@ -330,7 +330,7 @@ void ReactingGasModel<Pack, MeshType>::initialize_fields()
 }
 
 /**
- * @brief Build the derived initial state for two-population reaction_source.
+ * @brief Build the derived initial state for two-population reacting_gas.
  * @tparam Pack Tpetra type pack used by the model.
  * @param time Initial physical time.
  * @param temperature Initial cell temperature.
@@ -351,10 +351,10 @@ void ReactingGasModel<Pack, MeshType>::initialize_state(
     const material_type& material,
     bool force)
 {
-    if (mode() != ReactingGasMode::Sheng2024TwoPopulation)
+    if (mode() != ReactingGasMode::TwoPopulation)
     {
         throw std::logic_error(
-            "Only Sheng two-population reaction_source has a derived initial state.");
+            "Only Sheng two-population reacting_gas has a derived initial state.");
     }
     if (!std::isfinite(time))
     {
@@ -782,11 +782,11 @@ auto ReactingGasModel<Pack, MeshType>::
 evaluate_submerged_bubble_volume(
     scalar_type candidate_absolute_pressure_offset) const -> scalar_type
 {
-    if (mode() != ReactingGasMode::Sheng2024TwoPopulation)
+    if (mode() != ReactingGasMode::TwoPopulation)
     {
         throw std::logic_error(
             "Submerged bubble volume evaluation requires Sheng "
-            "two-population reaction_source.");
+            "two-population reacting_gas.");
     }
     if (!d_initial_state_initialized)
     {
@@ -1014,7 +1014,7 @@ void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(
                                     "variation.");
     }
 
-    if (mode() == ReactingGasMode::Sheng2024TwoPopulation && d_initial_state_initialized)
+    if (mode() == ReactingGasMode::TwoPopulation && d_initial_state_initialized)
     {
         // Validate every EOS radius collectively before mutating accepted
         // pressure or derived state.
@@ -1033,7 +1033,7 @@ void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(
     }
     d_absolute_pressure_offset = pressure_offset;
 
-    if (mode() == ReactingGasMode::Sheng2024TwoPopulation
+    if (mode() == ReactingGasMode::TwoPopulation
         && d_initial_state_initialized)
     {
         reconstruct_derived_fields(
@@ -1155,7 +1155,7 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_absolute_pressure(
  * @tparam Pack Tpetra type pack used by the model.
  * @param time_step Positive physical time step.
  * @param temperature Cell temperature field.
- * @param prescribed_heat_power_density Required prescribed_heat power-density field.
+ * @param prescribed_heat_density Required prescribed_heat power-density field.
  * @param alpha_g Authoritative gas void fraction.
  * @param alpha_max Upper bound for gas void fraction.
  * @throws std::invalid_argument if required fields or values are invalid.
@@ -1164,14 +1164,14 @@ template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::update_ideal_gas_source(
     scalar_type time_step,
     const field_type& temperature,
-    const field_type* prescribed_heat_power_density,
+    const field_type* prescribed_heat_density,
     const field_type& alpha_g,
     scalar_type alpha_max)
 {
-    if (!prescribed_heat_power_density)
+    if (!prescribed_heat_density)
     {
         throw std::invalid_argument(
-            "Enabled reaction_source requires a prescribed_heat power source.");
+            "Enabled reacting_gas requires a prescribed_heat power source.");
     }
     if (!std::isfinite(time_step) || time_step <= 0.0)
     {
@@ -1183,7 +1183,7 @@ void ReactingGasModel<Pack, MeshType>::update_ideal_gas_source(
         const auto alpha_values = alpha_g.owned_read_view();
         const auto temperature_values = temperature.owned_read_view();
         const auto pressure_values = d_absolute_pressure.owned_read_view();
-        const auto power_values = prescribed_heat_power_density->owned_read_view();
+        const auto power_values = prescribed_heat_density->owned_read_view();
         const auto source_values = d_source_alpha_reaction.owned_write_view();
         for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
         {
@@ -2697,7 +2697,7 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_ty
  * @param velocity Liquid velocity field.
  * @param liquid_face_flux Oriented liquid volumetric flux.
  * @param material Material-property fields.
- * @param prescribed_heat_power_density Required prescribed_heat power-density field.
+ * @param prescribed_heat_density Required prescribed_heat power-density field.
  * @throws std::invalid_argument if required fields or values are invalid.
  * @throws std::runtime_error if a transport or property solve fails.
  */
@@ -2708,14 +2708,14 @@ void ReactingGasModel<Pack, MeshType>::advance_two_population(
     const velocity_field_type& velocity,
     const face_flux_field_type& liquid_face_flux,
     const material_type& material,
-    const field_type* prescribed_heat_power_density,
+    const field_type* prescribed_heat_density,
     const FVM::ALEControlVolumeState* ale,
     Dimension slip_axis)
 {
-    if (!prescribed_heat_power_density)
+    if (!prescribed_heat_density)
     {
         throw std::invalid_argument(
-            "Sheng 2024 reaction_source requires a prescribed_heat power source.");
+            "Sheng 2024 reacting_gas requires a prescribed_heat power source.");
     }
 
     collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_donor_tracking_enabled),
@@ -2755,7 +2755,7 @@ void ReactingGasModel<Pack, MeshType>::advance_two_population(
             const auto temperature_values = temperature.owned_read_view();
             const auto density_values = material.density.owned_read_view();
             const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
-            const auto power_values = prescribed_heat_power_density->owned_read_view();
+            const auto power_values = prescribed_heat_density->owned_read_view();
             const auto alpha_values = d_alpha_g.owned_read_view();
             const auto inventory_values = d_dissolved_hydrogen_inventory.owned_write_view();
             const auto micro_number_values = d_micro_number.owned_write_view();
@@ -2990,7 +2990,7 @@ void ReactingGasModel<Pack, MeshType>::update_inertial_pressure(
 }
 
 /**
- * @brief Advance non-ideal reaction_source using the model-owned void fraction.
+ * @brief Advance non-ideal reacting_gas using the model-owned void fraction.
  * @tparam Pack Tpetra type pack used by the model.
  * @param time Current physical time.
  * @param time_step Positive physical time step.
@@ -2999,7 +2999,7 @@ void ReactingGasModel<Pack, MeshType>::update_inertial_pressure(
  * @param velocity Liquid velocity field.
  * @param liquid_face_flux Oriented liquid volumetric flux.
  * @param material Material-property fields.
- * @param prescribed_heat_power_density Optional source field required when active.
+ * @param prescribed_heat_density Optional source field required when active.
  * @throws std::logic_error if called for ideal-gas source mode.
  * @throws std::invalid_argument if fields or physical inputs are invalid.
  * @throws std::runtime_error if a transport or property solve fails.
@@ -3013,14 +3013,14 @@ void ReactingGasModel<Pack, MeshType>::advance(
     const velocity_field_type& velocity,
     const face_flux_field_type& liquid_face_flux,
     const material_type& material,
-    const field_type* prescribed_heat_power_density,
+    const field_type* prescribed_heat_density,
     const FVM::ALEControlVolumeState* ale,
     Dimension slip_axis)
 {
     if (mode() == ReactingGasMode::IdealGasSource)
     {
         throw std::logic_error(
-            "Ideal reaction_source advance requires authoritative scalar void.");
+            "Ideal reacting_gas advance requires authoritative scalar void.");
     }
     advance(
         time,
@@ -3030,7 +3030,7 @@ void ReactingGasModel<Pack, MeshType>::advance(
         velocity,
         liquid_face_flux,
         material,
-        prescribed_heat_power_density,
+        prescribed_heat_density,
         d_alpha_g,
         d_options.alpha_max,
         ale,
@@ -3038,7 +3038,7 @@ void ReactingGasModel<Pack, MeshType>::advance(
 }
 
 /**
- * @brief Advance the active reaction_source mode with authoritative void bounds.
+ * @brief Advance the active reacting_gas mode with authoritative void bounds.
  * @tparam Pack Tpetra type pack used by the model.
  * @param time Current physical time.
  * @param time_step Positive physical time step.
@@ -3047,7 +3047,7 @@ void ReactingGasModel<Pack, MeshType>::advance(
  * @param velocity Liquid velocity field.
  * @param liquid_face_flux Oriented liquid volumetric flux.
  * @param material Material-property fields.
- * @param prescribed_heat_power_density Optional source field required when active.
+ * @param prescribed_heat_density Optional source field required when active.
  * @param alpha_g Authoritative void fraction for ideal-gas source mode.
  * @param alpha_max Upper bound for authoritative void fraction.
  * @throws std::logic_error if model and authoritative state are incompatible.
@@ -3063,7 +3063,7 @@ void ReactingGasModel<Pack, MeshType>::advance(
     const velocity_field_type& velocity,
     const face_flux_field_type& liquid_face_flux,
     const material_type& material,
-    const field_type* prescribed_heat_power_density,
+    const field_type* prescribed_heat_density,
     const field_type& alpha_g,
     scalar_type alpha_max,
     const FVM::ALEControlVolumeState* ale,
@@ -3086,7 +3086,7 @@ void ReactingGasModel<Pack, MeshType>::advance(
         ale->validate(*d_mesh, static_cast<real_t>(time_step));
     }
 
-    if (mode() == ReactingGasMode::Sheng2024TwoPopulation
+    if (mode() == ReactingGasMode::TwoPopulation
         && !d_initial_state_initialized)
     {
         initialize_state(
@@ -3103,7 +3103,7 @@ void ReactingGasModel<Pack, MeshType>::advance(
         update_ideal_gas_source(
             time_step,
             temperature,
-            prescribed_heat_power_density,
+            prescribed_heat_density,
             alpha_g,
             alpha_max);
         reduce_event_statistics();
@@ -3116,7 +3116,7 @@ void ReactingGasModel<Pack, MeshType>::advance(
         velocity,
         liquid_face_flux,
         material,
-        prescribed_heat_power_density,
+        prescribed_heat_density,
         ale,
         slip_axis);
     update_inertial_pressure(
@@ -3163,7 +3163,7 @@ void ReactingGasModel<Pack, MeshType>::synchronize_void_fraction(
     if (mode() != ReactingGasMode::IdealGasSource)
     {
         throw std::logic_error(
-            "Only ideal reaction_source can mirror authoritative scalar void.");
+            "Only ideal reacting_gas can mirror authoritative scalar void.");
     }
     if (&alpha_g.mesh() != d_mesh.get())
     {

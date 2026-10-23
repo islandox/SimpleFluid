@@ -28,7 +28,7 @@ fixtures with a resolved buoyant plume and downward return flow.
 
 The mesh has ten y layers at the original 2 mm spacing. Uniform initial
 conditions and sources with slip/adiabatic front/back boundaries retain a
-nominally planar flow; front/back wall friction is absent. The source is a volumetric heater/supplied reaction sources surrogate inside the
+nominally planar flow; front/back wall friction is absent. The source is a volumetric heater/reacting_gas surrogate inside the
 lowest cells, not a resolved gas nozzle. Cold walls provide heat removal.
 The 20-second run is a **developing transient**, not a claim of thermal steady
 state. The earlier steady verification cases remain available separately.
@@ -265,7 +265,7 @@ control, 21 comparator checks, and 9 plotting checks also passed.
 ## Planar ALE boundary
 
 This case uses a fixed mesh and fixed liquid surface. Current planar ALE
-explicitly rejects spatial prescribed heat/gas profiles and nonadiabatic thermal
+explicitly rejects spatial prescribed_heat/gas profiles and nonadiabatic thermal
 boundaries. Those guards remain intact. Enabling this plume in ALE requires
 separate localized-source geometry, energy, gas-volume, and rollback work;
 changing a diagnostic surface level would not provide that capability.

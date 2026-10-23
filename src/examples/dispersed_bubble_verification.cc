@@ -135,7 +135,7 @@ int run(int argc, char** argv)
     SimpleFluid::MaterialPropertyFields<Pack, Mesh> material(mesh, material_options, time_options);
 
     SimpleFluid::ReactingGasOptions options;
-    options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
     options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;

@@ -84,7 +84,7 @@ SimpleFluid::FreeSurfaceOptions cell_mass_free_surface_options(double initial_vo
 SimpleFluid::ReactingGasOptions sheng_options()
 {
     SimpleFluid::ReactingGasOptions options;
-    options.mode = SimpleFluid::ReactingGasMode::Sheng2024TwoPopulation;
+    options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
     options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
     options.hydrogen_yield_mol_per_j = 2.0e-7;
     options.max_source_alpha_rate = 1.0;
@@ -272,9 +272,9 @@ TEST(BoussinesqFreeSurfaceTest, LazyFirstStepInitializesFromOneMaterialUpdate)
 
 TEST(BoussinesqFreeSurfaceTest, ExplicitInitializationOrdersMaterialBeforeShengReconstruction)
 {
-    auto reaction_source = sheng_options();
-    reaction_source.initial_micro_number_density = 1.0e10;
-    reaction_source.initial_micro_moles = 1.0e-6;
+    auto reacting_gas = sheng_options();
+    reacting_gas.initial_micro_number_density = 1.0e10;
+    reacting_gas.initial_micro_moles = 1.0e-6;
 
     auto reference_options = material_options();
     reference_options.reference_density = 800.0;
@@ -284,7 +284,7 @@ TEST(BoussinesqFreeSurfaceTest, ExplicitInitializationOrdersMaterialBeforeShengR
         SimpleFluid::LinearSolverOptions{}, reference_options);
     auto& reference = *reference_shared;
     SimpleFluid::MultiphysicsSolverCoupler<Pack> reference_coupling(reference_shared);
-    auto& reference_gas = reference_coupling.configure_reacting_gas(reaction_source);
+    auto& reference_gas = reference_coupling.configure_reacting_gas(reacting_gas);
     reference_coupling.configure_free_surface(free_surface_options());
     reference_coupling.initialize_heated_box(300.0, 300.0);
 
@@ -300,7 +300,7 @@ TEST(BoussinesqFreeSurfaceTest, ExplicitInitializationOrdersMaterialBeforeShengR
             material.density.put_scalar(800.0);
             material.dynamic_viscosity.put_scalar(1.5e-3);
         });
-    auto& updated_gas = updated_coupling.configure_reacting_gas(reaction_source);
+    auto& updated_gas = updated_coupling.configure_reacting_gas(reacting_gas);
     updated_coupling.configure_free_surface(free_surface_options());
     updated_coupling.initialize_heated_box(300.0, 300.0);
 
@@ -540,16 +540,16 @@ TEST(BoussinesqFreeSurfaceTest, TransfersOnlyExactSubmergedBubbleEscapeToVent)
     feedback.thermal_expansion = 0.0;
     feedback.reference_dynamic_viscosity = 1.0e-3;
     solver_coupling.configure_material_feedback(feedback);
-    auto reaction_source = sheng_options();
-    reaction_source.initial_micro_number_density = 1.0e10;
-    reaction_source.initial_micro_moles = 1.0e-6;
-    reaction_source.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    reaction_source.constant_slip_velocity = 10.0;
-    reaction_source.free_surface_patches = {"zmax"};
-    reaction_source.microbubble_lifetime = 1.0e30;
-    reaction_source.large_bubble_dissolution_time = 1.0e30;
-    reaction_source.micro_to_large_conversion_coefficient = 0.0;
-    auto& gas = solver_coupling.configure_reacting_gas(reaction_source);
+    auto reacting_gas = sheng_options();
+    reacting_gas.initial_micro_number_density = 1.0e10;
+    reacting_gas.initial_micro_moles = 1.0e-6;
+    reacting_gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    reacting_gas.constant_slip_velocity = 10.0;
+    reacting_gas.free_surface_patches = {"zmax"};
+    reacting_gas.microbubble_lifetime = 1.0e30;
+    reacting_gas.large_bubble_dissolution_time = 1.0e30;
+    reacting_gas.micro_to_large_conversion_coefficient = 0.0;
+    auto& gas = solver_coupling.configure_reacting_gas(reacting_gas);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
     solver_coupling.configure_free_surface(free_surface_options(0.4));
     solver_coupling.initialize_heated_box(300.0, 300.0);
@@ -738,14 +738,14 @@ TEST(BoussinesqFreeSurfaceTest, RejectsUnsupportedOwnershipAndPressureModes)
             SimpleFluid::LinearSolverOptions{}, material_options());
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        auto reaction_source = sheng_options();
-        reaction_source.pressure_mode = mode;
+        auto reacting_gas = sheng_options();
+        reacting_gas.pressure_mode = mode;
         if (mode == SimpleFluid::ReactingPressureMode::PrescribedHistory)
         {
-            reaction_source.pressure_history_times = {0.0, 1.0};
-            reaction_source.pressure_history_values = {1.0e5, 1.0e5};
+            reacting_gas.pressure_history_times = {0.0, 1.0};
+            reacting_gas.pressure_history_values = {1.0e5, 1.0e5};
         }
-        solver_coupling.configure_reacting_gas(reaction_source);
+        solver_coupling.configure_reacting_gas(reacting_gas);
         EXPECT_THROW(solver_coupling.configure_free_surface(free_surface_options()), std::invalid_argument);
     }
 }
@@ -831,12 +831,12 @@ TEST(BoussinesqFreeSurfaceTest, ClosedReconstructedPressureUsesCollectiveValidLo
         SimpleFluid::LinearSolverOptions{}, material_options());
     auto& solver = *solver_shared;
     SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-    auto reaction_source = sheng_options();
-    reaction_source.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
-    reaction_source.minimum_absolute_pressure = 90000.0;
-    reaction_source.initial_micro_number_density = 1.0e10;
-    reaction_source.initial_micro_moles = 1.0e-6;
-    auto& gas = solver_coupling.configure_reacting_gas(reaction_source);
+    auto reacting_gas = sheng_options();
+    reacting_gas.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
+    reacting_gas.minimum_absolute_pressure = 90000.0;
+    reacting_gas.initial_micro_number_density = 1.0e10;
+    reacting_gas.initial_micro_moles = 1.0e-6;
+    auto& gas = solver_coupling.configure_reacting_gas(reacting_gas);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
     solver_coupling.initialize_heated_box(300.0, 300.0);
 
@@ -862,16 +862,16 @@ TEST(BoussinesqFreeSurfaceTest, FailedStepRetainsEscapeButRejectsUnsafeFullStepR
         SimpleFluid::LinearSolverOptions{}, material_options());
     auto& solver = *solver_shared;
     SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-    auto reaction_source = sheng_options();
-    reaction_source.initial_micro_number_density = 1.0e10;
-    reaction_source.initial_micro_moles = 1.0e-6;
-    reaction_source.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    reaction_source.constant_slip_velocity = 10.0;
-    reaction_source.free_surface_patches = {"zmax"};
-    reaction_source.microbubble_lifetime = 1.0e30;
-    reaction_source.large_bubble_dissolution_time = 1.0e30;
-    reaction_source.micro_to_large_conversion_coefficient = 0.0;
-    auto& gas = solver_coupling.configure_reacting_gas(reaction_source);
+    auto reacting_gas = sheng_options();
+    reacting_gas.initial_micro_number_density = 1.0e10;
+    reacting_gas.initial_micro_moles = 1.0e-6;
+    reacting_gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    reacting_gas.constant_slip_velocity = 10.0;
+    reacting_gas.free_surface_patches = {"zmax"};
+    reacting_gas.microbubble_lifetime = 1.0e30;
+    reacting_gas.large_bubble_dissolution_time = 1.0e30;
+    reacting_gas.micro_to_large_conversion_coefficient = 0.0;
+    auto& gas = solver_coupling.configure_reacting_gas(reacting_gas);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
 
     auto surface_options = free_surface_options(0.4);

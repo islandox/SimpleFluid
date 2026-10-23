@@ -605,7 +605,7 @@ TEST(ReactingGasPropertiesTest, VoidAndCharacteristicRadiusReconstruct)
 TEST(ReactingGasPropertiesTest, ParsesFlatRuntimeSelectors)
 {
     SimpleFluid::Database database;
-    database.set("enable_reaction_source", true);
+    database.set("enable_reacting_gas", true);
     database.set(
         "hydrogen_yield_mol_per_j", SimpleFluid::real_t{2.0e-7});
     database.set(
@@ -628,7 +628,7 @@ TEST(ReactingGasPropertiesTest, ParsesFlatRuntimeSelectors)
 TEST(ReactingGasPropertiesTest, ReportsWrongTypedOptionContext)
 {
     SimpleFluid::Database database;
-    database.set("enable_reaction_source", std::string{"yes"});
+    database.set("enable_reacting_gas", std::string{"yes"});
 
     try
     {
@@ -639,16 +639,16 @@ TEST(ReactingGasPropertiesTest, ReportsWrongTypedOptionContext)
     {
         const std::string message(error.what());
         EXPECT_NE(message.find("Reacting gas model"), std::string::npos);
-        EXPECT_NE(message.find("enable_reaction_source"), std::string::npos);
+        EXPECT_NE(message.find("enable_reacting_gas"), std::string::npos);
         EXPECT_NE(message.find("wrong type"), std::string::npos);
     }
 }
 
-/** @brief Verifies that enabled reaction_source requires yield and rate-limit inputs. */
+/** @brief Verifies that enabled reacting_gas requires yield and rate-limit inputs. */
 TEST(ReactingGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
 {
     SimpleFluid::Database missing;
-    missing.set("enable_reaction_source", true);
+    missing.set("enable_reacting_gas", true);
     EXPECT_THROW(
         SimpleFluid::reacting_gas_options_from_database(missing),
         std::invalid_argument);
@@ -665,7 +665,7 @@ TEST(ReactingGasPropertiesTest, TransportToleranceIsOptionalValidatedAndParsed)
 {
     EXPECT_DOUBLE_EQ(SimpleFluid::ReactingGasOptions{}.transport_solver_tolerance,1e-10);
     SimpleFluid::Database database;
-    database.set("enable_reaction_source",true);
+    database.set("enable_reacting_gas",true);
     database.set("hydrogen_yield_mol_per_j",SimpleFluid::real_t{2e-7});
     database.set("max_source_alpha_rate",SimpleFluid::real_t{1});
     database.set("reacting_transport_solver_tolerance",SimpleFluid::real_t{1e-14});
@@ -678,3 +678,41 @@ TEST(ReactingGasPropertiesTest, TransportToleranceIsOptionalValidatedAndParsed)
 }
 
 } // namespace
+
+
+/** Retired keys never silently select the disabled default or override neutral keys. */
+TEST(ReactingGasPropertiesTest, RejectsRetiredControlsBeforeDefaultingToDisabled)
+{
+    for (const auto* key : {
+        "enable_radiolysis",
+        "radiolytic_bubble_model",
+        "radiolytic_pressure_mode",
+        "radiolytic_heaviside_mode",
+        "radiolytic_kinetics_mode",
+        "radiolytic_transport_solver_tolerance",
+        "max_radiolytic_subcycles",
+        "radiolytic_free_surface_patches",
+        "precursor_group_count",
+        "precursor_decay_constants",
+        "precursor_initial_concentrations",
+        "precursor_source_terms",
+        "precursor_power_yields",
+        "precursor_effective_diffusivity"})
+    {
+        SimpleFluid::Database database;
+        database.set(key, std::string{"disabled"});
+        EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+        database.set("reacting_bubble_model", std::string{"disabled"});
+        EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    }
+}
+
+TEST(ReactingGasPropertiesTest, RejectsRetiredTwoPopulationSelector)
+{
+    for (const auto* selector : {"sheng2024TwoPopulation", "sheng2024_two_population"})
+    {
+        SimpleFluid::Database database;
+        database.set("reacting_bubble_model", std::string{selector});
+        EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    }
+}

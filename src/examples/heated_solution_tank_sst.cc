@@ -493,7 +493,7 @@ int main(int argc, char** argv)
     long long local_cells = static_cast<long long>(mesh->num_owned_cells());
     long long global_cells = 0;
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_cells, &global_cells);
-    const auto integrated_prescribed_heat_power = prescribed_heat.integrated_power();
+    const auto integrated_prescribed_heat = prescribed_heat.integrated_power();
     double minimum_wall_face_distance = 0.0;
     double maximum_wall_face_distance = 0.0;
     Teuchos::reduceAll(
@@ -513,7 +513,7 @@ int main(int argc, char** argv)
                   << ", omega_initialization=wall-compatible"
                   << ", axisymmetric_projection=yes\n"
                   << "Gaussian source: requested_power=" << total_power
-                  << " W, integrated_power=" << integrated_prescribed_heat_power << " W\n";
+                  << " W, integrated_power=" << integrated_prescribed_heat << " W\n";
     }
 
     SimpleFluid::ProgressStream progress(std::cout);
@@ -544,7 +544,7 @@ int main(int argc, char** argv)
     {
         std::cout << "Gaussian tank SST complete: steps=" << solver.step_index() << ", t=" << solver.time()
                   << " s, maximum_Courant=" << maximum_courant_number
-                  << ", integrated_power=" << integrated_prescribed_heat_power << " W\n";
+                  << ", integrated_power=" << integrated_prescribed_heat << " W\n";
     }
     return 0;
 }

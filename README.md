@@ -297,7 +297,7 @@ establish physically validated scale-resolving turbulence.
 ### Turbulent Bubble-Flow Scope
 
 `MultiphysicsSolverCoupler` can combine a RANS-enabled `BoussinesqSolver` with
-the legacy `sheng2024TwoPopulation` gas model. The pressure–velocity and RANS
+the legacy `twoPopulation` gas model. The pressure–velocity and RANS
 systems advance first; the bubble inventories then use the projected liquid
 face flux plus the configured rise/slip velocity, after which reconstructed
 void can refresh mixture density and buoyancy feedback for subsequent solver
@@ -708,16 +708,25 @@ Chemical energy and externally deposited heat are counted once. Accepted
 species, mass, energy, and volume budgets and atomic rollback are required
 before new source laws or chemistry combinations are admitted.
 
-**Implementation scope:** the general species/provider contract is planned.
-The current baseline ideal-gas and advanced two-population implementations
-remain a hydrogen specialization with prescribed yield-based production.
-The advanced path includes dissolved gas, bubble transport, pressure-sensitive
-properties, escape, and inventory diagnostics, with focused numerical coverage
-but incomplete physical validation. It is not a general reaction-network solver.
+**Implementation scope:** standalone `Reacting::SpeciesCatalog`,
+`ReactionMechanism`, and supplied-rate/integrated-extent APIs define a general
+species source kernel. Integration of that kernel with transported solver
+fields, bubble populations, and coupled acceptance remains future work.
+The current field-coupled ideal-gas and two-population implementations remain
+an H2 specialization with prescribed yield-based production, dissolved-gas
+transport, pressure-sensitive properties, escape, and inventory diagnostics.
+Focused numerical coverage does not establish a general reaction-network flow
+solver or physical validation.
 
-The present gas-model, population, and heat-source interfaces retain
-specialized single-gas source laws. They do not establish a general
-species or reaction-network transport API.
+The present interfaces include `ReactingGasModel`, `BubblePopulationKinetics`,
+`PrescribedHeatSource`, and the `twoPopulation` selector. Their source and
+configuration contracts change without compatibility aliases.
+Configuration uses `reacting_*`, `enable_reacting_gas`, and
+`prescribed_heat_*` controls, and gas-source output is `S_alpha_reaction`.
+Explicit retired source/gas and scalar source-decay keys reject. Delayed-external-source
+coupling has been removed; `ScalarSourceDecayTransport` retains reusable
+scalar source/decay and conservative transport as a standalone utility.
+See the [migration table](docs/modeling/reacting_gas_sources.md).
 For independent thermal deposition, the existing
 `BoussinesqSolver::add_temperature_source()` API registers named W/m³ fields,
 as shown in the physical-material example above. Coupled gas generation and
@@ -728,7 +737,7 @@ fields remain solver-owned.
 
 See the [gas-population implementation guide](docs/reacting-gas-models.md)
 and [gas, boiling, and feedback guide](docs/modeling/reacting_bubble_boiling.md)
-for the current compatibility paths. The legacy smoke targets listed above
+for the current single-gas paths. The neutral smoke targets listed above
 remain runnable after `cmake --build --preset GCC-Debug`; executables are in
 `build/gcc/bin/Debug` (or `build/llvm/bin/Debug` for `LLVM-Debug`). The Gaussian
 source demo keeps boiling disabled by default; the constant-power cylinder
@@ -796,7 +805,7 @@ gas-state residual histories.
 This is a constrained flat-surface model with conservation-focused test
 coverage, not physical validation of free-surface dynamics.
 
-Closed headspace, tabulated vessels, RANS, boiling/steam, legacy scalar source-decay groups, scalar-
+Closed headspace, tabulated vessels, RANS, boiling/steam, standalone scalar transport, scalar-
 void-only transport, solids, dynamic user callbacks, legacy/const-only and
 general unstructured meshes, non-Backward-Euler time integration, nonadiabatic
 temperature boundaries, and nonzero physical liquid boundary flux fail closed.
@@ -882,3 +891,13 @@ DeepSeek-assisted commits may include custom trailers such as:
 
 `AI-assisted-by: DeepSeek API`  
 `AI-model: deepseek-v4-pro / deepseek-v4-flash`
+
+
+The source subsystem uses `PrescribedHeatSource`, `ReactingGasModel`,
+`BubbleGasPhysics`, and `BubblePopulationKinetics`.
+This is a source/configuration break with no aliases; explicit retired keys
+reject. The current gas path remains the H2 specialization with micro/large
+bubble populations. scalar source-decay coupling has been removed;
+standalone `ScalarSourceDecayTransport` retains generic scalar source/decay
+and transport. See the [migration contract](docs/modeling/reacting_gas_sources.md)
+for exact API, output, example, and key changes.

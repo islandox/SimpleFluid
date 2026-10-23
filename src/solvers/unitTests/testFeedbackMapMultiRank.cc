@@ -270,14 +270,14 @@ TEST(FeedbackMapMultiRankTest,
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType gas_fraction(mesh, 0.1, "alpha_g");
     FieldType density(mesh, 950.0, "rhoFeedback");
-    FieldType scalar_group(mesh, 2.0, "C_1");
+    FieldType scalar_group(mesh, 2.0, "scalar_1");
     SimpleFluid::FeedbackMap::FeedbackFieldRegistry<Pack> registry(*mesh);
     registry.register_liquid_temperature(temperature);
     registry.register_gas_fraction(gas_fraction);
     registry.register_density_feedback(density);
     if (comm->getRank() == 0)
     {
-        registry.register_scalar_group_group(1, scalar_group);
+        registry.register_scalar_group(1, scalar_group);
     }
 
     std::vector<Pack::local_ordinal_type> local_cells;
@@ -401,7 +401,7 @@ TEST(FeedbackMapMultiRankTest,
             registry.require_standard_fields(
                 rank_dependent_group_count);
         },
-        "scalar_group group count");
+        "scalar group count");
 
     SimpleFluid::FeedbackMap::PlaceholderOuterCouplingOptions options;
     options.outer_iterations =
@@ -426,14 +426,14 @@ TEST(FeedbackMapMultiRankTest,
         "TH subcycle count");
 
     options = {};
-    options.scalar_group_group_count = rank_dependent_group_count;
+    options.scalar_group_count = rank_dependent_group_count;
     expect_collective_rejection(
         [&]
         {
             (void)CouplingDriver(
                 registry, feedback_cells, options);
         },
-        "scalar_group group count");
+        "scalar group count");
 }
 
 /** @brief A rank-local alternate power mesh is rejected collectively. */
@@ -474,7 +474,7 @@ TEST(FeedbackMapMultiRankTest,
     auto& selected_power =
         comm->getRank() == 0 ? power : alternate_power;
     size_t thermal_hydraulic_calls = 0;
-    size_t neutronics_calls = 0;
+    size_t external_source_calls = 0;
     bool rejected = false;
     try
     {
@@ -488,7 +488,7 @@ TEST(FeedbackMapMultiRankTest,
             },
             [&](const auto&)
             {
-                ++neutronics_calls;
+                ++external_source_calls;
                 return std::vector<double>(
                     selected_power.mesh().num_owned_cells(), 1.0);
             });
@@ -502,7 +502,7 @@ TEST(FeedbackMapMultiRankTest,
     }
     EXPECT_TRUE(rejected);
     EXPECT_EQ(thermal_hydraulic_calls, 0u);
-    EXPECT_EQ(neutronics_calls, 0u);
+    EXPECT_EQ(external_source_calls, 0u);
 }
 
 /** @brief Invalid coarse maps fail before coupled state is advanced. */
@@ -540,7 +540,7 @@ TEST(FeedbackMapMultiRankTest,
         {{feedback_cell_name, std::move(local_cells)}});
 
     size_t thermal_hydraulic_calls = 0;
-    size_t neutronics_calls = 0;
+    size_t external_source_calls = 0;
     bool rejected = false;
     try
     {
@@ -553,7 +553,7 @@ TEST(FeedbackMapMultiRankTest,
             },
             [&](const auto&)
             {
-                ++neutronics_calls;
+                ++external_source_calls;
                 return std::vector<double>(
                     mesh->num_owned_cells(), 2.0);
             });
@@ -568,7 +568,7 @@ TEST(FeedbackMapMultiRankTest,
     }
     EXPECT_TRUE(rejected);
     EXPECT_EQ(thermal_hydraulic_calls, 0u);
-    EXPECT_EQ(neutronics_calls, 0u);
+    EXPECT_EQ(external_source_calls, 0u);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid =
@@ -658,7 +658,7 @@ TEST(FeedbackMapMultiRankTest,
         options);
 
     size_t thermal_hydraulic_calls = 0;
-    size_t neutronics_calls = 0;
+    size_t external_source_calls = 0;
     const auto records = driver.run(
         power,
         std::vector<double>(mesh->num_owned_cells(), 1.0),
@@ -682,16 +682,16 @@ TEST(FeedbackMapMultiRankTest,
         },
         [&](const auto& feedback)
         {
-            EXPECT_EQ(feedback.sequence_index(), neutronics_calls);
-            ++neutronics_calls;
+            EXPECT_EQ(feedback.sequence_index(), external_source_calls);
+            ++external_source_calls;
             return std::vector<double>(
                 mesh->num_owned_cells(),
-                static_cast<double>(neutronics_calls + 1));
+                static_cast<double>(external_source_calls + 1));
         });
 
     ASSERT_EQ(records.size(), 2u);
     EXPECT_EQ(thermal_hydraulic_calls, 2u);
-    EXPECT_EQ(neutronics_calls, 2u);
+    EXPECT_EQ(external_source_calls, 2u);
     EXPECT_DOUBLE_EQ(records[0].feedback.field("T_liquid")[0], 301.0);
     EXPECT_DOUBLE_EQ(records[1].feedback.field("T_liquid")[0], 303.0);
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
@@ -736,7 +736,7 @@ TEST(FeedbackMapMultiRankTest,
         mesh->num_owned_cells(), 1.0);
 
     size_t thermal_hydraulic_calls = 0;
-    size_t neutronics_calls = 0;
+    size_t external_source_calls = 0;
     bool thermal_hydraulic_rejected = false;
     try
     {
@@ -753,7 +753,7 @@ TEST(FeedbackMapMultiRankTest,
             },
             [&](const auto&)
             {
-                ++neutronics_calls;
+                ++external_source_calls;
                 return initial_power;
             });
     }
@@ -767,11 +767,11 @@ TEST(FeedbackMapMultiRankTest,
     }
     EXPECT_TRUE(thermal_hydraulic_rejected);
     EXPECT_EQ(thermal_hydraulic_calls, 1u);
-    EXPECT_EQ(neutronics_calls, 0u);
+    EXPECT_EQ(external_source_calls, 0u);
 
     thermal_hydraulic_calls = 0;
-    neutronics_calls = 0;
-    bool neutronics_rejected = false;
+    external_source_calls = 0;
+    bool external_source_rejected = false;
     try
     {
         (void)driver.run(
@@ -783,23 +783,23 @@ TEST(FeedbackMapMultiRankTest,
             },
             [&](const auto&) -> std::vector<double>
             {
-                ++neutronics_calls;
+                ++external_source_calls;
                 if (comm->getRank() == 1)
                 {
                     throw std::runtime_error(
-                        "rank-local neutronics failure");
+                        "rank-local external-source failure");
                 }
                 return initial_power;
             });
     }
     catch (const std::runtime_error& error)
     {
-        neutronics_rejected = true;
+        external_source_rejected = true;
         EXPECT_NE(
-            std::string(error.what()).find("neutronics callback"),
+            std::string(error.what()).find("external-source callback"),
             std::string::npos);
     }
-    EXPECT_TRUE(neutronics_rejected);
+    EXPECT_TRUE(external_source_rejected);
     EXPECT_EQ(thermal_hydraulic_calls, 1u);
-    EXPECT_EQ(neutronics_calls, 1u);
+    EXPECT_EQ(external_source_calls, 1u);
 }

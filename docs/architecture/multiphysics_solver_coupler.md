@@ -8,8 +8,8 @@ model-configuration forwarding APIs.
 
 The [general reacting-gas source design](../modeling/reacting_gas_sources.md)
 retains this ownership and transaction boundary while separating reaction
-extents from heat deposition. The first example below uses current legacy
-source identifiers; it does not expose the planned general reaction interface.
+extents from heat deposition. The first example below uses the neutral single-gas
+source APIs; it does not expose the planned general reaction interface.
 
 ```cpp
 auto solver = std::make_shared<BoussinesqSolver<Pack>>(
@@ -42,7 +42,7 @@ The solver retains its mesh, primary fields, material storage, turbulence,
 momentum and temperature equations, pressure/velocity algorithms, generic
 heat-source registry, and clock. It can independently advance flow, heat, and
 turbulence. The coupler owns gas-source models, prescribed power, boiling, scalar void,
-material feedback, scalar source-decay groups, free-surface mass accounting, planar mesh motion,
+material feedback, free-surface mass accounting, planar mesh motion,
 and thermal participants. Optional models remain lazily allocated.
 
 The dependency is from the controller to the solver. A private friend interface
@@ -73,7 +73,7 @@ absolute projected flux.
 Fixed-grid advancement preserves collective validation, interval-source
 refresh, material/source refresh, flow, turbulence, lagged ideal-gas source and
 boiling/void updates, temperature, legacy two-population gas kinetics and its void mirror,
-scalar source-decay groups, material feedback, free-surface accounting, and accepted publication.
+material feedback, free-surface accounting, and accepted publication.
 SST-SAS and nonlinear-flow rollback retain their existing scopes. The existing
 planar ALE geometry-trial Picard loop, relative transport, GCL/quality gates,
 energy/mass/gas/continuity acceptance checks, and rejection rollback belong to
@@ -142,3 +142,10 @@ check, and nine bounded example checks. The lifetime regression releases the
 caller's solver handle, advances and replays a checkpoint through the retained
 owner, then verifies solver destruction when the coupler releases the last
 owner. Null ownership and duplicate-controller rejection are also covered.
+
+
+The neutral source migration removes scalar source-decay ownership and
+configuration from this controller. Standalone `ScalarSourceDecayTransport`
+retains generic source/decay and scalar transport for callers that explicitly
+own it. Source APIs and configuration keys have no legacy aliases; see the
+[migration table](../modeling/reacting_gas_sources.md).

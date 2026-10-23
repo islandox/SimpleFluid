@@ -490,7 +490,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         coupler.d_ale_temperature_density = nullptr;
     }
 
-    /** @brief Advance reaction_source with trial temperature, pressure, and relative transport. */
+    /** @brief Advance reacting_gas with trial temperature, pressure, and relative transport. */
     void advance_gas()
     {
         if (coupler.d_reacting_gas_model && coupler.d_reacting_gas_model->enabled())

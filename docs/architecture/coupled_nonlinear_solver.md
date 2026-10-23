@@ -57,7 +57,7 @@ patches absent from that rank's local boundary batches.
 
 Custom momentum subclasses, legacy mesh drivers, pressure outlets,
 extrapolated/oblique-slip velocity boundaries, nonorthogonal geometry,
-free-surface, boiling and scalar source-decay models, and moving-mesh contexts are unsupported.
+free-surface and boiling models, and moving-mesh contexts are unsupported.
 They are rejected rather than silently losing their momentum sources or
 stress terms. A monolithic nonlinear temperature/turbulence/gas solve and ALE
 require separate trial residual and state contracts.
