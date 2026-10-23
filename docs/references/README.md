@@ -1,4 +1,10 @@
-# Primary Reference Manifest
+# Reference manifest
+
+The [general reacting-gas source design](../modeling/reacting_gas_sources.md)
+uses application-supplied chemistry and material data. The papers below document
+legacy closure provenance; their application-specific assumptions are not the
+general model specification. Original titles and supplied PDFs are retained
+for traceability.
 
 - Sheng et al. (2024): inertial-pressure effects on gas-bubble dynamics. DOI:
   <https://doi.org/10.1016/j.anucene.2024.110668>.

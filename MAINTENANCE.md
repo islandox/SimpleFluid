@@ -35,28 +35,16 @@ instead of converting a supplied native mesh into a legacy mesh.
 This avoids hidden conversions and duplicated storage while preserving compatibility
 consumers.
 
-Within the native path, Cartesian and cylindrical meshes construct
-[count-balanced, width-aware tensor decompositions](docs/architecture/orthogonal_decomposition.md)
-with initially contiguous owned cell/face algebraic maps and compact halo topology
-for local geometry lookup. An `UnstructuredMesh` must first be
+Within the native path, Cartesian and cylindrical meshes construct their
+distributed slab views directly. An `UnstructuredMesh` must first be
 partitioned with `MeshPartitioner` and adapted through `PartitionedMesh` on a
-multi-rank communicator. `SemiStructuredXY_Z` constructs native owned/overlap
-maps from Zoltan2/ParMETIS XY graph partitions crossed with balanced Z slabs.
-`MeshReorderingFactory` orders XY cells within the graph partitions before
-local maps are created. A decomposed XY/Z topology supplies local geometry
-lookup; owned cell and face Tpetra GIDs are then numbered contiguously on each
-rank. Source topology indices remain available through the geometry-ID accessors.
-Every rank
-supplies identical compact XY/Z geometry and boundary metadata. Explicit XY/Z
-factors must multiply to communicator size, and explicit rank/count overrides
-must match the communicator. Set `DistributionOptions::allow_empty_partitions`
-when the chosen factorization leaves owners empty.
-Face ownership and flux orientation retain the source owner/neighbor relation. Empty ranks
-retain all boundary names and participate in field, solver and ALE collectives.
-Focused semi-structured geometry, operator, flow and axial-ALE checks are listed
-in [the parallel semi-structured guide](docs/semi_structured_parallel.md).
-Do not infer qualification of every optional physics combination from mesh
-and operator coverage.
+multi-rank communicator. `SemiStructuredXY_Z` is serial-only; its
+`MeshHandle` constructor deliberately rejects multi-rank use until an owned,
+overlap, and ghost-indexing design is implemented for that topology.
+Focused native regressions cover unstructured geometry, operators,
+`FluidSolver`, and `BoussinesqSolver` directly in serial and across partition
+faces in MPI. Do not infer multi-rank `SemiStructuredXY_Z` support from that
+partitioned-unstructured coverage.
 
 `AnnularSemiStructuredMeshFactory` returns a `MultiRegionMesh` that combines
 immutable native XY/Z and optional `SweptRZRegion` children. Its distributed
@@ -96,8 +84,7 @@ This limits moving-mesh support to the implemented conservative transformation.
 Normal `MeshHandle::faces()` queries return independent sized/indexable ranges.
 Do not reintroduce implicit cell-face CSR while building fields, graphs, or
 solvers. `materialize_cell_faces()` is an explicit compatibility operation.
-Serial IDs are arithmetic. Decomposed orthogonal and XY/Z geometry lookup uses
-compact local topology; algebraic lookup reuses required Tpetra maps.
+Serial IDs are arithmetic and distributed lookup reuses required Tpetra maps;
 `indexer()` remains an opt-in compatibility allocation. Arbitrary native
 reordering is explicit and retains its permutation; composite reordering is
 currently rejected. See [region contracts and storage categories](docs/region_meshes.md).
@@ -133,7 +120,7 @@ flux because inlet composition and post-boiling local clipping have no
 conservative contract. Always derive liquid volume from this inventory and
 pure `rhoLiquid`, never void-reduced mixture density. Its physical mass-closure
 gate must remain independent of the Krylov tolerance; a loose linear solve must
-fail conservation rather than relax it. Separate solvent, solute, and heated
+fail conservation rather than relax it. Separate solvent, solute, and reactive-species
 inventories remain future work.
 
 When free-surface coupling has enabled boiling phase-inventory tracking,
@@ -146,8 +133,8 @@ This protects the phase inventory until it has an explicit conservative disposit
 
 `PlanarALEMeshMotion` is the sole geometry mutator for the constrained
 solver-integrated `planarALE` path. It supports fixed-topology Cartesian X/Y/Z
-and cylindrical or `SemiStructuredXY_Z` axial motion in serial/MPI. Use its
-`begin_trial()` and exactly one of `accept_trial()` or
+and cylindrical axial motion in serial/MPI plus serial `SemiStructuredXY_Z`
+axial motion. Use its `begin_trial()` and exactly one of `accept_trial()` or
 `rollback_trial()`; never update structured edge arrays directly after fields
 or caches exist. The exclusive controller lease and geometry epoch belong to
 the shared concrete mesh, so every alias `MeshHandle` observes the same
@@ -790,3 +777,19 @@ evidence requirements above to the final diff, so the handoff is scoped and revi
 When a full suite cannot run, record exactly what was built and tested, the
 reason for omissions, and the command another maintainer should run.
 This makes incomplete validation visible and reproducible.
+
+## Documentation ownership
+
+Maintain algorithms and ownership/API contracts in `docs/architecture/` and the
+relevant code guides, physical assumptions and applicability in `docs/modeling/`,
+and implementation/qualification tasks in `TODO.md`. Reproducible numerical
+assertions may have a durable verification index; benchmark guides describe the
+measurement contract rather than accumulating dated run reports.
+
+When consolidating a campaign, preserve implemented behavior, independent test
+oracles, superseding results, known failures, exclusions and remaining physical
+or scaling gates. Distinguish implemented, component-tested,
+solver-regression-tested, externally compared and physically validated states.
+Recorded evidence is not a fresh run. Keep raw commands, source/runtime hashes,
+logs, XML, profiles and timing samples in local build artifacts. Do not create
+another versioned implementation/review diary for each iteration.

@@ -9,9 +9,12 @@ GPU-portable parallelism.
 SimpleFluid is in active development with a tested incompressible Navier–Stokes
 solver for natural convection. The foundation through Phase 12 is substantially
 implemented, covering mesh infrastructure, verification, performance
-benchmarking, physical heat sources, updateable material properties, prescribed
-prescribed heat heating, and the baseline reacting-gas source. Numerical verification
-gaps and later multiphysics acceptance work remain tracked in `TODO.md`.
+benchmarking, physical heat sources, updateable material properties, and a
+specialized baseline gas-source implementation. The general design now targets
+reacting gas sources in solution with supplied chemistry and material laws;
+species-independent source APIs and their qualification remain planned work.
+Numerical verification gaps and later multiphysics acceptance work remain
+tracked in `TODO.md`.
 
 The pressure–velocity, Boussinesq, turbulence, and optional-physics stacks now
 run directly on `MeshHandle`/`FieldStored` data for supported mapped meshes,
@@ -19,16 +22,16 @@ without reconstructing a legacy mesh. Existing callers that supply the legacy
 `Mesh` backend retain their established object identity and behavior through a
 separate compatibility path.
 
-**The advanced Phase 14.1 two-population reacting-bubble model has broad
+**The advanced Phase 14.1 two-population gas-bubble implementation has broad
 implementation and focused conservation/transport coverage, but remains under
 physical validation and acceptance.**
 
 **Turbulent bubbly-flow scope:** the single-continuum RANS models and the
-reacting bubble-population model can run in the same `BoussinesqSolver` with
+existing gas-bubble population model can run in the same `BoussinesqSolver` with
 sequential void-to-density/buoyancy feedback. This is not a full Euler–Euler
 two-fluid formulation and is not yet a validated turbulent bubbly-flow model.
 Permanent serial and exact-two-rank regressions exercise that combined path,
-including causal changes from turbulence, dissolved-hydrogen advection, and
+including causal changes from turbulence, dissolved-gas advection, and
 void-dependent density feedback; a checked-in combined user example and
 quantitative bubbly-flow validation remain open.
 
@@ -50,19 +53,19 @@ quantitative bubbly-flow validation remain open.
 | Performance benchmarks & scaling tests | ✅ |
 | Physical heat sources & material-property fields | ✅ |
 | Solid subdomains & transient heat conduction | ✅ |
-| Prescribed heat power-density profiles | ✅ |
-| Baseline ideal-gas reacting source | ✅ |
+| Prescribed volumetric heat deposition | ✅ |
+| Baseline ideal-gas source (legacy single-species implementation) | ✅ |
 | Six two-equation RANS closures and wall treatments | ✅ |
-| Scalar void, boiling, feedback, and scalar source-decay infrastructure | 🚧 |
-| Two-population reacting-bubble model | 🚧 |
-| Weakly coupled RANS plus reacting bubble populations | 🚧 |
+| Scalar void, boiling, and material feedback infrastructure | 🚧 |
+| Two-population gas-bubble implementation (legacy single-species model) | 🚧 |
+| Weakly coupled RANS plus gas-bubble populations | 🚧 |
 | Fixed-grid planar volume budget and weak Boussinesq integration | 🚧 |
 | Structured planar geometry-motion/GCL substrate | ✅ |
 | Constrained solver-integrated planar ALE and generalized continuity | 🚧 |
 | Reusable scalar/vector/tensor cell transfer, including conservative supported overlaps | ✅ |
 | Conservative phase occupancy and coupled inventory mapping | ⬜ |
 | Full turbulent Euler–Euler bubbly flow | ⬜ |
-| In-memory TH/external-source physics feedback and coupling scaffold | 🚧 |
+| General reaction-source and species-provider contract | ⬜ |
 
 ## Governing Equations
 
@@ -143,7 +146,7 @@ sparse products component by component. Both choices preserve the assembled
 momentum/Schur preconditioners. See the [architecture, supported scope and
 measured tradeoffs](docs/architecture/coupled_operator_backends.md).
 These options do not implement scalar matrix-free transport. The
-[supported-solver validation report](docs/architecture/coupled_solver_backend_validation.md)
+[supported-solver qualification contract](docs/architecture/coupled_operator_backends.md#numerical-consistency-and-qualification)
 covers all four coupled choices, both pressure-gradient schemes, mesh families,
 physical-model regressions, and constrained ALE. Coupled MueLu reuse refreshes
 numeric state, and timestepper continuity assembly uses the same interpolation
@@ -189,19 +192,12 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
   - **Unstructured mesh** — STK-free hexahedral and triangular-prism
     connectivity; serial directly and distributed after
     `MeshPartitioner`/`PartitionedMesh` adaptation
-  - **Semi-structured XY×Z** — polygonal XY × structured Z prisms with native
-    serial/MPI ownership through XY graph partitions crossed with Z slabs,
-    shared XY reordering, compact local topology, contiguous owned Tpetra maps,
-    ghost layers, and axial ALE through `MeshHandle`;
-    see [distribution and support](docs/semi_structured_parallel.md)
+  - **Semi-structured XY×Z** — 2D unstructured × 1D structured prisms,
+    currently serial-only
   - **Compact multi-region** — conforming/coarse-fine composition, including
     distributed extruded and swept R–Z providers with common affine Z motion
   - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
     other volume topologies are rejected during assembly
-- Cartesian/cylindrical [multidimensional decomposition](docs/architecture/orthogonal_decomposition.md)
-  balances cell counts first, uses geometric widths for rank-grid/cut selection,
-  and creates contiguous owned cell/face Tpetra maps with compact halo topology
-  and arithmetic owned-cell/face geometry lookup
 - Owned + ghost cell decomposition for distributed-memory assembly
 - CRS-style neighbor connectivity for FVM stencil construction
 - Kokkos-based geometry storage — portable across CPU and GPU backends
@@ -287,9 +283,9 @@ velocity patch; explicit names augment that set and must also be no-slip.
 
 The opt-in `SSTKOmegaSAS` selection adds a SAS omega source to the existing
 **SST-1994** parent. See [the mathematical contract, configuration and supported
-scope](docs/modeling/sst_sas.md) and [verification evidence](docs/modeling/sst_sas_verification.md).
+scope](docs/modeling/sst_sas.md) and [qualification status](docs/modeling/sst_sas.md#qualification-status).
 The `sst_sas_activation` example is a small, isothermal transient source check
-with optional diagnostics. The [tested support extensions](docs/modeling/sst_sas_extensions.md)
+with optional diagnostics. The [supported model paths](docs/modeling/sst_sas.md)
 cover cylindrical and serial semi-structured meshes, mixed slip and translational
 periodicity, corrected Gauss-linear gradients, and accepted-state transactions
 for compatible fixed-grid multiphysics models. Isothermal and physical Boussinesq
@@ -300,8 +296,8 @@ establish physically validated scale-resolving turbulence.
 
 ### Turbulent Bubble-Flow Scope
 
-`BoussinesqSolver` can configure a RANS closure and
-`sheng2024TwoPopulation` supplied reaction sources together. The pressure–velocity and RANS
+`MultiphysicsSolverCoupler` can combine a RANS-enabled `BoussinesqSolver` with
+the legacy `sheng2024TwoPopulation` gas model. The pressure–velocity and RANS
 systems advance first; the bubble inventories then use the projected liquid
 face flux plus the configured rise/slip velocity, after which reconstructed
 void can refresh mixture density and buoyancy feedback for subsequent solver
@@ -316,13 +312,13 @@ bubble-induced turbulence, and a full bubble-size distribution are likewise
 absent. Those capabilities belong to the deferred Euler–Euler program in
 `TODO.md`.
 
-The shipped `pitz_daily` and `heated_solution_tank_sst` examples exercise
-RANS without reacting bubbles, while the heated-solution smoke examples
-exercise supplied reaction sources without RANS. A permanent serial and exact-two-rank
-regression advances both subsystems in a sheared flow and checks turbulence,
-dissolved-hydrogen advection, prescribed heat production, bubble slip, hydrogen
-balance, and void-dependent density feedback. There is not yet a checked-in
-combined user-facing example or quantitative bubbly-flow validation case.
+The shipped RANS and gas-source smoke examples exercise these subsystems
+separately. A permanent serial and exact-two-rank regression advances both
+subsystems in a sheared flow and checks turbulence, dissolved-gas advection,
+prescribed gas production, bubble slip, gas inventory balance, and void-dependent
+density feedback using the existing hydrogen specialization. There is not yet
+a checked-in combined user-facing example or quantitative bubbly-flow
+validation case. These checks do not qualify arbitrary reacting species.
 
 ### FVM Operators
 
@@ -376,12 +372,12 @@ short-running physical smoke cases:
 | OpenFOAM comparison | Manual external profile comparison; automated configuration and boundary-condition check |
 | OpenFOAM pitzDaily | Five-block standard-k-epsilon duct case with an authenticated fail-closed comparator; the physical acceptance manifest remains pending qualification |
 | OpenFOAM Gaussian tank | 1000 W axisymmetric SST tank with matched 50 x 150 R-Z distributions and error figures |
-| Native mesh path | Cartesian, cylindrical, serial/MPI semi-structured flow and axial ALE, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
+| Native mesh path | Cartesian, cylindrical, serial semi-structured, serial unstructured, partitioned-unstructured MPI, coupled-Krylov, and optional-physics regressions without legacy conversion |
 | Fixed-grid planar volume budget | Analytic/component, global/cellwise inventory, Boussinesq integration, and two-rank conservation checks; no moving-surface claim |
 | Planar geometry/GCL substrate | Structured/extruded motion, transactions, epoch/cache staleness, quality, and serial/two-rank GCL/shared-face checks |
 | Constrained planar ALE | Old/new-volume transport, mesh-relative flux, generalized continuity, moving-boundary, rollback, and conservation component/integration checks; no quantitative pool-dynamics validation |
 
-The turbulence and reacting-bubble subsystems have separate focused serial
+The turbulence and existing gas-bubble subsystems have separate focused serial
 and MPI coverage plus a permanent combined serial and exact-two-rank
 regression. A checked-in combined user example and a quantitative turbulent
 bubbly-flow benchmark remain open.
@@ -390,8 +386,8 @@ The cavity smoke tests do not currently assert agreement with Ghia et al. or
 with bundled OpenFOAM profile data. See
 `verification/openfoam/cavityFlow/README.md` for the cavity workflow and
 `verification/openfoam/pitzDaily/README.md` for the pitzDaily workflow. The
-matched Gaussian tank workflow and its interpretation are documented in
-`verification/openfoam/heatedSolutionTank/README.md`.
+matched Gaussian tank workflow and its interpretation are documented in the
+[legacy tank case directory](verification/openfoam/heatedSolutionTank/README.md).
 Matched steady and transient checks for the supported dispersed-bubble
 transport and constrained planar-ALE models are documented in
 [`verification/openfoam/README.md`](verification/openfoam/README.md).
@@ -413,9 +409,9 @@ Pre-built example executables:
 | `natural_convection_boundary_layer_box` | Box with thermal boundary layer resolution |
 | `natural_convection_shiri` | MPI-capable annular natural convection with standard k-epsilon and adaptive steady-state search |
 | `pitz_daily` | OpenFOAM pitzDaily geometry with transient isothermal standard k-epsilon transport |
-| `reacting_solution_tank_demo` | Cylindrical heated-solution smoke case with Gaussian prescribed heat power |
-| `heated_solution_tank_sst` | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
-| `constant_power_cylinder_vessel` | Cylindrical vessel smoke case with uniform prescribed heat power, reacting gas, and boiling |
+| `reacting_solution_tank_demo` (legacy target name) | Cylindrical gas-source smoke case with prescribed Gaussian heat deposition |
+| `heated_solution_tank_sst` (legacy target name) | 1000 W Gaussian tank SST case for matched OpenFOAM R-Z verification |
+| `constant_power_cylinder_vessel` | Legacy cylindrical vessel smoke case with uniform heat deposition, gas generation, and boiling |
 | `planar_free_surface_verification` | Five analytic fixed-grid volume-budget cases with CSV diagnostics |
 | `planar_ale_verification` | Four solver-integrated planar-ALE conservation cases: heating, gas generation, complete H2 escape, and rollback |
 | `dispersed_bubble_verification` | IF97 reference-water steady source/escape balance and transient bubble transport with matched OpenFOAM references |
@@ -425,7 +421,9 @@ Pre-built example executables:
 Examples use `Database` configuration, documented environment controls, or a
 combination of both. Their CTest smoke settings intentionally reduce mesh size
 and run length; production defaults can be substantially more expensive. None
-is currently a combined turbulent reacting-bubble example.
+is currently a combined turbulent reacting-gas example. Gas-source examples
+retain their existing hydrogen-specific implementation and legacy target names;
+they do not implement the proposed general chemistry contract.
 
 ## Build
 
@@ -693,83 +691,49 @@ See [lumped inner cavity](docs/modeling/lumped_inner_cavity.md)
 for the conservation contract, natural-convection options, radiation view
 factors, and a pool/wall example.
 
-## prescribed heat Power Source
+## Reacting Gas Sources in Solution
 
-`PrescribedHeatSource` registers the specialized temperature source
-`qdot_external` in W/m³. Constant power density, normalized three-axis Gaussian
-profiles, and caller-provided cell fields are supported. The controller below
-accepts a shared solver pointer (`SP<BoussinesqSolver<Pack>>`):
+The [general source design](docs/modeling/reacting_gas_sources.md) describes
+chemical gas generation and consumption in a liquid solution, with supplied
+species, stoichiometry, reaction rates, material properties, and gas/liquid
+transfer closures. Heat deposition is an independent input in W/m³. A reaction
+provider must state its source-volume basis and energy convention; heat input
+alone does not imply a gas yield or a particular solution composition.
 
-```cpp
-SimpleFluid::PrescribedHeatSourceOptions prescribed_heat;
-prescribed_heat.profile = SimpleFluid::PrescribedHeatProfile::Gaussian;
-prescribed_heat.total_power = 1.0e6;
-prescribed_heat.center = {0.0, 0.0, 1.0};
-prescribed_heat.standard_deviation = {0.25, 0.25, 0.5};
-SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
-coupling.configure_prescribed_heat_source(prescribed_heat);
-// Advance coupled physics with coupling.step() or coupling.run().
-```
+The design tracks reactants, dissolved products, dispersed bubbles, resolved
+gas, and headspace exchange through conservative inventories. Reaction sources
+must debit finite reactants, phase transfer must debit and credit the same
+species amount, and venting must carry the appropriate mass and enthalpy.
+Chemical energy and externally deposited heat are counted once. Accepted
+species, mass, energy, and volume budgets and atomic rollback are required
+before new source laws or chemistry combinations are admitted.
 
-Gaussian values are sampled at cell centroids and normalized with the
-distributed discrete volume integral, so `integrated_power()` equals the
-requested total power. Cylindrical axisymmetry is obtained by placing the
-center on the cylinder axis and setting equal X and Y widths.
+**Implementation scope:** the general species/provider contract is planned.
+The current baseline ideal-gas and advanced two-population implementations
+remain a hydrogen specialization with prescribed yield-based production.
+The advanced path includes dissolved gas, bubble transport, pressure-sensitive
+properties, escape, and inventory diagnostics, with focused numerical coverage
+but incomplete physical validation. It is not a general reaction-network solver.
 
-The equivalent flat `Database` keys are:
+The present gas-model, population, and heat-source interfaces retain
+specialized single-gas source laws. They do not establish a general
+species or reaction-network transport API.
+For independent thermal deposition, the existing
+`BoussinesqSolver::add_temperature_source()` API registers named W/m³ fields,
+as shown in the physical-material example above. Coupled gas generation and
+thermal deposition must still obey each implementation's documented support
+matrix. `MultiphysicsSolverCoupler` owns optional physics and coupled
+advancement while retaining shared ownership of the solver; core equations and
+fields remain solver-owned.
 
-```text
-prescribed_heat_power_mode = disabled | constant | gaussian
-prescribed_heat_power_density
-prescribed_heat_total_power
-prescribed_heat_center = [x, y, z]
-prescribed_heat_standard_deviation = [sigma_x, sigma_y, sigma_z]
-```
-
-For externally prepared fields, use `initialize_from_power_density()` to copy
-W/m³ values or `initialize_from_shape()` to normalize a nonnegative shape to a
-total power. The model owns its copied profile. A programmatic time multiplier
-may scale the base profile once per step at `t_n`; the retained
-`qdot_external` field is the value used for that step.
-
-`qdot_external` is included by
-`SolutionOutputOptions::include_sources` and is additive with other named
-temperature sources. The in-memory Phase 20 scaffold can import owned-cell
-power, register `T_liquid`, `alpha_g`, `rhoFeedback`, and scalar source-decay fields,
-export deterministic volume-averaged snapshots, and drive a callback-based
-outer loop with thermal-hydraulic subcycles and returned-power exchange. It is
-not a production external-external-source physics protocol or a external-source physics solver;
-file-based exchange remains future work.
-
-## Reacting Gas Models
-
-The optional supplied reaction sources subsystem provides a bounded ideal-gas void-source
-model and an advanced two-population hydrogen-bubble model. The latter includes
-dissolved hydrogen, bubble populations, pressure-sensitive properties,
-transport, escape, and diagnostic inventory accounting, but is not yet fully
-accepted as a validated physical model.
-
-The scalar source-decay model conservatively advances
-`alpha_l * C_i` with the projected liquid face flux, optional diffusion, and
-exact constant-source/decay integration. Its globally reduced diagnostics
-separate source addition, decay, boundary outflow, transport positivity
-adjustment, and balance error; distributed inputs are validated collectively.
-
-See [`docs/reacting-gas-models.md`](docs/reacting-gas-models.md) for the
-advanced supplied reaction sources model and
-[`docs/modeling/reacting_bubble_boiling.md`](docs/modeling/reacting_bubble_boiling.md)
-for the scalar void, boiling, feedback, scalar source-decay, and output workflow.
-
-The heated-solution tank smoke cases build as `reacting_solution_tank_demo`
-and `constant_power_cylinder_vessel`.
-After `cmake --build --preset GCC-Debug`, run
-`build/gcc/bin/Debug/reacting_solution_tank_demo` or
-`build/gcc/bin/Debug/constant_power_cylinder_vessel` and inspect the generated
-VTU files in ParaView. Use the corresponding `LLVM-Debug` preset and
-`build/llvm/bin/Debug` path for the LLVM build. The Gaussian tank demo keeps
-boiling disabled by default; the constant-power cylinder variant enables
-reacting gas plus bulk and wall boiling so the generated VTU contains the
-coupled gas-source and latent-heat fields.
+See the [gas-population implementation guide](docs/reacting-gas-models.md)
+and [gas, boiling, and feedback guide](docs/modeling/reacting_bubble_boiling.md)
+for the current compatibility paths. The legacy smoke targets listed above
+remain runnable after `cmake --build --preset GCC-Debug`; executables are in
+`build/gcc/bin/Debug` (or `build/llvm/bin/Debug` for `LLVM-Debug`). The Gaussian
+source demo keeps boiling disabled by default; the constant-power cylinder
+variant includes gas generation and bulk/wall boiling. Their VTU output is
+implementation evidence, not qualification of general reacting solutions.
 
 ## Planar Free-Surface Volume Budget and ALE
 
@@ -786,12 +750,12 @@ the projected single-continuum face-volume flux, applies accepted boiling and
 condensation sources transactionally, and evaluates volume with pure-liquid
 density. Its initial fill is a documented smeared distribution; a separate
 phase-weighted liquid flux, nonzero physical-boundary liquid flux, and separate
-solvent/heated inventories remain unsupported.
+solvent/solute/reactant inventories remain unsupported.
 
-`BoussinesqSolver` can own this fixed-grid budget and advances it after the
-temperature, bubble/boiling, scalar source-decay, and material updates. The accepted
-headspace pressure becomes the constant/reconstructed gas-pressure offset for
-the next step. This integration requires the dimensional physical-model
+`MultiphysicsSolverCoupler` owns this fixed-grid budget alongside a shared
+`BoussinesqSolver` and advances it after the temperature, bubble/boiling, enabled
+auxiliary-species, and material updates. The accepted headspace pressure becomes
+the constant/reconstructed gas-pressure offset for the next step. This integration requires the dimensional physical-model
 constructor; the legacy/default solver path rejects it.
 `free_surface_history()` retains initialization and accepted step snapshots,
 and `write_free_surface_history_csv()` writes their global
@@ -807,12 +771,12 @@ change incompressible continuity. The separate `planarALE` mode is enabled for
 a deliberately narrow matrix: a mutable native structured/extruded mesh,
 constant-area vessel, Backward Euler, laminar dimensional Boussinesq
 temperature transport, thermal-only pure-liquid density feedback,
-`cellMassInventory`, vented headspace, and either no supplied reaction sources or the Sheng
-two-population model with uniform geometry-invariant prescribed heat power, advective
-dissolved H2, general bubble transport, and exactly the moving-top escape patch.
-Cartesian X/Y/Z, cylindrical axial-Z, and semi-structured axial-Z motion are
-supported in serial/MPI. Semi-structured runs retain canonical partition faces
-and support explicit empty owners.
+`cellMassInventory`, vented headspace, and either no gas source or the legacy
+Sheng two-population implementation with uniform geometry-invariant prescribed
+power, advective dissolved H2, general bubble transport, and exactly the
+moving-top escape patch. General reaction providers are not admitted by this
+support matrix. Cartesian X/Y/Z and cylindrical axial-Z motion are supported in
+serial/MPI; semi-structured axial-Z motion is serial only.
 
 The ALE path retains absolute projected fluid flux for pressure and continuity
 diagnostics, and uses a distinct mesh-relative flux for transport and its
@@ -832,7 +796,7 @@ gas-state residual histories.
 This is a constrained flat-surface model with conservation-focused test
 coverage, not physical validation of free-surface dynamics.
 
-Closed headspace, tabulated vessels, RANS, boiling/steam, scalar source-decay groups, scalar-
+Closed headspace, tabulated vessels, RANS, boiling/steam, legacy scalar source-decay groups, scalar-
 void-only transport, solids, dynamic user callbacks, legacy/const-only and
 general unstructured meshes, non-Backward-Euler time integration, nonadiabatic
 temperature boundaries, and nonzero physical liquid boundary flux fail closed.
@@ -844,6 +808,10 @@ work. Fixed-grid vented boiling mass accounting remains available, but ALE
 boiling and steam transport/escape are deferred. Removing or replacing the
 fixed-grid free-surface model is rejected while boiling still owns nonzero
 submerged steam; the inventory is never silently discarded.
+
+Resolved-interface VoF, general AMR, and resolved/dispersed representation
+conversion are excluded from this source snapshot. Their implementation and
+qualification remain outside the retained reacting-flow support matrix.
 
 ## Dependencies
 
@@ -892,8 +860,9 @@ example and storage accounting](docs/region_meshes.md).
 | Region composition, MPI, and ALE | [Region meshes](docs/region_meshes.md) |
 | Conservative cell-field projection | [Mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md) |
 | Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
-| SST-SAS configuration and supported paths | [Model contract](docs/modeling/sst_sas.md) and [extensions](docs/modeling/sst_sas_extensions.md) |
-| supplied reaction sources, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/reacting_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
+| Reacting gas sources in solution | [Species, source, energy, and conservation contract](docs/modeling/reacting_gas_sources.md) |
+| SST-SAS configuration and supported paths | [Model contract and qualification](docs/modeling/sst_sas.md) |
+| Gas sources, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/reacting_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
 | External reference comparisons | [OpenFOAM workflows](verification/openfoam/README.md) |
 
 ## License

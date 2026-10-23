@@ -285,35 +285,12 @@ analytic derivative and deep-copy isolation, check heat/model advancement once
 per accepted step, and exercise material/gas restoration and retry after a
 rejected nonlinear flow.
 
-The initial implementation was validated on 2026-09-11 using GCC Debug and
-the selected Trilinos 17.2 installation, before the physical Boussinesq
-extension. That historical matrix was:
-
-| Check | Result |
-| --- | --- |
-| NOX enabled, serial nonlinear tests | 26 passed; 2 MPI-only tests skipped |
-| NOX enabled, two MPI ranks | All 28 logical tests passed on both ranks |
-| NOX disabled, serial nonlinear tests | All 14 tests passed |
-| Existing coupled-backend regressions | All 40 tests passed |
-| Existing direct coupled, base-fluid, and isothermal tests | 5, 16, and 4 passed |
-| Shared-library ELF export boundary | Passed |
-
-Both enabled and disabled configurations built successfully. The enabled
-tree is `build/gcc`; the independent disabled tree is `build/nox-disabled`.
-The two-rank run used host networking because the sandbox cannot provide
-the PMIx launcher sockets. No unrelated project-wide suite or performance
-campaign was run.
-
-The subsequent physical Boussinesq extension has a separate
-[Release validation and 10k/100k performance report](../benchmarks/coupled_nonlinear_20260911.md).
-It includes 35 nonlinear tests exercised across serial/MPI and matched physical
-convection runs; the initial matrix above is not a claim that every old check
-was repeated for the extension.
-
-The [SST-SAS support record](../modeling/sst_sas_extensions.md#coupled-nonlinear-integration)
-records the isothermal physical-context and active-SAS tests, including frozen
-native residual/derivative agreement, single-step turbulence equivalence,
-nonzero sources, disabled-source equality, and rollback/retry with NOX.
+Recorded focused campaigns cover NOX-enabled and disabled builds, serial/MPI
+residual and derivative checks, immutable retained generations, Boussinesq
+material/gas restoration and the active-SAS transaction. Enabled GCC NOX and
+disabled LLVM coverage are distinct; disabled-backend success does not qualify
+enabled LLVM NOX. See the [SAS model](../modeling/sst_sas.md#qualification-status)
+for supported geometry, optional physics and remaining physical gates.
 
 The nonlinear equations differ from a single frozen-convection timestep.
 Compare converged nonlinear solutions against an equivalent residual and
@@ -326,7 +303,11 @@ preconditioner. Performance evaluation must measure time per accepted,
 equally accurate physical step, including residual evaluations and setup,
 with failed solves excluded. Runtime benefit remains workload-dependent.
 
-The subsequent [flame-profile optimization report](../benchmarks/flame_optimization_20260915.md)
-records matched before/after measurements for cached traversal, shared immutable
-geometry, and scoped field views. Those results are limited to its stated
-meshes, solver policies, and short verification windows.
+Recorded matched startup comparisons support the implemented two-slot history
+workspace, residual-only assembly, retired-generation reuse, cached face/Schur
+slots and scoped field views. The analytic packing experiment had no repeatable
+whole-loop benefit and was not retained. Stronger initial forcing and a different
+pressure preconditioner are workload-specific settings, not new library defaults.
+Short startup comparisons do not qualify full transients or developed turbulence.
+Use the [profiling contract](../solver_timings.md#performance-qualification)
+before making further performance claims.

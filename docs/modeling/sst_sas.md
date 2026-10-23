@@ -150,11 +150,10 @@ product is multiplied by `sin(dtheta/2)/(dtheta/2)`. This closes the area-vector
 sum and preserves affine and rigid-rotation zero curvature. It adds no
 cylindrical-component metric terms and does not alter the parent transport
 operators. Manufactured refinement and transient swirl evidence are recorded
-in [the extension report](sst_sas_extensions.md).
+in the qualification summary below.
 
-Native `SemiStructuredXY_Z` uses the same planar-face operator directly. Its
-mesh ownership now supports MPI; the SAS qualification listed here retains its
-existing serial semi-structured cases. Skewed triangular extrusions have
+Native `SemiStructuredXY_Z` uses the same planar-face operator directly, with
+its existing serial-only ownership contract. Skewed triangular extrusions have
 manufactured derivative/refinement and transient solver coverage. Slip uses
 zero normal face velocity and zero normal derivative of tangential velocity.
 Its Laplacian boundary flux is the normal projection only. A SAS-only cached
@@ -260,8 +259,7 @@ as well as material and turbulence fields on failure. Scalar void diffusion
 and collapse also participate, including alpha_g, alpha_l and source mirrors;
 the RANS/SAS equations remain full-cell rather than phase weighted. Active SAS
 also supports existing scalar source-decay reaction/advection/diffusion, with complete
-concentration, inventory, source and diagnostic snapshots. Ideal and Sheng
-two-population supplied reaction sources snapshots cover
+concentration, inventory, source and diagnostic snapshots. Legacy ideal-gas and two-population model snapshots cover
 transport histories, slip fluxes, populations and hydrogen ledgers. Bulk/wall
 boiling also restores its source fields, steam/condensate ledger and pending
 phase-change state. Fixed-grid planar volume budgets capture the free-surface
@@ -296,8 +294,32 @@ registrations are independent of enlarged water-comparison defaults. It is
 not a wall-resolved or sustained-turbulence benchmark. No external reference
 manifest or tolerance is changed; pitzDaily physical qualification stays pending.
 
-See [the implementation verification record](sst_sas_verification.md) for the
-starting revision, commands actually executed, results and limitations.
+## Qualification status
+
+The source and supported fixed-grid transient integration are implemented,
+component-tested and solver-regression-tested. Recorded GCC and LLVM Debug
+campaigns cover the independent Decimal pointwise source oracle, manufactured
+derivatives, native/legacy paths, serial/MPI parity, source-disabled parent
+equivalence, diagnostics, restart, stale geometry and rejection/retry.
+The active-SAS NOX extension has enabled GCC coverage; its LLVM checks used
+NOX disabled and do not establish enabled LLVM NOX support qualification.
+
+Supported non-NOX extensions include cylindrical Cartesian components with
+integrated radial normals, serial semi-structured prisms, mixed slip conditions,
+translational periodic images, corrected Gauss-linear gradients and the existing
+compatible material, void, scalar source-decay, gas-source, boiling and fixed-grid surface
+transactions described above. The initial record's narrower support limits are
+superseded by these implemented paths. Active tests require a nonzero source;
+zero-source equivalence alone cannot qualify SAS integration.
+
+Use `testSSTSASSource`, `testSSTSASModel`, `testSASSupportedPaths`, affected
+turbulence/solver targets, and the `SSTSAS`, `SASSupportedPaths`, `SASNonlinear`
+and optional-physics MPI registrations for focused changes. This status is
+consolidated recorded evidence, not a fresh test execution. Planar ALE,
+pseudo-time SAS, rotated periodic transformations and incompatible physics
+pairings remain excluded. No full external-flow or experimental turbulence
+validation, universal mesh-distortion accuracy, accelerator support or
+long-running resolution study is inferred.
 
 Status must remain distinct: **implemented → component-tested →
 solver-regression-tested → externally compared → physically validated**.

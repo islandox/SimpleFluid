@@ -1,19 +1,51 @@
-# Reacting Gas Models
+# Reacting gas in solution: source and transport reference
 
-SimpleFluid provides one runtime-selectable supplied reaction sources subsystem with three
-modes:
+The general model design is [Reacting gas sources in solution](modeling/reacting_gas_sources.md).
+It separates application-supplied reactions, species, finite reactants, and
+heat release from conservative dissolved, dispersed, and resolved gas
+transport. A particular energy source or solution composition is not a
+required part of that design.
+
+This document retains its historical path for existing links. The
+`Reacting*`, `PrescribedHeat*`, and hydrogen-specific API names below describe the
+current implementation. They do not provide a general reaction-network or
+arbitrary-species interface; those interfaces remain planned. In particular,
+changing supplied material properties does not generalize the implemented H2
+chemistry or its energy-yield production closure.
+
+## General source boundary
+
+The planned provider supplies reaction extents or species rates with explicit
+units and volume basis, stoichiometric reactant/product changes, and already
+net thermal energy under a declared formation-energy convention. Per-liquid
+rates are converted to extensive amounts using true liquid volume exactly
+once. Finite reactants must be debited before a candidate can be accepted;
+external injection has a separate mass, species, momentum, and enthalpy ledger.
+Dissolution, bubble formation, capture, and representation changes transfer
+existing species and do not create additional reaction production.
+
+Gas EOS, solubility, diffusivity, surface tension, nucleation, and transfer
+laws remain supplied closures with declared composition and validity ranges.
+Their integration must preserve the transport, pressure, inventory, and
+rollback contracts documented below. Generic chemistry is not implemented by
+renaming the legacy options or interpreting an arbitrary reaction rate as
+power.
+
+## Legacy implementation: available modes and ownership
+
+The existing runtime-selectable source subsystem has three modes:
 
 - `disabled`
 - `idealGasSource`
 - `sheng2024TwoPopulation`
 
-The subsystem is owned by an external `MultiphysicsSolverCoupler` after
+This legacy subsystem is owned by an external `MultiphysicsSolverCoupler` after
 `configure_reacting_gas(...)` is called. Construct the coupler with a
 `SP<BoussinesqSolver<Pack>>` and use `coupling.step()` or `coupling.run()` for
 advancement. The standalone Boussinesq solver owns no reacting model. See
 [the controller ownership and migration guide](architecture/multiphysics_solver_coupler.md).
 
-## Public units
+## Legacy implementation: public units
 
 All public options and fields use SI:
 
@@ -23,19 +55,19 @@ All public options and fields use SI:
 | Absolute pressure | Pa |
 | Dissolved concentration | mol/m3 liquid |
 | Bulk molar inventory | mol/m3 bulk |
-| Reacting yield | mol/J |
+| Legacy energy-to-H2 yield | mol/J |
 | Radius | m |
 | Time | s |
 | Dynamic viscosity | Pa s |
 | Density | kg/m3 |
 | Henry coefficient, `C = H p` | mol/(m3 Pa) |
 
-## External material properties
+## Legacy implementation: external material properties
 
-SimpleFluid contains no heated-solution diffusivity, surface-tension, LET or
-nucleation-radius correlations. Density, heat capacity, viscosity and thermal
-conductivity can be supplied through the external `MaterialProvider` API.
-Reacting material properties use `ReactingGasOptions`:
+Application-specific property correlations belong to the supplied material
+model. Density, heat capacity, viscosity and thermal conductivity can be
+supplied through the external `MaterialProvider` API. The existing gas
+specialization takes its additional properties through `ReactingGasOptions`:
 
 | Property | Constant input | External callback | Callback inputs / output |
 | --- | --- | --- | --- |
@@ -52,8 +84,6 @@ failures propagate collectively before MPI-dependent assembly or field exchange.
 The generic Henry equilibrium, ideal-gas, bubble drag and transfer equations
 operate on supplied material values.
 
-external host connects these callbacks to a submodule which owns Winter's
-hydrogen diffusivity and the relocated surface-tension and nucleation properties.
 Temperature-dependent diffusivity is evaluated per cell for both dissolved
 transport and bubble mass transfer. Dissolved transport uses `alpha_l*D(T)`.
 The selected liquid-side transfer law, its strict domain, and the distinction
@@ -63,22 +93,23 @@ between kinetic and characteristic-radius coefficients are documented in
 The old `sheng2024` surface-tension and diffusivity selectors are removed.
 Database configurations supply constant properties, including an explicit
 positive `nucleation_radius`; external callbacks are configured through C++.
-The former `uranium_concentration_mol_per_m3`,
-`hydrogen_yield_molecules_per_100_ev` and `atmospheric_pressure` keys are rejected:
-those parameters belong to the external material provider. The physical source
-yield `hydrogen_yield_mol_per_j` remains a solver input.
+Removed application-specific property and alternate-yield keys remain
+rejected. The legacy source yield `hydrogen_yield_mol_per_j` remains a solver
+input; it is not a general reaction-rate interface.
 
-## Phase 12
+## Legacy implementation: low-order ideal-gas source
 
-The ideal-gas source is
+The current energy-yield specialization computes
 
 ```text
 S_alpha_reaction =
     (1 - alpha_g) eta G qdot_external R T / p_abs.
 ```
 
-The source is zero at zero prescribed heat power and when `alpha_g >= alpha_max`. It
-is limited by both `max_source_alpha_rate` and
+Here `qdot_external` is the existing power-density input name; this formula
+documents that specialization rather than defining the general source
+provider. The source is zero at zero supplied power and when
+`alpha_g >= alpha_max`. It is limited by both `max_source_alpha_rate` and
 `(alpha_max - alpha_g) / dt`. In the Boussinesq solver, the Phase 14 scalar
 model owns the authoritative `alpha_g` field and bound; ideal supplied reaction sources reads
 that state and mirrors it only for its model-local diagnostics.
@@ -91,7 +122,7 @@ Standalone ideal-mode calls likewise must use the `advance` overload that
 supplies authoritative `alpha_g` and `alpha_max`; the shorter overload is
 reserved for disabled and two-population modes.
 
-## Phase 14.1 state
+## Legacy implementation: two-population state
 
 The advanced model stores dissolved hydrogen conservatively as
 
@@ -114,13 +145,11 @@ void state and the scalar model is only a common publication mirror. Their
 configured alpha bounds must match so mirroring cannot clip conserved bubble
 state.
 
-The model implements the following Sheng et al. relationships:
-
-- Henry/Laplace equilibrium and critical concentration, Eqs. (9)-(10)
-- pressure-corrected nucleation radius, Eqs. (11)-(15)
-- two-population production, conversion, and dissolution, Eqs. (23)-(30)
-- bubble equation of state and void reconstruction, Eqs. (33)-(35)
-- experimental local inertial-pressure update based on Eq. (32)
+The `sheng2024TwoPopulation` selector retains its specific production,
+conversion, dissolution, and experimental inertial-pressure closures. These
+are compatibility behavior, not universal reaction or nucleation laws. The
+reusable thermodynamic pieces include Henry equilibrium, the Laplace
+pressure jump, and the gas equation of state.
 
 Bubble radii are positive roots of
 
@@ -131,11 +160,11 @@ Bubble radii are positive roots of
 The solver uses bracketed bisection over the configured radius interval and
 reports failed brackets or iterations.
 
-## Numerical ordering
+## Legacy implementation: numerical ordering
 
 For each configured two-population solver step:
 
-1. Refresh material properties and prescribed heat power.
+1. Refresh material properties and the prescribed source power.
 2. Solve velocity and pressure correction.
 3. Advance temperature.
 4. Reconstruct or prescribe absolute thermodynamic pressure.
@@ -223,17 +252,17 @@ and escape and can therefore be negative. The common scalar mirror derives
 `S_alpha_total` independently from its own published old/new state rather than
 copying this internal history.
 
-The no-advection dissolved mode is the default paper-compatibility mode.
+The no-advection dissolved mode is the legacy compatibility default.
 Optional CFD advection uses the projected liquid face flux. Bubble number and
 moles use the same category face flux. `general` bubble transport retains the
 full CFD liquid flux. `axial` reconstructs only the liquid z-velocity at each
-face for paper-style one-dimensional compatibility. Rise velocity is added
+face for one-dimensional compatibility. Rise velocity is added
 in the positive z direction in both modes. Configured free-surface patches
 are outflow-only for hydrogen and bubble-count escape.
 
-## Bubble rise velocity
+## Legacy implementation: bubble rise velocity
 
-`celata2007` implements Winter et al. (2022) Eqs. (15a-d):
+`celata2007` retains the following implemented drag/rise relation:
 
 ```text
 v_b = sqrt(8 r_b g / (3 C_D))
@@ -244,14 +273,15 @@ Eo = 4 g r_b^2 (rho_l - rho_g) / sigma
 Re = 2 rho_l v_b r_b / mu_l
 ```
 
-The coupled positive root is found by bracketed bisection. Gas density enters
-`Eo`, exactly as printed in Winter Eq. (15c); it is not inserted into
-Eq. (15a). Celata et al. (2007) Table 2 reports an experimental envelope of
+The coupled positive root is found by bracketed bisection. In this legacy
+relation gas density enters `Eo`; it is not inserted into the numerator of
+the velocity equation. Celata et al. (2007) Table 2 reports an experimental envelope of
 diameter 0.5-4 mm, `Re` 200-1500, and `Eo` 0.1-3.5. The pure property result
 reports whether a point lies inside that envelope, but the runtime model
-allows explicit extrapolation for the much smaller reacting populations.
+allows explicit extrapolation for much smaller populations. Such extrapolation
+requires application qualification and is not a general default for reacting gas.
 
-## Pressure
+## Legacy implementation: pressure
 
 Pressure modes are:
 
@@ -266,7 +296,7 @@ The incompressible pressure-correction field is never interpreted directly as
 absolute pressure. The inertial option does not change the projection
 equation. Pressure-floor events are reported in step statistics.
 
-## Conservation
+## Legacy implementation: conservation
 
 The per-step hydrogen balance is
 
@@ -290,7 +320,7 @@ remain unchanged. `alpha_g_raw`, `alpha_g_excess`, and bounded `alpha_g`
 publish the distinction. A concentration publication ceiling similarly does
 not modify `I_H2`; excluded dissolved inventory is reported separately.
 
-## Configuration
+## Legacy implementation: configuration
 
 Options are parsed from flat snake-case `Database` keys. The principal keys
 are:
@@ -353,7 +383,7 @@ Advanced mode reconstructs void from conserved bubble inventories. It is
 therefore rejected with active boiling or finite scalar collapse until those
 mechanisms can add or remove the corresponding inventories conservatively.
 
-## Output
+## Legacy implementation: output
 
 `SolutionOutputOptions::include_sources` writes `S_alpha_reaction`.
 
@@ -361,24 +391,39 @@ mechanisms can add or remove the corresponding inventories conservatively.
 `alpha_l`, absolute pressure, all advanced state fields, reconstructed
 properties, and diagnostic rates.
 
-## Limitations
+## Legacy implementation: limitations
 
-- Chemistry is H2-only and intended for short pulse studies.
+- Chemistry is H2-only; arbitrary species, reaction networks, and generic
+  finite-reactant inventories remain planned.
 - The two populations are representative radii, not a size distribution.
-- `F = 1e-4 Pa^-1 s^-1` is a SILENE-calibrated default, not a universal
-  coefficient.
+- The retained conversion coefficient `F = 1e-4 Pa^-1 s^-1` is an
+  application-calibrated implementation default, not a universal coefficient.
 - The inertial pressure update is experimental and weakly coupled.
-- Full SILENE validation requires point kinetics or external-source physics coupling.
+- Source calibration and coupled physical validation are application
+  responsibilities; transport tests do not qualify a reaction law.
 - Celata validity diagnostics use the experimental envelope in the primary
-  paper; reacting microbubble use is an explicit extrapolation.
+  paper; microbubble use outside it is an explicit extrapolation.
 
-## References
+## Legacy closure reference
 
-- H. Sheng et al., Annals of Nuclear Energy 206 (2024) 110668,
-  <https://doi.org/10.1016/j.anucene.2024.110668>.
-- F. Winter et al., Annals of Nuclear Energy (2020) 107379,
-  <https://doi.org/10.1016/j.anucene.2020.107379>.
-- F. Winter et al., Annals of Nuclear Energy (2022) 108614,
-  <https://doi.org/10.1016/j.anucene.2021.108614>.
 - G. P. Celata et al., Experimental Thermal and Fluid Science (2007),
   <https://doi.org/10.1016/j.expthermflusci.2006.06.006>.
+
+<a id="numerical-and-performance-qualification"></a>
+
+## Legacy implementation: numerical and performance qualification
+
+The strict auxiliary-transport policy has recorded serial/MPI coverage for exact
+global-zero skipping, rank-local activation, paired transport preparation and
+rank-divergent selection rejection. Matched fixed-grid reduced-fixture exports
+were unchanged by skipping inactive equations. That fixture aligns active gas
+equations with its external comparison; it does not equate matrix formats,
+iteration work, carriers or all model bookkeeping between solvers.
+
+Kinetics reuses the unchanged subcycle schedule and exponential coefficients per
+advance and frozen production/pressure/liquid-fraction factors per cell. Evolving
+concentration, supersaturation, conversion, radius, slip and transfer are still
+recomputed within each subcycle. Scoped field views end before synchronization
+or solves. Recorded gas/ALE replay fixtures preserve owned fields, histories and
+physical budgets. Their short CPU timings do not qualify a full coupled application,
+IF97/device path, large-rank scaling or long-duration physical behavior.

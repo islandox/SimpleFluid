@@ -1,5 +1,11 @@
 # Planar Free-Surface Volume Budget and Constrained ALE
 
+The source-independent target is the [reacting-gas design](reacting_gas_sources.md).
+Current gas integration in this guide uses the existing hydrogen-only model
+and its energy-yield source. Its support and rejection tables do not admit
+arbitrary reaction rates or general solution chemistry; those require the
+separate source-interface and conservation gates in that design.
+
 This note describes two related planar free-surface paths. The Milestone-A
 `planarVolumeBudget` path retains the fixed CFD grid while closing liquid,
 submerged-gas, level, and headspace inventories. The constrained Milestone-B
@@ -10,7 +16,7 @@ low-Mach volume-continuity target, and an atomic accepted-step transaction.
 The ALE path is deliberately narrow: native mutable structured/extruded
 geometry, a constant-area vessel, Backward Euler, laminar dimensional
 Boussinesq temperature transport, pure-liquid thermal-density feedback,
-`cellMassInventory`, vented headspace, and either no supplied reaction sources or the supported
+`cellMassInventory`, vented headspace, and either no gas model or the supported legacy
 Sheng two-population H2 transport/escape configuration. It is a flat moving
 boundary, not an interface-capturing method, and its verification is currently
 conservation- and solver-contract-focused rather than physical validation of
@@ -79,9 +85,9 @@ state when selected;
 advance scalar source-decay groups; refresh material properties and pure-liquid density;
 preview accepted boiling mass and condensate without committing the liquid
 ledger, including a conservative cellwise transport solve when selected; read
-the reacting model's authoritative cumulative H2 ledgers; solve
+the legacy gas model's authoritative cumulative H2 ledgers; solve
 the level/headspace closure; commit the liquid ledger and exact pending escape;
-update the constant or reconstructed reacting absolute-pressure offset; then
+update the constant or reconstructed gas-model absolute-pressure offset; then
 publish diagnostic fields and append the accepted history record.
 
 This is an accepted-step, one-way-lagged fixed-grid coupling. The momentum
@@ -276,21 +282,21 @@ sink after boiling has accepted vapor would break phase conservation. The
 accepted history and per-step mass residuals use a strict normalized tolerance
 of `max(4096 * machine epsilon, 1e-10)`, independent of the linear-solver
 tolerance. The current state is effective total liquid mass, not separate
-solvent and heated inventories, so composition-preserving evaporation remains
+solvent and reactive-solute inventories, so composition-preserving evaporation remains
 deferred.
 
 ## Bubble Volume, Boiling, and Exact Escape
 
 Only gas-phase inventories that remain submerged contribute to $V_b$.
 Dissolved hydrogen is retained in the gas conservation ledger but occupies no
-bubble volume. For the two-population reacting model,
+bubble volume. For the legacy two-population gas model,
 `global_submerged_bubble_volume()` integrates the unbounded, EOS-derived
 `alpha_g_raw` from the microbubble and large-bubble states. The separately
 reported `global_unrepresented_bubble_volume()` is the raw volume hidden by an
 `alpha_g` upper bound; capping a representational field therefore does not
 destroy moles or silently reduce the volume inventory.
 
-Candidate-pressure evaluation reuses the reacting model's accepted
+Candidate-pressure evaluation reuses the legacy gas model's accepted
 temperature and population states, configured surface-tension correlation,
 and existing Laplace-pressure bubble-radius solve. Conceptually, each
 population follows
@@ -310,10 +316,10 @@ decrement of the transported microbubble and large-bubble mole inventories.
 `submerged_bubble_hydrogen_escaped` is their sum and is the H2 quantity to
 transfer to a vent/headspace. Dissolved boundary outflow is reported
 separately; the legacy total `hydrogen_escaped` includes both for the existing
-reacting balance. The free-surface update accepts
+gas-species balance. The free-surface update accepts
 `escaped_moles_this_step`, previews it during the closure, and commits it once
 only after a successful solve. A failed closure therefore cannot duplicate or
-lose the transfer ledger: the pending amount remains the reacting model's
+lose the transfer ledger: the pending amount remains the legacy gas model's
 authoritative cumulative submerged-bubble escape minus the planar model's
 committed-transfer watermark. Every positive decrement is retained, including
 values small relative to a large remaining inventory. Because upstream flow,
@@ -348,7 +354,7 @@ distributed in proportion to bounded local collapse: it is globally
 conservative but not a local steam-fraction model. The current boiling path does not
 yet transport steam as a separate species to the free surface, so a steam
 escape transfer to headspace must not be inferred from scalar-void collapse.
-The existing solver also rejects simultaneous Sheng two-population supplied reaction sources
+The existing solver also rejects simultaneous legacy two-population gas production
 and boiling, so the integrated $V_b$ callback currently uses either raw H2
 bubble volume or owned submerged steam volume, never an unowned aggregate.
 Vented boiling liquid-mass/steam-volume accounting is supported. Closed
@@ -363,7 +369,7 @@ implicit discard or transfer to the default-off path is allowed.
 
 All gas EOS evaluations and headspace states use Pa absolute. Dynamic/gauge
 pressure remains a momentum variable and is not passed directly to the gas
-closure. For constant and reconstructed reacting pressure modes,
+closure. For constant and reconstructed gas-model pressure modes,
 `set_absolute_pressure_offset()` changes the thermodynamic offset while
 preserving reconstructed gauge-pressure variation. Candidate bubble-volume
 queries are non-mutating. Prescribed-history and inertial pressure modes reject
@@ -379,7 +385,7 @@ the CFD pressure remains the gauge/dynamic field $p'$. The moving top requires
 a zero-gauge Dirichlet physical-pressure condition. During pressure correction,
 the exact prescribed absolute face flux is enforced as a correction-Neumann
 condition rather than allowing a pressure correction to change the kinematic
-boundary flux. The reacting reconstruction subtracts the volume-weighted
+boundary flux. The legacy gas-pressure reconstruction subtracts the volume-weighted
 gauge mean, so the ALE coupling supplies $p_h+\overline{p'}$ as its internal
 offset:
 
@@ -811,12 +817,12 @@ fixed-flux boundary supplies the exact mesh-normal volume flux.
 
 | Concern | Initially supported | Rejected until separately migrated and tested |
 | --- | --- | --- |
-| Geometry | Mutable native Cartesian X/Y/Z, serial/MPI; mutable native cylindrical axial-Z, serial/MPI; mutable native `SemiStructuredXY_Z` axial-Z, serial/MPI | Const-only handles, legacy mesh compatibility, general unstructured/partitioned-unstructured/STK motion, non-axial cylindrical or semi-structured motion, topology change, remeshing, repartitioning |
+| Geometry | Mutable native Cartesian X/Y/Z, serial/MPI; mutable native cylindrical axial-Z, serial/MPI; mutable native `SemiStructuredXY_Z` axial-Z, serial only | Const-only handles, legacy mesh compatibility, general unstructured/partitioned-unstructured/STK motion, non-axial cylindrical or semi-structured motion, topology change, remeshing, repartitioning |
 | Vessel/range | `constantArea`; `error` range and depletion policies | Tabulated vessel ALE and `clampAndReport` |
 | Time/flow | Backward Euler; laminar dimensional Boussinesq; SIMPLE, PISO, PIMPLE, or coupled Krylov using the common target; gravity zero or inward along the top axis | BDF2/other moving-volume histories, transverse/outward gravity, and RANS/wall-distance/wall-law paths |
-| Thermal/material | Physical temperature transport with accepted/trial $V m_l^*c_pT$ storage; nonzero `BoussinesqTemperatureOnly` pure-liquid expansion; adiabatic boundaries; rollback-safe static volumetric sources or extensive interval prescribed heat budgets | Legacy nondimensional temperature, solids/conjugate heat transfer, nonadiabatic boundaries, pressure/composition material laws, dynamic material or source callbacks |
-| Liquid | `cellMassInventory`; every nonmoving patch has a closed velocity condition and absent or homogeneous-Neumann pressure, giving zero physical-boundary liquid flux | `globalConstantMass`, liquid inlet/outlet composition, separate solvent/solute/heated inventories |
-| Gas/void | No gas model, or `sheng2024TwoPopulation` with a uniform geometry-invariant source or an extensive interval prescribed heat budget, advective dissolved H2, general bubble transport/slip, constant or reconstructed absolute pressure, and exactly the moving top as escape patch | Sheng without prescribed heat power, unmapped Gaussian/spatial prescribed heat profiles, `idealGasSource`, axial compatibility transport, prescribed/inertial pressure, scalar-void-only evolution, any unowned gas volume |
+| Thermal/material | Physical temperature transport with accepted/trial $V m_l^*c_pT$ storage; nonzero `BoussinesqTemperatureOnly` pure-liquid expansion; adiabatic boundaries; rollback-safe static volumetric sources or extensive interval energy budgets through `PrescribedHeatSource` | Legacy nondimensional temperature, solids/conjugate heat transfer, nonadiabatic boundaries, pressure/composition material laws, dynamic material or source callbacks |
+| Liquid | `cellMassInventory`; every nonmoving patch has a closed velocity condition and absent or homogeneous-Neumann pressure, giving zero physical-boundary liquid flux | `globalConstantMass`, liquid inlet/outlet composition, separate solvent/solute/reactant inventories |
+| Gas/void | No gas model, or `sheng2024TwoPopulation` with a uniform geometry-invariant source or an extensive interval energy budget through `PrescribedHeatSource`, advective dissolved H2, general bubble transport/slip, constant or reconstructed absolute pressure, and exactly the moving top as escape patch | `sheng2024TwoPopulation` without `PrescribedHeatSource`, unmapped Gaussian/spatial source profiles, `idealGasSource`, axial compatibility transport, prescribed/inertial pressure, scalar-void-only evolution, any unowned gas volume |
 | Headspace/phase change | Fixed-temperature vented headspace with prescribed positive ambient absolute pressure | Closed/restricted headspace, non-fixed headspace-temperature policies, boiling, steam/condensation transport or escape |
 | Other transported physics | None beyond the supported liquid, temperature, momentum, and optional H2 equations | scalar source-decay groups and any optional extensive equation without ALE storage/flux/cache/rollback tests |
 
@@ -860,7 +866,7 @@ rejected evaporation; steam and non-steam collapse; condensate; submerged
 steam; and phase-change residuals. The boiling output registry exposes
 `phaseChangeMassRate`, `condensationMassRate`, `rejectedVaporMassRate`, and
 `condensationLatentHeatRelease` alongside the existing `S_alpha_boil` and
-`latentHeatSink` fields. The reacting output retains raw,
+`latentHeatSink` fields. The legacy gas-model output retains raw,
 bounded, and excess void/inventory diagnostics.
 
 `MultiphysicsSolverCoupler::planar_ale_diagnostics()` adds the latest accepted old/new
@@ -926,7 +932,7 @@ closure retain their model-specific physical tolerances. None of these
 conservation gates is relaxed when a Krylov solve is configured with a looser
 algebraic tolerance.
 
-Reacting transport checks the candidate inventory against accepted-old
+Legacy gas transport checks the candidate inventory against accepted-old
 inventory and physical boundary outflow before publishing fields. If the
 initial linear solve misses the existing `64 * machine epsilon` inventory
 balance, at most two residual corrections solve the same transport equation
@@ -1007,7 +1013,7 @@ Focused tests cover the implemented component contracts:
 `PlanarFreeSurfaceModel_2procs` checks a nonuniform pure-density liquid volume
 against an independently reduced value and verifies that liquid mass, volume,
 level/rate, escape, and closure diagnostics are replicated across two ranks.
-The existing two-rank reacting regression separately checks global raw
+The existing two-rank legacy gas-model regression separately checks global raw
 bubble volume, population moles, cap discrepancy, and conservative finite-
 Courant escape.
 
@@ -1086,7 +1092,7 @@ with a falling level, and restoration
 plus safe retry after forced outer nonconvergence. These remain deterministic
 conservation checks, not quantitative validation of real surface dynamics.
 The escape case starts from known nonzero micro- and large-bubble inventories,
-suppresses conversion and dissolution kinetics, uses zero prescribed heat/thermal
+suppresses conversion and dissolution kinetics, uses zero production-driving/thermal
 source, and repeats stable implicit high-slip steps until the remaining bubble
 moles are no more than `1e-18 mol + 1e-10` times the initial bubble inventory.
 It checks each population decrement, cumulative and vent transfer, and the
@@ -1108,7 +1114,7 @@ These are analytic component/conservation verifications, not a physical
 validation of pool dynamics. The ALE regressions verify discrete algebra,
 boundary ownership, transactional restoration, and conservation for the
 constrained matrix; they do not validate physical surface trajectories,
-circulation, or reacting-bubble experiments.
+circulation, or reacting-gas bubble experiments.
 
 The paired [`planarALE` OpenFOAM verification cases](../../verification/openfoam/planarALE/README.md)
 add a transient uniform-heating expansion and a source-off steady equilibrium.
@@ -1145,7 +1151,7 @@ Cellwise liquid mass is conservative on the fixed reference mesh, but its
 initial fill is deliberately smeared over that modeled domain and physical
 boundary mass flux is not yet supported. It uses the projected
 single-continuum face flux rather than a liquid-fraction-weighted phase flux.
-No separate solvent, solute, or heated-mass field exists, so local total-liquid
+No separate solvent, solute, or reactive-solute mass field exists, so local total-liquid
 conservation must not be described as composition-preserving evaporation.
 
 The `validity_warning` threshold is therefore an applicability diagnostic, not
@@ -1181,7 +1187,7 @@ In particular, the current ALE path does not:
   breakup, sloshing, or overflow hydrodynamics;
 - perform topology changes, remeshing, repartitioning, or arbitrary
   unstructured deformation;
-- provide composition-resolved solvent, solute, or heated transport, or claim
+- provide composition-resolved solvent, solute, or reactant transport, or claim
   composition-preserving evaporation or boundary flow;
 - transport steam conservatively or transfer steam across the moving surface;
 - support closed-headspace pressure coupling, pressure-dependent boiling
@@ -1194,14 +1200,15 @@ In particular, the current ALE path does not:
 Milestone C therefore remains open. Conservative pool occupancy needs
 geometric cut fractions or a mapper whose approximation error is part of its
 acceptance contract. Cross-mesh feedback must separately preserve
-liquid/heated mass, gas species, scalar source-decay inventory, and energy and report
+liquid mass, reactive and gas species, and energy and report
 mapping residuals across supported MPI partitions. Same-topology ALE
 conservation does not satisfy that requirement.
 
-Full VOF/interface capturing and Euler--Euler gas momentum remain separate
-deferred model families. The present conservation tests establish the discrete
-contract for a flat moving boundary; they do not constitute quantitative
-physical validation.
+Resolved interfaces belong to the separate [uniform-mesh VoF workstream](vof.md);
+its initial serial Cartesian solver is independent of this planar-ALE path.
+Coupled reacting-gas VoF on this moving mesh and Euler--Euler gas momentum remain later model work.
+The present conservation tests establish the discrete contract for a flat
+moving boundary; they do not constitute quantitative physical validation.
 
 
 ## External coupling intervals
@@ -1226,21 +1233,24 @@ An interval-energy trial can be accepted only after its full duration has elapse
 The const acceptance preflight performs the same ownership, configuration,
 failed-state, and strict interval-end checks as acceptance, without changing
 the checkpoint or physical state. A coupled driver can validate SF before
-committing the external-source solver, then call SF acceptance. No SF state or
+committing the external source model, then call SF acceptance. No SF state or
 configuration may change between preflight and acceptance; preflight does not
 reserve the candidate. Acceptance repeats the preflight before releasing the
 token. The duration-relative endpoint tolerance is unchanged.
 
 `set_coupling_interval_energy(owned_joules, duration)` sets one finite nonnegative
-prescribed heat-energy budget per owned CFD cell for an interval beginning at `time()`.
-The prescribed heat source must already exist. The caller performs spatial mapping before
+energy budget per owned CFD cell for an interval beginning at `time()`.
+The legacy `PrescribedHeatSource` must already exist. The caller performs spatial mapping before
 setting this budget. Stable cell IDs carry fixed extensive budgets through every
 substep and ALE corrector. The source recomputes `q = E / (duration * current_volume)`
-on each candidate mesh, and both heat and supplied reaction sources use that same field. A
+on each candidate mesh; heat and the legacy yield-based gas source use that same field. A
 substep outside the interval fails before physical state advances. Replay never
 consumes or adds to the source budget. This is a first-order, uniform-in-time,
 material-following source approximation; pulse applications need temporal refinement.
 Ordinary nonuniform profiles and arbitrary dynamic callbacks remain unsupported in ALE.
+This legacy shared-energy interface is not the proposed independent reaction
+extent and thermal-input contract; general chemistry must not be encoded as
+a fictitious heat budget.
 
 Before initializing Sheng state, callers may enable
 `enable_donor_hydrogen_deficit_tracking()`. Its `donor_hydrogen_deficit()` field is

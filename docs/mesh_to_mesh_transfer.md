@@ -63,10 +63,9 @@ native cylindrical handle. Interpolation still supports all handle families.
 A cylindrical endpoint may be paired in either direction with a direct
 `SemiStructuredXY_Z` handle or a `MultiRegionMesh` containing only
 `NativeIsoRegion<SemiStructuredXY_Z>`, `ExtrudedRegion`, and/or `SweptRZRegion`
-providers. Direct semi-structured handles now have native distributed maps;
-this does not by itself extend the transfer qualification evidence described
-below. Composite extrusions retain their established distributed transfer path.
-Each XY polygon must be convex and counter-clockwise.
+providers. Direct semi-structured handles retain their serial-only contract;
+composite extrusions support distributed maps. Each XY polygon must be convex
+and counter-clockwise.
 Curved cylindrical providers inside a composite and general unstructured
 providers are rejected, even if they report a hexahedron or prism cell type.
 
@@ -136,8 +135,8 @@ remaining full-annulus volume. It does not extrapolate an axisymmetric field
 around the rest of the circle. A consumer choosing rotational symmetry must
 represent that symmetry explicitly before transfer.
 
-A native full annulus needs at least two azimuthal cells. An external
-axisymmetric external-source cell covering the whole annulus can be represented by
+A native full annulus needs at least two azimuthal cells. An axisymmetric cell
+from an external model covering the whole annulus can be represented by
 multiple azimuthal slices: replicate its intensive value, but split its
 extensive inventory in proportion to slice volume. On return, sum extensive
 slice inventories or volume-average intensive slice values. Do not copy the
@@ -284,7 +283,8 @@ For cell averages/densities, use
 Conservation of a phase inventory requires the caller to supply the actual
 phase inventory or a density that already includes the relevant phase fraction.
 The library neither calculates pool/headspace occupancy nor closes coupled
-mass, heated species, energy or hydrogen budgets. Those remain TF physics.
+mass, reactive species, energy or gas budgets. Those remain the coupled
+physics model's responsibility.
 
 ## Raw multivectors and lifetime
 

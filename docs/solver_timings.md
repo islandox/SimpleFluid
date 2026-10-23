@@ -34,7 +34,7 @@ coupling includes each momentum predictor and pressure correction for segregated
 methods; coupled Krylov/NOX work belongs to `sf.pressure_velocity` and does not
 pretend to have separate segregated solve times. Physical model refresh,
 turbulence, pre-temperature models, temperature transport, post-temperature
-models, reacting gas advance, and fixed-grid free-surface advance follow the
+models, legacy gas-source advance, and fixed-grid free-surface advance follow the
 existing flow charts in `FluidSolver.hh`, `MultiphysicsSolverCoupler.hh`, and
 `IncompressibleIsothermalSolver.hh`. Isothermal steps record flow and turbulence
 without a temperature phase. The collector cannot be copied or moved while
@@ -92,3 +92,33 @@ for (const auto& phase : solver.solver_phase_timings())
     if (phase.calls != 0)
         std::cout << phase.name << ' ' << phase.calls << ' ' << phase.seconds << '\n';
 ```
+
+## Performance qualification
+
+Freeze matched source, headers, binaries, loaded libraries, dependencies, inputs
+and solver settings before comparing variants. Run complete equal physical
+horizons with unchanged residual, conservation and output gates. A failed or
+timed-out baseline cannot supply an end-to-end speedup denominator. Record
+logical solves separately from rank executions, and compare per-rank fields and
+non-timing histories as well as aggregate budgets.
+
+Use separate stock timing and instrumented profile runs. Keep builds and other
+numerical work outside timing windows, bind ranks consistently, control numerical
+library threads and alternate repeated variants. Record contention and any
+predeclared exclusions. Inclusive samples overlap; their percentages cannot be
+added or equated to wall time. MPI CPU polling is not elapsed communication wait.
+Instruction counts, missing symbols and operation reductions do not establish
+wall-time speedups or zero fallback counts.
+
+Recorded startup campaigns support scoped host views, immutable geometry reuse,
+NOX history/assembly reuse, Gauss geometry caches, coefficient/Schur slots, gas
+subcycle invariants and compatible pressure setup reuse. Benefits depend on the
+workload; the analytic packing experiment was not retained after inconclusive
+whole-loop results. Pressure MueLu and tighter NOX initial forcing have bounded
+comparison evidence, without changing final physical gates or implying new
+defaults. Full transients, application accuracy, device behavior and production
+scaling remain separate qualification work.
+
+Keep campaign manifests, raw logs/XML, profiles and timing tables in local
+`build/verification/` or `build/gcc/verification/` artifacts. Maintained design,
+modeling and roadmap documents own the supported contracts and remaining gates.

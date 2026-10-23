@@ -97,7 +97,7 @@ Install callbacks before free-surface liquid-mass initialization. Do not
 also install `MaterialFeedbackModel` modes that overwrite their density or
 viscosity. These are pure-liquid values; void fractions, noncondensable gas,
 and dissolved solutes need their own models. Saturated steam density is not
-the density of reacting hydrogen/oxygen bubbles.
+the density of noncondensable reaction-product bubbles.
 
 The current `planarALE` solver requires built-in
 `BoussinesqTemperatureOnly` feedback and rejects custom material callbacks.

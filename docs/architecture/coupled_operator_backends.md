@@ -151,92 +151,47 @@ qualified. Application shape/map errors require the ordinary collective MPI
 calling contract. Scalar face-based diffusion/upwind/BE, independent diagonal
 preconditioning and scalar unsupported-combination rejection are unfinished.
 
-## Delivery and validation record
+## Numerical consistency and qualification
 
-Implemented phases 1 and 2 as a coupled-only subset: true composite application,
-conditional monolithic allocation, ownership-preserving numeric reuse,
-streamed products/direct accumulation into final matrices, typed options,
-regressions, and opt-in benchmark. Scalar phase 3 is unfinished. Detailed
-allocation accounting and performance gates listed above remain unqualified;
-this is not completion of the entire original request.
+The coupled-only implementation covers all four combinations of assembled or
+block-composite operators and cached or streamed products. Assembled/cached
+remains the default. Scalar face-based operators, independent diagonal
+preconditioning and broader device/performance work remain separate.
 
-Changed implementation surfaces:
+MueLu uses `RP` numeric refresh: retain transfers and rebuild coarse numerical
+coefficients and smoothers when coefficients change. `full` reuse can retain
+stale numeric state and is not equivalent. Live retained operator generations
+remain immutable. `NumericUpdatesMatchFreshAssemblyAtScale` compares updated
+operator, RHS, stabilization and Schur actions with fresh assembly across four
+generations and every backend/workspace combination in serial/MPI.
 
-| Files | Change |
-| --- | --- |
-| `src/solvers/CoupledBlockOperator.hh` | New block application, map/view/alias contract and scratch accounting |
-| `src/solvers/CoupledPressureVelocitySolver.hh`, `.tcc` | Optional matrix/true operator, allocation branch, collective generation ownership, streamed assembly and weak storage observers |
-| `src/FVM/NumericAssemblyLease.hh`, `src/equations/IncompressibleMomentumEquation.hh`, `.tcc` | Protect retained momentum generations without normal-path deep copies |
-| `src/equations/CoupledOperatorBackend.hh`, `TimeStepperOptions.hh` | Explicit typed operator/workspace selection and strict string adapters |
-| `src/solvers/unitTests/testCoupledBlockOperator.cc`, `testBoussinesqSolver.cc`, `testBoussinesqPlanarALE.cc`, `CMakeLists.txt` | Operator, native/legacy, retained-generation, streamed, MPI and ALE tests |
-| `src/benchmarks/coupled_operator_memory.cc`, `summarize_coupled_memory.py`, `CMakeLists.txt` | Opt-in separate-process JSONL benchmark and comparison tool |
-| `README.md`, `TODO.md`, `MAINTENANCE.md`, this document and `docs/benchmarks/coupled_operator/` | Architecture, remaining scope, exact measurements and captured raw evidence |
+Timesteppers pass explicit continuity targets, including zero, so coupled
+assembly and reconstructed flux use the same distance interpolation. Historical
+direct-call arithmetic overloads keep their contract. Stabilization uses the
+selected boundary-aware least-squares or Gauss-linear gradient; changing that
+scheme invalidates setup. Unknown or rank-divergent selections reject before
+assembly. Independent pressure-row actions must agree with reconstructed flux
+balances under nonzero boundary data and physical density.
 
-The following commands were executed from the repository root. The existing
-preset was verified against CMakePresets.json and the live cache; CMake's
-source discovery reconfigured the build after new tests were added.
+`testCoupledSolverBackends` covers base, isothermal, kinematic and physical
+Boussinesq paths over four timesteps, changing timestep and switching backend.
+It compares fields, physical pressure, flux, temperature and independent cell
+continuity. Native Cartesian/cylindrical, periodic, partitioned unstructured,
+legacy and compact composite paths have serial/MPI coverage. Direct
+semi-structured handles retain their serial-only limit. Composite cases include
+coarse/fine, translated periodic, mixed HEX/prism and common affine axial ALE.
+ALE gates retain GCL, mass/volume closure, exact normal mesh flux and rollback.
+Existing turbulence/gas coupling tests retain their physical budget checks.
 
-```sh
-cmake --build --preset GCC-Debug --target \
-  testCoupledBlockOperator testCoupledPressureVelocitySolver \
-  testBoussinesqPlanarALE testBoussinesqSolver testTurbulentBoussinesqSolver \
-  testFluidSolver testIncompressibleIsothermalSolver coupled_operator_memory -j 4
+Composite production solves must build no monolithic matrix. Streamed setup
+retains at most one application-owned product, then releases it; this counter
+does not include Trilinos internals. Multivector checks cover aliasing,
+alpha/beta, selected views, maps, noncontiguous/reversed ownership and transpose
+rejection. These are CPU numerical regressions, not experimental physical,
+accelerator, arbitrary-condition or million-cell qualification.
 
-# After extending the existing legacy/ALE cases and benchmark metadata:
-cmake --build --preset GCC-Debug --target testBoussinesqSolver -j 4
-cmake --build --preset GCC-Debug --target testBoussinesqPlanarALE -j 4
-cmake --build --preset GCC-Debug --target coupled_operator_memory -j 4
-
-ctest --preset GCC-Debug -R '^(CoupledBlockOperatorTest\.|Native/CompositeMeshTest\.|CoupledPressureVelocitySolverTest\.|BoussinesqPlanarALETest.CompositeCoupledHeatingAndRollback|simplefluid_elf_export_boundary$)' --output-on-failure
-
-ctest --preset GCC-Debug -R '^(FluidSolverTest\.|BoussinesqSolverTest\.|IncompressibleIsothermalSolverTest\.|TurbulentBoussinesqSolverTest\.|BoussinesqPlanarALETest\.|PlanarALECouplingModes/|CoupledBlockOperatorTest\.|Native/CompositeMeshTest\.|CoupledPressureVelocitySolverTest\.|simplefluid_elf_export_boundary$)' --output-on-failure
-
-ctest --preset GCC-Debug -R '^(CoupledBlockOperator_[24]procs|BoussinesqPlanarALE_2procs|NativePhysicalBoussinesq_2procs|NativeUnstructuredPhysicalBoussinesq_2procs|NativeUnstructuredCoupledFlow_2procs|CoupledKrylovDirichletContinuity_2procs)$' --output-on-failure
-
-git diff --check
-```
-
-Builds and whitespace check passed. The focused gate passed 16/16 (including
-ELF exports); the final broader gate passed **109**, with **5 skipped** out of
-114 registrations, in 20.34 s. Skips were the rank-required PVTU test, three
-native distributed physical cases and the combined two-rank turbulence/gas
-case. They are not counted as passes. The selected MPI gate passed **7/7
-registrations** in 5.25 s with host networking; the MPI executables retain
-applicable serial-only skips. New composite/streamed tests ran at both two
-and four ranks. The full repository suite, all MPI registrations, accelerator
-runs and large benchmarks were not run.
-
-The first restricted-sandbox MPI launch exited 213 before tests started;
-host-network reruns succeeded. An exploratory broad regex also selected a
-stale turbulence executable after the options-layout change; rebuilding it
-resolved its invalid-backend diagnostic, and its final tests passed. Initial
-compilation errors were fixed before these final gates. None of these earlier
-attempts is counted as successful validation.
-
-All 12 final successful benchmark processes completed (four backend/policy
-combinations at two serial sizes and one two-rank size). Exact measured bytes,
-setup/apply/solve times, iteration sequences, RSS caveats, and the failed
-512-cell pilot are in the [measurement report](../benchmarks/coupled_operator/README.md).
-No commits or pushes were made; the checkout's initial worktree was clean.
-
-## Numeric preconditioner refresh correction
-
-The post-delivery 512-cell regression compares each updated true operator,
-RHS, C and Schur action with a fresh assembly before comparing solves. It
-reproduced a failure at the third generation: cached solve exhausted 400
-iterations while a fresh solve converged in 56, despite equivalent matrices.
-The linked Trilinos 17.2 `ParameterListInterpreter` keeps coarse matrices and
-smoothers under `reuse: type = full`; this is not a numeric refresh policy.
-
-Coupled MueLu now uses `RP`: retain transfer operators while refreshing coarse
-coefficients and smoother state. Momentum Jacobi, Schur construction, physical
-equations, tolerance, and Krylov settings remain unchanged. The benchmark
-metadata names this policy explicitly. The original `full`-reuse measurements
-above and in the benchmark report are historical, not results for this fix.
-
-`NumericUpdatesMatchFreshAssemblyAtScale` exercises four generations for all
-four operator/workspace combinations at 512 cells. It passes in serial and on
-two/four ranks. The focused CTest gate passed 22 tests including ELF exports;
-seven selected MPI registrations passed, including physical and ALE regressions.
-The broader supported-solver/backend qualification and subsequent continuity fixes
-are recorded in [the solver validation report](coupled_solver_backend_validation.md).
+Use focused `testCoupledBlockOperator`, `testCoupledPressureVelocitySolver`,
+`testCoupledSolverBackends` and affected solver/ALE registrations. The
+[measurement workflow](../benchmarks/coupled_operator/README.md) compares
+separate processes with residual and source/runtime gates. Reduced CRS payload
+does not establish an equal RSS reduction or a universal apply-time advantage.
