@@ -277,6 +277,11 @@ TEST(MeshHandleTest, SemiStructuredConstructionPreservesDefaultDistributedOwners
     const Handle handle(mesh);
     EXPECT_EQ(handle.num_owned_cells(), 1U);
     EXPECT_EQ(handle.cell_global_id(0), communicator->getRank());
+    EXPECT_EQ(handle.cell_geometry_global_id(0), communicator->getRank());
+    EXPECT_TRUE(handle.owned_cell_map()->isContiguous());
+    EXPECT_TRUE(handle.owned_face_map()->isContiguous());
+    EXPECT_TRUE(handle.owned_cell_map()->isOneToOne());
+    EXPECT_TRUE(handle.owned_face_map()->isOneToOne());
     EXPECT_EQ(handle.owned_cell_map()->getGlobalNumElements(), static_cast<std::size_t>(communicator->getSize()));
     EXPECT_EQ(handle.visit([](const auto& geometry) -> const void* { return &geometry; }), mesh.get());
 }
@@ -297,17 +302,20 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
     std::vector<Indexer::cell_id_t> owned_cells;
     std::vector<Indexer::face_id_t> owned_faces;
     std::vector<Indexer::node_id_t> nodes;
+    const auto original_cell_base = static_cast<Pack::global_ordinal_type>(1000 * (world->getRank() + 1));
+    const auto original_face_base = static_cast<Pack::global_ordinal_type>(2000 * (world->getRank() + 1));
+    const auto original_node_base = static_cast<Pack::global_ordinal_type>(3000 * (world->getRank() + 1));
     for (size_t cell = 0; cell < mesh->num_cells(); ++cell)
     {
-        owned_cells.push_back(mesh->cell_id(cell));
+        owned_cells.push_back(static_cast<Indexer::cell_id_t>(original_cell_base + cell));
     }
     for (size_t face = 0; face < mesh->num_faces(); ++face)
     {
-        owned_faces.push_back(mesh->face_id(face));
+        owned_faces.push_back(static_cast<Indexer::face_id_t>(original_face_base + face));
     }
     for (size_t node = 0; node < mesh->num_nodes(); ++node)
     {
-        nodes.push_back(mesh->node_id(node));
+        nodes.push_back(static_cast<Indexer::node_id_t>(original_node_base + node));
     }
 
     const auto partitioned = std::make_shared<PartitionedUnstructured>(
@@ -326,6 +334,27 @@ TEST(MeshHandleTest, PreservesPartitionedMeshCommunicator)
     EXPECT_EQ(handle.overlap_cell_map()->getComm()->getSize(), 1);
     EXPECT_EQ(handle.owned_face_map()->getComm()->getSize(), 1);
     EXPECT_EQ(handle.overlap_face_map()->getComm()->getSize(), 1);
+    const auto& original = partitioned->indexer();
+    const auto& exposed = handle.indexer();
+    for (std::size_t row = 0; row < handle.num_local_cells(); ++row)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(row);
+        const auto global = static_cast<Pack::global_ordinal_type>(original.cell_global_id(lid));
+        EXPECT_EQ(global, original_cell_base + row);
+        EXPECT_EQ(handle.cell_global_id(lid), global);
+        EXPECT_EQ(handle.cell_geometry_global_id(lid), global);
+        EXPECT_EQ(exposed.cell_global_id(lid), global);
+        EXPECT_NE(global, static_cast<Pack::global_ordinal_type>(row));
+    }
+    for (std::size_t row = 0; row < handle.num_faces(); ++row)
+    {
+        const auto lid = static_cast<Pack::local_ordinal_type>(row);
+        const auto global = static_cast<Pack::global_ordinal_type>(original.face_global_id(lid));
+        EXPECT_EQ(global, original_face_base + row);
+        EXPECT_EQ(handle.face_global_id(lid), global);
+        EXPECT_EQ(handle.face_geometry_global_id(lid), global);
+        EXPECT_EQ(exposed.face_global_id(lid), global);
+    }
 }
 
 /**

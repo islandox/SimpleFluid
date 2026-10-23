@@ -143,8 +143,8 @@ verification items below mean the foundation as a whole is not yet complete.
         `MeshPartitioner`/`PartitionedMesh` in MPI
   - [x] Support native `SemiStructuredXY_Z` serial/MPI ownership with Zoltan2
         XY graph partitions crossed with Z slabs, `MeshReorderingFactory` XY
-        ordering, adjacency ghosts, canonical face maps and axial ALE, including
-        empty owners
+        ordering, compact decomposed XY/Z topology, contiguous algebraic cell/face
+        maps, adjacency ghosts and axial ALE, including empty owners
         (see [scope and checks](docs/semi_structured_parallel.md))
 - [x] I/O and utilities
   - [x] VTU output for ParaView

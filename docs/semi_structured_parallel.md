@@ -18,7 +18,7 @@ distribution.allow_empty_partitions = true;
 auto mesh = std::make_shared<Handle>(geometry, distribution);
 ```
 
-The canonical cell ordinal stays `xy_cell + cells_per_layer * z_layer`.
+The source topology cell ordinal stays `xy_cell + cells_per_layer * z_layer`.
 Ownership combines a Zoltan2/ParMETIS partition of the base-cell XY adjacency
 graph with balanced contiguous Z slabs. Only XY edges shared by base cells
 enter that graph. The same XY assignment is reused in every slab, with
@@ -53,10 +53,11 @@ and applies deterministic reverse Cuthill-McKee ordering within each partition's
 induced graph. Every Z layer shares that base topology and permutation; there
 is no separate reordering per slab or copied topology per layer. Local owned
 cell maps follow the shared XY order within each Z layer, and ghost maps follow
-Z-layer order then the same XY order. Reordering occurs
-before fields or caches bind to the handle. It changes local cell order only:
-canonical cell/face IDs, physical geometry, rank ownership, and owner-oriented
-flux signs remain unchanged. The one-rank view retains its identity ordering.
+Z-layer order then the same XY order. Reordering occurs before fields or caches
+bind to the handle. It changes local cell order only:
+source topology cell/face indices, physical geometry, rank ownership, and
+owner/neighbor incidence remain unchanged. Algebraic GIDs are assigned after
+this local ordering is established. The one-rank view retains its identity ordering.
 
 Halos expand actual cell adjacency by the requested positive number of layers.
 Owned cells precede ghosts. A face is owned by the rank containing its canonical
@@ -70,18 +71,44 @@ collectively before maps are created. A null or inconsistent descriptor rejects
 collectively. Empty owners retain every global boundary ID/name with an empty
 local face vector.
 
-Compact XY topology and Z coordinates are replicated. Expanded cell/face/node
-maps scale with the local partition and halo. Large halo depths can intentionally
-make most of the domain visible on a rank; no global expanded incidence table
-is created as part of ordinary distribution.
+`DecomposedSemiStructuredTopology` describes the local partition with one XY
+layout and Z bands. Inspect it through
+`mesh->decomposed_semi_structured_topology()`; the observer is null for the
+serial identity view and other mesh families. Radius selections reuse the same XY layout across the bands;
+side and axial faces retain their separate extrusion orientations. Exact halos
+satisfy `XY graph distance + Z slab distance <= ghost_layers`. This excludes
+corner cells that a full product of independent XY and Z halos would add.
 
-## Fields, traversal and output
+The container translates local cells, faces and nodes to source XY/Z indices
+and back for geometry lookup. It retains compact base selections and band
+descriptors, without a persistent expanded 3D geometry-ID table. The supplied
+geometry object remains shared, so geometry epochs and axial motion still refer
+to that original object. The global compact XY topology and Z coordinates remain
+replicated; local fields and algebraic maps scale with the partition and halo.
 
-Owned cell and face local IDs are dense prefixes, with ghosts following them.
-Global IDs retain canonical geometry numbering, so distributed owned Tpetra
-maps generally use noncontiguous GID lists; partition reordering does not
-provide rank-contiguous algebraic numbering. No operator-performance claim is
-made by the correctness tests below.
+## Fields, numbering and output
+
+Owned cells and faces have dense local IDs. Their algebraic GIDs are assigned
+as `rank_offset + local_id`, with separate offsets for cells and faces. Owned
+Tpetra maps use the contiguous constructor. Ghost maps follow those owner-assigned
+GIDs and may be noncontiguous. Owner lookup uses a temporary distributed topology-ID
+directory and integer IDs, without a replicated expanded 3D ownership table.
+
+`cell_global_id()` and `face_global_id()` return algebraic IDs;
+`cell_geometry_global_id()` and `face_geometry_global_id()` return the source
+topology IDs. The optional compatibility `indexer()` describes topology IDs.
+Source owner/neighbor relations and oriented normals define flux orientation;
+renumbering algebraic IDs does not alter those relations.
+
+The construction-time XY ordering precedes algebraic numbering. A later explicit
+`MeshReorderingFactory::selected_cells_first()` operation preserves existing
+algebraic IDs while changing local row order, so its resulting cell map may lose
+contiguity. That opt-in operation retains its local permutation separately from
+the compact decomposition. The topology observer retains construction order;
+the handle's geometry accessors apply any later row permutation. Construct
+fields and caches after finalizing order.
+The tests check map contiguity and numerical correctness; they do not measure
+operator speedup.
 
 Fields bind to the native owned/overlap maps and synchronize ghosts through the
 usual Tpetra imports. Face fields use the same canonical ownership as geometry.
@@ -114,7 +141,8 @@ Build the geometry, operator, flow and ALE fixtures with a compatible Debug tree
 ```sh
 cmake --build --preset GCC-Debug --parallel 4 --target \
   testSemiStructuredDistributed testSemiStructuredDistributedOperators \
-  testMeshHandle testMeshReorderingFactory testPlanarALEMeshMotion \
+  testMeshHandle testMeshReorderingFactory testDecomposedSemiStructuredTopology \
+  testPlanarALEMeshMotion \
   testCoupledSolverBackends testBoussinesqPlanarALE testVolumeContinuityModel
 ctest --preset GCC-Debug -N -R '^SemiStructured.*_[24]procs$'
 ctest --preset GCC-Debug -R '^SemiStructured.*_[24]procs$' --output-on-failure
@@ -122,7 +150,8 @@ ctest --preset GCC-Debug -R '^SemiStructured.*_[24]procs$' --output-on-failure
 
 The registered two- and four-rank cases exercise canonical ownership, one/two
 halo layers, skew polygons, nonuniform Z, explicit XY-only/Z-only/hybrid factors,
-adversarial base-cell numbering, factory ordering, a single-layer XY partition, field
+adversarial base-cell numbering, compact topology lookup, contiguous algebraic
+maps, factory ordering, a single-layer XY partition, field
 imports, analytic gradient/diffusion and conservative transport, coupled flow,
 and ALE failure/retry. One-cell fixtures assert `ranks - 1` empty owners; the
 two-cell four-rank ALE fixture asserts two empty owners. These cases do not skip

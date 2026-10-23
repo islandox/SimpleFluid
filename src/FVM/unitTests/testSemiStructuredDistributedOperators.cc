@@ -19,6 +19,7 @@
 #include <memory>
 #include <numeric>
 #include <span>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
@@ -87,6 +88,8 @@ struct Fixture
     std::vector<Polygon> base;
     SP<Native> geometry;
     SP<const Handle> mesh;
+    std::vector<Global> algebraic_cell_geometry, algebraic_face_geometry;
+    std::vector<Global> geometry_cell_algebraic, geometry_face_algebraic;
 
     explicit Fixture(
         bool tiny = false, bool single_layer = false, Layout layout = Layout::Automatic, bool reordered = false)
@@ -172,6 +175,43 @@ struct Fixture
             distribution.z_partitions = ranks / 2;
         }
         mesh = std::make_shared<Handle>(geometry, distribution);
+        const auto comm = mesh->owned_cell_map()->getComm();
+        const auto mapping = [&](bool cells)
+        {
+            const auto total = cells ? geometry->num_cells() : geometry->num_faces();
+            const auto owned = cells ? mesh->num_owned_cells() : mesh->num_owned_faces();
+            const auto map = cells ? mesh->owned_cell_map() : mesh->owned_face_map();
+            std::vector<Global> local(total, -1), result(total, -1);
+            int valid = 1, all_valid = 0;
+            for (std::size_t i = 0; i < owned; ++i)
+            {
+                const auto algebraic = map->getGlobalElement(Local(i));
+                const auto canonical =
+                    cells ? mesh->cell_geometry_global_id(Local(i)) : mesh->face_geometry_global_id(Local(i));
+                if (algebraic < 0 || std::size_t(algebraic) >= total || canonical < 0 ||
+                    std::size_t(canonical) >= total)
+                {
+                    valid = 0;
+                    continue;
+                }
+                local[std::size_t(algebraic)] = canonical;
+            }
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &valid, &all_valid);
+            if (!all_valid)
+                throw std::runtime_error("Fixture encountered an invalid algebraic/canonical ID.");
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, int(total), local.data(), result.data());
+            if (std::find(result.begin(), result.end(), Global{-1}) != result.end())
+                throw std::runtime_error("Fixture algebraic ownership does not cover every canonical entity.");
+            return result;
+        };
+        algebraic_cell_geometry = mapping(true);
+        algebraic_face_geometry = mapping(false);
+        geometry_cell_algebraic.resize(algebraic_cell_geometry.size());
+        geometry_face_algebraic.resize(algebraic_face_geometry.size());
+        for (std::size_t i = 0; i < algebraic_cell_geometry.size(); ++i)
+            geometry_cell_algebraic[std::size_t(algebraic_cell_geometry[i])] = Global(i);
+        for (std::size_t i = 0; i < algebraic_face_geometry.size(); ++i)
+            geometry_face_algebraic[std::size_t(algebraic_face_geometry[i])] = Global(i);
     }
 
     Vec center(Global cell) const
@@ -259,19 +299,74 @@ void expect_native(const Fixture& fixture)
 void initialize(const Fixture& fixture, Scalar& scalar)
 {
     for (std::size_t c = 0; c < fixture.mesh->num_owned_cells(); ++c)
-        scalar.set_owned_value(Local(c), analytic(fixture.center(fixture.mesh->cell_global_id(Local(c)))));
+        scalar.set_owned_value(Local(c), analytic(fixture.center(fixture.mesh->cell_geometry_global_id(Local(c)))));
     scalar.sync_ghosts();
 }
-auto matrix_row(const Pack::matrix_type& matrix, Local row)
+auto matrix_row(const Fixture& fixture, const Pack::matrix_type& matrix, Local row)
 {
     Pack::matrix_type::local_inds_host_view_type columns;
     Pack::matrix_type::values_host_view_type values;
     matrix.getLocalRowView(row, columns, values);
     std::map<Global, double> result;
     for (std::size_t i = 0; i < columns.size(); ++i)
-        result[matrix.getColMap()->getGlobalElement(columns[i])] += values[i];
+        result[fixture.algebraic_cell_geometry.at(std::size_t(matrix.getColMap()->getGlobalElement(columns[i])))] +=
+            values[i];
     return result;
 }
+void expect_algebraic_maps(const Fixture& fixture)
+{
+    const auto& mesh = *fixture.mesh;
+    const auto comm = mesh.owned_cell_map()->getComm();
+    const int rank = comm->getRank(), ranks = comm->getSize();
+    std::vector<Global> local(2 * ranks), counts(2 * ranks);
+    local[2 * rank] = Global(mesh.num_owned_cells());
+    local[2 * rank + 1] = Global(mesh.num_owned_faces());
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), counts.data());
+    Global cell_offset = 0, face_offset = 0;
+    for (int r = 0; r < rank; ++r)
+    {
+        cell_offset += counts[2 * r];
+        face_offset += counts[2 * r + 1];
+    }
+    EXPECT_TRUE(mesh.owned_cell_map()->isContiguous());
+    EXPECT_TRUE(mesh.owned_face_map()->isContiguous());
+    EXPECT_TRUE(mesh.owned_cell_map()->isOneToOne());
+    EXPECT_TRUE(mesh.owned_face_map()->isOneToOne());
+    EXPECT_EQ(mesh.owned_cell_map()->getGlobalNumElements(), fixture.geometry->num_cells());
+    EXPECT_EQ(mesh.owned_face_map()->getGlobalNumElements(), fixture.geometry->num_faces());
+    auto canonical_cells = fixture.algebraic_cell_geometry, canonical_faces = fixture.algebraic_face_geometry;
+    std::ranges::sort(canonical_cells);
+    std::ranges::sort(canonical_faces);
+    for (std::size_t i = 0; i < canonical_cells.size(); ++i)
+        EXPECT_EQ(canonical_cells[i], Global(i));
+    for (std::size_t i = 0; i < canonical_faces.size(); ++i)
+        EXPECT_EQ(canonical_faces[i], Global(i));
+    for (std::size_t i = 0; i < mesh.num_local_cells(); ++i)
+    {
+        const Global algebraic = mesh.overlap_cell_map()->getGlobalElement(Local(i));
+        EXPECT_EQ(mesh.cell_global_id(Local(i)), algebraic);
+        EXPECT_EQ(fixture.algebraic_cell_geometry.at(std::size_t(algebraic)), mesh.cell_geometry_global_id(Local(i)));
+        EXPECT_EQ(mesh.overlap_cell_map()->getLocalElement(algebraic), Local(i));
+        if (i < mesh.num_owned_cells())
+        {
+            EXPECT_EQ(algebraic, cell_offset + Global(i));
+            EXPECT_EQ(mesh.owned_cell_map()->getGlobalElement(Local(i)), algebraic);
+        }
+    }
+    for (std::size_t i = 0; i < mesh.num_faces(); ++i)
+    {
+        const Global algebraic = mesh.overlap_face_map()->getGlobalElement(Local(i));
+        EXPECT_EQ(mesh.face_global_id(Local(i)), algebraic);
+        EXPECT_EQ(fixture.algebraic_face_geometry.at(std::size_t(algebraic)), mesh.face_geometry_global_id(Local(i)));
+        EXPECT_EQ(mesh.overlap_face_map()->getLocalElement(algebraic), Local(i));
+        if (i < mesh.num_owned_faces())
+        {
+            EXPECT_EQ(algebraic, face_offset + Global(i));
+            EXPECT_EQ(mesh.owned_face_map()->getGlobalElement(Local(i)), algebraic);
+        }
+    }
+}
+
 std::vector<int> owner_map(const Fixture& fixture)
 {
     const auto comm = Tpetra::getDefaultComm();
@@ -279,7 +374,7 @@ std::vector<int> owner_map(const Fixture& fixture)
     std::vector<int> local(total, -1), owners(total), local_count(total), counts(total);
     for (std::size_t cell = 0; cell < fixture.mesh->num_owned_cells(); ++cell)
     {
-        const auto gid = fixture.mesh->cell_global_id(Local(cell));
+        const auto gid = fixture.mesh->cell_geometry_global_id(Local(cell));
         local[std::size_t(gid)] = comm->getRank();
         local_count[std::size_t(gid)] = 1;
     }
@@ -372,24 +467,44 @@ TEST(SemiStructuredDistributedOperatorsTest, NativeCellVectorAndFaceGhostImports
                      << "layout=" << int(scenario.layout) << " reordered=" << scenario.reordered << " tiny=" << tiny);
         const Fixture fixture(tiny, false, scenario.layout, scenario.reordered);
         const auto& mesh = *fixture.mesh;
+        expect_algebraic_maps(fixture);
+        Scalar cell_ids(fixture.mesh, -91, "algebraic_cell_ids");
+        Flux face_ids(fixture.mesh, -91, "algebraic_face_ids");
+        for (std::size_t i = 0; i < mesh.num_owned_cells(); ++i)
+            cell_ids.set_owned_value(Local(i), double(mesh.owned_cell_map()->getGlobalElement(Local(i))) + .5);
+        for (std::size_t i = 0; i < mesh.num_owned_faces(); ++i)
+            face_ids.set_owned_value(Local(i), double(mesh.owned_face_map()->getGlobalElement(Local(i))) + .25);
+        cell_ids.sync_ghosts();
+        face_ids.sync_ghosts();
+        EXPECT_EQ(cell_ids.owned_read_view().extent(0), mesh.num_owned_cells());
+        EXPECT_EQ(cell_ids.local_read_view().extent(0), mesh.num_local_cells());
+        EXPECT_EQ(face_ids.owned_read_view().extent(0), mesh.num_owned_faces());
+        EXPECT_EQ(face_ids.local_read_view().extent(0), mesh.num_faces());
+        for (std::size_t i = 0; i < mesh.num_local_cells(); ++i)
+            EXPECT_DOUBLE_EQ(
+                cell_ids.local_value(Local(i)), double(mesh.overlap_cell_map()->getGlobalElement(Local(i))) + .5);
+        for (std::size_t i = 0; i < mesh.num_faces(); ++i)
+            EXPECT_DOUBLE_EQ(
+                face_ids.local_value(Local(i)), double(mesh.overlap_face_map()->getGlobalElement(Local(i))) + .25);
         Scalar scalar(fixture.mesh, -91, "analytic");
         Vector vector(fixture.mesh, Vec{-91, -91, -91}, "analytic_vector");
         Flux flux(fixture.mesh, -91, "canonical_flux");
         for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
         {
-            const auto point = fixture.center(mesh.cell_global_id(Local(c)));
+            const auto point = fixture.center(mesh.cell_geometry_global_id(Local(c)));
             scalar.set_owned_value(Local(c), analytic(point));
             vector.set_owned_value(Local(c), analytic_vector(point));
         }
         for (std::size_t f = 0; f < mesh.num_owned_faces(); ++f)
-            flux.set_owned_value(Local(f), dot(fixture.face(mesh.face_global_id(Local(f))).area_vector, {.2, -.1, .3}));
+            flux.set_owned_value(
+                Local(f), dot(fixture.face(mesh.face_geometry_global_id(Local(f))).area_vector, {.2, -.1, .3}));
         scalar.sync_ghosts();
         vector.sync_ghosts();
         flux.sync_ghosts();
         double local_ghosts = 0;
         for (std::size_t c = 0; c < mesh.num_local_cells(); ++c)
         {
-            const auto canonical = mesh.cell_global_id(Local(c));
+            const auto canonical = mesh.cell_geometry_global_id(Local(c));
             expect_vector(mesh.cell_centroid(Local(c)), fixture.center(canonical));
             EXPECT_NEAR(mesh.cell_volume(Local(c)), fixture.volume(canonical), 2e-13);
             EXPECT_NEAR(scalar.local_value(Local(c)), analytic(fixture.center(canonical)), 2e-13);
@@ -398,7 +513,7 @@ TEST(SemiStructuredDistributedOperatorsTest, NativeCellVectorAndFaceGhostImports
         }
         for (std::size_t f = 0; f < mesh.num_faces(); ++f)
         {
-            const auto raw = fixture.face(mesh.face_global_id(Local(f)));
+            const auto raw = fixture.face(mesh.face_geometry_global_id(Local(f)));
             expect_vector(mesh.face_centroid(Local(f)), raw.center);
             expect_vector(mesh.face_area_vector(Local(f)), raw.area_vector);
             EXPECT_NEAR(flux.local_value(Local(f)), dot(raw.area_vector, {.2, -.1, .3}), 2e-13);
@@ -407,8 +522,8 @@ TEST(SemiStructuredDistributedOperatorsTest, NativeCellVectorAndFaceGhostImports
             scalar.set_owned_value(Local(c), scalar.value(Local(c)) + 3);
         scalar.sync_ghosts();
         for (std::size_t c = 0; c < mesh.num_local_cells(); ++c)
-            EXPECT_NEAR(
-                scalar.local_value(Local(c)), 3 + analytic(fixture.center(mesh.cell_global_id(Local(c)))), 2e-13);
+            EXPECT_NEAR(scalar.local_value(Local(c)),
+                3 + analytic(fixture.center(mesh.cell_geometry_global_id(Local(c)))), 2e-13);
         EXPECT_EQ(global_sum(double(mesh.num_owned_cells())), fixture.geometry->num_cells());
         EXPECT_EQ(global_sum(double(mesh.num_owned_faces())), fixture.geometry->num_faces());
         if (!tiny && Tpetra::getDefaultComm()->getSize() > 1)
@@ -449,6 +564,7 @@ TEST(SemiStructuredDistributedOperatorsTest, MappedTraverseAndDirectBatchesKeepF
                                           << " tiny=" << tiny << " single=" << single_layer);
         const Fixture fixture(tiny, single_layer, scenario.layout, scenario.reordered);
         const auto& mesh = *fixture.mesh;
+        expect_algebraic_maps(fixture);
         const auto plan = make_mesh_traverse_plan(mesh, MeshTraverseEntities::AllWithCellFaces);
         const auto traversal = plan.acquire();
         if (Tpetra::getDefaultComm()->getSize() > 1)
@@ -461,8 +577,8 @@ TEST(SemiStructuredDistributedOperatorsTest, MappedTraverseAndDirectBatchesKeepF
             [&](const auto& cell)
             {
                 cells.push_back(cell.id());
-                EXPECT_NEAR(cell.volume(), fixture.volume(mesh.cell_global_id(cell.id())), 2e-13);
-                expect_vector(cell.centroid(), fixture.center(mesh.cell_global_id(cell.id())));
+                EXPECT_NEAR(cell.volume(), fixture.volume(mesh.cell_geometry_global_id(cell.id())), 2e-13);
+                expect_vector(cell.centroid(), fixture.center(mesh.cell_geometry_global_id(cell.id())));
             });
         traversal.cells().all().local().apply([&](const auto& cell) { local_cells.push_back(cell.id()); });
         traversal.faces().all().local().apply([&](const auto& face) { local_faces.push_back(face.id()); });
@@ -471,15 +587,15 @@ TEST(SemiStructuredDistributedOperatorsTest, MappedTraverseAndDirectBatchesKeepF
             [&](const auto& face)
             {
                 faces.push_back(face.id());
-                const auto raw = fixture.face(mesh.face_global_id(face.id()));
+                const auto raw = fixture.face(mesh.face_geometry_global_id(face.id()));
                 expect_vector(face.centroid(), raw.center);
                 expect_vector(face.normal() * face.area(), raw.area_vector);
                 ASSERT_NE(face.owner(), Handle::invalid_local_id());
-                EXPECT_EQ(mesh.cell_global_id(face.owner()), raw.owner);
+                EXPECT_EQ(mesh.cell_geometry_global_id(face.owner()), raw.owner);
                 if constexpr (std::remove_cvref_t<decltype(face)>::is_interior)
                 {
                     ASSERT_NE(face.neighbor(), Handle::invalid_local_id());
-                    EXPECT_EQ(mesh.cell_global_id(face.neighbor()), raw.neighbor);
+                    EXPECT_EQ(mesh.cell_geometry_global_id(face.neighbor()), raw.neighbor);
                     if (!mesh.is_owned_cell(face.neighbor()))
                     {
                         ++partition_faces;
@@ -504,19 +620,19 @@ TEST(SemiStructuredDistributedOperatorsTest, MappedTraverseAndDirectBatchesKeepF
         std::vector<double> metrics;
         for (const auto cell : cells)
         {
-            metrics.push_back(fixture.volume(mesh.cell_global_id(cell)));
+            metrics.push_back(fixture.volume(mesh.cell_geometry_global_id(cell)));
             std::vector<Global> actual;
             traversal.cell_faces(cell).all().apply(
                 [&](const auto& face)
                 {
-                    const auto canonical = mesh.face_global_id(face.id());
+                    const auto canonical = mesh.face_geometry_global_id(face.id());
                     actual.push_back(canonical);
                     const auto raw = fixture.face(canonical);
-                    const int sign = raw.owner == mesh.cell_global_id(cell) ? 1 : -1;
+                    const int sign = raw.owner == mesh.cell_geometry_global_id(cell) ? 1 : -1;
                     EXPECT_EQ(face.orientation(), sign);
                     expect_vector(face.outward_normal() * face.area(), raw.area_vector * sign);
                 });
-            EXPECT_EQ(actual, fixture.cell_faces(mesh.cell_global_id(cell)));
+            EXPECT_EQ(actual, fixture.cell_faces(mesh.cell_geometry_global_id(cell)));
         }
         // A grouped position deliberately differs from its field ordinal.
         // Direct batches must retain the explicit pairing in that order.
@@ -527,7 +643,7 @@ TEST(SemiStructuredDistributedOperatorsTest, MappedTraverseAndDirectBatchesKeepF
         direct.apply(
             [&](Local cell, double volume)
             {
-                EXPECT_NEAR(volume, fixture.volume(mesh.cell_global_id(cell)), 2e-13);
+                EXPECT_NEAR(volume, fixture.volume(mesh.cell_geometry_global_id(cell)), 2e-13);
                 direct_volume += volume;
             });
         EXPECT_EQ(direct.size(), mesh.num_owned_cells());
@@ -587,7 +703,7 @@ TEST(SemiStructuredDistributedOperatorsTest, LinearGradientAndNonorthogonalDiffu
         auto boundary_value = [&](int batch, std::size_t index)
         {
             const auto local = mesh.boundary_face_batch(batch).face_lids.at(index);
-            return analytic(fixture.face(mesh.face_global_id(local)).center);
+            return analytic(fixture.face(mesh.face_geometry_global_id(local)).center);
         };
         auto boundary = [&](int batch, std::size_t index)
         { return BoundaryCondition{BoundaryConditionType::Dirichlet, boundary_value(batch, index)}; };
@@ -621,7 +737,7 @@ TEST(SemiStructuredDistributedOperatorsTest, LinearGradientAndNonorthogonalDiffu
             for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
             {
                 double action = 0;
-                for (const auto [column, value] : matrix_row(*system.matrix, Local(c)))
+                for (const auto [column, value] : matrix_row(fixture, *system.matrix, Local(c)))
                     action += value * analytic(fixture.center(column));
                 EXPECT_NEAR(action - rhs[c], 0, 2e-10);
             }
@@ -633,7 +749,7 @@ TEST(SemiStructuredDistributedOperatorsTest, LinearGradientAndNonorthogonalDiffu
             ASSERT_TRUE(solver.solve(system.matrix, *system.rhs, solution, options));
             const auto values = solution.getData();
             for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
-                EXPECT_NEAR(values[c], analytic(fixture.center(mesh.cell_global_id(Local(c)))), 2e-10);
+                EXPECT_NEAR(values[c], analytic(fixture.center(mesh.cell_geometry_global_id(Local(c)))), 2e-10);
         }
         expect_empty_owners(fixture, tiny);
         expect_native(fixture);
@@ -655,7 +771,7 @@ TEST(SemiStructuredDistributedOperatorsTest, PartitionUpwindRowsAndTransportCons
         const Vec velocity{.2, -.1, .3};
         for (std::size_t f = 0; f < mesh.num_owned_faces(); ++f)
         {
-            const auto raw = fixture.face(mesh.face_global_id(Local(f)));
+            const auto raw = fixture.face(mesh.face_geometry_global_id(Local(f)));
             flux.set_owned_value(Local(f), raw.neighbor < 0 ? 0 : dot(raw.area_vector, velocity));
         }
         flux.sync_ghosts();
@@ -665,7 +781,7 @@ TEST(SemiStructuredDistributedOperatorsTest, PartitionUpwindRowsAndTransportCons
             [](int, std::size_t) { return 0.; }, [](Local) { return 0.; });
         for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
         {
-            const Global canonical = mesh.cell_global_id(Local(c));
+            const Global canonical = mesh.cell_geometry_global_id(Local(c));
             std::map<Global, double> expected{{canonical, fixture.volume(canonical) / dt}};
             for (const auto f : fixture.cell_faces(canonical))
             {
@@ -676,7 +792,7 @@ TEST(SemiStructuredDistributedOperatorsTest, PartitionUpwindRowsAndTransportCons
                 const auto upwind = outward >= 0 ? canonical : (raw.owner == canonical ? raw.neighbor : raw.owner);
                 expected[upwind] += outward;
             }
-            const auto actual = matrix_row(*system.matrix, Local(c));
+            const auto actual = matrix_row(fixture, *system.matrix, Local(c));
             for (const auto [column, value] : actual)
                 EXPECT_NEAR(value, expected.contains(column) ? expected.at(column) : 0, 2e-12);
             for (const auto [column, value] : expected)
@@ -698,7 +814,7 @@ TEST(SemiStructuredDistributedOperatorsTest, PartitionUpwindRowsAndTransportCons
         double before = 0, after = 0, change = 0;
         for (std::size_t c = 0; c < mesh.num_owned_cells(); ++c)
         {
-            const auto canonical = mesh.cell_global_id(Local(c));
+            const auto canonical = mesh.cell_geometry_global_id(Local(c));
             before += fixture.volume(canonical) * analytic(fixture.center(canonical));
             after += fixture.volume(canonical) * values[c];
             change += fixture.volume(canonical) * std::abs(values[c] - old.value(Local(c)));

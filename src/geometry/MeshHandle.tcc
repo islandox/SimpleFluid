@@ -704,90 +704,151 @@ void MeshHandle<Pack>::initialize_semi_structured(SemiStructuredPtr mesh, Distri
         error = std::current_exception();
     }
     collective_error(error, "SemiStructuredXY_Z graph reordering failed on another rank.");
-    const size_t xy_rank = rank % xy_parts, z_rank = rank / xy_parts;
-    const size_t z_begin = layers / z_parts * z_rank + std::min(layers % z_parts, z_rank);
-    const size_t z_count = layers / z_parts + (z_rank < layers % z_parts ? 1 : 0);
-    const auto z_owner = [&](size_t layer)
-    {
-        const size_t width = layers / z_parts, remainder = layers % z_parts;
-        const size_t wide_end = (width + 1) * remainder;
-        return layer < wide_end ? layer / (width + 1) : remainder + (layer - wide_end) / width;
-    };
-
     error = {};
     try
     {
-        std::vector<size_t> owned;
-        for (size_t layer = z_begin; layer < z_begin + z_count; ++layer)
-            for (const auto cell : xy_order)
-                if (xy_owners[cell] == xy_rank)
-                    owned.push_back(cell + xy_cells * layer);
-        std::vector<size_t> ghosts, frontier = owned;
-        std::unordered_set<size_t> seen(owned.begin(), owned.end());
-        for (size_t layer = 0; layer < options.ghost_layers && !frontier.empty(); ++layer)
+        auto source = std::shared_ptr<const Meshes::SemiStructMeshTopo>(mesh, &mesh->topology());
+        d_semi_structured_topology = std::make_shared<Meshes::DecomposedSemiStructuredTopology>(
+            std::move(source), xy_owners, xy_order, rank, xy_parts, z_parts, options.ghost_layers);
+        checked_local(d_semi_structured_topology->num_local_cells());
+        checked_local(d_semi_structured_topology->num_local_faces());
+        checked_local(d_semi_structured_topology->num_local_nodes());
+        for (const auto& band : d_semi_structured_topology->cell_bands())
         {
-            std::vector<size_t> next;
-            for (const auto cell : frontier)
-                for (const auto neighbor : mesh->topology().neighbor_cells(mesh->cell_id(cell)))
-                {
-                    const auto other = mesh->cell_local_id(neighbor);
-                    if (seen.insert(other).second)
-                    {
-                        ghosts.push_back(other);
-                        next.push_back(other);
-                    }
-                }
-            frontier = std::move(next);
+            const auto cells = d_semi_structured_topology->view_source_ids(band.view);
+            d_cells_reordered = d_cells_reordered || !std::is_sorted(cells.begin(), cells.end());
         }
-        std::sort(ghosts.begin(), ghosts.end(),
-            [&](size_t first, size_t second)
-            {
-                const size_t first_layer = first / xy_cells, second_layer = second / xy_cells;
-                return first_layer != second_layer ? first_layer < second_layer
-                                                   : xy_position[first % xy_cells] < xy_position[second % xy_cells];
-            });
-        d_cells_reordered =
-            !std::is_sorted(owned.begin(), owned.end()) || !std::is_sorted(ghosts.begin(), ghosts.end());
-        initialize_cells(std::move(owned), std::move(ghosts));
-        std::unordered_set<size_t> seen_faces, seen_nodes;
-        std::vector<size_t> owned_faces, overlap_faces;
-        for (const auto geometry : d_indexer.cell_global_ids())
-        {
-            const auto cell = mesh->cell_id(static_cast<size_t>(geometry));
-            for (const auto face : mesh->cell_faces(cell))
-            {
-                const auto global = mesh->face_local_id(face);
-                if (!seen_faces.insert(global).second)
-                    continue;
-                const auto owner = mesh->owner_cell(face);
-                (xy_owners[owner.ij] == xy_rank && z_owner(owner.k) == z_rank ? owned_faces : overlap_faces)
-                    .push_back(global);
-            }
-            for (const auto xy_node : mesh->xy_cell_nodes()[cell.ij])
-            {
-                seen_nodes.insert(mesh->node_local_id(typename SemiStructured::NodeID{xy_node, cell.k}));
-                const auto top = static_cast<typename SemiStructured::Indexer::Ordinal>(
-                    (static_cast<size_t>(cell.k) + 1) % mesh->indexer().num_node_layers);
-                seen_nodes.insert(mesh->node_local_id(typename SemiStructured::NodeID{xy_node, top}));
-            }
-        }
-        std::sort(owned_faces.begin(), owned_faces.end());
-        std::sort(overlap_faces.begin(), overlap_faces.end());
-        initialize_faces(std::move(owned_faces), std::move(overlap_faces));
-        std::vector<size_t> nodes(seen_nodes.begin(), seen_nodes.end());
-        std::sort(nodes.begin(), nodes.end());
-        d_indexer.set_nodes(checked_global_ids(std::move(nodes)));
-        checked_local(d_indexer.num_local_cells());
-        checked_local(d_indexer.num_local_faces());
-        checked_local(d_indexer.num_local_nodes());
         initialize_boundary_batches(*mesh);
     }
     catch (...)
     {
         error = std::current_exception();
     }
-    collective_error(error, "SemiStructuredXY_Z local layout failed on another rank.");
-    create_maps(comm);
+    collective_error(error, "SemiStructuredXY_Z local compact topology failed on another rank.");
+    initialize_contiguous_semi_structured_maps(comm);
+}
+
+/** Assign algebraic IDs only after the shared XY order and compact topology are fixed.
+ * Canonical owned maps exist transiently for integer owner/local-row queries;
+ * no canonical 3D map or expanded owner table is retained by the handle.
+ */
+template<TpetraTypePack Pack>
+void MeshHandle<Pack>::initialize_contiguous_semi_structured_maps(
+    const Teuchos::RCP<const typename Pack::comm_type>& comm)
+{
+    const auto collective_error = [&](const std::exception_ptr& error)
+    {
+        const int failed = error ? 1 : 0;
+        int any_failed = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
+        if (any_failed)
+        {
+            if (error)
+                std::rethrow_exception(error);
+            throw std::invalid_argument("Contiguous XY/Z algebraic map setup failed on another rank.");
+        }
+    };
+    const auto invalid_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
+    const auto build = [&](size_t owned, size_t local, auto geometry_id)
+    {
+        std::vector<global_ordinal_type> owned_geometry, ghost_geometry, overlap_algebraic, rank_counts, rank_offsets;
+        std::vector<int> owner_ranks;
+        std::vector<local_ordinal_type> owner_rows;
+        std::exception_ptr error;
+        try
+        {
+            checked_local(owned);
+            checked_local(local);
+            owned_geometry.resize(owned);
+            ghost_geometry.resize(local - owned);
+            overlap_algebraic.resize(local);
+            owner_ranks.resize(local - owned);
+            owner_rows.resize(local - owned);
+            rank_counts.resize(static_cast<size_t>(comm->getSize()));
+            rank_offsets.resize(rank_counts.size());
+            for (size_t row = 0; row < owned; ++row)
+                owned_geometry[row] = geometry_id(row);
+            for (size_t row = owned; row < local; ++row)
+                ghost_geometry[row - owned] = geometry_id(row);
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+        collective_error(error);
+        const global_ordinal_type owned_count = static_cast<global_ordinal_type>(owned);
+        Teuchos::gatherAll(*comm, 1, &owned_count, comm->getSize(), rank_counts.data());
+        global_ordinal_type total = 0;
+        for (size_t rank = 0; rank < rank_counts.size(); ++rank)
+        {
+            if (rank_counts[rank] < 0 || rank_counts[rank] > std::numeric_limits<global_ordinal_type>::max() - total)
+                throw std::overflow_error("XY/Z algebraic global IDs exceed the ordinal range.");
+            rank_offsets[rank] = total;
+            total += rank_counts[rank];
+        }
+        const auto canonical_owned = Teuchos::rcp(
+            new map_type(invalid_size, owned_geometry.data(), checked_local(owned), global_ordinal_type{}, comm));
+        Teuchos::RCP<const map_type> algebraic_owned =
+            Teuchos::rcp(new map_type(invalid_size, owned, global_ordinal_type{}, comm));
+        const auto status = canonical_owned->getRemoteIndexList(
+            Teuchos::ArrayView<const global_ordinal_type>(ghost_geometry.data(), checked_local(ghost_geometry.size())),
+            Teuchos::ArrayView<int>(owner_ranks.data(), checked_local(owner_ranks.size())),
+            Teuchos::ArrayView<local_ordinal_type>(owner_rows.data(), checked_local(owner_rows.size())));
+        error = {};
+        try
+        {
+            if (status == Tpetra::IDNotPresent)
+                throw std::invalid_argument("A canonical XY/Z halo entity has no owner.");
+            for (size_t row = 0; row < owned; ++row)
+                overlap_algebraic[row] = algebraic_owned->getGlobalElement(checked_local(row));
+            for (size_t row = 0; row < ghost_geometry.size(); ++row)
+            {
+                const auto rank = owner_ranks[row];
+                const auto owner_row = owner_rows[row];
+                if (rank < 0 || rank >= comm->getSize() || owner_row < 0 ||
+                    static_cast<global_ordinal_type>(owner_row) >= rank_counts[static_cast<size_t>(rank)])
+                    throw std::invalid_argument("Invalid canonical XY/Z owner/local-row lookup.");
+                overlap_algebraic[owned + row] =
+                    rank_offsets[static_cast<size_t>(rank)] + static_cast<global_ordinal_type>(owner_row);
+            }
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+        collective_error(error);
+        Teuchos::RCP<const map_type> algebraic_overlap = Teuchos::rcp(
+            new map_type(invalid_size, overlap_algebraic.data(), checked_local(local), global_ordinal_type{}, comm));
+        return std::pair{std::move(algebraic_owned), std::move(algebraic_overlap)};
+    };
+    const auto cells =
+        build(num_owned_cells(), num_local_cells(), [&](size_t row) { return geometry_cell_lid(checked_local(row)); });
+    const auto faces =
+        build(num_owned_faces(), num_faces(), [&](size_t row) { return geometry_face_lid(checked_local(row)); });
+    d_owned_cell_map = cells.first;
+    d_overlap_cell_map = cells.second;
+    d_owned_face_map = faces.first;
+    d_overlap_face_map = faces.second;
+    d_map_indexing = true;
+    std::vector<global_ordinal_type> boundary;
+    std::exception_ptr error;
+    try
+    {
+        for (const auto& [id, batch] : d_boundary_batches)
+        {
+            static_cast<void>(id);
+            for (const auto face : batch.face_lids)
+                if (is_owned_face(face))
+                    boundary.push_back(face_global_id(face));
+        }
+    }
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_error(error);
+    d_boundary_face_map = make_map(comm, boundary);
+    d_indexer = indexer_type{};
 }
 
 /**
@@ -1323,7 +1384,7 @@ void MeshHandle<Pack>::add_geometry_cell_data(VTUWriter& writer) const
     {
         const auto local_id = checked_local(lid);
         cell_ids.push_back(static_cast<global_index_t>(
-            cell_global_id(local_id)));
+            d_semi_structured_topology ? cell_geometry_global_id(local_id) : cell_global_id(local_id)));
         cell_volumes.push_back(cell_volume(local_id));
         cell_centroids.push_back(cell_centroid(local_id));
     }
