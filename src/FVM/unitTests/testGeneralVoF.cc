@@ -6,6 +6,7 @@
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/PhaseArithmetic.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/CompensatedSum.hh"
@@ -79,6 +80,12 @@ std::map<std::uint64_t, ExactPhaseMeasures> delivered_phases(const GeneralVoF::T
         total.carrier = total.carrier + route.exact.carrier;
     }
     return result;
+}
+GeneralVoFOptions exact_reference_options()
+{
+    GeneralVoFOptions options;
+    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    return options;
 }
 struct Fixture
 {
@@ -342,7 +349,7 @@ TEST(GeneralVoF, InferredCoarseFineCirculationUsesActualFourSubfaceSeam)
 TEST(GeneralVoF, ActualUnsplitCirculationHasPositiveRoutesIndependentComplementsAndEmptyOwners)
 {
     auto f = setup();
-    GeneralVoF state(f.hierarchy, f.order, f.gas, f.carrier);
+    GeneralVoF state(f.hierarchy, f.order, f.gas, f.carrier, exact_reference_options());
     auto controls = cycle(state);
     auto trial = state.plan_transport(nodes(state), controls, 1);
     auto moved = state.apply(trial);
@@ -501,7 +508,7 @@ TEST(GeneralVoF, ExactSkewWallAndEdgeTrajectoriesAreOwnershipIndependentAndDoNot
     for (unsigned shift = 0; shift < 2; ++shift)
     {
         auto fixture = skew_setup(shift);
-        GeneralVoF state(fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier);
+        GeneralVoF state(fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier, exact_reference_options());
         auto velocity = nodes(state);
         for (std::size_t i = 0; i < state.nodes().size(); ++i)
         {
@@ -639,12 +646,12 @@ TEST(GeneralVoF, InferredObliquePLICDrivesActualSkewPolyhedralUnsplitTransport)
         EXPECT_NEAR(result->gas_volumes()[i], source.gas_volumes()[i], 3e-13);
         EXPECT_NEAR(result->carrier_volumes()[i], source.carrier_volumes()[i], 3e-13);
     }
-    for (const auto& stream : trial.face_contributions())
+    for (const auto& stream : trial.finite_face_contributions())
     {
-        EXPECT_EQ((stream.exact.gas + stream.exact.carrier).compare(stream.exact.bulk), 0);
-        if (stream.exact.gas.sign() > 0)
+        EXPECT_NEAR(stream.amount.gas.value + stream.amount.carrier.value, stream.amount.bulk.value, stream.amount.gas.absolute_error + stream.amount.carrier.absolute_error + stream.amount.bulk.absolute_error);
+        if (stream.amount.gas.value > 0)
             EXPECT_NEAR(
-                stream.exact.gas.certified().as_double(), .5 * stream.exact.bulk.certified().as_double(), 3e-13);
+                stream.amount.gas.as_double(), .5 * stream.amount.bulk.as_double(), 3e-13);
     }
 }
 TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
@@ -665,7 +672,7 @@ TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
     const auto candidate = state.apply(trial);
     const auto support = state.support_cells();
     int local_corner = 0, global_corner = 0;
-    for (const auto& transfer : trial.transfers())
+    for (const auto& transfer : trial.finite_transfers())
     {
         const auto donor =
             std::find_if(support.begin(), support.end(), [&](const auto& cell) { return cell.cell == transfer.donor; });
@@ -675,18 +682,18 @@ TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
             donor->geometry->centroid() == GeometryPoint{.5, .5, .5} &&
             recipient->geometry->centroid() == GeometryPoint{1.5, 1.5, 1.5})
         {
-            EXPECT_GT(transfer.exact.bulk.sign(), 0);
-            EXPECT_EQ(transfer.exact.gas.compare(transfer.exact.bulk), 0);
+            EXPECT_GT(transfer.amount.bulk.value, transfer.amount.bulk.absolute_error);
+            EXPECT_NEAR(transfer.amount.gas.value, transfer.amount.bulk.value, transfer.amount.gas.absolute_error + transfer.amount.bulk.absolute_error);
             ++local_corner;
         }
     }
     const auto comm = Tpetra::getDefaultComm();
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_corner, &global_corner);
     EXPECT_EQ(global_corner, 1);
-    for (const auto& budget : trial.donor_budgets())
+    for (const auto& budget : trial.finite_donor_budgets())
     {
-        EXPECT_EQ((budget.exact_exported.gas + budget.exact_retained.gas).compare(budget.exact_old.gas), 0);
-        EXPECT_EQ((budget.exact_exported.carrier + budget.exact_retained.carrier).compare(budget.exact_old.carrier), 0);
+        EXPECT_NEAR(budget.exported.gas.value + budget.retained.gas.value, budget.old.gas.value, budget.exported.gas.absolute_error + budget.retained.gas.absolute_error);
+        EXPECT_NEAR(budget.exported.carrier.value + budget.retained.carrier.value, budget.old.carrier.value, budget.exported.carrier.absolute_error + budget.retained.carrier.absolute_error);
     }
     if (comm->getRank() >= 2)
         EXPECT_TRUE(candidate->owned_order().empty());
@@ -735,9 +742,9 @@ TEST(GeneralVoF, HighValenceNativeVertexFansIncludeDonorsBeyondBothFaceNeighborh
     const auto candidate = state.apply(trial);
     const auto support = state.support_cells();
     int local_distant = 0, distant = 0;
-    for (const auto& transfer : trial.transfers())
+    for (const auto& transfer : trial.finite_transfers())
     {
-        if (transfer.donor == transfer.recipient || transfer.exact.bulk.sign() <= 0)
+        if (transfer.donor == transfer.recipient || transfer.amount.bulk.value <= 0)
             continue;
         const auto donor =
             std::find_if(support.begin(), support.end(), [&](const auto& cell) { return cell.cell == transfer.donor; });
@@ -751,13 +758,13 @@ TEST(GeneralVoF, HighValenceNativeVertexFansIncludeDonorsBeyondBothFaceNeighborh
         // of the number of radial/Z halo rings one might assume for boxes.
         if (a[0] < -.5 && b[0] > .5)
             ++local_distant;
-        EXPECT_EQ(transfer.exact.gas.sign(), 0);
-        EXPECT_EQ(transfer.exact.carrier.compare(transfer.exact.bulk), 0);
+        EXPECT_EQ(transfer.amount.gas.value, 0);
+        EXPECT_NEAR(transfer.amount.carrier.value, transfer.amount.bulk.value, transfer.amount.carrier.absolute_error + transfer.amount.bulk.absolute_error);
     }
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_distant, &distant);
     EXPECT_GT(distant, 0);
-    for (const auto& budget : trial.donor_budgets())
-        EXPECT_EQ((budget.exact_exported.carrier + budget.exact_retained.carrier).compare(budget.exact_old.carrier), 0);
+    for (const auto& budget : trial.finite_donor_budgets())
+        EXPECT_NEAR(budget.exported.carrier.value + budget.retained.carrier.value, budget.old.carrier.value, budget.exported.carrier.absolute_error + budget.retained.carrier.absolute_error);
     if (comm->getRank() >= 2)
         EXPECT_TRUE(candidate->owned_order().empty());
 }
@@ -795,19 +802,19 @@ TEST(GeneralVoF, CrossedFaceKeepsOppositeDonorStreamsWhenProjectedNetVolumeIsZer
             const auto p = tile.geometry->centroid();
             if (p.x != 1 || p.y != .5)
                 continue;
-            ExactGeometryMeasure bulk;
+            SimpleFluid::VoF::finite_detail::Sum bulk;
             double gas = 0, carrier = 0;
             bool positive = false, negative = false;
-            for (const auto& stream : trial.face_contributions())
+            for (const auto& stream : trial.finite_face_contributions())
                 if (stream.face == tile.face_gid)
                 {
-                    bulk = bulk + stream.exact.bulk.scaled(stream.direction);
-                    gas += stream.direction * stream.exact.gas.certified().as_double();
-                    carrier += stream.direction * stream.exact.carrier.certified().as_double();
+                    bulk.add(stream.direction > 0 ? stream.amount.bulk : SimpleFluid::VoF::finite_detail::negate(stream.amount.bulk));
+                    gas += stream.direction * stream.amount.gas.as_double();
+                    carrier += stream.direction * stream.amount.carrier.as_double();
                     positive |= stream.direction > 0;
                     negative |= stream.direction < 0;
                 }
-            EXPECT_EQ(bulk.sign(), 0);
+            EXPECT_LE(std::abs(bulk.value().value), bulk.value().absolute_error);
             EXPECT_TRUE(positive);
             EXPECT_TRUE(negative);
             // Independent integration of the corrected departure fan: bottom gas
@@ -821,7 +828,7 @@ TEST(GeneralVoF, CrossedFaceKeepsOppositeDonorStreamsWhenProjectedNetVolumeIsZer
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_faces, &faces);
     EXPECT_EQ(faces, 2u);
 }
-TEST(GeneralVoF, UnderflowingIndividualPhaseStreamsRemainExactWithRepresentableFinalInventories)
+TEST(GeneralVoF, ExactSubquantumStreamsRemainExplicitAndFiniteRejectsCrossPolicyControls)
 {
     auto fixture = setup();
     for (std::size_t i = 0; i < fixture.order.size(); ++i)
@@ -830,7 +837,7 @@ TEST(GeneralVoF, UnderflowingIndividualPhaseStreamsRemainExactWithRepresentableF
         fixture.gas[i] = center[2] < 1 ? .5 : 0;
         fixture.carrier[i] = 1 - fixture.gas[i];
     }
-    GeneralVoF source(fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier);
+    GeneralVoF source(fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier, exact_reference_options());
     auto phi = cycle(source);
     const auto tiny = std::numeric_limits<double>::denorm_min();
     for (auto& face : phi)
@@ -876,50 +883,19 @@ TEST(GeneralVoF, UnderflowingIndividualPhaseStreamsRemainExactWithRepresentableF
         EXPECT_EQ((budget.exact_exported.gas + budget.exact_retained.gas).compare(budget.exact_old.gas), 0);
         EXPECT_EQ((budget.exact_exported.carrier + budget.exact_retained.carrier).compare(budget.exact_old.carrier), 0);
     }
-    // A subquantum arrival is now rounded once, with measured arithmetic
-    // uncertainty, rather than retained as an accepted rational inventory.
+    // The finite numerical route cannot acquire rational face authority. It
+    // rejects the unsupported control atomically rather than deleting a phase.
     auto pure_fixture = setup();
     GeneralVoF pure(pure_fixture.hierarchy, pure_fixture.order, pure_fixture.gas, pure_fixture.carrier);
     auto tiny_phi = cycle(pure);
     for (auto& face : tiny_phi)
         if (face.integrated_volume != 0)
         {
-            face.exact_integrated_volume =
-                ExactGeometryMeasure::from_value(tiny).scaled(face.integrated_volume > 0 ? .5 : -.5);
+            face.exact_integrated_volume = ExactGeometryMeasure::from_value(tiny).scaled(
+                face.integrated_volume > 0 ? .5 : -.5);
             face.integrated_volume = 0;
         }
-    const auto tiny_trial = pure.plan_transport(nodes(pure), tiny_phi, 1);
-    const auto finite = pure.apply(tiny_trial);
-    const auto delivered = delivered_phases(tiny_trial);
-    int local_unrepresented = 0;
-    for (std::size_t i = 0; i < finite->owned_order().size(); ++i)
-    {
-        const auto gid = std::uint64_t(finite->mesh()->cell_global_id(int(i)));
-        const auto& raw = delivered.at(gid);
-        const auto& phase = finite->phase_volumes()[i];
-        const auto& bound = tiny_trial.phase_roundoff_bounds()[i];
-        for (const auto& entry :
-            {std::tuple{raw.gas, phase.gas, bound.gas}, std::tuple{raw.carrier, phase.carrier, bound.carrier}})
-        {
-            const auto& exact = std::get<0>(entry);
-            const double value = std::get<1>(entry), error = std::get<2>(entry);
-            const auto difference = exact - ExactGeometryMeasure::from_value(value);
-            EXPECT_LE((difference.sign() < 0 ? difference.scaled(-1) : difference)
-                          .compare(ExactGeometryMeasure::from_value(error)),
-                0);
-            if (exact.compare(ExactGeometryMeasure::from_value(tiny)) >= 0)
-                EXPECT_GT(value, 0);
-            if (exact.sign() > 0 && value == 0)
-            {
-                ++local_unrepresented;
-                EXPECT_GT(error, 0);
-            }
-        }
-    }
-    int unrepresented = 0;
-    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_unrepresented, &unrepresented);
-    EXPECT_GT(unrepresented, 0);
-    expect_finite_phase_balance(pure, *finite, tiny_trial);
+    EXPECT_THROW(pure.plan_transport(nodes(pure), tiny_phi, 1), std::invalid_argument);
     auto malformed = tiny_phi;
     if (Tpetra::getDefaultComm()->getRank() == 0)
         for (auto& face : malformed)
@@ -931,7 +907,6 @@ TEST(GeneralVoF, UnderflowingIndividualPhaseStreamsRemainExactWithRepresentableF
     EXPECT_THROW((void) pure.plan_transport(nodes(pure), malformed, 1), std::invalid_argument);
     EXPECT_EQ(pure.gas_volumes(), pure_fixture.gas);
     EXPECT_EQ(pure.carrier_volumes(), pure_fixture.carrier);
-    EXPECT_EQ(finite->gas_volumes(), pure.apply(tiny_trial)->gas_volumes());
     EXPECT_NO_THROW(pure.plan_transport(nodes(pure), cycle(pure), 1));
 }
 TEST(GeneralVoF, DeclaredSubnormalInventorySurvivesWithoutInventingAnIdentifiableNormal)
@@ -961,8 +936,8 @@ TEST(GeneralVoF, DeclaredSubnormalInventorySurvivesWithoutInventingAnIdentifiabl
     for (const auto& p : state.reconstruct())
     {
         EXPECT_TRUE(p.pure_carrier);
-        EXPECT_TRUE(p.target_volume_difference.exact_nonzero);
-        EXPECT_LT(p.target_volume_difference.value, 0);
+        EXPECT_TRUE(p.finite_geometry);
+        EXPECT_LT(p.finite_target_volume_difference.value, 0);
     }
     const auto transported = state.plan_transport(nodes(state), cycle(state), 1);
     const auto moved = state.apply(transported);
@@ -973,13 +948,11 @@ TEST(GeneralVoF, DeclaredSubnormalInventorySurvivesWithoutInventingAnIdentifiabl
         EXPECT_EQ(published_phase_lifts(*moved)[i].gas.compare(ExactGeometryMeasure::from_value(1e-310)), 0);
         EXPECT_EQ(moved->initial_occupancy_errors()[i].difference, 1e-310);
     }
-    for (const auto& budget : transported.donor_budgets())
+    ASSERT_EQ(transported.finite_donor_budgets().size(), state.owned_order().size());
+    for (const auto& budget : transported.finite_donor_budgets())
     {
-        EXPECT_LE(budget.signed_repair_absolute.compare(budget.signed_repair_bound), 0);
-        EXPECT_LE(budget.route_repair_absolute.compare(budget.route_repair_bound), 0);
-        EXPECT_EQ(budget.route_repair_absolute.compare(ExactGeometryMeasure::from_value(1e-310)), 0);
-        EXPECT_EQ((budget.exact_exported.gas + budget.exact_retained.gas).compare(budget.exact_old.gas), 0);
-        EXPECT_EQ((budget.exact_exported.carrier + budget.exact_retained.carrier).compare(budget.exact_old.carrier), 0);
+        const auto gas = SimpleFluid::VoF::finite_detail::add(budget.exported.gas, budget.retained.gas);
+        EXPECT_LE(std::abs(gas.value - budget.old.gas.value), gas.absolute_error);
     }
     GeneralVoF unresolved(f.hierarchy, f.order, f.gas, f.carrier);
     EXPECT_THROW(unresolved.reconstruct(), std::invalid_argument);
@@ -1322,13 +1295,15 @@ TEST(GeneralVoF, FiniteInventoriesPublishOnceAndSubsequentTrialsLiftOnlyPublishe
     for (const auto& face : moved->tiles())
         stationary.push_back({face.face_gid, 0});
     const auto next = moved->plan_transport(nodes(*moved), stationary, 1);
-    ASSERT_EQ(next.donor_budgets().size(), moved->phase_volumes().size());
+    ASSERT_EQ(next.finite_donor_budgets().size(), moved->phase_volumes().size());
     for (std::size_t i = 0; i < moved->phase_volumes().size(); ++i)
     {
         const auto& phase = moved->phase_volumes()[i];
-        const auto& old = next.donor_budgets()[i].exact_old;
-        EXPECT_EQ(old.gas.encode(), ExactGeometryMeasure::from_value(phase.gas).encode());
-        EXPECT_EQ(old.carrier.encode(), ExactGeometryMeasure::from_value(phase.carrier).encode());
+        const auto& old = next.finite_donor_budgets()[i].old;
+        EXPECT_EQ(old.gas.value, phase.gas);
+        EXPECT_EQ(old.gas.absolute_error, 0);
+        EXPECT_EQ(old.carrier.value, phase.carrier);
+        EXPECT_EQ(old.carrier.absolute_error, 0);
         EXPECT_EQ(next.phase_roundoff_bounds()[i].gas, 0);
         EXPECT_EQ(next.phase_roundoff_bounds()[i].carrier, 0);
     }

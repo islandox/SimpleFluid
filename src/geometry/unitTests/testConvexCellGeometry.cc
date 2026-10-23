@@ -2,6 +2,9 @@
  * @brief Independent convex clipping, represented coverage and ancestry oracles.
  */
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/ExactGeometryInstrumentation.hh"
+#include "geometry/ExactPlanarFace.hh"
+#include "geometry/ExactSweptGeometry.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
@@ -383,5 +386,69 @@ TEST(AdaptiveOverlapTest, ActiveCatalogAncestryMustBeALeafAntichain)
     invalid[0].key = key({0});
     invalid[1].key = key({1});
     EXPECT_NO_THROW((void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(obs, obs, root, invalid, forward));
+}
+} // namespace
+
+namespace
+{
+TEST(ConvexCellGeometryTest, OptInExactStatisticsCountKernelEventsAndResetWithoutChangingEnablement)
+{
+    enable_exact_geometry_statistics(false);
+    reset_exact_geometry_statistics();
+    const auto ignored = ExactGeometryMeasure::from_value(7).scaled(2);
+    (void) ignored;
+    EXPECT_EQ(exact_geometry_statistics().measure_values, 0);
+    EXPECT_EQ(exact_geometry_statistics().measure_arithmetic, 0);
+    struct DisableOnExit
+    {
+        ~DisableOnExit() { enable_exact_geometry_statistics(false); }
+    } disable;
+    enable_exact_geometry_statistics(true);
+    reset_exact_geometry_statistics();
+    const auto a = ExactGeometryMeasure::from_value(1), b = ExactGeometryMeasure::from_value(3);
+    const auto third = a.divided_by(b);
+    EXPECT_GT(exact_geometry_statistics().measure_values, 0);
+    EXPECT_GT(exact_geometry_statistics().measure_arithmetic, 0);
+    EXPECT_GE(exact_geometry_statistics().maximum_result_denominator_bits, 2);
+    (void) third;
+    reset_exact_geometry_statistics();
+    const auto arithmetic = a + b;
+    (void) arithmetic;
+    EXPECT_EQ(exact_geometry_statistics().measure_arithmetic, 1);
+    const std::array<GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    const auto tetra = ConvexCellGeometry::make(vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
+    const auto before_tetra_moments = exact_geometry_statistics();
+    (void) tetra->moments();
+    EXPECT_GT(exact_geometry_statistics().moment_evaluations, before_tetra_moments.moment_evaluations);
+    const auto before_tetra_volume = exact_geometry_statistics();
+    (void) ExactGeometryMeasure::volume(*tetra);
+    EXPECT_GT(exact_geometry_statistics().volume_evaluations, before_tetra_volume.volume_evaluations);
+    const auto product = ConvexCellGeometry::extruded_polygon(
+        std::array<std::array<double, 2>, 3>{{{0, 0}, {1, 0}, {0, 1}}}, 0, 1);
+    const auto before_product = exact_geometry_statistics();
+    (void) product->moments();
+    EXPECT_GT(exact_geometry_statistics().moment_evaluations, before_product.moment_evaluations);
+    const auto face = ExactPlanarFace::make(std::array<GeometryPoint, 3>{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}});
+    const auto before_face = exact_geometry_statistics();
+    (void) face->area();
+    (void) face->area_vector();
+    (void) face->centroid();
+    EXPECT_EQ(exact_geometry_statistics().face_measure_evaluations, before_face.face_measure_evaluations + 3);
+    EXPECT_TRUE(face->contains_exact_point(face->vertex_identities().front()));
+    EXPECT_GT(exact_geometry_statistics().source_membership_predicates, before_face.source_membership_predicates);
+    const auto counted = exact_geometry_statistics();
+    EXPECT_GT(counted.moment_evaluations, 0);
+    EXPECT_GT(counted.volume_evaluations, 0);
+    EXPECT_GT(counted.maximum_result_numerator_bits, 0);
+    enable_exact_geometry_statistics(false);
+    (void) a.scaled(4);
+    (void) tetra->moments();
+    const auto disabled = exact_geometry_statistics();
+    EXPECT_EQ(disabled.measure_values, counted.measure_values);
+    EXPECT_EQ(disabled.measure_arithmetic, counted.measure_arithmetic);
+    EXPECT_EQ(disabled.moment_evaluations, counted.moment_evaluations);
+    reset_exact_geometry_statistics();
+    EXPECT_EQ(exact_geometry_statistics().measure_values, 0);
+    EXPECT_EQ(exact_geometry_statistics().moment_evaluations, 0);
 }
 } // namespace

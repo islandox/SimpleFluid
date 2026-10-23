@@ -4,9 +4,11 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     details/ConservativeVoFTransport.cc
     details/VoFProjectionWorkspace.cc
     details/GeneralVoFPhiClosure.cc
+    details/GeneralVoFFinitePhiClosure.inc
     details/GeneralVoFProjectionArithmetic.cc
     details/GeneralVoFExactPressure.cc
     details/GeneralVoFFlowWorkspace.cc
+    details/GeneralVoFFiniteProjection.inc
     details/GeneralVoFCurvature.cc
     details/GeneralVoFExactStorage.cc
     details/ConservativeVoFExactArithmetic.cc
@@ -76,3 +78,19 @@ simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactPressure.cc)
 simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactStorage.cc)
 
 simplefluid_exclude_from_pgo_sources(GeneralVoFSolver.cc)
+
+# Bounded interval/ledger proofs constrain every caller, including inline helpers.
+# Per-source options follow target/global options and keep relaxed arithmetic or
+# link-time transforms from crossing this numerical boundary.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        GeneralVoFSolver.cc
+        details/ConservativeVoFTransport.cc
+        details/GeneralVoFFlowWorkspace.cc
+        details/GeneralVoFPhiClosure.cc
+        details/GeneralVoFCurvature.cc
+        PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
+endif()

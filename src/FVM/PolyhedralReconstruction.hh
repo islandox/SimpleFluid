@@ -4,7 +4,9 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/BoundedConvexGeometry.hh"
 #include <span>
+#include <stdexcept>
 
 namespace SimpleFluid::VoF
 {
@@ -15,6 +17,41 @@ struct PolyhedralPhaseSample
     Meshes::ConvexGeometryPtr geometry;
     double gas_volume = 0, carrier_volume = 0;
 };
+/** Independent finite inventories on geometry carrying explicit uncertainty. */
+struct FinitePolyhedralPhaseSample
+{
+    Meshes::BoundedConvexGeometryPtr geometry;
+    double gas_volume = 0, carrier_volume = 0;
+};
+/** A necessary interface-support screen, separate from arithmetic acceptance and
+ * spatial convergence qualification. Small cuts use their whole neighborhood.
+ * A failed assessment requests one refinement level and a fresh assessment. */
+struct PolyhedralResolutionAssessment
+{
+    enum class Reason
+    {
+        Admitted,
+        InsufficientStencil,
+        InsufficientPhaseSupport,
+        UnresolvedPlaneModel
+    };
+    Reason reason = Reason::Admitted;
+    double local_cell_span = 0, requested_cell_span = 0;
+    double gas_support_fraction = 0, carrier_support_fraction = 0;
+    std::size_t stencil_cells = 0;
+    [[nodiscard]] bool admitted() const noexcept { return reason == Reason::Admitted; }
+};
+/** The caller may refine/reinitialize the interface neighborhood and retry.
+ * Without an adaptation controller the operation rejects without mutation. */
+class SIMPLEFLUID_FVM_EXPORT PolyhedralResolutionRequired : public std::invalid_argument
+{
+public:
+    explicit PolyhedralResolutionRequired(PolyhedralResolutionAssessment);
+    [[nodiscard]] const PolyhedralResolutionAssessment& assessment() const noexcept { return assessment_; }
+
+private:
+    PolyhedralResolutionAssessment assessment_;
+};
 struct PolyhedralReconstructionOptions
 {
     unsigned maximum_offset_iterations = 192, maximum_fit_iterations = 24;
@@ -22,12 +59,20 @@ struct PolyhedralReconstructionOptions
     double volume_tolerance = 8e-15, fit_tolerance = 2e-9;
     double maximum_condition = 1e8;
     double orientation_tolerance = 2e-8, maximum_model_residual = .2;
+    /** Each phase must occupy at least this fraction of some target/stencil
+     * cell before a mixed finite reconstruction. This requests more spatial
+     * support; it never erases or clips a smaller target-cell phase amount.
+     * The default requires majority support on both sides of an interface. */
+    double minimum_phase_support_fraction = .5;
 };
 struct PolyhedralInterface
 {
     Meshes::GeometryHalfspace gas;
     double target_volume_residual = 0, stencil_volume_residual = 0;
-    Meshes::CertifiedGeometryValue target_volume_difference; ///< Exact signed minority residual and conversion bound.
+    Meshes::CertifiedGeometryValue target_volume_difference; ///< Exact-mode signed minority residual.
+    Meshes::BoundedGeometryValue finite_target_volume_difference; ///< Finite construction/arithmetic enclosure.
+    bool finite_geometry = false; ///< Selects numerical residual evidence; no exact authority is implied.
+    PolyhedralResolutionAssessment resolution;
     double stencil_condition = 0, orientation_step = 0;
     unsigned fit_iterations = 0;
     bool fit_converged = false;
@@ -48,5 +93,17 @@ public:
         const PolyhedralPhaseSample&, Meshes::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
     [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample&,
         std::span<const PolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
+    static void validate_finite(const FinitePolyhedralPhaseSample&, PolyhedralReconstructionOptions = {});
+    /** Read-only preflight. Missing/dilute support requests refinement, never
+     * increased exact precision. The angular model gate remains independent. */
+    [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution_finite(
+        const FinitePolyhedralPhaseSample&, std::span<const FinitePolyhedralPhaseSample> stencil,
+        PolyhedralReconstructionOptions = {});
+    /** Numerical offset utility for a supplied normal. Physical interface
+     * admission belongs to reconstruct_finite()/assess_resolution_finite(). */
+    [[nodiscard]] static PolyhedralInterface solve_offset_finite(
+        const FinitePolyhedralPhaseSample&, Meshes::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
+    [[nodiscard]] static PolyhedralInterface reconstruct_finite(const FinitePolyhedralPhaseSample&,
+        std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
 };
 } // namespace SimpleFluid::VoF

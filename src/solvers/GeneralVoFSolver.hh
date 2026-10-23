@@ -2,6 +2,7 @@
  * @brief Source-free geometric two-phase flow on certified native polyhedral cells.
  */
 #pragma once
+#include "geometry/GeometryStatisticsSnapshot.hh"
 #include "FVM/GeneralVoF.hh"
 #include "solvers/VoFSolver.hh"
 namespace SimpleFluid
@@ -38,11 +39,13 @@ struct GeneralVoFMomentumDiagnostics
  * select ExperimentalExact; that optional path retains exact phase history and
  * remains unqualified, with known memory/performance gaps. The solver never
  * reinterprets or switches the source policy. Current-step arithmetic in finite
- * mode is rebuilt from finite values without a retained rational remainder.
+ * mode uses a separate bounded floating-point geometry/phase/mass/momentum
+ * route. Independent accumulated arithmetic history follows phase transfers;
+ * no rational numerical construction, measure or ledger fallback is selected.
  * All construction, initialization, timestep and
  * advance operations are collective, including empty-owner ranks. Pressure,
  * viscosity and curvature use actual physical geometry. Source-free compatible
- * momentum uses positive certified donor transfers and the original raw face
+ * momentum uses positive authenticated donor transfers and the original raw face
  * donor equation; material-volume sources, species sources and drift are absent.
  *
  * A failed step leaves the complete accepted publication and clock unchanged.
@@ -53,6 +56,11 @@ struct GeneralVoFMomentumDiagnostics
 class SIMPLEFLUID_SOLVERS_EXPORT GeneralVoFSolver
 {
 public:
+    /** This library image's calling-thread counters. Call every observed
+     * image's bridge and deduplicate snapshots by their separate domain IDs. */
+    static void enable_exact_geometry_statistics(bool enabled);
+    static void reset_geometry_statistics();
+    [[nodiscard]] static Meshes::GeometryStatisticsSnapshot geometry_statistics();
     explicit GeneralVoFSolver(
         std::shared_ptr<const VoF::GeneralVoF> phases, VoFMaterial material = {}, GeneralVoFSolverOptions options = {});
     ~GeneralVoFSolver();

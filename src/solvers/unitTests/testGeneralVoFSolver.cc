@@ -1,6 +1,12 @@
 /** @file testGeneralVoFSolver.cc
  * @brief Transactional source-free flow integration on actual detached native cells.
  */
+#include <sstream>
+#include <iomanip>
+#include <chrono>
+#include <cstdlib>
+#include "geometry/BoundedConvexGeometry.hh"
+#include "geometry/ExactGeometryInstrumentation.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
@@ -15,6 +21,7 @@
 #include <gtest/gtest.h>
 #include <limits>
 #include <map>
+#include <set>
 #include <numbers>
 #include <stdexcept>
 namespace
@@ -560,12 +567,133 @@ TEST(GeneralVoFSolverTest, MicroscopicDeclaredTraceAggregatesPhaseMassBeforeDiag
 
 namespace
 {
+void enable_observed_exact_geometry_statistics(bool enabled)
+{
+    Meshes::enable_exact_geometry_statistics(enabled);
+    VoF::GeneralVoF::enable_exact_geometry_statistics(enabled);
+    GeneralVoFSolver::enable_exact_geometry_statistics(enabled);
+}
+void reset_observed_geometry_statistics()
+{
+    Meshes::reset_exact_geometry_statistics();
+    Meshes::reset_bounded_geometry_statistics();
+    VoF::GeneralVoF::reset_geometry_statistics();
+    GeneralVoFSolver::reset_geometry_statistics();
+}
+std::array<Meshes::GeometryStatisticsSnapshot, 3> geometry_image_snapshots()
+{
+    return {{{Meshes::exact_geometry_statistics_domain(), Meshes::bounded_geometry_statistics_domain(),
+                 Meshes::exact_geometry_statistics(), Meshes::bounded_geometry_statistics()},
+        VoF::GeneralVoF::geometry_statistics(), GeneralVoFSolver::geometry_statistics()}};
+}
+Meshes::GeometryStatisticsSnapshot observed_geometry_statistics()
+{
+    Meshes::GeometryStatisticsSnapshot result;
+    std::set<const void*> exact_domains, bounded_domains;
+    for (const auto& image : geometry_image_snapshots())
+    {
+        if (exact_domains.insert(image.exact_domain).second)
+        {
+            result.exact.source_coordinate_exports += image.exact.source_coordinate_exports;
+            result.exact.source_support_exports += image.exact.source_support_exports;
+            result.exact.volume_evaluations += image.exact.volume_evaluations;
+            result.exact.moment_evaluations += image.exact.moment_evaluations;
+            result.exact.clip_constructions += image.exact.clip_constructions;
+            result.exact.intersection_constructions += image.exact.intersection_constructions;
+            result.exact.face_measure_evaluations += image.exact.face_measure_evaluations;
+            result.exact.source_membership_predicates += image.exact.source_membership_predicates;
+            result.exact.measure_values += image.exact.measure_values;
+            result.exact.measure_arithmetic += image.exact.measure_arithmetic;
+            result.exact.cover_certifications += image.exact.cover_certifications;
+            result.exact.maximum_result_numerator_bits =
+                std::max(result.exact.maximum_result_numerator_bits, image.exact.maximum_result_numerator_bits);
+            result.exact.maximum_result_denominator_bits =
+                std::max(result.exact.maximum_result_denominator_bits, image.exact.maximum_result_denominator_bits);
+        }
+        if (bounded_domains.insert(image.bounded_domain).second)
+        {
+            result.bounded.source_imports += image.bounded.source_imports;
+            result.bounded.constructions += image.bounded.constructions;
+            result.bounded.intersections += image.bounded.intersections;
+            result.bounded.support_distances += image.bounded.support_distances;
+            result.bounded.volume_evaluations += image.bounded.volume_evaluations;
+            result.bounded.moment_evaluations += image.bounded.moment_evaluations;
+            result.bounded.partition_checks += image.bounded.partition_checks;
+            result.bounded.structural_partition_reuses += image.bounded.structural_partition_reuses;
+            result.bounded.floating_operations += image.bounded.floating_operations;
+            result.bounded.interval_operations += image.bounded.interval_operations;
+            result.bounded.ledger_operations += image.bounded.ledger_operations;
+            result.bounded.wider_routes += image.bounded.wider_routes;
+            result.bounded.rejections += image.bounded.rejections;
+            result.bounded.exact_predicates += image.bounded.exact_predicates;
+            result.bounded.rational_constructions += image.bounded.rational_constructions;
+            result.bounded.rational_measures += image.bounded.rational_measures;
+            result.bounded.rational_ledgers += image.bounded.rational_ledgers;
+        }
+    }
+    return result;
+}
 TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependentInventories)
 {
+    using Clock = std::chrono::steady_clock;
+    const auto started = Clock::now();
+    reset_observed_geometry_statistics();
+    const auto record = [&](const std::string& name, auto value)
+    {
+        std::ostringstream text;
+        text << std::setprecision(20) << value;
+        RecordProperty(name, text.str());
+    };
+    const auto* exact_setting = std::getenv("SIMPLEFLUID_VOF_EXACT_STATS");
+    const bool exact_enabled = exact_setting && std::string(exact_setting) == "1";
+    struct ExactStatisticsScope
+    {
+        bool enabled;
+        ~ExactStatisticsScope()
+        {
+            if (enabled)
+                enable_observed_exact_geometry_statistics(false);
+        }
+    } exact_scope{exact_enabled};
+    if (exact_enabled)
+    {
+        enable_observed_exact_geometry_statistics(true);
+        reset_observed_geometry_statistics();
+    }
+    record("exact_statistics_enabled", exact_enabled);
+    std::set<const void*> exact_domains, bounded_domains;
+    for (const auto& image : geometry_image_snapshots())
+    {
+        exact_domains.insert(image.exact_domain);
+        bounded_domains.insert(image.bounded_domain);
+    }
+    record("observed_exact_counter_domains", exact_domains.size());
+    record("observed_bounded_counter_domains", bounded_domains.size());
+    const auto record_exact = [&](const std::string& stage)
+    {
+        if (!exact_enabled)
+            return;
+        const auto stats = observed_geometry_statistics().exact;
+        record("exact_api_" + stage + "_source_coordinate_exports", stats.source_coordinate_exports);
+        record("exact_api_" + stage + "_source_support_exports", stats.source_support_exports);
+        record("exact_api_" + stage + "_volume_evaluations", stats.volume_evaluations);
+        record("exact_api_" + stage + "_moment_evaluations", stats.moment_evaluations);
+        record("exact_api_" + stage + "_clip_constructions", stats.clip_constructions);
+        record("exact_api_" + stage + "_intersection_constructions", stats.intersection_constructions);
+        record("exact_api_" + stage + "_face_measure_evaluations", stats.face_measure_evaluations);
+        record("exact_api_" + stage + "_source_membership_predicates", stats.source_membership_predicates);
+        record("exact_api_" + stage + "_measure_values", stats.measure_values);
+        record("exact_api_" + stage + "_measure_arithmetic", stats.measure_arithmetic);
+        record("exact_api_" + stage + "_cover_certifications", stats.cover_certifications);
+        record("exact_api_" + stage + "_maximum_result_numerator_bits", stats.maximum_result_numerator_bits);
+        record("exact_api_" + stage + "_maximum_result_denominator_bits", stats.maximum_result_denominator_bits);
+    };
+    record_exact("before_construction");
     auto material = inviscid();
     material.gas_density = .1;
     material.liquid_density = 1;
     GeneralVoFSolver solver(skew_coarse_fine_plane(), material);
+    record_exact("after_construction");
     double local_structure[2] = {double(solver.mesh()->num_owned_cells()), 0}, structure[2]{};
     for (std::size_t f = 0; f < solver.mesh()->num_owned_faces(); ++f)
     {
@@ -580,6 +708,9 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     Teuchos::reduceAll(*solver.mesh()->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 2, local_structure, structure);
     // The provider also introduces conforming transition cells. Check its
     // actual refined native topology, rather than assuming only marked splits.
+    record("global_native_cells", structure[0]);
+    record("global_coarse_fine_face_incidences", structure[1]);
+    EXPECT_DOUBLE_EQ(structure[0], 50);
     EXPECT_GT(structure[0], 16);
     EXPECT_LE(structure[0], 64);
     EXPECT_GT(structure[1], 0);
@@ -592,7 +723,11 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         const double vy = -.05 * std::pow(std::sin(std::numbers::pi * eta), 2) * std::sin(2 * std::numbers::pi * xi);
         velocity[c] = {vx + .2 * vy, vy, 0};
     }
+    record_exact("before_initialize");
     solver.initialize(velocity);
+    record_exact("after_initialize");
+    const auto initialized = Clock::now();
+    record("initialization_seconds", std::chrono::duration<double>(initialized - started).count());
     const auto region_gas = [&]
     {
         double local = 0, global = 0;
@@ -607,27 +742,99 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     };
     const auto before = solver.diagnostics();
     const double initial_region = region_gas();
+    double gas_drift = 0, liquid_drift = 0, momentum_residual = 0, maximum_divergence = 0;
+    double gas_minimum = std::numeric_limits<double>::infinity(), carrier_minimum = gas_minimum;
+    double fraction_minimum = 1, fraction_maximum = 0;
+    unsigned accepted_steps = 0;
+    record_exact("before_loop");
     for (unsigned step = 0; step < 10; ++step)
     {
+        const auto previous_exact = observed_geometry_statistics().exact;
+        const auto step_started = Clock::now();
         const auto after = solver.step(.002);
+        record_exact("step_" + std::to_string(step));
+        if (exact_enabled)
+        {
+            const auto measured = observed_geometry_statistics().exact;
+            EXPECT_EQ(measured.volume_evaluations, previous_exact.volume_evaluations);
+            EXPECT_EQ(measured.moment_evaluations, previous_exact.moment_evaluations);
+            EXPECT_EQ(measured.clip_constructions, previous_exact.clip_constructions);
+            EXPECT_EQ(measured.intersection_constructions, previous_exact.intersection_constructions);
+            EXPECT_EQ(measured.face_measure_evaluations, previous_exact.face_measure_evaluations);
+            EXPECT_EQ(measured.measure_values, previous_exact.measure_values);
+            EXPECT_EQ(measured.measure_arithmetic, previous_exact.measure_arithmetic);
+            EXPECT_EQ(measured.cover_certifications, previous_exact.cover_certifications);
+        }
+        record("step_" + std::to_string(step) + "_seconds",
+            std::chrono::duration<double>(Clock::now() - step_started).count());
+        gas_drift = std::max(gas_drift, std::abs(after.gas_mass - before.gas_mass) / before.gas_mass);
+        liquid_drift = std::max(liquid_drift, std::abs(after.liquid_mass - before.liquid_mass) / before.liquid_mass);
+        maximum_divergence = std::max(maximum_divergence, after.maximum_divergence);
         EXPECT_LT(std::abs(after.gas_mass - before.gas_mass) / before.gas_mass, 2e-11);
         EXPECT_LT(std::abs(after.liquid_mass - before.liquid_mass) / before.liquid_mass, 2e-11);
         for (const auto& ledger : solver.momentum_transport_diagnostics())
+        {
+            momentum_residual = std::max(momentum_residual, ledger.physical_relative_residual);
             EXPECT_LE(ledger.physical_relative_residual, 1e-12);
+        }
         EXPECT_LT(after.maximum_divergence, 1e-8);
         for (std::size_t c = 0; c < solver.phases()->gas_volumes().size(); ++c)
         {
+            gas_minimum = std::min(gas_minimum, solver.phases()->gas_volumes()[c]);
+            carrier_minimum = std::min(carrier_minimum, solver.phases()->carrier_volumes()[c]);
+            fraction_minimum = std::min(fraction_minimum, solver.gas_fraction()[c]);
+            fraction_maximum = std::max(fraction_maximum, solver.gas_fraction()[c]);
             EXPECT_GE(solver.phases()->gas_volumes()[c], 0);
             EXPECT_GE(solver.phases()->carrier_volumes()[c], 0);
             EXPECT_GE(solver.gas_fraction()[c], 0);
             EXPECT_LE(solver.gas_fraction()[c], 1);
         }
+        ++accepted_steps;
+        record("accepted_steps", accepted_steps);
+        record("accepted_time", solver.time());
     }
     // The region's only open internal boundary is the actual refined stripe
     // interface xi=.5; external walls are impermeable. The initial analytic
     // velocity carries gas into this region, at O(1e−4) volume over .02s.
-    EXPECT_GT(region_gas() - initial_region, 1e-5);
+    const auto passage = region_gas() - initial_region;
+    EXPECT_GT(passage, 1e-5);
     EXPECT_DOUBLE_EQ(solver.time(), .02);
+    const double local_minimum[3] = {gas_minimum, carrier_minimum, fraction_minimum};
+    double global_minimum[3]{};
+    Teuchos::reduceAll(
+        *solver.mesh()->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 3, local_minimum, global_minimum);
+    record("maximum_gas_mass_relative_drift", gas_drift);
+    record("maximum_liquid_mass_relative_drift", liquid_drift);
+    record("maximum_original_momentum_relative_residual", momentum_residual);
+    record("maximum_physical_divergence", maximum_divergence);
+    record("minimum_gas_volume", global_minimum[0]);
+    record("minimum_carrier_volume", global_minimum[1]);
+    record("minimum_gas_fraction", global_minimum[2]);
+    double global_fraction_maximum = 0;
+    Teuchos::reduceAll(*solver.mesh()->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &fraction_maximum,
+        &global_fraction_maximum);
+    record("maximum_gas_fraction", global_fraction_maximum);
+    record("regional_gas_passage", passage);
+    record("complete_case_seconds", std::chrono::duration<double>(Clock::now() - started).count());
+    const auto operations = observed_geometry_statistics().bounded;
+    // These are bounded-kernel counters. A zero here alone is not a global
+    // proof that other infrastructure performed no rational operation.
+    record("bounded_kernel_source_imports", operations.source_imports);
+    record("bounded_kernel_constructions", operations.constructions);
+    record("bounded_kernel_intersections", operations.intersections);
+    record("bounded_kernel_volume_evaluations", operations.volume_evaluations);
+    record("bounded_kernel_moment_evaluations", operations.moment_evaluations);
+    record("bounded_kernel_partition_checks", operations.partition_checks);
+    record("bounded_kernel_structural_partition_reuses", operations.structural_partition_reuses);
+    record("bounded_kernel_floating_operations", operations.floating_operations);
+    record("bounded_kernel_interval_operations", operations.interval_operations);
+    record("bounded_kernel_ledger_operations", operations.ledger_operations);
+    record("bounded_kernel_wider_routes", operations.wider_routes);
+    record("bounded_kernel_rejections", operations.rejections);
+    record("bounded_kernel_exact_predicates", operations.exact_predicates);
+    record("bounded_kernel_reported_rational_constructions", operations.rational_constructions);
+    record("bounded_kernel_reported_rational_measures", operations.rational_measures);
+    record("bounded_kernel_reported_rational_ledgers", operations.rational_ledgers);
 }
 } // namespace
 
@@ -937,5 +1144,62 @@ TEST(GeneralVoFSolverTest, ExperimentalInventoryRejectsForeignPolicyTrialWithout
     EXPECT_EQ(solver.phases(), exact);
     EXPECT_EQ(solver.time(), 0);
     EXPECT_EQ(solver.phases()->inventory_policy(), Policy::ExperimentalExact);
+}
+} // namespace
+
+namespace
+{
+TEST(GeneralVoFSolverTest, GeometryInstrumentationObservesActualFiniteAndExactLibraryOperations)
+{
+    enable_observed_exact_geometry_statistics(true);
+    reset_observed_geometry_statistics();
+    struct DisableOnExit
+    {
+        ~DisableOnExit() { enable_observed_exact_geometry_statistics(false); }
+    } disable;
+    const auto comm = Tpetra::getDefaultComm();
+    const auto global_count = [&](std::uint64_t local)
+    {
+        std::uint64_t global = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local, &global);
+        return global;
+    };
+    for (const auto& image : geometry_image_snapshots())
+    {
+        EXPECT_NE(image.exact_domain, nullptr);
+        EXPECT_NE(image.bounded_domain, nullptr);
+    }
+    const auto finite_source = phases(0);
+    const auto fvm_finite = VoF::GeneralVoF::geometry_statistics();
+    EXPECT_GT(global_count(fvm_finite.bounded.constructions), 0);
+    const auto before_finite_solver = GeneralVoFSolver::geometry_statistics();
+    GeneralVoFSolver finite_solver(finite_source, inviscid());
+    const auto after_finite_solver = GeneralVoFSolver::geometry_statistics();
+    EXPECT_GT(global_count(
+                  after_finite_solver.bounded.floating_operations - before_finite_solver.bounded.floating_operations),
+        0);
+    auto exact_options = finite_source->options();
+    exact_options.inventory_policy = VoF::PhaseInventoryPolicy::ExperimentalExact;
+    const auto before_exact_fvm = VoF::GeneralVoF::geometry_statistics();
+    const auto exact_source = std::make_shared<const VoF::GeneralVoF>(finite_source->hierarchy(),
+        finite_source->owned_order(), finite_source->gas_volumes(), finite_source->carrier_volumes(), exact_options);
+    const auto after_exact_fvm = VoF::GeneralVoF::geometry_statistics();
+    EXPECT_GT(global_count(after_exact_fvm.exact.measure_values - before_exact_fvm.exact.measure_values), 0);
+    const auto before_exact_solver = GeneralVoFSolver::geometry_statistics();
+    GeneralVoFSolver exact_solver(exact_source, inviscid());
+    const auto after_exact_solver = GeneralVoFSolver::geometry_statistics();
+    EXPECT_GT(
+        global_count(after_exact_solver.exact.measure_arithmetic - before_exact_solver.exact.measure_arithmetic), 0);
+    // The aggregate represents these observed linked images only. A shared
+    // domain is counted once even if symbol binding makes two bridges alias.
+    const auto combined = observed_geometry_statistics();
+    EXPECT_GE(combined.exact.measure_values, after_exact_fvm.exact.measure_values);
+    EXPECT_GE(combined.exact.measure_arithmetic, after_exact_solver.exact.measure_arithmetic);
+    enable_observed_exact_geometry_statistics(false);
+    const auto disabled_before = observed_geometry_statistics();
+    (void) Meshes::ExactGeometryMeasure::from_value(13).scaled(3);
+    const auto disabled_after = observed_geometry_statistics();
+    EXPECT_EQ(disabled_after.exact.measure_values, disabled_before.exact.measure_values);
+    EXPECT_EQ(disabled_after.exact.measure_arithmetic, disabled_before.exact.measure_arithmetic);
 }
 } // namespace

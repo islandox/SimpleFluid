@@ -3,6 +3,10 @@
  */
 #include "solvers/details/ConservativeVoFTransport.hh"
 #include "geometry/ExactSweptGeometry.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "parallel/SparseOwnerExchange.hh"
+#include <bit>
+#include <tuple>
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFTransferBinding.hh"
@@ -1123,4 +1127,5 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_exact(
         ++preparation_statistics_.exact_builds;
     return result;
 }
+#include "solvers/details/ConservativeVoFFiniteTransport.inc"
 } // namespace SimpleFluid::detail

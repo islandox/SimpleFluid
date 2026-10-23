@@ -3,6 +3,9 @@
  */
 #include "FVM/GeneralVoF.hh"
 #include "FVM/details/ExactLiveStorage.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "FVM/details/DistributedAMROverlap.hh"
+#include "FVM/details/BoundedVoFTransport.hh"
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/ExperimentalPhaseBackend.hh"
@@ -19,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <type_traits>
+#include <tuple>
 namespace SimpleFluid::VoF
 {
 namespace
@@ -35,13 +39,15 @@ struct Cell
     Meshes::GeometryPoint centroid{};
     double native_volume = 0;
     PolyhedralPhaseSample phase;
+    Meshes::BoundedConvexGeometryPtr finite_geometry;
     PhaseError occupancy;
-    PhaseRoundoff roundoff;
+    PhaseRoundoff roundoff, finite_history;
     std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
     GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
     std::optional<PolyhedralInterface> retained_interface;
     bool inherited = false;
 };
+FinitePolyhedralPhaseSample finite_sample(const Cell&);
 Meshes::ExactPhaseMeasures phase_measures(const Cell& cell)
 {
     if (cell.experimental_exact)
@@ -57,6 +63,28 @@ Measure finite_bound(double value)
 PolyhedralPhaseSample geometric_sample(const Cell&);
 void occupancy(Cell& cell)
 {
+    if (cell.finite_geometry)
+    {
+        using namespace finite_detail;
+        const auto actual = cell.finite_geometry->volume();
+        const auto conversion = subtract(Value{cell.native_volume, 0}, actual);
+        Sum defect_sum;
+        defect_sum.add({cell.phase.gas_volume, 0});
+        defect_sum.add({cell.phase.carrier_volume, 0});
+        defect_sum.add(negate(actual));
+        const auto defect = defect_sum.value();
+        const auto input = static_cast<long double>(cell.native_volume) * 8 * std::numeric_limits<double>::epsilon();
+        if (!(cell.native_volume > 0) || !std::isfinite(cell.native_volume) ||
+            std::abs(conversion.value) > input + conversion.absolute_error ||
+            std::abs(defect.value - conversion.value) > input + defect.absolute_error + conversion.absolute_error)
+            throw std::invalid_argument("General VoF finite phase/native-volume input exceeds its arithmetic bound.");
+        cell.occupancy.difference = static_cast<double>(defect.value);
+        cell.occupancy.native_conversion = static_cast<double>(conversion.value);
+        cell.occupancy.phase_input_bound = upper_double(upward(input + defect.absolute_error));
+        cell.occupancy.admitted_bound = upper_double(upward(std::abs(conversion.value) + input +
+            conversion.absolute_error + defect.absolute_error));
+        return;
+    }
     if (!std::isfinite(cell.native_volume) || !(cell.native_volume > 0))
         throw std::invalid_argument("General VoF native metric is invalid.");
     const auto lifted = phase_measures(cell);
@@ -89,7 +117,40 @@ void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
         if (view.phases.gas != cell.phase.gas_volume || view.phases.carrier != cell.phase.carrier_volume)
             throw std::invalid_argument("Experimental exact diagnostic phase view differs.");
     }
-    // Finite diagnostic views still have honest finite conversion provenance.
+    if (!experimental)
+    {
+        using namespace finite_detail;
+        if (!cell.finite_geometry)
+            throw std::invalid_argument("Finite General VoF is missing bounded geometry authority.");
+        const auto actual = cell.finite_geometry->volume();
+        Sum defect_sum;
+        defect_sum.add({cell.phase.gas_volume, 0});
+        defect_sum.add({cell.phase.carrier_volume, 0});
+        defect_sum.add(negate(actual));
+        const auto defect = defect_sum.value();
+        const auto& e = cell.occupancy;
+        bool valid = std::isfinite(cell.phase.gas_volume) && cell.phase.gas_volume >= 0 &&
+            std::isfinite(cell.phase.carrier_volume) && cell.phase.carrier_volume >= 0 &&
+            std::isfinite(e.difference) && std::isfinite(e.native_conversion) &&
+            std::abs(defect.value) <= e.admitted_bound + defect.absolute_error;
+        for (double bound : {e.admitted_bound, e.phase_input_bound, e.fit_bound, e.transferred_bound,
+                 e.fit_allocation_bound, cell.roundoff.gas, cell.roundoff.carrier, cell.finite_history.gas, cell.finite_history.carrier})
+            valid = valid && std::isfinite(bound) && bound >= 0;
+        if (!valid || std::uint64_t(cell.declaration) > 2)
+            throw std::invalid_argument("General VoF finite occupancy provenance is invalid.");
+        PolyhedralReconstruction::validate_finite(finite_sample(cell), options.reconstruction);
+        if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
+        {
+            const auto minority = cell.declaration == GeneralVoFPhaseGeometry::PureGas ?
+                cell.phase.carrier_volume : cell.phase.gas_volume;
+            const auto bound = cell.inherited ? std::max(e.admitted_bound, e.fit_bound) :
+                actual.absolute_error + 8 * std::numeric_limits<double>::epsilon() * actual.value;
+            if (minority > bound)
+                throw std::invalid_argument("General VoF pure declaration contradicts finite inventory.");
+        }
+        return;
+    }
+    // Explicit exact-policy diagnostic views retain their exact provenance.
     const Meshes::ExactPhaseMeasures lifted{Measure::volume(*cell.phase.geometry),
         Measure::from_value(cell.phase.gas_volume), Measure::from_value(cell.phase.carrier_volume)};
     const auto defect = lifted.gas + lifted.carrier - lifted.bulk;
@@ -140,6 +201,44 @@ double real(wire::Reader& r)
 {
     return std::bit_cast<double>(r.word());
 }
+void finite_real(wire::Writer& w, long double value)
+{
+    if (!std::isfinite(value))
+        throw std::invalid_argument("Finite VoF wire value is nonfinite.");
+    int exponent = 0;
+    const auto mantissa = std::frexp(value, &exponent);
+    const auto high = static_cast<double>(mantissa);
+    const auto low = static_cast<double>(mantissa - high);
+    if (static_cast<long double>(high) + low != mantissa)
+        throw std::invalid_argument("Finite VoF wire significand exceeds its fixed representation.");
+    real(w, high);
+    real(w, low);
+    w.word(std::bit_cast<std::uint64_t>(static_cast<std::int64_t>(exponent)));
+}
+long double finite_real(wire::Reader& r)
+{
+    const auto high = real(r), low = real(r);
+    const auto exponent = std::bit_cast<std::int64_t>(r.word());
+    if (!std::isfinite(high) || !std::isfinite(low) || exponent < std::numeric_limits<int>::min() ||
+        exponent > std::numeric_limits<int>::max())
+        throw std::invalid_argument("Finite VoF wire scalar is malformed.");
+    const auto result = std::scalbn(static_cast<long double>(high) + low, int(exponent));
+    if (!std::isfinite(result) || ((high != 0 || low != 0) && result == 0))
+        throw std::invalid_argument("Finite VoF wire scalar exceeds qualified range.");
+    return result;
+}
+void finite_value(wire::Writer& w, Meshes::BoundedGeometryValue v)
+{
+    finite_real(w, v.value);
+    finite_real(w, v.absolute_error);
+}
+Meshes::BoundedGeometryValue finite_value(wire::Reader& r)
+{
+    Meshes::BoundedGeometryValue v{finite_real(r), finite_real(r)};
+    if (v.absolute_error < 0)
+        throw std::invalid_argument("Finite VoF wire bound is negative.");
+    return v;
+}
 void plane(wire::Writer& w, const PolyhedralInterface& p)
 {
     for (auto v : p.gas.normal)
@@ -154,6 +253,9 @@ void plane(wire::Writer& w, const PolyhedralInterface& p)
     real(w, p.orientation_step);
     w.word(p.fit_iterations);
     w.word(p.fit_converged);
+    w.word(p.finite_geometry);
+    if (p.finite_geometry)
+        finite_value(w, p.finite_target_volume_difference);
 }
 PolyhedralInterface plane(wire::Reader& r)
 {
@@ -170,6 +272,9 @@ PolyhedralInterface plane(wire::Reader& r)
     p.orientation_step = real(r);
     p.fit_iterations = r.word();
     p.fit_converged = r.word();
+    p.finite_geometry = r.word();
+    if (p.finite_geometry)
+        p.finite_target_volume_difference = finite_value(r);
     return p;
 }
 Meshes::ExactPhaseMeasures phases(const Meshes::ExactConvexFragment& fragment, const PolyhedralInterface& p)
@@ -214,6 +319,8 @@ struct GeneralVoF::Data
     {
         AMR::AdaptiveBytes identity;
         Meshes::ExactPlanarFacePtr geometry;
+        Meshes::BoundedPoint finite_normal;
+        Meshes::BoundedFaceConstraint finite_constraint;
     };
     struct Topology
     {
@@ -221,6 +328,7 @@ struct GeneralVoF::Data
         AMR::AdaptiveNativeDraft draft;
         std::vector<AMR::AdaptiveTile> tiles;
         std::vector<AMR::AdaptiveNode> nodes;
+        std::map<std::uint64_t, Meshes::BoundedPoint> finite_nodes;
         std::map<std::uint64_t, Key> by_gid;
         std::map<Key, std::set<Key>> adjacency;
         std::map<std::uint64_t, std::set<Key>> node_fans;
@@ -241,7 +349,7 @@ struct GeneralVoF::Data
     std::map<Key, Cell> cells;
     std::vector<double> gas, carrier;
     std::vector<PhaseVolumes> phases;
-    std::vector<PhaseRoundoff> roundoff;
+    std::vector<PhaseRoundoff> roundoff, phase_history;
     std::vector<PhaseError> occupancy;
     std::shared_ptr<const std::vector<Meshes::ExactPhaseMeasures>> experimental_catalog;
 };
@@ -282,7 +390,7 @@ void retained_budget(const GeneralVoF::Data& data)
     std::set<const void*> geometry;
     budget.add(sizeof(data) + sizeof(GeneralVoF::Data::Topology) + data.topology->order.capacity() * sizeof(Key) +
                (data.gas.capacity() + data.carrier.capacity()) * sizeof(double) +
-               data.phases.capacity() * sizeof(PhaseVolumes) + data.roundoff.capacity() * sizeof(PhaseRoundoff) +
+               data.phases.capacity() * sizeof(PhaseVolumes) + (data.roundoff.capacity() + data.phase_history.capacity()) * sizeof(PhaseRoundoff) +
                data.occupancy.capacity() * sizeof(PhaseError));
     std::set<const void*> exact_payloads;
     const auto charge_exact = [&](const Meshes::ExactGeometryMeasure& value)
@@ -298,6 +406,8 @@ void retained_budget(const GeneralVoF::Data& data)
         budget.add(sizeof(Cell) + sizeof(Key) + 8 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
         if (geometry.insert(cell.phase.geometry.get()).second)
             budget.add(cell.phase.geometry->storage_bytes());
+        if (cell.finite_geometry && geometry.insert(cell.finite_geometry.get()).second)
+            budget.add(cell.finite_geometry->storage_bytes());
         if (cell.experimental_exact)
         {
             budget.add(sizeof(ExperimentalPhaseInventory));
@@ -311,6 +421,8 @@ void retained_budget(const GeneralVoF::Data& data)
     }
     for (const auto& node : data.topology->nodes)
         budget.add(sizeof(node) + node.identity.capacity() + node.exact_identity.capacity());
+    for (const auto& [id, point] : data.topology->finite_nodes)
+        budget.add(sizeof(id) + 4 * sizeof(void*) + Meshes::bounded_point_storage_bytes(point));
     for (const auto& tile : data.topology->tiles)
     {
         budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t));
@@ -563,6 +675,7 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
             real(w, options.reconstruction.maximum_condition);
             real(w, options.reconstruction.orientation_tolerance);
             real(w, options.reconstruction.maximum_model_residual);
+            real(w, options.reconstruction.minimum_phase_support_fraction);
             packets.push_back({0, std::move(w.data)});
         });
     const auto received = exchange_owner_packets(packets, comm, options.byte_budget);
@@ -615,7 +728,7 @@ void import_phases(GeneralVoF::Data& data)
                 const auto& cell = data.cells.at(key);
                 if (cell.owner != comm->getRank() || cell.revision != revision)
                     throw std::invalid_argument("General VoF stale phase request.");
-                budget.packet(bytes.size() + 136);
+                budget.packet(bytes.size() + 152);
                 wire::Writer w;
                 w.bytes(bytes);
                 w.word(revision);
@@ -626,6 +739,8 @@ void import_phases(GeneralVoF::Data& data)
                 w.word(cell.inherited);
                 real(w, cell.roundoff.gas);
                 real(w, cell.roundoff.carrier);
+                real(w, cell.finite_history.gas);
+                real(w, cell.finite_history.carrier);
                 for (const auto* value :
                     {&cell.occupancy.difference, &cell.occupancy.admitted_bound, &cell.occupancy.native_conversion,
                         &cell.occupancy.phase_input_bound, &cell.occupancy.fit_residual, &cell.occupancy.fit_bound,
@@ -664,6 +779,8 @@ void import_phases(GeneralVoF::Data& data)
                 cell.inherited = r.word();
                 cell.roundoff.gas = real(r);
                 cell.roundoff.carrier = real(r);
+                cell.finite_history.gas = real(r);
+                cell.finite_history.carrier = real(r);
                 for (auto* value :
                     {&cell.occupancy.difference, &cell.occupancy.admitted_bound, &cell.occupancy.native_conversion,
                         &cell.occupancy.phase_input_bound, &cell.occupancy.fit_residual, &cell.occupancy.fit_bound,
@@ -680,14 +797,84 @@ void import_phases(GeneralVoF::Data& data)
                 throw std::invalid_argument("General VoF incomplete phase replies.");
         });
 }
-std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data)
+FinitePolyhedralPhaseSample finite_sample(const Cell& cell)
+{
+    const auto bulk = cell.finite_geometry->volume();
+    const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
+    const auto minority = gas ? cell.phase.gas_volume : cell.phase.carrier_volume;
+    const long double dominant = bulk.value - minority;
+    if (dominant < 0)
+        throw std::invalid_argument("Finite VoF minority exceeds actual cell geometry.");
+    return {cell.finite_geometry, gas ? minority : static_cast<double>(dominant),
+        gas ? static_cast<double>(dominant) : minority};
+}
+std::vector<FinitePolyhedralPhaseSample> finite_stencil(const GeneralVoF::Data& data, const Key& key)
+{
+    std::set<Key> visited{key}, front{key};
+    std::vector<FinitePolyhedralPhaseSample> result;
+    for (unsigned ring = 0; ring < data.options.support_rings; ++ring)
+    {
+        std::set<Key> next;
+        for (const auto& center : front)
+        {
+            const auto found = data.topology->adjacency.find(center);
+            if (found == data.topology->adjacency.end())
+                continue;
+            for (const auto& neighbor : found->second)
+                if (data.cells.contains(neighbor) && visited.insert(neighbor).second)
+                {
+                    if (result.size() == data.options.maximum_stencil_cells)
+                        throw std::invalid_argument("Finite VoF reconstruction stencil budget exhausted.");
+                    result.push_back(finite_sample(data.cells.at(neighbor)));
+                    next.insert(neighbor);
+                }
+        }
+        front = std::move(next);
+    }
+    return result;
+}
+PolyhedralInterface reconstruct_finite_cell(const GeneralVoF::Data& data, const Key& key)
+{
+    const auto& cell = data.cells.at(key);
+    validate_cell(cell, data.options);
+    if (cell.retained_interface)
+    {
+        if (!cell.retained_interface->finite_geometry)
+            throw std::invalid_argument("Finite VoF cannot adopt an exact-policy interface capsule.");
+        return *cell.retained_interface;
+    }
+    if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
+    {
+        PolyhedralInterface result;
+        result.finite_geometry = true;
+        result.pure_gas = cell.declaration == GeneralVoFPhaseGeometry::PureGas;
+        result.pure_carrier = !result.pure_gas;
+        const auto minority = result.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
+        result.target_volume_residual = minority;
+        result.finite_target_volume_difference = {-static_cast<long double>(minority), 0};
+        return result;
+    }
+    if (cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
+        return PolyhedralReconstruction::solve_offset_finite(
+            finite_sample(cell), {1, 0, 0}, data.options.reconstruction);
+    return PolyhedralReconstruction::reconstruct_finite(
+        finite_sample(cell), finite_stencil(data, key), data.options.reconstruction);
+}
+std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data)
+{
+    std::map<Key, PolyhedralInterface> result;
+    for (const auto& key : data.topology->order)
+        result.emplace(key, reconstruct_finite_cell(data, key));
+    return result;
+}
+std::map<Key, PolyhedralInterface> reconstruct_exact_local(const GeneralVoF::Data& data)
 {
     std::map<Key, PolyhedralInterface> result;
     for (const auto& key : data.topology->order)
     {
         const auto& target = data.cells.at(key);
         validate_cell(target, data.options);
-        if (target.retained_interface)
+        if (target.retained_interface && !target.retained_interface->finite_geometry)
         {
             result.emplace(key, *target.retained_interface);
             continue;
@@ -736,6 +923,11 @@ std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& dat
             key, PolyhedralReconstruction::reconstruct(geometric_sample(target), stencil, data.options.reconstruction));
     }
     return result;
+}
+std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data)
+{
+    return data.options.inventory_policy == PhaseInventoryPolicy::Finite ?
+        reconstruct_finite_local(data) : reconstruct_exact_local(data);
 }
 std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
 {
@@ -803,7 +995,21 @@ std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated plane reply.");
                 auto fitted = plane(r);
-                if (!fitted.pure_gas && !fitted.pure_carrier)
+                if (data.options.inventory_policy == PhaseInventoryPolicy::Finite)
+                {
+                    if (!fitted.finite_geometry)
+                        throw std::invalid_argument("Finite VoF imported an exact interface authority.");
+                    if (!fitted.pure_gas && !fitted.pure_carrier)
+                    {
+                        const auto amounts = cell.finite_geometry->phases(fitted.gas);
+                        const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
+                        fitted.finite_target_volume_difference = finite_detail::subtract(
+                            gas ? amounts.gas : amounts.carrier,
+                            {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
+                        fitted.target_volume_residual = static_cast<double>(fitted.finite_target_volume_difference.value);
+                    }
+                }
+                else if (!fitted.pure_gas && !fitted.pure_carrier)
                 {
                     const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                     const auto measures =
@@ -868,6 +1074,8 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 cell.revision = leaf.revision;
                 cell.phase = {hierarchy->geometry(leaf), gas[i], carrier[i]};
                 cell.native_volume = hierarchy->metrics(leaf).volume;
+                if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+                    cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(*cell.phase.geometry);
                 if (capsules)
                 {
                     cell.inherited = true;
@@ -878,10 +1086,11 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     cell.phase.gas_volume = capsule.phases.gas;
                     cell.phase.carrier_volume = capsule.phases.carrier;
                     cell.roundoff = capsule.roundoff;
+                    cell.finite_history = capsule.accumulated_roundoff;
                     const auto& e = capsule.error;
                     cell.occupancy = {e.difference, e.admitted_bound, e.native_conversion, e.phase_input_bound,
                         e.fit_residual, e.fit_bound, e.transferred_bound, e.fit_allocation_bound};
-                    if (capsule.geometry_ready)
+                    if (capsule.geometry_ready && options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
                         cell.retained_interface = capsule.geometry;
                 }
                 else
@@ -1008,6 +1217,8 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                         cell.owner = binding.owner;
                         cell.revision = leaf.revision;
                         cell.phase.geometry = retained_geometry;
+                        if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+                            cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(*retained_geometry);
                         budget.add(cell.phase.geometry->storage_bytes());
                         found = data->cells.emplace(binding.key, std::move(cell)).first;
                     }
@@ -1066,6 +1277,35 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
             for (const auto& node : topology->draft.nodes)
                 if (control_nodes.contains(node.gid))
                     topology->nodes.push_back(node);
+            std::map<std::uint64_t, std::set<Key>> node_source_cells;
+            std::map<AMR::AdaptiveBytes, const AMR::AdaptiveTile*> wall_tiles;
+            if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+                for (const auto& tile : topology->draft.tiles)
+                {
+                    for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
+                        if (key && data->cells.contains(*key))
+                            for (auto node : tile.node_gids)
+                                if (node_source_cells[node].insert(*key).second)
+                                    budget.add(sizeof(Key) + AMR::encode_adaptive_key(*key).size() + 8 * sizeof(void*));
+                    if (tile.exterior)
+                        wall_tiles.try_emplace(tile.identity, &tile);
+                }
+            if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+                for (const auto& node : topology->draft.nodes)
+                {
+                    const auto fan = topology->node_fans.find(node.gid);
+                    std::vector<Meshes::ConvexGeometryPtr> incident_sources;
+                    if (fan != topology->node_fans.end() && !fan->second.empty())
+                        for (const auto& key : fan->second)
+                            incident_sources.push_back(data->cells.at(key).phase.geometry);
+                    else if (const auto sources = node_source_cells.find(node.gid); sources != node_source_cells.end())
+                        for (const auto& key : sources->second)
+                            incident_sources.push_back(data->cells.at(key).phase.geometry);
+                    if (incident_sources.empty())
+                        throw std::invalid_argument("Finite VoF canonical node lacks an authenticated source fan.");
+                    auto p = Meshes::bounded_source_point(incident_sources, node.exact_identity);
+                    topology->finite_nodes.emplace(node.gid, std::move(p));
+                }
             std::map<std::uint64_t, std::map<AMR::AdaptiveBytes, Meshes::ExactPlanarFacePtr>> walls;
             std::map<std::uint64_t, std::set<Key>> incident;
             for (const auto& tile : topology->draft.tiles)
@@ -1101,7 +1341,35 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                         throw std::invalid_argument("General VoF wall catalog requires full incident native shells.");
                 auto& retained = topology->node_walls[node.gid];
                 for (const auto& [identity, geometry] : walls[node.gid])
-                    retained.push_back({identity, geometry});
+                {
+                    Meshes::BoundedPoint normal;
+                    Meshes::BoundedFaceConstraint constraint;
+                    if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+                    {
+                        const auto found_face = wall_tiles.find(identity);
+                        if (found_face == wall_tiles.end() || found_face->second->node_gids.size() < 3)
+                            throw std::invalid_argument("Finite VoF wall lacks its authenticated native loop.");
+                        const auto* face = found_face->second;
+                        const auto& source_cell = data->cells.at(face->first);
+                        constraint.geometry = source_cell.finite_geometry;
+                        bool matched = false;
+                        for (std::size_t index = 0; index < source_cell.phase.geometry->num_faces(); ++index)
+                            if (source_cell.phase.geometry->face_geometry(index)->contains(*face->geometry))
+                            {
+                                constraint.face = index;
+                                matched = true;
+                                break;
+                            }
+                        if (!matched)
+                            throw std::invalid_argument("Finite VoF source wall has no authenticated cell support.");
+                        const auto& a = topology->finite_nodes.at(face->node_gids[0]);
+                        for (std::size_t i = 1; i + 1 < face->node_gids.size(); ++i)
+                            normal = finite_detail::add(normal, finite_detail::cross(
+                                finite_detail::subtract(topology->finite_nodes.at(face->node_gids[i]), a),
+                                finite_detail::subtract(topology->finite_nodes.at(face->node_gids[i + 1]), a)));
+                    }
+                    retained.push_back({identity, geometry, normal, constraint});
+                }
             }
             for (const auto& [key, leaf] : hierarchy->owned())
             {
@@ -1130,6 +1398,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
             data->carrier.clear();
             data->phases.clear();
             data->roundoff.clear();
+            data->phase_history.clear();
             data->occupancy.clear();
             for (std::size_t c = 0; c < topology->native.mesh->num_owned_cells(); ++c)
             {
@@ -1140,6 +1409,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 data->phases.push_back({data->cells.at(key).native_volume, data->cells.at(key).phase.gas_volume,
                     data->cells.at(key).phase.carrier_volume});
                 data->roundoff.push_back(data->cells.at(key).roundoff);
+                data->phase_history.push_back(data->cells.at(key).finite_history);
                 data->occupancy.push_back(data->cells.at(key).occupancy);
             }
             refresh_experimental_catalog(*data);
@@ -1228,10 +1498,13 @@ void GeneralVoF::validate_transfer_target(const ExactPhaseTransferResult& result
                                              : (capsule.geometry.pure_carrier ? GeneralVoFPhaseGeometry::PureCarrier
                                                                               : GeneralVoFPhaseGeometry::Infer);
                 if (cell.revision != capsule.revision || cell.declaration != declaration ||
-                    bool(cell.retained_interface) != capsule.geometry_ready ||
+                    bool(cell.retained_interface) !=
+                        (capsule.geometry_ready && data_->options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact) ||
                     cell.native_volume != capsule.phases.bulk || cell.phase.gas_volume != capsule.phases.gas ||
                     cell.phase.carrier_volume != capsule.phases.carrier || cell.roundoff.gas != capsule.roundoff.gas ||
-                    cell.roundoff.carrier != capsule.roundoff.carrier)
+                    cell.roundoff.carrier != capsule.roundoff.carrier ||
+                    cell.finite_history.gas != capsule.accumulated_roundoff.gas ||
+                    cell.finite_history.carrier != capsule.accumulated_roundoff.carrier)
                     throw std::invalid_argument("General VoF adopted transfer finite phases differ.");
                 const auto& e = cell.occupancy;
                 const auto& p = capsule.error;
@@ -1256,7 +1529,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(bool prepare_geometr
         {
             current(*data_);
             wire::Budget budget{data_->options.byte_budget};
-            const auto interfaces = prepare_geometry ? reconstruct_local(*data_) : std::map<Key, PolyhedralInterface>{};
+            const auto interfaces = prepare_geometry ? reconstruct_exact_local(*data_) : std::map<Key, PolyhedralInterface>{};
             for (const auto& key : data_->topology->order)
             {
                 budget.add(sizeof(ExactPhaseTransferCapsule) + AMR::encode_adaptive_key(key).size());
@@ -1268,15 +1541,28 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(bool prepare_geometr
                 capsule.revision = cell.revision;
                 capsule.phases = {cell.native_volume, cell.phase.gas_volume, cell.phase.carrier_volume};
                 capsule.roundoff = cell.roundoff;
+                capsule.accumulated_roundoff = cell.finite_history;
                 const auto& e = cell.occupancy;
                 capsule.error = {e.difference, e.admitted_bound, e.native_conversion, e.phase_input_bound,
                     e.fit_residual, e.fit_bound, e.transferred_bound, e.fit_allocation_bound};
+                if (data_->options.inventory_policy == PhaseInventoryPolicy::Finite)
+                {
+                    // This explicitly selected reference export reconstructs
+                    // diagnostic centers only; the accepted finite allowance
+                    // is not replaced by a new input-admission tolerance.
+                    const auto exact = phase_measures(cell);
+                    const auto defect = exact.gas + exact.carrier - exact.bulk;
+                    if ((defect.sign() < 0 ? defect.scaled(-1) : defect).compare(Measure::from_value(e.admitted_bound)) > 0)
+                        throw std::invalid_argument("Explicit reference export exceeds accepted finite occupancy allowance.");
+                    capsule.error.difference = detail::phase_signed_value(defect);
+                    capsule.error.native_conversion = detail::phase_signed_value(Measure::from_value(cell.native_volume) - exact.bulk);
+                }
                 if (prepare_geometry)
                 {
                     capsule.geometry = interfaces.at(key);
                     capsule.geometry_ready = true;
                 }
-                else if (cell.retained_interface)
+                else if (cell.retained_interface && data_->options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
                 {
                     capsule.geometry = *cell.retained_interface;
                     capsule.geometry_ready = true;
@@ -1422,6 +1708,10 @@ const std::vector<PhaseRoundoff>& GeneralVoF::phase_roundoff_bounds() const noex
 {
     return data_->roundoff;
 }
+const std::vector<PhaseRoundoff>& GeneralVoF::accumulated_phase_errors() const noexcept
+{
+    return data_->phase_history;
+}
 std::vector<Meshes::ExactPhaseMeasures> GeneralVoF::geometric_phases() const
 {
     agree_transaction(data_->hierarchy->communicator(), data_->control);
@@ -1452,6 +1742,23 @@ std::vector<double> GeneralVoF::geometric_gas_fractions() const
         {
             current(*data_);
             wire::Budget budget{data_->options.byte_budget};
+            if (inventory_policy() == PhaseInventoryPolicy::Finite)
+            {
+                for (const auto& key : data_->topology->order)
+                {
+                    const auto& cell = data_->cells.at(key);
+                    validate_cell(cell, data_->options);
+                    const auto bulk = cell.finite_geometry->volume();
+                    const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
+                    const auto minority = gas ? cell.phase.gas_volume : cell.phase.carrier_volume;
+                    const auto fraction = static_cast<long double>(minority) / bulk.value;
+                    const auto value = gas ? fraction : 1 - fraction;
+                    if (!(bulk.value > 0) || !std::isfinite(value) || value < 0 || value > 1)
+                        throw std::invalid_argument("Finite VoF geometric fraction has no bounded view.");
+                    result.push_back(static_cast<double>(value));
+                }
+                return;
+            }
             const auto one = Measure::from_value(1);
             for (const auto& key : data_->topology->order)
             {
@@ -1480,6 +1787,28 @@ const std::vector<PhaseError>& GeneralVoF::initial_occupancy_errors() const noex
 {
     return data_->occupancy;
 }
+std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
+{
+    std::vector<GeneralVoFResolutionRequest> result;
+    wire::collective(*data_->hierarchy->communicator(), [&]
+    {
+        current(*data_);
+        if (inventory_policy() != PhaseInventoryPolicy::Finite)
+            return;
+        for (const auto& key : data_->topology->order)
+        {
+            const auto& cell = data_->cells.at(key);
+            if (cell.declaration != GeneralVoFPhaseGeometry::Infer ||
+                cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
+                continue;
+            auto assessment = PolyhedralReconstruction::assess_resolution_finite(
+                finite_sample(cell), finite_stencil(*data_, key), data_->options.reconstruction);
+            if (!assessment.admitted())
+                result.push_back({cell.gid, key, assessment});
+        }
+    });
+    return result;
+}
 std::vector<PolyhedralInterface> GeneralVoF::reconstruct() const
 {
     std::vector<PolyhedralInterface> result;
@@ -1502,7 +1831,7 @@ std::vector<GeneralVoFReconstructionPatch> GeneralVoF::reconstruction_patches() 
         [&]
         {
             for (const auto& [key, cell] : data_->cells)
-                result.push_back({cell.gid, cell.owner, cell.phase.geometry, planes.at(key)});
+                result.push_back({cell.gid, cell.owner, cell.phase.geometry, planes.at(key), cell.finite_geometry});
         });
     return result;
 }
@@ -1524,6 +1853,45 @@ std::vector<Meshes::ConvexGeometryPtr> GeneralVoF::owned_geometry() const
     for (const auto& key : data_->topology->order)
         result.push_back(data_->cells.at(key).phase.geometry);
     return result;
+}
+std::vector<Meshes::BoundedPoint> GeneralVoF::finite_face_points(std::uint64_t face) const
+{
+    current(*data_);
+    if (inventory_policy() != PhaseInventoryPolicy::Finite)
+        throw std::invalid_argument("Finite canonical face points require Finite inventory policy.");
+    const auto tile = std::find_if(data_->topology->tiles.begin(), data_->topology->tiles.end(),
+        [&](const auto& tile) { return tile.face_gid == face; });
+    if (tile == data_->topology->tiles.end())
+        throw std::invalid_argument("Finite canonical face identity is not retained.");
+    std::vector<Meshes::BoundedPoint> points;
+    for (auto node : tile->node_gids)
+        points.push_back(data_->topology->finite_nodes.at(node));
+    return points;
+}
+std::vector<Meshes::BoundedConvexGeometryPtr> GeneralVoF::owned_finite_geometry() const
+{
+    if (inventory_policy() != PhaseInventoryPolicy::Finite)
+        throw std::invalid_argument("Finite geometry access requires Finite inventory policy.");
+    std::vector<Meshes::BoundedConvexGeometryPtr> result;
+    for (const auto& key : data_->topology->order)
+        result.push_back(data_->cells.at(key).finite_geometry);
+    return result;
+}
+const std::vector<GeneralVoFFiniteFaceContribution>& GeneralVoF::Trial::finite_face_contributions() const noexcept
+{
+    return finite_faces_;
+}
+const std::vector<GeneralVoFFiniteTransfer>& GeneralVoF::Trial::finite_transfers() const noexcept
+{
+    return finite_transfers_;
+}
+const std::vector<GeneralVoFFiniteDonorBudget>& GeneralVoF::Trial::finite_donor_budgets() const noexcept
+{
+    return finite_budgets_;
+}
+const std::vector<GeneralVoFFiniteNodeTrajectory>& GeneralVoF::Trial::finite_node_trajectories() const noexcept
+{
+    return finite_trajectories_;
 }
 std::vector<std::uint64_t> GeneralVoF::node_cells(std::uint64_t node) const
 {
@@ -1590,7 +1958,7 @@ std::vector<GeneralVoFSupportCell> GeneralVoF::support_cells() const
 {
     std::vector<GeneralVoFSupportCell> result;
     for (const auto& [key, cell] : data_->cells)
-        result.push_back({cell.gid, cell.revision, cell.owner, cell.phase.geometry, cell.centroid, key});
+        result.push_back({cell.gid, cell.revision, cell.owner, cell.phase.geometry, cell.centroid, key, cell.finite_geometry});
     return result;
 }
 const std::vector<GeneralVoFDonorBudget>& GeneralVoF::Trial::donor_budgets() const noexcept
@@ -1854,6 +2222,8 @@ struct ExactStorageBudget
 GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVelocity> node_velocity,
     std::span<const GeneralVoFFaceVolume> face_volume, double timestep) const
 {
+    if (inventory_policy() == PhaseInventoryPolicy::Finite)
+        return plan_transport_finite(node_velocity, face_volume, timestep);
     const auto& data = *data_;
     auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
@@ -2834,4 +3204,24 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::apply(const Trial& trial) const
         });
     return trial.candidate();
 }
+#include "FVM/details/GeneralVoFFinite.inc"
+#include "FVM/details/GeneralVoFFiniteRemap.inc"
 } // namespace SimpleFluid::VoF
+
+namespace SimpleFluid::VoF
+{
+void GeneralVoF::enable_exact_geometry_statistics(bool enabled)
+{
+    Meshes::enable_exact_geometry_statistics(enabled);
+}
+void GeneralVoF::reset_geometry_statistics()
+{
+    Meshes::reset_exact_geometry_statistics();
+    Meshes::reset_bounded_geometry_statistics();
+}
+Meshes::GeometryStatisticsSnapshot GeneralVoF::geometry_statistics()
+{
+    return {Meshes::exact_geometry_statistics_domain(), Meshes::bounded_geometry_statistics_domain(),
+        Meshes::exact_geometry_statistics(), Meshes::bounded_geometry_statistics()};
+}
+}

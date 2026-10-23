@@ -562,3 +562,36 @@ simplefluid_add_mpi_test(
     PROCS 4
     LABELS "vof;pressure;exact;collective;empty_rank"
     TIMEOUT 180)
+
+# Fixed-width finite arithmetic has independent capacity/empty-owner coverage.
+foreach(_finite_projection_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME GeneralVoFFiniteProjection_${_finite_projection_procs}procs
+    TARGET testGeneralVoFFlowWorkspace
+    PROCS ${_finite_projection_procs}
+    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.FiniteProjectionKeepsOriginalPhysicalThresholdWithObservedEmptyOwners"
+    LABELS "mpi;vof;finite;projection;collective;empty_rank"
+    TIMEOUT 180)
+  simplefluid_add_mpi_test(
+    NAME GeneralVoFFinitePhiClosure_${_finite_projection_procs}procs
+    TARGET testGeneralVoFPhiClosure
+    PROCS ${_finite_projection_procs}
+    ARGS "--gtest_filter=GeneralVoFPhiClosureTest.FiniteSparseForestPreservesCirculationAndRejectsIndependentCapacityExhaustion"
+    LABELS "mpi;vof;finite;conservation;collective"
+    TIMEOUT 180)
+endforeach()
+
+# Private numerical sources are compiled directly in these test executables.
+# Source properties are directory-scoped, so repeat the production policy here.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        ../GeneralVoFSolver.cc
+        ../details/ConservativeVoFTransport.cc
+        ../details/GeneralVoFFlowWorkspace.cc
+        ../details/GeneralVoFPhiClosure.cc
+        ../details/GeneralVoFCurvature.cc
+        PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
+endif()
