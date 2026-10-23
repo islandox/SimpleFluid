@@ -1,13 +1,10 @@
 # VoF verification contracts
 
-This tracked index identifies reproducible numerical checks. The
-[review follow-up summary](vof_review_followup.md) records the tested source,
-commands, measured outcomes and remaining qualification for the follow-up to
-`8fbfb988`. Raw build logs, XML and CSV outputs remain local build artifacts.
-Historical Stage 1–4 reports
-referenced by earlier documentation were local ignored files and are unavailable
-in a fresh checkout. Use the source tests and commands below to reproduce their
-covered contracts; do not infer historical measured results from a link.
+This index owns reproducible numerical assertions and focused test entry
+points. The modeling guides and [general AMR design](../architecture/general_amr.md#qualification-status)
+own support and qualification status. Raw commands, source/runtime manifests,
+XML, logs and timing samples belong in local build artifacts. Historical passes
+remain scoped to their recorded source and do not imply a new run after edits.
 
 ## Focused Debug workflow
 
@@ -96,3 +93,39 @@ refinement seam at density ratio 10,000. Its parasitic-velocity criterion is an
 open qualification requirement. Run it explicitly with
 `--gtest_also_run_disabled_tests --gtest_filter='*CurvedCoarseFineSeamStaticBubbleQualification'`;
 passing the default capillary cases does not qualify this configuration.
+
+## General native AMR and flow checks
+
+Select only the affected family from this map; inspect current registrations
+before executing. These commands are reproduction entry points, not a report
+that a campaign ran during documentation maintenance.
+
+| Scope | Targets and independent gates |
+| --- | --- |
+| Hierarchy and construction | `testCartesianAMR`, `testExactExtrudedConstruction`, `testExtrudedAMR`, `testLocalProductAMR`, `testPolyhedralAMR`, `testMixedAMR`: ancestry, exact source observations, complete inverse families, closure and transactional rejection |
+| Geometry and remap | `testConvexCellGeometry`, `testExactPolyhedralComplex`, `testExactExplicitProvider`, `testConservativeAMRRemap`, `testProductAMRRemap`, `testPolyhedralAMRRemap`, `testMixedAMRRemap`: actual native certificates, positive tiny pieces, coverage, moments, independent phases and paired quantities |
+| Distributed migration | `testDistributedAdaptiveKey`, `testDistributedAdaptivePackets`, `testDistributedAdaptiveAuthority`, `testDistributedAdaptiveClosure`, `testDistributedAdaptiveBalance`, `testDistributedAdaptiveState`, `testDistributedCartesianKernel`, `testDistributedProductKernel`, `testDistributedMixedKernel`, `testFrozenNative`, `testSparseNativeMesh`, `testSparseNativePeriodic`, `testDistributedNativeOperators`, `testSparseOwnerExchange`: owner-local state, ghost completeness, exact contact authorities, final packet cost and observed empty owners |
+| General geometry/transport | `testExactSweptGeometry`, `testDepartureFan`, `testPolyhedralReconstruction`, `testExactPhaseTransfer`, `testGeneralVoF`: exact contacts versus positive overlaps, signed PLIC support, donor fans, finite provenance and optional exact-policy separation |
+| General flow | `testGeneralVoFFlowWorkspace`, `testConservativeVoFTransport`, `testGeneralVoFPhiClosure`, `testGeneralVoFExactPressure`, `testGeneralVoFCurvature`, `testGeneralVoFSolver`: physical residuals, conditioned sampled directions, independent phase mass, original physical horizons, rollback/regrid and cache invalidation |
+
+For example, a reconstruction-only change can use:
+
+```sh
+cmake --build --preset GCC-Debug --target testPolyhedralReconstruction
+build/gcc/bin/Debug/testPolyhedralReconstruction
+mpiexec -n 2 build/gcc/bin/Debug/testPolyhedralReconstruction
+mpiexec -n 4 build/gcc/bin/Debug/testPolyhedralReconstruction
+```
+
+Full flow qualification must name the physical methods explicitly:
+`PhysicalHydrostaticPressureBalancesSkewNativeCentersOverFourSteps`,
+`IndependentlyIntegratedReflectedCylinderRetainsFiniteDurationCapillaryBalance`,
+`ClosedSymmetryViscousModeRetainsAnalyticFiniteDurationRate`, and
+`NonzeroSkewCoarseFinePhasePassagePreservesIndependentInventories`.
+The coarse/fine fixture uses 50 native cells after closure and ten 0.002 s
+steps. The cylinder retains its 0.02 s endpoint; the refined viscous fixture
+uses 8×8×2 cells and ten 0.002 s steps with its fixed 5% rate gate. Setup,
+shortened prefixes, operator-only diagnostics and timeouts cannot replace these
+physical assertions. Use distinct per-rank XML paths and count logical methods
+separately from rank executions. Explicit exclusions and known failures must
+remain visible; consult the design's qualification table before reporting a pass.

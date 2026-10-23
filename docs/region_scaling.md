@@ -1,9 +1,4 @@
-# Region execution scaling qualification
-
-The subsequent [production diffusion qualification](region_production.md)
-compares production dispatch against the retained ordinal-query reference in
-the same binary and repairs the compatibility materialization allocation
-pattern. Measurements below remain the September 10 historical snapshot.
+# Region performance measurement contract
 
 `region_scaling_benchmark` retains the native geometry, `MultiRegionMesh`,
 `MeshHandle`, FVM diffusion assembly, and Belos solver paths. It is opt-in and has
@@ -90,105 +85,31 @@ and runtime/sandbox failures must not be interpreted as mesh failures.
 Small runs reveal costs and storage trends, not production scalability. In
 particular, this milestone keeps the contiguous canonical-cell partitioner and
 whole-descriptor construction; benchmark setup costs can expose remaining global
-work. Region-aware distributed layouts and distributed explicit packets require
-separate qualification. Numerical convergence and decomposition-invariance
+work. The [composite partitioner](composite_partitioning.md) provides a separate
+graph/distributed-explicit path; this benchmark's contiguous-partition fixtures
+do not qualify its scaling. Numerical convergence and decomposition-invariance
 studies are independent of this linear benchmark's solve gate.
 
-## Recorded Release qualification, 2026-09-10
+## Production versus reference assembly
 
-The measured executable was built from reviewed head
-`a1a5a7a77ab0ca96cf383d60ba1b64746e2eaa25` plus the region execution milestone
-changes. All 42 fresh benchmark processes completed with the same executable
-SHA-256 `0566a82b6bd1aa0bec34e3afaf31e2ef7d53affbc00645099b39faff70674550`.
-The toolchain was GNU 16.2.1 Release, Open MPI 5.0.10, on an Intel i5-12500 with
-12 logical CPUs under WSL2/Linux 6.18.33.2. MPI measurements used host defaults
-and `--bind-to core`; serial processes inherited the available CPU affinity.
-Builds and correctness tests had finished before these measurements.
+The optional final `auto|reference` argument selects production region traversal
+or the retained ordinal-query kernel. Use `--assemblies auto reference` in
+`verification/run_region_scaling.py` to run each in separate processes with the
+same executable, fields, matrix formulas and solve gates. This isolates dispatch
+from source-version changes. Explicit materialization has amortized CSR growth;
+its allocation regression is independent of timings.
 
-The main matrix used one fresh sample at `n=16,32`, `R=1,2,8,32`, and `P=1,2,4`,
-with fixed `n=32,R=2,P=1` for the independent sweeps. Four additional serial
-samples covered `n=64,R=2`, one per baseline. A targeted repeat then used three
-fresh composite samples for each `R=1,2,8,32` at fixed `n=32,P=1`. Each sample
-averaged five traversal/application repetitions. All true relative residuals
-were at most `9.97e-11`, and all analytical maximum solution errors were at most
-`2.74e-9`. Compact storage checks and native/canonical traversal checksum checks
-passed. The two flattened MPI matrix cases were explicitly unsupported; a
-separate two-rank invocation verified the executable's rejection status 77.
+Recorded Release studies completed the supported native/composite/materialized
+cases and demonstrated lower production-assembly cost on their conforming
+Cartesian fixtures. Flattened MPI remains an explicit unsupported result.
+Correctness coverage separately includes motion/rollback, periodic/coarse-fine
+parity and the [steady diffusion residual contract](steady_diffusion_convergence.md).
+These studies do not establish scalable construction, general CFD speedups or
+whole-process memory bounds. Recreate measurements with fresh artifacts rather
+than treating old timings as the current executable's performance.
 
-[The recorded CSV](region_scaling_release.csv) retains every phase's median,
-minimum and maximum, including storage and rank maxima. The `main` and `large`
-series are single samples, so their minima and maxima are identical. The
-following table reports the repeated region-count sweep; brackets contain the
-three-sample minimum and maximum, in milliseconds.
-
-| R | Provider traversal | Canonical handle traversal | Diffusion assembly |
-| ---: | ---: | ---: | ---: |
-| 1 | 2.268 [2.156, 2.514] | 54.492 [53.601, 55.039] | 113.835 [106.052, 125.595] |
-| 2 | 2.172 [2.137, 2.544] | 81.312 [78.220, 85.520] | 381.681 [379.195, 384.943] |
-| 8 | 2.271 [2.242, 2.307] | 105.930 [103.118, 116.638] | 568.208 [561.747, 592.513] |
-| 32 | 2.220 [2.129, 2.295] | 115.582 [112.296, 115.584] | 594.177 [588.348, 607.677] |
-
-Provider traversal stays near 2.2 ms across this R sweep. Median execution-view
-acquisition grows from 0.290 to 1.513 microseconds. Canonical handle traversal
-and production assembly still carry substantial overhead: at this fixed mesh,
-the native baseline traversed in roughly 6.1 ms and assembled in roughly 31 ms.
-The directory and execution scope remove whole-composite validation from the
-bulk loop, but canonical face recovery remains an expensive path. This evidence
-supports efficient provider traversal and identifies remaining operator work;
-it does not establish inexpensive production canonical execution.
-
-At 262,144 cells (`n=64,R=2,P=1`), the single-sample memory and construction
-comparison was:
-
-| Baseline | Structural mesh KiB | Peak RSS MiB | Construction seconds | Assembly seconds |
-| --- | ---: | ---: | ---: | ---: |
-| Native compact | 106.422 | 132.020 | 0.00135 | 0.333 |
-| Compact composite | 109.625 | 150.449 | 0.14749 | 4.264 |
-| Forced compatibility | 39,701.180 | 433.480 | 218.38394 | 3.557 |
-| Flattened unstructured | 197,573.945 | 402.852 | 1.37663 | 0.294 |
-
-The composite has a much smaller structural mesh payload than the explicit
-reference, while its measured benchmark process peak is about 150 MiB and the native
-compact peak about 132 MiB. Fields, matrices, solver state and output account for
-memory beyond the structural report. Forced compatibility construction includes
-the existing per-cell `reserve(current_size + face_count)` behavior and full
-indexer materialization; its extreme setup time must be kept separate from
-compact construction and must not support a general application speedup claim.
-
-The fixed `N=32,768,R=2` composite rank sweep was also diagnostic:
-
-| P | Construction ms | Canonical traversal ms | Assembly ms | Solve ms | Peak RSS max-rank MiB | Ghost/owned max |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 14.701 | 82.947 | 379.409 | 24.202 | 65.023 | 0.0000 |
-| 2 | 127.611 | 59.173 | 340.228 | 15.192 | 79.934 | 0.0625 |
-| 4 | 90.997 | 36.226 | 212.953 | 14.094 | 70.109 | 0.1250 |
-
-Construction does not improve with rank count at this size. The map/halo setup
-and replicated descriptor work remain visible; this is not evidence of scalable
-distributed construction. Solver work and operator application are similar
-across representations, with the main CPU difference in mesh traversal and
-assembly. Larger production workloads and alternative distributed layouts remain
-outside this qualification.
-
-The retained manifests, exact commands, source patches/new files, library hashes,
-JSONL, geometry VTU output, and full CSV records are in:
-
-- `/tmp/region-scaling-gcc-release-main`
-- `/tmp/region-scaling-gcc-release-large`
-- `/tmp/region-scaling-gcc-release-region-repeats`
-
-To reproduce the measured axes, use the environment/build commands above and
-invoke the runner with these arguments, choosing new output directories:
-
-```sh
-python3 verification/run_region_scaling.py --binary "$SIMPLEFLUID_BIN_DIR/region_scaling_benchmark" \
-  --output /tmp/region-scaling-main-new --cells 16,32 --regions 1,2,8,32 --ranks 1,2,4 \
-  --fixed-cells 32 --fixed-regions 2 --fixed-ranks 1 --samples 1 --repeats 5 --mpi-args '--bind-to core'
-python3 verification/run_region_scaling.py --binary "$SIMPLEFLUID_BIN_DIR/region_scaling_benchmark" \
-  --output /tmp/region-scaling-large-new --cells 64 --regions 2 --ranks 1 \
-  --fixed-cells 64 --fixed-regions 2 --fixed-ranks 1 --samples 1 --repeats 5 \
-  --modes native composite flattened materialized --timeout 300
-python3 verification/run_region_scaling.py --binary "$SIMPLEFLUID_BIN_DIR/region_scaling_benchmark" \
-  --output /tmp/region-scaling-repeat-new --cells 32 --regions 1,2,8,32 --ranks 1 \
-  --fixed-cells 32 --fixed-regions 2 --fixed-ranks 1 --samples 3 --repeats 5 --modes composite
-```
+Report `T_reference/T_auto`, `(T_reference-T_auto)/T_reference`, and
+`T_auto/T_native` separately. Medians of maximum-rank durations are not total CPU
+cost; independently maximized timers are not additive. Compare identical build,
+rank, binding, inputs and completed numerical gates, retaining failed runs and
+unsupported cases outside successful timing cohorts.
