@@ -2,7 +2,9 @@
  * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/BoundedConvexGeometry.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactPressure.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
@@ -12,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cfenv>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -62,20 +65,23 @@ double GeneralVoFFlowWorkspace::maximum(double value) const
     Teuchos::reduceAll(*mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &value, &global);
     return global;
 }
-GeneralVoFFlowWorkspace::GeneralVoFFlowWorkspace(SP<const MeshHandle<>> mesh)
+GeneralVoFFlowWorkspace::GeneralVoFFlowWorkspace(SP<const MeshHandle<>> mesh, bool finite_arithmetic,
+    std::vector<Vector> finite_spans)
     : mesh_(validated_native_flow_mesh(std::move(mesh))),
       cell_import_(mesh_->owned_cell_map(), mesh_->overlap_cell_map()),
       face_import_(mesh_->owned_face_map(), mesh_->overlap_face_map()), cell_owned_(mesh_->owned_cell_map()),
       cell_overlap_(mesh_->overlap_cell_map()), face_owned_(mesh_->owned_face_map()),
       face_overlap_(mesh_->overlap_face_map()), projection_(mesh_)
 {
-    bool valid = true;
+    finite_arithmetic_ = finite_arithmetic;
+    bool valid = !finite_arithmetic || finite_spans.size() == mesh_->num_owned_cells();
     auto local_gauge = std::numeric_limits<Pack::global_ordinal_type>::max();
     try
     {
         const auto lease = mesh_->acquire_execution_view();
         volumes_.resize(mesh_->num_owned_cells());
-        exact_volumes_.resize(mesh_->num_owned_cells());
+        if (!finite_arithmetic_)
+            exact_volumes_.resize(mesh_->num_owned_cells());
         spans_.resize(volumes_.size());
         for (std::size_t c = 0; c < volumes_.size(); ++c)
         {
@@ -86,6 +92,18 @@ GeneralVoFFlowWorkspace::GeneralVoFFlowWorkspace(SP<const MeshHandle<>> mesh)
             if (!native || !*native)
             {
                 valid = false;
+                continue;
+            }
+            if (finite_arithmetic_)
+            {
+                if (finite_spans.size() != volumes_.size())
+                {
+                    valid = false;
+                    continue;
+                }
+                spans_[c] = finite_spans[c];
+                for (double span : spans_[c])
+                    valid = valid && std::isfinite(span) && span > 0;
                 continue;
             }
             const auto exact_cell =
@@ -480,6 +498,7 @@ void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::v
     std::optional<std::span<const Meshes::ExactGeometryMeasure>> physical_mass,
     const GeneralVoFProjectionClosureTopology* closure_topology)
 {
+    require(!finite_arithmetic_, "Exact projection requires an exact workspace; finite policy cannot switch arithmetic.");
     int closure_requested = bool(closure_topology), closure_minimum = 0, closure_maximum = 0;
     Teuchos::reduceAll(
         *mesh_->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &closure_requested, &closure_minimum);
@@ -1379,6 +1398,7 @@ void GeneralVoFFlowWorkspace::project(std::vector<double>& face_velocity, std::v
         provenance->face_rate = std::move(accepted_rate);
     }
 }
+#include "solvers/details/GeneralVoFFiniteProjection.inc"
 double GeneralVoFFlowWorkspace::stable_timestep(
     const std::vector<double>& velocity, double rho, double mu, double sigma, const VoFSolverOptions& options) const
 {

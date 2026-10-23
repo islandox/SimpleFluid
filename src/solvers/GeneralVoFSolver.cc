@@ -4,7 +4,11 @@
 #include "solvers/GeneralVoFSolver.hh"
 #include "FVM/ExactFaceTransfer.hh"
 #include "FVM/ExactPhaseTransfer.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include <cstring>
+#include <tuple>
 #include "geometry/ExactPlanarFace.hh"
+#include "geometry/BoundedPlanarFace.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
@@ -58,6 +62,17 @@ std::shared_ptr<const MeshHandle<>> validated_phase_mesh(const std::shared_ptr<c
         throw std::runtime_error("General VoF source geometry is stale before workspace construction.");
     return mesh;
 }
+std::vector<Vector> finite_spans(const std::shared_ptr<const VoF::GeneralVoF>& phases)
+{
+    std::vector<Vector> result;
+    if (phases->inventory_policy() == VoF::PhaseInventoryPolicy::Finite)
+        for (const auto& geometry : phases->owned_finite_geometry())
+        {
+            const auto spans = geometry->axis_spans();
+            result.push_back({spans[0].as_double(), spans[1].as_double(), spans[2].as_double()});
+        }
+    return result;
+}
 } // namespace
 struct GeneralVoFSolver::Impl
 {
@@ -70,6 +85,8 @@ struct GeneralVoFSolver::Impl
         // rebuilds from represented phases; experimental exact mode opts into
         // its separately retained authority, never a solver-side reinterpretation.
         std::vector<Meshes::ExactGeometryMeasure> physical_mass;
+        std::vector<long double> finite_mass, finite_mass_error;
+        detail::GeneralVoFFiniteProjectionProvenance finite_projection;
         detail::GeneralVoFProjectionProvenance projection_arithmetic;
         VoFStepDiagnostics diagnostics;
         std::array<GeneralVoFMomentumDiagnostics, 3> momentum_transport;
@@ -115,7 +132,7 @@ struct GeneralVoFSolver::Impl
         return result;
     }
     Impl(std::shared_ptr<const VoF::GeneralVoF> phases, VoFMaterial m, GeneralVoFSolverOptions o)
-        : mesh(validated_phase_mesh(phases)), material(m), options(o), flow(mesh), transport(mesh)
+        : mesh(validated_phase_mesh(phases)), material(m), options(o), flow(mesh, phases->inventory_policy() == VoF::PhaseInventoryPolicy::Finite, finite_spans(phases)), transport(mesh)
     {
         bool valid = options.byte_budget > 0 && options.maximum_momentum_iterations > 0 &&
                      std::isfinite(options.momentum_relative_tolerance) && options.momentum_relative_tolerance > 0;
@@ -146,6 +163,8 @@ struct GeneralVoFSolver::Impl
         require(controls == agreed, "General VoF material/numerical controls differ across ranks.");
         require(phases->hierarchy()->geometry_unchanged(), "General VoF source geometry is stale.");
         const auto geometry = phases->owned_geometry();
+        const auto bounded_geometry = phases->inventory_policy() == VoF::PhaseInventoryPolicy::Finite ?
+            phases->owned_finite_geometry() : std::vector<Meshes::BoundedConvexGeometryPtr>{};
         volume.resize(mesh->num_owned_cells());
         thickness.resize(volume.size());
         collective(
@@ -155,6 +174,27 @@ struct GeneralVoFSolver::Impl
                     throw std::runtime_error("General VoF phase/native geometry order differs.");
                 for (std::size_t c = 0; c < volume.size(); ++c)
                 {
+                    if (!bounded_geometry.empty())
+                    {
+                        const auto& p = bounded_geometry[c]->points();
+                        long double area = 0;
+                        for (const auto& face : bounded_geometry[c]->faces())
+                        {
+                            VoF::finite_detail::Point normal{};
+                            for (std::size_t i = 1; i + 1 < face.size(); ++i)
+                                normal = VoF::finite_detail::add(normal, VoF::finite_detail::cross(
+                                    VoF::finite_detail::subtract(p[face[i]], p[face[0]]),
+                                    VoF::finite_detail::subtract(p[face[i + 1]], p[face[0]])));
+                            const auto square = VoF::finite_detail::dot(normal, normal);
+                            area += std::sqrt(square.value) / 2;
+                        }
+                        const auto v = bounded_geometry[c]->volume();
+                        volume[c] = v.as_double();
+                        thickness[c] = static_cast<double>(2 * v.value / area);
+                        if (!std::isfinite(thickness[c]) || !(thickness[c] > 0))
+                            throw std::runtime_error("Finite VoF cell has no physical thickness.");
+                        continue;
+                    }
                     volume[c] = geometry[c]->moments().volume.as_double();
                     long double area = 0;
                     for (std::size_t face = 0; face < geometry[c]->num_faces(); ++face)
@@ -168,8 +208,17 @@ struct GeneralVoFSolver::Impl
         state->phases = std::move(phases);
         accepted = std::move(state);
     }
+    bool finite(const State& state) const
+    {
+        return state.phases->inventory_policy() == VoF::PhaseInventoryPolicy::Finite;
+    }
     void phase_storage(State& state) const
     {
+        if (finite(state))
+        {
+            phase_storage_finite(state);
+            return;
+        }
         const auto& gas = state.phases->gas_volumes();
         const auto& carrier = state.phases->carrier_volumes();
         const auto geometric_fraction = state.phases->geometric_gas_fractions();
@@ -251,8 +300,12 @@ struct GeneralVoFSolver::Impl
             [&]
             {
                 for (const auto& patch : patches)
-                    if (auto sample = detail::GeneralVoFCurvature::patch(patch.cell, *patch.geometry, patch.interface))
-                        surface.push_back(*sample);
+                {
+                    const auto sample = finite(state) ? detail::GeneralVoFCurvature::patch_finite(
+                        patch.cell, *patch.finite_geometry, patch.interface) :
+                        detail::GeneralVoFCurvature::patch(patch.cell, *patch.geometry, patch.interface);
+                    if (sample) surface.push_back(*sample);
+                }
                 constexpr auto index_entry_bytes =
                     sizeof(std::pair<const std::uint64_t, std::size_t>) + 4 * sizeof(void*);
                 if (surface.size() > options.byte_budget / index_entry_bytes)
@@ -327,6 +380,11 @@ struct GeneralVoFSolver::Impl
     }
     void budget(State& state) const
     {
+        if (finite(state))
+        {
+            budget_finite(state);
+            return;
+        }
         std::array<Meshes::ExactGeometryMeasure, 7> local;
         std::vector<Meshes::ExactPhaseMeasures> authority;
         bool valid = true;
@@ -436,8 +494,9 @@ struct GeneralVoFSolver::Impl
                     OwnerPacket packet;
                     packet.peer = int(node.gid % comm->getSize());
                     append_word(packet.bytes, node.gid);
-                    append_word(packet.bytes, node.exact_identity.size());
-                    packet.bytes.insert(packet.bytes.end(), node.exact_identity.begin(), node.exact_identity.end());
+                    const auto& node_identity = finite(state) ? node.identity : node.exact_identity;
+                    append_word(packet.bytes, node_identity.size());
+                    packet.bytes.insert(packet.bytes.end(), node_identity.begin(), node_identity.end());
                     for (double x : node.coordinate)
                         append_word(packet.bytes, std::bit_cast<std::uint64_t>(x));
                     const auto& support = supports.at(node.gid);
@@ -468,10 +527,23 @@ struct GeneralVoFSolver::Impl
                     for (const auto* wall : walls)
                     {
                         append_word(packet.bytes, wall->face_gid);
-                        const auto normal = wall->geometry->area_vector();
-                        for (double x : {normal.x, normal.y, normal.z})
+                        Vector normal{};
+                        std::vector<char> certificate;
+                        if (finite(state))
+                        {
+                            const auto face = mesh->overlap_face_map()->getLocalElement(GO(wall->face_gid));
+                            const auto n = mesh->face_normal(face);
+                            normal = {n.x, n.y, n.z};
+                            certificate = wall->identity;
+                        }
+                        else
+                        {
+                            const auto n = wall->geometry->area_vector();
+                            normal = {n.x, n.y, n.z};
+                            certificate = wall->geometry->encode_incidence();
+                        }
+                        for (double x : normal)
                             append_word(packet.bytes, std::bit_cast<std::uint64_t>(x));
-                        const auto certificate = wall->geometry->encode_incidence();
                         append_word(packet.bytes, certificate.size());
                         packet.bytes.insert(packet.bytes.end(), certificate.begin(), certificate.end());
                     }
@@ -713,6 +785,8 @@ struct GeneralVoFSolver::Impl
         if (speed > 0 && std::isfinite(speed))
             speed = std::nextafter(speed, std::numeric_limits<double>::infinity());
         speed = maximum(speed);
+        if (finite(state))
+            return stable_timestep_finite(state, bound, speed, global_thickness);
         // Supplement rounded face CFL with the authoritative exact rate, including
         // nonzero streams whose individual binary64 product is zero.
         FaceMeasures owned;
@@ -783,6 +857,11 @@ struct GeneralVoFSolver::Impl
     }
     void verify_phase_publication(const VoF::GeneralVoF::Trial& trial, const VoF::GeneralVoF& candidate) const
     {
+        if (candidate.inventory_policy() == VoF::PhaseInventoryPolicy::Finite)
+        {
+            verify_phase_publication_finite(trial, candidate);
+            return;
+        }
         collective(
             [&]
             {
@@ -908,10 +987,22 @@ struct GeneralVoFSolver::Impl
         surface_curvature(*next);
         next->face_velocity = supplied_faces ? flow.faces(face_velocity) : flow.interpolate(next->velocity);
         next->projection_arithmetic.byte_budget = options.byte_budget;
-        const auto closure_topology = projection_topology(*next->phases);
-        flow.project(next->face_velocity, next->velocity, next->pressure, next->density, next->fraction,
-            next->curvature, 1, 0, options.flow, next->diagnostics, &next->projection_arithmetic,
-            std::span<const Meshes::ExactGeometryMeasure>(next->physical_mass), &closure_topology);
+        if (finite(*next))
+        {
+            const auto closure_topology = projection_topology<detail::GeneralVoFFiniteProjectionClosureTopology>(*next->phases);
+            next->finite_projection.byte_budget = options.byte_budget;
+            flow.project_finite(next->face_velocity, next->velocity, next->pressure, next->density, next->fraction,
+                next->curvature, 1, 0, options.flow, next->diagnostics, &next->finite_projection,
+                std::span<const long double>(next->finite_mass), &closure_topology,
+                std::span<const long double>(next->finite_mass_error));
+        }
+        else
+        {
+            const auto closure_topology = projection_topology(*next->phases);
+            flow.project(next->face_velocity, next->velocity, next->pressure, next->density, next->fraction,
+                next->curvature, 1, 0, options.flow, next->diagnostics, &next->projection_arithmetic,
+                std::span<const Meshes::ExactGeometryMeasure>(next->physical_mass), &closure_topology);
+        }
         budget(*next);
         accepted = std::move(next);
     }
@@ -1034,9 +1125,10 @@ struct GeneralVoFSolver::Impl
             });
         return result;
     }
-    detail::GeneralVoFProjectionClosureTopology projection_topology(const VoF::GeneralVoF& phases) const
+    template<class Topology = detail::GeneralVoFProjectionClosureTopology>
+    Topology projection_topology(const VoF::GeneralVoF& phases) const
     {
-        detail::GeneralVoFProjectionClosureTopology result;
+        Topology result;
         collective(
             [&]
             {
@@ -1122,6 +1214,8 @@ struct GeneralVoFSolver::Impl
     }
     VoFStepDiagnostics step(double dt)
     {
+        if (finite(*accepted))
+            return step_finite(dt);
         require(std::isfinite(dt) && dt > 0, "General VoF timestep must be positive and finite.");
         double minimum = 0, maximum_dt = 0;
         Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &dt, &minimum);
@@ -1264,6 +1358,9 @@ struct GeneralVoFSolver::Impl
         accepted = std::move(next);
         return accepted->diagnostics;
     }
+#include "solvers/details/GeneralVoFFiniteSolver.inc"
+#include "solvers/details/GeneralVoFFiniteFaceAdaptation.inc"
+#include "solvers/details/GeneralVoFFiniteRemap.inc"
     Meshes::ExactGeometryMeasure global_sum(const std::vector<Meshes::ExactGeometryMeasure>& values) const
     {
         Meshes::ExactGeometryMeasure local;
@@ -1317,6 +1414,8 @@ struct GeneralVoFSolver::Impl
     std::unique_ptr<Impl> remap(bool migration, std::span<const int> destinations,
         std::span<const Meshes::AMR::AdaptiveMark> refine, std::span<const Meshes::AMR::AdaptiveBytes> coarsen) const
     {
+        if (finite(*accepted))
+            return remap_finite(migration, destinations, refine, coarsen);
         using M = Meshes::ExactGeometryMeasure;
         const auto& old = *accepted;
         const auto hierarchy = old.phases->hierarchy();
@@ -1640,3 +1739,21 @@ const VoFStepDiagnostics& GeneralVoFSolver::diagnostics() const noexcept
     return impl_->accepted->diagnostics;
 }
 } // namespace SimpleFluid
+
+namespace SimpleFluid
+{
+void GeneralVoFSolver::enable_exact_geometry_statistics(bool enabled)
+{
+    Meshes::enable_exact_geometry_statistics(enabled);
+}
+void GeneralVoFSolver::reset_geometry_statistics()
+{
+    Meshes::reset_exact_geometry_statistics();
+    Meshes::reset_bounded_geometry_statistics();
+}
+Meshes::GeometryStatisticsSnapshot GeneralVoFSolver::geometry_statistics()
+{
+    return {Meshes::exact_geometry_statistics_domain(), Meshes::bounded_geometry_statistics_domain(),
+        Meshes::exact_geometry_statistics(), Meshes::bounded_geometry_statistics()};
+}
+}

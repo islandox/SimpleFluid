@@ -2,6 +2,7 @@
  * @brief Exact represented-input convex clipping and moment certificates.
  */
 #include "geometry/ConvexCellGeometry.hh"
+#include "geometry/ExactGeometryInstrumentation.hh"
 #include "geometry/ExactPlanarFace.hh"
 #include "geometry/ExactPolyhedralComplex.hh"
 #include "geometry/ExactSweptGeometry.hh"
@@ -33,6 +34,24 @@ using Q = boost::multiprecision::cpp_rational;
 using I = boost::multiprecision::cpp_int;
 using P = std::array<Q, 3>;
 using Face = std::vector<std::size_t>;
+thread_local bool count_exact_geometry = false;
+thread_local ExactGeometryStatistics exact_geometry_counts;
+void sample_exact_measure_result(const Q& value)
+{
+    if (!count_exact_geometry)
+        return;
+    ++exact_geometry_counts.measure_values;
+    I numerator = boost::multiprecision::numerator(value);
+    if (numerator < 0)
+        numerator = -numerator;
+    const I denominator = boost::multiprecision::denominator(value);
+    const auto numerator_bits = numerator == 0 ? 0 : boost::multiprecision::msb(numerator) + 1;
+    const auto denominator_bits = boost::multiprecision::msb(denominator) + 1;
+    exact_geometry_counts.maximum_result_numerator_bits =
+        std::max(exact_geometry_counts.maximum_result_numerator_bits, std::uint64_t(numerator_bits));
+    exact_geometry_counts.maximum_result_denominator_bits =
+        std::max(exact_geometry_counts.maximum_result_denominator_bits, std::uint64_t(denominator_bits));
+}
 struct Poly
 {
     std::vector<P> vertices;
@@ -194,6 +213,8 @@ struct ExactMoments
 };
 ExactMoments exact_moments(const Poly& poly, const P& origin)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.moment_evaluations;
     ExactMoments result{};
     for (const auto& face : poly.faces)
         for (std::size_t i = 1; i + 1 < face.size(); ++i)
@@ -217,6 +238,8 @@ ExactMoments exact_moments(const Poly& poly, const P& origin)
 
 Q exact_volume(const Poly& poly, const P& origin)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.volume_evaluations;
     // Volume-only consumers use the identical oriented fan determinants and
     // exact accumulation. Full moment admission and cover proofs still call
     // exact_moments, including their independent first-moment certificates.
@@ -656,6 +679,8 @@ void clipped_incidence(const Poly& poly, const Plane& plane)
 }
 std::optional<CertifiedPoly> certified_clip(CertifiedPolyRef input, const Plane& plane, ClipScratch& scratch)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.clip_constructions;
     if (zero(plane.normal))
         throw std::invalid_argument("Certified clipping plane has a zero normal.");
     // Preconditions are a fully admitted, full-dimensional, oriented convex
@@ -688,6 +713,8 @@ std::optional<CertifiedPoly> certified_clip(CertifiedPolyRef input, const Plane&
 }
 std::optional<CertifiedPoly> certified_clip_uncached(CertifiedPolyRef input, const Plane& plane)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.clip_constructions;
     if (zero(plane.normal))
         throw std::invalid_argument("Certified clipping plane has a zero normal.");
     // Identical convexity preservation proof, with the pre-existing constant
@@ -701,6 +728,8 @@ std::optional<CertifiedPoly> certified_clip_uncached(CertifiedPolyRef input, con
 }
 std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef a, CertifiedPolyRef b, ClipScratch& scratch)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.intersection_constructions;
     std::optional<CertifiedPoly> result{CertifiedPoly(a.get())};
     for (const auto& plane : planes(b.get()))
     {
@@ -713,6 +742,8 @@ std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef a, Certifie
 std::optional<CertifiedPoly> certified_intersection(
     CertifiedPolyRef a, std::span<const Plane> clipper_planes, ClipScratch& scratch)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.intersection_constructions;
     std::optional<CertifiedPoly> result{CertifiedPoly(a.get())};
     for (const auto& plane : clipper_planes)
     {
@@ -725,6 +756,8 @@ std::optional<CertifiedPoly> certified_intersection(
 
 std::optional<Poly> intersection(const Poly& a, const Poly& b, bool measure_outputs = true)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.intersection_constructions;
     std::optional<Poly> result = a;
     for (const auto& plane : planes(b))
     {
@@ -777,6 +810,8 @@ std::optional<Product> product_description(const Poly& poly)
 
 ExactMoments product_moments(const Product& product, const P& origin)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.moment_evaluations;
     ExactMoments result{};
     Q area = 0, first_x = 0, first_y = 0;
     for (std::size_t i = 0; i < product.base.size(); ++i)
@@ -998,12 +1033,38 @@ NativeConvexShell canonical_native_shell(
 
 } // namespace
 
+void enable_exact_geometry_statistics(bool enabled) { count_exact_geometry = enabled; }
+void reset_exact_geometry_statistics() { exact_geometry_counts = {}; }
+ExactGeometryStatistics exact_geometry_statistics() { return exact_geometry_counts; }
+
 struct ConvexCellGeometry::Impl
 {
     Poly poly;
     GeometryPoint origin;
     std::optional<Product> product;
 };
+
+NumericalConvexShell ConvexCellGeometry::numerical_shell() const
+{
+    if (count_exact_geometry)
+        ++exact_geometry_counts.source_coordinate_exports;
+    NumericalConvexShell result;
+    result.origin = impl_->origin;
+    result.outward_faces = impl_->poly.faces;
+    result.relative_vertices.reserve(impl_->poly.vertices.size());
+    const auto origin = point(result.origin);
+    for (const auto& vertex : impl_->poly.vertices)
+    {
+        std::array<CertifiedGeometryValue, 3> enclosed;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            enclosed[axis] = measured(vertex[axis] - origin[axis], true);
+        result.relative_vertices.push_back(enclosed);
+    }
+    result.face_support_identities.reserve(result.outward_faces.size());
+    for (std::size_t face = 0; face < result.outward_faces.size(); ++face)
+        result.face_support_identities.push_back(exact_planar_support(*face_geometry(face)));
+    return result;
+}
 
 std::vector<char> ConvexCellGeometry::encode_exact_certificate() const
 {
@@ -1349,6 +1410,8 @@ std::size_t ConvexCellGeometry::num_faces() const noexcept
 
 ConvexClipResult ConvexCellGeometry::clip(const GeometryHalfspace& halfspace) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.clip_constructions;
     const Plane plane{point(halfspace.normal), point(halfspace.anchor), exact(halfspace.offset)};
     if (zero(plane.normal))
         throw std::invalid_argument("Clipping halfspace needs a nonzero finite normal.");
@@ -1429,6 +1492,8 @@ ConvexGeometryPtr ConvexCellGeometry::intersect(const ConvexCellGeometry& other)
 
 void ConvexCellGeometry::certify_partition(std::span<const ConvexGeometryPtr> pieces) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.cover_certifications;
     const P origin = point(impl_->origin);
     const auto expected = exact_moments(impl_->poly, origin);
     ExactMoments sum{};
@@ -3417,15 +3482,21 @@ ExactPlanarFacePtr ExactPlanarFace::make(std::span<const GeometryPoint> vertices
 }
 CertifiedGeometryValue ExactPlanarFace::area() const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.face_measure_evaluations;
     const auto n = polygon_vector(impl_->polygon);
     return square_root(dot(n, n));
 }
 MeshUtils::Vec3 ExactPlanarFace::centroid() const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.face_measure_evaluations;
     return rounded_point(polygon_center(impl_->polygon));
 }
 MeshUtils::Vec3 ExactPlanarFace::area_vector() const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.face_measure_evaluations;
     return rounded_point(polygon_vector(impl_->polygon));
 }
 ExactPlanarFacePtr ExactPlanarFace::reversed() const
@@ -3550,6 +3621,16 @@ GeometryPoint exact_point_display(std::span<const char> identity)
 {
     const auto point = rounded_point(authority_point(identity));
     return {point.x, point.y, point.z};
+}
+std::array<CertifiedGeometryValue, 3> numerical_point(std::span<const char> identity)
+{
+    if (count_exact_geometry)
+        ++exact_geometry_counts.source_coordinate_exports;
+    const auto point = authority_point(identity);
+    std::array<CertifiedGeometryValue, 3> result;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        result[axis] = measured(point[axis], true);
+    return result;
 }
 struct ExactEdgePointIndex::Impl
 {
@@ -3689,6 +3770,8 @@ ExactPlanarFacePtr ExactPlanarFace::with_edge_vertices(std::span<const std::vect
 }
 std::vector<char> exact_planar_support(const ExactPlanarFace& face)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.source_support_exports;
     auto normal = polygon_vector(face.impl_->polygon);
     std::size_t axis = 0;
     while (normal[axis] == 0)
@@ -3775,6 +3858,8 @@ std::vector<ExactPlanarFacePtr> subtract_planar_faces(
 }
 bool ExactPlanarFace::contains_exact_point(std::span<const char> identity) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.source_membership_predicates;
     const auto p = authority_point(identity), normal = polygon_vector(impl_->polygon);
     if (dot(normal, sub(p, impl_->polygon[0])) != 0)
         return false;
@@ -4093,6 +4178,7 @@ public:
     static const Polygon& polygon(const ExactPlanarFace& face) { return face.impl_->polygon; }
     static ExactGeometryMeasure measure(Q value)
     {
+        sample_exact_measure_result(value);
         auto p = std::make_shared<ExactGeometryMeasure::Impl>();
         p->value = std::move(value);
         return ExactGeometryMeasure(std::move(p));
@@ -4517,6 +4603,8 @@ bool certified_cover_contained(std::span<const ExactConvexFragmentPtr> pieces, C
 void certify_sweep_partition(
     CertifiedPolyRef expected_certificate, std::span<const ExactConvexFragmentPtr> pieces, SweepBudget& budget)
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.cover_certifications;
     const auto& expected = expected_certificate.get();
     const auto origin = expected.vertices[0];
     const auto whole = exact_moments(expected, origin);
@@ -4926,14 +5014,20 @@ int ExactGeometryMeasure::compare(const ExactGeometryMeasure& other) const
 }
 ExactGeometryMeasure ExactGeometryMeasure::operator+(const ExactGeometryMeasure& other) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.measure_arithmetic;
     return ExactSweepAccess::measure(impl_->value + other.impl_->value);
 }
 ExactGeometryMeasure ExactGeometryMeasure::operator-(const ExactGeometryMeasure& other) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.measure_arithmetic;
     return ExactSweepAccess::measure(impl_->value - other.impl_->value);
 }
 ExactGeometryMeasure ExactGeometryMeasure::scaled(double factor) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.measure_arithmetic;
     return ExactSweepAccess::measure(impl_->value * exact(factor));
 }
 namespace
@@ -4979,6 +5073,8 @@ void exact_scalar_storage(std::size_t& bytes, const Q& q)
 ExactGeometryMeasure ExactGeometryMeasure::divided_by(
     const ExactGeometryMeasure& denominator, std::size_t byte_budget) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.measure_arithmetic;
     if (denominator.impl_->value == 0)
         throw std::invalid_argument("Exact measure division by zero.");
     exact_measure_arithmetic_preflight(impl_->value, denominator.impl_->value, true, byte_budget);
@@ -4989,6 +5085,8 @@ ExactGeometryMeasure ExactGeometryMeasure::divided_by(
 }
 ExactGeometryMeasure ExactGeometryMeasure::squared(std::size_t byte_budget) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.measure_arithmetic;
     exact_measure_arithmetic_preflight(impl_->value, impl_->value, false, byte_budget);
     auto result = ExactSweepAccess::measure(impl_->value * impl_->value);
     if (result.storage_bytes() > byte_budget)
@@ -5034,6 +5132,8 @@ ExactGeometryMeasure ExactGeometryMeasure::compacted(std::size_t operation_byte_
 ExactGeometryMeasure ExactGeometryMeasure::rounded_dyadic(
     unsigned significant_bits, std::size_t operation_byte_budget) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.measure_arithmetic;
     if (significant_bits < 2)
         throw std::invalid_argument("Exact dyadic representation needs at least two significand bits.");
     const auto source_bytes = storage_bytes();
@@ -5216,6 +5316,8 @@ P bounded_polygon_vector(const Polygon& polygon, TrajectoryArithmetic& arithmeti
 ExactGeometryMeasure ExactPlanarFace::coplanar_area_ratio(
     const ExactPlanarFace& denominator, std::size_t byte_budget) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.face_measure_evaluations;
     ExactTrajectoryLimits limits;
     limits.byte_budget = byte_budget;
     TrajectoryArithmetic arithmetic(limits);
@@ -5241,6 +5343,8 @@ ExactGeometryMeasure ExactPlanarFace::coplanar_area_ratio(
 }
 ExactGeometryMeasure ExactPlanarFace::area_vector_dot(GeometryPoint velocity, std::size_t byte_budget) const
 {
+    if (count_exact_geometry)
+        ++exact_geometry_counts.face_measure_evaluations;
     ExactTrajectoryLimits limits;
     limits.byte_budget = byte_budget;
     TrajectoryArithmetic arithmetic(limits);
@@ -5728,3 +5832,8 @@ ExactPhaseMeasures ExactTransportPartition::phases(
 }
 
 } // namespace SimpleFluid::Meshes
+
+namespace SimpleFluid::Meshes
+{
+const void* exact_geometry_statistics_domain() { return &exact_geometry_counts; }
+}

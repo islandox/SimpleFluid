@@ -53,6 +53,7 @@ struct WorkingCapsule
     PolyhedralInterface geometry;
     bool geometry_ready = false;
     WorkingError error;
+    WorkingMass accumulated_roundoff;
     std::optional<WorkingMass> phase_mass;
     std::vector<M> amounts;
 };
@@ -64,6 +65,7 @@ WorkingCapsule lift(const ExactPhaseTransferCapsule& c, const M& bulk)
     w.policy = c.policy;
     w.geometry = c.geometry;
     w.geometry_ready = c.geometry_ready;
+    w.accumulated_roundoff = {M::from_value(c.accumulated_roundoff.gas), M::from_value(c.accumulated_roundoff.carrier)};
     w.phases = {bulk, M::from_value(c.phases.gas), M::from_value(c.phases.carrier)};
     w.error = {w.phases.gas + w.phases.carrier - bulk, M::from_value(c.error.admitted_bound),
         M::from_value(c.phases.bulk) - bulk, M::from_value(c.error.phase_input_bound),
@@ -105,6 +107,8 @@ struct Capacity
         measure(c.phases.bulk);
         measure(c.phases.gas);
         measure(c.phases.carrier);
+        measure(c.accumulated_roundoff.gas);
+        measure(c.accumulated_roundoff.carrier);
         for (const auto* q :
             {&c.error.difference, &c.error.admitted_bound, &c.error.native_conversion, &c.error.phase_input_bound,
                 &c.error.fit_residual, &c.error.fit_bound, &c.error.transferred_bound, &c.error.fit_allocation_bound})
@@ -226,7 +230,7 @@ AMR::AdaptiveBytes encode_work(const WorkingCapsule& c, std::size_t limit)
     budget.add(272 + key_bytes.size());
     wire::Writer w;
     w.word(0x5346455054523731ULL);
-    w.word(2);
+    w.word(3);
     w.word(std::uint64_t(c.policy));
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
@@ -244,6 +248,8 @@ AMR::AdaptiveBytes encode_work(const WorkingCapsule& c, std::size_t limit)
     put(c.phases.bulk);
     put(c.phases.gas);
     put(c.phases.carrier);
+    put(c.accumulated_roundoff.gas);
+    put(c.accumulated_roundoff.carrier);
     for (const auto* q :
         {&c.error.difference, &c.error.admitted_bound, &c.error.native_conversion, &c.error.phase_input_bound,
             &c.error.fit_residual, &c.error.fit_bound, &c.error.transferred_bound, &c.error.fit_allocation_bound})
@@ -266,7 +272,7 @@ WorkingCapsule decode_work(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Exact phase capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346455054523731ULL || r.word() != 2)
+    if (r.word() != 0x5346455054523731ULL || r.word() != 3)
         throw std::invalid_argument("Unknown policy-pinned working capsule format.");
     const auto policy = r.word();
     if (policy > 1)
@@ -282,6 +288,7 @@ WorkingCapsule decode_work(std::span<const char> bytes, std::size_t limit)
     c.geometry = plane(r);
     auto get = [&] { return M::decode(r.bytes(), limit); };
     c.phases = {get(), get(), get()};
+    c.accumulated_roundoff = {get(), get()};
     for (auto* q :
         {&c.error.difference, &c.error.admitted_bound, &c.error.native_conversion, &c.error.phase_input_bound,
             &c.error.fit_residual, &c.error.fit_bound, &c.error.transferred_bound, &c.error.fit_allocation_bound})
@@ -350,7 +357,7 @@ void validate_capsule(const H& h, const ExactPhaseTransferCapsule& c, std::span<
         c.phases.bulk != h.metrics(found->second).volume || !std::isfinite(c.phases.bulk) || c.phases.bulk <= 0 ||
         !std::isfinite(c.phases.gas) || !std::isfinite(c.phases.carrier) || c.phases.gas < 0 || c.phases.carrier < 0)
         throw std::invalid_argument("Finite source capsule ownership/geometry/phase differs.");
-    for (double bound : {c.roundoff.gas, c.roundoff.carrier, c.error.admitted_bound, c.error.phase_input_bound,
+    for (double bound : {c.roundoff.gas, c.roundoff.carrier, c.accumulated_roundoff.gas, c.accumulated_roundoff.carrier, c.error.admitted_bound, c.error.phase_input_bound,
              c.error.fit_bound, c.error.transferred_bound, c.error.fit_allocation_bound})
         if (!std::isfinite(bound) || bound < 0)
             throw std::invalid_argument("Invalid finite source bound.");
@@ -386,10 +393,10 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
 {
     wire::Budget capacity{limit};
     const auto key_bytes = AMR::encode_adaptive_key(c.key);
-    capacity.add(512 + key_bytes.size());
+    capacity.add(528 + key_bytes.size());
     wire::Writer w;
     w.word(0x5346465054523731ULL);
-    w.word(2);
+    w.word(3);
     w.word(std::uint64_t(c.policy));
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
@@ -399,7 +406,7 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
     w.word(c.geometry_ready);
     plane(w, c.geometry);
     for (double value : {c.phases.bulk, c.phases.gas, c.phases.carrier, c.roundoff.gas, c.roundoff.carrier,
-             c.error.difference, c.error.admitted_bound, c.error.native_conversion, c.error.phase_input_bound,
+             c.accumulated_roundoff.gas, c.accumulated_roundoff.carrier, c.error.difference, c.error.admitted_bound, c.error.native_conversion, c.error.phase_input_bound,
              c.error.fit_residual, c.error.fit_bound, c.error.transferred_bound, c.error.fit_allocation_bound})
         real(w, value);
     const auto put = [&](const M& value)
@@ -438,7 +445,7 @@ ExactPhaseTransferCapsule decode(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Finite source capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346465054523731ULL || r.word() != 2)
+    if (r.word() != 0x5346465054523731ULL || r.word() != 3)
         throw std::invalid_argument("Unknown policy-pinned source capsule format.");
     const auto policy = r.word();
     if (policy > 1)
@@ -454,6 +461,7 @@ ExactPhaseTransferCapsule decode(std::span<const char> bytes, std::size_t limit)
     c.geometry = plane(r);
     c.phases = {real(r), real(r), real(r)};
     c.roundoff = {real(r), real(r)};
+    c.accumulated_roundoff = {real(r), real(r)};
     for (auto* q :
         {&c.error.difference, &c.error.admitted_bound, &c.error.native_conversion, &c.error.phase_input_bound,
             &c.error.fit_residual, &c.error.fit_bound, &c.error.transferred_bound, &c.error.fit_allocation_bound})
@@ -499,6 +507,10 @@ ExactPhaseTransferCapsule publish(const WorkingCapsule& c, double native_bulk, E
         throw std::invalid_argument("Experimental exact remap requires representable positive owned views.");
     out.phases = {native_bulk, gas.value, carrier.value};
     out.roundoff = {gas.absolute_error, carrier.absolute_error};
+    if (c.policy == PhaseInventoryPolicy::Finite)
+        out.accumulated_roundoff = {
+            detail::phase_upper_bound(c.accumulated_roundoff.gas + M::from_value(gas.absolute_error)),
+            detail::phase_upper_bound(c.accumulated_roundoff.carrier + M::from_value(carrier.absolute_error))};
     const auto round = M::from_value(gas.absolute_error) + M::from_value(carrier.absolute_error);
     const auto defect = M::from_value(gas.value) + M::from_value(carrier.value) - c.phases.bulk;
     const auto diagnostic = detail::round_phase_residual(defect);
@@ -992,7 +1004,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     label_map =
                         detail::ExactPhaseLabelMap::create(full, gas, physical_minor, original.error.fit_bound, limit);
                 }
-                M column_gas, column_carrier, column_bulk;
+                M column_gas, column_carrier, column_bulk, column_history_gas, column_history_carrier;
                 std::vector<M> column_amount(original.amounts.size());
                 M column_mass_gas, column_mass_carrier;
                 for (std::size_t i = 0; i < records.size(); ++i)
@@ -1033,6 +1045,9 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     const auto wg = weight(out.phases.gas, original.phases.gas, limit),
                                wc = weight(out.phases.carrier, original.phases.carrier, limit),
                                wb = weight(out.phases.bulk, original.phases.bulk, limit);
+                    out.accumulated_roundoff = {
+                        product(original.accumulated_roundoff.gas, original.phases.gas.sign() ? wg : wb, limit),
+                        product(original.accumulated_roundoff.carrier, original.phases.carrier.sign() ? wc : wb, limit)};
                     out.error.difference = out.phases.gas + out.phases.carrier - out.phases.bulk;
                     out.error.transferred_bound = product(abs(original.error.difference), share, limit);
                     out.error.admitted_bound = product(original.error.admitted_bound, share, limit);
@@ -1067,6 +1082,8 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     column_bulk = column_bulk + out.phases.bulk;
                     column_gas = column_gas + out.phases.gas;
                     column_carrier = column_carrier + out.phases.carrier;
+                    column_history_gas = column_history_gas + out.accumulated_roundoff.gas;
+                    column_history_carrier = column_history_carrier + out.accumulated_roundoff.carrier;
                     if (out.phase_mass)
                     {
                         column_mass_gas = column_mass_gas + out.phase_mass->gas;
@@ -1085,6 +1102,9 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 if (column_bulk.compare(original.phases.bulk) || column_gas.compare(original.phases.gas) ||
                     column_carrier.compare(original.phases.carrier))
                     throw std::invalid_argument("Exact source phase columns do not close.");
+                if (column_history_gas.compare(original.accumulated_roundoff.gas) ||
+                    column_history_carrier.compare(original.accumulated_roundoff.carrier))
+                    throw std::invalid_argument("Explicit reference transfer lost finite arithmetic history.");
                 for (std::size_t i = 0; i < column_amount.size(); ++i)
                     if (column_amount[i].compare(original.amounts[i]))
                         throw std::invalid_argument("Exact extensive inventory column does not close.");
@@ -1161,6 +1181,8 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                 out.phases.bulk = out.phases.bulk + c.phases.bulk;
                 out.phases.gas = out.phases.gas + c.phases.gas;
                 out.phases.carrier = out.phases.carrier + c.phases.carrier;
+                out.accumulated_roundoff.gas = out.accumulated_roundoff.gas + c.accumulated_roundoff.gas;
+                out.accumulated_roundoff.carrier = out.accumulated_roundoff.carrier + c.accumulated_roundoff.carrier;
                 out.error.difference = out.error.difference + c.error.difference;
                 out.error.admitted_bound = out.error.admitted_bound + c.error.admitted_bound;
                 out.error.transferred_bound = out.error.transferred_bound + c.error.transferred_bound;

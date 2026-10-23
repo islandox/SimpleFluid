@@ -39,6 +39,8 @@ public:
      */
     [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(
         std::uint64_t cell, const Meshes::ConvexCellGeometry&, const VoF::PolyhedralInterface&);
+    [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch_finite(
+        std::uint64_t cell, const Meshes::BoundedConvexGeometry&, const VoF::PolyhedralInterface&);
     /** Fit a quadratic Monge surface in the target normal's tangential frame.
      * Curvature is div(n) [1/m], positive for convex gas with outward normals.
      */

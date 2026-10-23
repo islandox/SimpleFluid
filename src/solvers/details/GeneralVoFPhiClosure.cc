@@ -7,6 +7,7 @@
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -945,4 +946,5 @@ bool general_vof_projection_arithmetic_admitted(
 {
     return certify_general_vof_projection_rate(mesh, values, budget).arithmetic_admitted;
 }
+#include "solvers/details/GeneralVoFFinitePhiClosure.inc"
 } // namespace SimpleFluid::detail

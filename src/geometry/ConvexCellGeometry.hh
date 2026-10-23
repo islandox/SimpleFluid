@@ -63,6 +63,19 @@ struct NativeConvexShell
     std::vector<std::vector<std::size_t>> outward_faces;
 };
 
+/** Enclosed coordinates exported from an authenticated source shell. Values
+ * are relative to origin, preserving small cells at translated coordinates.
+ * This is numerical input with uncertainty, never a lossless exact certificate. */
+struct NumericalConvexShell
+{
+    GeometryPoint origin{};
+    std::vector<std::array<CertifiedGeometryValue, 3>> relative_vertices;
+    std::vector<std::vector<std::size_t>> outward_faces;
+    /** Collision-free opaque source support identities. The numerical importer
+     * may use equality for authenticated incidence, never as FP coefficients. */
+    std::vector<std::vector<char>> face_support_identities;
+};
+
 class ExactPlanarFace;
 class ConvexCellGeometry;
 using ConvexGeometryPtr = std::shared_ptr<const ConvexCellGeometry>;
@@ -117,6 +130,10 @@ public:
      * equal coordinates merge exactly, never within a spatial tolerance. */
     [[nodiscard]] static ConvexGeometryPtr from_native_shell(
         std::span<const GeometryPoint> vertices, const std::vector<std::vector<std::size_t>>& outward_faces);
+    /** Export source coordinates once for bounded numerical geometry. This
+     * conversion uses the source authority to enclose rounding; it computes no
+     * exact volume, moment, intersection or finite transport ledger. */
+    [[nodiscard]] NumericalConvexShell numerical_shell() const;
     [[nodiscard]] GeometryMoments moments() const;
     [[nodiscard]] GeometryPoint centroid() const;
     [[nodiscard]] std::vector<char> encode_exact_certificate() const;

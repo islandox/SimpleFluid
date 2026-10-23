@@ -23,11 +23,21 @@ struct GeneralVoFProjectionProvenance
     std::vector<GeneralVoFRoundedValue> face_velocity;   ///< Owned canonical order.
     std::vector<Meshes::ExactGeometryMeasure> face_rate; ///< Certified zero-divergence rate, when topology supplied.
 };
+/** Finite operation evidence in owned canonical face order. Error radii
+ * describe arithmetic only and never replace physical pressure thresholds. */
+struct GeneralVoFFiniteProjectionProvenance
+{
+    std::size_t byte_budget = 64 * 1024 * 1024;
+    std::vector<long double> face_rate, face_radius, cell_radius;
+    std::vector<std::array<long double, 3>> velocity_error;
+    std::size_t closure_storage_bytes = 0;
+};
 class SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFlowWorkspace
 {
 public:
     using Vector = VoF::Vector;
-    explicit GeneralVoFFlowWorkspace(SP<const MeshHandle<>> mesh);
+    explicit GeneralVoFFlowWorkspace(
+        SP<const MeshHandle<>> mesh, bool finite_arithmetic = false, std::vector<Vector> finite_spans = {});
     [[nodiscard]] std::vector<double> cells(const std::vector<double>& owned) const;
     [[nodiscard]] std::vector<Vector> vectors(const std::vector<Vector>& owned) const;
     [[nodiscard]] std::vector<double> faces(const std::vector<double>& overlap) const;
@@ -47,6 +57,15 @@ public:
         GeneralVoFProjectionProvenance* arithmetic = nullptr,
         std::optional<std::span<const Meshes::ExactGeometryMeasure>> physical_mass = std::nullopt,
         const GeneralVoFProjectionClosureTopology* closure_topology = nullptr);
+    /** Separate bounded FP route; finite physical masses retain products below
+     * binary64 range. No rational construction, measure or ledger fallback. */
+    void project_finite(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
+        std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
+        const std::vector<double>& curvature, double dt, double surface_tension, const VoFSolverOptions& options,
+        VoFStepDiagnostics& diagnostics, GeneralVoFFiniteProjectionProvenance* arithmetic = nullptr,
+        std::optional<std::span<const long double>> physical_mass = std::nullopt,
+        const GeneralVoFFiniteProjectionClosureTopology* closure_topology = nullptr,
+        std::optional<std::span<const long double>> physical_mass_error = std::nullopt);
     [[nodiscard]] double stable_timestep(const std::vector<double>& face_velocity, double minimum_density,
         double maximum_viscosity, double surface_tension, const VoFSolverOptions& options) const;
     /** Rank-local cached geometry view; unlike collective numerical operators,
@@ -70,6 +89,7 @@ private:
     };
     SP<const MeshHandle<>> mesh_;
     std::vector<Face> geometry_;
+    bool finite_arithmetic_ = false;
     std::vector<double> volumes_;
     std::vector<Meshes::ExactGeometryMeasure> exact_volumes_;
     std::vector<Vector> spans_;

@@ -45,6 +45,9 @@ struct ExactPhaseTransferCapsule
     std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
     PhaseVolumes phases;
     PhaseRoundoff roundoff;
+    /** Independent accumulated finite arithmetic history. Explicit reference
+     * remaps transfer it with phase carriers; ExperimentalExact leaves it empty. */
+    PhaseRoundoff accumulated_roundoff;
     PolyhedralInterface geometry;
     bool geometry_ready = false;
     ExactTransferError error;

@@ -99,6 +99,28 @@ public:
         const std::vector<FaceContribution>& contributions, bool nonnegative, int maximum_iterations,
         double tolerance = 1e-12, bool equilibrate_rows = true, std::size_t byte_budget = 64 * 1024 * 1024);
 
+    struct FiniteTransfer
+    {
+        DefaultTpetraTypes::global_ordinal_type donor = 0, recipient = 0;
+        long double amount = 0, absolute_error = 0;
+    };
+    struct FiniteFaceContribution
+    {
+        DefaultTpetraTypes::local_ordinal_type face = 0;
+        DefaultTpetraTypes::global_ordinal_type donor = 0;
+        long double amount = 0, absolute_error = 0;
+    };
+    /** Separate fixed-storage FP ledger. Row normalization is a numerical
+     * solve aid; acceptance checks the original canonical raw-face equation
+     * with propagated arithmetic bounds and the unchanged physical tolerance. */
+    [[nodiscard]] Result solve_finite(const std::vector<long double>& old,
+        const std::vector<long double>& source, const std::vector<long double>& capacity,
+        const std::vector<long double>& outgoing, const std::vector<FiniteTransfer>& incoming,
+        const std::vector<FiniteFaceContribution>& contributions, bool nonnegative,
+        int maximum_iterations, double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024,
+        std::span<const long double> old_error = {}, std::span<const long double> source_error = {},
+        std::span<const long double> capacity_error = {}, std::span<const long double> outgoing_error = {});
+
     struct ExactTransfer
     {
         DefaultTpetraTypes::global_ordinal_type donor = 0, recipient = 0;

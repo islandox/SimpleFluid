@@ -3,6 +3,7 @@ add_library(SimpleFluidFVM SHARED
     ExactPhaseTransfer.cc
     ExactFaceTransfer.cc
     PolyhedralReconstruction.cc
+    FinitePolyhedralReconstruction.cc
     GeometricVoF.cc
     AdaptiveVoF.cc
     ConservativeAMRRemap.cc
@@ -55,5 +56,24 @@ target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 # when the enclosing build uses a larger --parallel value.
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS simplefluid_fvm_compile=1)
 set_property(TARGET SimpleFluidFVM PROPERTY JOB_POOL_COMPILE simplefluid_fvm_compile)
+
+# Forward-error bounds require the same strict arithmetic used by the numerical
+# geometry kernel. Do not import relaxed arithmetic through LTO.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(FinitePolyhedralReconstruction.cc PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION OFF
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
+endif()
+
 # The independent VoF workstream is outside the existing Shiri PGO workload.
-simplefluid_exclude_from_pgo_sources(GeneralVoF.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc PolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc details/ExperimentalPhaseBackend.cc)
+simplefluid_exclude_from_pgo_sources(GeneralVoF.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc PolyhedralReconstruction.cc FinitePolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc details/ExperimentalPhaseBackend.cc)
+
+# Error-free transforms and directed residual bounds require strict arithmetic in
+# every caller translation unit; a strictly compiled geometry callee alone does
+# not constrain reassociation of its inline finite ledger helpers.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(GeneralVoF.cc PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
+endif()

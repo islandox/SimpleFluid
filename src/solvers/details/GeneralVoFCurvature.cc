@@ -113,6 +113,47 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
         "General VoF curvature has no positive physical cell scale.");
     return result;
 }
+std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch_finite(
+    std::uint64_t cell, const Meshes::BoundedConvexGeometry& geometry, const VoF::PolyhedralInterface& plane)
+{
+    if (plane.pure_gas || plane.pure_carrier)
+        return {};
+    const auto section = geometry.clip(plane.gas).section;
+    require(section.vertices.size() >= 3, "A mixed general VoF cell has no physical PLIC polygon.");
+    const auto basis = frame(plane.gas.normal);
+    require(section.area.value > section.area.absolute_error,
+        "Finite general VoF PLIC polygon area has unresolved positivity.");
+    GeneralVoFCurvaturePatch result;
+    result.cell = cell;
+    result.area = section.area.as_double();
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        // The bounded kernel already integrates the local first moment. Do
+        // not replace its numerical construction by an unbounded replay here.
+        result.centroid[a] = static_cast<double>(section.centroid.value[a]);
+        result.normal[a] = static_cast<double>(basis[2][a]);
+    }
+    const auto spans = geometry.axis_spans();
+    result.physical_spans = {spans[0].as_double(), spans[1].as_double(), spans[2].as_double()};
+    result.cell_scale = std::min({spans[0].as_double(), spans[1].as_double(), spans[2].as_double()});
+    long double surface = 0;
+    const auto& points = geometry.points();
+    for (const auto& face : geometry.faces())
+    {
+        Point area{};
+        for (std::size_t i = 1; i + 1 < face.size(); ++i)
+        {
+            const auto triangle = cross(difference(points[face[i]].value, points[face[0]].value),
+                difference(points[face[i + 1]].value, points[face[0]].value));
+            for (unsigned a = 0; a < 3; ++a) area[a] += triangle[a] / 2;
+        }
+        surface += std::sqrt(dot(area, area));
+    }
+    result.cell_scale = std::min(result.cell_scale, static_cast<double>(2 * geometry.volume().value / surface));
+    require(std::isfinite(result.cell_scale) && result.cell_scale > 0,
+        "General VoF curvature has no positive physical cell scale.");
+    return result;
+}
 GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatch& target,
     std::span<const GeneralVoFCurvaturePatch> support, GeneralVoFCurvatureOptions options)
 {
