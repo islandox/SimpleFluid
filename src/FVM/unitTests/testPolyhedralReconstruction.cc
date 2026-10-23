@@ -1,205 +1,189 @@
 /** @file testPolyhedralReconstruction.cc
- * @brief Native convex PLIC fitting, minority bounds and invalid-input checks.
+ * @brief Resolution requests, bounded PLIC fitting and retained finite inventories.
  */
 #include "FVM/GeometricVoF.hh"
 #include "FVM/PolyhedralReconstruction.hh"
 #include "geometry/ExactSweptGeometry.hh"
-#include <bit>
+#include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <gtest/gtest.h>
-#include <limits>
+
 namespace
 {
 using namespace SimpleFluid;
 using namespace SimpleFluid::VoF;
 using namespace SimpleFluid::Meshes;
-GeometryPoint mapped(GeometryPoint p)
-{
-    return {p[0] + .25 * p[1] + .125 * p[2], p[1] + .25 * p[2], p[2]};
-}
-ConvexGeometryPtr skew_cell(GeometryPoint lower, GeometryPoint upper)
-{
-    std::vector<GeometryPoint> points;
-    for (unsigned k = 0; k < 2; ++k)
-        for (unsigned j = 0; j < 2; ++j)
-            for (unsigned i = 0; i < 2; ++i)
-                points.push_back(mapped({i ? upper[0] : lower[0], j ? upper[1] : lower[1], k ? upper[2] : lower[2]}));
-    return ConvexCellGeometry::make(
-        points, {{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}});
-}
-TEST(PolyhedralReconstruction, InfersObliquePlanarNormalFromIndependentSkewNonuniformVolumes)
-{
-    const std::array<double, 4> edges{-1, -.25, .5, 1.5};
-    const GeometryPoint reference_normal{.75, -.5, .625};
-    const double offset = .125;
-    const auto sample = [&](int i, int j, int k)
-    {
-        GeometryPoint lower{edges[i], edges[j], edges[k]}, upper{edges[i + 1], edges[j + 1], edges[k + 1]};
-        // Analytic box inclusion/exclusion in reference coordinates, independent
-        // of the actual skew-polyhedron clipping and nonlinear fit under test.
-        const auto gas = GeometricVoF::box_plane_volume(lower, upper, reference_normal, offset);
-        const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-        return PolyhedralPhaseSample{skew_cell(lower, upper), gas, volume - gas};
-    };
-    auto target = sample(1, 1, 1);
-    std::vector<PolyhedralPhaseSample> stencil;
-    for (auto ijk : std::vector<std::array<int, 3>>{{0, 1, 1}, {2, 1, 1}, {1, 0, 1}, {1, 2, 1}, {1, 1, 0}, {1, 1, 2},
-             {0, 0, 0}, {2, 2, 2}, {0, 2, 2}, {2, 0, 0}})
-        stencil.push_back(sample(ijk[0], ijk[1], ijk[2]));
-    auto result = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
-    GeometryPoint expected{.75, -.5 - .25 * .75, .625 - .125 * .75 - .25 * (-.5 - .25 * .75)};
-    const double norm = std::hypot(expected[0], expected[1], expected[2]);
-    for (unsigned a = 0; a < 3; ++a)
-        EXPECT_NEAR(result.gas.normal[a], expected[a] / norm, 2e-7);
-    EXPECT_LT(result.stencil_volume_residual, 2e-9);
-    EXPECT_NEAR(target.geometry->clip(result.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
-}
-TEST(PolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedReconstruction)
-{
-    const std::array<double, 4> edges{-1, -.25, .5, 1.5};
-    const GeometryPoint reference_normal{.75, -.5, .625};
-    const double offset = .125;
-    const auto sample = [&](int i, int j, int k)
-    {
-        GeometryPoint lower{edges[i], edges[j], edges[k]}, upper{edges[i + 1], edges[j + 1], edges[k + 1]};
-        // Analytic box inclusion/exclusion in reference coordinates, independent
-        // of the actual skew-polyhedron clipping and nonlinear fit under test.
-        const auto gas = GeometricVoF::box_plane_volume(lower, upper, reference_normal, offset);
-        const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-        return PolyhedralPhaseSample{skew_cell(lower, upper), gas, volume - gas};
-    };
-    auto target = sample(1, 1, 1);
-    std::vector<PolyhedralPhaseSample> stencil;
-    for (auto ijk : std::vector<std::array<int, 3>>{{0, 1, 1}, {2, 1, 1}, {1, 0, 1}, {1, 2, 1}, {1, 1, 0}, {1, 1, 2},
-             {0, 0, 0}, {2, 2, 2}, {0, 2, 2}, {2, 0, 0}})
-        stencil.push_back(sample(ijk[0], ijk[1], ijk[2]));
-    auto result = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
-    GeometryPoint expected{.75, -.5 - .25 * .75, .625 - .125 * .75 - .25 * (-.5 - .25 * .75)};
-    const double norm = std::hypot(expected[0], expected[1], expected[2]);
-    for (unsigned a = 0; a < 3; ++a)
-        EXPECT_NEAR(result.gas.normal[a], expected[a] / norm, 2e-7);
-    EXPECT_LT(result.stencil_volume_residual, 2e-9);
-    EXPECT_NEAR(target.geometry->clip(result.gas).inside->moments().volume.as_double(), target.gas_volume, 2e-12);
 
-    auto rejected = target;
-    rejected.gas_volume = -1;
-    EXPECT_THROW((void) Exact::PolyhedralReconstruction::reconstruct(rejected, stencil), std::invalid_argument);
-    const auto repeated = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
+std::vector<std::array<int, 3>> neighbors()
+{
+    return {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1},
+        {-1, -1, -1}, {1, 1, 1}, {-1, 1, 1}, {1, -1, -1}};
+}
+FinitePolyhedralPhaseSample uniform_sample(std::array<int, 3> index, double scale, double fraction)
+{
+    GeometryPoint lower{}, upper{};
     for (unsigned a = 0; a < 3; ++a)
-        EXPECT_EQ(
-            std::bit_cast<std::uint64_t>(result.gas.normal[a]), std::bit_cast<std::uint64_t>(repeated.gas.normal[a]));
-    EXPECT_EQ(std::bit_cast<std::uint64_t>(result.gas.offset), std::bit_cast<std::uint64_t>(repeated.gas.offset));
+    {
+        lower[a] = index[a] * scale;
+        upper[a] = (index[a] + 1) * scale;
+    }
+    const double volume = scale * scale * scale;
+    return {BoundedConvexGeometry::box(lower, upper), fraction * volume, (1 - fraction) * volume};
+}
+FinitePolyhedralPhaseSample plane_sample(
+    std::array<int, 3> index, GeometryPoint normal, double offset, double scale = 1)
+{
+    GeometryPoint lower{}, upper{};
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        lower[a] = index[a] * scale;
+        upper[a] = (index[a] + 1) * scale;
+    }
+    const auto gas = GeometricVoF::box_plane_volume(lower, upper, normal, offset * scale);
+    const double volume = scale * scale * scale;
+    return {BoundedConvexGeometry::box(lower, upper), gas, volume - gas};
 }
 
-TEST(PolyhedralReconstruction, IndependentPhaseVolumesAreUnchangedDuringFitting)
+TEST(PolyhedralReconstruction, DiluteFeatureRequestsRefinementBeforeClippingAndPreservesAmounts)
 {
-    for (const double minority_volume : {.25, .375})
-        for (bool minority_gas : {true, false})
-        {
-            const double other_volume = 1. - minority_volume;
-            PolyhedralPhaseSample sample{ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1}),
-                minority_gas ? minority_volume : other_volume, minority_gas ? other_volume : minority_volume};
-            const auto original = sample;
-            auto plane = Exact::PolyhedralReconstruction::solve_offset(sample, {1, 0, 0});
-            EXPECT_FALSE(plane.pure_gas);
-            EXPECT_FALSE(plane.pure_carrier);
-            EXPECT_EQ(sample.gas_volume, original.gas_volume);
-            EXPECT_EQ(sample.carrier_volume, original.carrier_volume);
-            const auto fragment = ExactConvexFragment::from_geometry(*sample.geometry);
-            const auto phases = fragment->phases(plane.gas);
-            const auto minority = minority_gas ? phases.gas : phases.carrier;
-            const auto requested = ExactGeometryMeasure::from_value(minority_volume);
-            EXPECT_TRUE(minority.relative_error_at_most(requested, 8e-15));
-            EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
-        }
+    auto target = uniform_sample({0, 0, 0}, 1, .01);
+    std::vector<FinitePolyhedralPhaseSample> stencil;
+    for (const auto index : neighbors())
+        stencil.push_back(uniform_sample(index, 1, .01));
+    const auto before = target;
+    reset_bounded_geometry_statistics();
+    const auto assessment = PolyhedralReconstruction::assess_resolution(target, stencil);
+    EXPECT_EQ(assessment.reason, PolyhedralResolutionAssessment::Reason::InsufficientPhaseSupport);
+    EXPECT_EQ(assessment.local_cell_span, 1);
+    EXPECT_EQ(assessment.requested_cell_span, .5);
+    EXPECT_THROW(PolyhedralReconstruction::reconstruct(target, stencil), PolyhedralResolutionRequired);
+    EXPECT_EQ(target.gas_volume, before.gas_volume);
+    EXPECT_EQ(target.carrier_volume, before.carrier_volume);
+    EXPECT_EQ(bounded_geometry_statistics().constructions, 0u);
+    EXPECT_EQ(bounded_geometry_statistics().rational_measures, 0u);
 }
-TEST(PolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEndpoints)
+TEST(PolyhedralReconstruction, ResolutionAdmissionIsInvariantUnderUnitScaling)
 {
-    const auto box = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
-    // Retain nonbinary support, reversed-normal and pure-endpoint coverage
-    // without requiring reconstruction of an arbitrarily thin phase layer.
-    const auto cell = box->clip({{-10, 0, 0}, {}, -1}).inside;
-    const auto fragment = ExactConvexFragment::from_geometry(*cell);
-    for (const double direction : {1., -1.})
-        for (const bool minority_gas : {true, false})
-        {
-            SCOPED_TRACE(::testing::Message() << direction << " " << minority_gas);
-            PolyhedralPhaseSample sample{cell, minority_gas ? .225 : .675, minority_gas ? .675 : .225};
-            const auto original = sample;
-            const auto plane = Exact::PolyhedralReconstruction::solve_offset(sample, {direction, 0, 0});
-            const auto phases = fragment->phases(plane.gas);
-            const auto minority = minority_gas ? phases.gas : phases.carrier;
-            EXPECT_TRUE(minority.relative_error_at_most(ExactGeometryMeasure::from_value(.225), 8e-15));
-            EXPECT_GT(minority.sign(), 0);
-            EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
-            EXPECT_EQ(sample.gas_volume, original.gas_volume);
-            EXPECT_EQ(sample.carrier_volume, original.carrier_volume);
-            EXPECT_FALSE(plane.pure_gas);
-            EXPECT_FALSE(plane.pure_carrier);
-        }
-    for (const double direction : {1., -1.})
-        for (const bool pure_gas : {true, false})
-        {
-            const auto plane = Exact::PolyhedralReconstruction::solve_offset(
-                {cell, pure_gas ? .9 : 0., pure_gas ? 0. : .9}, {direction, 0, 0});
-            const auto phases = fragment->phases(plane.gas);
-            EXPECT_EQ((pure_gas ? phases.carrier : phases.gas).sign(), 0);
-            EXPECT_EQ((pure_gas ? phases.gas : phases.carrier).compare(fragment->volume()), 0);
-        }
-}
-TEST(PolyhedralReconstruction, CurvedVolumeModelSeparatesAngularConvergenceFromPlanarDefect)
-{
-    constexpr double width = .25, linear_x = .125, linear_y = -.0625, curvature = .03125;
-    const auto sample = [&](int i, int j, int k)
+    for (const double scale : {1e-3, 1., 1e3})
     {
-        GeometryPoint lower{double(i) - width / 2, double(j) - width / 2, double(k)};
-        GeometryPoint upper{lower[0] + width, lower[1] + width, lower[2] + 1};
-        const double volume = width * width;
-        // Independent exact polynomial integral of z<h(x,y) over each XY
-        // rectangle; the graph stays strictly within the middle Z layer.
-        const double mean = .5 + linear_x * i + linear_y * j + curvature * (i * i + j * j + width * width / 6);
-        const double gas = k < 0 ? volume : k > 0 ? 0 : volume * mean;
-        return PolyhedralPhaseSample{ConvexCellGeometry::box(lower, upper), gas, volume - gas};
-    };
-    const auto target = sample(0, 0, 0);
-    std::vector<PolyhedralPhaseSample> stencil;
-    for (int j = -1; j <= 1; ++j)
-        for (int i = -1; i <= 1; ++i)
-            if (i || j)
-                stencil.push_back(sample(i, j, 0));
-    stencil.push_back(sample(0, 0, -1));
-    stencil.push_back(sample(0, 0, 1));
-    const auto fit = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
-    const double norm = std::hypot(linear_x, linear_y, 1);
-    EXPECT_TRUE(fit.fit_converged);
-    EXPECT_GT(fit.stencil_volume_residual, 1e-3);
-    EXPECT_NEAR(fit.gas.normal[0], -linear_x / norm, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[1], -linear_y / norm, 2e-7);
-    EXPECT_NEAR(fit.gas.normal[2], 1 / norm, 2e-7);
-    PolyhedralReconstructionOptions strict;
-    strict.maximum_model_residual = 1e-3;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil, strict), std::invalid_argument);
-    strict = {};
-    strict.maximum_fit_iterations = 1;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil, strict), std::invalid_argument);
+        const auto target = uniform_sample({0, 0, 0}, scale, .01);
+        std::vector<FinitePolyhedralPhaseSample> stencil;
+        for (const auto index : neighbors())
+            stencil.push_back(uniform_sample(index, scale, .01));
+        const auto assessment = PolyhedralReconstruction::assess_resolution(target, stencil);
+        EXPECT_EQ(assessment.reason, PolyhedralResolutionAssessment::Reason::InsufficientPhaseSupport);
+        EXPECT_NEAR(assessment.requested_cell_span / scale, .5, 2e-15);
+        EXPECT_NEAR(assessment.gas_support_fraction, .01, 2e-17);
+    }
 }
-TEST(PolyhedralReconstruction, RejectsDeficientPhysicalStencilAndInvalidOccupancy)
+TEST(PolyhedralReconstruction, ResolvedGrazingPlaneUsesNeighborSupport)
 {
-    PolyhedralPhaseSample target{ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1}), .5, .5};
-    std::vector<PolyhedralPhaseSample> stencil;
+    const GeometryPoint normal{1, 1, 1};
+    const auto target = plane_sample({0, 0, 0}, normal, .05);
+    ASSERT_LT(target.gas_volume, 1e-4);
+    std::vector<FinitePolyhedralPhaseSample> stencil;
+    for (const auto index : neighbors())
+        stencil.push_back(plane_sample(index, normal, .05));
+    const auto assessment = PolyhedralReconstruction::assess_resolution(target, stencil);
+    EXPECT_TRUE(assessment.admitted());
+    EXPECT_GE(assessment.gas_support_fraction, .5);
+    EXPECT_GE(assessment.carrier_support_fraction, .5);
+    const auto fit = PolyhedralReconstruction::reconstruct(target, stencil);
+    EXPECT_TRUE(fit.finite_geometry);
+    EXPECT_TRUE(fit.resolution.admitted());
+    for (auto n : fit.gas.normal)
+        EXPECT_NEAR(n, 1 / std::sqrt(3.), 2e-7);
+    EXPECT_TRUE(target.geometry->phases(fit.gas).gas.relative_error_at_most(target.gas_volume, 8e-15));
+}
+TEST(PolyhedralReconstruction, RefinementRechecksThePhysicalSupportOfAThinLayer)
+{
+    // Same physical layer .1 <= x <= .2, integrated independently on each
+    // mesh. Splitting the old uniform average alone cannot recover its faces.
+    const auto layer = [](std::array<int, 3> index, double h, double shift)
+    {
+        GeometryPoint lower{shift + index[0] * h, index[1] * h, index[2] * h};
+        GeometryPoint upper{shift + (index[0] + 1) * h, (index[1] + 1) * h, (index[2] + 1) * h};
+        const double width = std::max(0., std::min(upper[0], .2) - std::max(lower[0], .1));
+        const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
+        const double gas = width * (upper[1] - lower[1]) * (upper[2] - lower[2]);
+        return FinitePolyhedralPhaseSample{BoundedConvexGeometry::box(lower, upper), gas, volume - gas};
+    };
+    const auto coarse = layer({0, 0, 0}, 1, 0);
+    std::vector<FinitePolyhedralPhaseSample> coarse_stencil;
+    for (const auto index : neighbors())
+        coarse_stencil.push_back(layer(index, 1, 0));
+    EXPECT_FALSE(PolyhedralReconstruction::assess_resolution(coarse, coarse_stencil).admitted());
+
+    const auto fine = layer({1, 0, 0}, .05, .025);
+    std::vector<FinitePolyhedralPhaseSample> fine_stencil;
+    for (auto index : neighbors())
+    {
+        ++index[0];
+        fine_stencil.push_back(layer(index, .05, .025));
+    }
+    EXPECT_TRUE(PolyhedralReconstruction::assess_resolution(fine, fine_stencil).admitted());
+    const auto fit = PolyhedralReconstruction::reconstruct(fine, fine_stencil);
+    EXPECT_TRUE(fit.resolution.admitted());
+    EXPECT_NEAR(fit.gas.normal[0], -1, 2e-7);
+}
+TEST(PolyhedralReconstruction, DeficientAndUnobservableStencilsRequestMoreSupport)
+{
+    const auto target = uniform_sample({0, 0, 0}, 1, .5);
+    std::vector<FinitePolyhedralPhaseSample> deficient;
     for (int i : {-2, -1, 1, 2})
-        stencil.push_back({ConvexCellGeometry::box({double(i), 0, 0}, {double(i + 1), 1, 1}), .5, .5});
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil), std::invalid_argument);
-    PolyhedralReconstructionOptions limited;
-    limited.maximum_clip_evaluations = 1;
-    target.gas_volume = .3;
-    target.carrier_volume = .7;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::solve_offset(target, {1, 0, 0}, limited), std::invalid_argument);
-    limited = {};
-    limited.maximum_stencil_cells = 2;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil, limited), std::invalid_argument);
-    target.carrier_volume = .4;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::solve_offset(target, {1, 0, 0}), std::invalid_argument);
+        deficient.push_back(uniform_sample({i, 0, 0}, 1, i < 0 ? 1 : 0));
+    EXPECT_EQ(PolyhedralReconstruction::assess_resolution(target, deficient).reason,
+        PolyhedralResolutionAssessment::Reason::InsufficientStencil);
+    std::vector<FinitePolyhedralPhaseSample> constant;
+    for (const auto index : neighbors())
+        constant.push_back(uniform_sample(index, 1, .5));
+    EXPECT_EQ(PolyhedralReconstruction::assess_resolution(target, constant).reason,
+        PolyhedralResolutionAssessment::Reason::InsufficientStencil);
+    EXPECT_THROW(PolyhedralReconstruction::reconstruct(target, deficient), PolyhedralResolutionRequired);
 }
+TEST(PolyhedralReconstruction, RationalSupportFitsComplementaryOrdinaryVolumes)
+{
+    const auto exact = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})->clip({{-10, 0, 0}, {}, -1}).inside;
+    const auto numerical = BoundedConvexGeometry::from_geometry(*exact);
+    for (double direction : {-1., 1.})
+        for (bool minority_gas : {false, true})
+        {
+            const FinitePolyhedralPhaseSample sample{
+                numerical, minority_gas ? .225 : .675, minority_gas ? .675 : .225};
+            const auto fit = PolyhedralReconstruction::solve_offset(sample, {direction, 0, 0});
+            ASSERT_TRUE(fit.finite_geometry);
+            const auto measured = numerical->phases(fit.gas);
+            EXPECT_TRUE((minority_gas ? measured.gas : measured.carrier).relative_error_at_most(.225, 8e-15));
+            const auto reference = ExactConvexFragment::from_geometry(*exact)->phases(fit.gas);
+            EXPECT_TRUE((minority_gas ? reference.gas : reference.carrier)
+                            .relative_error_at_most(ExactGeometryMeasure::from_value(.225), 8e-15));
+            EXPECT_EQ(sample.gas_volume, minority_gas ? .225 : .675);
+            EXPECT_EQ(sample.carrier_volume, minority_gas ? .675 : .225);
+        }
+}
+TEST(PolyhedralReconstruction, PureEndpointsAndRejectedArithmeticDoNotChangePolicyOrAmounts)
+{
+    const auto geometry = BoundedConvexGeometry::box({0, 0, 0}, {1, 1, 1});
+    for (double direction : {-1., 1.})
+        for (bool gas : {false, true})
+        {
+            const auto fit = PolyhedralReconstruction::solve_offset(
+                {geometry, gas ? 1. : 0., gas ? 0. : 1.}, {direction, 0, 0});
+            EXPECT_TRUE(gas ? fit.pure_gas : fit.pure_carrier);
+            const auto phases = geometry->phases(fit.gas);
+            EXPECT_EQ((gas ? phases.carrier : phases.gas).upper(), 0);
+        }
+    FinitePolyhedralPhaseSample sample{geometry, .3, .7};
+    PolyhedralReconstructionOptions options;
+    options.maximum_clip_evaluations = 1;
+    EXPECT_THROW(PolyhedralReconstruction::solve_offset(sample, {1, 0, 0}, options), std::invalid_argument);
+    EXPECT_EQ(sample.gas_volume, .3);
+    EXPECT_EQ(sample.carrier_volume, .7);
+    sample.gas_volume = -.1;
+    EXPECT_THROW(PolyhedralReconstruction::solve_offset(sample, {1, 0, 0}), std::invalid_argument);
+}
+
+
+
+
 } // namespace

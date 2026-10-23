@@ -105,16 +105,16 @@ that a campaign ran during documentation maintenance.
 | Hierarchy and construction | `testCartesianAMR`, `testExactExtrudedConstruction`, `testExtrudedAMR`, `testLocalProductAMR`, `testPolyhedralAMR`, `testMixedAMR`: ancestry, exact source observations, complete inverse families, closure and transactional rejection |
 | Geometry and remap | `testConvexCellGeometry`, `testExactPolyhedralComplex`, `testExactExplicitProvider`, `testConservativeAMRRemap`, `testProductAMRRemap`, `testPolyhedralAMRRemap`, `testMixedAMRRemap`: actual native certificates, positive tiny pieces, coverage, moments, independent phases and paired quantities |
 | Distributed migration | `testDistributedAdaptiveKey`, `testDistributedAdaptivePackets`, `testDistributedAdaptiveAuthority`, `testDistributedAdaptiveClosure`, `testDistributedAdaptiveBalance`, `testDistributedAdaptiveState`, `testDistributedCartesianKernel`, `testDistributedProductKernel`, `testDistributedMixedKernel`, `testFrozenNative`, `testSparseNativeMesh`, `testSparseNativePeriodic`, `testDistributedNativeOperators`, `testSparseOwnerExchange`: owner-local state, ghost completeness, exact contact authorities, final packet cost and observed empty owners |
-| General geometry/transport | `testExactSweptGeometry`, `testDepartureFan`, `testPolyhedralReconstruction`, `testExactPhaseTransfer`, `testGeneralVoF`: exact contacts versus positive overlaps, signed PLIC support, donor fans, finite provenance and optional exact-policy separation |
+| General geometry/transport | `testExactSweptGeometry`, `testDepartureFan`, `testPolyhedralReconstruction`, `testExactPolyhedralReconstruction`, `testExactPhaseTransfer`, `testGeneralVoF`, `testExactGeneralVoF`: exact contacts versus positive overlaps, signed PLIC support, donor fans, finite provenance and optional exact-policy separation |
 | General flow | `testGeneralVoFFlowWorkspace`, `testConservativeVoFTransport`, `testGeneralVoFPhiClosure`, `testGeneralVoFExactPressure`, `testGeneralVoFCurvature`, `testGeneralVoFSolver`: physical residuals, conditioned sampled directions, independent phase mass, original physical horizons, rollback/regrid and cache invalidation |
+| Explicit exact test targets | `testExactGeneralVoF`, `testExactPolyhedralReconstruction`, `testExactConservativeVoFTransport`, `testExactGeneralVoFFlowWorkspace`, `testExactGeneralVoFPhiClosure`, `testExactGeneralVoFCurvature`, `testExactGeneralVoFSolver`: extracted exact-backend and cross-policy cases, registered with the `exact` label |
 
 For example, a reconstruction-only change can use:
 
 ```sh
 cmake --build --preset GCC-Debug --target testPolyhedralReconstruction
-build/gcc/bin/Debug/testPolyhedralReconstruction
-mpiexec -n 2 build/gcc/bin/Debug/testPolyhedralReconstruction
-mpiexec -n 4 build/gcc/bin/Debug/testPolyhedralReconstruction
+ctest --test-dir build/gcc -C Debug -R '^PolyhedralReconstruction\.' --output-on-failure
+ctest --test-dir build/gcc -C Debug -R '^PolyhedralReconstruction_(2|4)procs$' --output-on-failure
 ```
 
 Full flow qualification must name the physical methods explicitly:

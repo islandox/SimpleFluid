@@ -4,6 +4,9 @@ file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
+  if(TEST_NAME STREQUAL "testExactGeneralVoF")
+    target_sources(${TEST_NAME} PRIVATE exact/GeneralVoFRoundtrip.cc)
+  endif()
   if(TEST_NAME STREQUAL "testGradientTraverse")
     target_sources(${TEST_NAME} PRIVATE
         gradient_traverse/ReferenceCases.cc
@@ -12,7 +15,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFinitePolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
+  if(TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
       OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     # Catch dependencies from FVM back into the higher-level solver DSO.
@@ -21,11 +24,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  if(TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
+  if(TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;exact\\;geometry\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
       OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
-  elseif(TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFinitePolyhedralReconstruction")
+  elseif(TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testPolyhedralReconstruction")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;geometry\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testGeometricVoF")
@@ -287,8 +293,8 @@ endforeach()
 
 foreach(PROCS IN ITEMS 2 4)
   simplefluid_add_mpi_test(
-    NAME FinitePolyhedralReconstruction_${PROCS}procs
-    TARGET testFinitePolyhedralReconstruction PROCS ${PROCS}
+    NAME PolyhedralReconstruction_${PROCS}procs
+    TARGET testPolyhedralReconstruction PROCS ${PROCS}
     LABELS "vof;geometry;resolution;finite;collective"
     TIMEOUT 180)
 endforeach()
@@ -299,7 +305,8 @@ foreach(PROCS IN ITEMS 2 4)
 endforeach()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc PROPERTIES
+    set_source_files_properties(testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc
+        testExactGeneralVoF.cc exact/GeneralVoFRoundtrip.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE
         SKIP_PRECOMPILE_HEADERS TRUE)
@@ -321,4 +328,10 @@ foreach(_ortho_ranks IN ITEMS 2 4 8)
     simplefluid_add_mpi_test(NAME OrthogonalDistributedOperators_${_ortho_ranks}procs
         TARGET testOrthogonalDistributedOperators PROCS ${_ortho_ranks}
         LABELS "mpi;orthogonal;fields;transport;conservation;empty_rank" TIMEOUT 120)
+endforeach()
+
+# Rational transport and explicit exact/finite handoffs are independently selectable.
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME ExactGeneralVoF_${PROCS}procs TARGET testExactGeneralVoF PROCS ${PROCS}
+    LABELS "vof;exact;geometry;conservation;collective" TIMEOUT 300)
 endforeach()

@@ -1,74 +1,8 @@
-/** @file testGeneralVoFFinite.cc
- * @brief Finite numerical routing, independent accounting and atomic collective rejection.
- */
-#include "FVM/GeneralVoF.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
-#include "geometry/mesh/AMR/CartesianAMR.hh"
-#include "utils/testing_environment.hh"
-#include <Tpetra_Core.hpp>
-#include <Teuchos_CommHelpers.hpp>
-#include <gtest/gtest.h>
-#include <cmath>
-#include <map>
+/** @file testGeneralVoFFinite.cc */
+#include "general_vof_finite_test_helpers.hh"
 namespace
 {
-using namespace SimpleFluid;
-using namespace SimpleFluid::VoF;
-using namespace SimpleFluid::Meshes;
-using namespace SimpleFluid::Meshes::AMR;
-namespace fp = SimpleFluid::VoF::finite_detail;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-struct Fixture
-{
-    std::shared_ptr<const DistributedAdaptiveHierarchy> hierarchy;
-    std::vector<AdaptiveCellKey> order;
-    std::vector<double> gas, carrier;
-};
-Fixture fixture(bool dilute = false)
-{
-    const auto comm = Tpetra::getDefaultComm();
-    AMRGrid grid;
-    grid.block_cells = {2, 2, 2};
-    grid.extent = {2, 2, 2};
-    CartesianAMR mesh(grid);
-    std::vector<std::uint64_t> owned;
-    for (std::uint64_t id = 0; id < 8; ++id)
-        if (int(id % std::min(2, comm->getSize())) == comm->getRank()) owned.push_back(id);
-    auto source = mesh.detach_owned(owned, {'f', 'i', 'n', 'i', 't', 'e'});
-    Fixture result;
-    result.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(std::move(source.owned),
-        std::move(source.families), source.kernel, comm);
-    for (const auto& [key, leaf] : result.hierarchy->owned())
-    {
-        result.order.push_back(key);
-        const auto center = result.hierarchy->geometry(leaf)->centroid();
-        const auto gas = dilute ? 1e-6 : (center[0] < 1 && center[1] < 1 && center[2] < 1 ? 1. : 0.);
-        result.gas.push_back(gas);
-        result.carrier.push_back(1 - gas);
-    }
-    return result;
-}
-std::vector<GeneralVoFNodeVelocity> stationary(const GeneralVoF& state)
-{
-    std::vector<GeneralVoFNodeVelocity> result;
-    for (const auto& node : state.nodes()) result.push_back({node.gid, {0, 0, 0}});
-    return result;
-}
-std::vector<GeneralVoFFaceVolume> circulation(const GeneralVoF& state, bool identity = false)
-{
-    std::vector<GeneralVoFFaceVolume> result;
-    for (const auto& face : state.tiles())
-    {
-        const auto p = face.geometry->centroid(), n = face.geometry->area_vector();
-        double phi = 0;
-        if (!identity && !face.exterior && p.x == 1 && n.x != 0)
-            phi = (p.y < 1 ? 1 : -1) * (n.x > 0 ? 1 : -1) / 64.;
-        if (!identity && !face.exterior && p.y == 1 && n.y != 0)
-            phi = (p.x > 1 ? 1 : -1) * (n.y > 0 ? 1 : -1) / 64.;
-        result.push_back({face.face_gid, phi});
-    }
-    return result;
-}
 TEST(GeneralVoFFinite, BoundedTransportKeepsIndependentPhasesCanonicalRoutesAndEmptyOwners)
 {
     const auto input = fixture();
@@ -290,60 +224,8 @@ TEST(GeneralVoFFinite, FiniteMigrationCopiesInventoriesAndRejectsForeignSchemaAt
     EXPECT_EQ(source.carrier_volumes(), input.carrier);
 }
 
-TEST(GeneralVoFFinite, ExplicitExactRoundtripKeepsHistoryAndRebuildsFiniteGeometryAuthority)
-{
-    auto input = fixture();
-    for (std::size_t i = 0; i < input.order.size(); ++i)
-    {
-        const auto center = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
-        input.gas[i] = center[2] < 1 ? .9 : 0;
-        input.carrier[i] = 1 - input.gas[i];
-    }
-    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier);
-    auto control = circulation(source);
-    for (auto& face : control)
-        face.integrated_volume = face.integrated_volume > 0 ? .0125 : face.integrated_volume < 0 ? -.0125 : 0;
-    const auto moved = source.apply(source.plan_transport(stationary(source), control, 1));
-    const auto comm = Tpetra::getDefaultComm();
-    double local_history = 0, global_history = 0;
-    for (const auto& error : moved->accumulated_phase_errors()) local_history += error.gas + error.carrier;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_history, &global_history);
-    ASSERT_GT(global_history, 0);
-    // This call is an explicitly selected exact reference operation. It may
-    // prepare exact geometry; the subsequent numerical route cannot inherit
-    // its coordinate/measure authority or reset its finite error history.
-    const auto exported = moved->export_transfer_source(true);
-    for (const auto& capsule : exported.owned())
-        if (capsule.geometry_ready) EXPECT_FALSE(capsule.geometry.finite_geometry);
-    std::vector<int> destination(moved->hierarchy()->owned().size(),
-        (comm->getRank() + 1) % std::min(2, comm->getSize()));
-    const auto plan = moved->hierarchy()->plan_migration(destination);
-    const auto raw = moved->hierarchy()->apply(plan);
-    const auto native = assemble_adaptive_native(*raw, raw->configuration_descriptor());
-    const auto target = moved->hierarchy()->apply(plan,
-        raw->with_partition(native.partition, native.mesh->owned_cell_map()));
-    const auto transfer = ExactPhaseTransfer::prepare(exported, plan, target);
-    const auto adopted = moved->adopt_transfer(transfer);
-    EXPECT_NO_THROW(adopted->validate_transfer_target(transfer));
-    std::map<AdaptiveCellKey, const ExactPhaseTransferCapsule*> capsules;
-    for (const auto& capsule : transfer.owned()) capsules.emplace(capsule.key, &capsule);
-    for (std::size_t i = 0; i < adopted->owned_order().size(); ++i)
-    {
-        const auto& capsule = *capsules.at(adopted->owned_order()[i]);
-        EXPECT_EQ(adopted->phase_volumes()[i].gas, capsule.phases.gas);
-        EXPECT_EQ(adopted->phase_volumes()[i].carrier, capsule.phases.carrier);
-        EXPECT_EQ(adopted->accumulated_phase_errors()[i].gas, capsule.accumulated_roundoff.gas);
-        EXPECT_EQ(adopted->accumulated_phase_errors()[i].carrier, capsule.accumulated_roundoff.carrier);
-    }
-    GeneralVoF::enable_exact_geometry_statistics(true);
-    GeneralVoF::reset_geometry_statistics();
-    const auto rebuilt = adopted->reconstruct();
-    for (const auto& interface : rebuilt) EXPECT_TRUE(interface.finite_geometry);
-    const auto observed = GeneralVoF::geometry_statistics();
-    GeneralVoF::enable_exact_geometry_statistics(false);
-    EXPECT_EQ(observed.exact.volume_evaluations, 0);
-    EXPECT_EQ(observed.exact.moment_evaluations, 0);
-    EXPECT_EQ(observed.exact.clip_constructions, 0);
-    EXPECT_EQ(observed.exact.measure_arithmetic, 0);
-}
+
+
+
+
 } // namespace

@@ -25,14 +25,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     # Exercise the private adapter directly without exporting it from the DSO.
     target_sources(${TEST_NAME} PRIVATE ../details/LowMachFaceTransportAdapter.cc)
   endif()
-  if(TEST_NAME STREQUAL "testConservativeVoFTransport")
+  if(TEST_NAME STREQUAL "testConservativeVoFTransport" OR TEST_NAME STREQUAL "testExactConservativeVoFTransport")
     # Compile the private numerical boundary directly; it is not a DSO export.
     target_sources(${TEST_NAME} PRIVATE ../details/ConservativeVoFTransport.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc ../details/GeneralVoFTransferBinding.cc)
   endif()
-  if(TEST_NAME STREQUAL "testGeneralVoFCurvature")
+  if(TEST_NAME STREQUAL "testGeneralVoFCurvature" OR TEST_NAME STREQUAL "testExactGeneralVoFCurvature")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFCurvature.cc)
   endif()
-  if(TEST_NAME STREQUAL "testGeneralVoFFlowWorkspace")
+  if(TEST_NAME STREQUAL "testGeneralVoFFlowWorkspace" OR TEST_NAME STREQUAL "testExactGeneralVoFFlowWorkspace")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/VoFProjectionWorkspace.cc
       ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactPressure.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
@@ -40,12 +40,18 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFExactPressure.cc
       ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
-  if(TEST_NAME STREQUAL "testGeneralVoFPhiClosure")
+  if(TEST_NAME STREQUAL "testGeneralVoFPhiClosure" OR TEST_NAME STREQUAL "testExactGeneralVoFPhiClosure")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFPhiClosure.cc
       ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  if(TEST_NAME STREQUAL "testGeneralVoFSolver")
+  if(TEST_NAME STREQUAL "testExactGeneralVoFSolver")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;exact\\;general_mesh\\;integration\\;experimental\\;policy" TIMEOUT 1800)
+  elseif(TEST_NAME MATCHES "^testExact(GeneralVoFCurvature|GeneralVoFFlowWorkspace|GeneralVoFPhiClosure|ConservativeVoFTransport)$")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;exact\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testGeneralVoFSolver")
     simplefluid_discover_tests(${TEST_NAME} PROPERTIES LABELS "vof\\;general_mesh\\;integration" TIMEOUT 1800)
   elseif(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
@@ -600,6 +606,7 @@ simplefluid_add_mpi_test(
     TIMEOUT 60)
 
 if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+
   # Direct transport update, before pressure or accepted-state publication.
   simplefluid_add_mpi_test(
       NAME ConservativeVoFTransport_2procs
@@ -659,20 +666,20 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
 
   # Explicit optional-authority contract checks, not experimental physical qualification.
   set(general_vof_experimental_inventory_filter
-      "--gtest_filter=GeneralVoFSolverTest.ExperimentalInventoryIsExplicitAndRollbackPreservesItsSelectedAuthority:GeneralVoFSolverTest.ExperimentalInventorySamePolicyRegridRetainsClockAndPhaseAuthority:GeneralVoFSolverTest.ExperimentalInventoryRejectsForeignPolicyTrialWithoutChangingAcceptedSolver")
+      "--gtest_filter=ExactGeneralVoFSolverTest.ExperimentalInventoryIsExplicitAndRollbackPreservesItsSelectedAuthority:ExactGeneralVoFSolverTest.ExperimentalInventorySamePolicyRegridRetainsClockAndPhaseAuthority:ExactGeneralVoFSolverTest.ExperimentalInventoryRejectsForeignPolicyTrialWithoutChangingAcceptedSolver")
   simplefluid_add_mpi_test(
-      NAME GeneralVoFSolver_ExperimentalInventory_2procs
-      TARGET testGeneralVoFSolver
+      NAME ExactGeneralVoFSolver_2procs
+      TARGET testExactGeneralVoFSolver
       PROCS 2
-      ARGS "${general_vof_experimental_inventory_filter}"
-      LABELS "mpi;vof;general_mesh;experimental;policy"
-      TIMEOUT 180)
+      ARGS "--gtest_filter=ExactGeneralVoFSolverTest.*"
+      LABELS "mpi;vof;exact;general_mesh;experimental;policy"
+      TIMEOUT 3600)
   simplefluid_add_mpi_test(
-      NAME GeneralVoFSolver_ExperimentalInventory_4procs
-      TARGET testGeneralVoFSolver
+      NAME ExactGeneralVoFSolver_4procs
+      TARGET testExactGeneralVoFSolver
       PROCS 4
       ARGS "${general_vof_experimental_inventory_filter}"
-      LABELS "mpi;vof;general_mesh;experimental;policy;empty_rank"
+      LABELS "mpi;vof;exact;general_mesh;experimental;policy;empty_rank"
       TIMEOUT 180)
 
   simplefluid_add_mpi_test(
@@ -710,6 +717,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   # Source properties are directory-scoped, so repeat the production policy here.
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
       set_source_files_properties(
+          testExactGeneralVoFFlowWorkspace.cc
           ../GeneralVoFSolver.cc
           ../details/ConservativeVoFTransport.cc
           ../details/GeneralVoFFlowWorkspace.cc
@@ -720,6 +728,24 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
           SKIP_UNITY_BUILD_INCLUSION TRUE
           SKIP_PRECOMPILE_HEADERS TRUE)
   endif()
+
+  # Preserve the rank coverage of cases extracted from the mixed executables.
+  simplefluid_add_mpi_test(
+      NAME ExactConservativeVoFTransport_2procs
+      TARGET testExactConservativeVoFTransport PROCS 2
+      LABELS "vof;exact;conservation;collective")
+  simplefluid_add_mpi_test(
+      NAME ExactConservativeVoFTransport_EmptyRank_33procs
+      TARGET testExactConservativeVoFTransport PROCS 33
+      LABELS "vof;exact;conservation;collective;empty_rank" TIMEOUT 120)
+  simplefluid_add_mpi_test(
+      NAME ExactGeneralVoFFlowWorkspace_2procs
+      TARGET testExactGeneralVoFFlowWorkspace PROCS 2
+      LABELS "vof;exact;amr;flow;collective" TIMEOUT 180)
+  simplefluid_add_mpi_test(
+      NAME ExactGeneralVoFFlowWorkspace_EmptyRank_4procs
+      TARGET testExactGeneralVoFFlowWorkspace PROCS 4
+      LABELS "mpi;vof;exact;flow;collective;empty_rank" TIMEOUT 180)
 endif()
 
 foreach(_semi_ranks IN ITEMS 2 4)
