@@ -8,6 +8,53 @@ volumes with explicit accepted-old donor velocities is incompatible: material
 received in one direction can leave in the next direction with a different
 velocity from the original cell.
 
+## Conservation requirements and arithmetic choices
+
+For an extensive phase volume `q`, a source-free face-ledger update has the form
+`q_new[c] = q_old[c] - sum_f s[c,f] * dV[f]`. One canonical `dV[f]` is used by
+both incident cells with opposite incidence signs. Coarse/fine cells consume the
+same canonical subfaces exactly once. This gives algebraic cancellation of
+internal transfers; floating-point cell updates and reductions still require
+controlled accumulation error. It does not imply bitwise equality of independently
+summed global totals.
+
+The essential requirements are conservative phase accounting, nonnegative
+capacity-limited transfers, compatible phase/total-volume fluxes, preservation
+of constant states, and accuracy of interface transport. The coupled flow solver
+also requires mass-compatible momentum and its original physical-residual gates.
+These properties do not require arbitrary-precision rational coordinates,
+volumes or first moments as a general rule. Basic PLIC VoF does not evolve first
+moments; methods using centroids or higher-order remapping need accurate moments,
+but not necessarily rational ones.
+
+The implemented general-native path currently imposes stronger exact geometry
+and partition certificates even with finite physical inventories. The
+[proposed FP geometry contract](general_amr.md#proposed-floating-point-geometry-for-finite-vof)
+separates those implementation choices from the required physical invariants.
+It is not implemented and does not change existing geometry, phase-budget,
+inventory-policy or residual-acceptance contracts. In particular, the directional
+Cartesian roundoff rule below is not a blanket allowance for a new general-mesh
+geometry backend.
+
+Physical interface resolution is a separate admission decision. The mandatory
+arbitrary subcell-phase fitting case has been withdrawn. The proposed general
+backend requests refinement or rejects an underresolved feature according to
+[mesh/stencil resolution](general_amr.md#resolution-before-additional-precision),
+without silently deleting its accepted phase amount. Small numerical inventories
+still require conservative accounting; they do not prove a resolved interface.
+The refinement-request behavior remains planned.
+
+Under the [finite arithmetic policy](general_amr.md#finite-arithmetic-policy-and-permitted-exact-work),
+the proposed backend uses bounded FP intersections, volumes, required moments,
+PLIC fits and phase/mass ledgers. Arithmetic uncertainty permits bounded FP
+retries, then rejection. Exact arithmetic is limited to bounded topology
+predicates returning discrete decisions, explicit reference verification and
+the separate exact APIs/policy; it must not trigger a whole-geometry or timestep
+retry with rationals. Small intermediate contributions still enter conservative
+aggregate accounting and error bounds. Removing exact per-fragment values does
+not authorize a phase cutoff, mass deletion, looser physical tolerances or larger
+resource caps.
+
 ## Implicit momentum contract
 
 For each velocity component, the private `ConservativeVoFTransport` component

@@ -48,11 +48,13 @@ has a recorded topology/geometry numbering failure before balancing. It was
 excluded explicitly from the later six-method balance selection. Passing
 migration checks do not close this unresolved fixture.
 
-The separately staged integer-sign and certified floating-point filter candidate
-has recorded focused correctness and complete coarse/fine runs in serial/MPI2/MPI4.
-It remains a pending integration, distinct from the committed support-plane
-cache. Its design is specified below; those candidate results are not a claim
-that its source is already part of the committed backend.
+The bounded integer-sign and certified floating-point/lazy-distance helpers are
+integrated. Their recorded focused correctness matrix and complete coarse/fine
+runs cover serial/MPI2/MPI4 on the qualified source. They accelerate predicates
+and defer exact distances; intersections, measures and coverage proofs still use
+rational arithmetic. The broader
+[FP geometry proposal](#proposed-floating-point-geometry-for-finite-vof) below is
+separate, unimplemented work. This documentation update adds no runtime evidence.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -772,7 +774,10 @@ Canonical phase transfers are shared by both incident cells. Accumulation and
 once-rounded publication use cancellation-resistant sums and explicit,
 scale-aware per-phase arithmetic/conversion bounds from the actual terms and
 operation counts. There is no cell-volume minority floor or magnitude-based
-phase deletion: independent representable microscopic phases remain supported.
+phase deletion: independent representable microscopic phases remain supported
+by the current inventory arithmetic. This does not establish spatial resolution
+of their interface; the proposed FP path follows the
+[resolution policy](#resolution-before-additional-precision) below.
 Sub-range rounding is governed by the stated finite-precision arithmetic policy,
 not a requirement to retain below-binary64 physical inventory indefinitely.
 Material capacity, positivity, conservation or occupancy errors reject. Any
@@ -1320,15 +1325,15 @@ scratch leases. Only typed optional-cache exhaustion selects the uncached path;
 geometry, incidence and allocation failures propagate. Independent containment,
 pairwise disjointness, volume and first-moment proofs remain mandatory.
 
-### Predicate acceleration candidate
+### Implemented predicate acceleration
 
-The pending private integer helper evaluates rational support signs with checked
+The private integer helper evaluates rational support signs with checked
 fraction-free integer sums and positive denominators. Its bounded 32,768-bit
 workspace is leased before allocation. Unavailable capacity or checked overflow
 releases that lease and uses the original rational expression. Reserve-callback
 exceptions propagate. The result supplies only a sign, never approximate geometry.
 
-The pending floating-point helper encloses rational plane distances with outward
+The floating-point helper encloses rational plane distances with outward
 binary64 intervals. Only an interval strictly on one side of zero certifies a
 sign; contact, cancellation, subnormal/overflow or unsupported arithmetic falls
 back to integer/rational evaluation. It is enabled only for guarded strict GCC
@@ -1348,3 +1353,250 @@ moments and rational normalization remain substantial costs. Inclusive profile
 rows overlap; sample shares are not operation counts, fallback rates or elapsed
 time. Payload admission excludes backend/allocator/Krylov internals and is not
 an RSS cap. Large migration and process-memory costs still need qualification.
+
+### Proposed floating-point geometry for finite VoF
+
+**Status: design and qualification work only; no FP construction/measure backend
+is implemented or selected by this document.** The implemented predicate filters
+above leave exact coordinates, volumes, moments and coverage proofs intact.
+The proposed change targets that remaining construction and certification cost.
+No physical tolerance, current exact-API guarantee, resource limit or inventory
+policy changes through this proposal alone. The production requirement to fit
+arbitrarily thin phase features on the current mesh is withdrawn; the proposed
+resolution/adaptation policy below replaces that requirement.
+
+Conservative VoF requires consistent face transfers, bounded phase amounts and
+sufficient geometric accuracy. It does not generally require rational measures
+of every intermediate polyhedron. In the source-free finite-volume formulation,
+one estimated phase transfer is shared by adjacent cells with opposite signs;
+the estimate and the accumulation have separate accuracy obligations. See the
+[isoAdvector formulation, section 1.1](https://pmc.ncbi.nlm.nih.gov/articles/PMC5180117/).
+Moment-of-fluid reconstruction explicitly adds centroids to ordinary VoF volume
+data; first moments are not an independently evolved requirement of basic PLIC.
+See [Dyadechko and Shashkov](https://laro.lanl.gov/esploro/outputs/journalArticle/Reconstruction-of-multi-material-interfaces-from-moment/9916364204103761).
+These references motivate the distinction, not a new dependency or a claim that
+their mesh support or accuracy qualifies this backend.
+
+#### Finite arithmetic policy and permitted exact work
+
+The target production `Finite` path uses bounded floating-point geometry and
+accounting once the mesh/stencil resolution criterion is satisfied. Exact
+rational coordinates, measures and whole-partition replay are no longer design
+requirements for that path. This changes the target arithmetic contract; the
+current implementation remains exact until a separate numerical representation
+and its acceptance gates are qualified.
+
+Use the following routing rules:
+
+1. Check physical resolution before attempting progressively more expensive
+   reconstruction. Underresolved features request refinement and recheck, or
+   reject atomically. Extra precision cannot satisfy this admission gate.
+2. Use locally scaled binary64 constructions, compensated sums and propagated
+   error bounds for intersections, support distances, volumes, required moments,
+   PLIC fits, face transfers and finite inventory/residual calculations.
+   Canonical ownership determines shared values; independently recomputing an
+   equivalent value on each side is not a conservation mechanism.
+3. For arithmetic ambiguity in a resolved case, allow a bounded retry with
+   wider FP or a fixed, bounded expansion whose error/environment assumptions
+   are qualified. Retries count against the existing work and storage caps.
+   Do not convert the construction, volume, moment or ledger to rational form.
+4. Permit exact arithmetic only as a narrowly scoped sign/ordering predicate
+   when qualified FP predicates cannot decide topology. It must classify the
+   original construction using authenticated provenance, return only the
+   discrete decision, and have bounded work/storage charged to the same caps.
+   It cannot export rational vertices or start an exact measure/coverage replay.
+   An exact sign of an already rounded point is insufficient evidence.
+5. If those bounded calculations cannot establish the required sign, range,
+   nonnegativity or error budget, reject collectively with an arithmetic
+   diagnostic. Do not silently retry the whole geometry operation or timestep
+   through the exact backend, switch inventory policy, or increase resource
+   limits. An arithmetic failure alone is not proof of spatial underresolution.
+
+Exact geometry remains available as an explicit reference/debug oracle and for
+clients of the existing exact APIs. `ExperimentalExact` retains its separate
+inventory contract. Neither is an automatic acceptance fallback for the proposed
+finite path; reference comparisons run as explicitly selected verification work.
+Discrete entity keys, owner identity, incidence signs and exactly-once routing
+remain exact independently of the choice of numerical coordinates.
+
+#### Finite-path numerical representation
+
+| Current exact quantity or condition | Proposed finite-path treatment | Required replacement guarantee |
+| --- | --- | --- |
+| Cell, clipped and swept phase volumes | Local-coordinate FP integration with compensated accumulation and derived construction/arithmetic bounds; cache immutable measures | Fit and transfer errors satisfy the existing physical targets and independent per-phase budgets; all users share compatible canonical values |
+| First moments and centroids | FP integration about local anchors, evaluated only when reconstruction, remapping or physical operators need it | Bounds use the appropriate volume/length scales and handle translation, cancellation and small denominators; basic VoF does not acquire a new moment-conservation requirement |
+| Intersection coordinates and backward trajectories | Shared FP constructions with propagated error and source/support provenance; no persistent rational vertices | Canonical shared edges/faces remain coherent; bounded FP retries and the sign-only exception above must establish the decision, otherwise reject |
+| PLIC offsets and volume matching | Check mesh resolution first, then use bracketed FP fitting with conservatively bounded support extrema and phase-aware residuals | Underresolved features request refinement or rejection; admitted fits retain signed support and physical error targets without exact-volume root finding or deleting phase mass |
+| Donor/recipient volume-equality certificates | Structural partition evidence plus bounded geometric/ledger closure residuals | Establish containment, ownership and non-overlap; retain occupancy and constant-state compatibility, with no unexplained source or residual normalization |
+| Repeated exact first-moment cover checks | Omit routine recomputation only where an adequate coverage proof already implies the moment property; retain independent reference/debug checks | The implication is proved for the actual piece class and arithmetic policy; moments needed elsewhere are still evaluated |
+| Transient inventory products, sums, face-rate closure and residual ratios in `Finite` mode | Scaled FP arithmetic, compensated sums and propagated bounds; no unconditional rational lifts or rational history | Preserve independent phases, finite publication, source-free closure, physical residual thresholds and zero-reference handling; unresolved range/budgets reject rather than silently underflow or switch policy |
+
+The first-moment implication has a precise scope. For bounded, positive-volume
+pieces contained in a donor, with disjoint interiors and exact volume
+completeness, the uncovered set has zero measure and the first moments agree.
+Equal volume alone does not prove coverage: gaps and overlaps can cancel.
+With only an FP volume residual, this is an error-bound argument rather than
+exact equality; moment error can be bounded by a local extent times the
+uncovered volume only after the containment/disjointness hypotheses have been
+established. Signed overlays, multiple coverage, or unauthenticated fragments
+cannot use this implication without an additional proof.
+
+Structural certificates should establish complementary splits, oriented shared
+boundaries and non-overlapping ownership once, and compose across authenticated
+immutable geometry. Reusing such evidence can avoid replaying all fragment-pair
+intersections and moments. It does not authorize accepting arbitrary fragments
+from a volume sum or dropping the current checks before the replacement proof
+exists. Exact reference comparisons validate the replacement; they are not a
+hidden runtime fallback in the finite path. A certificate must identify whether
+it proves an exact partition or bounds a numerical construction.
+
+#### Invariants retained by the FP proposal
+
+- Each face has one owner-canonical phase-transfer record, consumed with opposite
+  signs on its two sides and consistently across MPI replicas. Identity, routing,
+  incidence and exactly-once application remain discrete guarantees.
+- Canonical coarse/fine subfaces have compatible flux sums. Phase fluxes and total
+  volume flux must agree under the declared arithmetic bounds; source-free
+  constant-state and pure-phase preservation remain required. A future moving-mesh
+  extension must additionally satisfy its mesh-relative flux and old/new-volume
+  geometric conservation law; this proposal adds no ALE support.
+- Donors cannot export more of either phase than they own, and recipients cannot
+  exceed their admitted capacity. Any limiting or roundoff repair changes the
+  shared transfer ledger conservatively and stays within a justified arithmetic
+  allowance. Independent cell clipping, renormalization, or allocation of every
+  closure residual to an arbitrary phase is forbidden.
+- Momentum and transported quantities use compatible physical mass/carrier
+  ledgers. Preserve the existing positivity, physical-residual and iteration
+  gates, boundary/source accounting, and collective participation of empty owners.
+- Topology and orientation decisions need reliable predicates. A predicate that
+  is exact for an already rounded vertex does not certify the original
+  construction. Retain original inputs or construction provenance and propagate
+  their uncertainty through later queries. Use the bounded FP retries and
+  sign-only exact exception above; unresolved constructions reject without
+  rationalizing the vertices or replaying exact coverage.
+- Rejection remains collective and atomic. Native geometry, topology, partition,
+  maps, policy, units and provenance pin caches and certificates; a failed trial
+  or refresh cannot mutate accepted state or leave reusable partial evidence.
+
+#### Error budgets and policy boundaries
+
+Geometric approximation, FP arithmetic/publication, physical solver residuals
+and model/discretization error are distinct. Derive local arithmetic bounds from
+the actual operations, conditioning, coordinate scales and construction history;
+propagate them through reconstruction, transfer, MPI accumulation, publication
+and remap. A bound is evidence about error, not permission to enlarge a physical
+tolerance. Once adequate spatial resolution has been established, an arithmetic
+bound that cannot establish the original acceptance target permits only the
+bounded retries above, then rejection; no exact volume, moment or ledger retry
+is required or permitted within this proposed path. A physical resolution failure
+calls for refinement or rejection as specified below. An interval containing zero
+is not proof of exact zero. Repeated steps and regrids cannot reset accumulated
+error provenance or create a new unexplained allowance.
+
+Accepted phase amounts remain independent extensive inventories. Resolution
+failure must not erase them or turn a geometric approximation into a mass sink.
+For admitted states, phase-aware bounds and stable arithmetic still matter;
+small carrier amounts or zero-reference residuals are numerical accounting
+cases, not evidence that a phase interface is physically resolved.
+
+#### Resolution before additional precision
+
+Successful reconstruction of the former `1e-18` unit-cell phase case is no
+longer a production acceptance requirement. The corresponding dedicated success
+regression, and the still-smaller phase-fit success cases, are replaced by
+ordinary-volume fitting coverage. Historical results remain historical; they
+must not force the future FP backend to reconstruct arbitrary subcell features.
+
+A physical resolution criterion must relate estimated feature thickness/scale,
+curvature, stencil support and geometric uncertainty to local mesh spacing and
+the required interface accuracy. Absolute phase volume or FP representability
+alone is not that criterion. Changing units must not change the decision, and a
+tiny cut fraction from a well-resolved interface grazing a cell corner does not
+automatically require refinement. Criterion definitions and thresholds remain
+planned work; this change introduces no universal fraction or volume cutoff.
+
+When a feature is underresolved, the proposed backend requests refinement of
+the relevant interface/stencil neighborhood and reevaluates resolution before
+accepting the reconstructed state. If refinement cannot meet the criterion,
+is unavailable, or exhausts its limits, reject with an actionable resolution
+diagnostic and retain accepted state atomically. Refining an already underresolved
+reconstruction does not recover missing initial interface information;
+reinitialization or independent convergence evidence may be required.
+
+The bounded arithmetic routing above applies only to otherwise resolved
+constructions; even a successful exact sign predicate does not qualify an
+underresolved interface. Shared-face conservation, independent phase accounting
+and boundedness remain required during refinement/remap and rejection; no phase
+clipping, renormalization, mass deletion or implicit change of physical model is
+authorized.
+The resolution gate and refinement-request integration are unimplemented tasks,
+not behavior supplied merely by retiring the old success tests.
+
+The following distinctions must be explicit before implementing a new backend:
+
+| Contract | Policy disposition |
+| --- | --- |
+| Physical phase resolution | Require adequate mesh/stencil resolution; request refinement or reject underresolved features instead of requiring arbitrary-precision reconstruction |
+| Accepted extensive phase inventories and physical acceptance thresholds | Retain conservative accounting, boundedness and unchanged residual tolerances; a resolution failure does not authorize mass deletion |
+| Exact representation of every positive intermediate fragment, including values below FP output range | Retain only in the exact API/reference contract. The finite path may accumulate bounded aggregate contributions without an exact value for each piece; include every contribution in the aggregate error/accounting and reject if phase budgets cannot be established |
+| Rejection of every nonzero geometric gap, however small | Keep in the existing exact path. The finite path requires structural coverage plus bounded residuals within the unchanged physical targets; it must still detect holes/overlaps beyond those bounds and cannot infer coverage from a net volume sum |
+| Bitwise or exact-real equality of global sums, coordinates or moments | Distinguish from conservative FP updates with bounded roundoff; do not claim these from shared fluxes alone |
+| `PhaseInventoryPolicy::ExperimentalExact`, exact geometry APIs and authenticated lossless certificates | Preserve their current meaning; approximate values cannot silently replace their authority |
+
+A contribution smaller than an individual FP output can be represented through
+scaled/compensated accumulation and an aggregate uncertainty bound; this is not
+permission to declare it zero or delete accepted inventory. An uncertain sign
+must not be clamped to obtain a nonnegative phase amount. If a conservative,
+nonnegative transfer cannot be established within the existing per-phase error
+budget, reject the trial. A cell-volume-relative cutoff is not a substitute for
+this accounting, particularly when the other phase dominates the cell volume.
+
+Geometry evaluation policy is separate from phase inventory policy. `Finite`
+already publishes finite physical states while using rational geometry and
+transient exact lifts. The replacement needs a separate internal representation
+carrying values, bounds and provenance, with distinct certificate authority;
+this document names no new public selector or option. Wrapping a rounded FP value
+in `ExactGeometryMeasure` makes it exact only for that rounded value, not for the
+original construction, and cannot manufacture a coverage or owner certificate.
+Keep rational measure/construction objects out of finite-path caches and MPI
+payloads; exchange canonical FP values, their error evidence and discrete identity.
+Do not silently adopt an exact-policy state or capsule into the finite path.
+Retries must not erase history, enlarge resource caps or hide malformed input.
+Changes to work/storage accounting semantics need an explicit contract as well
+as unchanged limit values.
+
+#### Implementation priorities and acceptance
+
+1. Specify and implement the physical resolution gate, refinement requests and
+   atomic rejection on unresolved or exhausted adaptation. Qualify unit/scale
+   invariance and grazing-interface cases. Resolution admission is a prerequisite
+   for the new path, not a reason to relax accepted inventory accounting.
+2. Establish a baseline and instrument complete physical steps: fragment/pair
+   work, distance/volume/moment evaluations, certificate reuse, exact operations
+   separated by predicate/construction/measure/ledger, operand-size distributions,
+   and per-rank computation, waiting and peak memory. Record bounded retries and
+   rejections. Inclusive sample profiles do not supply these counts.
+3. Introduce the separate FP value/bound/provenance representation, canonical
+   intersections and support, volume integration and only the moments actually
+   consumed. Reuse immutable geometry and measures with topology, partition and
+   geometry invalidation. Qualify against independently selected exact/analytic
+   oracles; retain the existing implementation until replacement gates pass.
+4. Replace cover-proof replay with demonstrated structural certificates and
+   bounded conservative closure. Move finite face-rate, inventory and residual
+   calculations to the same bounded FP contract. Keep rational construction,
+   measure and ledger operations out of this path, including retries and caches.
+   Exact predicates remain limited to the documented discrete-decision exception.
+5. Execute the [proposed acceptance matrix](../verification/vof_solver_contracts.md#proposed-fp-geometry-acceptance-gates)
+   and the [Stage 7 roadmap](../../TODO.md#stage-7--general-vof-and-flow-qualification)
+   before integration or changing defaults. Preserve complete physical horizons
+   and compare matched Release serial/MPI cases with empty owners. Require zero
+   rational construction, volume/moment and ledger operations in the finite
+   backend, with exact predicate use separately counted and bounded. Report
+   reference-oracle cost separately; demonstrate accuracy and scaling, not just
+   fewer exact calls.
+
+These are unimplemented tasks, not evidence of a faster FP backend or a working
+resolution controller. The arbitrary subcell-phase success requirement is retired;
+existing exact APIs retain their guarantees. Finite-path replacements must pass
+the revised numerical acceptance gates and all retained conservation, positivity,
+physical-tolerance, resource-cap and atomic-rejection requirements.
