@@ -13,6 +13,7 @@
 #include "SimpleFluidExport.hh"
 #include "dataclass/Database.hh"
 #include "dataclass/typedefs.hh"
+#include "equations/ReactingThermodynamics.hh"
 
 #include <functional>
 #include <limits>
@@ -122,11 +123,56 @@ enum class NucleationRadiusMode
     External
 };
 
+namespace BubbleGasPhysics
+{
+struct MultispeciesPopulationContext;
+struct MultispeciesPopulationPacket;
+} // namespace BubbleGasPhysics
+
+/** Explicit species film-transfer data; zero diffusivity disables that process. */
+enum class ReactingBulkDiffusionMode
+{
+    Disabled,
+    ConservativeMixture ///< Requires paired finite counterflux and canonical face enthalpy; currently rejected.
+};
+
+struct ReactingSpeciesProperties
+{
+    Reacting::SpeciesId species = 0;
+    double diffusivity = 0.0;       ///< Film diffusivity [m2/s]; does not implicitly enable bulk diffusion.
+    double henry_coefficient = 0.0; ///< mol/(m3 liquid Pa), multiplied by this species fugacity.
+    std::function<double(const Reacting::ReactionContext&)> diffusivity_provider;
+    std::function<double(const Reacting::ReactionContext&, const Reacting::MixtureThermodynamicPoint&)>
+        equilibrium_concentration;
+    std::function<double(const Reacting::ReactionContext&, Reacting::SpeciesPhase, std::string_view)>
+        carried_molar_enthalpy; ///< Required when this species crosses an open boundary, J/mol.
+};
 /**
  * @brief Runtime configuration for ideal and two-population reacting_gas.
  */
 struct ReactingGasOptions
 {
+    /** Typed general chemistry. Its catalog defines every authoritative chemical field.
+     * Schema, property order/values, process selections and callback presence are uniform across ranks,
+     * including empty owners. Callbacks are pure and reentrant, with immutable physically identical
+     * captured laws; spatial variation comes from the supplied local context.
+     */
+    std::shared_ptr<const Reacting::ReactionMechanism> reaction_mechanism;
+    std::shared_ptr<const Reacting::MixtureThermodynamics> gas_thermodynamics;
+    std::shared_ptr<const Reacting::MixtureThermodynamics> liquid_thermodynamics;
+    std::function<Reacting::ReactionSourceInput(const Reacting::ReactionContext&, double)> species_source;
+    std::vector<ReactingSpeciesProperties> species_properties;
+    ReactingBulkDiffusionMode bulk_diffusion = ReactingBulkDiffusionMode::Disabled;
+    std::function<Reacting::CellSpeciesState(const Reacting::ReactionEnvironment&, std::int64_t)> initial_species_state;
+    std::function<std::vector<double>(const Reacting::ReactionContext&)> initial_population_numbers;
+    std::vector<std::string> population_ids{"micro", "large"};
+    std::function<BubbleGasPhysics::MultispeciesPopulationPacket(
+        const BubbleGasPhysics::MultispeciesPopulationContext&, double)>
+        population_process;
+    Reacting::ReactionAdvanceOptions reaction_advance;
+    double micro_dissolution_frequency = 0.0; ///< 1/s, optional supplied first-order population dissolution.
+    double large_dissolution_frequency = 0.0; ///< 1/s.
+    double micro_conversion_frequency = 0.0;  ///< 1/s, micro->large transfer, preserving each species.
     ReactingGasMode mode = ReactingGasMode::Disabled;
     ReactingPressureMode pressure_mode = ReactingPressureMode::Constant;
     ReactingTransportMode dissolved_transport = ReactingTransportMode::NoAdvection;

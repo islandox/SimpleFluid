@@ -10,6 +10,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <limits>
 
 #include "equations/PrescribedHeatSource.hh"
 #include "geometry/unitTests/test_mesh_helpers.hh"
@@ -78,7 +79,7 @@ TEST(PrescribedHeatSourceMultiRankTest, RankLocalInvalidPowerDensityThrowsCohere
     FieldType power_density(mesh, 1.0, "supplied_power_density");
     if (comm->getRank() == 0)
     {
-        power_density.set_owned_value(0, -1.0);
+        power_density.set_owned_value(0, std::numeric_limits<double>::quiet_NaN());
     }
 
     EXPECT_ANY_THROW(

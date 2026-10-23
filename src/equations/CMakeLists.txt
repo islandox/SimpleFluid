@@ -1,5 +1,6 @@
 set(SIMPLEFLUID_EQUATION_SOURCES
     ReactionMechanism.cc
+    ReactingThermodynamics.cc
     explicit_instantiation/BoilingSourceModel.cc
     explicit_instantiation/ScalarSourceDecayTransport.cc
     explicit_instantiation/PrescribedHeatSource.cc

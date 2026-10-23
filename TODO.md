@@ -1,5 +1,10 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
+**Excluded interface-capturing scope:** VoF and general AMR are not included
+in this source snapshot. No experimental-enable path supplies those absent
+solvers, tests, or applications. Reusable lower-level FVM and geometry
+mathematics remain available.
+
 **Documentation review date:** October 24, 2026
 
 This refresh reconciles the current source, public APIs, and checked-in test

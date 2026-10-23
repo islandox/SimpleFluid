@@ -844,7 +844,12 @@ void BoussinesqSolver<Pack>::advance_temperature_transport(
             auto total = stored_temperature_sources().total_power_density(cell_lid);
             if (transport.power_sink)
             {
-                total += -transport.power_sink->value(cell_lid) + transport.power_release->value(cell_lid);
+                total += -transport.power_sink->value(cell_lid) +
+                    (transport.power_release ? transport.power_release->value(cell_lid) : scalar_type{});
+            }
+            else if (transport.power_release)
+            {
+                total += transport.power_release->value(cell_lid);
             }
             return total;
         };

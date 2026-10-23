@@ -2545,6 +2545,34 @@ TEST(BoussinesqCouplingIntervalTest, RepeatedReplayPreservesAcceptedHistoryPrefi
     EXPECT_EQ(solver_coupling.free_surface_history().size(), prefix.size() + 1);
 }
 
+TEST(BoussinesqCouplingIntervalTest, SignedCoolingIntervalConservesEnergyAndReplaysMovingGeometry)
+{
+    auto state = make_case(Coupling::PISO, 0.0, 25);
+    auto& coupling = *state.coupling;
+    coupling.add_prescribed_heat_source().initialize_constant(0.0);
+    const auto initial_energy = coupling_sensible_energy(state);
+    const auto initial_history = coupling.free_surface_history().size();
+    auto checkpoint = coupling.create_coupling_checkpoint();
+    std::vector<double> energy(state.mesh->num_owned_cells());
+    for (size_t owned = 0; owned < energy.size(); ++owned)
+        energy[owned] = -2.0 * state.mesh->cell_volume(static_cast<Pack::local_ordinal_type>(owned));
+    coupling.set_coupling_interval_energy(energy, 0.02);
+    coupling.step();
+    coupling.step();
+    EXPECT_NEAR(coupling_sensible_energy(state) - initial_energy, -2.0, 2.e-8);
+    EXPECT_LT(top_elevation(*state.mesh), 1.0);
+    const auto accepted_level = top_elevation(*state.mesh);
+    coupling.restore_coupling_checkpoint(checkpoint);
+    EXPECT_NEAR(coupling_sensible_energy(state), initial_energy, 2.e-8);
+    EXPECT_EQ(coupling.free_surface_history().size(), initial_history);
+    coupling.set_coupling_interval_energy(energy, 0.02);
+    coupling.step();
+    coupling.step();
+    EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), accepted_level);
+    EXPECT_NEAR(coupling_sensible_energy(state) - initial_energy, -2.0, 2.e-8);
+    coupling.accept_coupling_checkpoint(checkpoint);
+}
+
 TEST(BoussinesqCouplingIntervalTest, RejectsInvalidBudgetAndRestoresSourceAfterFailedTrial)
 {
     auto state = make_case(Coupling::PISO, 0.0, 1);
@@ -2554,7 +2582,7 @@ TEST(BoussinesqCouplingIntervalTest, RejectsInvalidBudgetAndRestoresSourceAfterF
     auto checkpoint = solver_coupling.create_coupling_checkpoint();
     std::vector<double> invalid(state.mesh->num_owned_cells(), 0.0);
     if (state.mesh->owned_cell_map()->getComm()->getRank() == 0 && !invalid.empty())
-        invalid[0] = -1.0;
+        invalid[0] = std::numeric_limits<double>::quiet_NaN(); // Signed cooling is a valid budget.
     EXPECT_THROW(solver_coupling.set_coupling_interval_energy(invalid, 0.01), std::exception);
     std::vector<double> energy(state.mesh->num_owned_cells(), 0.01);
     EXPECT_THROW(solver_coupling.set_coupling_interval_energy(energy, 0.0), std::invalid_argument);

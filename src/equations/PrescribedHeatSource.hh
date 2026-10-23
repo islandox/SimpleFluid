@@ -86,20 +86,20 @@ namespace detail
 {
 
 /**
- * @brief Validate a non-negative prescribed heat-source scalar.
+ * @brief Validate a signed finite prescribed heat-source scalar.
  * @param value Value to validate.
  * @param name Option name used in diagnostics.
- * @throws std::invalid_argument If @p value is negative or not finite.
+ * @throws std::invalid_argument If @p value is not finite.
  */
-inline void validate_non_negative_prescribed_heat_value(
+inline void validate_finite_prescribed_heat_value(
     real_t value,
     const std::string& name)
 {
-    if (!std::isfinite(value) || value < 0.0)
+    if (!std::isfinite(value))
     {
         throw std::invalid_argument(
             "Prescribed heat option '" + name
-            + "' must be finite and non-negative.");
+            + "' must be finite.");
     }
 }
 
@@ -146,11 +146,11 @@ inline void validate_prescribed_heat_options(
         case PrescribedHeatProfile::Disabled:
             return;
         case PrescribedHeatProfile::Constant:
-            validate_non_negative_prescribed_heat_value(
+            validate_finite_prescribed_heat_value(
                 options.power_density, "prescribed_heat_density");
             return;
         case PrescribedHeatProfile::Gaussian:
-            validate_non_negative_prescribed_heat_value(
+            validate_finite_prescribed_heat_value(
                 options.total_power, "prescribed_heat_total_power");
             for (size_t component = 0; component < 3; ++component)
             {
@@ -234,7 +234,7 @@ prescribed_heat_source_options_from_database(const Database& database)
 }
 
 /**
- * @brief Specialized non-negative heat source named qdot_external.
+ * @brief Independent signed external heat source named qdot_external.
  */
 template<TpetraTypePack Pack, class MeshType>
 class SIMPLEFLUID_EQUATIONS_EXPORT PrescribedHeatSource
@@ -286,7 +286,7 @@ public:
     void configure(const PrescribedHeatSourceOptions& options);
 
     /**
-     * @brief Set a uniform non-negative power density.
+     * @brief Set a uniform signed power density; negative values remove heat.
      */
     void initialize_constant(scalar_type power_density);
 
@@ -299,7 +299,7 @@ public:
         const vec3<scalar_type>& standard_deviation);
 
     /**
-     * @brief Copy a non-negative power-density field into the source.
+     * @brief Copy a signed finite power-density field into the source.
      */
     void initialize_from_power_density(const field_type& power_density);
 
@@ -324,7 +324,7 @@ public:
      * Set extensive joules per owned cell over [start, start + duration].
      * Stable cell IDs follow the moving material mesh. The interval is replayable:
      * refresh_interval_energy() never consumes energy or advances a ledger.
-     * Collective; values must be finite/nonnegative, duration positive, and no
+     * Collective; values must be finite, duration positive, and no
      * user time multiplier may be installed. Time endpoints and substeps must
      * advance representably, with clock rounding within 32 epsilon times the
      * interval duration; underresolved time intervals fail before source mutation.
@@ -403,6 +403,13 @@ private:
         return mesh;
     }
 
+    SIMPLEFLUID_EQUATIONS_LOCAL
+    static void require_finite(scalar_type value, const std::string& label)
+    {
+        if (!std::isfinite(value))
+            throw std::invalid_argument("Prescribed heat " + label + " must be finite.");
+    }
+
     static void require_non_negative(
         scalar_type value,
         const std::string& label)
@@ -425,7 +432,7 @@ private:
     }
 
     SIMPLEFLUID_EQUATIONS_LOCAL
-    void copy_non_negative_field(const field_type& field);
+    void copy_finite_field(const field_type& field);
 
     void validate_non_negative_field(const field_type& field) const
     {

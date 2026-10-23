@@ -500,4 +500,82 @@ BubblePopulationStepResult advance_upper_bubble_population(const MolarPivotGrid&
     return result;
 }
 
+MultispeciesPopulationResult advance_multispecies_population_exchange(const Reacting::SpeciesCatalog& catalog,
+    const Reacting::CellSpeciesState& initial, const std::vector<PopulationNumberState>& numbers,
+    const Reacting::ReactionEnvironment& environment, const MultispeciesPopulationPacket& packet)
+{
+    initial.validate(catalog);
+    require(numbers.size() == initial.dispersedPopulations.size(),
+        "Every dispersed population needs one explicit number inventory.");
+    std::vector<Sum> births(numbers.size()), deaths(numbers.size());
+    const auto population_index = [&](std::string_view id)
+    {
+        for (std::size_t i = 0; i < numbers.size(); ++i)
+            if (numbers[i].population == id)
+                return i;
+        throw std::invalid_argument("Population event refers to an unknown population.");
+    };
+    for (std::size_t i = 0; i < numbers.size(); ++i)
+    {
+        require(numbers[i].population == initial.dispersedPopulations[i].id && nonnegative(numbers[i].number),
+            "Population numbers must match unique species population order and be finite/nonnegative.");
+    }
+    for (const auto& event : packet.numberEvents)
+    {
+        require(nonnegative(event.births) && nonnegative(event.deaths),
+            "Population number births and deaths must be finite and nonnegative.");
+        const auto i = population_index(event.population);
+        births[i] += event.births;
+        deaths[i] += event.deaths;
+    }
+    std::vector<Reacting::ReactionDefinition> reactions;
+    Reacting::ReactionSourceInput sources;
+    for (std::size_t i = 0; i < packet.transfers.size(); ++i)
+    {
+        const auto& event = packet.transfers[i];
+        require(nonnegative(event.moles), "Population species transfers must be finite and nonnegative.");
+        require(event.donor != event.receiver || event.donorPopulation != event.receiverPopulation,
+            "Population transfer requires different donor and receiver compartments.");
+        require(i <= std::numeric_limits<Reacting::ReactionId>::max(), "Too many population transfer events.");
+        const auto id = static_cast<Reacting::ReactionId>(i);
+        reactions.push_back({id, "phase transfer " + std::to_string(i),
+            {{event.species, event.donor, -1.0, event.donorPopulation},
+                {event.species, event.receiver, 1.0, event.receiverPopulation}},
+            0.0});
+        sources.integratedExtents.push_back({id, event.moles});
+    }
+    const Reacting::ReactionMechanism mechanism(std::make_shared<const Reacting::SpeciesCatalog>(catalog),
+        std::move(reactions), Reacting::EnergyConvention::IncludesFormationEnergy);
+    const auto advance = Reacting::advance_reactions(mechanism, initial, environment, 0.0, sources);
+    MultispeciesPopulationResult result{advance.state, numbers, advance.ledger, std::vector<double>(numbers.size())};
+    for (std::size_t i = 0; i < numbers.size(); ++i)
+    {
+        require_result(deaths[i].value() <= numbers[i].number,
+            "Competing population events exceed the jointly available number donor.");
+        Sum number, change, moles;
+        change += births[i].value();
+        change += -deaths[i].value();
+        number += numbers[i].number;
+        number += change.value();
+        for (const auto value : result.state.dispersedPopulations[i].amounts)
+            moles += value;
+        require_result(nonnegative(number.value()) && nonnegative(moles.value()),
+            "Population exchange produced invalid number/species amounts.");
+        if (moles.value() == 0.0)
+        {
+            // Exact disappearance is a physical count-death event, not a positivity repair.
+            change += -number.value();
+            result.numbers[i].number = 0.0;
+        }
+        else
+        {
+            require_result(number.value() > 0.0, "Nonempty gas populations require positive paired bubble number.");
+            result.numbers[i].number = number.value();
+        }
+        require_result(
+            births[i].value() == 0.0 || moles.value() > 0.0, "A bubble birth must carry a positive gas inventory.");
+        result.numberChanges[i] = change.value();
+    }
+    return result;
+}
 } // namespace SimpleFluid::BubbleGasPhysics

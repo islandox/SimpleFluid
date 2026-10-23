@@ -484,6 +484,14 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
                                "reacting gas, then configure free surface last.");
     }
     validate_reacting_gas_options(options);
+    collective_detail::collective_local_validation(*d_solver->d_mesh, "Boussinesq reaction energy convention", [&]
+    {
+        if (options.reaction_mechanism && options.mode != ReactingGasMode::Disabled &&
+            options.reaction_mechanism->energy_convention() != Reacting::EnergyConvention::SensibleEnergy)
+            throw std::invalid_argument("Boussinesq temperature storage requires the sensible-energy reaction "
+                "convention; use a low-Mach mixture solver for formation-energy phase storage.");
+    });
+
     if (d_free_surface_model && options.mode == ReactingGasMode::IdealGasSource)
     {
         throw std::invalid_argument("The planar free-surface budget cannot use idealGasSource "
@@ -1504,6 +1512,9 @@ void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(const 
     {
         return;
     }
+    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
+        throw std::invalid_argument("General species free-surface coupling requires the species-owned liquid "
+            "and gas-history adapter; the specialized inventory bridge is not admissible.");
     if (options.headspace.temperature_mode == HeadspaceTemperatureMode::External &&
         (options.mode != FreeSurfaceMode::PlanarALE || !d_thermal_participant))
         throw std::invalid_argument("External headspace temperature requires a typed planar ALE thermal participant.");
@@ -2593,10 +2604,20 @@ template<TpetraTypePack Pack>
 bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type time_step)
 {
     const auto phase_timing = d_solver->d_solver_timings.scope(SolverPhase::PreTemperatureModels);
-    const auto two_population_after_temperature =
-        d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->supplies_void_fraction();
+    const bool species_before_temperature = d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+        d_reacting_gas_model->species_enabled();
+    const auto two_population_after_temperature = d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+        d_reacting_gas_model->supplies_void_fraction() && !species_before_temperature;
+    if (species_before_temperature)
+    {
+        const auto gas_timing = d_solver->d_solver_timings.scope(SolverPhase::Gas);
+        d_reacting_gas_model->advance(d_solver->d_time + time_step, time_step, d_solver->temperature(),
+            d_solver->pressure(), d_solver->velocity(), d_solver->projected_face_fluxes(),
+            d_solver->stored_material_properties(), nullptr);
+    }
 
-    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && !two_population_after_temperature)
+    if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+        !two_population_after_temperature && !species_before_temperature)
     {
         if (!d_scalar_void_fraction_model)
         {
@@ -2660,6 +2681,12 @@ void MultiphysicsSolverCoupler<Pack>::advance_post_temperature_models(
     }
 
 
+    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
+    {
+        d_reacting_gas_model->refresh_species_thermodynamics(d_solver->d_time + time_step, d_solver->temperature(), d_solver->pressure(),
+            d_solver->velocity(), d_solver->stored_material_properties());
+        update_void_fraction_models(time_step);
+    }
     refresh_material_feedback(d_solver->d_time + time_step);
     advance_free_surface(time_step);
     if (auto* turbulence = d_solver->find_turbulence_model())
@@ -3008,31 +3035,33 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
         }
         return;
     }
-    AcceptedStateRollback sas_rollback;
+    AcceptedStateRollback physics_rollback;
     auto* sas_model = d_solver->find_turbulence_model();
     const bool active_sas =
         sas_model && sas_model->type() == TurbulenceModelType::SSTKOmegaSAS && sas_model->options().sas.enabled;
+    const bool transactional_physics = active_sas ||
+        (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled());
     if (sas_model)
         sas_model->validate_time_mode(d_solver->d_problem.time_options().physical_time);
-    if (active_sas)
+    if (transactional_physics)
     {
         if (d_material_feedback_model)
-            sas_rollback.capture_model(*d_material_feedback_model);
+            physics_rollback.capture_model(*d_material_feedback_model);
         if (d_scalar_void_fraction_model)
-            sas_rollback.capture_model(*d_scalar_void_fraction_model);
+            physics_rollback.capture_model(*d_scalar_void_fraction_model);
         if (d_reacting_gas_model)
-            sas_rollback.capture_model(*d_reacting_gas_model);
+            physics_rollback.capture_model(*d_reacting_gas_model);
         if (d_boiling_source_model)
-            sas_rollback.capture_model(*d_boiling_source_model);
+            physics_rollback.capture_model(*d_boiling_source_model);
         if (d_free_surface_model)
-            sas_rollback.capture_model(*d_free_surface_model);
+            physics_rollback.capture_model(*d_free_surface_model);
         if (d_liquid_mass_inventory)
-            sas_rollback.capture_model(*d_liquid_mass_inventory);
+            physics_rollback.capture_model(*d_liquid_mass_inventory);
         for (auto* field :
             {d_clear_level.get(), d_pool_level.get(), d_headspace_pressure.get(), d_pool_occupancy.get()})
             if (field)
-                sas_rollback.capture(*field);
-        sas_rollback.add(
+                physics_rollback.capture(*field);
+        physics_rollback.add(
             [this, history_size = d_free_surface_history.size(), occupancy_error = d_pool_occupancy_volume_error,
                 failed = d_free_surface_step_failed]
             {
@@ -3040,29 +3069,30 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
                 d_pool_occupancy_volume_error = occupancy_error;
                 d_free_surface_step_failed = failed;
             });
-        sas_rollback.capture(d_solver->temperature());
+        physics_rollback.capture(d_solver->temperature());
         for (const auto& [name, source] : d_solver->stored_temperature_sources().entries())
-            sas_rollback.capture(source->field());
-        sas_rollback.capture(d_solver->pressure());
-        sas_rollback.capture(d_solver->pressure_correction());
-        sas_rollback.capture(d_solver->velocity());
-        sas_rollback.capture(d_solver->predictor_pressure_gradient());
-        sas_rollback.capture(d_solver->predictor_velocity());
-        sas_rollback.capture(d_solver->old_face_fluxes());
-        sas_rollback.capture(d_solver->projected_face_fluxes());
-        sas_rollback.add(
+            physics_rollback.capture(source->field());
+        physics_rollback.capture(d_solver->pressure());
+        physics_rollback.capture(d_solver->pressure_correction());
+        physics_rollback.capture(d_solver->velocity());
+        physics_rollback.capture(d_solver->predictor_pressure_gradient());
+        physics_rollback.capture(d_solver->predictor_velocity());
+        physics_rollback.capture(d_solver->old_face_fluxes());
+        physics_rollback.capture(d_solver->projected_face_fluxes());
+        physics_rollback.add(
             [this, residuals = d_solver->pressure_velocity_residuals(),
                 volume = d_solver->d_last_volume_continuity_residuals]
             {
                 d_solver->pressure_velocity_residuals() = residuals;
                 d_solver->d_last_volume_continuity_residuals = volume;
             });
-        sas_rollback.add([this, saved = d_solver->stored_material_properties().snapshot()]
+        physics_rollback.add([this, saved = d_solver->stored_material_properties().snapshot()]
             { d_solver->stored_material_properties().restore(saved); });
-        sas_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
-        sas_rollback.add(
+        if (sas_model)
+            physics_rollback.add([sas_model, saved = sas_model->snapshot()] { sas_model->restore(saved); });
+        physics_rollback.add(
             [this, saved = d_solver->d_last_nonlinear_result] { d_solver->d_last_nonlinear_result = saved; });
-        sas_rollback.add(
+        physics_rollback.add(
             [this, time = d_solver->d_time, step = d_solver->d_step_index,
                 statistics = d_solver->d_last_step_statistics]
             {
@@ -3081,7 +3111,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
     std::optional<typename material_feedback_model_type::StateSnapshot> nonlinear_feedback_snapshot;
     std::optional<typename reacting_gas_model_type::StateSnapshot> nonlinear_gas_snapshot;
     std::optional<typename scalar_void_fraction_model_type::StateSnapshot> nonlinear_void_snapshot;
-    if (nonlinear_flow && !active_sas)
+    if (nonlinear_flow && !transactional_physics)
     {
         nonlinear_material_snapshot.emplace(d_solver->stored_material_properties().snapshot());
         if (d_material_feedback_model)
@@ -3103,7 +3133,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
         {
             refresh_physical_models();
         }
-        initialize_free_surface_if_needed(true, d_solver->d_physical_model_enabled, active_sas);
+        initialize_free_surface_if_needed(true, d_solver->d_physical_model_enabled, transactional_physics);
         if (auto* turbulence = d_solver->find_turbulence_model())
         {
             turbulence->refresh_effective_properties(
@@ -3130,7 +3160,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
     }
     catch (...)
     {
-        if (nonlinear_flow && !flow_accepted && !active_sas)
+        if (nonlinear_flow && !flow_accepted && !transactional_physics)
         {
             d_solver->stored_material_properties().restore(*nonlinear_material_snapshot);
             if (nonlinear_feedback_snapshot)
@@ -3143,16 +3173,16 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
                 turbulence->refresh_effective_properties(
                     d_solver->stored_material_properties(), d_solver->d_model_options.reference_density);
         }
-        if (active_sas)
+        if (transactional_physics)
         {
-            sas_rollback.restore();
+            physics_rollback.restore();
             if (d_solver->uses_legacy_backend())
             {
                 d_solver->sync_primary_fields_to_legacy();
                 d_solver->sync_temperature_to_legacy();
             }
         }
-        if (!active_sas && (free_surface_active || (nonlinear_flow && flow_accepted)))
+        if (!transactional_physics && (free_surface_active || (nonlinear_flow && flow_accepted)))
         {
             d_free_surface_step_failed = true;
         }
@@ -3339,12 +3369,32 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::refresh_geom
 /** @brief Pass numeric carrier, storage, and source inputs to the temperature equation stage. */
 template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::advance_temperature_transport(scalar_type time_step)
 {
+    const field_type* power_release = d_boiling_source_model
+        ? &d_boiling_source_model->condensation_latent_heat_release() : nullptr;
+    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
+    {
+        if (!d_combined_heat_release)
+            d_combined_heat_release = std::make_unique<field_type>(d_solver->d_mesh, "combinedReactionHeat");
+        collective_detail::collective_local_validation(*d_solver->d_mesh, "Combined reaction thermal source", [&]
+        {
+            for (size_t c = 0; c < d_solver->d_mesh->num_owned_cells(); ++c)
+            {
+                const auto cell = static_cast<local_ordinal_type>(c);
+                const auto value = d_reacting_gas_model->thermal_source().value(cell) +
+                    (power_release ? power_release->value(cell) : scalar_type{});
+                if (!std::isfinite(value)) throw std::runtime_error("Nonfinite combined reaction heat source.");
+                d_combined_heat_release->set_owned_value(cell, value);
+            }
+        });
+        d_combined_heat_release->sync_ghosts();
+        power_release = d_combined_heat_release.get();
+    }
     const typename solver_type::TemperatureTransportInputs inputs{d_active_ale ? &*d_active_ale : nullptr,
         d_active_ale && d_liquid_mass_inventory ? &d_liquid_mass_inventory->cellMassInventory() : nullptr,
         d_active_ale ? d_ale_old_heat_capacity.get() : nullptr, d_active_ale ? d_ale_temperature_density : nullptr,
         d_active_ale ? d_mesh_relative_face_flux.get() : nullptr,
         d_boiling_source_model ? &d_boiling_source_model->latent_heat_sink() : nullptr,
-        d_boiling_source_model ? &d_boiling_source_model->condensation_latent_heat_release() : nullptr};
+        power_release};
     d_solver->advance_temperature_transport(time_step, inputs);
 }
 

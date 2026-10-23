@@ -606,6 +606,7 @@ private:
     std::weak_ptr<const CouplingState> d_active_coupling_checkpoint;
     std::unique_ptr<prescribed_heat_source_type> d_prescribed_heat_source;
     std::unique_ptr<reacting_gas_model_type> d_reacting_gas_model;
+    std::unique_ptr<field_type> d_combined_heat_release; ///< Reusable derived source workspace, never a ledger.
     std::unique_ptr<boiling_source_model_type> d_boiling_source_model;
     std::unique_ptr<scalar_void_fraction_model_type> d_scalar_void_fraction_model;
     bool d_scalar_void_fraction_explicitly_configured = false;

@@ -574,6 +574,10 @@ template<class Scalar> struct LiquidMassInventoryDiagnostics
     Scalar total_mass = {};                    ///< [kg]
     Scalar cumulative_evaporated_mass = {};    ///< [kg]
     Scalar cumulative_condensed_mass = {};     ///< [kg]
+    Scalar cumulative_species_mass_change = {}; ///< Signed chemical/external liquid mass [kg].
+    Scalar cumulative_species_outflow = {}; ///< Liquid-carried species boundary withdrawal [kg].
+    Scalar species_step_mass_change = {}; ///< Current signed source/phase-transfer budget [kg].
+    Scalar species_step_outflow = {}; ///< Current physical liquid-species outflow [kg].
     Scalar dryout_mass_deficit = {};           ///< [kg]
     Scalar mass_weighted_specific_volume = {}; ///< [m^3/kg]
     Scalar liquid_volume = {};                 ///< [m^3]
@@ -618,6 +622,8 @@ public:
         size_t d_phase_change_generation = 0;
         size_t d_cellwise_trial_nonce = 0;
         bool d_initialized = false;
+        bool d_species_bound = false;
+        detail::CompensatedSum<long double> d_species_change_sum, d_species_outflow_sum;
     };
 
     /** Opaque, single-generation phase-change transaction prepared collectively. */
@@ -648,6 +654,9 @@ public:
         std::optional<LinearSolveStatistics> d_transport_statistics;
         std::uint64_t d_geometry_epoch = 0;
         std::optional<FVM::ALEControlVolumeState> d_ale;
+        bool d_from_species = false;
+        std::vector<scalar_type> d_species_density;
+        detail::CompensatedSum<long double> d_species_change_sum, d_species_outflow_sum;
     };
 
     LiquidMassInventory(SP<const mesh_type> mesh, LiquidMassInventoryOptions options = {})
@@ -673,6 +682,16 @@ public:
             return pure_liquid_density(cell);
         });
     }
+
+    /** Bind cellwise reporting to authoritative species mass and EOS density.
+     * This path performs no independent mass transport. Every subsequent preview
+     * must supply the already transported species field and physical source/outflow budgets.
+     */
+    void initializeFromSpecies(const field_type& liquid_mass_density, const field_type& pure_liquid_density);
+    [[nodiscard]] PhaseChangePreview previewSpeciesMass(const field_type& liquid_mass_density,
+        const field_type& pure_liquid_density, scalar_type global_mass_change,
+        scalar_type global_boundary_outflow = {}, const FVM::ALEControlVolumeState* ale = nullptr);
+    [[nodiscard]] bool speciesBound() const noexcept { return d_species_bound; }
 
     /** Refresh pure density and the mass-weighted liquid material volume. */
     template<class DensityEvaluator> void updatePureLiquidDensity(DensityEvaluator&& pure_liquid_density)
@@ -835,6 +854,13 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL
     void updateVolumeFromStoredDensity();
 
+    SIMPLEFLUID_SOLVERS_LOCAL
+    [[nodiscard]] static scalar_type speciesMassClosureTolerance(scalar_type scale)
+    {
+        return std::max(scalar_type{4096} * std::numeric_limits<scalar_type>::epsilon(), scalar_type{1e-10}) * scale +
+            scalar_type{64} * std::numeric_limits<scalar_type>::denorm_min();
+    }
+
     [[nodiscard]] static scalar_type massClosureTolerance(scalar_type scale)
     {
         // This is a physical acceptance gate, not a linear-solver convergence
@@ -886,6 +912,8 @@ private:
     size_t d_phase_change_generation = 0;
     size_t d_cellwise_trial_nonce = 0;
     bool d_initialized = false;
+    bool d_species_bound = false;
+    detail::CompensatedSum<long double> d_species_change_sum, d_species_outflow_sum;
 };
 extern template class LiquidMassInventory<DefaultTpetraTypes, Mesh<DefaultTpetraTypes>>;
 extern template class LiquidMassInventory<DefaultTpetraTypes, MeshHandle<DefaultTpetraTypes>>;

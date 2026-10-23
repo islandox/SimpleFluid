@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "equations/CollectiveValidation.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
 
 #include <iomanip>
@@ -12,6 +13,215 @@
 namespace SimpleFluid
 {
 
+template<TpetraTypePack Pack, class MeshType>
+void LiquidMassInventory<Pack, MeshType>::initializeFromSpecies(
+    const field_type& mass_density, const field_type& pure_density)
+{
+    const auto comm = d_mesh->owned_cell_map()->getComm();
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(d_initialized), "Liquid follower initialization state");
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_options.mode), "Liquid follower mode");
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(d_options.depletion_policy), "Liquid follower depletion policy");
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_options.initial_liquid_mass.has_value()),
+        "Liquid follower configured initial mass selection");
+    collective_detail::collective_local_validation(*d_mesh, "Liquid species follower initialization",
+        [&]
+        {
+            if (d_initialized || d_options.mode != LiquidVolumeMode::CellMassInventory ||
+                d_options.depletion_policy != FreeSurfaceRangePolicy::Error)
+                throw std::logic_error(
+                    "Species liquid mass binds only an uninitialized cellMassInventory/error reporter.");
+            if (&mass_density.mesh() != d_mesh.get() || &pure_density.mesh() != d_mesh.get() ||
+                (d_options.initial_liquid_mass &&
+                    (!std::isfinite(*d_options.initial_liquid_mass) || *d_options.initial_liquid_mass < scalar_type{})))
+                throw std::invalid_argument(
+                    "Species liquid mass initialization has foreign fields or invalid configured mass.");
+        });
+    if (d_options.initial_liquid_mass)
+        requireReplicated(*d_options.initial_liquid_mass, "configured initial mass");
+    const auto count = d_mesh->num_owned_cells();
+    std::vector<scalar_type> masses(count), densities(count), fractions(count);
+    std::array<detail::CompensatedSum<long double>, 2> accumulated;
+    collective_detail::collective_local_validation(*d_mesh, "Liquid species initial physical fields",
+        [&]
+        {
+            for (std::size_t owned = 0; owned < count; ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto volume = d_mesh->cell_volume(cell);
+                masses[owned] = mass_density.value(cell);
+                densities[owned] = pure_density.value(cell);
+                if (!std::isfinite(volume) || volume <= 0.0 || !std::isfinite(masses[owned]) || masses[owned] < 0.0 ||
+                    !std::isfinite(densities[owned]) || densities[owned] < 0.0 ||
+                    (masses[owned] > 0.0 && densities[owned] <= 0.0))
+                    throw std::invalid_argument(
+                        "Occupied species liquid needs positive EOS density; empty liquid may have zero density.");
+                accumulated[0] += static_cast<long double>(masses[owned]) * volume;
+                if (masses[owned] > 0.0)
+                    accumulated[1] += static_cast<long double>(masses[owned]) / densities[owned] * volume;
+            }
+            for (const auto& sum : accumulated)
+            {
+                const auto value = static_cast<scalar_type>(sum.value());
+                if (!std::isfinite(value) || (sum.value() != 0.0L && value == 0.0))
+                    throw std::invalid_argument("Species liquid initial mass/volume cannot be represented.");
+            }
+        });
+    const std::array<scalar_type, 2> local{
+        static_cast<scalar_type>(accumulated[0].value()), static_cast<scalar_type>(accumulated[1].value())};
+    std::array<scalar_type, 2> global{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local.data(), global.data());
+    if (!std::isfinite(global[0]) || !std::isfinite(global[1]))
+        throw std::invalid_argument("Species liquid initial global mass/volume overflow.");
+    if (d_options.initial_liquid_mass &&
+        std::abs(*d_options.initial_liquid_mass - global[0]) >
+            speciesMassClosureTolerance(std::max(std::abs(*d_options.initial_liquid_mass), global[0])))
+        throw std::invalid_argument(
+            "Configured initial liquid mass disagrees with authoritative chemical species mass.");
+    const auto generation =
+        invalidatedCounter(d_phase_change_generation, d_phase_change_generation, "phase-change generation");
+    const auto nonce = invalidatedCounter(d_cellwise_trial_nonce, d_cellwise_trial_nonce, "cellwise trial nonce");
+    for (std::size_t owned = 0; owned < count; ++owned)
+    {
+        const auto cell = static_cast<local_ordinal_type>(owned);
+        d_cell_mass_inventory.set_owned_value(cell, masses[owned]);
+        d_trial_cell_mass_inventory.set_owned_value(cell, masses[owned]);
+        d_pure_liquid_density.set_owned_value(cell, densities[owned]);
+        fractions[owned] = global[0] > 0.0 ? masses[owned] * d_mesh->cell_volume(cell) / global[0] : 0.0;
+    }
+    d_cell_mass_inventory.sync_ghosts();
+    d_trial_cell_mass_inventory.sync_ghosts();
+    d_pure_liquid_density.sync_ghosts();
+    d_reference_mass_fraction = std::move(fractions);
+    d_density_scratch = std::move(densities);
+    d_diagnostics = {};
+    d_diagnostics.initial_mass = d_diagnostics.total_mass = global[0];
+    d_diagnostics.liquid_volume = global[1];
+    d_diagnostics.mass_weighted_specific_volume = global[0] > 0.0 ? global[1] / global[0] : 0.0;
+    d_species_change_sum = {};
+    d_species_outflow_sum = {};
+    d_species_bound = true;
+    d_initialized = true;
+    d_phase_change_generation = generation;
+    d_cellwise_trial_nonce = nonce;
+    updateMassBalance();
+}
+
+template<TpetraTypePack Pack, class MeshType>
+auto LiquidMassInventory<Pack, MeshType>::previewSpeciesMass(const field_type& mass_density,
+    const field_type& pure_density, scalar_type global_mass_change, scalar_type global_boundary_outflow,
+    const FVM::ALEControlVolumeState* ale) -> PhaseChangePreview
+{
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(d_initialized), "Liquid follower initialized state");
+    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_species_bound), "Liquid follower ownership");
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(ale != nullptr), "Liquid follower ALE selection");
+    collective_detail::collective_local_validation(*d_mesh, "Liquid species follower inputs",
+        [&]
+        {
+            if (!d_initialized || !d_species_bound || d_options.mode != LiquidVolumeMode::CellMassInventory ||
+                d_options.depletion_policy != FreeSurfaceRangePolicy::Error)
+                throw std::logic_error(
+                    "Species mass preview requires an initialized species-bound cellwise/error reporter.");
+            if (&mass_density.mesh() != d_mesh.get() || &pure_density.mesh() != d_mesh.get() ||
+                !std::isfinite(global_mass_change) || !std::isfinite(global_boundary_outflow) ||
+                global_boundary_outflow < 0.0)
+                throw std::invalid_argument("Species liquid follower budgets/fields are invalid.");
+        });
+    requireReplicated(global_mass_change, "species mass change");
+    requireReplicated(global_boundary_outflow, "species physical outflow");
+    if (ale)
+        ale->validate(*d_mesh);
+    const auto count = d_mesh->num_owned_cells();
+    std::vector<scalar_type> masses(count), densities(count);
+    std::array<detail::CompensatedSum<long double>, 3> accumulated;
+    collective_detail::collective_local_validation(*d_mesh, "Liquid species follower physical fields",
+        [&]
+        {
+            for (std::size_t owned = 0; owned < count; ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                const auto newVolume = ale ? ale->new_cell_volumes()[owned] : d_mesh->cell_volume(cell);
+                const auto oldVolume = ale ? ale->old_cell_volumes()[owned] : newVolume;
+                const auto accepted = d_cell_mass_inventory.value(cell);
+                masses[owned] = mass_density.value(cell);
+                densities[owned] = pure_density.value(cell);
+                if (!std::isfinite(newVolume) || newVolume <= 0.0 || !std::isfinite(oldVolume) || oldVolume <= 0.0 ||
+                    !std::isfinite(accepted) || accepted < 0.0 || !std::isfinite(masses[owned]) ||
+                    masses[owned] < 0.0 || !std::isfinite(densities[owned]) || densities[owned] < 0.0 ||
+                    (masses[owned] > 0.0 && densities[owned] <= 0.0))
+                    throw std::invalid_argument(
+                        "Species liquid follower has invalid mass, EOS density or control volumes.");
+                accumulated[0] += static_cast<long double>(accepted) * oldVolume;
+                accumulated[1] += static_cast<long double>(masses[owned]) * newVolume;
+                if (masses[owned] > 0.0)
+                    accumulated[2] += static_cast<long double>(masses[owned]) / densities[owned] * newVolume;
+            }
+            for (const auto& sum : accumulated)
+            {
+                const auto value = static_cast<scalar_type>(sum.value());
+                if (!std::isfinite(value) || (sum.value() != 0.0L && value == 0.0))
+                    throw std::invalid_argument("Species follower mass/volume cannot be represented.");
+            }
+        });
+    const std::array<scalar_type, 3> local{static_cast<scalar_type>(accumulated[0].value()),
+        static_cast<scalar_type>(accumulated[1].value()), static_cast<scalar_type>(accumulated[2].value())};
+    std::array<scalar_type, 3> global{};
+    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 3, local.data(), global.data());
+    for (const auto value : global)
+        if (!std::isfinite(value) || value < 0.0)
+            throw std::invalid_argument("Species follower global mass/volume is invalid.");
+    const auto oldScale = std::max(global[0], d_diagnostics.total_mass);
+    if (std::abs(global[0] - d_diagnostics.total_mass) > speciesMassClosureTolerance(oldScale))
+        throw std::logic_error("Accepted liquid species mass disagrees with its old-volume inventory; an ALE "
+                               "descriptor is required after volume motion.");
+    detail::CompensatedSum<long double> residual;
+    residual += global[0];
+    residual += global_mass_change;
+    residual += -global_boundary_outflow;
+    residual += -global[1];
+    const auto scale = std::max(global[0] + std::abs(global_mass_change) + global_boundary_outflow, global[1]);
+    if (!std::isfinite(scale) || std::abs(residual.value()) > speciesMassClosureTolerance(scale))
+        throw std::logic_error(
+            "Authoritative liquid species mass does not close its signed source and physical outflow budgets.");
+    auto diagnostics = d_diagnostics;
+    auto changes = d_species_change_sum, outflow = d_species_outflow_sum;
+    changes += global_mass_change;
+    outflow += global_boundary_outflow;
+    diagnostics.cumulative_species_mass_change = static_cast<scalar_type>(changes.value());
+    diagnostics.cumulative_species_outflow = static_cast<scalar_type>(outflow.value());
+    diagnostics.species_step_mass_change = global_mass_change;
+    diagnostics.species_step_outflow = global_boundary_outflow;
+    diagnostics.total_mass = global[1];
+    diagnostics.liquid_volume = global[2];
+    diagnostics.mass_weighted_specific_volume = global[1] > 0.0 ? global[2] / global[1] : 0.0;
+    diagnostics.step_mass_balance_residual = static_cast<scalar_type>(residual.value());
+    diagnostics.normalized_step_mass_balance_residual =
+        scale > 0.0 ? diagnostics.step_mass_balance_residual / scale : 0.0;
+    updateMassBalance(diagnostics);
+    const auto cumulativeScale = std::max({std::abs(diagnostics.initial_mass), std::abs(diagnostics.total_mass),
+        std::abs(diagnostics.cumulative_species_mass_change), diagnostics.cumulative_species_outflow,
+        diagnostics.cumulative_evaporated_mass, diagnostics.cumulative_condensed_mass});
+    if (!std::isfinite(diagnostics.mass_balance_residual) ||
+        std::abs(diagnostics.mass_balance_residual) > speciesMassClosureTolerance(cumulativeScale))
+        throw std::logic_error("Cumulative authoritative species liquid mass exceeds its actual-scale closure tolerance.");
+    const auto nonce = invalidatedCounter(d_cellwise_trial_nonce, d_cellwise_trial_nonce, "cellwise trial nonce");
+    d_cellwise_trial_nonce = nonce;
+    for (std::size_t owned = 0; owned < count; ++owned)
+        d_trial_cell_mass_inventory.set_owned_value(static_cast<local_ordinal_type>(owned), masses[owned]);
+    d_trial_cell_mass_inventory.sync_ghosts();
+    auto result = PhaseChangePreview(this, d_phase_change_generation, std::move(diagnostics), true, nonce);
+    result.d_geometry_epoch = mesh_geometry_epoch(*d_mesh);
+    if (ale)
+        result.d_ale = *ale;
+    result.d_from_species = true;
+    result.d_species_density = std::move(densities);
+    result.d_species_change_sum = changes;
+    result.d_species_outflow_sum = outflow;
+    return result;
+}
 template<TpetraTypePack Pack, class MeshType>
 auto LiquidMassInventory<Pack, MeshType>::previewPhaseChange(
     scalar_type evaporated_mass, scalar_type condensed_mass) const -> PhaseChangePreview
@@ -74,15 +284,15 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
 
     const int backend = static_cast<int>(linear_options.backend);
     const int preconditioner = static_cast<int>(linear_options.preconditioner);
-    const std::array<int, 13> local_control{static_cast<int>(d_options.mode),
+    const std::array<int, 14> local_control{static_cast<int>(d_options.mode),
         d_options.depletion_policy == FreeSurfaceRangePolicy::Error ? 1 : 0,
         evaporation_mass_rate != nullptr ? 1 : 0, condensation_mass_rate != nullptr ? 1 : 0,
         std::isfinite(time_step) && time_step > scalar_type{} ? 1 : 0,
         std::isfinite(linear_options.tolerance) && linear_options.tolerance > 0.0 ? 1 : 0,
         linear_options.max_iterations > 0 ? 1 : 0, linear_options.max_iterations, linear_options.verbosity, backend,
-        preconditioner, linear_options.reuse_preconditioner ? 1 : 0, ale != nullptr ? 1 : 0};
-    std::array<int, 13> minimum_control{};
-    std::array<int, 13> maximum_control{};
+        preconditioner, linear_options.reuse_preconditioner ? 1 : 0, ale != nullptr ? 1 : 0, d_species_bound ? 1 : 0};
+    std::array<int, 14> minimum_control{};
+    std::array<int, 14> maximum_control{};
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN, static_cast<int>(local_control.size()),
         local_control.data(), minimum_control.data());
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX, static_cast<int>(local_control.size()),
@@ -92,6 +302,9 @@ auto LiquidMassInventory<Pack, MeshType>::previewCellwiseAdvance(scalar_type tim
         throw std::invalid_argument("Cellwise liquid-mass mode, optional sources, timestep validity, and linear "
                                     "solver controls must match on every rank.");
     }
+    if (local_control[13] != 0)
+        throw std::logic_error(
+            "Species-bound liquid mass cannot run an independent mass transport; use previewSpeciesMass.");
     if (local_control[0] != static_cast<int>(LiquidVolumeMode::CellMassInventory))
     {
         throw std::logic_error("previewCellwiseAdvance requires cellMassInventory mode.");
@@ -416,6 +629,51 @@ auto LiquidMassInventory<Pack, MeshType>::refresh_cellwise_density_impl(const Ph
     if (global[0] || (global[1] && global[2]))
         throw std::logic_error("Cellwise density refresh requires unchanged geometry and a consistent ALE preview.");
     if (preview.d_ale) preview.d_ale->validate(*d_mesh);
+    if (preview.d_from_species)
+    {
+        std::vector<scalar_type> densities(d_mesh->num_owned_cells());
+        detail::CompensatedSum<long double> local_volume;
+        collective_detail::collective_local_validation(*d_mesh, "Species liquid trial EOS refresh",
+            [&]
+            {
+                for (std::size_t owned = 0; owned < densities.size(); ++owned)
+                {
+                    const auto cell = static_cast<local_ordinal_type>(owned);
+                    const auto mass = d_trial_cell_mass_inventory.value(cell);
+                    const auto volume =
+                        preview.d_ale ? preview.d_ale->new_cell_volumes()[owned] : d_mesh->cell_volume(cell);
+                    if (!std::isfinite(mass) || mass < 0.0 || !std::isfinite(volume) || volume <= 0.0)
+                        throw std::invalid_argument("Species liquid EOS refresh has invalid trial mass or volume.");
+                    if (mass == 0.0)
+                    {
+                        densities[owned] = 0.0;
+                        continue;
+                    }
+                    densities[owned] = density(cell);
+                    if (!std::isfinite(densities[owned]) || densities[owned] <= 0.0)
+                        throw std::invalid_argument(
+                            "Occupied liquid trial requires a finite positive supplied EOS density.");
+                    local_volume += static_cast<long double>(mass) / densities[owned] * volume;
+                }
+                const auto value = static_cast<scalar_type>(local_volume.value());
+                if (!std::isfinite(value) || (local_volume.value() != 0.0L && value == 0.0))
+                    throw std::invalid_argument("Refreshed species liquid volume cannot be represented.");
+            });
+        const auto volume = globalSum(static_cast<scalar_type>(local_volume.value()));
+        if (!std::isfinite(volume) || volume < 0.0)
+            throw std::invalid_argument("Refreshed global species liquid volume is invalid.");
+        const auto nonce = invalidatedCounter(d_cellwise_trial_nonce, d_cellwise_trial_nonce, "cellwise trial nonce");
+        auto result = preview;
+        result.d_trial_nonce = nonce;
+        result.d_species_density = std::move(densities);
+        result.d_transport_statistics.reset();
+        result.d_diagnostics.liquid_volume = volume;
+        result.d_diagnostics.mass_weighted_specific_volume =
+            result.d_diagnostics.total_mass > 0.0 ? volume / result.d_diagnostics.total_mass : 0.0;
+        updateMassBalance(result.d_diagnostics);
+        d_cellwise_trial_nonce = nonce;
+        return result;
+    }
     const auto nonce = invalidatedCounter(d_cellwise_trial_nonce, d_cellwise_trial_nonce, "cellwise trial nonce");
     d_cellwise_trial_nonce = nonce;
     update_pure_liquid_density_impl(density);
@@ -453,9 +711,13 @@ auto LiquidMassInventory<Pack, MeshType>::refresh_cellwise_density_impl(const Ph
 template<TpetraTypePack Pack, class MeshType>
 void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePreview& preview)
 {
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(preview.d_ale.has_value()), "Liquid inventory commit ALE selection");
     const auto cellwise_mode = d_options.mode == LiquidVolumeMode::CellMassInventory;
     const int local_invalid = preview.d_owner != this || preview.d_generation != d_phase_change_generation ||
-                                      preview.d_cellwise != cellwise_mode ||
+                                      preview.d_cellwise != cellwise_mode || preview.d_from_species != d_species_bound ||
+                (cellwise_mode && preview.d_geometry_epoch != mesh_geometry_epoch(*d_mesh)) ||
+                (preview.d_from_species && preview.d_species_density.size() != d_mesh->num_owned_cells()) ||
                                       (cellwise_mode && preview.d_trial_nonce != d_cellwise_trial_nonce)
                                   ? 1
                                   : 0;
@@ -466,6 +728,8 @@ void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePre
         throw std::logic_error(
             "LiquidMassInventory phase-change preview is stale, foreign, or inconsistent across ranks.");
     }
+    if (preview.d_ale)
+        preview.d_ale->validate(*d_mesh);
     const auto next_generation =
         invalidatedCounter(d_phase_change_generation, d_phase_change_generation, "phase-change generation");
     if (cellwise_mode)
@@ -473,6 +737,16 @@ void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePre
         d_cell_mass_inventory.owned_data().update(
             scalar_type{1}, d_trial_cell_mass_inventory.owned_data(), scalar_type{});
         d_cell_mass_inventory.sync_ghosts();
+    }
+    if (preview.d_from_species)
+    {
+        for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            d_pure_liquid_density.set_owned_value(
+                static_cast<local_ordinal_type>(owned), preview.d_species_density[owned]);
+        d_pure_liquid_density.sync_ghosts();
+        d_density_scratch = preview.d_species_density;
+        d_species_change_sum = preview.d_species_change_sum;
+        d_species_outflow_sum = preview.d_species_outflow_sum;
     }
     d_diagnostics = preview.d_diagnostics;
     if (!cellwise_mode)
@@ -485,10 +759,13 @@ void LiquidMassInventory<Pack, MeshType>::commitPhaseChange(const PhaseChangePre
 template<TpetraTypePack Pack, class MeshType>
 auto LiquidMassInventory<Pack, MeshType>::trialCellMassInventory(const PhaseChangePreview& preview) const -> const field_type&
 {
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(preview.d_ale.has_value()), "Liquid inventory trial ALE selection");
     const auto cellwise_mode = d_options.mode == LiquidVolumeMode::CellMassInventory;
     const int local_invalid = !d_initialized || preview.d_owner != this ||
                               preview.d_generation != d_phase_change_generation || !preview.d_cellwise ||
-                              !cellwise_mode || preview.d_trial_nonce != d_cellwise_trial_nonce;
+                              !cellwise_mode || preview.d_trial_nonce != d_cellwise_trial_nonce ||
+        preview.d_from_species != d_species_bound || preview.d_geometry_epoch != mesh_geometry_epoch(*d_mesh);
     int any_invalid = 0;
     Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
     if (any_invalid != 0)
@@ -496,6 +773,8 @@ auto LiquidMassInventory<Pack, MeshType>::trialCellMassInventory(const PhaseChan
         throw std::logic_error("LiquidMassInventory trial field preview is stale, foreign, non-cellwise, or "
                                "inconsistent across ranks.");
     }
+    if (preview.d_ale)
+        preview.d_ale->validate(*d_mesh);
     return d_trial_cell_mass_inventory;
 }
 
@@ -522,6 +801,9 @@ auto LiquidMassInventory<Pack, MeshType>::snapshot() const -> StateSnapshot
     result.d_phase_change_generation = d_phase_change_generation;
     result.d_cellwise_trial_nonce = d_cellwise_trial_nonce;
     result.d_initialized = d_initialized;
+    result.d_species_bound = d_species_bound;
+    result.d_species_change_sum = d_species_change_sum;
+    result.d_species_outflow_sum = d_species_outflow_sum;
     return result;
 }
 
@@ -560,6 +842,9 @@ void LiquidMassInventory<Pack, MeshType>::restore(const StateSnapshot& snapshot)
     d_phase_change_generation = next_phase_change_generation;
     d_cellwise_trial_nonce = next_cellwise_trial_nonce;
     d_initialized = snapshot.d_initialized;
+    d_species_bound = snapshot.d_species_bound;
+    d_species_change_sum = snapshot.d_species_change_sum;
+    d_species_outflow_sum = snapshot.d_species_outflow_sum;
     invalidateGeometry();
 }
 
@@ -578,7 +863,8 @@ void LiquidMassInventory<Pack, MeshType>::updateVolumeFromStoredDensity()
                 const auto mass_density = mass(owned, 0);
                 const auto density = pure_density(owned, 0);
                 const auto volume = static_cast<scalar_type>(d_mesh->cell_volume(cell));
-                local_liquid_volume += mass_density / density * volume;
+                if (mass_density > scalar_type{})
+                    local_liquid_volume += mass_density / density * volume;
             }
         }
         d_diagnostics.liquid_volume = globalSum(static_cast<scalar_type>(local_liquid_volume.value()));
@@ -603,10 +889,23 @@ void LiquidMassInventory<Pack, MeshType>::updateVolumeFromStoredDensity()
 template<TpetraTypePack Pack, class MeshType>
 void LiquidMassInventory<Pack, MeshType>::updateMassBalance(diagnostics_type& diagnostics)
 {
-    diagnostics.mass_balance_residual = diagnostics.initial_mass + diagnostics.cumulative_condensed_mass -
-                                        diagnostics.cumulative_evaporated_mass - diagnostics.total_mass;
+    const std::array values{diagnostics.initial_mass, diagnostics.total_mass, diagnostics.cumulative_condensed_mass,
+        diagnostics.cumulative_evaporated_mass, diagnostics.cumulative_species_mass_change,
+        diagnostics.cumulative_species_outflow};
+    for (const auto value : values)
+        if (!std::isfinite(value))
+            throw std::logic_error("Liquid inventory cumulative mass budget is nonfinite.");
+    detail::CompensatedSum<long double> balance;
+    balance += diagnostics.initial_mass;
+    balance += diagnostics.cumulative_condensed_mass;
+    balance += -diagnostics.cumulative_evaporated_mass;
+    balance += diagnostics.cumulative_species_mass_change;
+    balance += -diagnostics.cumulative_species_outflow;
+    balance += -diagnostics.total_mass;
+    diagnostics.mass_balance_residual = static_cast<scalar_type>(balance.value());
     const auto scale =
-        std::max(scalar_type{1}, std::abs(diagnostics.initial_mass) + diagnostics.cumulative_condensed_mass);
+        std::max(scalar_type{1}, std::abs(diagnostics.initial_mass) + diagnostics.cumulative_condensed_mass +
+            std::abs(diagnostics.cumulative_species_mass_change) + diagnostics.cumulative_species_outflow);
     diagnostics.normalized_mass_balance_residual = diagnostics.mass_balance_residual / scale;
     const auto tolerance = massClosureTolerance(scale);
     if (std::abs(diagnostics.mass_balance_residual) > tolerance)
@@ -618,6 +917,8 @@ void LiquidMassInventory<Pack, MeshType>::updateMassBalance(diagnostics_type& di
                 << " kg, initial mass=" << diagnostics.initial_mass
                 << " kg, condensed=" << diagnostics.cumulative_condensed_mass
                 << " kg, evaporated=" << diagnostics.cumulative_evaporated_mass
+                << " kg, signed species change=" << diagnostics.cumulative_species_mass_change
+                << " kg, physical species outflow=" << diagnostics.cumulative_species_outflow
                 << " kg, current mass=" << diagnostics.total_mass << " kg.";
         throw std::logic_error(message.str());
     }
@@ -768,6 +1069,10 @@ void LiquidMassInventory<Pack, MeshType>::initialize_impl(scalar_type initial_li
 template<TpetraTypePack Pack, class MeshType>
 void LiquidMassInventory<Pack, MeshType>::update_pure_liquid_density_impl(const std::function<scalar_type(local_ordinal_type)>& pure_liquid_density)
 {
+    collective_detail::require_uniform_value(
+        *d_mesh, static_cast<int>(d_species_bound), "Liquid species follower ownership");
+    if (d_species_bound)
+        throw std::logic_error("Species-bound liquid EOS density is committed only with its species preview.");
     requireInitialized();
     const auto count = d_mesh->num_owned_cells();
     if (d_density_scratch.size() != count)

@@ -12,12 +12,12 @@
 
 #include "SimpleFluidExport.hh"
 
+#include "FVM/TransportSystem.hh"
 #include "equations/BoussinesqModel.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/ReactingGasProperties.hh"
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"
-#include "FVM/TransportSystem.hh"
 #include "solvers/BelosLinearSolver.hh"
 
 #include <array>
@@ -30,6 +30,11 @@
 
 namespace SimpleFluid
 {
+namespace BubbleGasPhysics
+{
+struct PopulationNumberState;
+struct PopulationCondition;
+} // namespace BubbleGasPhysics
 template<TpetraTypePack Pack> class SIMPLEFLUID_SOLVERS_EXPORT MultiphysicsSolverCoupler;
 /** Local elapsed times; reduce across ranks when exporting diagnostics. */
 struct ReactingTransportWork
@@ -115,12 +120,51 @@ public:
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using statistics_type = ReactingGasStepStatistics<scalar_type>;
 
+    /** True when the authoritative inventories use the declared general species schema. */
+    bool species_enabled() const noexcept { return static_cast<bool>(d_options.reaction_mechanism); }
+    /** Collective atomic initialization, one extensive state and optional population-count vector per owned cell.
+     * Counts use options().population_ids order. All configured populations must be declared in each cell state.
+     * Zero-owner ranks supply empty spans and participate in the same validations/imports.
+     */
+    void initialize_species(std::span<const Reacting::CellSpeciesState> states,
+        std::span<const std::vector<double>> population_numbers = {});
+    const field_type& species_field(
+        Reacting::SpeciesId id, Reacting::SpeciesPhase phase, std::string_view population = {}) const;
+    /** Stored fields are mol/m3 current bulk volume; this conversion restores extensive mol/cell exactly once. */
+    Reacting::CellSpeciesState cell_species_state(local_ordinal_type cell, double bulk_volume) const;
+    Reacting::CellSpeciesState cell_species_state(local_ordinal_type cell) const;
+    const field_type& population_number_field(std::string_view population) const;
+    scalar_type global_species_moles(Reacting::SpeciesId species) const;
+    /** Nonadvancing EOS refresh: no source evaluation, number/species transport or ledger publication. */
+    void refresh_species_thermodynamics(scalar_type time, const field_type& temperature,
+        const field_type& gauge_pressure, const velocity_field_type& velocity, const material_type& material);
+    const std::vector<Reacting::SpeciesSourceLedger>& source_ledgers() const noexcept
+    {
+        return d_species_source_ledgers;
+    }
+    const std::vector<Reacting::SpeciesSourceLedger>& population_ledgers() const noexcept
+    {
+        return d_species_population_ledgers;
+    }
+    const std::vector<Reacting::SpeciesSourceLedger>& escape_ledgers() const noexcept
+    {
+        return d_species_escape_ledgers;
+    }
+    /** Accepted independent external/reaction/transfer thermal allocation in W/m3 bulk, consumed once by controller. */
+    const field_type& thermal_source() const noexcept { return d_species_thermal_source; }
+    const field_type& material_volume_source() const noexcept { return d_species_material_source; }
+    /** Derived from all Liquid+Dissolved components, never an independently advanced mass inventory. */
+    const field_type& liquid_mass_density() const noexcept { return d_species_liquid_mass; }
+    const field_type& pure_liquid_density() const noexcept { return d_species_liquid_density; }
+    scalar_type liquid_volume(local_ordinal_type cell) const { return d_alpha_l.value(cell) * d_mesh->cell_volume(cell); }
     /** Opaque complete model snapshot for an ALE outer-step transaction. */
     class StateSnapshot
     {
     private:
         friend class ReactingGasModel;
         const ReactingGasModel* d_owner = nullptr;
+        std::uint64_t d_species_generation = 0, d_species_fingerprint = 0, d_geometry_epoch = 0;
+        std::vector<Reacting::SpeciesSourceLedger> d_species_sources, d_species_populations, d_species_escapes;
         std::vector<std::vector<scalar_type>> d_fields;
         std::vector<local_ordinal_type> d_transport_slip_face_ids;
         std::vector<scalar_type> d_transport_slip_face_values;
@@ -533,6 +577,8 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     static SP<const mesh_type> require_mesh(SP<const mesh_type> mesh);
     SIMPLEFLUID_EQUATIONS_LOCAL
+    static ReactingGasOptions require_options(const SP<const mesh_type>& mesh, ReactingGasOptions options);
+    SIMPLEFLUID_EQUATIONS_LOCAL
     void initialize_fields();
     SIMPLEFLUID_EQUATIONS_LOCAL
     void register_output_fields();
@@ -589,7 +635,7 @@ private:
         size_t operator_slot = 0,
         bool reuse_population_operator = false,
         const field_type* diffusivity_temperature = nullptr,
-        const std::array<bool, 4>* pending_zero = nullptr);
+        const std::array<bool, 4>* pending_zero = nullptr, const field_type* species_diffusivity = nullptr);
     SIMPLEFLUID_EQUATIONS_LOCAL
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;
@@ -661,6 +707,38 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     std::vector<const field_type*> state_fields() const;
 
+    struct SpeciesFieldBundle
+    {
+        Reacting::SpeciesId id;
+        std::array<std::unique_ptr<field_type>, 4> phases;
+        std::vector<std::unique_ptr<field_type>> populations;
+        std::unique_ptr<field_type> escape;
+    };
+    SIMPLEFLUID_EQUATIONS_LOCAL void configure_species_fields();
+    SIMPLEFLUID_EQUATIONS_LOCAL scalar_type evaluate_species_bubble_volume(scalar_type candidate_absolute_pressure_offset) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL field_type& mutable_species_field(
+        Reacting::SpeciesId id, Reacting::SpeciesPhase phase, std::string_view population = {});
+    SIMPLEFLUID_EQUATIONS_LOCAL field_type& mutable_population_number(std::string_view population);
+    SIMPLEFLUID_EQUATIONS_LOCAL void publish_species_states(
+        std::span<const Reacting::CellSpeciesState> states, std::span<const double> volumes);
+    SIMPLEFLUID_EQUATIONS_LOCAL void reconstruct_species_derived(
+        const field_type& temperature, std::span<const real_t> volumes = {});
+    SIMPLEFLUID_EQUATIONS_LOCAL void advance_species_fields(scalar_type time, scalar_type time_step,
+        const field_type& temperature, const field_type& gauge_pressure, const velocity_field_type& velocity,
+        const face_flux_field_type& liquid_face_flux, const material_type& material,
+        const FVM::ALEControlVolumeState* ale, Dimension slip_axis);
+    SIMPLEFLUID_EQUATIONS_LOCAL std::vector<BubbleGasPhysics::PopulationNumberState> cell_population_numbers(
+        local_ordinal_type cell, double volume) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL Reacting::ReactionEnvironment species_environment(
+        local_ordinal_type cell, double time, double temperature, double bulk_volume) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL std::vector<BubbleGasPhysics::PopulationCondition> population_conditions(
+        const Reacting::CellSpeciesState& state, const std::vector<BubbleGasPhysics::PopulationNumberState>& numbers,
+        const Reacting::ReactionEnvironment& environment) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL BubbleGasPhysics::MultispeciesPopulationPacket population_packet(
+        const Reacting::ReactionContext& chemistry,
+        const std::vector<BubbleGasPhysics::PopulationCondition>& populations, double duration) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL void append_species_fields(std::vector<field_type*>& fields);
+    SIMPLEFLUID_EQUATIONS_LOCAL void append_species_fields(std::vector<const field_type*>& fields) const;
     // Scratch storage is not accepted physical state. Numeric operators are
     // rebuilt for each transport stage, including after a rejected ALE trial.
     struct TransportWorkspace
@@ -690,11 +768,20 @@ private:
         std::array<FVM::detail::StoredTransportSymbolicPlan<Pack>, 4> symbolic_plans;
     };
 
+    std::vector<SpeciesFieldBundle> d_species_fields;
+    std::vector<std::unique_ptr<field_type>> d_additional_population_numbers;
+    std::vector<std::unique_ptr<field_type>> d_population_volume_fractions, d_population_slip_fields;
+    std::vector<Reacting::SpeciesSourceLedger> d_species_source_ledgers, d_species_population_ledgers,
+        d_species_escape_ledgers;
+    std::uint64_t d_species_generation = 0;
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     ReactingGasOptions d_options;
     LinearSolverOptions d_transport_linear_options;
     bool d_skip_zero_auxiliary_transport = false;
+
+    field_type d_species_thermal_source, d_species_material_source, d_species_diffusivity;
+    field_type d_species_liquid_mass, d_species_liquid_density;
 
     field_type d_alpha_g;
     field_type d_alpha_l;

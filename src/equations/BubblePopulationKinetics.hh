@@ -209,4 +209,66 @@ struct BubblePopulationStepResult
     real_t duration, const BubblePopulationKernels& kernels = {}, const std::vector<BubblePopulationBirth>& births = {},
     BubblePopulationStepOptions options = {});
 
+/** A conservative transfer of one chemical species between exact physical compartments. */
+struct SpeciesPhaseTransfer
+{
+    Reacting::SpeciesId species = 0;
+    Reacting::SpeciesPhase donor = Reacting::SpeciesPhase::Dissolved;
+    Reacting::SpeciesPhase receiver = Reacting::SpeciesPhase::Dispersed;
+    std::string donorPopulation, receiverPopulation;
+    double moles = 0.0; ///< Nonnegative integrated mol per cell; reverse the endpoints for reverse transfer.
+};
+
+struct PopulationNumberState
+{
+    std::string population;
+    double number = 0.0; ///< Extensive count per cell, independent of species amounts.
+};
+
+struct PopulationNumberEvent
+{
+    std::string population;
+    double births = 0.0, deaths = 0.0; ///< Nonnegative integrated physical counts per cell.
+};
+
+struct PopulationCondition
+{
+    std::string id;
+    double number = 0.0, radius = 0.0;
+    Reacting::MixtureThermodynamicPoint properties; ///< Full mixture fugacities, never total pressure per species.
+};
+
+struct MultispeciesPopulationContext
+{
+    const Reacting::ReactionContext& chemistry;
+    std::vector<PopulationCondition> populations;
+};
+
+/** Supplied nucleation, transfer, conversion, coalescence or breakup event packet.
+ * Material enters only through paired same-species transfers; chemistry/external
+ * reservoirs are owned by ReactionSourceInput. Count births require paired gas.
+ */
+struct MultispeciesPopulationPacket
+{
+    std::vector<SpeciesPhaseTransfer> transfers;
+    std::vector<PopulationNumberEvent> numberEvents;
+};
+
+struct MultispeciesPopulationResult
+{
+    Reacting::CellSpeciesState state;
+    std::vector<PopulationNumberState> numbers;
+    Reacting::SpeciesSourceLedger ledger;
+    std::vector<double> numberChanges;
+};
+
+/** Atomic joint donor reservation, including competing populations and all gases.
+ * Exact complete dissolution removes its remaining count as a physical collapse
+ * event. A nonempty population must have positive count; empty populations have
+ * zero count. No mass is created and no number/species inventory is clipped.
+ */
+[[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT MultispeciesPopulationResult advance_multispecies_population_exchange(
+    const Reacting::SpeciesCatalog& catalog, const Reacting::CellSpeciesState& initial,
+    const std::vector<PopulationNumberState>& numbers, const Reacting::ReactionEnvironment& environment,
+    const MultispeciesPopulationPacket& packet);
 } // namespace SimpleFluid::BubbleGasPhysics

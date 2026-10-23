@@ -194,8 +194,8 @@ HydrogenDiffusivityMode parse_diffusivity(std::string value)
     value = normalized(std::move(value));
     if (value == "constant")
         return HydrogenDiffusivityMode::Constant;
-    throw std::invalid_argument(
-        "Unknown hydrogen_diffusivity_model; only constant is configured from a database. Set external callbacks in C++.");
+    throw std::invalid_argument("Unknown hydrogen_diffusivity_model; only constant is configured from a database. Set "
+                                "external callbacks in C++.");
 }
 
 /** @brief Parse the selected liquid-side bubble transfer law. */
@@ -327,8 +327,7 @@ ReactingGasOptions reacting_gas_options_from_database(
     options.mass_transfer_mode = parse_mass_transfer(reader.value_or<std::string>(
         "bubble_mass_transfer_model", "legacyHughmark"));
 
-#define SIMPLEFLUID_REACTING_REAL(member, key) \
-    options.member = reader.value_or<real_t>(key, options.member)
+#define SIMPLEFLUID_REACTING_REAL(member, key) options.member = reader.value_or<real_t>(key, options.member)
     SIMPLEFLUID_REACTING_REAL(
         hydrogen_yield_mol_per_j, "hydrogen_yield_mol_per_j");
     SIMPLEFLUID_REACTING_REAL(
@@ -443,11 +442,73 @@ void validate_reacting_gas_options(
             "Reacting alpha bounds require 0 <= alpha_min < "
             "alpha_max < 1.");
     }
-    if (options.mode == ReactingGasMode::Disabled)
+    if (options.mode == ReactingGasMode::Disabled && !options.reaction_mechanism)
         return;
 
     require_positive(options.transport_solver_tolerance, "reacting transport solver tolerance");
 
+    if (options.reaction_mechanism)
+    {
+        const auto& catalog = options.reaction_mechanism->catalog();
+        if (options.bulk_diffusion != ReactingBulkDiffusionMode::Disabled)
+            throw std::invalid_argument("Typed bulk species diffusion requires finite counterflux and canonical face enthalpy; this field backend currently rejects it.");
+        if ((options.pressure_mode != ReactingPressureMode::Constant &&
+                options.pressure_mode != ReactingPressureMode::PrescribedHistory &&
+                options.pressure_mode != ReactingPressureMode::Reconstructed) ||
+            (options.dissolved_transport != ReactingTransportMode::NoAdvection &&
+                options.dissolved_transport != ReactingTransportMode::Advective) ||
+            options.bubble_transport != BubbleTransportMode::General ||
+            (options.rise_velocity_mode != BubbleRiseVelocityMode::ZeroSlip &&
+                options.rise_velocity_mode != BubbleRiseVelocityMode::ConstantSlip &&
+                options.rise_velocity_mode != BubbleRiseVelocityMode::Celata2007) ||
+            (options.surface_tension_mode != SurfaceTensionMode::Constant &&
+                options.surface_tension_mode != SurfaceTensionMode::External) ||
+            (options.surface_tension_mode == SurfaceTensionMode::External && !options.surface_tension_correlation))
+            throw std::invalid_argument("General reacting transport/process selection is invalid or lacks its callback.");
+        (void)select_bubble_mass_transfer_evaluator(options.mass_transfer_mode);
+        if (options.mode != ReactingGasMode::TwoPopulation || !options.gas_thermodynamics ||
+            !options.liquid_thermodynamics || options.gas_thermodynamics->kind() != Reacting::EOSKind::Gas ||
+            options.liquid_thermodynamics->kind() != Reacting::EOSKind::Liquid ||
+            options.gas_thermodynamics->catalog().fingerprint() != catalog.fingerprint() ||
+            options.liquid_thermodynamics->catalog().fingerprint() != catalog.fingerprint() ||
+            options.gas_thermodynamics->energy_convention() != options.reaction_mechanism->energy_convention() ||
+            options.liquid_thermodynamics->energy_convention() != options.reaction_mechanism->energy_convention())
+            throw std::invalid_argument(
+                "General reacting fields require matching species/energy schemas and supplied liquid/gas EOS.");
+        if (options.pressure_mode == ReactingPressureMode::Inertial)
+            throw std::invalid_argument(
+                "General reacting fields use supplied mixture EOS pressure closure, not the scalar inertial law.");
+        if (options.pressure_mode == ReactingPressureMode::PrescribedHistory)
+            require_history(options);
+        require_positive(options.minimum_absolute_pressure, "minimum absolute pressure");
+        require_positive(options.min_radius, "minimum radius");
+        require_positive(options.max_radius, "maximum radius");
+        if (options.max_radius <= options.min_radius || options.max_subcycles <= 0)
+            throw std::invalid_argument("General population radius bounds/subcycle limit are invalid.");
+        require_non_negative(options.surface_tension, "surface tension");
+        require_non_negative(options.constant_slip_velocity, "slip velocity");
+        require_non_negative(options.micro_dissolution_frequency, "micro dissolution frequency");
+        require_non_negative(options.large_dissolution_frequency, "large dissolution frequency");
+        require_non_negative(options.micro_conversion_frequency, "micro conversion frequency");
+        std::vector<Reacting::SpeciesId> ids;
+        for (const auto& property : options.species_properties)
+        {
+            (void) catalog.index(property.species);
+            if (std::ranges::find(ids, property.species) != ids.end())
+                throw std::invalid_argument("Species properties must have unique stable species IDs.");
+            ids.push_back(property.species);
+            require_non_negative(property.diffusivity, "species diffusivity");
+            require_non_negative(property.henry_coefficient, "species Henry coefficient");
+        }
+        std::vector<std::string> populations;
+        for (const auto& id : options.population_ids)
+        {
+            if (id.empty() || std::ranges::find(populations, id) != populations.end())
+                throw std::invalid_argument("Population IDs must be nonempty and unique.");
+            populations.push_back(id);
+        }
+        return;
+    }
     require_positive(
         options.hydrogen_yield_mol_per_j,
         "hydrogen yield");

@@ -136,7 +136,7 @@ TEST(PrescribedHeatSourceTest, RejectsInvalidDatabaseOptions)
         "prescribed_heat_mode", std::string{"constant"});
     negative.set(
         "prescribed_heat_density", SimpleFluid::real_t{-1.0});
-    expect_invalid(negative);
+    EXPECT_DOUBLE_EQ(SimpleFluid::prescribed_heat_source_options_from_database(negative).power_density, -1.0);
 
     SimpleFluid::Database missing_gaussian;
     missing_gaussian.set(
@@ -337,9 +337,9 @@ TEST(PrescribedHeatSourceTest, CopiesAndNormalizesCallerOwnedFields)
     EXPECT_DOUBLE_EQ(source.integrated_power(), 0.0);
 
     shape.put_scalar(-1.0);
-    EXPECT_THROW(
-        source.initialize_from_power_density(shape),
-        std::invalid_argument);
+    EXPECT_NO_THROW(source.initialize_from_power_density(shape));
+    EXPECT_NEAR(source.integrated_power(), -1.0, 1e-12);
+    EXPECT_THROW(source.initialize_from_shape(shape, -2.0), std::invalid_argument);
 
     auto other_mesh = make_unit_box(2);
     FieldType other(other_mesh, 1.0, "other");
@@ -459,4 +459,27 @@ TEST(PrescribedHeatSourceTest, RejectsRetiredControlsBeforeDefaultingToDisabled)
         database.set("prescribed_heat_mode", std::string{"disabled"});
         EXPECT_THROW(SimpleFluid::prescribed_heat_source_options_from_database(database), std::invalid_argument);
     }
+}
+
+TEST(PrescribedHeatSourceTest, SignedCoolingProfilesAndIntervalEnergyRemainIndependent)
+{
+    auto mesh = make_unit_box(1);
+    SimpleFluid::TemperatureSourceRegistry<Pack> registry(mesh);
+    SourceType source(mesh, registry);
+    source.initialize_constant(-6.0);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), -6.0);
+    source.initialize_gaussian(-12.0, {0.5, 0.5, 0.5}, {0.2, 0.3, 0.4});
+    EXPECT_NEAR(source.integrated_power(), -12.0, 1e-12);
+    FieldType shape(mesh, 2.0, "shape");
+    source.initialize_from_shape(shape, -3.0);
+    EXPECT_NEAR(source.integrated_power(), -3.0, 1e-12);
+    const auto accepted = source.snapshot();
+    const std::vector<double> joules(mesh->num_owned_cells(), -2.0);
+    source.set_interval_energy(joules, 4.0, 0.5);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), -4.0);
+    source.refresh_interval_energy(4.25, 0.25);
+    EXPECT_DOUBLE_EQ(source.integrated_power(), -4.0);
+    source.restore(accepted);
+    EXPECT_NEAR(source.integrated_power(), -3.0, 1e-12);
+    EXPECT_FALSE(source.has_interval_energy());
 }

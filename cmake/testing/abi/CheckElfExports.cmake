@@ -217,6 +217,8 @@ string(REPLACE "\n" ";"
        simplefluid_demangled_symbols "${simplefluid_demangled_symbols}")
 
 set(simplefluid_forbidden_api_patterns
+    "SimpleFluid::PrescribedHeatSource<.*>[ ]*::require_finite[(]"
+    "SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesMassClosureTolerance[(]"
     "SimpleFluid::VoFSolver::Impl::"
     "SimpleFluid::AdaptiveVoFSolver::Impl::"
     "SimpleFluid::ReactingVoFCoupler::Impl::"
@@ -250,6 +252,12 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::TurbulenceWallTreatment<.*>[ ]*::(initialize|validate_velocity_cache)[(]"
     "SimpleFluid::AdaptiveSteadyStateController::adapted_time_step[(]"
     "SimpleFluid::SteadyStateFieldMonitor<.*>[ ]*::(require_mesh|require_field_mesh|capture_current_state)[(]")
+if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    list(APPEND simplefluid_forbidden_api_patterns
+        "^SimpleFluid::(VoFSolver|AdaptiveVoFSolver|GeneralVoFSolver|ReactingVoFCoupler)::"
+        "^SimpleFluid::VoF::")
+endif()
+
 set(simplefluid_forbidden_api_symbols)
 foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
     foreach(simplefluid_forbidden_api_pattern
@@ -264,37 +272,6 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
 endforeach()
 
 set(simplefluid_required_api_patterns
-    "^SimpleFluid::VoFSolver::VoFSolver[(]"
-    "^SimpleFluid::VoFSolver::initialize[(]"
-    "^SimpleFluid::VoFSolver::step[(]double[)]$"
-    "^SimpleFluid::VoFSolver::stable_timestep[(][)] const$"
-    "^SimpleFluid::VoFSolver::fraction_field[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::AdaptiveVoFSolver[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::step[(]double[)]$"
-    "^SimpleFluid::AdaptiveVoFSolver::regrid[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::checkpoint[(][)]$"
-    "^SimpleFluid::AdaptiveVoFSolver::fraction_field[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::initialize_low_mach[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::preview_low_mach_step[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::commit_low_mach_trial[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::state[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::preview_representation_change[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::state_revision[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::pending_representation_relaxation[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::representation_diagnostics[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::ReactingVoFCoupler[(]"
-    "^SimpleFluid::ReactingVoFCoupler::preview[(]"
-    "^SimpleFluid::ReactingVoFCoupler::commit[(]"
-    "^SimpleFluid::ReactingVoFCoupler::checkpoint[(][)]$"
-    "^SimpleFluid::ReactingVoFCoupler::Trial::state[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::request_births[(]"
-    "^SimpleFluid::ReactingVoFCoupler::birth_registry[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::conversion_history[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::inspect_representation[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::preview_representation[(][)]$"
-    "^SimpleFluid::ReactingVoFCoupler::Trial::representation[(][)] const$"
-    "^SimpleFluid::VoF::LiquidThermodynamics::evaluate[(]double, double[)] const$"
-    "^SimpleFluid::VoF::make_linear_compressible_liquid[(]"
     "^SimpleFluid::BubbleGasPhysics::advance_microbubble_substep[(]"
     "^SimpleFluid::BubbleGasPhysics::advance_upper_bubble_population[(]"
     "^SimpleFluid::BoilingSourceModel<.*>[ ]*::update[(]"
@@ -373,6 +350,45 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
+# VoF solvers remain an explicit experimental build selection. Disabled builds
+# must contain no solver/controller/caloric exports from that path; reusable FVM
+# geometry and transport kernels are audited separately in their owning library.
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    list(APPEND simplefluid_required_api_patterns
+    "^SimpleFluid::VoFSolver::VoFSolver[(]"
+    "^SimpleFluid::VoFSolver::initialize[(]"
+    "^SimpleFluid::VoFSolver::step[(]double[)]$"
+    "^SimpleFluid::VoFSolver::stable_timestep[(][)] const$"
+    "^SimpleFluid::VoFSolver::fraction_field[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::AdaptiveVoFSolver[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::step[(]double[)]$"
+    "^SimpleFluid::AdaptiveVoFSolver::regrid[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::checkpoint[(][)]$"
+    "^SimpleFluid::AdaptiveVoFSolver::fraction_field[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::initialize_low_mach[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::preview_low_mach_step[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::commit_low_mach_trial[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::state[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::preview_representation_change[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::state_revision[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::pending_representation_relaxation[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::representation_diagnostics[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::ReactingVoFCoupler[(]"
+    "^SimpleFluid::ReactingVoFCoupler::preview[(]"
+    "^SimpleFluid::ReactingVoFCoupler::commit[(]"
+    "^SimpleFluid::ReactingVoFCoupler::checkpoint[(][)]$"
+    "^SimpleFluid::ReactingVoFCoupler::Trial::state[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::request_births[(]"
+    "^SimpleFluid::ReactingVoFCoupler::birth_registry[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::conversion_history[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::inspect_representation[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::preview_representation[(][)]$"
+    "^SimpleFluid::ReactingVoFCoupler::Trial::representation[(][)] const$"
+    "^SimpleFluid::VoF::LiquidThermodynamics::evaluate[(]double, double[)] const$"
+    "^SimpleFluid::VoF::make_linear_compressible_liquid[(]"
+)
+endif()
+
 # The standalone reacting schema adds exactly 21 reviewed definitions across
 # 18 signatures: SpeciesCatalog (7), ReactionMechanism (6), CellSpeciesState
 # (6), SpeciesSourceLedger::thermal_energy (1), and advance_reactions (1).
@@ -380,7 +396,7 @@ endmacro()
 # Match their complete argument lists, including libc++ inline namespaces.
 set(simplefluid_reacting_schema_public_symbol_budget 21)
 set(simplefluid_reviewed_reacting_api_patterns)
-macro(simplefluid_require_reacting_schema_api simplefluid_pattern simplefluid_count)
+macro(simplefluid_require_reacting_api simplefluid_pattern simplefluid_count)
     list(APPEND simplefluid_reviewed_reacting_api_patterns "${simplefluid_pattern}")
     simplefluid_require_exact_api("${simplefluid_pattern}" "${simplefluid_count}")
 endmacro()
@@ -392,42 +408,105 @@ set(simplefluid_reacting_catalog_pointer_pattern
     "std::(__[0-9]+::)?shared_ptr<SimpleFluid::Reacting::SpeciesCatalog const>")
 set(simplefluid_reacting_string_view_pattern
     "std::(__[0-9]+::)?basic_string_view<char, std::(__[0-9]+::)?char_traits<char>[ ]*>")
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::SpeciesCatalog::SpeciesCatalog[(]${simplefluid_reacting_catalog_vector_pattern}, (unsigned long|unsigned long long)[)]$" 2)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::SpeciesCatalog::species[(][)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::SpeciesCatalog::index[(]unsigned int[)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::SpeciesCatalog::revision[(][)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::SpeciesCatalog::fingerprint[(][)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::SpeciesCatalog::allows[(]unsigned int, SimpleFluid::Reacting::SpeciesPhase[)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::ReactionMechanism::ReactionMechanism[(]${simplefluid_reacting_catalog_pointer_pattern}, ${simplefluid_reacting_reaction_vector_pattern}, SimpleFluid::Reacting::EnergyConvention[)]$" 2)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::ReactionMechanism::catalog[(][)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::ReactionMechanism::reactions[(][)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::ReactionMechanism::index[(]unsigned int[)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::ReactionMechanism::energy_convention[(][)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::CellSpeciesState::CellSpeciesState[(]SimpleFluid::Reacting::SpeciesCatalog const&[)]$" 2)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::CellSpeciesState::amount[(]SimpleFluid::Reacting::SpeciesCatalog const&, unsigned int, SimpleFluid::Reacting::SpeciesPhase, ${simplefluid_reacting_string_view_pattern}[)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::CellSpeciesState::phase_amount[(]SimpleFluid::Reacting::SpeciesCatalog const&, unsigned int, SimpleFluid::Reacting::SpeciesPhase[)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::CellSpeciesState::set_amount[(]SimpleFluid::Reacting::SpeciesCatalog const&, unsigned int, SimpleFluid::Reacting::SpeciesPhase, double, ${simplefluid_reacting_string_view_pattern}[)]$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::CellSpeciesState::validate[(]SimpleFluid::Reacting::SpeciesCatalog const&[)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::SpeciesSourceLedger::thermal_energy[(][)] const$" 1)
-simplefluid_require_reacting_schema_api(
+simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::advance_reactions[(]SimpleFluid::Reacting::ReactionMechanism const&, SimpleFluid::Reacting::CellSpeciesState const&, SimpleFluid::Reacting::ReactionEnvironment const&, double, SimpleFluid::Reacting::ReactionSourceInput const&, SimpleFluid::Reacting::ReactionAdvanceOptions const&[)]$" 1)
+
+# Composition-aware caloric providers replace the five scalar-liquid definitions.
+# Seven class definitions (including the two constructor entries) and six pure
+# factory/recovery/exchange functions are the entire new thermodynamic surface.
+set(simplefluid_reacting_thermodynamic_public_symbol_budget 13)
+set(simplefluid_reacting_const_double_span
+    "std::(__[0-9]+::)?span<double const, [0-9]+u?l*>")
+set(simplefluid_reacting_phase_span
+    "std::(__[0-9]+::)?span<SimpleFluid::Reacting::PhaseThermalState const, [0-9]+u?l*>")
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::MixtureThermodynamics::MixtureThermodynamics[(]${simplefluid_reacting_catalog_pointer_pattern}, SimpleFluid::Reacting::ThermodynamicBounds, SimpleFluid::Reacting::EOSKind, std::(__[0-9]+::)?function<SimpleFluid::Reacting::MixtureThermodynamicPoint [(]double, double, ${simplefluid_reacting_const_double_span}[)]>, SimpleFluid::Reacting::EnergyConvention, std::(__[0-9]+::)?function<.* [(]double, double, ${simplefluid_reacting_const_double_span}[)]>[)]$" 2)
+foreach(simplefluid_thermodynamic_query IN ITEMS bounds catalog kind energy_convention)
+    simplefluid_require_reacting_api(
+        "^SimpleFluid::Reacting::MixtureThermodynamics::${simplefluid_thermodynamic_query}[(][)] const$" 1)
+endforeach()
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::MixtureThermodynamics::evaluate[(]double, double, ${simplefluid_reacting_const_double_span}[)] const$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::make_ideal_gas_mixture[(]${simplefluid_reacting_catalog_pointer_pattern}, std::(__[0-9]+::)?vector<SimpleFluid::Reacting::IdealGasCaloricSpecies, .*>, SimpleFluid::Reacting::ThermodynamicBounds, SimpleFluid::Reacting::EnergyConvention, double, std::(__[0-9]+::)?function<.* [(]double, double, ${simplefluid_reacting_const_double_span}[)]>[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::make_linear_compressible_mixture_liquid[(]${simplefluid_reacting_catalog_pointer_pattern}, SimpleFluid::Reacting::ThermodynamicBounds, std::(__[0-9]+::)?function<SimpleFluid::Reacting::LinearCompressibleMixtureLiquid [(]${simplefluid_reacting_const_double_span}[)]>, SimpleFluid::Reacting::EnergyConvention[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::recover_phase_temperatures[(]${simplefluid_reacting_phase_span}, double, SimpleFluid::Reacting::PhaseThermalMode[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::solve_phase_pressure[(]${simplefluid_reacting_phase_span}, double, double, double, double, SimpleFluid::Reacting::PhaseThermalMode[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::solve_bubble_radius[(]SimpleFluid::Reacting::MixtureThermodynamics const&, ${simplefluid_reacting_const_double_span}, double, double, double, double, double, double[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::preview_interphase_exchange[(]${simplefluid_reacting_phase_span}, (unsigned long|unsigned long long), (unsigned long|unsigned long long), std::(__[0-9]+::)?function<SimpleFluid::Reacting::InterphaseExchange [(]SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&, SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&[)]> const&, SimpleFluid::Reacting::PhaseThermalMode[)]$" 1)
+
+# Sixteen public field-model operations for each of the two supported meshes,
+# three inventory-follower operations for each mesh and one pure multispecies
+# population kernel: exactly 39 additional definitions.
+set(simplefluid_species_adapters_public_symbol_budget 39)
+foreach(simplefluid_model_query IN ITEMS species_enabled source_ledgers population_ledgers escape_ledgers
+        thermal_source material_volume_source liquid_mass_density pure_liquid_density)
+    simplefluid_require_exact_api(
+        "^SimpleFluid::ReactingGasModel<.*>[ ]*::${simplefluid_model_query}[(][)] const$" 2)
+endforeach()
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::initialize_species[(]std::(__[0-9]+::)?span<SimpleFluid::Reacting::CellSpeciesState const, [0-9]+u?l*>, std::(__[0-9]+::)?span<std::(__[0-9]+::)?vector<double, .* const, [0-9]+u?l*>[)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::species_field[(]unsigned int, SimpleFluid::Reacting::SpeciesPhase, ${simplefluid_reacting_string_view_pattern}[)] const$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::cell_species_state[(]int[)] const$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::cell_species_state[(]int, double[)] const$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::population_number_field[(]${simplefluid_reacting_string_view_pattern}[)] const$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::global_species_moles[(]unsigned int[)] const$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::refresh_species_thermodynamics[(]double, .* const&, .* const&, .* const&, SimpleFluid::MaterialPropertyFields<.*>[ ]*const&[)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::liquid_volume[(]int[)] const$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesBound[(][)] const$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::LiquidMassInventory<.*>[ ]*::initializeFromSpecies[(].* const&, .* const&[)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::LiquidMassInventory<.*>[ ]*::previewSpeciesMass[(].* const&, .* const&, double, double, SimpleFluid::FVM::ALEControlVolumeState const[*][)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::BubbleGasPhysics::advance_multispecies_population_exchange[(]SimpleFluid::Reacting::SpeciesCatalog const&, SimpleFluid::Reacting::CellSpeciesState const&, std::(__[0-9]+::)?vector<SimpleFluid::BubbleGasPhysics::PopulationNumberState, .* const&, SimpleFluid::Reacting::ReactionEnvironment const&, SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket const&[)]$" 1)
 
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
 # two virtual hooks. Even private overrides must remain exported: downstream
@@ -819,7 +898,7 @@ if(simplefluid_forbidden_api_symbols)
         "SimpleFluid definitions:\n  "
         "${simplefluid_forbidden_api_symbol_sample}")
 endif()
-# Reject any extra reacting-schema definition, including implementation helpers;
+# Reject any extra reacting definition, including implementation helpers;
 # the namespace itself is not an export allowlist.
 foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
     if(simplefluid_demangled_symbol MATCHES "^SimpleFluid::Reacting::")
@@ -832,7 +911,7 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
         endforeach()
         if(NOT simplefluid_reviewed_reacting_api)
             message(FATAL_ERROR
-                "Unreviewed reacting-schema dynamic definition: ${simplefluid_demangled_symbol}")
+                "Unreviewed reacting dynamic definition: ${simplefluid_demangled_symbol}")
         endif()
     endif()
 endforeach()
@@ -872,9 +951,19 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # The remaining preexisting substrate has 1547 entries and fits its unchanged
 # 1550 ceiling. Add only the separately anchored schema budget, retaining three
 # substrate headroom entries; do not absorb unrelated exports or widen any map.
+# Multispecies fields add exactly 13 thermodynamic and 39 adapter definitions.
+# VoF's unqualified solvers are default-off: 25 uniform solver, 58 adaptive,
+# 25 general, 29 reacting controller, and five scalar caloric definitions are
+# absent in that configuration (142 total). The disabled-family guard above
+# independently enforces this boundary. Preserve the same three-entry substrate
+# headroom: expected GCC Debug 1478 disabled / 1620 experimental-enabled.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
+set(simplefluid_disabled_vof_symbol_count 0)
+if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    set(simplefluid_disabled_vof_symbol_count 142)
+endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

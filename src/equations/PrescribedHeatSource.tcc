@@ -26,7 +26,7 @@ void PrescribedHeatSource<Pack, MeshType>::set_interval_energy(
             throw std::invalid_argument("Prescribed heat interval duration is not resolved by the source clock.");
         for (size_t owned = 0; owned < owned_energy.size(); ++owned)
         {
-            require_non_negative(owned_energy[owned], "interval joules");
+            require_finite(owned_energy[owned], "interval joules");
             const auto volume = d_mesh->cell_volume(static_cast<local_ordinal_type>(owned));
             if (!std::isfinite(volume) || volume <= scalar_type{} ||
                 !std::isfinite(owned_energy[owned] / duration / volume))
@@ -159,7 +159,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_constant(scalar_type power
         "Prescribed heat constant-power initialization",
         [&]
         {
-            require_non_negative(
+            require_finite(
                 power_density, "power density");
         });
     require_uniform_value(power_density, "power density");
@@ -180,7 +180,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
         "Prescribed heat Gaussian configuration",
         [&]
         {
-            require_non_negative(total_power, "total power");
+            require_finite(total_power, "total power");
             for (size_t component = 0;
                  component < 3;
                  ++component)
@@ -241,12 +241,12 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
         "Prescribed heat Gaussian normalization",
         [&]
         {
-            if (total_power > scalar_type{}
+            if (total_power != scalar_type{}
                 && (!std::isfinite(profile_integral)
                     || profile_integral <= scalar_type{}))
             {
                 throw std::invalid_argument(
-                    "Positive prescribed_heat total power requires a positive "
+                    "Nonzero prescribed heat total power requires a positive "
                     "profile integral.");
             }
             scale = total_power == scalar_type{}
@@ -283,7 +283,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_gaussian(
                     scale
                   * std::exp(
                         -scalar_type{0.5} * exponent);
-                require_non_negative(
+                require_finite(
                     value, "Gaussian field value");
                 d_base_profile.set_owned_value(
                     cell_lid, value);
@@ -304,7 +304,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_shape(
         [&]
         {
             require_same_mesh(shape);
-            require_non_negative(total_power, "total power");
+            require_finite(total_power, "total power");
             validate_non_negative_field(shape);
         });
     require_uniform_value(total_power, "total power");
@@ -316,12 +316,12 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_shape(
         "Prescribed heat shape normalization",
         [&]
         {
-            if (total_power > scalar_type{}
+            if (total_power != scalar_type{}
                 && (!std::isfinite(profile_integral)
                     || profile_integral <= scalar_type{}))
             {
                 throw std::invalid_argument(
-                    "Positive prescribed_heat total power requires a positive "
+                    "Nonzero prescribed heat total power requires a positive "
                     "profile integral.");
             }
             scale = total_power == scalar_type{}
@@ -448,7 +448,7 @@ void PrescribedHeatSource<Pack, MeshType>::copy_scaled_field(
                     static_cast<local_ordinal_type>(owned);
                 const auto value =
                     field.value(cell_lid) * scale;
-                require_non_negative(
+                require_finite(
                     value, "normalized field value");
                 d_base_profile.set_owned_value(
                     cell_lid, value);
@@ -492,7 +492,7 @@ void PrescribedHeatSource<Pack, MeshType>::apply_base_profile(scalar_type multip
                     static_cast<local_ordinal_type>(owned);
                 const auto value =
                     d_base_profile.value(cell_lid) * multiplier;
-                require_non_negative(
+                require_finite(
                     value, "applied field value");
                 applied.set_owned_value(cell_lid, value);
             }
@@ -533,7 +533,7 @@ void PrescribedHeatSource<Pack, MeshType>::initialize_from_power_density(const f
         [&] { require_same_mesh(power_density); });
     d_interval_energy.clear();
     d_interval_duration = {};
-    copy_non_negative_field(power_density);
+    copy_finite_field(power_density);
     apply_base_profile(scalar_type{1});
 }
 
@@ -546,7 +546,7 @@ auto PrescribedHeatSource<Pack, MeshType>::integrated_power() const -> scalar_ty
 
 
 template<TpetraTypePack Pack, class MeshType>
-void PrescribedHeatSource<Pack, MeshType>::copy_non_negative_field(const field_type& field)
+void PrescribedHeatSource<Pack, MeshType>::copy_finite_field(const field_type& field)
 {
     copy_scaled_field(field, scalar_type{1});
 }

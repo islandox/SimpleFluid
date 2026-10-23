@@ -31,19 +31,17 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
 endforeach()
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+# Schema-indexed reacting fields and the liquid inventory follower.
+simplefluid_add_mpi_test(NAME ReactingSpeciesModel_2procs TARGET testReactingSpeciesModel PROCS 2
+    ARGS "--gtest_filter=-*LegacyMesh*"
+    LABELS "mpi;reacting_gas;species;conservation;transaction" TIMEOUT 180)
+simplefluid_add_mpi_test(NAME ReactingSpeciesModel_EmptyRank_4procs TARGET testReactingSpeciesModel PROCS 4
+    ARGS "--gtest_filter=*CollectiveInitialization*:*RankAsymmetric*"
+    LABELS "mpi;reacting_gas;species;collective;empty_rank" TIMEOUT 120)
+simplefluid_add_mpi_test(NAME ReactingBoussinesqCoupling_2procs TARGET testReactingBoussinesqCoupling PROCS 2
+    LABELS "mpi;reacting_gas;boussinesq;conservation;transaction" TIMEOUT 180)
+simplefluid_add_mpi_test(NAME SpeciesLiquidMassInventory_2procs TARGET testSpeciesLiquidMassInventory PROCS 2
+    LABELS "mpi;reacting_gas;free_surface;ale;conservation;transaction" TIMEOUT 180)
 
 simplefluid_add_mpi_test(
     NAME CoupledPreconditionerValidation_2procs

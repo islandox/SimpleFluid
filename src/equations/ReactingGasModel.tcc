@@ -11,8 +11,8 @@
 
 #pragma once
 
-#include "equations/ReactingGasModel.hh"
 #include "equations/BubblePopulationKinetics.hh"
+#include "equations/ReactingGasModel.hh"
 
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
@@ -68,7 +68,12 @@ ReactingGasModel<Pack, MeshType>::ReactingGasModel(
     ReactingGasOptions options)
     : d_mesh(require_mesh(std::move(mesh))),
       d_transport_geometry_cache(*d_mesh),
-      d_options(std::move(options)),
+      d_options(require_options(d_mesh, std::move(options))),
+      d_species_thermal_source(d_mesh, "species_thermal_source"),
+      d_species_material_source(d_mesh, "species_material_volume_source"),
+      d_species_diffusivity(d_mesh, "species_diffusivity_scratch"),
+      d_species_liquid_mass(d_mesh, "species_liquid_mass_density"),
+      d_species_liquid_density(d_mesh, "species_pure_liquid_density"),
       d_alpha_g(d_mesh, "alpha_g"),
       d_alpha_l(d_mesh, "alpha_l"),
       d_source_alpha_reaction(d_mesh, "S_alpha_reaction"),
@@ -114,9 +119,8 @@ ReactingGasModel<Pack, MeshType>::ReactingGasModel(
       d_transport_bubble_carrier_volume_flux(
           d_mesh, "bubble_transport_carrier_volume_flux")
 {
-    validate_reacting_gas_options(d_options);
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
-    if (d_options.mode
+    if (!species_enabled() && d_options.mode
             == ReactingGasMode::TwoPopulation
         && d_options.micro_to_large_conversion_coefficient == 1.0e-4
         && d_mesh->owned_cell_map()->getComm()->getRank() == 0)
@@ -127,6 +131,7 @@ ReactingGasModel<Pack, MeshType>::ReactingGasModel(
     }
     register_output_fields();
     initialize_fields();
+    configure_species_fields();
 }
 
 /**
@@ -139,8 +144,7 @@ template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::configure(
     const ReactingGasOptions& options)
 {
-    validate_reacting_gas_options(options);
-    d_options = options;
+    d_options = require_options(d_mesh, options);
     d_donor_tracking_enabled = false;
     d_output_fields.erase("donorH2Deficit");
     d_transport_workspace.reset();
@@ -148,7 +152,7 @@ void ReactingGasModel<Pack, MeshType>::configure(
     d_transport_linear_options = {};
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
     d_transport_solver.reset();
-    if (d_options.mode
+    if (!species_enabled() && d_options.mode
             == ReactingGasMode::TwoPopulation
         && d_options.micro_to_large_conversion_coefficient == 1.0e-4
         && d_mesh->owned_cell_map()->getComm()->getRank() == 0)
@@ -165,6 +169,7 @@ void ReactingGasModel<Pack, MeshType>::configure(
     d_cumulative_escaped_bubble_count = 0.0;
     d_last_statistics = {};
     initialize_fields();
+    configure_species_fields();
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -351,7 +356,36 @@ void ReactingGasModel<Pack, MeshType>::initialize_state(
     const material_type& material,
     bool force)
 {
-    if (mode() != ReactingGasMode::TwoPopulation)
+    if (species_enabled())
+    {
+        reconstruct_absolute_pressure(time, gauge_pressure);
+        if (!d_initial_state_initialized || (force && d_options.initial_species_state))
+        {
+            std::vector<Reacting::CellSpeciesState> states;
+            std::vector<std::vector<double>> numbers;
+            collective_detail::collective_local_validation(*d_mesh, "Reacting typed initialization callback", [&]
+            {
+                if (!d_options.initial_species_state)
+                    throw std::logic_error("Supply initial_species_state or initialize_species before deriving typed fields.");
+                const auto& catalog = d_options.reaction_mechanism->catalog();
+                for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                {
+                    const auto cell = static_cast<local_ordinal_type>(owned);
+                    const Reacting::ReactionEnvironment environment{time, temperature.value(cell),
+                        d_absolute_pressure.value(cell), 0.0, d_mesh->cell_volume(cell)};
+                    states.push_back(d_options.initial_species_state(environment,
+                        static_cast<std::int64_t>(d_mesh->cell_global_id(cell))));
+                    const Reacting::ReactionContext context{catalog, states.back(), environment};
+                    numbers.push_back(d_options.initial_population_numbers ? d_options.initial_population_numbers(context)
+                        : std::vector<double>(d_options.population_ids.size(), 0.0));
+                }
+            });
+            initialize_species(states, numbers);
+        }
+        reconstruct_species_derived(temperature);
+        sync_all_fields();
+        return;
+    }    if (mode() != ReactingGasMode::TwoPopulation)
     {
         throw std::logic_error(
             "Only Sheng two-population reacting_gas has a derived initial state.");
@@ -376,6 +410,7 @@ void ReactingGasModel<Pack, MeshType>::initialize_state(
     if (force)
     {
         initialize_fields();
+        configure_species_fields();
     }
 
     reconstruct_absolute_pressure(time, gauge_pressure);
@@ -782,6 +817,7 @@ auto ReactingGasModel<Pack, MeshType>::
 evaluate_submerged_bubble_volume(
     scalar_type candidate_absolute_pressure_offset) const -> scalar_type
 {
+    if (species_enabled()) return evaluate_species_bubble_volume(candidate_absolute_pressure_offset);
     if (mode() != ReactingGasMode::TwoPopulation)
     {
         throw std::logic_error(
@@ -1425,7 +1461,7 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(
     size_t operator_slot,
     bool reuse_population_operator,
     const field_type* diffusivity_temperature,
-    const std::array<bool, 4>* pending_zero)
+    const std::array<bool, 4>* pending_zero, const field_type* species_diffusivity)
 {
     const auto started = std::chrono::steady_clock::now();
     const auto elapsed = [](auto begin)
@@ -1568,20 +1604,31 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(
             const auto temperature_values = diffusivity_temperature ? diffusivity_temperature->owned_read_view()
                 : decltype(field.owned_read_view()){};
             const auto liquid_values = d_alpha_l.owned_read_view();
+            const auto explicit_diffusivity =
+                species_diffusivity ? species_diffusivity->owned_read_view() : decltype(field.owned_read_view()){};
             const auto field_values = field.owned_read_view();
             const auto old = old_values.owned_write_view();
             const auto storage = storage_weight.owned_write_view();
             const auto diffusion = diffusion_weight.owned_write_view();
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
-                const auto liquid_fraction = std::max(liquid_values(owned, 0), 1.0e-15);
+                const auto raw_liquid_fraction = liquid_values(owned, 0);
+                if (species_enabled() &&
+                    (!std::isfinite(raw_liquid_fraction) || raw_liquid_fraction < 0.0 ||
+                        (raw_liquid_fraction == 0.0 && liquid_weighted && field_values(owned, 0) != 0.0)))
+                    throw std::invalid_argument("Species transport needs a finite physical liquid carrier.");
+                const auto liquid_fraction = species_enabled()
+                                                 ? (raw_liquid_fraction == 0.0 ? scalar_type{1} : raw_liquid_fraction)
+                                                 : std::max(raw_liquid_fraction, 1.0e-15);
                 old(owned, 0) = liquid_weighted ? field_values(owned, 0) / liquid_fraction
                                               : field_values(owned, 0);
                 if (liquid_weighted)
                     storage(owned, 0) = liquid_fraction;
-                const auto cell_diffusivity = diffuse && diffusivity_temperature
+                const auto cell_diffusivity =
+                    species_diffusivity ? explicit_diffusivity(owned, 0)
+                    : diffuse && diffusivity_temperature
                     ? BubbleGasPhysics::hydrogen_diffusivity(d_options, temperature_values(owned, 0)) : diffusivity;
-                diffusion(owned, 0) = diffuse ? liquid_fraction * cell_diffusivity : 0.0;
+                diffusion(owned, 0) = diffuse ? (species_enabled() ? raw_liquid_fraction : liquid_fraction) * cell_diffusivity : 0.0;
             }
             if (pending_zero != nullptr && diffuse &&
                 d_options.diffusivity_mode == HydrogenDiffusivityMode::External)
@@ -1692,12 +1739,12 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(
                 auto value = candidate(owned, 0);
                 if (liquid_weighted)
                     value *= storage(owned, 0);
-                if (!std::isfinite(value))
+                if (!std::isfinite(value) || (species_enabled() && value < scalar_type{}))
                 {
                     invalid_candidate = 1;
                     return scalar_type{};
                 }
-                return std::max(value, scalar_type{});
+                return species_enabled() ? value : std::max(value, scalar_type{});
             };
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
@@ -2578,6 +2625,7 @@ template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_type& temperature,
     const field_type& density, const field_type& dynamic_viscosity, bool record_event_statistics)
 {
+    if (species_enabled()) { reconstruct_species_derived(temperature); return; }
     collective_detail::collective_local_validation(*d_mesh, "Reacting derived-state reconstruction",
         [&]
         {
@@ -3069,6 +3117,13 @@ void ReactingGasModel<Pack, MeshType>::advance(
     const FVM::ALEControlVolumeState* ale,
     Dimension slip_axis)
 {
+    if (species_enabled())
+    {
+        if (!enabled()) { d_source_alpha_reaction.put_scalar(0.0); d_species_thermal_source.put_scalar(0.0); return; }
+        advance_species_fields(
+            time, time_step, temperature, gauge_pressure, velocity, liquid_face_flux, material, ale, slip_axis);
+        return;
+    }
     d_last_statistics = {};
     const auto update_started = std::chrono::steady_clock::now();
     if (!enabled())
@@ -3205,7 +3260,7 @@ template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::sync_all_fields()
 {
     const auto fields = mutable_state_fields();
-    if (d_state_sync_owned.is_null())
+    if (d_state_sync_owned.is_null() || d_state_sync_owned->getNumVectors() != fields.size())
     {
         d_state_sync_owned = Teuchos::rcp(new typename Pack::multi_vector_type(
             fields.front()->owned_data().getMap(), fields.size(), false));
@@ -3239,7 +3294,7 @@ template<TpetraTypePack Pack, class MeshType>
 std::vector<typename ReactingGasModel<Pack, MeshType>::field_type*>
 ReactingGasModel<Pack, MeshType>::mutable_state_fields()
 {
-    return {
+    std::vector<field_type*> result{
         &d_alpha_g,
         &d_alpha_l,
         &d_source_alpha_reaction,
@@ -3277,13 +3332,15 @@ ReactingGasModel<Pack, MeshType>::mutable_state_fields()
         &d_escape_molar_rate,
         &d_escape_number_rate,
         &d_inventory_error};
+    append_species_fields(result);
+    return result;
 }
 
 template<TpetraTypePack Pack, class MeshType>
 std::vector<const typename ReactingGasModel<Pack, MeshType>::field_type*>
 ReactingGasModel<Pack, MeshType>::state_fields() const
 {
-    return {
+    std::vector<const field_type*> result{
         &d_alpha_g,
         &d_alpha_l,
         &d_source_alpha_reaction,
@@ -3321,6 +3378,8 @@ ReactingGasModel<Pack, MeshType>::state_fields() const
         &d_escape_molar_rate,
         &d_escape_number_rate,
         &d_inventory_error};
+    append_species_fields(result);
+    return result;
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -3328,6 +3387,13 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
 {
     StateSnapshot result;
     result.d_owner = this;
+    result.d_species_generation = d_species_generation;
+    result.d_species_fingerprint = species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0;
+    if constexpr (requires { d_mesh->geometry_epoch(); })
+        result.d_geometry_epoch = d_mesh->geometry_epoch();
+    result.d_species_sources = d_species_source_ledgers;
+    result.d_species_populations = d_species_population_ledgers;
+    result.d_species_escapes = d_species_escape_ledgers;
     for (const auto* field : state_fields())
     {
         auto& values = result.d_fields.emplace_back();
@@ -3380,7 +3446,12 @@ template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapshot, bool refresh_metrics)
 {
     const auto fields = mutable_state_fields();
-    int local_invalid = snapshot.d_owner != this || snapshot.d_fields.size() != fields.size() ||
+    // Typed snapshots bind the initialized schema generation. Legacy snapshots retain
+    // the same-owner/same-storage restore contract across cache-clearing configure().
+    int local_invalid = snapshot.d_owner != this ||
+                        (species_enabled() && snapshot.d_species_generation != d_species_generation) ||
+                        snapshot.d_species_fingerprint !=
+                            (species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0) || snapshot.d_fields.size() != fields.size() ||
                         snapshot.d_transport_slip_face_ids !=
                             d_transport_bubble_slip_volume_flux.owned_face_ids() ||
                         snapshot.d_transport_slip_face_values.size() !=
@@ -3435,6 +3506,9 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
         }
     }
     d_last_statistics = snapshot.d_statistics;
+    d_species_source_ledgers = snapshot.d_species_sources;
+    d_species_population_ledgers = snapshot.d_species_populations;
+    d_species_escape_ledgers = snapshot.d_species_escapes;
     d_donor_tracking_enabled = snapshot.d_donor_tracking_enabled;
     if (d_donor_tracking_enabled)
         d_output_fields.emplace("donorH2Deficit", &d_donor_hydrogen_deficit);
@@ -3488,3 +3562,5 @@ void ReactingGasModel<Pack, MeshType>::invalidate_transport_operator()
 }
 
 } // namespace SimpleFluid
+
+#include "equations/ReactingGasSpecies.ipp"
