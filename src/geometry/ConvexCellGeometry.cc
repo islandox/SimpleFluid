@@ -5,6 +5,8 @@
 #include "geometry/ExactPlanarFace.hh"
 #include "geometry/ExactPolyhedralComplex.hh"
 #include "geometry/ExactSweptGeometry.hh"
+#include "geometry/details/CertifiedSupportFilter.hh"
+#include "geometry/details/ExactSupportSign.hh"
 #include "geometry/mesh/ExactExtrudedConstruction.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <algorithm>
@@ -352,40 +354,93 @@ struct ClipCacheLease
 };
 struct UncachedPlaneDistances
 {
+    struct Sample
+    {
+        Q value;
+        int sign() const { return value < 0 ? -1 : value > 0 ? 1 : 0; }
+        const Q& exact() const { return value; }
+    };
     const Poly& poly;
     const Plane& plane;
     Q input(std::size_t i) const { return distance(plane, poly.vertices[i]); }
-    void append(const Q&) {}
+    Sample sample(std::size_t i) const { return {input(i)}; }
+    int sign(std::size_t i) const
+    {
+        const Q value = input(i);
+        return value < 0 ? -1 : value > 0 ? 1 : 0;
+    }
+    void append(int) {}
     bool output_zero(const Poly& output, std::size_t i) const { return distance(plane, output.vertices[i]) == 0; }
 };
 struct CachedPlaneDistances
 {
+    struct Sample
+    {
+        CachedPlaneDistances& distances;
+        std::size_t index;
+        int sign() const { return distances.sign(index); }
+        const Q& exact() const { return distances.input(index); }
+    };
+    struct Entry
+    {
+        Q value;
+        // Two means not yet classified. A filter never supplies exact zero.
+        int sign = 2;
+        bool exact = false;
+    };
     // Declared first, destroyed last: release the admitted capacity only after
     // both cache vectors have died, including constructor exception unwinding.
     ClipCacheLease lease;
     ClipScratch& scratch;
-    std::vector<Q> input_values, output_values;
-    CachedPlaneDistances(const Poly& poly, const Plane& plane, ClipScratch& budget) : lease(budget), scratch(budget)
+    const Poly& poly;
+    const Plane& plane;
+    detail::CertifiedFilterPlane filter;
+    std::vector<Entry> input_values;
+    std::vector<int> output_signs;
+    CachedPlaneDistances(const Poly& input, const Plane& halfspace, ClipScratch& budget)
+        : lease(budget), scratch(budget), poly(input), plane(halfspace)
     {
-        if (poly.vertices.size() > scratch.limit / sizeof(Q))
+        scratch.add(sizeof(filter));
+        if (poly.vertices.size() > (scratch.limit - scratch.used) / sizeof(Entry))
             throw ClipCacheExhausted("Optional clipping distance cache exceeds its live count lease.");
-        scratch.add(poly.vertices.size() * sizeof(Q));
-        input_values.reserve(poly.vertices.size());
-        for (const auto& p : poly.vertices)
-        {
-            auto value = distance(plane, p);
-            scratch.scalar(value);
-            input_values.push_back(std::move(value));
-        }
+        scratch.add(poly.vertices.size() * sizeof(Entry));
+        input_values.resize(poly.vertices.size());
+        if (input_values.capacity() > poly.vertices.size())
+            scratch.add((input_values.capacity() - poly.vertices.size()) * sizeof(Entry));
+        filter = detail::certified_filter_plane(plane.normal, plane.anchor, plane.offset);
     }
-    const Q& input(std::size_t i) const { return input_values[i]; }
-    void append(const Q& value)
+    const Q& input(std::size_t i)
     {
-        scratch.add(4 * sizeof(Q)); // old/new geometric growth capacities
-        scratch.scalar(value);
-        output_values.push_back(value);
+        auto& entry = input_values[i];
+        if (!entry.exact)
+        {
+            auto value = distance(plane, poly.vertices[i]);
+            scratch.scalar(value);
+            entry.value = std::move(value);
+            entry.exact = true;
+            entry.sign = entry.value < 0 ? -1 : entry.value > 0 ? 1 : 0;
+        }
+        return entry.value;
     }
-    bool output_zero(const Poly&, std::size_t i) const { return output_values[i] == 0; }
+    int sign(std::size_t i)
+    {
+        auto& entry = input_values[i];
+        if (entry.sign == 2)
+        {
+            if (const auto certified = detail::try_certified_support_sign(filter, poly.vertices[i]))
+                entry.sign = *certified;
+            else
+                (void) input(i);
+        }
+        return entry.sign;
+    }
+    Sample sample(std::size_t i) { return {*this, i}; }
+    void append(int sign)
+    {
+        scratch.add(4 * sizeof(int)); // old/new geometric growth capacities
+        output_signs.push_back(sign);
+    }
+    bool output_zero(const Poly&, std::size_t i) const { return output_signs[i] == 0; }
 };
 class CertifiedPoly;
 class CertifiedPolyRef
@@ -436,7 +491,7 @@ Cut clipped_impl(const Poly& input, const Plane&, bool measure_outputs, Distance
     bool negative = false, positive = false;
     for (std::size_t i = 0; i < input.vertices.size(); ++i)
     {
-        const auto& d = distances.input(i);
+        const auto d = distances.sign(i);
         negative = negative || d < 0;
         positive = positive || d > 0;
     }
@@ -445,7 +500,7 @@ Cut clipped_impl(const Poly& input, const Plane&, bool measure_outputs, Distance
         // Zero 3D measure does not erase a represented face contact.
         for (std::size_t f = 0; measure_outputs && f < input.faces.size(); ++f)
             if (std::all_of(
-                    input.faces[f].begin(), input.faces[f].end(), [&](auto i) { return distances.input(i) == 0; }))
+                    input.faces[f].begin(), input.faces[f].end(), [&](auto i) { return distances.sign(i) == 0; }))
             {
                 const auto area = area_vector(input, input.faces[f]);
                 if (measure_outputs)
@@ -467,12 +522,12 @@ Cut clipped_impl(const Poly& input, const Plane&, bool measure_outputs, Distance
     }
     Poly output;
     std::map<P, std::size_t> indices;
-    auto index = [&](const P& p, const Q& d)
+    auto index = [&](const P& p, int sign)
     {
         const auto [it, inserted] = indices.emplace(p, output.vertices.size());
         if (inserted)
         {
-            distances.append(d);
+            distances.append(sign);
             output.vertices.push_back(p);
         }
         return it->second;
@@ -481,9 +536,9 @@ Cut clipped_impl(const Poly& input, const Plane&, bool measure_outputs, Distance
     for (std::size_t f = 0; f < input.faces.size(); ++f)
     {
         Face face;
-        auto append = [&](const P& p, const Q& d)
+        auto append = [&](const P& p, int sign)
         {
-            const auto n = index(p, d);
+            const auto n = index(p, sign);
             if (face.empty() || face.back() != n)
                 face.push_back(n);
         };
@@ -492,12 +547,23 @@ Cut clipped_impl(const Poly& input, const Plane&, bool measure_outputs, Distance
         {
             const auto& a = input.vertices[original[i]];
             const auto& b = input.vertices[original[(i + 1) % original.size()]];
-            const auto& da = distances.input(original[i]);
-            const auto& db = distances.input(original[(i + 1) % original.size()]);
-            if (da <= 0)
-                append(a, da);
-            if ((da < 0 && db > 0) || (da > 0 && db < 0))
-                append(add(a, mul(sub(b, a), Q(da / (da - db)))), Q(0));
+            // The uncached samples own one exact distance per endpoint, as in
+            // the original edge loop. Cached samples only reference entries
+            // and preserve lazy construction until a crossing needs the value.
+            const auto da = distances.sample(original[i]);
+            const auto db = distances.sample(original[(i + 1) % original.size()]);
+            const auto sa = da.sign();
+            const auto sb = db.sign();
+            if (sa <= 0)
+                append(a, sa);
+            if ((sa < 0 && sb > 0) || (sa > 0 && sb < 0))
+            {
+                // Certified signs decide topology only. Intersections always
+                // use the original, unscaled exact rational distances.
+                const auto& va = da.exact();
+                const auto& vb = db.exact();
+                append(add(a, mul(sub(b, a), Q(va / (va - vb)))), 0);
+            }
         }
         if (face.size() > 1 && face.front() == face.back())
             face.pop_back();
@@ -4292,7 +4358,7 @@ bool axis_separates(CertifiedPolyRef first, CertifiedPolyRef second)
 // therefore supplies the same outward supporting halfspace as its full area
 // vector, without summing all polygon cross products. No derived/raw Poly can
 // enter this certificate without the existing private admission bridge.
-bool support_plane_separates(const P& normal, const P& anchor, const Poly& other)
+bool support_plane_separates(const P& normal, const P& anchor, const Poly& other, ClipScratch* scratch = nullptr)
 {
     // a lies on the nonpositive side. Convexity makes every point of b a
     // convex combination of its vertices. If all are nonnegative, the
@@ -4304,6 +4370,21 @@ bool support_plane_separates(const P& normal, const P& anchor, const Poly& other
     for (unsigned axis = 0; axis < 3; ++axis)
         if (normal[axis] != 0)
             active[active_count++] = axis;
+    // This geometry-only summary belongs to this immutable plane query. When
+    // caller scratch is present, lease its fixed storage alongside the live
+    // support-plane cache. An unavailable summary simply retains the existing
+    // integer/Q evaluation; no acceptance condition depends on this cache.
+    std::optional<ClipCacheLease> filter_lease;
+    std::optional<detail::CertifiedFilterPlane> filter;
+    if (active_count > 1 && (!scratch || sizeof(detail::CertifiedFilterPlane) <= scratch->limit - scratch->used))
+    {
+        if (scratch)
+        {
+            filter_lease.emplace(*scratch);
+            scratch->add(sizeof(detail::CertifiedFilterPlane));
+        }
+        filter.emplace(detail::certified_filter_plane(normal, anchor, Q(0)));
+    }
     bool separated = true;
     for (const auto& vertex : other.vertices)
     {
@@ -4318,16 +4399,44 @@ bool support_plane_separates(const P& normal, const P& anchor, const Poly& other
         }
         else
         {
-            // Zero normal components contribute exactly zero. Avoid the
-            // unrelated coordinate subtractions performed by distance().
-            const auto first = active[0];
-            Q value = normal[first] * (vertex[first] - anchor[first]);
-            for (unsigned term = 1; term < active_count; ++term)
+            if (filter)
+                if (const auto sign = detail::try_certified_support_sign(*filter, vertex))
+                {
+                    if (*sign < 0)
+                        return false;
+                    continue;
+                }
+            std::optional<int> integer_sign;
+            if (scratch)
             {
-                const auto axis = active[term];
-                value += normal[axis] * (vertex[axis] - anchor[axis]);
+                // Account optional integer work together with the live plane
+                // cache. All integer storage dies before this lease releases,
+                // and the original rational fallback runs after that release.
+                ClipCacheLease lease(*scratch);
+                integer_sign = detail::try_integer_support_sign(normal, anchor, vertex,
+                    [&](std::size_t bytes)
+                    {
+                        if (bytes > scratch->limit - scratch->used)
+                            return false;
+                        scratch->add(bytes);
+                        return true;
+                    });
             }
-            negative = value < 0;
+            if (integer_sign)
+                negative = *integer_sign < 0;
+            else
+            {
+                // Original exact predicate, including all inconclusive integer
+                // attempts. Zero normal components contribute exactly zero.
+                const auto first = active[0];
+                Q value = normal[first] * (vertex[first] - anchor[first]);
+                for (unsigned term = 1; term < active_count; ++term)
+                {
+                    const auto axis = active[term];
+                    value += normal[axis] * (vertex[axis] - anchor[axis]);
+                }
+                negative = value < 0;
+            }
         }
         if (negative)
         {
@@ -4346,7 +4455,8 @@ bool support_separates(CertifiedPolyRef boundary, CertifiedPolyRef other)
             return true;
     return false;
 }
-bool support_separates(CertifiedPolyRef boundary, CertifiedPolyRef other, std::span<const Plane> support_planes)
+bool support_separates(
+    CertifiedPolyRef boundary, CertifiedPolyRef other, std::span<const Plane> support_planes, ClipScratch& scratch)
 {
     const auto& a = boundary.get();
     const auto& b = other.get();
@@ -4356,7 +4466,7 @@ bool support_separates(CertifiedPolyRef boundary, CertifiedPolyRef other, std::s
     {
         if (zero(plane.normal))
             throw std::logic_error("Certified convex face lost its supporting plane.");
-        if (support_plane_separates(plane.normal, plane.anchor, b))
+        if (support_plane_separates(plane.normal, plane.anchor, b, &scratch))
             return true;
     }
     return false;
@@ -4365,8 +4475,8 @@ bool cached_pair_intersects(CertifiedPolyRef first, std::size_t first_index, Cer
     std::size_t second_index, const SupportPlaneCache& cache, ClipScratch& scratch)
 {
     if (axis_separates(first, second) ||
-        support_separates(first, second, cache.for_piece(first_index)) ||
-        support_separates(second, first, cache.for_piece(second_index)))
+        support_separates(first, second, cache.for_piece(first_index), scratch) ||
+        support_separates(second, first, cache.for_piece(second_index), scratch))
         return false;
     return certified_intersection(first, cache.for_piece(second_index), scratch).has_value();
 }
