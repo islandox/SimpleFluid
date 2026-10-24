@@ -1,6 +1,8 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "utils/BoundedInterval.hh"
+#include "utils/OrdinaryScalar.hh"
+#include <type_traits>
 /** @file BoundedConvexGeometryInternal.hh
  * @brief Bounded wider-FP construction and structural convex partitions.
  */
@@ -81,10 +83,12 @@ void operation();
 using ::SimpleFluid::detail::directed_fp::infinity;
 // Persisted intervals carry coordinates only. Arithmetic must first bind a
 // fixed policy; deleted hooks turn accidental storage arithmetic into an error.
-struct StoragePolicy
+template<ArithmeticMode Mode> struct StoragePolicy
 {
-    static bool ordinary() = delete;
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    static constexpr bool ordinary() { return Mode == ArithmeticMode::Ordinary; }
     static void interval_operation() = delete;
+    static void scalar_operation() = delete;
     static void operation() = delete;
     static void finite(long double value)
     {
@@ -94,9 +98,12 @@ struct StoragePolicy
     [[noreturn]] static void reject(const char* reason) { bounded_geometry_detail::reject(reason); }
 };
 
-using Interval = ::SimpleFluid::detail::directed_fp::Interval<StoragePolicy>;
+template<ArithmeticMode Mode>
+using StoredValue = std::conditional_t<Mode == ArithmeticMode::Ordinary,
+    ::SimpleFluid::detail::ordinary_fp::Scalar<StoragePolicy<Mode>>,
+    ::SimpleFluid::detail::directed_fp::Interval<StoragePolicy<Mode>>>;
 
-using Point = std::array<Interval, 3>;
+template<ArithmeticMode Mode> using StoredPoint = std::array<StoredValue<Mode>, 3>;
 
 struct Frame
 {
@@ -113,22 +120,22 @@ struct CoordinateRange
 
 using CoordinateBox = std::array<CoordinateRange, 3>;
 
-struct Plane
+template<ArithmeticMode Mode> struct StoredPlane
 {
     Frame frame;
-    Point normal, anchor;
-    Interval offset;
+    StoredPoint<Mode> normal, anchor;
+    StoredValue<Mode> offset;
     std::optional<GeometryHalfspace> input;
     std::vector<BoundedPlaneAuthority> authorities;
     std::vector<std::weak_ptr<const BoundedPointProvenance>> source_vertices;
 };
 
-using PlanePtr = std::shared_ptr<const Plane>;
+template<ArithmeticMode Mode> using StoredPlanePtr = std::shared_ptr<const StoredPlane<Mode>>;
 
-struct Vertex
+template<ArithmeticMode Mode> struct StoredVertex
 {
-    Point coordinates;
-    std::vector<PlanePtr> incident;
+    StoredPoint<Mode> coordinates;
+    std::vector<StoredPlanePtr<Mode>> incident;
     std::vector<BoundedPlaneAuthority> authorities;
     std::shared_ptr<const BoundedPointProvenance> source_identity;
 };
@@ -156,22 +163,22 @@ struct PartitionCertificate
     std::vector<std::weak_ptr<const Ancestry>> members;
 };
 
-struct Surface
+template<ArithmeticMode Mode> struct StoredSurface
 {
-    PlanePtr plane;
+    StoredPlanePtr<Mode> plane;
     int orientation = 1;
 };
 
-struct Integrals
+template<ArithmeticMode Mode> struct StoredIntegrals
 {
-    Interval volume;
-    Point first;
+    StoredValue<Mode> volume;
+    StoredPoint<Mode> first;
 };
 
-struct MomentCache
+template<ArithmeticMode Mode> struct StoredMomentCache
 {
     std::once_flag prepared;
-    std::optional<Integrals> integrals;
+    std::optional<StoredIntegrals<Mode>> integrals;
 };
 } // namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes
@@ -182,18 +189,35 @@ struct SIMPLEFLUID_LOCAL BoundedConvexGeometry::Impl
 {
     Frame frame;
     GeometryPoint reference_origin{};
-    std::vector<Vertex> vertices;
     std::vector<Face> faces;
-    std::vector<Surface> surfaces;
     std::vector<BoundedPoint> displayed;
     BoundedGeometryLimits limits;
     CoordinateBox bounds;
-    Interval volume;
     bool partition_proof_only = false;
     std::shared_ptr<const Ancestry> ancestry = std::make_shared<Ancestry>();
     std::shared_ptr<const PartitionCertificate> partition_certificate;
-    std::shared_ptr<MomentCache> moment_cache = std::make_shared<MomentCache>();
 };
+
+namespace bounded_geometry_detail
+{
+template<ArithmeticMode Mode> struct GeometryStorage : BoundedConvexGeometry::Impl
+{
+    GeometryStorage() { limits.arithmetic_mode = Mode; }
+    std::vector<StoredVertex<Mode>> vertices;
+    std::vector<StoredSurface<Mode>> surfaces;
+    StoredValue<Mode> volume;
+    std::shared_ptr<StoredMomentCache<Mode>> moment_cache = std::make_shared<StoredMomentCache<Mode>>();
+};
+
+template<ArithmeticMode Mode>
+std::shared_ptr<const GeometryStorage<Mode>> checked_geometry_storage(
+    const std::shared_ptr<const BoundedConvexGeometry::Impl>& source)
+{
+    require_mode(source->limits.arithmetic_mode, Mode);
+    return std::static_pointer_cast<const GeometryStorage<Mode>>(source);
+}
+} // namespace bounded_geometry_detail
+
 } // namespace SimpleFluid::Meshes
 namespace SimpleFluid::Meshes
 {
@@ -230,19 +254,19 @@ namespace SimpleFluid::Meshes
 
 namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
 {
-struct PlanarVertex
+template<ArithmeticMode Mode> struct StoredPlanarVertex
 {
-    std::array<Interval, 2> coordinates;
-    Point physical;
+    std::array<StoredValue<Mode>, 2> coordinates;
+    StoredPoint<Mode> physical;
     std::vector<BoundedPlaneAuthority> supports;
     std::size_t token = 0;
 };
 
-using PlanarPolygon = std::vector<PlanarVertex>;
+template<ArithmeticMode Mode> using StoredPlanarPolygon = std::vector<StoredPlanarVertex<Mode>>;
 
-struct PlanarLine
+template<ArithmeticMode Mode> struct StoredPlanarLine
 {
-    PlanarVertex first, second;
+    StoredPlanarVertex<Mode> first, second;
     std::vector<BoundedPlaneAuthority> supports;
 };
 } // namespace bounded_geometry_detail SIMPLEFLUID_LOCAL

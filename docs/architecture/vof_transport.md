@@ -51,11 +51,21 @@ on empty owners. No mode silently falls back to another arithmetic policy.
 
 The private `Arithmetic<Mode>` and `SumFor<Mode>` helpers are implementation
 interfaces, not template parameters on the public VoF API. Inferred external
-values retain their checked runtime adapters. Persistent geometry storage is
-shared by the two finite specializations; mode-specific kernel views do not
-replace retained geometry objects or change their storage accounting. Heavy
-template definitions remain in compiled `.tcc` providers with explicit
-instantiations for the supported modes.
+values retain their checked runtime adapters. Ordinary geometry has dedicated
+scalar numerical providers and retains one `long double` per coordinate, without
+interval endpoint accessors. Separate certified providers retain two endpoints
+and a nominal estimate and own interval propagation and certification retries.
+Vertices, planes, integral caches and planar geometry use the selected scalar
+storage behind the same public geometry facade. Mode checks precede typed access,
+and allocation accounting uses the actual retained types. Spatial bounding boxes
+still retain both coordinate extrema. Heavy template definitions remain in
+compiled `.tcc` providers with explicit instantiations for the supported modes.
+
+Public value/error views and source-provenance snapshots retain their existing
+interfaces. Version 3 numerical packets retain their two-endpoint encoding for
+compatibility: Ordinary writes its scalar twice, verifies equal endpoints when
+decoding, and stores one scalar in memory. Packet encoding does not introduce
+interval arithmetic or certified bounds into Ordinary execution.
 
 Physical interface resolution is a separate admission decision. The mandatory
 arbitrary subcell-phase fitting case has been withdrawn. The general

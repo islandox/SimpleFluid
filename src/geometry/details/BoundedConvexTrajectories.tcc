@@ -1,16 +1,17 @@
-/** Compiled finite geometry kernels. Included only by the owning implementation unit.
- * Namespace operators bind shared storage to the fixed arithmetic policy; Mode
- * templates retain the compiled implementation boundary across geometry units.
+/** Compiled certification geometry kernels. Included only by the owning implementation unit.
+ * Directed interval arithmetic and retained certificates remain confined to this
+ * provider; Mode templates retain the compiled implementation boundary.
  */
 namespace SimpleFluid::Meshes::bounded_geometry_detail
 {
-namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+namespace certification_kernel SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode>
 BoundedPoint source_point_fan(
     std::span<const ConvexCellGeometry* const> sources, std::span<const char> identity, ArithmeticMode mode)
 {
     static_assert(Mode == kernel_mode);
+    require_mode(mode, Mode);
     Operation scope(mode_limits(mode));
     ++statistics.source_imports;
     if (sources.empty() || identity.size() > active_work->limits.byte_budget)
@@ -29,7 +30,7 @@ BoundedPoint source_point_fan(
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
         result.value[axis] = coordinates[axis].value;
-        result.absolute_error[axis] = mode == ArithmeticMode::Ordinary ? 0 : coordinates[axis].absolute_error;
+        result.absolute_error[axis] = coordinates[axis].absolute_error;
     }
     std::vector<BoundedPlaneAuthority> supports;
     for (const auto* source : sources)
@@ -120,7 +121,7 @@ BoundedPoint GeometryKernel<Mode>::backtrace(const BoundedPoint& source, Geometr
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
             const auto x = p[axis];
-            const auto lower = x.lo > 0 ? x.lo : x.hi < 0 ? -x.hi : 0;
+            const auto lower = x.lo() > 0 ? x.lo() : x.hi() < 0 ? -x.hi() : 0;
             if (lower > strength)
             {
                 pivot = axis;
@@ -139,10 +140,10 @@ BoundedPoint GeometryKernel<Mode>::backtrace(const BoundedPoint& source, Geometr
     for (const auto& wall : walls)
     {
         active_work->pair();
-        if (!wall.geometry || wall.face >= wall.geometry->impl_->surfaces.size())
+        if (!wall.geometry || wall.face >= checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces.size())
             reject("invalid wall support constraint.");
         require_mode(source.arithmetic_mode, wall.geometry->arithmetic_mode());
-        const auto& plane = wall.geometry->impl_->surfaces[wall.face].plane;
+        const auto& plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane;
         bool authenticated = false;
         for (const auto& key : plane->authorities)
             if (std::find(source.supports().begin(), source.supports().end(), key) != source.supports().end())
@@ -187,7 +188,7 @@ BoundedPoint GeometryKernel<Mode>::backtrace(const BoundedPoint& source, Geometr
             const auto determinant = dot<Mode>(normal, tangent);
             if (determinant.zero())
                 continue;
-            if (!(determinant.lo > 0 || determinant.hi < 0))
+            if (!(determinant.lo() > 0 || determinant.hi() < 0))
                 reject("wall constraint rank/conditioning unresolved.");
             rank = 3;
         }
@@ -216,14 +217,13 @@ BoundedPoint GeometryKernel<Mode>::backtrace(const BoundedPoint& source, Geometr
     // Verify the enclosure of every original wall residual before attaching
     // its incidence. The downstream geometry/CFL budget consumes the full
     // propagated coordinate error; this does not introduce a wall tolerance.
-    if constexpr (!ordinary())
-        for (const auto& wall : walls)
-        {
-            const auto& normal = wall.geometry->impl_->surfaces[wall.face].plane->normal;
-            const auto residual = dot<Mode>(normal, projected);
-            if (residual.lo > 0 || residual.hi < 0)
-                reject("projected trajectory does not enclose original wall tangency.");
-        }
+    for (const auto& wall : walls)
+    {
+        const auto& normal = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane->normal;
+        const auto residual = dot<Mode>(normal, projected);
+        if (residual.lo() > 0 || residual.hi() < 0)
+            reject("projected trajectory does not enclose original wall tangency.");
+    }
     auto result = bounded<Mode>(input - projected);
     std::sort(retained.begin(), retained.end());
     retained.erase(std::unique(retained.begin(), retained.end()), retained.end());
@@ -241,5 +241,5 @@ template BoundedPoint bounded_point_displaced<kernel_mode>(
     const BoundedPoint& source, const BoundedPoint& displacement);
 template BoundedPoint GeometryKernel<kernel_mode>::backtrace(const BoundedPoint& source, GeometryPoint velocity,
     double timestep, std::span<const BoundedFaceConstraint> walls, BoundedGeometryLimits limits);
-} // namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+} // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail

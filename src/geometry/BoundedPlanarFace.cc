@@ -1,11 +1,7 @@
 #include "geometry/details/BoundedGeometryKernels.hh"
 
-#define SIMPLEFLUID_GEOMETRY_KERNEL ordinary_kernel
+#include "geometry/details/ordinary/BoundedPlanarFace.tcc"
 #include "geometry/details/BoundedPlanarFace.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
-#define SIMPLEFLUID_GEOMETRY_KERNEL certification_kernel
-#include "geometry/details/BoundedPlanarFace.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
 
 namespace SimpleFluid::Meshes
 {

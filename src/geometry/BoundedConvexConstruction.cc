@@ -113,12 +113,8 @@ const std::vector<Face>& BoundedConvexGeometry::faces() const
 }
 } // namespace SimpleFluid::Meshes
 
-#define SIMPLEFLUID_GEOMETRY_KERNEL ordinary_kernel
+#include "geometry/details/ordinary/BoundedConvexConstruction.tcc"
 #include "geometry/details/BoundedConvexConstruction.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
-#define SIMPLEFLUID_GEOMETRY_KERNEL certification_kernel
-#include "geometry/details/BoundedConvexConstruction.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
 
 namespace SimpleFluid::Meshes
 {

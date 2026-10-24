@@ -1,10 +1,10 @@
-/** Compiled finite geometry kernels. Included only by the owning implementation unit.
- * Namespace operators bind shared storage to the fixed arithmetic policy; Mode
- * templates retain the compiled implementation boundary across geometry units.
+/** Compiled certification geometry kernels. Included only by the owning implementation unit.
+ * Directed interval arithmetic and retained certificates remain confined to this
+ * provider; Mode templates retain the compiled implementation boundary.
  */
 namespace SimpleFluid::Meshes::bounded_geometry_detail
 {
-namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+namespace certification_kernel SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode> Interval planar_turn(const PlanarVertex& a, const PlanarVertex& b, const PlanarVertex& c)
 {
@@ -41,7 +41,7 @@ PlanarLine planar_line(const PlanarVertex& first, const PlanarVertex& second, co
     PlanarLine line{first, second, planar_common<Mode>(first.supports, second.supports)};
     std::erase(line.supports, primary);
     const auto dx = second.coordinates[0] - first.coordinates[0], dy = second.coordinates[1] - first.coordinates[1];
-    if (!((dx.lo > 0 || dx.hi < 0) || (dy.lo > 0 || dy.hi < 0)))
+    if (!((dx.lo() > 0 || dx.hi() < 0) || (dy.lo() > 0 || dy.hi() < 0)))
         reject("planar face edge has unresolved positive length.");
     return line;
 }
@@ -73,7 +73,7 @@ template<ArithmeticMode Mode> Interval planar_area(const PlanarPolygon& polygon)
     }
     area = area / Interval(2);
     area.estimate = (estimate + correction) / 2;
-    return ordinary() ? Interval(area.estimate) : area;
+    return area;
 }
 
 template<ArithmeticMode Mode>
@@ -115,7 +115,7 @@ PlanarVertex planar_crossing(
     if (db.zero())
         return b;
     const auto fraction = da / (da - db);
-    if (fraction.hi < 0 || fraction.lo > 1)
+    if (fraction.hi() < 0 || fraction.lo() > 1)
         reject("planar clipping intersection is outside its certified crossing edge.");
     PlanarVertex result;
     for (unsigned k = 0; k < 2; ++k)
@@ -176,7 +176,7 @@ BoundedPlanarFaceOverlap bounded_planar_face_overlap(std::span<const BoundedPoin
             for (unsigned a = 0; a < 3; ++a)
             {
                 p[a] = p[a] - Interval(origin[a]);
-                maximum_coordinate = std::max({maximum_coordinate, std::abs(p[a].lo), std::abs(p[a].hi)});
+                maximum_coordinate = std::max({maximum_coordinate, std::abs(p[a].lo()), std::abs(p[a].hi())});
             }
             output.push_back(p);
         }
@@ -208,7 +208,7 @@ BoundedPlanarFaceOverlap bounded_planar_face_overlap(std::span<const BoundedPoin
     {
         std::size_t token = 0;
         const auto area = planar_area<Mode>(project(source_first, first, axis, token));
-        const auto certain = area.lo > 0 ? area.lo : area.hi < 0 ? -area.hi : 0;
+        const auto certain = area.lo() > 0 ? area.lo() : area.hi() < 0 ? -area.hi() : 0;
         if (certain > best)
         {
             best = certain;
@@ -282,7 +282,7 @@ BoundedPlanarFaceOverlap bounded_planar_face_overlap(std::span<const BoundedPoin
         result.overlap_vertices.push_back(std::move(exported));
     }
     const auto over_first = overlap / first_area, over_second = overlap / second_area;
-    if (over_first.lo > 1 || over_second.lo > 1)
+    if (over_first.lo() > 1 || over_second.lo() > 1)
         reject("planar overlap area exceeds an input polygon.");
     result.overlap_over_first = bounded<Mode>(result.orientation > 0 ? over_first : -over_first);
     result.overlap_over_second = bounded<Mode>(result.orientation > 0 ? over_second : -over_second);
@@ -305,5 +305,5 @@ template PlanarVertex planar_crossing<kernel_mode>(
 template bool planar_line_contact<kernel_mode>(const PlanarPolygon& polygon, const BoundedPlaneAuthority& primary);
 template BoundedPlanarFaceOverlap bounded_planar_face_overlap<kernel_mode>(std::span<const BoundedPoint> first,
     std::span<const BoundedPoint> second, const BoundedPlaneAuthority& support, BoundedGeometryLimits limits);
-} // namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+} // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail

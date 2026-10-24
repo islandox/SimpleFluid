@@ -10,8 +10,18 @@ std::size_t BoundedConvexPartition::storage_bytes() const noexcept
 
 namespace SimpleFluid::Meshes
 {
-std::size_t BoundedConvexGeometry::storage_bytes() const
+namespace
 {
+template<ArithmeticMode Mode>
+std::size_t geometry_storage_bytes(const std::shared_ptr<const BoundedConvexGeometry::Impl>& base)
+{
+    using Impl = GeometryStorage<Mode>;
+    using MomentCache = StoredMomentCache<Mode>;
+    using Vertex = StoredVertex<Mode>;
+    using Surface = StoredSurface<Mode>;
+    using Plane = StoredPlane<Mode>;
+    using PlanePtr = StoredPlanePtr<Mode>;
+    const auto impl_ = checked_geometry_storage<Mode>(base);
     std::size_t bytes = sizeof(Impl) + sizeof(MomentCache) + impl_->vertices.capacity() * sizeof(Vertex) +
                         impl_->faces.capacity() * sizeof(Face) + impl_->surfaces.capacity() * sizeof(Surface) +
                         impl_->displayed.capacity() * sizeof(BoundedPoint);
@@ -48,14 +58,19 @@ std::size_t BoundedConvexGeometry::storage_bytes() const
     }
     return bytes;
 }
+} // namespace
+
+std::size_t BoundedConvexGeometry::storage_bytes() const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return geometry_storage_bytes<ArithmeticMode::Ordinary>(impl_);
+    return geometry_storage_bytes<ArithmeticMode::BoundedCertification>(impl_);
+}
+
 } // namespace SimpleFluid::Meshes
 
-#define SIMPLEFLUID_GEOMETRY_KERNEL ordinary_kernel
+#include "geometry/details/ordinary/BoundedConvexPartitions.tcc"
 #include "geometry/details/BoundedConvexPartitions.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
-#define SIMPLEFLUID_GEOMETRY_KERNEL certification_kernel
-#include "geometry/details/BoundedConvexPartitions.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
 
 namespace SimpleFluid::Meshes
 {

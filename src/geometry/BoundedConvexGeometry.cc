@@ -186,9 +186,5 @@ Operation::Operation(BoundedGeometryLimits limits) : work(limits), previous(acti
 }
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail
 
-#define SIMPLEFLUID_GEOMETRY_KERNEL ordinary_kernel
+#include "geometry/details/ordinary/BoundedConvexGeometry.tcc"
 #include "geometry/details/BoundedConvexGeometry.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
-#define SIMPLEFLUID_GEOMETRY_KERNEL certification_kernel
-#include "geometry/details/BoundedConvexGeometry.tcc"
-#undef SIMPLEFLUID_GEOMETRY_KERNEL
