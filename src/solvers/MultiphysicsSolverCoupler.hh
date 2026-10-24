@@ -6,18 +6,19 @@
 
 #include "FVM/ALEControlVolumeState.hh"
 #include "equations/BoilingSourceModel.hh"
-#include "equations/PrescribedHeatSource.hh"
 #include "equations/MaterialFeedbackModel.hh"
+#include "equations/PrescribedHeatSource.hh"
 #include "equations/ReactingGasModel.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 #include "equations/TemperatureDiffusionEquation.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
-#include "solvers/BoussinesqSolver.hh"
 #include "solvers/ALEConvergenceStatistics.hh"
+#include "solvers/BoussinesqSolver.hh"
 #include "solvers/PlanarALEBoundary.hh"
 #include "solvers/PlanarFreeSurfaceModel.hh"
 #include "solvers/ThermalStepParticipant.hh"
 #include "solvers/VolumeContinuityModel.hh"
+#include "solvers/details/SpeciesSurfaceAccounting.hh"
 
 #include <cstdint>
 #include <memory>
@@ -125,6 +126,8 @@ public:
         free_surface_diagnostics_type free_surface;
         liquid_mass_diagnostics_type liquid_mass;
         scalar_type pool_occupancy_volume_error = {};
+        bool catalogued_species = false;
+        Reacting::SpeciesEventReceipt species_event;
         scalar_type microbubble_hydrogen_moles = {};
         scalar_type large_bubble_hydrogen_moles = {};
         std::optional<boiling_diagnostics_type> boiling;
@@ -399,6 +402,12 @@ public:
      * @note Invoke collectively on every mesh rank.
      */
     free_surface_model_type* configure_free_surface(const FreeSurfaceOptions& options);
+    /** Explicit supplied closure. Typed closed headspace requires catalog-bound
+     * immutable metadata and actual initial species; ownership belongs to this
+     * coupler and transaction snapshots clone the closure.
+     */
+    free_surface_model_type* configure_free_surface(
+        const FreeSurfaceOptions& options, std::unique_ptr<HeadspaceModel> headspace);
     /** Configure optional planar free-surface coupling from flat keys. */
     free_surface_model_type* configure_free_surface(const Database& database);
     /**
@@ -551,7 +560,8 @@ private:
     SIMPLEFLUID_SOLVERS_LOCAL
     void validate_collective_model_state() const;
     SIMPLEFLUID_SOLVERS_LOCAL
-    void validate_free_surface_configuration(const FreeSurfaceOptions& options) const;
+    void validate_free_surface_configuration(
+        const FreeSurfaceOptions& options, const HeadspaceModel* proposed_headspace = nullptr) const;
     SIMPLEFLUID_SOLVERS_LOCAL
     void validate_planar_ale_support(const FreeSurfaceOptions& options) const;
     SIMPLEFLUID_SOLVERS_LOCAL
@@ -583,7 +593,20 @@ private:
     {
         typename liquid_mass_inventory_type::diagnostics_type liquid;
         scalar_type liquid_volume_deficit = {};
+        std::optional<detail::surface_species::Accounting> species;
+        std::optional<FreeSurfaceGasInventory> species_gas;
+        scalar_type species_liquid_source = {}, species_liquid_outflow = {};
     };
+    SIMPLEFLUID_SOLVERS_LOCAL bool species_surface_enabled() const noexcept
+    {
+        return d_free_surface_model && d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+               d_reacting_gas_model->species_enabled();
+    }
+    SIMPLEFLUID_SOLVERS_LOCAL FreeSurfaceGasInventory current_species_surface_inventory() const;
+    SIMPLEFLUID_SOLVERS_LOCAL FreeSurfaceAccountingPreview prepare_species_surface_preview(
+        scalar_type interval_end, scalar_type time_step, bool initializing = false);
+    SIMPLEFLUID_SOLVERS_LOCAL scalar_type surface_pressure_offset(scalar_type headspace_pressure) const;
+    SIMPLEFLUID_SOLVERS_LOCAL void advance_species_free_surface(scalar_type time_step);
     SIMPLEFLUID_SOLVERS_LOCAL
     FreeSurfaceUpdate make_free_surface_update(
         scalar_type time, bool initializing, const FreeSurfaceAccountingPreview* preview = nullptr);
@@ -633,6 +656,7 @@ private:
     ALEConvergenceStatistics d_ale_convergence_statistics;
     ALEConvergenceObserver d_ale_convergence_observer;
     FreeSurfaceOptions d_free_surface_options;
+    detail::surface_species::Accounting d_species_surface_accounting;
     scalar_type d_pool_occupancy_volume_error = {};
     std::vector<FreeSurfaceHistoryRecord> d_free_surface_history;
     bool d_free_surface_step_failed = false;

@@ -63,61 +63,37 @@ ReactingGasModel<Pack, MeshType>::require_mesh(SP<const mesh_type> mesh)
  * @throws std::invalid_argument if the mesh or options are invalid.
  */
 template<TpetraTypePack Pack, class MeshType>
-ReactingGasModel<Pack, MeshType>::ReactingGasModel(
-    SP<const mesh_type> mesh,
-    ReactingGasOptions options)
-    : d_mesh(require_mesh(std::move(mesh))),
-      d_transport_geometry_cache(*d_mesh),
+ReactingGasModel<Pack, MeshType>::ReactingGasModel(SP<const mesh_type> mesh, ReactingGasOptions options)
+    : d_mesh(require_mesh(std::move(mesh))), d_transport_geometry_cache(*d_mesh),
       d_options(require_options(d_mesh, std::move(options))),
       d_species_thermal_source(d_mesh, "species_thermal_source"),
       d_species_material_source(d_mesh, "species_material_volume_source"),
       d_species_diffusivity(d_mesh, "species_diffusivity_scratch"),
       d_species_liquid_mass(d_mesh, "species_liquid_mass_density"),
-      d_species_liquid_density(d_mesh, "species_pure_liquid_density"),
-      d_alpha_g(d_mesh, "alpha_g"),
-      d_alpha_l(d_mesh, "alpha_l"),
-      d_source_alpha_reaction(d_mesh, "S_alpha_reaction"),
-      d_absolute_pressure(d_mesh, "p_abs"),
-      d_previous_temperature(d_mesh, "reacting_previous_temperature"),
+      d_species_liquid_density(d_mesh, "species_pure_liquid_density"), d_alpha_g(d_mesh, "alpha_g"),
+      d_alpha_l(d_mesh, "alpha_l"), d_source_alpha_reaction(d_mesh, "S_alpha_reaction"),
+      d_absolute_pressure(d_mesh, "p_abs"), d_previous_temperature(d_mesh, "reacting_previous_temperature"),
       d_previous_density(d_mesh, "reacting_previous_density"),
-      d_previous_dynamic_viscosity(
-          d_mesh, "reacting_previous_dynamic_viscosity"),
-      d_previous_alpha_g(d_mesh, "reacting_previous_alpha_g"),
-      d_donor_hydrogen_deficit(d_mesh, "donorH2Deficit"),
-      d_donor_escape_rate(d_mesh, "donorH2OutflowRate"),
-      d_dissolved_hydrogen(d_mesh, "C_H2"),
-      d_dissolved_hydrogen_inventory(d_mesh, "I_H2"),
-      d_excluded_dissolved_inventory(d_mesh, "I_H2_excluded"),
-      d_micro_number(d_mesh, "N_micro"),
-      d_micro_moles(d_mesh, "M_micro"),
-      d_large_number(d_mesh, "N_large"),
-      d_large_moles(d_mesh, "M_large"),
-      d_nucleation_radius(d_mesh, "r_nuc"),
-      d_micro_radius(d_mesh, "r_micro"),
-      d_large_radius(d_mesh, "r_large"),
-      d_critical_concentration(d_mesh, "C_H2_crit"),
-      d_equilibrium_concentration(d_mesh, "C_H2_eq"),
-      d_mass_transfer_coefficient(d_mesh, "K_L"),
-      d_alpha_g_micro(d_mesh, "alpha_g_micro"),
-      d_alpha_g_large(d_mesh, "alpha_g_large"),
-      d_alpha_g_raw(d_mesh, "alpha_g_raw"),
-      d_transport_alpha_g_raw(d_mesh, "alpha_g_transport_raw"),
-      d_alpha_g_excess(d_mesh, "alpha_g_excess"),
-      d_characteristic_radius(d_mesh, "r_characteristic"),
+      d_previous_dynamic_viscosity(d_mesh, "reacting_previous_dynamic_viscosity"),
+      d_previous_alpha_g(d_mesh, "reacting_previous_alpha_g"), d_donor_hydrogen_deficit(d_mesh, "donorH2Deficit"),
+      d_donor_escape_rate(d_mesh, "donorH2OutflowRate"), d_dissolved_hydrogen(d_mesh, "C_H2"),
+      d_dissolved_hydrogen_inventory(d_mesh, "I_H2"), d_excluded_dissolved_inventory(d_mesh, "I_H2_excluded"),
+      d_micro_number(d_mesh, "N_micro"), d_micro_moles(d_mesh, "M_micro"), d_large_number(d_mesh, "N_large"),
+      d_large_moles(d_mesh, "M_large"), d_nucleation_radius(d_mesh, "r_nuc"), d_micro_radius(d_mesh, "r_micro"),
+      d_large_radius(d_mesh, "r_large"), d_critical_concentration(d_mesh, "C_H2_crit"),
+      d_equilibrium_concentration(d_mesh, "C_H2_eq"), d_mass_transfer_coefficient(d_mesh, "K_L"),
+      d_alpha_g_micro(d_mesh, "alpha_g_micro"), d_alpha_g_large(d_mesh, "alpha_g_large"),
+      d_alpha_g_raw(d_mesh, "alpha_g_raw"), d_transport_alpha_g_raw(d_mesh, "alpha_g_transport_raw"),
+      d_alpha_g_excess(d_mesh, "alpha_g_excess"), d_characteristic_radius(d_mesh, "r_characteristic"),
       d_hydrogen_production_rate(d_mesh, "H2_production_rate"),
-      d_micro_to_large_number_rate(
-          d_mesh, "micro_to_large_number_rate"),
-      d_micro_to_large_molar_rate(
-          d_mesh, "micro_to_large_molar_rate"),
-      d_large_growth_rate(d_mesh, "large_growth_rate"),
-      d_dissolution_rate(d_mesh, "H2_dissolution_rate"),
-      d_escape_molar_rate(d_mesh, "H2_escape_molar_rate"),
-      d_escape_number_rate(d_mesh, "bubble_escape_number_rate"),
+      d_micro_to_large_number_rate(d_mesh, "micro_to_large_number_rate"),
+      d_micro_to_large_molar_rate(d_mesh, "micro_to_large_molar_rate"),
+      d_large_growth_rate(d_mesh, "large_growth_rate"), d_dissolution_rate(d_mesh, "H2_dissolution_rate"),
+      d_escape_molar_rate(d_mesh, "H2_escape_molar_rate"), d_escape_number_rate(d_mesh, "bubble_escape_number_rate"),
       d_inventory_error(d_mesh, "H2_inventory_error"),
-      d_transport_bubble_slip_volume_flux(
-          d_mesh, "bubble_transport_slip_volume_flux"),
-      d_transport_bubble_carrier_volume_flux(
-          d_mesh, "bubble_transport_carrier_volume_flux")
+      d_transport_bubble_slip_volume_flux(d_mesh, "bubble_transport_slip_volume_flux"),
+      d_transport_bubble_carrier_volume_flux(d_mesh, "bubble_transport_carrier_volume_flux"),
+      d_transport_liquid_material_volume_flux(d_mesh, "liquid_transport_material_volume_flux")
 {
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
     if (!species_enabled() && d_options.mode
@@ -326,11 +302,14 @@ void ReactingGasModel<Pack, MeshType>::initialize_fields()
     d_inventory_error.put_scalar(0.0);
     d_transport_bubble_slip_volume_flux.put_scalar(0.0);
     d_transport_bubble_carrier_volume_flux.put_scalar(0.0);
+    d_transport_liquid_material_volume_flux.put_scalar(0.0);
+    d_liquid_transport_volume_receipt = {};
     sync_all_fields();
     if constexpr (requires { d_transport_bubble_slip_volume_flux.sync_ghosts(); })
     {
         d_transport_bubble_slip_volume_flux.sync_ghosts();
         d_transport_bubble_carrier_volume_flux.sync_ghosts();
+        d_transport_liquid_material_volume_flux.sync_ghosts();
     }
 }
 
@@ -1453,21 +1432,12 @@ void ReactingGasModel<Pack, MeshType>::validate_pending_zero_auxiliary_fields(
  * @throws std::runtime_error if the transport solve does not converge.
  */
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::transport_scalar(
-    field_type& field,
-    scalar_type time_step,
-    const face_flux_field_type& liquid_face_flux,
-    field_type* slip_velocity,
-    scalar_type diffusivity,
-    bool diffuse,
-    bool liquid_weighted,
-    field_type& escape_rate,
-    const FVM::ALEControlVolumeState* ale,
-    Dimension slip_axis,
-    size_t operator_slot,
-    bool reuse_population_operator,
-    const field_type* diffusivity_temperature,
-    const std::array<bool, 4>* pending_zero, const field_type* species_diffusivity)
+void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scalar_type time_step,
+    const face_flux_field_type& liquid_face_flux, field_type* slip_velocity, scalar_type diffusivity, bool diffuse,
+    bool liquid_weighted, field_type& escape_rate, const FVM::ALEControlVolumeState* ale, Dimension slip_axis,
+    size_t operator_slot, bool reuse_population_operator, const field_type* diffusivity_temperature,
+    const std::array<bool, 4>* pending_zero, const field_type* species_diffusivity,
+    face_flux_field_type* canonical_molar_packet)
 {
     const auto started = std::chrono::steady_clock::now();
     const auto elapsed = [](auto begin)
@@ -1850,6 +1820,37 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(
     }
     field.sync_ghosts();
 
+    if (canonical_molar_packet)
+    {
+        if constexpr (requires { solution.sync_ghosts(); })
+            solution.sync_ghosts();
+        collective_detail::collective_local_validation(*d_mesh, "Canonical transported molar face packet",
+            [&]
+            {
+                if (&canonical_molar_packet->mesh() != d_mesh.get())
+                    throw std::invalid_argument("Canonical transport packet has a foreign mesh.");
+                for (const auto face : canonical_molar_packet->owned_face_ids())
+                {
+                    const auto flux = transport_flux.value(face); // identical boundary gating and orientation
+                    const auto owner = d_mesh->owner_cell(face);
+                    const auto donor = flux >= scalar_type{} || d_mesh->is_boundary_face(face)
+                                           ? owner
+                                           : d_mesh->opposite_or_periodic_neighbor_cell(face, owner);
+                    const auto primary = solution.local_value(donor);
+                    const auto weight = storage_weight.local_value(donor);
+                    // Same left-associated coefficient/product as the scalar boundary
+                    // ledger and upwind operator; do not reconstruct from rounded alpha*C.
+                    const auto stored = flux * weight * primary;
+                    if (!std::isfinite(stored) || (flux != 0 && weight != 0 && primary != 0 && stored == 0) ||
+                        primary < 0 || weight < 0)
+                        throw std::runtime_error("Canonical transported molar packet is invalid.");
+                    canonical_molar_packet->owned_write_view()(canonical_molar_packet->owned_row(face), 0) = stored;
+                }
+            });
+        if constexpr (requires { canonical_molar_packet->sync_ghosts(); })
+            canonical_molar_packet->sync_ghosts();
+    }
+
     const auto flux_values = transport_flux.owned_read_view();
     const auto field_values = field.owned_read_view();
     const auto storage_values = storage_weight.owned_read_view();
@@ -2189,6 +2190,7 @@ void ReactingGasModel<Pack, MeshType>::transport_populations(
     {
         d_transport_bubble_slip_volume_flux.sync_ghosts();
         d_transport_bubble_carrier_volume_flux.sync_ghosts();
+        d_transport_liquid_material_volume_flux.sync_ghosts();
     }
 
     d_escape_molar_rate.sync_ghosts();
@@ -3401,6 +3403,7 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     result.d_species_populations = d_species_population_ledgers;
     result.d_species_escapes = d_species_escape_ledgers;
     result.d_species_history = d_species_history;
+    result.d_species_event_receipt = d_species_event_receipt;
     for (const auto* field : state_fields())
     {
         auto& values = result.d_fields.emplace_back();
@@ -3417,13 +3420,16 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
         result.d_transport_slip_face_ids.size());
     result.d_transport_carrier_face_values.reserve(
         result.d_transport_slip_face_ids.size());
+    result.d_transport_liquid_face_values.reserve(result.d_transport_slip_face_ids.size());
     for (const auto face_lid : result.d_transport_slip_face_ids)
     {
         result.d_transport_slip_face_values.push_back(
             d_transport_bubble_slip_volume_flux.value(face_lid));
         result.d_transport_carrier_face_values.push_back(
             d_transport_bubble_carrier_volume_flux.value(face_lid));
+        result.d_transport_liquid_face_values.push_back(d_transport_liquid_material_volume_flux.value(face_lid));
     }
+    result.d_liquid_transport_volume_receipt = d_liquid_transport_volume_receipt;
     result.d_statistics = d_last_statistics;
     result.d_donor_tracking_enabled = d_donor_tracking_enabled;
     result.d_history_initialized = d_history_initialized;
@@ -3458,13 +3464,12 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
     int local_invalid = snapshot.d_owner != this ||
                         (species_enabled() && snapshot.d_species_generation != d_species_generation) ||
                         snapshot.d_species_fingerprint !=
-                            (species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0) || snapshot.d_fields.size() != fields.size() ||
-                        snapshot.d_transport_slip_face_ids !=
-                            d_transport_bubble_slip_volume_flux.owned_face_ids() ||
-                        snapshot.d_transport_slip_face_values.size() !=
-                            snapshot.d_transport_slip_face_ids.size() ||
-                        snapshot.d_transport_carrier_face_values.size() !=
-                            snapshot.d_transport_slip_face_ids.size();
+                            (species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0) ||
+                        snapshot.d_fields.size() != fields.size() ||
+                        snapshot.d_transport_slip_face_ids != d_transport_bubble_slip_volume_flux.owned_face_ids() ||
+                        snapshot.d_transport_slip_face_values.size() != snapshot.d_transport_slip_face_ids.size() ||
+                        snapshot.d_transport_carrier_face_values.size() != snapshot.d_transport_slip_face_ids.size() ||
+                        snapshot.d_transport_liquid_face_values.size() != snapshot.d_transport_slip_face_ids.size();
     if (!local_invalid)
     {
         for (const auto& values : snapshot.d_fields)
@@ -3501,6 +3506,8 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
             d_transport_bubble_carrier_volume_flux.set_owned_value(
                 snapshot.d_transport_slip_face_ids[face],
                 snapshot.d_transport_carrier_face_values[face]);
+            d_transport_liquid_material_volume_flux.set_owned_value(
+                snapshot.d_transport_slip_face_ids[face], snapshot.d_transport_liquid_face_values[face]);
         }
         else
         {
@@ -3510,13 +3517,17 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
             d_transport_bubble_carrier_volume_flux.set_value(
                 snapshot.d_transport_slip_face_ids[face],
                 snapshot.d_transport_carrier_face_values[face]);
+            d_transport_liquid_material_volume_flux.set_value(
+                snapshot.d_transport_slip_face_ids[face], snapshot.d_transport_liquid_face_values[face]);
         }
     }
+    d_liquid_transport_volume_receipt = snapshot.d_liquid_transport_volume_receipt;
     d_last_statistics = snapshot.d_statistics;
     d_species_source_ledgers = snapshot.d_species_sources;
     d_species_population_ledgers = snapshot.d_species_populations;
     d_species_escape_ledgers = snapshot.d_species_escapes;
     d_species_history = snapshot.d_species_history;
+    d_species_event_receipt = snapshot.d_species_event_receipt;
     d_donor_tracking_enabled = snapshot.d_donor_tracking_enabled;
     if (d_donor_tracking_enabled)
         d_output_fields.emplace("donorH2Deficit", &d_donor_hydrogen_deficit);
@@ -3535,6 +3546,7 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
     {
         d_transport_bubble_slip_volume_flux.sync_ghosts();
         d_transport_bubble_carrier_volume_flux.sync_ghosts();
+        d_transport_liquid_material_volume_flux.sync_ghosts();
     }
     if (refresh_metrics) refresh_geometry();
     else invalidate_transport_operator();

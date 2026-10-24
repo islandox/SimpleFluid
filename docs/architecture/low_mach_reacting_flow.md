@@ -85,6 +85,9 @@ phase volume before pressure/occupancy convergence, without changing the actual
 EOS concentration basis or geometric bulk volume. Finite positive carrier and
 finite-donor checks remain mandatory. The flow owner must pass the original
 occupancy and conservation gates before any physical state is accepted.
+The separate weak Boussinesq field adapter explicitly uses
+`ReferenceControlVolume`; that mode makes no local occupancy claim and is not
+used to bypass this native flow's acceptance gates.
 
 `CoupledReactionContext` exposes both the raw transported inventory and a
 thermodynamic rate state with that composition. For an arriving occupied phase
@@ -304,8 +307,10 @@ constant/reconstructed pressure modes and identical finite candidate offsets on
 all ranks. These queries replace the uniform pressure offset while preserving retained local pressure variation;
 they evaluate no source and publish no pressure, fields or history. Pressure
 publication validates occupied-phase EOS states and capacity before writes and
-restores the accepted snapshot if publication fails. These seams do not by
-themselves enable the pending species-owned free-surface/headspace adapter.
+restores the accepted snapshot if publication fails. The
+[species-bound surface adapter](reacting_species_surface.md) additionally owns
+event consumption, liquid following and atomic surface/headspace advancement;
+these candidate queries alone do not establish that coupling.
 
 A Boussinesq field model does not own extensive phase energy or independent
 dispersed momentum. Its supplied partial-molar carried-enthalpy and continuous-

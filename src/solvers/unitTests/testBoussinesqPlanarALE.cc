@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include "solvers/unitTests/CoupledBackendTestSupport.hh"
 
+#include "ReactingMixtureTestSupport.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
@@ -3346,6 +3347,168 @@ TEST(BoussinesqCouplingIntervalTest, CheckpointInitializesLazyMaterialAndGasDepe
     solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_TRUE(solver_coupling.planar_ale_enabled());
     solver_coupling.accept_coupling_checkpoint(checkpoint);
+}
+
+namespace TypedSpeciesSurface
+{
+namespace M = SimpleFluid::Testing::ReactingMixture;
+namespace R = SimpleFluid::Reacting;
+using Model = SimpleFluid::MultiphysicsSolverCoupler<Pack>::reacting_gas_model_type;
+double global_mass(const Model& model)
+{
+    double local = 0, global = 0;
+    const auto& field = model.liquid_mass_density();
+    for (std::size_t c = 0; c < field.mesh().num_owned_cells(); ++c)
+        local += field.value(static_cast<Pack::local_ordinal_type>(c)) *
+                 field.mesh().cell_volume(static_cast<Pack::local_ordinal_type>(c));
+    Teuchos::reduceAll(*field.mesh().owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local, &global);
+    return global;
+}
+ConfiguredCase make(double heat_rate = .4, bool bubbles = false, bool fail_expanded_volume = false)
+{
+    Handle::DistributionOptions distribution;
+    distribution.allow_empty_partitions = true;
+    auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., 1.}, {0., 1.}, {0., .5, 1.}}});
+    auto grid = std::make_shared<Handle>(std::move(geometry), distribution);
+    // Resolve the small bubble displacement against the much larger finite liquid inventory.
+    // Physical convergence/conservation tolerances retain the common fixture's original values.
+    SimpleFluid::LinearSolverOptions linear;
+    linear.tolerance = 1e-13;
+    linear.preconditioner = SimpleFluid::LinearPreconditioner::None;
+    auto solver = std::make_shared<Solver>(grid, planar_boundaries(), time_options(Coupling::PISO), linear,
+        physical_options());
+    auto coupling = std::make_unique<SimpleFluid::MultiphysicsSolverCoupler<Pack>>(solver);
+    coupling->configure_material_feedback(material_feedback_options());
+    M::Mixture mixture(false, false, R::EnergyConvention::SensibleEnergy, 0);
+    mixture.liquid = R::make_linear_compressible_mixture_liquid(
+        mixture.catalog, M::bounds, [](std::span<const double>)
+        {
+            // Valid caloric derivative over the EOS bounds; the Boussinesq temperature owner still uses cp=2.
+            return R::LinearCompressibleMixtureLiquid{300, 101325, 10, 100000, 1e-3, 1e-9, 0, .01, 0};
+        },
+        R::EnergyConvention::SensibleEnergy);
+    M::InitialMixture seed;
+    seed.product_concentration = .2;
+    if (bubbles)
+        seed.populations = {{"micro", 1e4, 1e-9, .25}, {"large", 2e3, 2e-9, .6}};
+    auto settings = M::field_options(mixture, seed);
+    settings.reference_pressure = 101325;
+    settings.species_properties = {mixture.transport(M::gas_one, 0, 1e-5), mixture.transport(M::gas_two, 0, 2e-5)};
+    settings.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    settings.constant_slip_velocity = bubbles ? .02 : 0;
+    settings.free_surface_patches = {"zmax"};
+    settings.initial_species_state = [mixture, seed](const R::ReactionEnvironment& environment, std::int64_t gid)
+    {
+        auto local = seed;
+        local.reactant_concentration = gid == 0 ? .2 : .1;
+        return M::initial_cell(mixture, environment, local).species;
+    };
+    settings.species_source = [heat_rate, fail_expanded_volume](const R::ReactionContext& context, double duration)
+    {
+        const double reactant = context.state.amount(context.catalog, M::reactant, R::SpeciesPhase::Liquid);
+        if (fail_expanded_volume && context.environment.bulkVolume > .5 * (1 + 1e-8) &&
+            reactant / context.environment.bulkVolume > .15)
+            throw std::runtime_error("manufactured bottom-cell expanded-volume source failure");
+        R::ReactionSourceInput source;
+        source.heat.integratedEnergy = heat_rate * duration * context.environment.bulkVolume;
+        return source;
+    };
+    auto& gas = coupling->configure_reacting_gas(settings);
+    gas.set_transport_linear_solver_options(linear);
+    coupling->initialize_heated_box(300, 300);
+    auto options = free_surface_options(60);
+    options.initial_liquid_volume.reset();
+    options.liquid_mass.initial_liquid_mass = global_mass(gas);
+    coupling->configure_free_surface(options);
+    return {std::move(grid), std::move(solver), std::move(coupling), nullptr};
+}
+} // namespace TypedSpeciesSurface
+
+TEST(BoussinesqSpeciesPlanarALETest, FollowsTransportedLiquidAndExactEOSFacePacketsOnActualEmptyOwners)
+{
+    auto configured = TypedSpeciesSurface::make();
+    auto& coupling = *configured.coupling;
+    auto& gas = *coupling.find_reacting_gas_model();
+    const double old_mass = coupling.liquid_mass_inventory().totalMass();
+    const auto before = gas.species_event_receipt();
+    coupling.step();
+    EXPECT_TRUE(coupling.liquid_mass_inventory().speciesBound());
+    EXPECT_NEAR(coupling.liquid_mass_inventory().totalMass(), old_mass, 2e-12);
+    EXPECT_EQ(gas.species_event_receipt().revision, before.revision + 1);
+    EXPECT_EQ(gas.liquid_transport_volume_receipt().event, gas.species_event_receipt());
+    EXPECT_EQ(gas.liquid_transport_volume_receipt().geometry_epoch, SimpleFluid::mesh_geometry_epoch(*configured.mesh));
+    EXPECT_TRUE(gas.liquid_transport_volume_receipt().complete_carrier);
+    EXPECT_GT(coupling.free_surface_diagnostics().pool_level, 1.);
+    EXPECT_NEAR(coupling.planar_ale_diagnostics().liquid_mass_residual, 0., 1e-12);
+    int local_empty = configured.mesh->num_owned_cells() == 0, empty = 0;
+    Teuchos::reduceAll(*configured.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+    if (configured.mesh->owned_cell_map()->getComm()->getSize() == 4)
+        EXPECT_EQ(empty, 2);
+}
+TEST(BoussinesqSpeciesPlanarALETest, MixedPopulationEscapeAndIntervalReplayCommitEverySpeciesOnce)
+{
+    auto configured = TypedSpeciesSurface::make(0, true);
+    auto& coupling = *configured.coupling;
+    auto& gas = *coupling.find_reacting_gas_model();
+    auto checkpoint = coupling.create_coupling_checkpoint();
+    const auto accepted_receipt = gas.species_event_receipt();
+    coupling.step();
+    const auto accepted_surface = coupling.free_surface_diagnostics();
+    const auto accepted_events = gas.physical_escape_events();
+    const auto accepted_step = gas.species_event_receipt();
+    const auto accepted_mass = coupling.liquid_mass_inventory().totalMass();
+    SimpleFluid::GasMolesBySpecies expected;
+    for (const auto& event : accepted_events)
+        if (event.phase == SimpleFluid::Reacting::SpeciesPhase::Dispersed ||
+            event.phase == SimpleFluid::Reacting::SpeciesPhase::Resolved)
+            expected[gas.options()
+                    .reaction_mechanism->catalog()
+                    .species()[gas.options().reaction_mechanism->catalog().index(event.species)]
+                    .name] += event.moles;
+    for (const auto& name : {"gas_one", "gas_two"})
+    {
+        EXPECT_GT(expected.at(name), 0);
+        EXPECT_DOUBLE_EQ(accepted_surface.vented_gas_moles.at(name), expected.at(name));
+    }
+    coupling.restore_coupling_checkpoint(checkpoint);
+    EXPECT_EQ(gas.species_event_receipt(), accepted_receipt);
+    EXPECT_TRUE(coupling.free_surface_diagnostics().vented_gas_moles.empty());
+    coupling.step();
+    EXPECT_EQ(gas.species_event_receipt().revision, accepted_step.revision);
+    EXPECT_DOUBLE_EQ(gas.species_event_receipt().interval_end, accepted_step.interval_end);
+    EXPECT_DOUBLE_EQ(gas.species_event_receipt().time_step, accepted_step.time_step);
+    EXPECT_GT(gas.species_event_receipt().publication_nonce, accepted_step.publication_nonce);
+    EXPECT_EQ(gas.physical_escape_events(), accepted_events);
+    EXPECT_EQ(coupling.free_surface_diagnostics().vented_gas_moles, accepted_surface.vented_gas_moles);
+    EXPECT_DOUBLE_EQ(coupling.liquid_mass_inventory().totalMass(), accepted_mass);
+    coupling.accept_coupling_checkpoint(checkpoint);
+}
+TEST(BoussinesqSpeciesPlanarALETest, RankLocalSourceFailureAfterMotionRestoresGeometryReceiptAndRetries)
+{
+    auto configured = TypedSpeciesSurface::make(.4, false, true);
+    auto& coupling = *configured.coupling;
+    auto& gas = *coupling.find_reacting_gas_model();
+    const auto receipt = gas.species_event_receipt();
+    const auto surface = coupling.free_surface_diagnostics();
+    const auto history = coupling.free_surface_history().size();
+    const auto mass = coupling.liquid_mass_inventory().totalMass();
+    const SimpleFluid::Testing::ReactingMixture::SavedReactingState<TypedSpeciesSurface::Model> saved(gas);
+    std::vector<double> volumes;
+    for (std::size_t c = 0; c < configured.mesh->num_owned_cells(); ++c)
+        volumes.push_back(configured.mesh->cell_volume(static_cast<Pack::local_ordinal_type>(c)));
+    EXPECT_ANY_THROW(coupling.step());
+    saved.expect_restored(gas);
+    EXPECT_EQ(gas.species_event_receipt(), receipt);
+    EXPECT_DOUBLE_EQ(configured.solver->time(), 0.);
+    EXPECT_DOUBLE_EQ(coupling.liquid_mass_inventory().totalMass(), mass);
+    EXPECT_DOUBLE_EQ(coupling.free_surface_diagnostics().pool_level, surface.pool_level);
+    EXPECT_EQ(coupling.free_surface_history().size(), history);
+    for (std::size_t c = 0; c < volumes.size(); ++c)
+        EXPECT_DOUBLE_EQ(configured.mesh->cell_volume(static_cast<Pack::local_ordinal_type>(c)), volumes[c]);
+    configured.solver->set_time_step(1e-5);
+    EXPECT_NO_THROW(coupling.step());
+    EXPECT_EQ(gas.species_event_receipt().revision, receipt.revision + 1);
 }
 
 } // namespace

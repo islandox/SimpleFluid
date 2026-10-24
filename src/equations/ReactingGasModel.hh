@@ -151,6 +151,7 @@ public:
     {
         return d_species_escape_ledgers;
     }
+    const Reacting::SpeciesEventReceipt& species_event_receipt() const noexcept { return d_species_event_receipt; }
     /** Globally reduced catalog-ordered accepted histories; no query advances a counter. */
     const std::vector<Reacting::SpeciesInventoryHistory>& species_histories() const noexcept
     {
@@ -160,6 +161,10 @@ public:
     const std::vector<Reacting::SpeciesCompartmentEvents>& species_step_events() const noexcept
     {
         return d_species_history.step;
+    }
+    const std::vector<Reacting::SpeciesSubsetSourceChange>& species_subset_source_changes() const noexcept
+    {
+        return d_species_history.subset_step;
     }
     /** Actual transport escape only. Supplied enthalpy/momentum traces do not debit an owned phase-energy ledger. */
     const std::vector<Reacting::SpeciesPhysicalEscapeEvent>& physical_escape_events() const noexcept
@@ -186,10 +191,13 @@ public:
         std::uint64_t d_species_generation = 0, d_species_fingerprint = 0, d_geometry_epoch = 0;
         std::vector<Reacting::SpeciesSourceLedger> d_species_sources, d_species_populations, d_species_escapes;
         Reacting::history_detail::State d_species_history;
+        Reacting::SpeciesEventReceipt d_species_event_receipt;
         std::vector<std::vector<scalar_type>> d_fields;
         std::vector<local_ordinal_type> d_transport_slip_face_ids;
         std::vector<scalar_type> d_transport_slip_face_values;
         std::vector<scalar_type> d_transport_carrier_face_values;
+        std::vector<scalar_type> d_transport_liquid_face_values;
+        Reacting::LiquidTransportVolumeReceipt d_liquid_transport_volume_receipt;
         statistics_type d_statistics;
         bool d_donor_tracking_enabled = false;
         bool d_history_initialized = false;
@@ -299,6 +307,9 @@ public:
      *
      * Reconstructed pressure mode uses the supplied physical gauge-pressure
      * variation in Pa.
+     *
+     * Typed species use time as the accepted interval end; rates integrate over
+     * [time-time_step,time]. Successful publication emits one immutable event receipt.
      *
      * Ideal-gas mode requires the overload carrying authoritative scalar void.
      */
@@ -435,6 +446,18 @@ public:
     const face_flux_field_type& transported_bubble_slip_volume_flux() const noexcept
     {
         return d_transport_bubble_slip_volume_flux;
+    }
+    /** Canonical relative liquid material-volume flux [m3/s], captured from the
+     * same post-transport/pre-source donor species packet and supplied EOS.
+     * Use only with a matching complete-carrier receipt and geometry epoch.
+     */
+    const face_flux_field_type& transported_liquid_material_volume_flux() const noexcept
+    {
+        return d_transport_liquid_material_volume_flux;
+    }
+    const Reacting::LiquidTransportVolumeReceipt& liquid_transport_volume_receipt() const noexcept
+    {
+        return d_liquid_transport_volume_receipt;
     }
     /** Carrier part of the same implicit bubble transport face flux. */
     const face_flux_field_type& transported_bubble_carrier_volume_flux() const noexcept
@@ -644,21 +667,12 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL
     void validate_pending_zero_auxiliary_fields(const std::array<bool, 4>& pending_zero) const;
     SIMPLEFLUID_EQUATIONS_LOCAL
-    void transport_scalar(
-        field_type& field,
-        scalar_type time_step,
-        const face_flux_field_type& liquid_face_flux,
-        field_type* slip_velocity,
-        scalar_type diffusivity,
-        bool diffuse,
-        bool liquid_weighted,
-        field_type& escape_rate,
-        const FVM::ALEControlVolumeState* ale,
-        Dimension slip_axis,
-        size_t operator_slot = 0,
-        bool reuse_population_operator = false,
-        const field_type* diffusivity_temperature = nullptr,
-        const std::array<bool, 4>* pending_zero = nullptr, const field_type* species_diffusivity = nullptr);
+    void transport_scalar(field_type& field, scalar_type time_step, const face_flux_field_type& liquid_face_flux,
+        field_type* slip_velocity, scalar_type diffusivity, bool diffuse, bool liquid_weighted, field_type& escape_rate,
+        const FVM::ALEControlVolumeState* ale, Dimension slip_axis, size_t operator_slot = 0,
+        bool reuse_population_operator = false, const field_type* diffusivity_temperature = nullptr,
+        const std::array<bool, 4>* pending_zero = nullptr, const field_type* species_diffusivity = nullptr,
+        face_flux_field_type* canonical_molar_packet = nullptr);
     SIMPLEFLUID_EQUATIONS_LOCAL
     CellProperties cell_properties(local_ordinal_type cell_lid, const field_type& temperature,
         const field_type& density, const field_type& dynamic_viscosity) const;
@@ -740,8 +754,9 @@ private:
     using species_step_sums = std::vector<Reacting::history_detail::CompartmentSums>;
     SIMPLEFLUID_EQUATIONS_LOCAL std::size_t species_compartment_index(
         Reacting::SpeciesId species, Reacting::SpeciesPhase phase, std::string_view population) const;
-    SIMPLEFLUID_EQUATIONS_LOCAL void publish_species_history(
-        std::span<const Reacting::CellSpeciesState> states, species_step_sums step, bool initialize);
+    SIMPLEFLUID_EQUATIONS_LOCAL void publish_species_history(std::span<const Reacting::CellSpeciesState> states,
+        species_step_sums step, bool initialize,
+        std::span<const Reacting::ReactionLocalReceipt> chemical_receipts = {});
     SIMPLEFLUID_EQUATIONS_LOCAL void validate_species_pressure_metadata(scalar_type pressure_offset) const;
     SIMPLEFLUID_EQUATIONS_LOCAL void validate_species_candidate_pressure(scalar_type pressure_offset) const;
     SIMPLEFLUID_EQUATIONS_LOCAL void set_species_absolute_pressure_offset(scalar_type pressure_offset);
@@ -805,6 +820,7 @@ private:
     std::vector<Reacting::SpeciesSourceLedger> d_species_source_ledgers, d_species_population_ledgers,
         d_species_escape_ledgers;
     Reacting::history_detail::State d_species_history;
+    Reacting::SpeciesEventReceipt d_species_event_receipt;
     std::uint64_t d_species_generation = 0;
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
@@ -857,6 +873,9 @@ private:
     field_type d_inventory_error;
     face_flux_field_type d_transport_bubble_slip_volume_flux;
     face_flux_field_type d_transport_bubble_carrier_volume_flux;
+    face_flux_field_type d_transport_liquid_material_volume_flux;
+    Reacting::LiquidTransportVolumeReceipt d_liquid_transport_volume_receipt;
+    std::uint64_t d_species_publication_nonce = 0; ///< Validation allocator, deliberately not physical snapshot state.
 
     bool d_history_initialized = false;
     bool d_initial_state_initialized = false;

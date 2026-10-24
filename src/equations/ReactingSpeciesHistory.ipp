@@ -21,8 +21,8 @@ std::size_t ReactingGasModel<Pack, MeshType>::species_compartment_index(
 }
 
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::publish_species_history(
-    std::span<const Reacting::CellSpeciesState> states, species_step_sums step, bool initialize)
+void ReactingGasModel<Pack, MeshType>::publish_species_history(std::span<const Reacting::CellSpeciesState> states,
+    species_step_sums step, bool initialize, std::span<const Reacting::ReactionLocalReceipt> chemical_receipts)
 {
     namespace H = Reacting::history_detail;
     using Sum = H::Sum;
@@ -70,13 +70,14 @@ void ReactingGasModel<Pack, MeshType>::publish_species_history(
             {
                 require(std::isfinite(amount) && amount >= 0, "Cumulative history amount is invalid.");
                 candidate.cumulative_local[s][metric] += amount;
-                candidate.net_local[s] += (metric == H::Produced || metric == H::Supplied) ? amount : -amount;
+                // Gross reporting totals never seed the independently accumulated signed net.
             };
             if (!initialize)
             {
                 require(d_species_source_ledgers.size() == states.size() &&
-                            d_species_escape_ledgers.size() == states.size(),
-                    "Accepted event ledgers have wrong owned size.");
+                            d_species_escape_ledgers.size() == states.size() &&
+                            chemical_receipts.size() == states.size(),
+                    "Accepted event ledgers/raw chemistry receipts have wrong owned size.");
                 std::vector<std::vector<std::pair<std::size_t, long double>>> net(mechanism.reactions().size());
                 for (std::size_t r = 0; r < mechanism.reactions().size(); ++r)
                 {
@@ -90,11 +91,29 @@ void ReactingGasModel<Pack, MeshType>::publish_species_history(
                 for (std::size_t cell = 0; cell < states.size(); ++cell)
                 {
                     const auto& source = d_species_source_ledgers[cell];
+                    const auto& raw = chemical_receipts[cell];
+                    require(raw.schemaFingerprint == catalog.fingerprint(),
+                        "Accepted raw chemistry history belongs to another ordered schema.");
+                    for (const auto& change : raw.chemicalChanges)
+                    {
+                        require(std::isfinite(change.moles), "Raw accepted chemical change is nonfinite.");
+                        const auto slot = species_compartment_index(change.species, change.phase, change.population);
+                        const auto s = catalog.index(change.species);
+                        step[slot].source_change += change.moles;
+                        candidate.net_local[s] += change.moles;
+                        if (change.phase != Reacting::SpeciesPhase::Liquid)
+                            step[s].gas_subset_source += change.moles;
+                        if (change.phase == Reacting::SpeciesPhase::Liquid ||
+                            change.phase == Reacting::SpeciesPhase::Dissolved)
+                            step[s].solution_subset_source += change.moles;
+                    }
                     require(source.forwardReactionExtents.size() == mechanism.reactions().size() &&
                                 source.reverseReactionExtents.size() == mechanism.reactions().size(),
                         "Directional chemistry provenance is absent or has the wrong mechanism.");
                     for (std::size_t r = 0; r < mechanism.reactions().size(); ++r)
                     {
+                        // Rounded directional extents are gross provenance only. Signed channels above
+                        // consume the kernel's accepted keyed local receipt, never reconstructed extents.
                         require(std::isfinite(source.forwardReactionExtents[r]) &&
                                     source.forwardReactionExtents[r] >= 0 &&
                                     std::isfinite(source.reverseReactionExtents[r]) &&
@@ -120,8 +139,17 @@ void ReactingGasModel<Pack, MeshType>::publish_species_history(
                     for (const auto& transfer : source.externalTransfers)
                     {
                         const auto amount = std::abs(static_cast<long double>(transfer.moles));
-                        add(species_compartment_index(transfer.species, transfer.phase, transfer.population),
-                            transfer.moles >= 0 ? H::ExternalSupply : H::ExternalWithdrawal, amount);
+                        const auto slot =
+                            species_compartment_index(transfer.species, transfer.phase, transfer.population);
+                        const auto s = catalog.index(transfer.species);
+                        candidate.net_local[s] += transfer.moles;
+                        step[slot].source_change += transfer.moles;
+                        if (transfer.phase != Reacting::SpeciesPhase::Liquid)
+                            step[s].gas_subset_source += transfer.moles;
+                        if (transfer.phase == Reacting::SpeciesPhase::Liquid ||
+                            transfer.phase == Reacting::SpeciesPhase::Dissolved)
+                            step[s].solution_subset_source += transfer.moles;
+                        add(slot, transfer.moles >= 0 ? H::ExternalSupply : H::ExternalWithdrawal, amount);
                         total(
                             catalog.index(transfer.species), transfer.moles >= 0 ? H::Supplied : H::Withdrawn, amount);
                     }
@@ -134,6 +162,7 @@ void ReactingGasModel<Pack, MeshType>::publish_species_history(
                         const auto slot = species_compartment_index(event.species, event.phase, event.population);
                         add(slot, H::PhysicalOutflow, -static_cast<long double>(event.moles));
                         total(catalog.index(event.species), H::Escaped, -static_cast<long double>(event.moles));
+                        candidate.net_local[catalog.index(event.species)] += event.moles;
                         step[slot].escaped_mass += -static_cast<long double>(event.mass);
                         step[slot].escaped_enthalpy += -static_cast<long double>(event.energy);
                         for (std::size_t axis = 0; axis < 3; ++axis)
@@ -157,8 +186,20 @@ void ReactingGasModel<Pack, MeshType>::publish_species_history(
                 for (const auto& amount : candidate.cumulative_local[s])
                     append(amount.value());
             }
+            for (std::size_t s = 0; s < ns; ++s)
+            {
+                Sum gas, solution;
+                for (std::size_t compartment = 0; compartment < compartments; ++compartment)
+                {
+                    gas += step[compartment * ns + s].gas_subset_source.value();
+                    solution += step[compartment * ns + s].solution_subset_source.value();
+                }
+                append(gas.value());
+                append(solution.value());
+            }
             for (const auto& event : step)
             {
+                append(event.source_change.value());
                 for (const auto& amount : event.amount)
                     append(amount.value());
                 append(event.escaped_mass.value());
@@ -204,6 +245,10 @@ void ReactingGasModel<Pack, MeshType>::publish_species_history(
                 require(std::abs(residual.value()) <= 4096 * std::numeric_limits<double>::epsilon() * scale,
                     "Cumulative species history fails closure on its actual inventory scale.");
             }
+            candidate.subset_step.resize(ns);
+            for (std::size_t s = 0; s < ns; ++s)
+                candidate.subset_step[s] = {
+                    catalog.species()[s].id, narrow(global[position++]), narrow(global[position++])};
             candidate.step.clear();
             candidate.escape.clear();
             for (std::size_t compartment = 0; compartment < compartments; ++compartment)
@@ -214,6 +259,7 @@ void ReactingGasModel<Pack, MeshType>::publish_species_history(
                     report.phase = compartment < 4 ? static_cast<Reacting::SpeciesPhase>(compartment)
                                                    : Reacting::SpeciesPhase::Dispersed;
                     report.population = compartment < 4 ? std::string{} : d_options.population_ids[compartment - 4];
+                    report.signed_source_change = narrow(global[position++]);
                     std::array<long double, H::EventMetricCount> amount;
                     for (auto& value : amount)
                         value = global[position++];

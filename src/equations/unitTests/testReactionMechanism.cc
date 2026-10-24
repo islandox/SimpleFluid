@@ -543,6 +543,36 @@ TEST(ReactionMechanismTest, PredictorEOSVolumeDefersOnlyOccupancyToTheFlowOwner)
     EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, .1, overdraw), std::exception);
     EXPECT_DOUBLE_EQ(initial.amount(*schema, A, R::SpeciesPhase::Liquid), .2);
 }
+TEST(ReactionMechanismTest, ReferenceControlVolumeKeepsPhysicalLiquidRatesAndGeometricHeatBasis)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    const auto initial = state(*schema, .5);
+    auto context = environment();
+    context.liquidVolume = .75;
+    context.bulkVolume = .5;
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, .5);
+    input.heat.rate = R::VolumetricHeatRate{8., R::SourceVolumeBasis::BulkVolume};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, .25, input), std::invalid_argument);
+    context.volumeClosure = R::ReactionVolumeClosure::ReferenceControlVolume;
+    input.rates->validate = [](const R::ReactionContext& value)
+    {
+        EXPECT_EQ(value.environment.volumeClosure, R::ReactionVolumeClosure::ReferenceControlVolume);
+        EXPECT_DOUBLE_EQ(value.environment.liquidVolume, .75);
+        EXPECT_DOUBLE_EQ(value.environment.bulkVolume, .5);
+    };
+    const auto result = R::advance_reactions(mechanism, initial, context, .25, input);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], .09375); // .5 mol/(liquid m3 s) * .75 m3 * .25 s.
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), .40625);
+    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, 1.); // 8 W/(bulk m3) * .5 m3 * .25 s.
+    R::ReactionSourceInput overdraw;
+    overdraw.integratedExtents = {{split, .75}};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, .25, overdraw), std::exception);
+    context.bulkVolume = 0;
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, .25, input), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, A, R::SpeciesPhase::Liquid), .5);
+}
 } // namespace
 TEST(ReactionDirectionalHistoryTest, AcceptedStagesRetainGrossReversalWithoutChangingNetInventoryOrHeat)
 {
@@ -598,12 +628,11 @@ TEST(ReactionMechanismTest, LocalAcceptedReceiptPreservesHeatAndMaterialLostByRo
     namespace R = SimpleFluid::Reacting;
     using P = R::SpeciesPhase;
     const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
-        {11, "left", .1, {{"X", 1}}, {P::Liquid}},
-        {29, "right", .1, {{"X", 1}}, {P::Liquid}}});
+        {11, "left", .1, {{"X", 1}}, {P::Liquid}}, {29, "right", .1, {{"X", 1}}, {P::Liquid}}});
     const double large = std::ldexp(1., 60), quantum = std::ldexp(1., -60);
-    const R::ReactionMechanism mechanism(schema,
-        {{41, "forward", {{11, P::Liquid, -quantum}, {29, P::Liquid, quantum}}, 1.},
-            {83, "opposing", {{29, P::Liquid, -quantum}, {11, P::Liquid, quantum}}, -1.}});
+    const R::ReactionMechanism mechanism(
+        schema, {{41, "forward", {{11, P::Liquid, -quantum}, {29, P::Liquid, quantum}}, 1.},
+                    {83, "opposing", {{29, P::Liquid, -quantum}, {11, P::Liquid, quantum}}, -1.}});
     R::CellSpeciesState initial(*schema);
     initial.set_amount(*schema, 11, P::Liquid, 2.);
     initial.set_amount(*schema, 29, P::Liquid, 2.);
@@ -657,8 +686,8 @@ TEST(ReactionMechanismTest, LocalAcceptedReceiptPreservesHeatAndMaterialLostByRo
 TEST(ReactionMechanismTest, LocalReceiptRetainsVolumetricHeatBeforeItsDoubleReportingView)
 {
     namespace R = SimpleFluid::Reacting;
-    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
-        {7, "ordinary carrier", .1, {{"X", 1}}, {R::SpeciesPhase::Liquid}}});
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{7, "ordinary carrier", .1, {{"X", 1}}, {R::SpeciesPhase::Liquid}}});
     const R::ReactionMechanism mechanism(schema, {}, R::EnergyConvention::IncludesFormationEnergy);
     R::CellSpeciesState initial(*schema);
     const double factor = std::ldexp(1., 30);

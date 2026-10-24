@@ -150,11 +150,15 @@ struct IntegratedReactionExtent
 /** Accepted occupancy is the default. A thermodynamic predictor carries the
  * actual provisional EOS liquid volume during a flow corrector; its owner must
  * close and validate material occupancy before accepting the physical state.
+ * ReferenceControlVolume identifies the weak Boussinesq field adapter: physical
+ * EOS liquid volume is a rate basis distinct from its prescribed carrier CV,
+ * and no local phase-occupancy closure is claimed by that approximation.
  */
 enum class ReactionVolumeClosure
 {
     Accepted,
-    ThermodynamicPredictor
+    ThermodynamicPredictor,
+    ReferenceControlVolume
 };
 
 struct ReactionEnvironment
@@ -286,7 +290,7 @@ struct ReactionLocalReceipt
 struct ReactionAdvance
 {
     CellSpeciesState state;
-    SpeciesSourceLedger ledger; ///< Double reporting views of the accepted events.
+    SpeciesSourceLedger ledger;        ///< Double reporting views of the accepted events.
     ReactionLocalReceipt localReceipt; ///< Use raw local channels when composing later physical source stages.
 };
 

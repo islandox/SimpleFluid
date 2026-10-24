@@ -14,6 +14,7 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     explicit_instantiation/FluidSolver.cc
     explicit_instantiation/IncompressibleIsothermalSolver.cc
     PlanarFreeSurfaceModel.cc
+    ClosedMixtureHeadspaceModel.cc
     SteadyStateSearch.cc
 )
 

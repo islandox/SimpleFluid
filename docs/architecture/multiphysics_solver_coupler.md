@@ -149,3 +149,8 @@ configuration from this controller. Standalone `ScalarSourceDecayTransport`
 retains generic source/decay and scalar transport for callers that explicitly
 own it. Source APIs and configuration keys have no legacy aliases; see the
 [migration table](../modeling/reacting_gas_sources.md).
+
+The typed species surface adapter uses accepted event receipts, supplied catalog-bound
+headspace EOS and exact transported liquid-volume packets. Its ownership and
+constrained Boussinesq ALE limits are specified in
+[species-bound surface coupling](reacting_species_surface.md).

@@ -35,6 +35,20 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
 endforeach()
 
+# Typed species surface coupling and exact transported liquid-volume packets.
+foreach(_species_surface_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME BoussinesqSpeciesFreeSurface_${_species_surface_ranks}procs
+        TARGET testBoussinesqSpeciesFreeSurface PROCS ${_species_surface_ranks}
+        LABELS "mpi;species;free_surface;boussinesq;conservation;transaction;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME SpeciesLiquidVolumePacket_${_species_surface_ranks}procs
+        TARGET testSpeciesLiquidVolumePacket PROCS ${_species_surface_ranks}
+        LABELS "mpi;species;ale;conservation;transaction;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME BoussinesqSpeciesPlanarALE_${_species_surface_ranks}procs
+        TARGET testBoussinesqPlanarALE PROCS ${_species_surface_ranks}
+        ARGS "--gtest_filter=BoussinesqSpeciesPlanarALETest.*"
+        LABELS "mpi;species;ale;boussinesq;conservation;transaction;empty_rank" TIMEOUT 120)
+endforeach()
+
 # Conservative native mixture flow and its external reaction controller.
 foreach(_mixture_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME LowMachMixture_${_mixture_ranks}procs

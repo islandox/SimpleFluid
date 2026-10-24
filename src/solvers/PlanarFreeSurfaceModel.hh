@@ -207,7 +207,10 @@ struct LiquidMassInventoryOptions
     FreeSurfaceRangePolicy depletion_policy = FreeSurfaceRangePolicy::Error;
 };
 
-/** Lumped ideal-gas headspace configuration in SI units. */
+/** Lumped headspace configuration in SI units.
+ * gas_constant/compressibility_factor apply only to the explicitly retained ideal reference closure;
+ * a supplied mixture closure owns its EOS and actual catalog species.
+ */
 struct HeadspaceOptions
 {
     HeadspaceMode mode = HeadspaceMode::Vented;
@@ -298,6 +301,21 @@ SIMPLEFLUID_SOLVERS_EXPORT real_t prescribed_headspace_temperature(const Headspa
 
 using GasMolesBySpecies = std::map<std::string, real_t>;
 using GasMolesByPopulation = std::map<std::string, GasMolesBySpecies>;
+using GasMoleSums = std::map<std::string, detail::CompensatedSum<long double>>;
+
+/** Immutable supplied closure identity. Zero fingerprint identifies the retained
+ * uncatalogued reference closure; a typed closed coupling requires nonzero catalog
+ * fingerprint, explicit law identity/revision, and finite increasing EOS bounds.
+ */
+struct HeadspaceMetadata
+{
+    std::uint64_t catalog_fingerprint = 0;
+    std::string provider_identity;
+    std::uint64_t provider_revision = 0;
+    std::array<real_t, 4> validity_bounds{}; ///< Tmin,Tmax,pmin,pmax.
+    bool prescribed_temperature_only = true;
+    bool operator==(const HeadspaceMetadata&) const = default;
+};
 
 /** Prospective or accepted lumped headspace state. */
 struct HeadspaceState
@@ -313,6 +331,7 @@ class SIMPLEFLUID_SOLVERS_EXPORT HeadspaceModel
 {
 public:
     explicit HeadspaceModel(HeadspaceOptions options);
+    explicit HeadspaceModel(HeadspaceOptions options, HeadspaceMetadata metadata);
     virtual ~HeadspaceModel() = default;
 
     [[nodiscard]] virtual std::unique_ptr<HeadspaceModel> clone() const = 0;
@@ -323,6 +342,7 @@ public:
     virtual void commit(const HeadspaceState& state, const GasMolesBySpecies& escaped_moles) = 0;
 
     [[nodiscard]] const HeadspaceOptions& options() const noexcept;
+    [[nodiscard]] const HeadspaceMetadata& metadata() const noexcept;
     [[nodiscard]] const HeadspaceState& state() const noexcept;
     [[nodiscard]] virtual const GasMolesBySpecies& headspaceMoles() const noexcept = 0;
     [[nodiscard]] virtual const GasMolesBySpecies& ventedMoles() const noexcept = 0;
@@ -333,6 +353,7 @@ protected:
     void setState(HeadspaceState state) noexcept;
 
     HeadspaceOptions d_options;
+    const HeadspaceMetadata d_metadata;
     HeadspaceState d_state;
 };
 
@@ -353,6 +374,7 @@ public:
 private:
     GasMolesBySpecies d_empty_headspace;
     GasMolesBySpecies d_vented_moles;
+    GasMoleSums d_vented_sums;
 };
 
 /** Closed lumped ideal-gas headspace. */
@@ -381,7 +403,13 @@ SIMPLEFLUID_SOLVERS_EXPORT std::unique_ptr<HeadspaceModel> make_headspace_model(
 struct FreeSurfaceGasInventory
 {
     GasMolesBySpecies initial_moles;
-    GasMolesBySpecies generated_moles; ///< Cumulative generated gas [mol].
+    GasMolesBySpecies generated_moles; ///< Cumulative gross gas-subset production [mol].
+    GasMolesBySpecies consumed_moles;  ///< Cumulative gross gas-subset consumption [mol].
+    /** Authoritative signed cumulative gas-subset source, formed directly from
+     * accepted event signs before gross report narrowing. If absent, retain the
+     * reference equation generated_moles-consumed_moles.
+     */
+    std::optional<GasMolesBySpecies> net_source_moles;
     GasMolesBySpecies dissolved_moles;
     GasMolesBySpecies submerged_moles;
     GasMolesByPopulation submerged_population_moles;
@@ -417,6 +445,8 @@ struct FreeSurfaceDiagnostics
     real_t relative_level_change = 0.0;
     bool validity_warning = false;
     GasMolesBySpecies generated_gas_moles;
+    GasMolesBySpecies consumed_gas_moles;
+    std::optional<GasMolesBySpecies> net_source_gas_moles;
     GasMolesBySpecies dissolved_gas_moles;
     GasMolesBySpecies submerged_gas_moles;
     GasMolesByPopulation submerged_population_gas_moles;
@@ -476,6 +506,7 @@ public:
         real_t d_initial_pool_level = 0.0;
         GasMolesBySpecies d_initial_gas_moles;
         GasMolesBySpecies d_committed_escaped_moles;
+        GasMoleSums d_committed_escape_sums;
         FreeSurfaceDiagnostics d_diagnostics;
         std::size_t d_update_generation = 0;
     };
@@ -512,7 +543,9 @@ public:
     void commitUpdate(const UpdatePreview& preview);
     void update(const FreeSurfaceUpdate& update);
 
-    /** Capture every mutable accepted ledger and headspace state. */
+    /** Capture every mutable accepted ledger and headspace state.
+     * With distributed controller guards installed, capture/restore are collective.
+     */
     [[nodiscard]] StateSnapshot snapshot() const;
     /** Restore accepted state and monotonically invalidate all outstanding previews. */
     void restore(const StateSnapshot& snapshot);
@@ -530,6 +563,19 @@ public:
     }
 
 private:
+    template<TpetraTypePack> friend class MultiphysicsSolverCoupler;
+    using local_failure_fence_type = std::function<void(std::string_view, const std::function<void()>&)>;
+    using replicated_check_type = std::function<void(std::string_view, const std::string&)>;
+    SIMPLEFLUID_SOLVERS_LOCAL void install_collective_guards(
+        local_failure_fence_type fence, replicated_check_type replicated);
+    SIMPLEFLUID_SOLVERS_LOCAL void local_stage(std::string_view label, const std::function<void()>& operation) const;
+    SIMPLEFLUID_SOLVERS_LOCAL void replicated_update(const FreeSurfaceUpdate& update) const;
+    SIMPLEFLUID_SOLVERS_LOCAL void replicated_headspace(const HeadspaceState& state) const;
+    SIMPLEFLUID_SOLVERS_LOCAL real_t checked_callback_volume(
+        const std::function<real_t(real_t)>& callback, real_t pressure, const char* label, bool allow_negative) const;
+    local_failure_fence_type d_local_failure_fence;
+    replicated_check_type d_replicated_check;
+
     struct ClosureResult
     {
         real_t liquid_volume = 0.0;
@@ -559,6 +605,7 @@ private:
     real_t d_initial_pool_level = 0.0;
     GasMolesBySpecies d_initial_gas_moles;
     GasMolesBySpecies d_committed_escaped_moles;
+    GasMoleSums d_committed_escape_sums;
     FreeSurfaceDiagnostics d_diagnostics;
     std::size_t d_update_generation = 0;
 };

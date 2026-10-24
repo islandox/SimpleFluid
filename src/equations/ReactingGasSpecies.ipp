@@ -387,7 +387,15 @@ void ReactingGasModel<Pack, MeshType>::initialize_species(
         d_history_initialized = false;
         publish_species_history(states, {}, true);
         sync_all_fields();
+        collective_detail::collective_local_validation(*d_mesh, "Reacting initialized receipt generation",
+            [&]
+            {
+                require(d_species_generation != std::numeric_limits<std::uint64_t>::max(),
+                    "Reacting initialization generation exhausted.");
+            });
         ++d_species_generation;
+        d_species_event_receipt = {
+            false, 0, d_species_generation, d_options.reaction_mechanism->catalog().fingerprint(), 0, 0};
     }
     catch (...)
     {
@@ -454,7 +462,10 @@ template<TpetraTypePack Pack, class MeshType>
 Reacting::ReactionEnvironment ReactingGasModel<Pack, MeshType>::species_environment(
     local_ordinal_type cell, double time, double temperature, double volume) const
 {
-    return {time, temperature, d_absolute_pressure.value(cell), d_alpha_l.value(cell) * volume, volume};
+    // This field adapter reports physical EOS solution volume on a prescribed carrier mesh.
+    // Local material occupancy is closed only by the separate native low-Mach flow owner.
+    return {time, temperature, d_absolute_pressure.value(cell), d_alpha_l.value(cell) * volume, volume,
+        Reacting::ReactionVolumeClosure::ReferenceControlVolume};
 }
 
 template<TpetraTypePack Pack, class MeshType>
@@ -796,11 +807,24 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     }
                 });
         };
+        std::vector<std::vector<detail::CompensatedSum<long double>>> liquid_molar_packets;
+        std::unique_ptr<face_flux_field_type> liquid_packet_scratch;
+        collective_detail::collective_local_validation(*d_mesh, "Liquid canonical packet workspace",
+            [&]
+            {
+                liquid_molar_packets.resize(catalog.species().size());
+                for (auto& species : liquid_molar_packets)
+                    species.resize(liquid_flux.owned_face_ids().size());
+                liquid_packet_scratch = std::make_unique<face_flux_field_type>(d_mesh, "liquid_species_molar_packet");
+            });
+        face_flux_field_type* active_liquid_packet = nullptr;
         const auto transport_one = [&](field_type& field, field_type& escape, const face_flux_field_type& flux,
                                        field_type* slip, bool liquidWeighted, bool diffuse, std::size_t slot,
                                        bool reuse)
         {
             escape.put_scalar(0.0);
+            if (active_liquid_packet)
+                active_liquid_packet->put_scalar(0.0);
             if (global_integral(field, oldVolumes) == scalar_type{})
             {
                 field.put_scalar(0.0);
@@ -813,7 +837,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 workspace.operator_ready.at(slot) = false;
             }
             transport_scalar(field, dt, flux, slip, 0.0, diffuse, liquidWeighted, escape, ale, axis, slot, reuse,
-                nullptr, nullptr, diffuse ? &d_species_diffusivity : nullptr);
+                nullptr, nullptr, diffuse ? &d_species_diffusivity : nullptr, active_liquid_packet);
         };
         for (auto& species : d_species_fields)
         {
@@ -836,13 +860,22 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                         d_species_diffusivity.owned_write_view()(owned, 0) = value;
                     }
                 });
+            active_liquid_packet = liquid_packet_scratch.get();
             transport_one(*species.phases[0], *species.escape, liquid_flux, nullptr, true, false, 0, false);
             record_escape(species.id, P::Liquid, {}, *species.escape);
+            const auto species_index = catalog.index(species.id);
+            for (const auto face : liquid_packet_scratch->owned_face_ids())
+                liquid_molar_packets[species_index][liquid_packet_scratch->owned_row(face)] +=
+                    liquid_packet_scratch->value(face);
             const auto& dissolvedFlux =
                 d_options.dissolved_transport == ReactingTransportMode::Advective ? liquid_flux : workspace.zero_flux;
             transport_one(*species.phases[1], *species.escape, dissolvedFlux, nullptr, true, false, 0,
                 false); // Film D never silently enables an unclosed bulk mass/energy diffusion model.
             record_escape(species.id, P::Dissolved, {}, *species.escape);
+            for (const auto face : liquid_packet_scratch->owned_face_ids())
+                liquid_molar_packets[species_index][liquid_packet_scratch->owned_row(face)] +=
+                    liquid_packet_scratch->value(face);
+            active_liquid_packet = nullptr;
             // This dispersed-bubble backend declares a stationary resolved compartment.
             // Its zero carrier still needs conservative accepted-old/trial-new ALE storage.
             // Advecting resolved interfaces are owned by the VoF phase-flux backend.
@@ -924,6 +957,69 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
         for (std::size_t owned = 0; owned < volumes.size(); ++owned)
             d_transport_alpha_g_raw.owned_write_view()(owned, 0) =
                 d_alpha_g_raw.value(static_cast<local_ordinal_type>(owned));
+        // Own the thermal trace used by canonical face EOS work. Do not require
+        // writable/synchronized ghost storage from a borrowed temperature input.
+        d_previous_temperature.sync_ghosts();
+        d_transport_liquid_material_volume_flux.put_scalar(0.0);
+        int local_incomplete_carrier = 0, incomplete_carrier = 0;
+        collective_detail::collective_local_validation(*d_mesh, "Reacting canonical liquid material-volume flux",
+            [&]
+            {
+                for (const auto face : d_transport_liquid_material_volume_flux.owned_face_ids())
+                {
+                    const auto owner = d_mesh->owner_cell(face);
+                    const bool boundary = d_mesh->is_boundary_face(face);
+                    const auto neighbor = boundary ? owner : d_mesh->opposite_or_periodic_neighbor_cell(face, owner);
+                    const bool open = boundary && std::ranges::find(d_options.free_surface_patches,
+                                                      d_mesh->boundary_batch_name(d_mesh->boundary_id(face))) !=
+                                                      d_options.free_surface_patches.end();
+                    double carrier = liquid_flux.value(face);
+                    if (boundary)
+                        carrier = open ? std::max(carrier, 0.0) : 0.0;
+                    require(std::isfinite(carrier), "Liquid material carrier is nonfinite.");
+                    if (carrier == 0)
+                        continue;
+                    const auto donor = carrier >= 0 ? owner : neighbor;
+                    std::vector<double> concentration(catalog.species().size());
+                    detail::CompensatedSum<long double> amount, dissolved, mass_rate;
+                    const auto face_row = d_transport_liquid_material_volume_flux.owned_row(face);
+                    for (std::size_t i = 0; i < concentration.size(); ++i)
+                    {
+                        const auto id = catalog.species()[i].id;
+                        const auto signed_rate = liquid_molar_packets[i][face_row].value();
+                        require(std::isfinite(signed_rate) && (signed_rate == 0 || (signed_rate > 0) == (carrier > 0)),
+                            "Canonical liquid species packet has an inconsistent donor/orientation.");
+                        concentration[i] = narrow(std::abs(signed_rate));
+                        amount += std::abs(signed_rate);
+                        mass_rate += signed_rate * catalog.species()[i].molarMass;
+                        dissolved += species_field(id, P::Dissolved).local_value(donor);
+                    }
+                    if (d_options.dissolved_transport != ReactingTransportMode::Advective && dissolved.value() > 0)
+                    {
+                        // Selectively moving part of a nonideal solution requires
+                        // supplied partial molar volumes. Existing ALE gates require
+                        // Advective, so the full liquid carrier always closes there.
+                        local_incomplete_carrier = 1;
+                        continue;
+                    }
+                    if (amount.value() == 0)
+                        continue;
+                    const auto point = d_options.liquid_thermodynamics->evaluate(
+                        d_previous_temperature.local_value(donor), d_absolute_pressure.local_value(donor),
+                        reacting_species_detail::composition(concentration));
+                    const double packet = narrow(mass_rate.value() / point.density);
+                    require((carrier > 0 && packet >= 0) || (carrier < 0 && packet <= 0),
+                        "Liquid material-volume packet changed canonical orientation.");
+                    d_transport_liquid_material_volume_flux.owned_write_view()(
+                        d_transport_liquid_material_volume_flux.owned_row(face), 0) = packet;
+                }
+            });
+        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_incomplete_carrier,
+            &incomplete_carrier);
+        d_liquid_transport_volume_receipt = {{}, mesh_geometry_epoch(*d_mesh), incomplete_carrier == 0};
+        if constexpr (requires { d_transport_liquid_material_volume_flux.sync_ghosts(); })
+            d_transport_liquid_material_volume_flux.sync_ghosts();
+
         // Exact owner-oriented carrier/slip volume ledger uses each population's
         // post-transport occupancy and the same combined-flux upwind selector.
         d_transport_bubble_slip_volume_flux.put_scalar(0.0);
@@ -968,6 +1064,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
             });
         species_step_sums interphase_step;
         std::vector<Reacting::CellSpeciesState> candidates;
+        std::vector<Reacting::ReactionLocalReceipt> chemical_receipts;
         std::vector<std::vector<BubbleGasPhysics::PopulationNumberState>> candidateNumbers;
         std::vector<double> transportedGas(volumes.size()), transportedMaterial(volumes.size());
         d_species_source_ledgers.resize(volumes.size());
@@ -975,6 +1072,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
         collective_detail::collective_local_validation(*d_mesh, "Reacting history scratch", [&]
         {
             interphase_step.resize(catalog.species().size() * (4 + d_options.population_ids.size()));
+            chemical_receipts.resize(volumes.size());
         });
         collective_detail::collective_local_validation(*d_mesh, "Reacting joint species and population preview",
             [&]
@@ -997,6 +1095,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     // Reporting ledgers may round away a channel before a later physical cancellation.
                     // Accumulate the accepted local receipt and each original reservoir packet before one division.
                     const auto& raw = chemistry.localReceipt;
+                    chemical_receipts[owned] = raw; // Transient exact keyed chemistry input to accepted history.
                     require(raw.schemaFingerprint == catalog.fingerprint() &&
                                 raw.reactionHeatContributions.size() ==
                                     d_options.reaction_mechanism->reactions().size(),
@@ -1114,6 +1213,23 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                                         transfer.species, transfer.donor, transfer.donorPopulation);
                                     const auto receiver = species_compartment_index(
                                         transfer.species, transfer.receiver, transfer.receiverPopulation);
+                                    interphase_step[donor].source_change += -static_cast<long double>(transfer.moles);
+                                    interphase_step[receiver].source_change += transfer.moles;
+                                    const auto s = catalog.index(transfer.species);
+                                    const bool donor_gas = transfer.donor != P::Liquid;
+                                    const bool receiver_gas = transfer.receiver != P::Liquid;
+                                    const bool donor_solution =
+                                        transfer.donor == P::Liquid || transfer.donor == P::Dissolved;
+                                    const bool receiver_solution =
+                                        transfer.receiver == P::Liquid || transfer.receiver == P::Dissolved;
+                                    if (donor_gas != receiver_gas)
+                                        interphase_step[s].gas_subset_source +=
+                                            receiver_gas ? static_cast<long double>(transfer.moles)
+                                                         : -static_cast<long double>(transfer.moles);
+                                    if (donor_solution != receiver_solution)
+                                        interphase_step[s].solution_subset_source +=
+                                            receiver_solution ? static_cast<long double>(transfer.moles)
+                                                              : -static_cast<long double>(transfer.moles);
                                     interphase_step[donor].amount[Reacting::history_detail::InterphaseOutflow] +=
                                         transfer.moles;
                                     interphase_step[receiver].amount[Reacting::history_detail::InterphaseInflow] +=
@@ -1194,14 +1310,34 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 std::abs((global[1] - global[0]) - global[2]) <= 4096 * std::numeric_limits<double>::epsilon() * scale,
                 "Accepted multispecies source/transport/escape ledger does not close.");
         }
-        publish_species_history(candidates, std::move(interphase_step), false);
+        publish_species_history(candidates, std::move(interphase_step), false, chemical_receipts);
         d_history_initialized = true;
         sync_all_fields();
         if constexpr (requires { d_transport_bubble_slip_volume_flux.sync_ghosts(); })
         {
             d_transport_bubble_slip_volume_flux.sync_ghosts();
             d_transport_bubble_carrier_volume_flux.sync_ghosts();
+            d_transport_liquid_material_volume_flux.sync_ghosts();
         }
+        collective_detail::collective_local_validation(*d_mesh, "Reacting accepted interval receipt",
+            [&]
+            {
+                require(d_species_event_receipt.schema_fingerprint == catalog.fingerprint() &&
+                            d_species_event_receipt.initialization_generation == d_species_generation &&
+                            d_species_event_receipt.revision != std::numeric_limits<std::uint64_t>::max() &&
+                            d_species_publication_nonce != std::numeric_limits<std::uint64_t>::max() &&
+                            std::isfinite(time - dt) && time > time - dt,
+                    "Reacting accepted interval receipt is invalid or exhausted.");
+            });
+        collective_detail::require_uniform_value(
+            *d_mesh, d_species_event_receipt.revision, "Reacting accepted event revision");
+        collective_detail::require_uniform_value(
+            *d_mesh, d_species_publication_nonce, "Reacting publication nonce allocator");
+        collective_detail::require_uniform_value(*d_mesh, time, "Reacting accepted interval end");
+        collective_detail::require_uniform_value(*d_mesh, dt, "Reacting accepted interval duration");
+        d_species_event_receipt = {true, d_species_event_receipt.revision + 1, d_species_generation,
+            catalog.fingerprint(), time, dt, ++d_species_publication_nonce};
+        d_liquid_transport_volume_receipt.event = d_species_event_receipt;
     }
     catch (...)
     {

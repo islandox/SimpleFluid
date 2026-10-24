@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <locale>
 #include <numeric>
 #include <set>
 #include <sstream>
@@ -66,6 +68,20 @@ void add_moles(GasMolesBySpecies& destination, const GasMolesBySpecies& source)
         {
             throw std::overflow_error("Accumulated gas moles for species '" + species + "' are not finite.");
         }
+    }
+}
+
+void add_compensated_moles(GasMolesBySpecies& values, GasMoleSums& sums, const GasMolesBySpecies& events)
+{
+    static_cast<void>(sum_moles(events));
+    for (const auto& [name, amount] : events)
+    {
+        sums[name] += amount;
+        const auto exact = sums[name].value();
+        const real_t stored = static_cast<real_t>(exact);
+        if (!std::isfinite(exact) || !std::isfinite(stored) || (exact != 0 && stored == 0))
+            throw std::overflow_error("Accepted species accumulation is not representable.");
+        values[name] = stored;
     }
 }
 
@@ -350,6 +366,33 @@ void validate_gas_inventory(const FreeSurfaceGasInventory& gas)
 {
     static_cast<void>(sum_moles(gas.initial_moles));
     static_cast<void>(sum_moles(gas.generated_moles));
+    static_cast<void>(sum_moles(gas.consumed_moles));
+    if (gas.net_source_moles)
+    {
+        std::set<std::string> names;
+        for (const auto& [name, amount] : gas.generated_moles)
+            names.insert(name);
+        for (const auto& [name, amount] : gas.consumed_moles)
+            names.insert(name);
+        for (const auto& [name, amount] : *gas.net_source_moles)
+            names.insert(name);
+        const auto value = [](const auto& values, const auto& name)
+        {
+            const auto found = values.find(name);
+            return found == values.end() ? real_t{} : found->second;
+        };
+        for (const auto& name : names)
+        {
+            const long double produced = value(gas.generated_moles, name), consumed = value(gas.consumed_moles, name);
+            const long double net = value(*gas.net_source_moles, name);
+            // Only representation consistency of rounded gross reports uses this
+            // operand bound; physical closure below uses the authoritative net.
+            const auto representation =
+                8 * std::numeric_limits<real_t>::epsilon() * (std::abs(produced) + std::abs(consumed) + std::abs(net));
+            if (name.empty() || !std::isfinite(net) || std::abs(net - (produced - consumed)) > representation)
+                throw std::invalid_argument("Signed gas source disagrees with its rounded gross event reports.");
+        }
+    }
     static_cast<void>(sum_moles(gas.dissolved_moles));
     static_cast<void>(sum_moles(gas.submerged_moles));
     for (const auto& [population, moles] : gas.submerged_population_moles)
@@ -398,6 +441,9 @@ void validate_gas_inventory(const FreeSurfaceGasInventory& gas)
     };
     insert_species(initial);
     insert_species(gas.generated_moles);
+    insert_species(gas.consumed_moles);
+    if (gas.net_source_moles)
+        insert_species(*gas.net_source_moles);
     insert_species(gas.dissolved_moles);
     insert_species(gas.submerged_moles);
     insert_species(headspace);
@@ -412,10 +458,23 @@ void validate_gas_inventory(const FreeSurfaceGasInventory& gas)
     GasMolesBySpecies closure;
     for (const auto& name : species)
     {
-        closure[name] = value_or_zero(initial, name) + value_or_zero(gas.generated_moles, name) -
-                        value_or_zero(gas.dissolved_moles, name) - value_or_zero(gas.submerged_moles, name) -
-                        value_or_zero(headspace, name) - value_or_zero(vented, name) -
-                        value_or_zero(gas.other_sink_moles, name);
+        detail::CompensatedSum<long double> balance;
+        balance += value_or_zero(initial, name);
+        if (gas.net_source_moles)
+            balance += value_or_zero(*gas.net_source_moles, name);
+        else
+        {
+            balance += value_or_zero(gas.generated_moles, name);
+            balance += -static_cast<long double>(value_or_zero(gas.consumed_moles, name));
+        }
+        balance += -static_cast<long double>(value_or_zero(gas.dissolved_moles, name));
+        balance += -static_cast<long double>(value_or_zero(gas.submerged_moles, name));
+        balance += -static_cast<long double>(value_or_zero(headspace, name));
+        balance += -static_cast<long double>(value_or_zero(vented, name));
+        balance += -static_cast<long double>(value_or_zero(gas.other_sink_moles, name));
+        closure[name] = static_cast<real_t>(balance.value());
+        if (!std::isfinite(closure[name]))
+            throw std::overflow_error("Gas closure overflow.");
     }
     return closure;
 }
@@ -1003,7 +1062,10 @@ real_t prescribed_headspace_temperature(const HeadspaceOptions& options, real_t 
     return values[lower_index] + fraction * (values[upper_index] - values[lower_index]);
 }
 
-HeadspaceModel::HeadspaceModel(HeadspaceOptions options) : d_options(std::move(options))
+HeadspaceModel::HeadspaceModel(HeadspaceOptions options) : HeadspaceModel(std::move(options), HeadspaceMetadata{}) {}
+
+HeadspaceModel::HeadspaceModel(HeadspaceOptions options, HeadspaceMetadata metadata)
+    : d_options(std::move(options)), d_metadata(std::move(metadata))
 {
     validate_headspace_options(d_options);
     d_state.pressure =
@@ -1014,6 +1076,11 @@ HeadspaceModel::HeadspaceModel(HeadspaceOptions options) : d_options(std::move(o
 const HeadspaceOptions& HeadspaceModel::options() const noexcept
 {
     return d_options;
+}
+
+const HeadspaceMetadata& HeadspaceModel::metadata() const noexcept
+{
+    return d_metadata;
 }
 
 const HeadspaceState& HeadspaceModel::state() const noexcept
@@ -1072,7 +1139,10 @@ HeadspaceMode VentedHeadspaceModel::mode() const noexcept
 
 void VentedHeadspaceModel::initialize(real_t pool_volume, real_t supplied_temperature)
 {
-    setState(trialState(pool_volume, supplied_temperature, {}));
+    const auto initial = trialState(pool_volume, supplied_temperature, {});
+    d_vented_moles.clear();
+    d_vented_sums.clear();
+    setState(initial);
 }
 
 HeadspaceState VentedHeadspaceModel::trialState(
@@ -1093,8 +1163,10 @@ void VentedHeadspaceModel::commit(const HeadspaceState& state, const GasMolesByS
         throw std::invalid_argument("Invalid thermodynamic state supplied to vented headspace.");
     }
     auto prospective = d_vented_moles;
-    add_moles(prospective, escaped_moles);
+    auto prospective_sums = d_vented_sums;
+    add_compensated_moles(prospective, prospective_sums, escaped_moles);
     d_vented_moles = std::move(prospective);
+    d_vented_sums = std::move(prospective_sums);
     setState(state);
 }
 
@@ -1270,6 +1342,132 @@ PlanarFreeSurfaceModel::PlanarFreeSurfaceModel(std::shared_ptr<const VesselVolum
     }
 }
 
+void PlanarFreeSurfaceModel::install_collective_guards(local_failure_fence_type fence, replicated_check_type replicated)
+{
+    if (d_initialized || d_local_failure_fence || d_replicated_check || !fence || !replicated)
+        throw std::logic_error("Install both surface collective guards once, before initialization.");
+    d_local_failure_fence = std::move(fence);
+    d_replicated_check = std::move(replicated);
+}
+void PlanarFreeSurfaceModel::local_stage(std::string_view label, const std::function<void()>& operation) const
+{
+    if (d_local_failure_fence)
+        d_local_failure_fence(label, operation);
+    else
+        operation();
+}
+void PlanarFreeSurfaceModel::replicated_update(const FreeSurfaceUpdate& update) const
+{
+    if (!d_replicated_check)
+        return;
+    std::string encoded;
+    local_stage("Headspace replicated input encoding",
+        [&]
+        {
+            std::ostringstream out;
+            out.imbue(std::locale::classic());
+            out << std::hexfloat << int(d_headspace->mode()) << ':' << update.time << ':' << update.time_step << ':'
+                << update.minimum_valid_absolute_pressure << ':' << update.liquid_volume_deficit << ':'
+                << update.headspace_temperature;
+            const auto& accepted = d_headspace->state();
+            const auto& controls = d_headspace->options();
+            if (!finite_positive(accepted.pressure) || !finite_positive(accepted.temperature) ||
+                !std::isfinite(accepted.volume) || accepted.volume < 0 || !std::isfinite(accepted.total_moles) ||
+                accepted.total_moles < 0)
+                throw std::invalid_argument("Accepted headspace state is invalid before closure.");
+            out << ':' << accepted.pressure << ':' << accepted.volume << ':' << accepted.temperature << ':'
+                << accepted.total_moles << ':' << int(controls.mode) << ':' << controls.ambient_pressure << ':'
+                << controls.total_internal_volume;
+            const auto append = [&](const GasMolesBySpecies& values)
+            {
+                out << ':' << values.size();
+                for (const auto& [name, value] : values)
+                    out << ':' << name.size() << ':' << name << ':' << value;
+            };
+            append(d_headspace->headspaceMoles());
+            append(d_headspace->ventedMoles());
+            append(update.gas.initial_moles);
+            append(update.gas.generated_moles);
+            append(update.gas.consumed_moles);
+            out << ':' << bool(update.gas.net_source_moles);
+            if (update.gas.net_source_moles)
+                append(*update.gas.net_source_moles);
+            append(update.gas.dissolved_moles);
+            append(update.gas.submerged_moles);
+            append(update.gas.escaped_moles_this_step);
+            append(update.gas.other_sink_moles);
+            out << ':' << update.gas.submerged_population_moles.size();
+            for (const auto& [population, values] : update.gas.submerged_population_moles)
+            {
+                out << ':' << population.size() << ':' << population;
+                append(values);
+            }
+            if (d_headspace->mode() != d_headspace->options().mode)
+                throw std::invalid_argument("Headspace mode changed after immutable configuration.");
+            encoded = out.str();
+        });
+    d_replicated_check("Headspace replicated input", encoded);
+}
+void PlanarFreeSurfaceModel::replicated_headspace(const HeadspaceState& state) const
+{
+    std::string encoded;
+    local_stage("Headspace returned state",
+        [&]
+        {
+            if (!finite_positive(state.pressure) || !finite_positive(state.temperature) ||
+                !std::isfinite(state.volume) || state.volume < 0 || !std::isfinite(state.total_moles) ||
+                state.total_moles < 0 || (d_headspace->mode() == HeadspaceMode::Closed && state.volume <= 0))
+                throw std::invalid_argument("Headspace returned an invalid physical state.");
+            if (d_replicated_check)
+            {
+                std::ostringstream out;
+                out.imbue(std::locale::classic());
+                out << std::hexfloat << state.pressure << ':' << state.volume << ':' << state.temperature << ':'
+                    << state.total_moles << ':' << int(d_headspace->mode()) << ':' << int(d_headspace->options().mode)
+                    << ':' << d_headspace->options().ambient_pressure << ':'
+                    << d_headspace->options().total_internal_volume;
+                if (d_headspace->mode() != d_headspace->options().mode)
+                    throw std::invalid_argument("Headspace mode changed during a local trial.");
+                const auto append = [&](const GasMolesBySpecies& values)
+                {
+                    static_cast<void>(sum_moles(values));
+                    out << ':' << values.size();
+                    for (const auto& [name, amount] : values)
+                        out << ':' << name.size() << ':' << name << ':' << amount;
+                };
+                append(d_headspace->headspaceMoles());
+                append(d_headspace->ventedMoles());
+                encoded = out.str();
+            }
+        });
+    if (d_replicated_check)
+        d_replicated_check("Headspace returned replicated state", encoded);
+}
+real_t PlanarFreeSurfaceModel::checked_callback_volume(
+    const std::function<real_t(real_t)>& callback, real_t pressure, const char* label, bool allow_negative) const
+{
+    // The internal collective callback fences its EOS work before returning.
+    // Never enclose its mesh communication in a local-only error fence.
+    const auto raw = callback(pressure);
+    real_t value{};
+    std::string encoded;
+    local_stage(label,
+        [&]
+        {
+            value = checked_volume([raw](real_t) { return raw; }, pressure, label, allow_negative);
+            if (d_replicated_check)
+            {
+                std::ostringstream out;
+                out.imbue(std::locale::classic());
+                out << std::hexfloat << pressure << ':' << value;
+                encoded = out.str();
+            }
+        });
+    if (d_replicated_check)
+        d_replicated_check(label, encoded);
+    return value;
+}
+
 void PlanarFreeSurfaceModel::validateUpdate(const FreeSurfaceUpdate& update, bool initializing) const
 {
     if (!update.liquid_volume_at_pressure || !update.bubble_volume_at_pressure)
@@ -1307,23 +1505,28 @@ void PlanarFreeSurfaceModel::initialize(const FreeSurfaceUpdate& update)
     {
         throw std::logic_error("PlanarFreeSurfaceModel is already initialized.");
     }
-    validateUpdate(update, true);
+    local_stage("Surface initial input validation", [&] { validateUpdate(update, true); });
+    replicated_update(update);
     const auto next_generation =
         invalidated_generation(d_update_generation, d_update_generation, "PlanarFreeSurfaceModel");
-    auto rollback_headspace = d_headspace->clone();
+    std::unique_ptr<HeadspaceModel> rollback_headspace;
+    local_stage("Initial headspace rollback clone", [&] { rollback_headspace = d_headspace->clone(); });
     try
     {
         const auto initial_pressure = d_headspace->state().pressure;
-        const auto raw_liquid = checked_volume(update.liquid_volume_at_pressure, initial_pressure, "Liquid volume",
-            d_volume_map->rangePolicy() == FreeSurfaceRangePolicy::ClampAndReport);
+        const auto raw_liquid = checked_callback_volume(update.liquid_volume_at_pressure, initial_pressure,
+            "Liquid volume", d_volume_map->rangePolicy() == FreeSurfaceRangePolicy::ClampAndReport);
         const auto liquid_range = d_volume_map->evaluateLevelForVolume(raw_liquid);
         const auto liquid = raw_liquid < 0.0 ? liquid_range.accepted : raw_liquid;
-        const auto bubble =
-            checked_volume(update.bubble_volume_at_pressure, initial_pressure, "Submerged bubble volume", false);
-        d_headspace->initialize(liquid + bubble, update.headspace_temperature);
+        const auto bubble = checked_callback_volume(
+            update.bubble_volume_at_pressure, initial_pressure, "Submerged bubble volume", false);
+        local_stage(
+            "Headspace initialize", [&] { d_headspace->initialize(liquid + bubble, update.headspace_temperature); });
+        replicated_headspace(d_headspace->state());
 
         const auto closure = solveClosure(update);
-        d_headspace->commit(closure.headspace, {});
+        local_stage("Headspace initial commit", [&] { d_headspace->commit(closure.headspace, {}); });
+        replicated_headspace(d_headspace->state());
 
         if (!update.gas.initial_moles.empty())
         {
@@ -1336,7 +1539,7 @@ void PlanarFreeSurfaceModel::initialize(const FreeSurfaceUpdate& update)
             add_moles(d_initial_gas_moles, d_headspace->headspaceMoles());
             add_moles(d_initial_gas_moles, d_headspace->ventedMoles());
         }
-        d_diagnostics = makeDiagnostics(closure, update, true);
+        local_stage("Surface initial diagnostics", [&] { d_diagnostics = makeDiagnostics(closure, update, true); });
         d_initial_pool_level = d_diagnostics.pool_level;
         d_diagnostics.old_pool_level = d_diagnostics.pool_level;
         d_diagnostics.old_clear_level = d_diagnostics.clear_level;
@@ -1348,6 +1551,7 @@ void PlanarFreeSurfaceModel::initialize(const FreeSurfaceUpdate& update)
         d_headspace = std::move(rollback_headspace);
         d_initial_gas_moles.clear();
         d_committed_escaped_moles.clear();
+        d_committed_escape_sums.clear();
         d_diagnostics = {};
         d_initial_pool_level = 0.0;
         d_initialized = false;
@@ -1361,27 +1565,48 @@ PlanarFreeSurfaceModel::UpdatePreview PlanarFreeSurfaceModel::previewUpdate(cons
     {
         throw std::logic_error("PlanarFreeSurfaceModel must be initialized before previewUpdate.");
     }
-    validateUpdate(update, false);
+    local_stage("Surface input validation", [&] { validateUpdate(update, false); });
+    replicated_update(update);
     const auto closure = solveClosure(update);
-    auto diagnostics = makeDiagnostics(closure, update, false);
+    FreeSurfaceDiagnostics diagnostics;
+    local_stage("Surface preview diagnostics", [&] { diagnostics = makeDiagnostics(closure, update, false); });
     return UpdatePreview(
         this, d_update_generation, closure.headspace, update.gas.escaped_moles_this_step, std::move(diagnostics));
 }
 
 void PlanarFreeSurfaceModel::commitUpdate(const UpdatePreview& preview)
 {
-    if (preview.d_owner != this || preview.d_generation != d_update_generation)
+    std::size_t next_generation{};
+    GasMolesBySpecies committed_escape;
+    GasMoleSums committed_sums;
+    FreeSurfaceDiagnostics diagnostics;
+    std::unique_ptr<HeadspaceModel> prior;
+    local_stage("Surface commit preflight",
+        [&]
+        {
+            if (preview.d_owner != this || preview.d_generation != d_update_generation)
+                throw std::logic_error("PlanarFreeSurfaceModel update preview is stale or belongs to another model.");
+            next_generation =
+                invalidated_generation(d_update_generation, d_update_generation, "PlanarFreeSurfaceModel");
+            prior = d_headspace->clone();
+            committed_escape = d_committed_escaped_moles;
+            committed_sums = d_committed_escape_sums;
+            add_compensated_moles(committed_escape, committed_sums, preview.d_escaped_moles);
+            diagnostics = preview.d_diagnostics;
+        });
+    try
     {
-        throw std::logic_error("PlanarFreeSurfaceModel update preview is stale or belongs to another model.");
+        local_stage("Headspace commit", [&] { d_headspace->commit(preview.d_headspace, preview.d_escaped_moles); });
+        replicated_headspace(d_headspace->state());
     }
-
-    const auto next_generation =
-        invalidated_generation(d_update_generation, d_update_generation, "PlanarFreeSurfaceModel");
-    auto committed_escape = d_committed_escaped_moles;
-    add_moles(committed_escape, preview.d_escaped_moles);
-    d_headspace->commit(preview.d_headspace, preview.d_escaped_moles);
+    catch (...)
+    {
+        d_headspace = std::move(prior);
+        throw;
+    }
     d_committed_escaped_moles = std::move(committed_escape);
-    d_diagnostics = preview.d_diagnostics;
+    d_committed_escape_sums = std::move(committed_sums);
+    d_diagnostics = std::move(diagnostics);
     d_update_generation = next_generation;
 }
 
@@ -1394,40 +1619,49 @@ void PlanarFreeSurfaceModel::update(const FreeSurfaceUpdate& update)
 PlanarFreeSurfaceModel::StateSnapshot PlanarFreeSurfaceModel::snapshot() const
 {
     StateSnapshot result;
-    result.d_owner = this;
-    result.d_headspace = d_headspace->clone();
-    result.d_initialized = d_initialized;
-    result.d_initial_pool_level = d_initial_pool_level;
-    result.d_initial_gas_moles = d_initial_gas_moles;
-    result.d_committed_escaped_moles = d_committed_escaped_moles;
-    result.d_diagnostics = d_diagnostics;
-    result.d_update_generation = d_update_generation;
+    local_stage("Surface snapshot preparation",
+        [&]
+        {
+            result.d_owner = this;
+            result.d_headspace = d_headspace->clone();
+            result.d_initialized = d_initialized;
+            result.d_initial_pool_level = d_initial_pool_level;
+            result.d_initial_gas_moles = d_initial_gas_moles;
+            result.d_committed_escaped_moles = d_committed_escaped_moles;
+            result.d_committed_escape_sums = d_committed_escape_sums;
+            result.d_diagnostics = d_diagnostics;
+            result.d_update_generation = d_update_generation;
+        });
     return result;
 }
 
 void PlanarFreeSurfaceModel::restore(const StateSnapshot& snapshot)
 {
-    if (snapshot.d_owner != this || !snapshot.d_headspace)
-    {
-        throw std::invalid_argument("PlanarFreeSurfaceModel snapshot is foreign or incomplete.");
-    }
-
-    // Prepare all potentially throwing copies before replacing accepted state.
-    auto restored_headspace = snapshot.d_headspace->clone();
-    auto restored_initial_gas = snapshot.d_initial_gas_moles;
-    auto restored_escape = snapshot.d_committed_escaped_moles;
-    auto restored_diagnostics = snapshot.d_diagnostics;
-    const auto next_generation =
-        invalidated_generation(d_update_generation, snapshot.d_update_generation, "PlanarFreeSurfaceModel");
-
+    std::unique_ptr<HeadspaceModel> restored_headspace;
+    GasMolesBySpecies restored_initial, restored_escape;
+    GasMoleSums restored_sums;
+    FreeSurfaceDiagnostics restored_diagnostics;
+    std::size_t next_generation{};
+    local_stage("Surface restore preparation",
+        [&]
+        {
+            if (snapshot.d_owner != this || !snapshot.d_headspace)
+                throw std::invalid_argument("PlanarFreeSurfaceModel snapshot is foreign or incomplete.");
+            restored_headspace = snapshot.d_headspace->clone();
+            restored_initial = snapshot.d_initial_gas_moles;
+            restored_escape = snapshot.d_committed_escaped_moles;
+            restored_sums = snapshot.d_committed_escape_sums;
+            restored_diagnostics = snapshot.d_diagnostics;
+            next_generation =
+                invalidated_generation(d_update_generation, snapshot.d_update_generation, "PlanarFreeSurfaceModel");
+        });
     d_headspace = std::move(restored_headspace);
     d_initialized = snapshot.d_initialized;
     d_initial_pool_level = snapshot.d_initial_pool_level;
-    d_initial_gas_moles = std::move(restored_initial_gas);
+    d_initial_gas_moles = std::move(restored_initial);
     d_committed_escaped_moles = std::move(restored_escape);
+    d_committed_escape_sums = std::move(restored_sums);
     d_diagnostics = std::move(restored_diagnostics);
-    // Accepted values roll back exactly, while the token epoch only moves
-    // forward so previews from either side of the rollback cannot revive.
     d_update_generation = next_generation;
 }
 
@@ -1445,7 +1679,7 @@ PlanarFreeSurfaceModel::ClosureResult PlanarFreeSurfaceModel::solveVented(const 
         throw std::runtime_error(
             "Vented free-surface pressure is below the valid domain of a coupled volume callback.");
     }
-    result.liquid_volume = checked_volume(update.liquid_volume_at_pressure, pressure, "Liquid volume",
+    result.liquid_volume = checked_callback_volume(update.liquid_volume_at_pressure, pressure, "Liquid volume",
         d_volume_map->rangePolicy() == FreeSurfaceRangePolicy::ClampAndReport);
     const auto liquid_evaluation = d_volume_map->evaluateLevelForVolume(result.liquid_volume);
     if (result.liquid_volume < 0.0)
@@ -1453,9 +1687,15 @@ PlanarFreeSurfaceModel::ClosureResult PlanarFreeSurfaceModel::solveVented(const 
         result.liquid_volume = liquid_evaluation.accepted;
         result.dryout_deficit = liquid_evaluation.underflow;
     }
-    result.bubble_volume = checked_volume(update.bubble_volume_at_pressure, pressure, "Submerged bubble volume", false);
-    result.headspace = d_headspace->trialState(
-        result.liquid_volume + result.bubble_volume, update.headspace_temperature, update.gas.escaped_moles_this_step);
+    result.bubble_volume =
+        checked_callback_volume(update.bubble_volume_at_pressure, pressure, "Submerged bubble volume", false);
+    local_stage("Vented headspace trial",
+        [&]
+        {
+            result.headspace = d_headspace->trialState(result.liquid_volume + result.bubble_volume,
+                update.headspace_temperature, update.gas.escaped_moles_this_step);
+        });
+    replicated_headspace(result.headspace);
     result.iterations = 1;
     return result;
 }
@@ -1464,14 +1704,15 @@ PlanarFreeSurfaceModel::ClosureResult PlanarFreeSurfaceModel::evaluateClosedTria
     const FreeSurfaceUpdate& update, real_t pressure) const
 {
     ClosureResult result;
-    result.liquid_volume = checked_volume(update.liquid_volume_at_pressure, pressure, "Liquid volume",
+    result.liquid_volume = checked_callback_volume(update.liquid_volume_at_pressure, pressure, "Liquid volume",
         d_volume_map->rangePolicy() == FreeSurfaceRangePolicy::ClampAndReport);
     if (result.liquid_volume < 0.0)
     {
         result.dryout_deficit = -result.liquid_volume;
         result.liquid_volume = 0.0;
     }
-    result.bubble_volume = checked_volume(update.bubble_volume_at_pressure, pressure, "Submerged bubble volume", false);
+    result.bubble_volume =
+        checked_callback_volume(update.bubble_volume_at_pressure, pressure, "Submerged bubble volume", false);
     const auto pool_volume = result.liquid_volume + result.bubble_volume;
     const auto available = d_headspace->options().total_internal_volume - pool_volume;
     if (!(available > 0.0))
@@ -1483,8 +1724,14 @@ PlanarFreeSurfaceModel::ClosureResult PlanarFreeSurfaceModel::evaluateClosedTria
         result.residual = -std::numeric_limits<real_t>::infinity();
         return result;
     }
-    const auto equilibrium =
-        d_headspace->trialState(pool_volume, update.headspace_temperature, update.gas.escaped_moles_this_step);
+    HeadspaceState equilibrium;
+    local_stage("Closed headspace trial",
+        [&]
+        {
+            equilibrium =
+                d_headspace->trialState(pool_volume, update.headspace_temperature, update.gas.escaped_moles_this_step);
+        });
+    replicated_headspace(equilibrium);
     result.residual = pressure - equilibrium.pressure;
     result.headspace = equilibrium;
     result.headspace.pressure = pressure;
@@ -1646,6 +1893,8 @@ FreeSurfaceDiagnostics PlanarFreeSurfaceModel::makeDiagnostics(
     }
 
     diagnostics.generated_gas_moles = gas.generated_moles;
+    diagnostics.consumed_gas_moles = gas.consumed_moles;
+    diagnostics.net_source_gas_moles = gas.net_source_moles;
     diagnostics.dissolved_gas_moles = gas.dissolved_moles;
     diagnostics.submerged_gas_moles = gas.submerged_moles;
     diagnostics.submerged_population_gas_moles = gas.submerged_population_moles;
@@ -1702,7 +1951,10 @@ FreeSurfaceDiagnostics PlanarFreeSurfaceModel::makeDiagnostics(
     for (const auto& [species, residual] : diagnostics.gas_closure_by_species)
     {
         const auto inventory_scale =
-            species_value(d_initial_gas_moles, species) + species_value(gas.generated_moles, species) +
+            species_value(d_initial_gas_moles, species) +
+            (gas.net_source_moles
+                    ? std::abs(species_value(*gas.net_source_moles, species))
+                    : species_value(gas.generated_moles, species) + species_value(gas.consumed_moles, species)) +
             species_value(gas.dissolved_moles, species) + species_value(gas.submerged_moles, species) +
             species_value(diagnostics.headspace_gas_moles, species) +
             species_value(diagnostics.vented_gas_moles, species) + species_value(gas.other_sink_moles, species);

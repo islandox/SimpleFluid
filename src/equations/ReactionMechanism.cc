@@ -454,8 +454,10 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
                 environment.absolutePressure > 0.0 && nonnegative(environment.liquidVolume) &&
                 nonnegative(environment.bulkVolume) &&
                 (environment.volumeClosure == ReactionVolumeClosure::Accepted ||
-                    environment.volumeClosure == ReactionVolumeClosure::ThermodynamicPredictor) &&
+                    environment.volumeClosure == ReactionVolumeClosure::ThermodynamicPredictor ||
+                    environment.volumeClosure == ReactionVolumeClosure::ReferenceControlVolume) &&
                 (environment.volumeClosure == ReactionVolumeClosure::ThermodynamicPredictor ||
+                    environment.volumeClosure == ReactionVolumeClosure::ReferenceControlVolume ||
                     environment.liquidVolume <= environment.bulkVolume) &&
                 (environment.liquidVolume == 0 || environment.bulkVolume > 0) && nonnegative(duration) &&
                 std::isfinite(environment.time + duration) &&
@@ -649,8 +651,8 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
         {
             const auto value = chemicalValues[chemicalIndex++];
             if (value != 0)
-                local.chemicalChanges.push_back({mechanism.catalog().species()[s].id,
-                    static_cast<SpeciesPhase>(phase), {}, value});
+                local.chemicalChanges.push_back(
+                    {mechanism.catalog().species()[s].id, static_cast<SpeciesPhase>(phase), {}, value});
         }
     for (const auto& population : initial.dispersedPopulations)
         for (std::size_t s = 0; s < speciesCount; ++s)

@@ -227,6 +227,10 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::Reacting::history_detail::"
     "^SimpleFluid::Reacting::low_mach_faces::"
     "^SimpleFluid::Reacting::population_source_detail::"
+    "^SimpleFluid::detail::surface_species::"
+    "^SimpleFluid::ClosedMixtureHeadspaceModel::(prospective|recover)[(]"
+    "^SimpleFluid::ClosedMixtureHeadspaceModel::InventoryCandidate::"
+    "^SimpleFluid::PlanarFreeSurfaceModel::(install_collective_guards|local_stage|replicated_update|replicated_headspace|checked_callback_volume)[(]"
     "^SimpleFluid::ReactingGasModel<.*>[ ]*::(species_compartment_index|publish_species_history|validate_species_pressure_metadata|validate_species_candidate_pressure|set_species_absolute_pressure_offset)[(]"
     "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::ControllerLease[(]SimpleFluid::Reacting::LowMachMixtureSolver[*], (unsigned long|unsigned long long)[)]$"
     "SimpleFluid::VoFSolver::Impl::"
@@ -690,6 +694,49 @@ foreach(simplefluid_stage4_mesh_kind IN ITEMS native legacy)
     endforeach()
     simplefluid_require_exact_api(
         "^${simplefluid_stage4_model}::evaluate_liquid_volume[(]double[)] const$" 1)
+endforeach()
+
+# Typed surface receipts (8), supplied headspace configuration (1), base metadata
+# constructor/query (3), and closed-mixture headspace methods/RTTI (13): exactly 25.
+set(simplefluid_species_surface_public_symbol_budget 25)
+foreach(simplefluid_surface_mesh_kind IN ITEMS native legacy)
+    set(simplefluid_surface_model
+        "SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_surface_mesh_kind}_mesh}[ ]*>")
+    foreach(simplefluid_surface_query IN ITEMS species_event_receipt species_subset_source_changes
+            liquid_transport_volume_receipt transported_liquid_material_volume_flux)
+        simplefluid_require_exact_api(
+            "^${simplefluid_surface_model}::${simplefluid_surface_query}[(][)] const$" 1)
+    endforeach()
+endforeach()
+simplefluid_require_exact_api(
+    "^SimpleFluid::MultiphysicsSolverCoupler<SimpleFluid::TpetraTypes<.*>[ ]*>::configure_free_surface[(]SimpleFluid::FreeSurfaceOptions const&, ${simplefluid_stage3_std}unique_ptr<SimpleFluid::HeadspaceModel, ${simplefluid_stage3_std}default_delete<SimpleFluid::HeadspaceModel>[ ]*>[)]$" 1)
+# Keep the original one-argument exported constructor as well as the metadata overload.
+simplefluid_require_exact_api(
+    "^SimpleFluid::HeadspaceModel::HeadspaceModel[(]SimpleFluid::HeadspaceOptions[)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::HeadspaceModel::HeadspaceModel[(]SimpleFluid::HeadspaceOptions, SimpleFluid::HeadspaceMetadata[)]$" 2)
+simplefluid_require_exact_api("^SimpleFluid::HeadspaceModel::metadata[(][)] const$" 1)
+set(simplefluid_surface_string
+    "std::(__[0-9]+::|__cxx11::)?basic_string<char, ${simplefluid_stage3_std}char_traits<char>, ${simplefluid_stage3_std}allocator<char>[ ]*>")
+set(simplefluid_surface_moles
+    "${simplefluid_stage3_std}map<${simplefluid_surface_string}, double, ${simplefluid_stage3_std}less<${simplefluid_surface_string}[ ]*>[ ]*, ${simplefluid_stage3_std}allocator<${simplefluid_stage3_std}pair<${simplefluid_surface_string} const, double>[ ]*>[ ]*>")
+simplefluid_require_exact_api(
+    "^SimpleFluid::ClosedMixtureHeadspaceModel::ClosedMixtureHeadspaceModel[(]SimpleFluid::HeadspaceOptions, ${simplefluid_stage3_eos_pointer}, ${simplefluid_surface_string}, (unsigned long|unsigned long long)[)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ClosedMixtureHeadspaceModel::initialize[(]double, double[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ClosedMixtureHeadspaceModel::commit[(]SimpleFluid::HeadspaceState const&, ${simplefluid_surface_moles} const&[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::ClosedMixtureHeadspaceModel::trialState[(]double, double, ${simplefluid_surface_moles} const&[)] const$" 1)
+foreach(simplefluid_surface_query IN ITEMS mode clone)
+    simplefluid_require_exact_api("^SimpleFluid::ClosedMixtureHeadspaceModel::${simplefluid_surface_query}[(][)] const$" 1)
+endforeach()
+foreach(simplefluid_surface_query IN ITEMS ventedMoles headspaceMoles accumulatedEscapedMoles)
+    simplefluid_require_exact_api(
+        "^SimpleFluid::ClosedMixtureHeadspaceModel::${simplefluid_surface_query}([[]abi:cxx11[]])?[(][)] const$" 1)
+endforeach()
+foreach(simplefluid_surface_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
+    simplefluid_require_exact_api("^${simplefluid_surface_rtti} SimpleFluid::ClosedMixtureHeadspaceModel$" 1)
 endforeach()
 
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
@@ -1174,13 +1221,15 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # 1550, disabled ceiling 1553. Internal distributed face helpers stay hidden.
 # Explicit number events add one exactly anchored receipt query: measured GCC
 # Debug 1551, disabled ceiling 1554. Population helpers remain private.
+# Typed surface/headspace adds 25 anchored definitions: measured GCC Debug 1576,
+# disabled ceiling 1579. No previous export is removed and private helpers stay hidden.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

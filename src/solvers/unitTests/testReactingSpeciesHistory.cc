@@ -654,4 +654,100 @@ TEST(ReactingSpeciesHistoryTest, RawVolumetricHeatAndCarriedEnergyCancelBeforeFi
         static_cast<double>(ranks - 1));
 }
 
+TEST(ReactingSpeciesHistoryTest, RawKeyedChemistrySurvivesEqualRoundedExtentsInSignedAndCumulativeHistory)
+{
+    using P = R::SpeciesPhase;
+    constexpr R::SpeciesId carrier = 97;
+    const double large = std::ldexp(1., 60), quantum = std::ldexp(1., -60);
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{donor, "raw finite liquid donor", .010, {{"X", 1}}, {P::Liquid}},
+            {gasOne, "ordinary dissolved product", .010, {{"X", 1}}, {P::Dissolved, P::Dispersed, P::Resolved}},
+            {carrier, "explicit finite solvent", .018, {{"S", 1}}, {P::Liquid}}});
+    auto selected = options();
+    selected.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(catalog,
+        std::vector<R::ReactionDefinition>{
+            {41, "forward accepted channels", {{donor, P::Liquid, -quantum}, {gasOne, P::Dissolved, quantum}}, 0},
+            {83, "opposing accepted channels", {{gasOne, P::Dissolved, -quantum}, {donor, P::Liquid, quantum}}, 0}},
+        R::EnergyConvention::SensibleEnergy);
+    const R::ThermodynamicBounds bounds{250, 600, 10000, 2000000};
+    selected.gas_thermodynamics = R::make_ideal_gas_mixture(
+        catalog, {{20, 300, 0}, {20, 300, 0}, {20, 300, 0}}, bounds, R::EnergyConvention::SensibleEnergy);
+    selected.liquid_thermodynamics = R::make_linear_compressible_mixture_liquid(
+        catalog, bounds, [](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4200, 0, 1e-9, 0, .001, .6}; },
+        R::EnergyConvention::SensibleEnergy);
+    S::ReactingSpeciesProperties property;
+    property.species = gasOne;
+    property.carried_molar_enthalpy = [](const auto&, auto, auto) { return 0.; };
+    selected.species_properties = {property};
+    selected.reaction_advance.maximumSubstep = .5;
+    selected.species_source = [catalog, large](const R::ReactionContext&, double)
+    {
+        R::ReactionSourceInput input;
+        R::ReactionRateProvider provider;
+        provider.identity = "two half-steps retain a finite keyed residual";
+        provider.schemaRevision = catalog->revision();
+        provider.schemaFingerprint = catalog->fingerprint();
+        provider.validityDescription = "manufactured finite donor stock over [0,1]";
+        provider.parameterUnits = "mol/(m3 s)";
+        provider.validate = [](const auto&) {};
+        provider.evaluate = [large](const R::ReactionContext& context)
+        {
+            const double t = context.environment.time;
+            return std::vector<R::ReactionRate>{
+                {41, t == 0 ? 4 * large : (t == 1 ? 4. : 0.), R::SourceVolumeBasis::BulkVolume},
+                {83, t == 0 ? 4 * large : 0., R::SourceVolumeBasis::BulkVolume}};
+        };
+        input.rates = std::move(provider);
+        return input;
+    };
+    Fixture fixture(selected, 2);
+    std::vector<R::CellSpeciesState> initial;
+    for (std::size_t c = 0; c < fixture.grid->num_owned_cells(); ++c)
+    {
+        const double v = fixture.grid->cell_volume(static_cast<Pack::local_ordinal_type>(c));
+        R::CellSpeciesState state(*catalog);
+        state.dispersedPopulations = {{"micro", std::vector<double>(3)}, {"large", std::vector<double>(3)}};
+        state.set_amount(*catalog, donor, P::Liquid, 2 * v);
+        state.set_amount(*catalog, gasOne, P::Dissolved, 2 * v);
+        state.set_amount(*catalog, carrier, P::Liquid, (1000 - .04) * v / .018);
+        initial.push_back(std::move(state));
+    }
+    fixture.initialize(initial);
+    const auto saved = fixture.model.snapshot();
+    const auto check = [&]
+    {
+        // All communication precedes local fatal shape assertions, including on actual empty owners.
+        EXPECT_EQ(fixture.sum(fixture.grid->num_owned_cells() == 0 ? 1. : 0.),
+            std::max(0, fixture.grid->owned_cell_map()->getComm()->getSize() - 2));
+        for (const auto& source : fixture.model.source_ledgers())
+        {
+            ASSERT_EQ(source.reactionExtents.size(), 2U);
+            EXPECT_EQ(source.reactionExtents[0], source.reactionExtents[1]); // Double gross reconstruction is zero.
+        }
+        const auto& event = events(fixture.model, gasOne, P::Dissolved);
+        EXPECT_EQ(event.chemical_production, event.chemical_consumption);
+        EXPECT_EQ(event.signed_source_change, quantum);
+        EXPECT_EQ(events(fixture.model, donor, P::Liquid).signed_source_change, -quantum);
+        const auto& subsets = fixture.model.species_subset_source_changes();
+        const auto product = std::ranges::find(subsets, gasOne, &R::SpeciesSubsetSourceChange::species);
+        const auto reactant = std::ranges::find(subsets, donor, &R::SpeciesSubsetSourceChange::species);
+        ASSERT_NE(product, subsets.end());
+        ASSERT_NE(reactant, subsets.end());
+        EXPECT_EQ(product->gas_source_moles, quantum);
+        EXPECT_EQ(product->solution_source_moles, quantum);
+        EXPECT_EQ(reactant->gas_source_moles, 0.);
+        EXPECT_EQ(reactant->solution_source_moles, -quantum);
+        // Stored fields cannot represent this sub-ULP change, but their independent signed history must retain it.
+        EXPECT_EQ(history(fixture.model, gasOne).initial_moles, history(fixture.model, gasOne).current_moles);
+        EXPECT_EQ(history(fixture.model, gasOne).inventory_error, quantum);
+        EXPECT_EQ(history(fixture.model, donor).inventory_error, -quantum);
+    };
+    fixture.advance(1.);
+    check();
+    fixture.model.restore(saved);
+    fixture.advance(1.);
+    check(); // A replay must not double the raw cumulative net.
+}
+
 } // namespace

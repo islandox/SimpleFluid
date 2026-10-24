@@ -10,6 +10,32 @@
 
 namespace SimpleFluid::Reacting
 {
+/** One accepted typed-model interval. No accepted event exists after initialization.
+ * Advance increments revision exactly once after all fields/history accept;
+ * thermodynamic/pressure refresh never changes this receipt. Snapshot/restore
+ * includes the receipt, so a replay resumes the same accepted event chain.
+ */
+struct SpeciesEventReceipt
+{
+    bool accepted = false;
+    std::uint64_t revision = 0, initialization_generation = 0, schema_fingerprint = 0;
+    double interval_end = 0, time_step = 0;
+    std::uint64_t publication_nonce = 0; ///< Unique validation identity; allocator never rewinds on restore.
+    bool operator==(const SpeciesEventReceipt&) const = default;
+};
+
+/** Identity of a captured pre-source liquid face-volume packet.
+ * Geometry refresh does not reconstruct the packet; a consumer must require its
+ * active geometry epoch and accepted event receipt before using it.
+ */
+struct LiquidTransportVolumeReceipt
+{
+    SpeciesEventReceipt event;
+    std::uint64_t geometry_epoch = 0;
+    bool complete_carrier = false;
+    bool operator==(const LiquidTransportVolumeReceipt&) const = default;
+};
+
 /** Global molar inventory report. Chemical production/consumption use each reaction's
  * net coefficient for this species across compartments; phase relocation alone
  * cannot create or destroy species. Public doubles are rounded views of retained
@@ -39,7 +65,20 @@ struct SpeciesCompartmentEvents
     double external_supply = 0, external_withdrawal = 0;
     double interphase_inflow = 0, interphase_outflow = 0;
     double physical_outflow = 0;
+    double signed_source_change = 0; ///< Chemical/external/interphase net; excludes physical outflow.
     bool operator==(const SpeciesCompartmentEvents&) const = default;
+};
+
+/** Signed accepted source change in overlapping physical subsets [mol/species].
+ * Gas subset: Dissolved + Resolved + all Dispersed; solution: Liquid + Dissolved.
+ * Formed directly from net stoichiometric events and raw external/interphase
+ * packets before narrowing gross or compartment reports. Physical outflow is separate.
+ */
+struct SpeciesSubsetSourceChange
+{
+    SpeciesId species = 0;
+    double gas_source_moles = 0, solution_source_moles = 0;
+    bool operator==(const SpeciesSubsetSourceChange&) const = default;
 };
 
 enum class PhysicalEscapeEnergyContract
@@ -100,6 +139,7 @@ enum CumulativeMetric : std::size_t
 struct CompartmentSums
 {
     std::array<Sum, EventMetricCount> amount;
+    Sum source_change, gas_subset_source, solution_subset_source;
     Sum escaped_mass, escaped_enthalpy;
     std::array<Sum, 3> escaped_momentum;
 };
@@ -113,6 +153,7 @@ struct State
     std::vector<std::array<Sum, CumulativeMetricCount>> cumulative_local;
     std::vector<SpeciesInventoryHistory> inventory;
     std::vector<SpeciesCompartmentEvents> step;
+    std::vector<SpeciesSubsetSourceChange> subset_step;
     std::vector<SpeciesPhysicalEscapeEvent> escape;
 };
 } // namespace history_detail

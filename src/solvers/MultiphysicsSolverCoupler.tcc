@@ -26,6 +26,17 @@ namespace SimpleFluid
 namespace
 {
 
+[[nodiscard]] std::string encode_headspace_metadata(const HeadspaceMetadata& metadata)
+{
+    std::ostringstream encoded;
+    encoded << std::hexfloat << metadata.catalog_fingerprint << ':' << metadata.provider_identity.size() << ':'
+            << metadata.provider_identity << ':' << metadata.provider_revision << ':'
+            << metadata.prescribed_temperature_only;
+    for (const auto bound : metadata.validity_bounds)
+        encoded << ':' << bound;
+    return encoded.str();
+}
+
 /** @brief Deterministically encode every free-surface option for MPI parity. */
 [[nodiscard]] std::string encode_free_surface_options(const FreeSurfaceOptions& options)
 {
@@ -906,6 +917,71 @@ template<TpetraTypePack Pack>
 auto MultiphysicsSolverCoupler<Pack>::configure_free_surface(const FreeSurfaceOptions& options)
     -> free_surface_model_type*
 {
+    return configure_free_surface(options, nullptr);
+}
+
+template<TpetraTypePack Pack>
+auto MultiphysicsSolverCoupler<Pack>::configure_free_surface(
+    const FreeSurfaceOptions& options, std::unique_ptr<HeadspaceModel> supplied_headspace) -> free_surface_model_type*
+{
+    const auto& mesh = *d_solver->d_mesh;
+    collective_detail::require_uniform_value(
+        mesh, static_cast<int>(bool(supplied_headspace)), "Supplied headspace selection");
+    std::string supplied_signature;
+    collective_detail::collective_local_validation(mesh, "Supplied headspace metadata",
+        [&]
+        {
+            const bool typed =
+                d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled();
+            if (supplied_headspace)
+            {
+                auto bound_options = options;
+                bound_options.headspace = supplied_headspace->options();
+                if (supplied_headspace->mode() != options.headspace.mode ||
+                    encode_free_surface_options(bound_options) != encode_free_surface_options(options))
+                    throw std::invalid_argument("Supplied headspace options do not match the configured surface.");
+                const auto& metadata = supplied_headspace->metadata();
+                if (supplied_headspace->state().volume != real_t{} || !supplied_headspace->headspaceMoles().empty() ||
+                    !supplied_headspace->ventedMoles().empty())
+                    throw std::invalid_argument("Inject a fresh uninitialized headspace closure.");
+                supplied_signature = encode_headspace_metadata(metadata);
+                if (supplied_signature.size() > std::size_t(std::numeric_limits<int>::max()))
+                    throw std::invalid_argument("Supplied headspace metadata exceeds MPI ordinal range.");
+                if (typed && options.headspace.mode == HeadspaceMode::Closed)
+                {
+                    const auto& catalog = d_reacting_gas_model->options().reaction_mechanism->catalog();
+                    if (options.headspace.infer_initial_moles ||
+                        metadata.catalog_fingerprint != catalog.fingerprint() || metadata.provider_identity.empty() ||
+                        metadata.provider_revision == 0 || !metadata.prescribed_temperature_only)
+                        throw std::invalid_argument(
+                            "Typed closed headspace requires an explicit catalog-bound prescribed-T EOS.");
+                    for (const auto& [name, amount] : options.headspace.initial_moles)
+                    {
+                        const auto found =
+                            std::ranges::find(catalog.species(), name, &Reacting::SpeciesDefinition::name);
+                        if (found == catalog.species().end() || !std::isfinite(amount) || amount < 0 ||
+                            (amount > 0 && !catalog.allows(found->id, Reacting::SpeciesPhase::Resolved) &&
+                                !catalog.allows(found->id, Reacting::SpeciesPhase::Dispersed)))
+                            throw std::invalid_argument(
+                                "Initial headspace gas must name actual allowed catalog species.");
+                    }
+                }
+            }
+            else if (options.enabled && typed && options.headspace.mode == HeadspaceMode::Closed)
+                throw std::invalid_argument(
+                    "Typed closed coupling requires explicit supplied HeadspaceModel ownership.");
+        });
+    collective_detail::require_uniform_value(mesh, supplied_signature.size(), "Headspace signature size");
+    std::string root_signature = supplied_signature;
+    if (!root_signature.empty())
+        Teuchos::broadcast(
+            *mesh.owned_cell_map()->getComm(), 0, static_cast<int>(root_signature.size()), root_signature.data());
+    collective_detail::collective_local_validation(mesh, "Collective headspace metadata",
+        [&]
+        {
+            if (root_signature != supplied_signature)
+                throw std::invalid_argument("Headspace provider metadata differs across ranks.");
+        });
     const auto communicator = d_solver->d_mesh->owned_cell_map()->getComm();
     const auto rank = communicator->getRank();
     const auto local_encoding = encode_free_surface_options(options);
@@ -939,7 +1015,7 @@ auto MultiphysicsSolverCoupler<Pack>::configure_free_surface(const FreeSurfaceOp
             "A prior step failed after upstream multiphysics state advanced; reconstruct the solver from an accepted "
             "state before configuring or advancing the free surface.");
     }
-    validate_free_surface_configuration(options);
+    validate_free_surface_configuration(options, supplied_headspace.get());
     if (options.enabled && options.mode == FreeSurfaceMode::PlanarALE)
     {
         PlanarALEMeshMotionOptions motion_options;
@@ -984,7 +1060,53 @@ auto MultiphysicsSolverCoupler<Pack>::configure_free_surface(const FreeSurfaceOp
             "already configured physical model.");
     }
 
-    auto model = make_planar_free_surface_model(options);
+    auto model = [&]()
+    {
+        if (!supplied_headspace)
+            return make_planar_free_surface_model(options);
+        auto volume_map = make_vessel_volume_map(options);
+        real_t underflow{}, overflow{};
+        if (options.initial_clear_level)
+        {
+            const auto range = volume_map->evaluateVolumeBelow(*options.initial_clear_level);
+            underflow = range.underflow;
+            overflow = range.overflow;
+        }
+        return std::make_unique<free_surface_model_type>(std::move(volume_map), std::move(supplied_headspace),
+            options.coupling, options.validity_warning_relative_level_change, underflow, overflow);
+    }();
+    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
+    {
+        const auto mesh = d_solver->d_mesh;
+        collective_detail::collective_local_validation(*mesh, "Surface collective guard installation",
+            [&]
+            {
+                model->install_collective_guards([mesh](std::string_view label, const std::function<void()>& operation)
+                    { collective_detail::collective_local_validation(*mesh, label, operation); },
+                    [mesh](std::string_view label, const std::string& local)
+                    {
+                        collective_detail::collective_local_validation(*mesh, std::string(label) + " size",
+                            [&]
+                            {
+                                if (local.size() > std::size_t(std::numeric_limits<int>::max()))
+                                    throw std::invalid_argument("Replicated surface result exceeds MPI ordinal range.");
+                            });
+                        collective_detail::require_uniform_value(*mesh, static_cast<int>(local.size()), label);
+                        std::string root;
+                        collective_detail::collective_local_validation(
+                            *mesh, std::string(label) + " buffer", [&] { root = local; });
+                        if (!root.empty())
+                            Teuchos::broadcast(
+                                *mesh->owned_cell_map()->getComm(), 0, static_cast<int>(root.size()), root.data());
+                        collective_detail::collective_local_validation(*mesh, label,
+                            [&]
+                            {
+                                if (root != local)
+                                    throw std::invalid_argument("Headspace/volume result differs across ranks.");
+                            });
+                    });
+            });
+    }
     auto inventory = std::make_unique<liquid_mass_inventory_type>(d_solver->d_mesh, options.liquid_mass);
     auto clear_level = std::make_unique<field_type>(d_solver->d_mesh, "clearLevel");
     auto pool_level = std::make_unique<field_type>(d_solver->d_mesh, "poolLevel");
@@ -1104,6 +1226,7 @@ template<TpetraTypePack Pack> bool MultiphysicsSolverCoupler<Pack>::remove_free_
     d_headspace_pressure.reset();
     d_pool_occupancy.reset();
     d_free_surface_options = {};
+    d_species_surface_accounting = {};
     d_pool_occupancy_volume_error = {};
     d_free_surface_history.clear();
     d_planar_ale_diagnostics = {};
@@ -1259,6 +1382,61 @@ void MultiphysicsSolverCoupler<Pack>::write_free_surface_history_csv(const std::
     if (!output)
     {
         throw std::runtime_error("Could not create free-surface history CSV file '" + filename + "'.");
+    }
+    if (species_surface_enabled())
+    {
+        const auto quote = [](std::string value)
+        {
+            std::string result = "\"";
+            for (const auto character : value)
+            {
+                if (character == '"')
+                    result += '"';
+                result += character;
+            }
+            return result + "\"";
+        };
+        output << "time_s,time_step_s,schema_fingerprint,event_revision,publication_nonce,species_id,species_name,"
+                  "gas_subset_generated_mol,gas_subset_consumed_mol,gas_subset_net_source_mol,dissolved_mol,submerged_"
+                  "mol,headspace_mol,vented_mol,"
+                  "escaped_this_step_mol,other_sink_mol,closure_mol,liquid_mass_kg,liquid_volume_m3,pool_volume_m3,"
+                  "headspace_pressure_pa,headspace_temperature_k,headspace_thermal_contract";
+        for (const auto& population : d_reacting_gas_model->options().population_ids)
+            output << ',' << quote("population_moles:" + population);
+        output << '\n';
+        output << std::setprecision(std::numeric_limits<real_t>::max_digits10);
+        const auto& catalog = d_reacting_gas_model->options().reaction_mechanism->catalog();
+        for (const auto& record : d_free_surface_history)
+        {
+            if (!record.catalogued_species || record.species_event.schema_fingerprint != catalog.fingerprint())
+                throw std::logic_error("History record belongs to a foreign chemical schema.");
+            const auto& surface = record.free_surface;
+            for (const auto& species : catalog.species())
+            {
+                const auto value = [&](const GasMolesBySpecies& amounts)
+                { return free_surface_species_moles(amounts, species.name); };
+                if (!surface.net_source_gas_moles)
+                    throw std::logic_error("Typed history lacks its authoritative signed source report.");
+                output << surface.time << ',' << surface.time_step << ',' << record.species_event.schema_fingerprint
+                       << ',' << record.species_event.revision << ',' << record.species_event.publication_nonce << ','
+                       << species.id << ',' << quote(species.name) << ',' << value(surface.generated_gas_moles) << ','
+                       << value(surface.consumed_gas_moles) << ',' << value(*surface.net_source_gas_moles) << ','
+                       << value(surface.dissolved_gas_moles) << ',' << value(surface.submerged_gas_moles) << ','
+                       << value(surface.headspace_gas_moles) << ',' << value(surface.vented_gas_moles) << ','
+                       << value(surface.escaped_gas_moles_this_step) << ',' << value(surface.other_sink_gas_moles)
+                       << ',' << value(surface.gas_closure_by_species) << ',' << record.liquid_mass.total_mass << ','
+                       << surface.liquid_volume << ',' << surface.pool_volume << ',' << surface.headspace.pressure
+                       << ',' << surface.headspace.temperature << ",prescribed_temperature_pressure_only";
+                for (const auto& population : d_reacting_gas_model->options().population_ids)
+                {
+                    const auto found = surface.submerged_population_gas_moles.find(population);
+                    output << ','
+                           << (found == surface.submerged_population_gas_moles.end() ? real_t{} : value(found->second));
+                }
+                output << '\n';
+            }
+        }
+        return;
     }
     const bool include_planar_ale = d_free_surface_options.mode == FreeSurfaceMode::PlanarALE;
     output << "time_s,time_step_s,liquid_mass_kg,cumulative_evaporated_mass_kg,"
@@ -1505,7 +1683,8 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_col
  * the globally tracked submerged-steam volume.
  */
 template<TpetraTypePack Pack>
-void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(const FreeSurfaceOptions& options) const
+void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(
+    const FreeSurfaceOptions& options, const HeadspaceModel* proposed_headspace) const
 {
     validate_free_surface_options(options);
     if (!options.enabled)
@@ -1513,8 +1692,30 @@ void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(const 
         return;
     }
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
-        throw std::invalid_argument("General species free-surface coupling requires the species-owned liquid "
-            "and gas-history adapter; the specialized inventory bridge is not admissible.");
+    {
+        if (options.liquid_mass.mode != LiquidVolumeMode::CellMassInventory ||
+            options.liquid_mass.depletion_policy != FreeSurfaceRangePolicy::Error ||
+            (d_boiling_source_model && d_boiling_source_model->enabled()))
+            throw std::invalid_argument(
+                "Typed species surface requires a cellMassInventory/error follower and no independent boiling owner.");
+        if (options.headspace.mode == HeadspaceMode::Closed)
+        {
+            const auto* closure = proposed_headspace
+                                      ? proposed_headspace
+                                      : (d_free_surface_model ? &d_free_surface_model->headspace() : nullptr);
+            if (!closure || options.headspace.infer_initial_moles)
+                throw std::invalid_argument("Typed closed headspace requires an explicit catalog-bound closure.");
+            const auto& metadata = closure->metadata();
+            const auto& bounds = metadata.validity_bounds;
+            if (metadata.catalog_fingerprint !=
+                    d_reacting_gas_model->options().reaction_mechanism->catalog().fingerprint() ||
+                metadata.provider_identity.empty() || metadata.provider_revision == 0 ||
+                !metadata.prescribed_temperature_only ||
+                !std::ranges::all_of(bounds, [](auto value) { return std::isfinite(value); }) ||
+                !(bounds[0] > 0 && bounds[1] > bounds[0] && bounds[2] > 0 && bounds[3] > bounds[2]))
+                throw std::invalid_argument("Supplied closed-mixture metadata/schema/bounds are invalid.");
+        }
+    }
     if (options.headspace.temperature_mode == HeadspaceTemperatureMode::External &&
         (options.mode != FreeSurfaceMode::PlanarALE || !d_thermal_participant))
         throw std::invalid_argument("External headspace temperature requires a typed planar ALE thermal participant.");
@@ -1708,7 +1909,7 @@ void MultiphysicsSolverCoupler<Pack>::validate_planar_ale_support(const FreeSurf
 
     if (d_reacting_gas_model && d_reacting_gas_model->enabled())
     {
-        if (!d_prescribed_heat_source)
+        if (!d_reacting_gas_model->species_enabled() && !d_prescribed_heat_source)
         {
             throw std::invalid_argument(
                 "planarALE Sheng reacting_gas requires an authoritative prescribed_heat-power source before setup.");
@@ -2136,7 +2337,13 @@ auto MultiphysicsSolverCoupler<Pack>::make_free_surface_update(
 
     FreeSurfaceUpdate update;
     const auto liquid_volume = preview ? preview->liquid.liquid_volume : d_liquid_mass_inventory->liquidVolume();
-    update.liquid_volume_at_pressure = [liquid_volume](real_t) { return static_cast<real_t>(liquid_volume); };
+    if (species_surface_enabled())
+        update.liquid_volume_at_pressure = [this](real_t pressure)
+        {
+            return static_cast<real_t>(d_reacting_gas_model->evaluate_liquid_volume(surface_pressure_offset(pressure)));
+        };
+    else
+        update.liquid_volume_at_pressure = [liquid_volume](real_t) { return static_cast<real_t>(liquid_volume); };
     update.liquid_volume_deficit = preview ? static_cast<real_t>(preview->liquid_volume_deficit) : real_t{};
     update.bubble_volume_at_pressure = [this](real_t pressure)
     {
@@ -2167,6 +2374,21 @@ auto MultiphysicsSolverCoupler<Pack>::make_free_surface_update(
 
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->supplies_void_fraction())
     {
+        if (species_surface_enabled())
+        {
+            if (!initializing && (!preview || !preview->species || !preview->species_gas))
+                throw std::logic_error("An accepted typed surface step requires its exact event receipt preview.");
+            const auto typed = initializing ? prepare_species_surface_preview(time, scalar_type{}, true) : *preview;
+            update.gas = *typed.species_gas;
+            update.minimum_valid_absolute_pressure = d_reacting_gas_model->minimum_valid_absolute_pressure_offset();
+            if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
+                d_reacting_gas_model->options().pressure_mode == ReactingPressureMode::Reconstructed)
+                update.minimum_valid_absolute_pressure -= volume_weighted_mean_pressure();
+            update.headspace_temperature = headspace_temperature(time);
+            update.time = time;
+            update.time_step = initializing ? real_t{} : d_solver->time_step();
+            return update;
+        }
         update.gas.generated_moles["H2"] = d_reacting_gas_model->cumulative_hydrogen_produced();
         update.gas.dissolved_moles["H2"] = d_reacting_gas_model->global_dissolved_hydrogen_moles();
         const auto microbubble_moles = d_reacting_gas_model->global_microbubble_hydrogen_moles();
@@ -2213,6 +2435,131 @@ auto MultiphysicsSolverCoupler<Pack>::make_free_surface_update(
     return update;
 }
 
+/** Pure collective current gas-subset inventory. All species/population identities
+ * come from the immutable schema; no reserved gas slot or phase renormalization.
+ */
+template<TpetraTypePack Pack>
+FreeSurfaceGasInventory MultiphysicsSolverCoupler<Pack>::current_species_surface_inventory() const
+{
+    const auto& mesh = *d_solver->d_mesh;
+    const auto& options = d_reacting_gas_model->options();
+    const auto& catalog = options.reaction_mechanism->catalog();
+    const auto ns = catalog.species().size(), stride = std::size_t{2} + options.population_ids.size();
+    std::vector<detail::surface_species::Sum> sums;
+    std::vector<scalar_type> local, global;
+    collective_detail::collective_local_validation(mesh, "Species surface inventory reduction",
+        [&]
+        {
+            if (ns > std::size_t(std::numeric_limits<int>::max()) / stride)
+                throw std::invalid_argument("Species surface reduction exceeds MPI ordinal range.");
+            sums.resize(ns * stride);
+            for (std::size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
+            {
+                const auto state = d_reacting_gas_model->cell_species_state(static_cast<local_ordinal_type>(owned));
+                for (std::size_t s = 0; s < ns; ++s)
+                {
+                    const auto id = catalog.species()[s].id;
+                    sums[s * stride] += state.amount(catalog, id, Reacting::SpeciesPhase::Dissolved);
+                    sums[s * stride + 1] += state.amount(catalog, id, Reacting::SpeciesPhase::Resolved);
+                    for (std::size_t p = 0; p < options.population_ids.size(); ++p)
+                        sums[s * stride + p + 2] +=
+                            state.amount(catalog, id, Reacting::SpeciesPhase::Dispersed, options.population_ids[p]);
+                }
+            }
+            local.resize(sums.size());
+            global.resize(sums.size());
+            for (std::size_t i = 0; i < sums.size(); ++i)
+                local[i] = detail::surface_species::narrow(sums[i].value());
+        });
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, static_cast<int>(local.size()),
+        local.data(), global.data());
+    FreeSurfaceGasInventory gas;
+    collective_detail::collective_local_validation(mesh, "Species surface inventory publication",
+        [&]
+        {
+            for (std::size_t s = 0; s < ns; ++s)
+            {
+                const auto& name = catalog.species()[s].name;
+                gas.dissolved_moles[name] = detail::surface_species::narrow(global[s * stride]);
+                detail::surface_species::Sum submerged;
+                submerged += global[s * stride + 1];
+                for (std::size_t p = 0; p < options.population_ids.size(); ++p)
+                {
+                    const auto amount = detail::surface_species::narrow(global[s * stride + p + 2]);
+                    gas.submerged_population_moles[options.population_ids[p]][name] = amount;
+                    submerged += amount;
+                }
+                gas.submerged_moles[name] = detail::surface_species::narrow(submerged.value());
+            }
+        });
+    return gas;
+}
+
+template<TpetraTypePack Pack>
+auto MultiphysicsSolverCoupler<Pack>::prepare_species_surface_preview(
+    scalar_type interval_end, scalar_type time_step, bool initializing) -> FreeSurfaceAccountingPreview
+{
+    const auto& mesh = *d_solver->d_mesh;
+    const auto& catalog = d_reacting_gas_model->options().reaction_mechanism->catalog();
+    FreeSurfaceAccountingPreview result;
+    result.species_gas.emplace(current_species_surface_inventory());
+    auto& gas = *result.species_gas;
+    collective_detail::collective_local_validation(mesh, "Species surface accepted event receipt",
+        [&]
+        {
+            if (initializing)
+                result.species = d_species_surface_accounting;
+            else
+                result.species = d_species_surface_accounting.preview(catalog,
+                    d_reacting_gas_model->species_event_receipt(), interval_end, time_step,
+                    d_reacting_gas_model->species_step_events(), d_reacting_gas_model->species_subset_source_changes(),
+                    d_reacting_gas_model->physical_escape_events(), gas.escaped_moles_this_step,
+                    result.species_liquid_source, result.species_liquid_outflow);
+            gas.initial_moles = result.species->initial;
+            gas.generated_moles = detail::surface_species::Accounting::report(result.species->production);
+            gas.consumed_moles = detail::surface_species::Accounting::report(result.species->consumption);
+            gas.net_source_moles = detail::surface_species::Accounting::report(result.species->net_source);
+            gas.other_sink_moles = detail::surface_species::Accounting::report(result.species->dissolved_outflow);
+        });
+    return result;
+}
+
+template<TpetraTypePack Pack>
+auto MultiphysicsSolverCoupler<Pack>::surface_pressure_offset(scalar_type headspace_pressure) const -> scalar_type
+{
+    if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
+        d_reacting_gas_model->options().pressure_mode == ReactingPressureMode::Reconstructed)
+        return headspace_pressure + volume_weighted_mean_pressure();
+    return headspace_pressure;
+}
+
+/** Fixed-grid typed reporting/closure transaction. No liquid transport solve,
+ * no source reevaluation, and no phase-energy debit inferred from escape traces.
+ * The enclosing physical-step rollback also owns this model/bridge state.
+ */
+template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::advance_species_free_surface(scalar_type time_step)
+{
+    auto accounting = prepare_species_surface_preview(d_solver->d_time + time_step, time_step);
+    auto mass = d_liquid_mass_inventory->previewSpeciesMass(d_reacting_gas_model->liquid_mass_density(),
+        d_reacting_gas_model->pure_liquid_density(), accounting.species_liquid_source,
+        accounting.species_liquid_outflow);
+    accounting.liquid = mass.diagnostics();
+    const auto surface =
+        d_free_surface_model->previewUpdate(make_free_surface_update(d_solver->d_time + time_step, false, &accounting));
+    // Only a physically accepted closure may change the retained pressure.
+    const auto offset = surface_pressure_offset(surface.headspacePressure());
+    d_reacting_gas_model->set_absolute_pressure_offset(offset);
+    // Mass is unchanged by pressure publication; report the accepted EOS density,
+    // not the lagged pressure used for the source/transport substep.
+    mass = d_liquid_mass_inventory->previewSpeciesMass(d_reacting_gas_model->liquid_mass_density(),
+        d_reacting_gas_model->pure_liquid_density(), accounting.species_liquid_source,
+        accounting.species_liquid_outflow);
+    d_free_surface_model->commitUpdate(surface);
+    d_liquid_mass_inventory->commitPhaseChange(mass);
+    d_species_surface_accounting = std::move(*accounting.species);
+    publish_free_surface_fields();
+}
+
 /** @brief Initialize a configured free-surface after fields are usable. */
 template<TpetraTypePack Pack>
 void MultiphysicsSolverCoupler<Pack>::initialize_free_surface_if_needed(
@@ -2249,10 +2596,24 @@ void MultiphysicsSolverCoupler<Pack>::initialize_free_surface_if_needed(
         }
 
         const auto initial_volume = configured_initial_liquid_volume(d_free_surface_options).value_or(real_t{});
-        d_liquid_mass_inventory->initialize(static_cast<scalar_type>(initial_volume),
-            [this](local_ordinal_type cell_lid) { return pure_liquid_density(cell_lid); });
+        if (species_surface_enabled())
+        {
+            d_liquid_mass_inventory->initializeFromSpecies(
+                d_reacting_gas_model->liquid_mass_density(), d_reacting_gas_model->pure_liquid_density());
+            auto initial_gas = current_species_surface_inventory();
+            auto amounts = initial_gas.dissolved_moles;
+            for (const auto& [name, amount] : initial_gas.submerged_moles)
+                amounts[name] += amount;
+            for (const auto& [name, amount] : d_free_surface_options.headspace.initial_moles)
+                amounts[name] += amount;
+            d_species_surface_accounting.initialize(d_reacting_gas_model->options().reaction_mechanism->catalog(),
+                d_reacting_gas_model->species_event_receipt(), std::move(amounts), d_solver->d_time);
+        }
+        else
+            d_liquid_mass_inventory->initialize(static_cast<scalar_type>(initial_volume),
+                [this](local_ordinal_type cell_lid) { return pure_liquid_density(cell_lid); });
         const auto configured_volume = configured_initial_liquid_volume(d_free_surface_options);
-        if (d_free_surface_options.liquid_mass.initial_liquid_mass && configured_volume)
+        if (!species_surface_enabled() && d_free_surface_options.liquid_mass.initial_liquid_mass && configured_volume)
         {
             const auto actual_volume = static_cast<real_t>(d_liquid_mass_inventory->liquidVolume());
             const auto scale = std::max(std::abs(*configured_volume), std::abs(actual_volume));
@@ -2279,6 +2640,22 @@ void MultiphysicsSolverCoupler<Pack>::initialize_free_surface_if_needed(
                     offset += volume_weighted_mean_pressure();
                 }
                 d_reacting_gas_model->set_absolute_pressure_offset(offset);
+                if (species_surface_enabled())
+                {
+                    const auto eos_report = d_liquid_mass_inventory->previewSpeciesMass(
+                        d_reacting_gas_model->liquid_mass_density(), d_reacting_gas_model->pure_liquid_density(), 0, 0);
+                    d_liquid_mass_inventory->commitPhaseChange(eos_report);
+                    if (configured_volume)
+                    {
+                        const auto actual = static_cast<real_t>(d_liquid_mass_inventory->liquidVolume());
+                        const auto scale = std::max(std::abs(*configured_volume), std::abs(actual));
+                        const auto tolerance = d_free_surface_options.coupling.volume_absolute_tolerance +
+                                               d_free_surface_options.coupling.volume_relative_tolerance * scale;
+                        if (std::abs(actual - *configured_volume) > tolerance)
+                            throw std::invalid_argument("Configured fill disagrees with actual species liquid volume "
+                                                        "at the accepted initial pressure.");
+                    }
+                }
             }
         }
         // Lazy primary-field initialization must complete the same ALE
@@ -2305,6 +2682,11 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::advance_free
         return;
     }
     initialize_free_surface_if_needed(true);
+    if (species_surface_enabled())
+    {
+        advance_species_free_surface(time_step);
+        return;
+    }
 
     scalar_type evaporated_mass{};
     scalar_type condensed_mass{};
@@ -2414,7 +2796,13 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::record_free_
     record.free_surface = d_free_surface_model->diagnostics();
     record.liquid_mass = d_liquid_mass_inventory->diagnostics();
     record.pool_occupancy_volume_error = d_pool_occupancy_volume_error;
-    if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->supplies_void_fraction())
+    if (species_surface_enabled())
+    {
+        record.catalogued_species = true;
+        record.species_event = d_reacting_gas_model->species_event_receipt();
+    }
+    if (!species_surface_enabled() && d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+        d_reacting_gas_model->supplies_void_fraction())
     {
         auto population_moles = [&record](const std::string& population, const std::string& species)
         {
@@ -2610,6 +2998,13 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
         d_reacting_gas_model->supplies_void_fraction() && !species_before_temperature;
     if (species_before_temperature)
     {
+        if (species_surface_enabled())
+            collective_detail::collective_local_validation(*d_solver->d_mesh, "Species surface pre-advance receipt",
+                [&]
+                {
+                    d_species_surface_accounting.require_before_advance(
+                        d_reacting_gas_model->species_event_receipt(), d_solver->d_time);
+                });
         const auto gas_timing = d_solver->d_solver_timings.scope(SolverPhase::Gas);
         d_reacting_gas_model->advance(d_solver->d_time + time_step, time_step, d_solver->temperature(),
             d_solver->pressure(), d_solver->velocity(), d_solver->projected_face_fluxes(),
@@ -2713,6 +3108,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::CouplingSt
     typename material_feedback_model_type::StateSnapshot feedback;
     typename liquid_mass_inventory_type::StateSnapshot liquid;
     std::optional<typename free_surface_model_type::StateSnapshot> surface;
+    detail::surface_species::Accounting species_surface;
     std::optional<typename volume_continuity_model_type::StateSnapshot> continuity;
     std::optional<typename reacting_gas_model_type::StateSnapshot> gas;
     std::optional<typename scalar_void_fraction_model_type::StateSnapshot> void_state;
@@ -2783,6 +3179,8 @@ template<TpetraTypePack Pack> std::string MultiphysicsSolverCoupler<Pack>::coupl
         sources.emplace_back(name, true); // Enabled flags are checkpointed physical source state.
     return (d_thermal_participant ? d_thermal_participant->configuration_signature() : std::string{}) +
            std::to_string(d_reacting_gas_model && d_reacting_gas_model->donor_hydrogen_deficit_tracking_enabled()) +
+           (d_free_surface_model ? encode_headspace_metadata(d_free_surface_model->headspace().metadata())
+                                 : std::string{}) +
            encode_free_surface_options(d_free_surface_options) +
            encode_planar_ale_runtime_options(time_options, d_solver->d_problem.linear_options(),
                d_solver->pressure_linear_solver_options(), d_solver->momentum_linear_solver_options(),
@@ -2792,8 +3190,7 @@ template<TpetraTypePack Pack> std::string MultiphysicsSolverCoupler<Pack>::coupl
                d_solver->uses_legacy_backend(), d_solver->physical_transport_enabled(),
                d_solver->stored_turbulence_model().enabled(),
                d_boiling_source_model && d_boiling_source_model->enabled(),
-               d_scalar_void_fraction_explicitly_configured,
-               d_solver->stored_material_properties().has_updater(),
+               d_scalar_void_fraction_explicitly_configured, d_solver->stored_material_properties().has_updater(),
                d_solver->stored_temperature_sources().has_dynamic_updates());
 }
 
@@ -2849,6 +3246,7 @@ template<TpetraTypePack Pack> auto MultiphysicsSolverCoupler<Pack>::create_coupl
     saved->feedback = d_material_feedback_model->snapshot();
     saved->liquid = d_liquid_mass_inventory->snapshot();
     saved->surface.emplace(d_free_surface_model->snapshot());
+    saved->species_surface = d_species_surface_accounting;
     saved->continuity.emplace(d_volume_continuity_model->snapshot());
     if (d_reacting_gas_model)
         saved->gas.emplace(d_reacting_gas_model->snapshot());
@@ -2921,6 +3319,7 @@ void MultiphysicsSolverCoupler<Pack>::restore_coupling_checkpoint(const Coupling
     d_material_feedback_model->restore(saved.feedback);
     d_liquid_mass_inventory->restore(saved.liquid);
     d_free_surface_model->restore(*saved.surface);
+    d_species_surface_accounting = saved.species_surface;
     d_volume_continuity_model->restore(*saved.continuity);
     if (saved.gas)
         d_reacting_gas_model->restore(*saved.gas);
@@ -3057,6 +3456,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
             physics_rollback.capture_model(*d_free_surface_model);
         if (d_liquid_mass_inventory)
             physics_rollback.capture_model(*d_liquid_mass_inventory);
+        physics_rollback.capture_model(d_species_surface_accounting);
         for (auto* field :
             {d_clear_level.get(), d_pool_level.get(), d_headspace_pressure.get(), d_pool_occupancy.get()})
             if (field)
