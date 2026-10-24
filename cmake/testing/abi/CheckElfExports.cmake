@@ -228,6 +228,7 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::PlanarALEBoundary<.*>[ ]*::(validate|validate_collective_controls)[(]"
     "^SimpleFluid::detail::"
     "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(view|source_entity|position_in_view|lookup|band_for_local)[(]"
+    "^SimpleFluid::Meshes::DecomposedOrthogonalTopology::(subtract|insert|count|finalize|flatten|expand|owned_face_local_id|owned_source_face|lookup|select|add_wrapped|shape)[(]"
     "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(View|Group)::"
     "SimpleFluid::FluidSolver<.*>[ ]*::(run_momentum_predictor|global_sum|write_step_progress|run_pressure_correction|solve_coupled_krylov)[(]"
     "SimpleFluid::FluidSolver<.*>[ ]*::FluidSolver[(].*bool[)]$"
@@ -263,6 +264,7 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
 endforeach()
 
 set(simplefluid_required_api_patterns
+    "^SimpleFluid::MeshHandle<.*>[ ]*::decomposed_orthogonal_topology[(]"
     "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::OrthogonalMeshDecomposition[(]"
     "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::owned_begin[(]"
     "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::owned_end[(]"

@@ -52,8 +52,7 @@ local row and rank offset. `cell_global_id()` and `face_global_id()` expose
 these algebraic IDs; their `*_geometry_global_id()` counterparts expose source
 topology IDs. The optional compatibility `indexer()` uses source topology IDs.
 
-The local source lookup is kept separately from the algebraic maps. Fields and
-operators retain native geometry access and share its motion epoch. Calling
+Fields and operators retain native geometry access and share its motion epoch. Calling
 `MeshReorderingFactory::selected_cells_first()` later preserves algebraic IDs
 attached to physical cells while changing local rows, so its cell map may lose
 contiguity. Construct fields and caches after finalizing order.
@@ -63,6 +62,45 @@ serial virtual partition/count overrides remain diagnostic compatibility views
 with source-ID maps; they are not communicating MPI partitions and do not carry
 the contiguous-map guarantee. In real MPI, rank/count overrides must match the
 communicator.
+
+## Compact local topology and geometry lookup
+
+`mesh->decomposed_orthogonal_topology()` exposes the construction-local view
+for decomposed Cartesian/cylindrical handles. It shares the source topology and
+stores the owned block plus disjoint logical boxes for halo cells, faces and
+nodes. It retains no per-entity source-ID table, hash map or tree. One-part
+serial handles retain their established arithmetic path and return a null view.
+
+| Query | Cost |
+| --- | --- |
+| Owned cell or face, local ID to source ID and back | O(1) coordinate/stride arithmetic |
+| Halo cell/face or local node, local ID to source ID | O(log B) prefix-box selection, then arithmetic |
+| Halo cell/face or local node, source ID to local ID | O(B) box membership, then arithmetic |
+
+Here B is the number of relevant disjoint boxes, not the number of cells or
+faces. Metadata does not scale with the owned block volume for a fixed halo
+layout. Larger halo depths can increase the number of boxes and construction
+cost. Required Tpetra maps, field storage, boundary rows and shared coordinate
+arrays still scale according to their own contracts; this is not a claim of
+constant total process memory.
+
+Owned faces retain orientation-grouped I-fastest order, including periodic seam
+faces. Ghost entities and nodes concatenate deterministic boxes. The public
+box observers expose coverage; owned-face boxes do not define the flattened
+owned-face order across a seam.
+
+Ordinary geometry and traversal queries use this view without materializing
+`indexer()` or cell-face CSR. Explicit `indexer()` requests create compatibility
+source-ID arrays. Explicit selected-cell reordering retains an optional forward
+and inverse local ordinal overlay; the compact view keeps its construction
+order, and the handle's accessors apply the overlay. Faces and nodes keep their
+order. Storage reports count compact metadata as topology and an optional
+reordering overlay as compatibility storage.
+
+The compact view aliases the concrete mesh's topology, so ALE trials and
+rollback retain geometry identity, map identity and ownership. Numeric caches
+must still track the shared geometry epoch. This local lookup path does not
+expand the support matrix of specialized structured traversal ranges.
 
 ## Halos, collective inputs and support
 

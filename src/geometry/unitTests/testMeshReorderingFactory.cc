@@ -763,6 +763,10 @@ TEST(MeshReorderingFactoryMultiRankTest, OrthogonalSelectedFirstPreservesGeometr
                     EXPECT_EQ(parent->num_faces(), 0U);
                 }
             }
+            EXPECT_FALSE(parent->has_materialized_indexer());
+            EXPECT_FALSE(parent->has_materialized_connectivity());
+            const auto compact = parent->decomposed_orthogonal_topology();
+            ASSERT_TRUE(compact);
             const auto before = capture_cells(*parent);
             std::vector<GlobalOrdinal> owned_order;
             double local_distinct = 0., distinct = 0.;
@@ -799,6 +803,7 @@ TEST(MeshReorderingFactoryMultiRankTest, OrthogonalSelectedFirstPreservesGeometr
             const auto verify_layout = [&](const auto& layout)
             {
                 const auto& mesh = *layout.mesh;
+                EXPECT_EQ(mesh.decomposed_orthogonal_topology().get(), compact.get());
                 expect_cells_preserved(before, mesh);
                 EXPECT_TRUE(mesh.owned_cell_map()->isOneToOne());
                 EXPECT_TRUE(mesh.owned_face_map()->isOneToOne());

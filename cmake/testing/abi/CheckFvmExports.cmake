@@ -100,6 +100,7 @@ foreach(index RANGE ${last_symbol})
         continue()
     endif()
     if(name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(view|source_entity|position_in_view|lookup|band_for_local)([(]|$)"
+       OR name MATCHES "^SimpleFluid::Meshes::DecomposedOrthogonalTopology::(subtract|insert|count|finalize|flatten|expand|owned_face_local_id|owned_source_face|lookup|select|add_wrapped|shape)([(]|$)"
        OR name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(View|Group)::"
        OR name MATCHES "^SimpleFluid::MeshHandle<.*>[ ]*::initialize_contiguous_native_maps([(]|$)")
         message(FATAL_ERROR "Private mesh implementation exported: ${name}")
@@ -169,6 +170,16 @@ foreach(method IN ITEMS
         boundary_id view_source_ids storage_bytes lookup_storage_estimate)
     if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::Meshes::DecomposedSemiStructuredTopology::${method}([(]|\n|$)")
         message(FATAL_ERROR "Missing compiled decomposed-topology API: ${method}")
+    endif()
+endforeach()
+
+# Orthogonal views use the same compiled lookup boundary as XY/Z views.
+foreach(method IN ITEMS
+        DecomposedOrthogonalTopology source_cell source_face source_node
+        cell_local_id face_local_id node_local_id cell_faces owner_cell neighbor_cell
+        boundary_id storage_bytes)
+    if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::Meshes::DecomposedOrthogonalTopology::${method}([(]|\n|$)")
+        message(FATAL_ERROR "Missing compiled orthogonal-topology API: ${method}")
     endif()
 endforeach()
 

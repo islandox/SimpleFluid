@@ -1,5 +1,7 @@
 /** Independent geometry and algebraic-ID oracles for orthogonal MPI decomposition. */
 #include "geometry/MeshHandle.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
+#include "geometry/mesh/DecomposedOrthogonalTopology.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -61,6 +63,54 @@ template<class Native> void verify(const std::shared_ptr<Native>& native, std::s
     const Handle mesh(native, options);
     if (options.orthogonal_partitions)
         EXPECT_EQ(mesh.orthogonal_decomposition()->factors(), *options.orthogonal_partitions);
+    EXPECT_FALSE(mesh.has_materialized_indexer());
+    EXPECT_FALSE(mesh.has_materialized_connectivity());
+    const auto compact = mesh.decomposed_orthogonal_topology();
+    if (processes == 1)
+        EXPECT_FALSE(compact);
+    else
+    {
+        ASSERT_TRUE(compact);
+        EXPECT_EQ(&compact->source_topology(), &native->topology());
+        EXPECT_EQ(compact->num_owned_cells(), mesh.num_owned_cells());
+        EXPECT_EQ(compact->num_local_cells(), mesh.num_local_cells());
+        EXPECT_EQ(compact->num_owned_faces(), mesh.num_owned_faces());
+        EXPECT_EQ(compact->num_local_faces(), mesh.num_faces());
+        EXPECT_EQ(compact->lookup_storage_estimate(), 0U);
+        for (std::size_t c = 0; c < mesh.num_local_cells(); ++c)
+        {
+            const auto source = compact->source_cell(c);
+            EXPECT_EQ(compact->cell_local_id(source), c);
+            EXPECT_EQ(native->indexer().cell_ordinal(source), std::size_t(mesh.cell_geometry_global_id(LO(c))));
+            std::set<std::size_t> direct, observed;
+            for (const auto f : compact->cell_faces(c))
+                direct.insert(f);
+            for (const auto f : mesh.faces(LO(c)))
+                observed.insert(std::size_t(f));
+            EXPECT_EQ(direct, observed);
+        }
+        for (std::size_t f = 0; f < mesh.num_faces(); ++f)
+        {
+            const auto source = compact->source_face(f);
+            EXPECT_EQ(compact->face_local_id(source), f);
+            EXPECT_EQ(native->indexer().face_ordinal(source), std::size_t(mesh.face_geometry_global_id(LO(f))));
+            const auto translate = [](std::size_t value)
+            {
+                return value == Meshes::DecomposedOrthogonalTopology::invalid_local_id() ? Handle::invalid_local_id()
+                                                                                         : LO(value);
+            };
+            EXPECT_EQ(translate(compact->owner_cell(f)), mesh.owner_cell(LO(f)));
+            EXPECT_EQ(translate(compact->neighbor_cell(f)), mesh.neighbor_cell(LO(f)));
+            EXPECT_EQ(compact->boundary_id(f), mesh.boundary_id(LO(f)));
+        }
+        std::set<std::size_t> source_nodes;
+        for (std::size_t n = 0; n < compact->num_local_nodes(); ++n)
+        {
+            const auto source = compact->source_node(n);
+            EXPECT_EQ(compact->node_local_id(source), n);
+            EXPECT_TRUE(source_nodes.insert(native->indexer().node_ordinal(source)).second);
+        }
+    }
     const auto comm = Tpetra::getDefaultComm();
     const auto rank = std::size_t(comm->getRank()), ranks = std::size_t(comm->getSize());
     std::vector<GO> local_counts(2 * ranks), counts(2 * ranks);
@@ -173,6 +223,7 @@ template<class Native> void verify(const std::shared_ptr<Native>& native, std::s
         EXPECT_EQ(mesh.is_geometry_exterior_face(lid), native->neighbor_cell(face) == Native::invalid_cell_id());
     }
     EXPECT_EQ(actual_faces, expected_faces);
+    EXPECT_FALSE(mesh.has_materialized_indexer());
     EXPECT_FALSE(mesh.has_materialized_connectivity());
     if (owned.empty())
     {
@@ -282,4 +333,114 @@ TEST(OrthogonalDistributedTest, RankLocalNullGeometryFailsCollectively)
     // In serial these calls exercise the ordinary null-pointer rejection too.
     EXPECT_THROW((Handle(cartesian, options)), std::invalid_argument);
     EXPECT_THROW((Handle(cylindrical, options)), std::invalid_argument);
+}
+
+TEST(OrthogonalDistributedTest, CompactTopologyStorageDoesNotScaleWithOwnedVolume)
+{
+    const auto ranks = std::size_t(Tpetra::getDefaultComm()->getSize());
+    Handle::DistributionOptions options;
+    options.allow_empty_partitions = true;
+    const auto partitions = std::max<std::size_t>(ranks, 2);
+    options.orthogonal_partitions = std::array<std::size_t, 3>{partitions, 1, 1};
+    if (ranks == 1)
+    {
+        options.partition = 0;
+        options.partitions = partitions;
+    }
+    const auto make = [&](std::size_t scale)
+    {
+        Vec3D<ArrReal> edges;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            const auto cells = scale * (axis == 0 ? partitions : 2);
+            for (std::size_t edge = 0; edge <= cells; ++edge)
+                edges[axis].push_back(double(edge) / double(cells));
+        }
+        return std::make_shared<Handle>(std::make_shared<Handle::Cartesian>(edges), options);
+    };
+    const auto small = make(4), large = make(16);
+    const auto small_topology = small->decomposed_orthogonal_topology();
+    const auto large_topology = large->decomposed_orthogonal_topology();
+    ASSERT_TRUE(small_topology);
+    ASSERT_TRUE(large_topology);
+    EXPECT_GT(large->num_owned_cells(), 32 * small->num_owned_cells());
+    EXPECT_LE(large_topology->storage_bytes(), 2 * small_topology->storage_bytes());
+    EXPECT_LT(double(large_topology->storage_bytes()) / double(large->num_owned_cells()),
+        double(small_topology->storage_bytes()) / double(small->num_owned_cells()));
+    for (const auto& mesh : {small, large})
+    {
+        EXPECT_EQ(mesh->decomposed_orthogonal_topology()->lookup_storage_estimate(), 0U);
+        EXPECT_EQ(mesh->storage_report().indexing, 0U);
+        EXPECT_EQ(mesh->storage_report().indexing_estimate, 0U);
+        EXPECT_FALSE(mesh->has_materialized_indexer());
+        EXPECT_FALSE(mesh->has_materialized_connectivity());
+    }
+}
+
+TEST(OrthogonalDistributedTest, CompactViewRetainsNativeGeometryAcrossAxialTrialAndRollback)
+{
+    const auto check = []<class Native>(const std::shared_ptr<Native>& native)
+    {
+        Handle::DistributionOptions options;
+        options.allow_empty_partitions = true;
+        auto mesh = std::make_shared<Handle>(native, options);
+        const auto compact = mesh->decomposed_orthogonal_topology();
+        if (compact)
+            EXPECT_EQ(&compact->source_topology(), &native->topology());
+        const auto owned_cells = mesh->owned_cell_map(), owned_faces = mesh->owned_face_map();
+        std::vector<double> volumes;
+        std::vector<Handle::Vec3> centers;
+        std::vector<GO> cell_source, cell_algebraic, face_source, face_algebraic;
+        for (std::size_t c = 0; c < mesh->num_local_cells(); ++c)
+        {
+            volumes.push_back(mesh->cell_volume(LO(c)));
+            centers.push_back(mesh->cell_centroid(LO(c)));
+            cell_source.push_back(mesh->cell_geometry_global_id(LO(c)));
+            cell_algebraic.push_back(mesh->cell_global_id(LO(c)));
+        }
+        for (std::size_t f = 0; f < mesh->num_faces(); ++f)
+        {
+            face_source.push_back(mesh->face_geometry_global_id(LO(f)));
+            face_algebraic.push_back(mesh->face_global_id(LO(f)));
+        }
+        PlanarALEMeshMotion<Pack> motion(mesh);
+        motion.begin_trial(3., 1.);
+        EXPECT_EQ(mesh->geometry_epoch(), 1U);
+        EXPECT_EQ(native->geometry_epoch(), 1U);
+        for (std::size_t c = 0; c < volumes.size(); ++c)
+        {
+            EXPECT_NEAR(mesh->cell_volume(LO(c)), 1.5 * volumes[c], 2e-12);
+            auto expected = centers[c];
+            expected.z *= 1.5;
+            expect_vector(mesh->cell_centroid(LO(c)), expected);
+        }
+        EXPECT_EQ(mesh->decomposed_orthogonal_topology().get(), compact.get());
+        EXPECT_EQ(mesh->owned_cell_map().get(), owned_cells.get());
+        EXPECT_EQ(mesh->owned_face_map().get(), owned_faces.get());
+        motion.rollback_trial();
+        EXPECT_EQ(mesh->geometry_epoch(), 2U);
+        EXPECT_EQ(native->geometry_epoch(), 2U);
+        EXPECT_EQ(mesh->decomposed_orthogonal_topology().get(), compact.get());
+        if (compact)
+            EXPECT_EQ(&compact->source_topology(), &native->topology());
+        for (std::size_t c = 0; c < volumes.size(); ++c)
+        {
+            EXPECT_NEAR(mesh->cell_volume(LO(c)), volumes[c], 2e-12);
+            expect_vector(mesh->cell_centroid(LO(c)), centers[c]);
+            EXPECT_EQ(mesh->cell_geometry_global_id(LO(c)), cell_source[c]);
+            EXPECT_EQ(mesh->cell_global_id(LO(c)), cell_algebraic[c]);
+        }
+        for (std::size_t f = 0; f < face_source.size(); ++f)
+        {
+            EXPECT_EQ(mesh->face_geometry_global_id(LO(f)), face_source[f]);
+            EXPECT_EQ(mesh->face_global_id(LO(f)), face_algebraic[f]);
+            const auto source = native->indexer().face_id(std::size_t(face_source[f]));
+            expect_vector(mesh->face_area_vector(LO(f)), native->face_area_vector(source));
+        }
+        EXPECT_FALSE(mesh->has_materialized_indexer());
+        EXPECT_FALSE(mesh->has_materialized_connectivity());
+    };
+    const Vec3D<ArrReal> edges{{{1., 1.2, 1.7, 2.1, 3.}, {0., .3, .8, 1.2, 2.}, {0., .1, .4, .9, 2.}}};
+    check(std::make_shared<Handle::Cartesian>(edges));
+    check(std::make_shared<Handle::Cylindrical>(edges));
 }
