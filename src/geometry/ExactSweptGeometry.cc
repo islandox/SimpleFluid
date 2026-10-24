@@ -1293,37 +1293,6 @@ const std::vector<ExactConvexFragmentPtr>& ExactDonorExport::retained_atoms() co
     return impl_->retained;
 }
 } // namespace SimpleFluid::Meshes
-namespace SimpleFluid::Meshes
-{
-namespace exact_geometry_detail
-{
-void target_sweep_shell(const ExactSweepRecipient& target, SweepBudget& budget, std::map<P, P>& shared)
-{
-    if (!target.geometry)
-        throw std::invalid_argument("Missing actual recipient geometry.");
-    std::vector<ExactPlanarFacePtr> faces;
-    for (const auto& oriented : target.outward_faces)
-    {
-        if (!oriented.face || (oriented.outward_sign != 1 && oriented.outward_sign != -1))
-            throw std::invalid_argument("Invalid recipient outward sweep incidence.");
-        auto face = oriented.face->origin_face();
-        if (oriented.outward_sign < 0)
-            face = face->reversed();
-        faces.push_back(std::move(face));
-        for (const auto& trace : oriented.face->trajectories())
-        {
-            budget.add(trace.point.size() + trace.departure.size() + 2 * sizeof(P));
-            const auto p = authority_point(trace.point), back = authority_point(trace.departure);
-            auto [it, inserted] = shared.emplace(p, back);
-            if (!inserted && it->second != back)
-                throw std::invalid_argument("Incident sweeps disagree on a shared exact node trajectory.");
-        }
-    }
-    if (!ExactPlanarFace::cell_shell(faces)->equivalent(*target.geometry))
-        throw std::invalid_argument("Recipient face sweeps do not close its actual oriented native shell.");
-}
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::Meshes
 
 namespace SimpleFluid::Meshes
 {

@@ -117,6 +117,11 @@ Multi-config executable paths include the configuration, such as
 - Honor documented support/rejection matrices. Component coverage does not
   establish support for every mesh, physics combination, or MPI rank count.
 
+## Commit messages
+
+Follow the [commit-message format and workflow](MAINTENANCE.md#commit-messages)
+when drafting messages or preparing an authorized commit.
+
 ## Documentation and handoff
 
 Update public contracts with behavior changes. Keep architecture in

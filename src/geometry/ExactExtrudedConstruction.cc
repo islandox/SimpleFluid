@@ -497,18 +497,3 @@ void ExactExtrudedConstruction::certify_base_embedding() const
     }
 }
 } // namespace SimpleFluid::Meshes
-namespace SimpleFluid::Meshes
-{
-namespace exact_geometry_detail
-{
-P polygon_vector(const Polygon& polygon)
-{
-    P area{};
-    if (polygon.size() < 3)
-        return area;
-    for (std::size_t i = 1; i + 1 < polygon.size(); ++i)
-        area = add(area, cross(sub(polygon[i], polygon[0]), sub(polygon[i + 1], polygon[0])));
-    return mul(area, Q(1, 2));
-}
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::Meshes

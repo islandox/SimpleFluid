@@ -494,6 +494,42 @@ change focused and reviewable.
   over an unchecked assertion on user-provided configuration.
   This gives actionable failures in Debug and production builds.
 
+## Commit messages
+
+Follow the repository's structured Conventional Commit style:
+
+```text
+<type>(<scope>): <concise imperative summary>
+
+<Short explanation of the problem and resulting behavior.>
+
+=== <Logical change group> ===
+- <Concrete change and its purpose.>
+- <Related implementation or contract detail.>
+
+Tests:
+- <Actual validation and result, or "Not run" with the reason.>
+
+Co-authored-by: Codex <noreply@openai.com>
+```
+
+Use an appropriate type such as `feat`, `fix`, `refactor`, `test`, `docs`,
+`build`, or `perf`, and a meaningful component scope. Keep the subject short;
+scale the body to the change and omit unnecessary detail groups. Use the Codex
+co-author trailer for Codex-contributed changes, consistent with local history.
+
+For a message-only request, inspect the requested diff and recent commit style
+without editing files or the index, running new tests, committing, or pushing.
+For staged messages and "Write for next change", freshly inspect
+`git diff --cached --stat`, `git diff --cached --name-status`, the staged patch,
+and `git diff --cached --check`. Describe only the staged scope; if the index
+is empty, report that and stop. Return only ready-to-paste message text.
+
+Keep `Tests:` factual: distinguish fresh execution from recorded validation,
+report failures and skips, and state when build/runtime tests were not run.
+Do not reuse prior test claims without checking their evidence and applicability
+to the change being described.
+
 ## Test strategy
 
 Use the GCC test preset for the normal local gate:
