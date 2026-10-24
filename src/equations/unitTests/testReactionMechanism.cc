@@ -890,3 +890,85 @@ TEST(ReactionMechanismTest, SSPRK2PrivateHalfEventsDoNotPrematurelyNarrowARepres
             std::invalid_argument);
     }
 }
+
+TEST(ReactionSourceLocationTest, PureInputsMayOmitLocationButPresentCoordinatesMustBeFinite)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {5, "left", .1, {{"X", 1}}, {P::Liquid}}, {17, "right", .1, {{"X", 1}}, {P::Liquid}}});
+    const R::ReactionMechanism mechanism(schema, {{41, "isomerization", {{5, P::Liquid, -1}, {17, P::Liquid, 1}}}});
+    R::CellSpeciesState initial(*schema);
+    initial.set_amount(*schema, 5, P::Liquid, 1.);
+    R::ReactionEnvironment environment{0., 300., 100000., .2, .5};
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{41, .125}};
+    EXPECT_FALSE(environment.location);
+    const auto ordinary = R::advance_reactions(mechanism, initial, environment, .1, input);
+    EXPECT_DOUBLE_EQ(ordinary.state.amount(*schema, 5, P::Liquid), .875);
+    environment.location = R::ReactionLocation{7, 3, {.25, .5, .75}, std::nullopt};
+    const auto positioned = R::advance_reactions(mechanism, initial, environment, .1, input);
+    EXPECT_EQ(positioned.state.amounts, ordinary.state.amounts);
+    for (const double invalid : {std::numeric_limits<double>::infinity(),
+             -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            auto malformed = environment;
+            malformed.location->centroid[axis] = invalid;
+            EXPECT_THROW((void) R::advance_reactions(mechanism, initial, malformed, .1, input),
+                std::invalid_argument);
+        }
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, 5, P::Liquid), 1.);
+}
+
+TEST(ReactionSourceLocationTest, RetriedSSPRK2KeepsOneImmutableSpatialFrameAndIntegerIdentity)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {5, "left", .1, {{"X", 1}}, {P::Liquid}}, {17, "right", .1, {{"X", 1}}, {P::Liquid}}});
+    const R::ReactionMechanism mechanism(schema, {{41, "decay", {{5, P::Liquid, -1}, {17, P::Liquid, 1}}}});
+    R::CellSpeciesState initial(*schema);
+    initial.set_amount(*schema, 5, P::Liquid, 1.);
+    const R::ReactionLocation location{(std::uint64_t{1} << 54) + 3, 47, {.25, .5, 1.}, std::size_t{13}};
+    EXPECT_NE(location.geometryCellId, static_cast<std::uint64_t>(static_cast<double>(location.geometryCellId)));
+    R::ReactionEnvironment environment{0., 300., 100000., 1., 1.};
+    environment.location = location;
+    R::ReactionRateProvider provider;
+    provider.identity = "pure-spatial-first-order-source";
+    provider.schemaRevision = schema->revision();
+    provider.schemaFingerprint = schema->fingerprint();
+    provider.validityDescription = "Requires one immutable finite source location; k(z)=2*(1+z) per second.";
+    provider.parameterUnits = "mol reaction/(m3 bulk s)";
+    provider.validate = [location](const R::ReactionContext& context)
+    {
+        if (!context.environment.location)
+            throw std::invalid_argument("This spatial source requires explicit location metadata.");
+        EXPECT_EQ(*context.environment.location, location);
+        EXPECT_GE(context.environment.time, 0.);
+        EXPECT_LE(context.environment.time, 1.);
+    };
+    provider.evaluate = [](const R::ReactionContext& context)
+    {
+        const double k = 2 * (1 + context.environment.location->centroid[2]);
+        return std::vector<R::ReactionRate>{{41,
+            k * context.state.amount(context.catalog, 5, P::Liquid) / context.environment.bulkVolume,
+            R::SourceVolumeBasis::BulkVolume}};
+    };
+    R::ReactionSourceInput input;
+    input.rates = provider;
+    auto missing = environment;
+    missing.location.reset();
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, missing, 1., input), std::invalid_argument);
+    const auto result = R::advance_reactions(mechanism, initial, environment, 1., input);
+    EXPECT_GT(result.ledger.retries, 0U);
+    EXPECT_EQ(result.ledger.substeps, 4U);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, 5, P::Liquid), .0625); // Four SSPRK2 steps, k*dt=1.
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], .9375);
+    const auto replay = R::advance_reactions(mechanism, initial, environment, 1., input);
+    EXPECT_EQ(replay.state.amounts, result.state.amounts);
+    EXPECT_EQ(replay.ledger.reactionExtents, result.ledger.reactionExtents);
+    EXPECT_EQ(replay.ledger.retries, result.ledger.retries);
+    EXPECT_EQ(*environment.location, location);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, 5, P::Liquid), 1.);
+}

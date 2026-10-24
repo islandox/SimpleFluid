@@ -3,6 +3,7 @@
  */
 #pragma once
 #include <bit>
+#include <utility>
 
 namespace SimpleFluid
 {
@@ -464,8 +465,29 @@ Reacting::ReactionEnvironment ReactingGasModel<Pack, MeshType>::species_environm
 {
     // This field adapter reports physical EOS solution volume on a prescribed carrier mesh.
     // Local material occupancy is closed only by the separate native low-Mach flow owner.
-    return {time, temperature, d_absolute_pressure.value(cell), d_alpha_l.value(cell) * volume, volume,
+    using reacting_species_detail::require;
+    require(cell >= 0 && static_cast<std::size_t>(cell) < d_mesh->num_owned_cells(),
+        "A source location requires an actual owned cell.");
+    Reacting::ReactionEnvironment result{
+        time, temperature, d_absolute_pressure.value(cell), d_alpha_l.value(cell) * volume, volume,
         Reacting::ReactionVolumeClosure::ReferenceControlVolume};
+    const auto geometryCell = [&]
+    {
+        if constexpr (requires { d_mesh->cell_geometry_global_id(cell); })
+            return d_mesh->cell_geometry_global_id(cell);
+        else
+            return d_mesh->cell_global_id(cell); // Legacy Mesh retains its original physical global identities.
+    }();
+    require(std::in_range<std::uint64_t>(geometryCell), "Canonical source cell identity is not representable.");
+    Reacting::ReactionLocation location;
+    location.geometryCellId = static_cast<std::uint64_t>(geometryCell);
+    if constexpr (requires { d_mesh->geometry_epoch(); })
+        location.geometryEpoch = d_mesh->geometry_epoch();
+    const auto center = d_mesh->cell_centroid(cell);
+    location.centroid = {center.x, center.y, center.z};
+    location.ownedCell = static_cast<std::size_t>(cell);
+    result.location = location;
+    return result;
 }
 
 template<TpetraTypePack Pack, class MeshType>

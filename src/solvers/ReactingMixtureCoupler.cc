@@ -16,6 +16,7 @@
 #include <set>
 #include <sstream>
 #include <tuple>
+#include <utility>
 
 namespace SimpleFluid::Reacting
 {
@@ -221,6 +222,15 @@ struct SourceEngine
                     }
             ReactionEnvironment environment{transport.accepted_time, temperature, liquid.absolute_pressure,
                 liquid_volume, transport.new_control_volumes.at(c), ReactionVolumeClosure::ThermodynamicPredictor};
+            require(transport.new_geometry_epoch == context.mesh.geometry_epoch(),
+                "Reaction source location belongs to stale trial geometry.");
+            const auto local = static_cast<Solver::Pack::local_ordinal_type>(c);
+            const auto geometryCell = context.mesh.cell_geometry_global_id(local);
+            require(std::in_range<std::uint64_t>(geometryCell), "Canonical source cell identity is not representable.");
+            const auto center = context.mesh.cell_centroid(local);
+            environment.location = ReactionLocation{static_cast<std::uint64_t>(geometryCell),
+                transport.new_geometry_epoch, {center.x, center.y, center.z}, c};
+
             ReactionContext reaction{catalog, initial, environment};
             const auto input =
                 options.source ? options.source({reaction, cell, c, transport.cells[c]}, dt) : ReactionSourceInput{};
@@ -440,6 +450,17 @@ struct SourceEngine
         return result;
     }
 };
+// Fence allocation before entering the communicating motion constructor.
+struct PlanarMotionStorage
+{
+    alignas(Solver::PlanarMotion) std::byte memory[sizeof(Solver::PlanarMotion)];
+    Solver::PlanarMotion* value = nullptr;
+    ~PlanarMotionStorage()
+    {
+        if (value)
+            std::destroy_at(value);
+    }
+};
 struct SourceReceipt
 {
     Solver::TransportSnapshot transport;
@@ -464,6 +485,7 @@ struct ReactingMixtureCoupler::Implementation
     ReactingMixtureOptions options;
     Solver::ControllerLease lease;
     std::shared_ptr<const SourceEngine> source_engine;
+    std::shared_ptr<Solver::PlanarMotion> motion;
     Diagnostics diagnostics;
     std::uint64_t generation = 0;
 
@@ -483,6 +505,13 @@ struct ReactingMixtureCoupler::Implementation
                 require((!options.source || !options.source_identity.empty()) && options.source_revision > 0,
                     "A reaction source needs an explicit identity and a positive immutable revision.");
                 require(flow->initialized(), "Initialize low-Mach flow before constructing its reaction controller.");
+                if (options.planar_motion)
+                {
+                    const auto& law = *options.planar_motion;
+                    require(law.mesh && law.mesh.get() == flow->mesh().get() && !law.identity.empty() &&
+                                law.revision > 0 && law.target_surface,
+                        "Prescribed planar motion requires its exact mutable mesh and immutable target law metadata.");
+                }
                 // Callback copies/immutable engine allocation are local and may fail even on an empty owner.
                 source_engine = std::make_shared<const SourceEngine>(SourceEngine{flow, options, {}});
                 const auto& catalog = options.mechanism->catalog();
@@ -650,6 +679,12 @@ struct ReactingMixtureCoupler::Implementation
                     signature << ':' << law.identity.size() << ':' << law.identity << ':' << law.revision << ':'
                               << law.schema_fingerprint;
                 }
+                signature << ":planar:" << bool(options.planar_motion);
+                if (options.planar_motion)
+                {
+                    const auto& law = *options.planar_motion;
+                    signature << ':' << law.identity.size() << ':' << law.identity << ':' << law.revision;
+                }
                 schema_signature = signature.str();
             });
         uniform_text(mesh, schema_signature);
@@ -690,6 +725,15 @@ struct ReactingMixtureCoupler::Implementation
                 engine->face_stages.emplace_back(storage, storage->value);
             }
             source_engine = std::move(engine);
+        }
+        if (options.planar_motion)
+        {
+            std::shared_ptr<PlanarMotionStorage> storage;
+            collective_detail::collective_local_validation(mesh, "Allocate controller-owned planar motion",
+                [&] { storage = std::make_shared<PlanarMotionStorage>(); });
+            storage->value = ::new (static_cast<void*>(storage->memory))
+                Solver::PlanarMotion(options.planar_motion->mesh, options.planar_motion->options);
+            motion = std::shared_ptr<Solver::PlanarMotion>(storage, storage->value);
         }
     }
 
@@ -842,6 +886,17 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
     collective_detail::collective_local_validation(mesh, "Reacting mixture timestep",
         [&] { require(std::isfinite(dt) && dt > 0, "Reacting mixture timestep must be positive and finite."); });
     collective_detail::require_uniform_value(mesh, dt, "Reacting mixture timestep");
+    double target_surface = 0;
+    if (d->motion)
+    {
+        collective_detail::collective_local_validation(mesh, "Prescribed planar target law",
+            [&]
+            {
+                target_surface = d->options.planar_motion->target_surface(d->flow->state().time, dt);
+                require(std::isfinite(target_surface), "Prescribed planar target must be finite.");
+            });
+        collective_detail::require_uniform_value(mesh, target_surface, "Prescribed planar target");
+    }
     std::shared_ptr<SourceReceipt> receipt;
     std::shared_ptr<const Solver::SourceStageProvider> provider;
     collective_detail::collective_local_validation(mesh, "Allocate immutable source provider",
@@ -854,6 +909,11 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                             ? (":population:" + std::to_string(d->options.population_events->identity.size()) + ":" +
                                   d->options.population_events->identity + ":" +
                                   std::to_string(d->options.population_events->revision))
+                            : std::string{}) +
+                    (d->options.planar_motion
+                            ? (":motion:" + std::to_string(d->options.planar_motion->identity.size()) + ":" +
+                                  d->options.planar_motion->identity + ":" +
+                                  std::to_string(d->options.planar_motion->revision))
                             : std::string{}),
                 d->options.source_revision, d->options.mechanism->catalog().fingerprint(),
                 [engine = d->source_engine, receipt](const Solver::SourceStageContext& context)
@@ -873,7 +933,9 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                 },
                 d->options.source_relative_tolerance, d->options.maximum_correctors});
         });
-    auto flow_trial = d->flow->preview_with_sources(dt, std::move(provider), &d->lease);
+    auto flow_trial =
+        d->motion ? d->flow->preview_ale_with_sources(dt, *d->motion, target_surface, std::move(provider), &d->lease)
+                  : d->flow->preview_with_sources(dt, std::move(provider), &d->lease);
     collective_detail::collective_local_validation(mesh, "Reacting mixture immutable source receipt",
         [&]
         {
@@ -887,7 +949,11 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                 "Reaction receipt does not match the exact accepted gross events.");
         });
     const Solver::SourceStageContext final_context{flow_trial.transport_snapshot(), flow_trial.state(), mesh};
-    d->source_engine->validate_face_receipts(receipt->prepared, final_context);
+    // ALE receipts were producer/phase/epoch validated inside the active source callback.
+    // The exact immutable transport/source/gross equality above binds that proof to the retained trial.
+    // Its live geometry is now rolled back, so only fixed-grid previews repeat live-epoch validation.
+    if (!d->motion)
+        d->source_engine->validate_face_receipts(receipt->prepared, final_context);
     auto statistics = d->totals(receipt->prepared.ledgers, flow_trial.integrated_sources(),
         receipt->prepared.population_events, flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
     std::shared_ptr<Trial::Data> data;
@@ -923,7 +989,10 @@ void ReactingMixtureCoupler::commit(const Trial& trial)
                 "Reacting mixture controller generation exhausted.");
             candidate = trial.d->diagnostics;
         });
-    d->flow->commit(trial.d->flow, &d->lease);
+    if (d->motion)
+        d->flow->commit_ale(trial.d->flow, *d->motion, &d->lease);
+    else
+        d->flow->commit(trial.d->flow, &d->lease);
     d->diagnostics = std::move(candidate);
     ++d->generation;
 }
@@ -937,7 +1006,7 @@ ReactingMixtureCoupler::Checkpoint ReactingMixtureCoupler::checkpoint() const
 {
     Checkpoint result;
     result.owner = this;
-    result.flow = d->flow->checkpoint();
+    result.flow = d->motion ? d->flow->checkpoint(*d->motion) : d->flow->checkpoint();
     result.diagnostics = d->diagnostics;
     return result;
 }
@@ -952,7 +1021,10 @@ void ReactingMixtureCoupler::restore(const Checkpoint& checkpoint)
                 "Reacting mixture controller generation exhausted.");
             restored = checkpoint.diagnostics;
         });
-    d->flow->restore(checkpoint.flow, &d->lease);
+    if (d->motion)
+        d->flow->restore(checkpoint.flow, *d->motion, &d->lease);
+    else
+        d->flow->restore(checkpoint.flow, &d->lease);
     d->diagnostics = std::move(restored);
     ++d->generation;
 }

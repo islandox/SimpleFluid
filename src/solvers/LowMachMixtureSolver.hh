@@ -5,6 +5,7 @@
 #include "SimpleFluidExport.hh"
 #include "equations/LowMachPressureEquation.hh"
 #include "equations/ReactingThermodynamics.hh"
+#include "geometry/PlanarALEMeshMotion.hh"
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -18,9 +19,12 @@ namespace SimpleFluid::Reacting
 {
 class SIMPLEFLUID_SOLVERS_EXPORT LowMachMixtureSolver
 {
+    struct SIMPLEFLUID_SOLVERS_LOCAL ALEGeometryCertificate;
+
 public:
     using Pack = DefaultTpetraTypes;
     using Mesh = MeshHandle<Pack>;
+    using PlanarMotion = SimpleFluid::PlanarALEMeshMotion<Pack>;
     using Traits = MeshFieldTraits<Pack, Mesh>;
     using Vector = Traits::vector_cell_type::vec_type;
     enum class PhaseRole
@@ -148,6 +152,8 @@ public:
     {
         double carrier_volume_flux = 0;
         std::vector<double> phase_volume_flux, material_fraction;
+        double mesh_volume_flux = 0;                    ///< Canonical swept rate; zero for fixed geometry.
+        std::vector<double> relative_phase_volume_flux; ///< Actual phase advection rate; no extra alpha.
         bool operator==(const PhaseFaceTransport&) const = default;
     };
     struct Diagnostics
@@ -175,7 +181,8 @@ public:
         friend class LowMachMixtureSolver;
         State state;
         const LowMachMixtureSolver* owner = nullptr;
-        std::uint64_t geometry_epoch = 0;
+        std::uint64_t geometry_epoch = 0, logical_geometry = 0;
+        std::shared_ptr<const ALEGeometryCertificate> ale_geometry;
         std::vector<double> face_flux;
         Diagnostics diagnostics;
     };
@@ -208,7 +215,8 @@ public:
         std::vector<double> face_flux;
         std::vector<PhaseFaceTransport> phase_transport;
         const LowMachMixtureSolver* owner = nullptr;
-        std::uint64_t nonce = 0, base_revision = 0, geometry_epoch = 0;
+        std::uint64_t nonce = 0, base_revision = 0, geometry_epoch = 0, logical_geometry = 0;
+        std::shared_ptr<const ALEGeometryCertificate> ale_geometry;
 
     public:
         [[nodiscard]] const TransportSnapshot& transport_snapshot() const noexcept { return transport; }
@@ -238,6 +246,15 @@ public:
     [[nodiscard]] Trial preview_with_sources(double time_step, std::shared_ptr<const SourceStageProvider> provider,
         const ControllerLease* controller = nullptr);
     void commit(const Trial& trial, const ControllerLease* controller = nullptr);
+    /** Prescribed closed planar ALE. Preview owns begin/rollback and returns
+     * an immutable candidate on restored accepted geometry; explicit commit requires live motion authority.
+     */
+    [[nodiscard]] Trial preview_ale(double time_step, PlanarMotion& motion, double target_surface,
+        const std::vector<CellSources>& integrated_sources = {}, const ControllerLease* controller = nullptr);
+    [[nodiscard]] Trial preview_ale_with_sources(double time_step, PlanarMotion& motion, double target_surface,
+        std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller = nullptr);
+    /** Explicit live motion authority; fixed commit rejects moving candidates. */
+    void commit_ale(const Trial& trial, PlanarMotion& motion, const ControllerLease* controller = nullptr);
     LowMachMixtureSolver(SP<const Mesh> mesh,
         std::vector<std::shared_ptr<const MixtureThermodynamics>> phase_thermodynamics, Options options);
     ~LowMachMixtureSolver();
@@ -261,6 +278,8 @@ public:
     [[nodiscard]] const Diagnostics& diagnostics() const noexcept;
     [[nodiscard]] Checkpoint checkpoint() const;
     void restore(const Checkpoint& checkpoint, const ControllerLease* controller = nullptr);
+    [[nodiscard]] Checkpoint checkpoint(const PlanarMotion& motion) const;
+    void restore(const Checkpoint& checkpoint, PlanarMotion& motion, const ControllerLease* controller = nullptr);
     /** Accepted absolute carrier flux. Continuity uses the distinct phase-weighted material flux
      * sum(alpha_upwind*(carrier+phase_slip)), with exact packets retained by each Trial.
      */
@@ -270,7 +289,15 @@ public:
 
 private:
     SIMPLEFLUID_SOLVERS_LOCAL Trial preview_impl(double time_step, const std::vector<CellSources>& fixed_sources,
-        std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller);
+        std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller,
+        const FVM::ALEControlVolumeState* ale = nullptr);
+    SIMPLEFLUID_SOLVERS_LOCAL Trial preview_planar_impl(double time_step, PlanarMotion& motion, double target_surface,
+        const std::vector<CellSources>& fixed_sources, std::shared_ptr<const SourceStageProvider> provider,
+        const ControllerLease* controller);
+    SIMPLEFLUID_SOLVERS_LOCAL std::shared_ptr<ALEGeometryCertificate> capture_accepted_geometry(
+        const PlanarMotion& motion) const;
+    SIMPLEFLUID_SOLVERS_LOCAL void restore_accepted_after_motion(
+        PlanarMotion& motion, const PlanarMotion::StateSnapshot& snapshot, std::span<const double> absolute_flux);
     SIMPLEFLUID_SOLVERS_LOCAL void require_controller(const ControllerLease* controller) const;
     SIMPLEFLUID_SOLVERS_LOCAL void release_controller(std::uint64_t id) noexcept;
     struct SIMPLEFLUID_SOLVERS_LOCAL Implementation;

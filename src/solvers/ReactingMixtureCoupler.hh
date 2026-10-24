@@ -68,6 +68,19 @@ struct MixturePopulationEventReceipt
     std::vector<double> births, deaths, changes;
 };
 
+/** Immutable prescribed closed planar motion. The controller owns the motion lease;
+ * target_surface evaluates once per preview on accepted time/dt, never during commit or restore.
+ * The exact mutable mesh must be the same object bound to the flow solver.
+ */
+struct MixturePlanarMotionProvider
+{
+    const std::shared_ptr<LowMachMixtureSolver::Mesh> mesh;
+    const PlanarALEMeshMotionOptions options;
+    const std::string identity;
+    const std::uint64_t revision = 1;
+    const std::function<double(double accepted_time, double time_step)> target_surface;
+};
+
 struct ReactingMixtureOptions
 {
     std::shared_ptr<const ReactionMechanism> mechanism;
@@ -93,7 +106,8 @@ struct ReactingMixtureOptions
      */
     std::vector<MixtureFaceTransportOptions> face_transport;
     std::shared_ptr<const MixturePopulationEventProvider>
-        population_events; ///< Optional explicit post-face number law.
+        population_events;                                            ///< Optional explicit post-face number law.
+    std::shared_ptr<const MixturePlanarMotionProvider> planar_motion; ///< Optional prescribed closed planar ALE.
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler

@@ -49,6 +49,15 @@ foreach(_species_surface_ranks IN ITEMS 2 4)
         LABELS "mpi;species;ale;boussinesq;conservation;transaction;empty_rank" TIMEOUT 120)
 endforeach()
 
+# Prescribed native ALE transactions and actual source geometry frames.
+foreach(_native_ale_ranks IN ITEMS 2 4)
+    foreach(_native_ale_case IN ITEMS LowMachPlanarALE LowMachALEConservation ReactingMixtureALE ReactingSourceLocation)
+        simplefluid_add_mpi_test(NAME ${_native_ale_case}_${_native_ale_ranks}procs
+            TARGET test${_native_ale_case} PROCS ${_native_ale_ranks}
+            LABELS "mpi;reacting;low_mach;ale;conservation;transaction;empty_rank" TIMEOUT 180)
+    endforeach()
+endforeach()
+
 # Conservative native mixture flow and its external reaction controller.
 foreach(_mixture_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME LowMachMixture_${_mixture_ranks}procs

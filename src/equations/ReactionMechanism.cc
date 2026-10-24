@@ -463,6 +463,10 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
                 std::isfinite(environment.time + duration) &&
                 (duration == 0.0 || environment.time + duration > environment.time),
         "Reaction context needs finite time, positive temperature/pressure and valid volumes/duration.");
+    if (environment.location)
+        require(std::all_of(environment.location->centroid.begin(), environment.location->centroid.end(),
+                    [](double coordinate) { return std::isfinite(coordinate); }),
+            "Reaction source centroid coordinates must be finite.");
     const auto initialValues = flatten(initial);
     const auto liquidEntries = 2 * mechanism.catalog().species().size();
     require(

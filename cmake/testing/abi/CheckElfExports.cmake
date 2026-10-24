@@ -221,7 +221,7 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesMassClosureTolerance[(]"
     "^SimpleFluid::Reacting::(LowMachMixtureSolver|LowMachPressureEquation|ReactingMixtureCoupler)::Implementation::"
     "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::Data::"
-    "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller|preview_impl)[(]"
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller|preview_impl|preview_planar_impl|capture_accepted_geometry|restore_accepted_after_motion)[(]"
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_impl[(]"
     "^SimpleFluid::Reacting::source_stage_detail::"
     "^SimpleFluid::Reacting::history_detail::"
@@ -695,6 +695,24 @@ foreach(simplefluid_stage4_mesh_kind IN ITEMS native legacy)
     simplefluid_require_exact_api(
         "^${simplefluid_stage4_model}::evaluate_liquid_volume[(]double[)] const$" 1)
 endforeach()
+
+# Native prescribed closed planar ALE adds exactly six public entry points.
+# Trial geometry certificates and replay helpers remain private implementation.
+set(simplefluid_native_ale_public_symbol_budget 6)
+set(simplefluid_native_ale_motion
+    "SimpleFluid::PlanarALEMeshMotion<SimpleFluid::TpetraTypes<.*>[ ]*>")
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::preview_ale[(]double, ${simplefluid_native_ale_motion}&, double, ${simplefluid_stage3_sources_vector} const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::preview_ale_with_sources[(]double, ${simplefluid_native_ale_motion}&, double, ${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::LowMachMixtureSolver::SourceStageProvider const>, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::commit_ale[(]SimpleFluid::Reacting::LowMachMixtureSolver::Trial const&, ${simplefluid_native_ale_motion}&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::checkpoint[(]${simplefluid_native_ale_motion} const&[)] const$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::restore[(]SimpleFluid::Reacting::LowMachMixtureSolver::Checkpoint const&, ${simplefluid_native_ale_motion}&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachPressureEquation::project_material_ale_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::FVM::ALEControlVolumeState const&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
 
 # Typed surface receipts (8), supplied headspace configuration (1), base metadata
 # constructor/query (3), and closed-mixture headspace methods/RTTI (13): exactly 25.
@@ -1223,13 +1241,15 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # Debug 1551, disabled ceiling 1554. Population helpers remain private.
 # Typed surface/headspace adds 25 anchored definitions: measured GCC Debug 1576,
 # disabled ceiling 1579. No previous export is removed and private helpers stay hidden.
+# Native ALE adds six exact anchors: measured GCC Debug 1582, disabled ceiling 1585.
+# The existing three-entry headroom and all earlier API anchors are retained.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

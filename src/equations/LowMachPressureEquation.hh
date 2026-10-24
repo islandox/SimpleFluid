@@ -2,6 +2,7 @@
  * @brief Native variable-density low-Mach pressure correction on orthogonal mapped meshes.
  */
 #pragma once
+#include "FVM/ALEControlVolumeState.hh"
 #include "SimpleFluidExport.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "geometry/MeshHandle.hh"
@@ -72,12 +73,26 @@ public:
         const FaceField& predictor_carrier_flux, FaceField& corrected_carrier_flux, ScalarField& mechanical_pressure,
         VectorField& velocity, const LinearSolverOptions& linear = {}, double continuity_tolerance = 1e-10);
 
+    /** Explicit closed moving-wall variant. The supplied ALE transaction must
+     * remain active; physical boundary predictor/corrected ABSOLUTE flux is
+     * exactly the owner-oriented mesh swept rate, with zero normal phase slip.
+     * target_absolute includes the caller's theta-dependent mesh correction.
+     * Existing fixed-grid entry points keep their zero-boundary-flux contract.
+     */
+    Result project_material_ale_with_eos(const ScalarField& density, double time_step,
+        std::span<const double> target_absolute, std::span<const double> volume_susceptibility,
+        const FaceField& material_carrier_fraction, const FaceField& slip_material_flux,
+        const FaceField& predictor_absolute, FaceField& corrected_absolute, ScalarField& mechanical_pressure,
+        VectorField& velocity, const FVM::ALEControlVolumeState& ale, const LinearSolverOptions& linear = {},
+        double continuity_tolerance = 1e-10);
+
 private:
     SIMPLEFLUID_SOLVERS_LOCAL Result project_impl(const ScalarField& density, double time_step,
         std::span<const double> integrated_volume_target, std::span<const double> volume_susceptibility,
         bool linearize_eos, const FaceField* material_carrier_fraction, const FaceField* slip_material_flux,
         const FaceField& predictor_flux, FaceField& corrected_flux, ScalarField& mechanical_pressure,
-        VectorField& velocity, const LinearSolverOptions& linear, double continuity_tolerance);
+        VectorField& velocity, const LinearSolverOptions& linear, double continuity_tolerance,
+        const FVM::ALEControlVolumeState* ale = nullptr);
     struct SIMPLEFLUID_SOLVERS_LOCAL Implementation;
     std::unique_ptr<Implementation> d;
 };

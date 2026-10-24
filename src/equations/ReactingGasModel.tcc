@@ -350,8 +350,9 @@ void ReactingGasModel<Pack, MeshType>::initialize_state(
                 for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
                 {
                     const auto cell = static_cast<local_ordinal_type>(owned);
-                    const Reacting::ReactionEnvironment environment{time, temperature.value(cell),
-                        d_absolute_pressure.value(cell), 0.0, d_mesh->cell_volume(cell)};
+                    auto environment =
+                        species_environment(cell, time, temperature.value(cell), d_mesh->cell_volume(cell));
+                    environment.liquidVolume = 0.0; // Preserve the initial callback's existing volume contract.
                     states.push_back(d_options.initial_species_state(environment,
                         static_cast<std::int64_t>(d_mesh->cell_global_id(cell))));
                     const Reacting::ReactionContext context{catalog, states.back(), environment};

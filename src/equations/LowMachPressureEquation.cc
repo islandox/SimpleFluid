@@ -60,10 +60,20 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_material_with_e
         velocity, options, tolerance);
 }
 
+LowMachPressureEquation::Result LowMachPressureEquation::project_material_ale_with_eos(const ScalarField& rho,
+    double dt, std::span<const double> target, std::span<const double> susceptibility, const FaceField& fraction,
+    const FaceField& slip, const FaceField& predictor, FaceField& corrected, ScalarField& pressure,
+    VectorField& velocity, const FVM::ALEControlVolumeState& ale, const LinearSolverOptions& options, double tolerance)
+{
+    return project_impl(rho, dt, target, susceptibility, true, &fraction, &slip, predictor, corrected, pressure,
+        velocity, options, tolerance, &ale);
+}
+
 LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const ScalarField& rho, double dt,
     std::span<const double> target, std::span<const double> susceptibility, bool linearize_eos,
     const FaceField* fraction, const FaceField* slip, const FaceField& predictor, FaceField& corrected,
-    ScalarField& pressure, VectorField& velocity, const LinearSolverOptions& options, double tolerance)
+    ScalarField& pressure, VectorField& velocity, const LinearSolverOptions& options, double tolerance,
+    const FVM::ALEControlVolumeState* ale)
 {
     const auto& mesh = *d->mesh;
     using LO = Pack::local_ordinal_type;
@@ -73,6 +83,9 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     collective_detail::require_uniform_value(mesh, int(linearize_eos), "Low-Mach EOS pressure linearization");
     const bool material = fraction != nullptr;
     collective_detail::require_uniform_value(mesh, int(material), "Low-Mach material flux projection");
+    collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach moving-wall projection");
+    if (ale)
+        ale->validate(mesh, dt); // Collective geometry seam, never inside a local callback fence.
     collective_detail::collective_local_validation(mesh, "Low-Mach pressure inputs",
         [&]
         {
@@ -126,8 +139,13 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
                 const LO face = static_cast<LO>(f);
                 if (!std::isfinite(predictor.local_value(face)))
                     throw std::invalid_argument("Nonfinite predictor volume flux.");
-                if (mesh.is_geometry_exterior_face(face) && predictor.local_value(face) != 0)
-                    throw std::invalid_argument("Closed low-Mach projection requires zero boundary volume flux.");
+                if (mesh.is_geometry_exterior_face(face))
+                {
+                    const double wall_flux = ale ? ale->face_mesh_fluxes()[f] : 0.;
+                    if (predictor.local_value(face) != wall_flux)
+                        throw std::invalid_argument(
+                            "Closed projection boundary absolute flux must equal its prescribed wall swept rate.");
+                }
             }
         });
     collective_detail::require_uniform_value(mesh, options.max_iterations, "Pressure linear iteration limit");

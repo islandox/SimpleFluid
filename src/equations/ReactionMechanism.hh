@@ -161,6 +161,22 @@ enum class ReactionVolumeClosure
     ReferenceControlVolume
 };
 
+/** Immutable position of one local source-donor frame.
+ * Canonical geometry identity is distinct from algebraic map GIDs and owned rows.
+ * The centroid/epoch belong to the actual donor stage (trial-new geometry on ALE).
+ * An owned row is supplied only by a mesh executor; it is an ephemeral callback index,
+ * not a persistent identity or permission to retain a view across mesh/owner changes.
+ */
+struct ReactionLocation
+{
+    std::uint64_t geometryCellId = 0;
+    std::uint64_t geometryEpoch = 0;
+    std::array<double, 3> centroid{}; ///< m, in the actual source frame.
+    std::optional<std::size_t> ownedCell;
+    bool operator==(const ReactionLocation&) const = default;
+};
+
+
 struct ReactionEnvironment
 {
     double time = 0.0;
@@ -169,6 +185,7 @@ struct ReactionEnvironment
     double liquidVolume = 0.0;     ///< m3, shared by Liquid and Dissolved.
     double bulkVolume = 0.0;       ///< Actual geometric m3, including during a predictor.
     ReactionVolumeClosure volumeClosure = ReactionVolumeClosure::Accepted;
+    std::optional<ReactionLocation> location; ///< Optional for pure kernels; spatial laws explicitly require it.
 };
 
 struct ReactionContext

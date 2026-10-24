@@ -135,6 +135,16 @@ together with compensation before narrowing each phase packet. Its
 opposite reservoir channels cancel; adding the individually rounded channel
 totals is not an equivalent energy budget.
 
+## Spatial source context
+
+`ReactionEnvironment::location` optionally supplies an integer canonical geometry
+cell ID, geometry epoch, actual centroid in meters and a local owned-row index.
+The owned row is valid only within that callback and is not persistent identity;
+contiguous algebraic GIDs do not substitute for canonical geometry IDs. Pure
+reaction kernels may omit location. Mesh-bound field and native source executors
+supply the actual current trial frame. SSPRK2 retains this frame during its local
+source substeps while advancing callback time; it does not invent a trajectory.
+
 ## Supplied mixture diffusion and Fourier contacts
 
 `ReactingMixtureOptions::face_transport` is an ordered list of explicit physical
@@ -248,7 +258,68 @@ phase-aligned accepted interval totals. Exact source matching includes the numbe
 packets; commit and restore never invoke the provider. Retained valid trials and
 all counts survive later rejected previews and checkpoint replay.
 
+## Prescribed closed planar motion
+
+The explicit `preview_ale` and `preview_ale_with_sources` operations accept a
+live `PlanarALEMeshMotion` bound to the exact same native mesh. Preview begins
+one geometry trial, assembles on its actual geometry, then restores the accepted
+geometry before returning an immutable candidate. `commit_ale` requires that
+same live motion authority and restages the retained old/new volumes and swept
+rates exactly. It publishes without invoking source, EOS or target laws. The
+ordinary fixed-grid commit rejects moving candidates.
+
+Geometry epochs invalidate numerical caches on motion and rollback. A separate
+logical accepted-geometry identity lets earlier valid candidates survive a
+later failed preview; it does not authorize arbitrary external geometry edits.
+Moving checkpoint/restore requires the explicit motion authority and restores
+geometry, all physical fields, accepted absolute flux, diagnostics and time.
+Trials retain owned geometry certificates, not a borrowed active ALE view or a
+lease that outlives the controller.
+
+Species, phase internal energy, population number and momentum use accepted-old
+and trial-new control-volume storage with mesh-relative phase advection. The
+absolute carrier and phase-flux queries keep their existing meaning.
+`PhaseFaceTransport::mesh_volume_flux` records swept volume rate, and
+`relative_phase_volume_flux` records actual phase advection. Physical boundary
+absolute carrier flux equals the prescribed swept rate, with zero relative
+normal phase flux. The transport snapshot captures the actual trial geometry
+and its pre-source inventory.
+
+Let `Wold`, `Wadv` and `Wnew` be accepted, advected and final physical material
+volumes, `CVnew` the trial geometric cell volume, `w` the canonical swept face
+rate and `theta` the summed upwind material fraction. The absolute pressure target
+is `(Wnew-Wadv)/dt + (Wold-CVnew)/dt + D(theta*w)`. Retaining these operands keeps
+physical material changes separate from geometric conservation. Accepted occupancy
+and discrete GCL reduce the geometric term to `D((theta-1)*w)`, without requiring
+`theta=1`. Phase pressure work remains `-p*(Vnew-Vadv)`; swept volume is not an
+additional source of material or heat. At zero motion, retained accepted EOS
+occupancy roundoff can therefore produce a small pressure correction relative
+to the fixed-grid route. Cross-route numerical equivalence is bounded by the
+volume arithmetic and EOS susceptibility; accepted-state rollback is exact.
+
+`ReactingMixtureOptions::planar_motion` supplies an immutable exact-mesh target
+provider with identity and revision. The controller owns its motion authority
+and evaluates the target once per preview at accepted time and proposed `dt`.
+Source and face laws see actual trial coordinates and volumes. Face receipts
+are validated while that geometry is live; exact retained source, transport and
+gross-event equality binds their proof after preview rolls back. Commit and
+restore invoke no target or source callback.
+
+This path accepts closed, nonperiodic, orthogonal Cartesian, cylindrical and
+`SemiStructuredXY_Z` native meshes with inviscid/slip walls. The swept normal
+rate does not supply tangential viscous wall velocity or traction, so nonzero
+viscosity is rejected. Reservoir boundaries, free-surface target selection,
+capillarity, nonorthogonal and general composite motion require separate
+contracts and qualification. Fixed-grid capability does not establish support
+for those combinations.
+
 ## Acceptance and replay
+
+The global Krylov residual does not by itself bound a small local arriving
+population. Each population must also close its physical cellwise count/face
+balance. Callers select sufficient linear accuracy and a suitable supported
+solver policy; an underresolved small phase rejects without a count floor or a
+relaxed conservation tolerance.
 
 A source preview retains the final transport snapshot, integrated species,
 energy and momentum packets, and gross events. The controller verifies exact receipt
@@ -325,10 +396,12 @@ ownership and caloric conventions.
 
 ## Current support boundary
 
-The solver supports closed, fixed, orthogonal native mapped meshes. Focused
+The solver supports closed, orthogonal native mapped meshes. Prescribed planar
+motion is available through the explicit transaction above. Focused
 geometry fixtures include Cartesian, cylindrical, and orthogonal
 `SemiStructuredXY_Z` meshes with contiguous algebraic maps. The geometry check
-rejects nonorthogonal incidences; construction captures a fixed geometry epoch.
+rejects nonorthogonal incidences; geometry-dependent caches track the active
+epoch and are refreshed by the motion owner.
 An exactly zero interior material-mobility fraction requires strictly positive
 EOS susceptibility in every cell. Other possibly disconnected pressure graphs
 reject explicitly; this sufficient anchoring rule does not insert diagonal
@@ -339,8 +412,9 @@ inside its declared bracket after the mechanical gauge is separated.
 Prescribed phase drift is an explicit closure. Dispersed number ownership is
 opt-in through explicit roles and events; bulk phases retain disengaged counts.
 The present model uses common phase pressure and zero surface tension. Number
-transport does not qualify a capillary, radius or slip correlation. ALE is not
-enabled by the old/new-volume fields in a source snapshot.
+transport does not qualify a capillary, radius or slip correlation. Old/new-volume
+fields in a source snapshot alone do not authorize motion; use the explicit ALE
+transaction and its support boundary.
 
 Supplied same-carrier species diffusion and Fourier contact laws use the explicit
 ordered face adapter described above. Interphase thermal exchange and latent

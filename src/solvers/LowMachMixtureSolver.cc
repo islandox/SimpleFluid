@@ -13,11 +13,13 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <numeric>
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 
 namespace SimpleFluid::Reacting
 {
@@ -179,6 +181,18 @@ CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<con
 }
 } // namespace
 
+struct LowMachMixtureSolver::ALEGeometryCertificate
+{
+    const LowMachMixtureSolver* owner = nullptr;
+    const void* motion_identity = nullptr; // Compared against explicit live authority, never dereferenced.
+    const void* geometry_identity = nullptr;
+    PlanarMotion::StateSnapshot source;
+    std::uint64_t logical_geometry = 0;
+    double target_surface = 0, time_step = 0;
+    std::vector<double> old_volumes, new_volumes, swept_flux;
+    std::vector<Pack::global_ordinal_type> cell_ids, face_ids, cell_geometry_ids, face_geometry_ids;
+};
+
 struct LowMachMixtureSolver::Implementation
 {
     SP<const Mesh> mesh;
@@ -188,7 +202,7 @@ struct LowMachMixtureSolver::Implementation
     Diagnostics diagnostics;
     bool initialized = false, controller_active = false;
     std::uint64_t trial_nonce = 0, controller_id = 0, source_invocation = 0;
-    std::uint64_t epoch = 0;
+    std::uint64_t epoch = 0, logical_geometry = 0;
     ScalarField rho, old_rho, mu, mechanical_pressure, old_scalar, scalar, unit, zero, published_rho;
     VectorField u, old_u, pressure_gradient, published_u;
     FaceField flux, trial_flux, mass_flux;
@@ -196,7 +210,7 @@ struct LowMachMixtureSolver::Implementation
     FVM::CellGradientCache<Pack, Mesh> gradient_cache;
     BelosLinearSolver<Pack> transport_solver;
     VariableDensityMomentumEquation<Pack, Mesh> momentum;
-    LowMachPressureEquation pressure;
+    std::optional<LowMachPressureEquation> pressure;
     Implementation(
         SP<const Mesh> grid, std::vector<std::shared_ptr<const MixtureThermodynamics>> providers, Options controls)
         : mesh(EquationValidation::require_non_null_mesh(std::move(grid), "LowMachMixtureSolver")),
@@ -209,7 +223,7 @@ struct LowMachMixtureSolver::Implementation
           pressure_gradient(mesh, "mechanical_pressure_gradient"), published_u(mesh, "accepted_velocity"),
           flux(mesh, 0.0, "accepted_volume_flux"), trial_flux(mesh, 0.0, "trial_volume_flux"),
           mass_flux(mesh, 0.0, "actual_mass_flux"), geometry(*mesh), gradient_cache(mesh), momentum(mesh),
-          pressure(mesh)
+          pressure(std::in_place, mesh)
     {
         collective_detail::collective_local_validation(*mesh, "Low-Mach mixture options",
             [&]
@@ -361,14 +375,25 @@ struct LowMachMixtureSolver::Implementation
         Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local, &global);
         return global;
     }
-    void publish_fields(const State& state, bool publish = false)
+    void refresh_numeric_geometry()
+    {
+        geometry.refresh();
+        gradient_cache.refresh();
+        momentum.refresh_geometry();
+        // Inline storage removes a rank-local outer allocation before the pressure
+        // constructor enters its field/cache communication.
+        pressure.emplace(mesh);
+        epoch = mesh_geometry_epoch(*mesh);
+    }
+    void publish_fields(const State& state, bool publish = false, std::span<const double> control_volumes = {})
     {
         for (size_t c = 0; c < state.cells.size(); ++c)
         {
             double mass = 0;
             for (const auto& phase : state.cells[c].phases)
                 mass += phase_mass(phase);
-            rho.set_owned_value(static_cast<LO>(c), mass / mesh->cell_volume(static_cast<LO>(c)));
+            rho.set_owned_value(static_cast<LO>(c),
+                mass / (control_volumes.empty() ? mesh->cell_volume(static_cast<LO>(c)) : control_volumes[c]));
             u.set_owned_value(static_cast<LO>(c), state.cells[c].velocity);
             mechanical_pressure.set_owned_value(static_cast<LO>(c), state.cells[c].mechanical_pressure);
         }
@@ -384,10 +409,11 @@ struct LowMachMixtureSolver::Implementation
         }
     }
     void transport(std::span<const double> old_amount, const FaceField& phase_flux, double dt,
-        std::vector<double>& new_amount, Diagnostics& statistics)
+        std::vector<double>& new_amount, Diagnostics& statistics, const FVM::ALEControlVolumeState* ale = nullptr)
     {
         for (size_t c = 0; c < old_amount.size(); ++c)
-            old_scalar.set_owned_value(static_cast<LO>(c), old_amount[c] / mesh->cell_volume(static_cast<LO>(c)));
+            old_scalar.set_owned_value(static_cast<LO>(c),
+                old_amount[c] / (ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(static_cast<LO>(c))));
         old_scalar.sync_ghosts();
         scalar.owned_data().update(1.0, old_scalar.owned_data(), 0.0);
         auto system = FVM::weighted_scalar_transport_system<Pack>(
@@ -401,7 +427,8 @@ struct LowMachMixtureSolver::Implementation
                 .boundary_value = [](int, size_t) { return 0.0; },
                 .source = [](LO) { return 0.0; },
                 .treatment = FVM::NonOrthogonalTreatment::Implicit,
-                .geometry_cache = &geometry});
+                .geometry_cache = &geometry,
+                .ale = ale});
         transport_solver.notify_operator_values_changed();
         const auto result =
             transport_solver.solve_with_statistics(system.matrix, *system.rhs, scalar.owned_data(), options.linear);
@@ -585,6 +612,7 @@ LowMachMixtureSolver::Checkpoint LowMachMixtureSolver::checkpoint() const
     saved.state = d->accepted;
     saved.owner = this;
     saved.geometry_epoch = d->epoch;
+    saved.logical_geometry = d->logical_geometry;
     saved.diagnostics = d->diagnostics;
     saved.face_flux.resize(d->mesh->num_owned_faces());
     for (size_t f = 0; f < saved.face_flux.size(); ++f)
@@ -600,7 +628,8 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach checkpoint",
         [&]
         {
-            check(saved.owner == this && saved.geometry_epoch == mesh_geometry_epoch(*d->mesh) &&
+            check(saved.owner == this && !saved.ale_geometry && saved.logical_geometry == d->logical_geometry &&
+                      d->epoch == mesh_geometry_epoch(*d->mesh) &&
                       saved.state.cells.size() == d->mesh->num_owned_cells() &&
                       saved.face_flux.size() == d->mesh->num_owned_faces(),
                 "Low-Mach checkpoint belongs to a foreign solver, stale geometry or different maps.");
@@ -616,10 +645,12 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
     d->flux.sync_ghosts();
     d->accepted = std::move(candidate);
     d->diagnostics = std::move(statistics);
-    d->epoch = saved.geometry_epoch;
+    d->epoch = mesh_geometry_epoch(*d->mesh);
     d->initialized = true;
     ++d->trial_nonce;
 }
+
+#include "solvers/details/LowMachPlanarALE.inc"
 
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
     double dt, const std::vector<CellSources>& sources, const ControllerLease* controller)
@@ -636,12 +667,16 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_sources(
 }
 
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const std::vector<CellSources>& fixed_sources,
-    std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller)
+    std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller,
+    const FVM::ALEControlVolumeState* ale)
 {
     std::vector<CellSources> sources;
     const auto& mesh = *d->mesh;
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
+    collective_detail::require_uniform_value(mesh, int(ale != nullptr), "Low-Mach ALE transport selection");
+    if (ale)
+        ale->validate(mesh, dt);
     collective_detail::collective_local_validation(mesh, "Low-Mach mixture step inputs",
         [&]
         {
@@ -727,7 +762,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     std::vector<CellSources> previous_sources;
     std::vector<std::vector<double>> gross_events, previous_events;
     std::optional<bool> event_channel;
-    d->publish_fields(accepted);
+    d->publish_fields(accepted, false, ale ? ale->old_cell_volumes() : std::span<const double>{});
     d->old_rho.owned_data().update(1.0, d->rho.owned_data(), 0.0);
     d->old_rho.sync_ghosts();
     d->old_u.owned_data().update(1.0, d->u.owned_data(), 0.0);
@@ -774,6 +809,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             std::vector<std::unique_ptr<VectorField>> drift(np);
             std::vector<std::unique_ptr<FaceField>> phase_flux(np);
             std::vector<double> before(nc), after;
+            if (ale)
+            {
+                for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                    if (mesh.is_geometry_exterior_face(static_cast<LO>(f)))
+                        d->trial_flux.set_owned_value(static_cast<LO>(f), ale->face_mesh_fluxes()[f]);
+                d->trial_flux.sync_ghosts();
+            }
             for (size_t a = 0; a < np; ++a)
             {
                 drift[a] = std::make_unique<VectorField>(d->mesh, "phase_drift");
@@ -785,12 +827,17 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 {
                     const auto face = static_cast<LO>(f);
                     if (mesh.is_boundary_face(face))
+                    {
+                        // Impermeable moving wall: relative phase advection is exactly zero.
+                        phase_flux[a]->set_owned_value(face, 0.);
                         continue;
+                    }
                     const auto owner = mesh.owner_cell(face),
                                neighbor = mesh.opposite_or_periodic_neighbor_cell(face, owner);
                     const auto slip = (drift[a]->local_value(owner) + drift[a]->local_value(neighbor)) * 0.5;
-                    phase_flux[a]->set_owned_value(
-                        face, d->trial_flux.local_value(face) + slip.dot(mesh.face_area_vector(face)));
+                    phase_flux[a]->set_owned_value(face, d->trial_flux.local_value(face) -
+                                                             (ale ? ale->face_mesh_fluxes()[f] : 0.) +
+                                                             slip.dot(mesh.face_area_vector(face)));
                 }
                 phase_flux[a]->sync_ghosts();
                 if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
@@ -801,11 +848,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             for (size_t c = 0; c < nc; ++c)
                             {
                                 before[c] = *accepted.cells[c].phase_numbers[a];
-                                check(std::isfinite(before[c] / mesh.cell_volume(static_cast<LO>(c))),
+                                check(std::isfinite(before[c] / (ale ? ale->old_cell_volumes()[c]
+                                                                     : mesh.cell_volume(static_cast<LO>(c)))),
                                     "Population number concentration is not representable.");
                             }
                         });
-                    d->transport(before, *phase_flux[a], dt, after, result);
+                    d->transport(before, *phase_flux[a], dt, after, result, ale);
 
                     ScalarField number_concentration(d->mesh, 0.0, "transported_population_number");
                     FaceField number_flux(d->mesh, 0.0, "conservative_population_number_flux");
@@ -843,6 +891,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         });
                     number_flux.sync_ghosts();
                     double local_number_error = 0;
+                    std::optional<LO> worst_number_cell;
+                    std::array<long double, 3> worst_number_operands{};
                     collective_detail::collective_local_validation(mesh, "Physical local population balance",
                         [&]
                         {
@@ -851,23 +901,40 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 const long double flux = static_cast<long double>(dt) *
                                                          FVM::cell_flux_balance(mesh, number_flux, static_cast<LO>(c));
                                 const long double residual = static_cast<long double>(after[c]) - before[c] + flux;
-                                local_number_error = std::max(local_number_error,
-                                    source_stage_detail::normalized(residual,
-                                        std::abs(static_cast<long double>(after[c])) +
-                                            std::abs(static_cast<long double>(before[c])) + std::abs(flux),
-                                        d->options.conservation_relative_tolerance));
+                                const double error = source_stage_detail::normalized(residual,
+                                    std::abs(static_cast<long double>(after[c])) +
+                                        std::abs(static_cast<long double>(before[c])) + std::abs(flux),
+                                    d->options.conservation_relative_tolerance);
+                                if (error > local_number_error)
+                                {
+                                    local_number_error = error;
+                                    worst_number_cell = static_cast<LO>(c);
+                                    worst_number_operands = {before[c], after[c], flux};
+                                }
                             }
                         });
                     const double count_error = d->maximum(local_number_error);
                     result.maximum_population_transport_residual =
                         std::max(result.maximum_population_transport_residual, count_error);
-                    check(count_error <= 1, "Population transport fails its physical local count-balance gate.");
+                    if (count_error > 1)
+                    {
+                        std::ostringstream message;
+                        message.precision(17);
+                        message << "Population transport fails its physical local count-balance gate: normalized="
+                                << count_error << ", local=" << local_number_error;
+                        if (worst_number_cell)
+                            message << ", geometry cell=" << mesh.cell_geometry_global_id(*worst_number_cell)
+                                    << ", phase=" << a << ", before=" << worst_number_operands[0]
+                                    << ", after=" << worst_number_operands[1]
+                                    << ", integrated outgoing=" << worst_number_operands[2];
+                        throw std::runtime_error(message.str());
+                    }
                 }
                 for (size_t s = 0; s < ns; ++s)
                 {
                     for (size_t c = 0; c < nc; ++c)
                         before[c] = accepted.cells[c].phases[a].moles[s];
-                    d->transport(before, *phase_flux[a], dt, after, result);
+                    d->transport(before, *phase_flux[a], dt, after, result, ale);
                     auto field = std::make_unique<ScalarField>(d->mesh, "transported_species_concentration");
                     for (size_t c = 0; c < nc; ++c)
                     {
@@ -879,7 +946,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 }
                 for (size_t c = 0; c < nc; ++c)
                     before[c] = accepted.cells[c].phases[a].internal_energy;
-                d->transport(before, *phase_flux[a], dt, after, result);
+                d->transport(before, *phase_flux[a], dt, after, result, ale);
                 for (size_t c = 0; c < nc; ++c)
                     trial.cells[c].phases[a].internal_energy = after[c];
                 ScalarField transported_energy_density(d->mesh, "transported_energy_operand");
@@ -900,7 +967,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                               ->evaluate(old_phase.temperature, old_phase.absolute_pressure,
                                                   fractions(old_phase))
                                               .internal_energy_temperature;
-                            caloric_carrier_density.set_owned_value(cell, caloric / mesh.cell_volume(cell));
+                            caloric_carrier_density.set_owned_value(
+                                cell, caloric / (ale ? ale->old_cell_volumes()[c] : mesh.cell_volume(cell)));
                         }
                     });
                 transported_energy_density.sync_ghosts();
@@ -953,7 +1021,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
                         {
                             const LO face = static_cast<LO>(f);
-                            if (mesh.is_boundary_face(face))
+                            if (mesh.is_boundary_face(face) && !ale)
                                 continue;
                             const double phi = phase_flux[a]->local_value(face);
                             const LO owner = mesh.owner_cell(face);
@@ -997,8 +1065,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     last_transport.new_control_volumes.resize(nc);
                     last_transport.accepted_revision = accepted.revision;
                     last_transport.accepted_generation = d->trial_nonce;
-                    last_transport.old_geometry_epoch = d->epoch;
-                    last_transport.new_geometry_epoch = d->epoch;
+                    last_transport.old_geometry_epoch = ale ? ale->old_geometry_epoch() : d->epoch;
+                    last_transport.new_geometry_epoch = ale ? ale->new_geometry_epoch() : d->epoch;
                     last_transport.schema_fingerprint = d->eos.front()->catalog().fingerprint();
                     last_transport.accepted_time = accepted.time;
                     last_transport.time_step = dt;
@@ -1011,10 +1079,14 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         packet.carrier_volume_flux = d->trial_flux.local_value(face);
                         packet.phase_volume_flux.resize(np);
                         packet.material_fraction.resize(np);
+                        packet.mesh_volume_flux = ale ? ale->face_mesh_fluxes()[f] : 0.;
+                        packet.relative_phase_volume_flux.resize(np);
                         check(std::isfinite(packet.carrier_volume_flux), "Nonfinite stage carrier flux receipt.");
                         for (size_t a = 0; a < np; ++a)
                         {
-                            packet.phase_volume_flux[a] = phase_flux[a]->local_value(face);
+                            packet.relative_phase_volume_flux[a] = phase_flux[a]->local_value(face);
+                            packet.phase_volume_flux[a] =
+                                packet.relative_phase_volume_flux[a] + packet.mesh_volume_flux;
                             packet.material_fraction[a] = material_face_fraction[a]->local_value(face);
                             check(std::isfinite(packet.phase_volume_flux[a]) &&
                                       std::isfinite(packet.material_fraction[a]) && packet.material_fraction[a] >= 0,
@@ -1023,8 +1095,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     }
                     for (size_t c = 0; c < nc; ++c)
                     {
-                        last_transport.old_control_volumes[c] = mesh.cell_volume(static_cast<LO>(c));
-                        last_transport.new_control_volumes[c] = last_transport.old_control_volumes[c];
+                        last_transport.old_control_volumes[c] =
+                            ale ? ale->old_cell_volumes()[c] : mesh.cell_volume(static_cast<LO>(c));
+                        last_transport.new_control_volumes[c] =
+                            ale ? ale->new_cell_volumes()[c] : last_transport.old_control_volumes[c];
                         last_transport.cells[c].phases.resize(np);
                         for (size_t a = 0; a < np; ++a)
                         {
@@ -1381,13 +1455,15 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
                     {
                         const LO face = static_cast<LO>(f);
-                        if (mesh.is_boundary_face(face))
+                        if (mesh.is_boundary_face(face) && !ale)
                         {
                             d->mass_flux.set_owned_value(face, 0);
                             continue;
                         }
                         const LO owner = mesh.owner_cell(face),
-                                 neighbor = mesh.opposite_or_periodic_neighbor_cell(face, owner);
+                                 neighbor = mesh.is_boundary_face(face)
+                                                ? owner
+                                                : mesh.opposite_or_periodic_neighbor_cell(face, owner);
                         double mass_flux = 0, volume_slip = 0, theta = 0;
                         Vector drift_flux{};
                         for (size_t a = 0; a < np; ++a)
@@ -1401,7 +1477,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             const double mf = phi * density;
                             mass_flux += mf;
                             drift_flux = drift_flux + drift[a]->local_value(donor) * mf;
-                            const double slip = phi - d->trial_flux.local_value(face);
+                            const double slip =
+                                phi - (d->trial_flux.local_value(face) - (ale ? ale->face_mesh_fluxes()[f] : 0.));
                             const double phase_fraction = material_face_fraction[a]->local_value(face);
                             theta += phase_fraction;
                             volume_slip += slip * phase_fraction;
@@ -1421,6 +1498,14 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             carrier_fraction.sync_ghosts();
             for (auto& field : drift_momentum)
                 field->sync_ghosts();
+            FaceField theta_mesh_correction(d->mesh, 0., "theta_dependent_mesh_volume_correction");
+            if (ale)
+            {
+                for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                    theta_mesh_correction.set_owned_value(static_cast<LO>(f),
+                        carrier_fraction.local_value(static_cast<LO>(f)) * ale->face_mesh_fluxes()[f]);
+                theta_mesh_correction.sync_ghosts();
+            }
             double occupancy = 0, local_work = 0, local_roundoff = 0, local_work_magnitude = 0,
                    local_pressure_operands = 0;
             collective_detail::collective_local_validation(mesh, "Low-Mach EOS transport candidate",
@@ -1437,6 +1522,15 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         check(std::isfinite(volume_susceptibility[c]) && volume_susceptibility[c] >= 0,
                             "Low-Mach local EOS volume susceptibility is not stable and nonnegative.");
                         target[c] = (thermal[c].volume - advected_volume) / dt;
+                        if (ale)
+                        {
+                            const double old_material =
+                                std::accumulate(old_volumes[c].begin(), old_volumes[c].end(), 0.);
+                            // Unsimplified identity retains actual accepted occupancy/GCL operands.
+                            // With accepted occupancy and exact GCL this is S + D[(theta-1)*w].
+                            target[c] += (old_material - volume) / dt +
+                                         FVM::cell_flux_balance(mesh, theta_mesh_correction, cell);
+                        }
                         occupancy = std::max(occupancy, std::abs(thermal[c].volume - volume) / volume);
                         local_work += thermal[c].work;
                         local_work_magnitude += thermal[c].work_magnitude;
@@ -1469,6 +1563,9 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 }
                         }
                         check(std::isfinite(viscosity) && viscosity >= 0, "Invalid supplied mixture viscosity.");
+                        if (ale)
+                            check(viscosity == 0.,
+                                "Initial prescribed closed ALE requires an explicit inviscid/slip wall policy.");
                         d->mu.set_owned_value(cell, viscosity);
                     }
                 });
@@ -1502,7 +1599,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             FVM::cell_flux_balance(mesh, *drift_momentum[component], cell) / mesh.cell_volume(cell);
                     return force;
                 },
-                {}, {}, d->options.linear);
+                {}, {}, d->options.linear, FVM::NonOrthogonalTreatment::Implicit, ale);
             FaceField predictor(d->mesh, 0.0, "low_mach_velocity_predictor_flux");
             std::vector<double> previous_flux(mesh.num_owned_faces());
             for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
@@ -1510,7 +1607,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 const LO face = static_cast<LO>(f);
                 previous_flux[f] = d->trial_flux.local_value(face);
                 if (mesh.is_boundary_face(face))
+                {
+                    predictor.set_owned_value(face, ale ? ale->face_mesh_fluxes()[f] : 0.);
                     continue;
+                }
                 const LO owner = mesh.owner_cell(face), neighbor = mesh.opposite_or_periodic_neighbor_cell(face, owner);
                 auto velocity = (d->u.local_value(owner) + d->u.local_value(neighbor)) * 0.5;
                 velocity = velocity + (d->pressure_gradient.local_value(owner) / d->rho.local_value(owner) +
@@ -1530,9 +1630,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 pressure_impulse = pressure_impulse - d->pressure_gradient.local_value(static_cast<LO>(c)) *
                                                           (dt * mesh.cell_volume(static_cast<LO>(c)));
             }
-            const auto projected = d->pressure.project_material_with_eos(d->rho, dt, target, volume_susceptibility,
-                carrier_fraction, slip_volume, predictor, d->trial_flux, d->mechanical_pressure, d->u,
-                d->options.linear, d->options.continuity_tolerance);
+            const auto projected =
+                ale ? d->pressure->project_material_ale_with_eos(d->rho, dt, target, volume_susceptibility,
+                          carrier_fraction, slip_volume, predictor, d->trial_flux, d->mechanical_pressure, d->u, *ale,
+                          d->options.linear, d->options.continuity_tolerance)
+                    : d->pressure->project_material_with_eos(d->rho, dt, target, volume_susceptibility,
+                          carrier_fraction, slip_volume, predictor, d->trial_flux, d->mechanical_pressure, d->u,
+                          d->options.linear, d->options.continuity_tolerance);
             trial.thermodynamic_pressure += projected.thermodynamic_pressure_increment;
             check(std::isfinite(trial.thermodynamic_pressure), "Uniform pressure gauge increment overflow.");
             result.maximum_continuity_residual = projected.maximum_continuity_residual;
@@ -1773,6 +1877,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         staged.nonce = d->trial_nonce;
         staged.base_revision = accepted.revision;
         staged.geometry_epoch = d->epoch;
+        staged.logical_geometry = d->logical_geometry;
         staged.phase_transport = std::move(last_phase_transport);
         staged.face_flux.resize(mesh.num_owned_faces());
         for (size_t f = 0; f < staged.face_flux.size(); ++f)
@@ -1851,8 +1956,9 @@ void LowMachMixtureSolver::commit(const Trial& trial, const ControllerLease* con
     collective_detail::collective_local_validation(*d->mesh, "Low-Mach immutable trial commit",
         [&]
         {
-            check(trial.owner == this && trial.nonce == d->trial_nonce && trial.base_revision == d->accepted.revision &&
-                      trial.geometry_epoch == d->epoch && d->epoch == mesh_geometry_epoch(*d->mesh),
+            check(trial.owner == this && !trial.ale_geometry && trial.nonce == d->trial_nonce &&
+                      trial.base_revision == d->accepted.revision && trial.logical_geometry == d->logical_geometry &&
+                      d->epoch == mesh_geometry_epoch(*d->mesh),
                 "Low-Mach trial is foreign, already committed, superseded or belongs to stale geometry.");
             candidate = trial.candidate;
             statistics = trial.statistics;
