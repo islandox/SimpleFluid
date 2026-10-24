@@ -18,6 +18,26 @@ namespace
 using Sum = detail::CompensatedSum<real_t>;
 constexpr real_t ledger_tolerance = 1e-12;
 
+/** Preserve event components until after cancellation with the original stock. */
+class CountSum
+{
+public:
+    void add(long double value)
+    {
+        const auto next = high_ + value;
+        if (std::abs(high_) >= std::abs(value))
+            correction_ += (high_ - next) + value;
+        else
+            correction_ += (value - next) + high_;
+        high_ = next;
+    }
+    [[nodiscard]] long double value() const { return high_ + correction_; }
+    [[nodiscard]] PopulationNumberChangeReceipt receipt() const { return {high_, correction_}; }
+
+private:
+    long double high_ = 0, correction_ = 0;
+};
+
 void require(bool valid, const char* message)
 {
     if (!valid)
@@ -507,7 +527,8 @@ MultispeciesPopulationResult advance_multispecies_population_exchange(const Reac
     initial.validate(catalog);
     require(numbers.size() == initial.dispersedPopulations.size(),
         "Every dispersed population needs one explicit number inventory.");
-    std::vector<Sum> births(numbers.size()), deaths(numbers.size());
+    std::vector<CountSum> endpoints(numbers.size()), changes(numbers.size()), deathMargins(numbers.size());
+    std::vector<bool> hasBirth(numbers.size(), false);
     const auto population_index = [&](std::string_view id)
     {
         for (std::size_t i = 0; i < numbers.size(); ++i)
@@ -519,15 +540,26 @@ MultispeciesPopulationResult advance_multispecies_population_exchange(const Reac
     {
         require(numbers[i].population == initial.dispersedPopulations[i].id && nonnegative(numbers[i].number),
             "Population numbers must match unique species population order and be finite/nonnegative.");
+        endpoints[i].add(numbers[i].number);
+        deathMargins[i].add(numbers[i].number);
     }
     for (const auto& event : packet.numberEvents)
     {
         require(nonnegative(event.births) && nonnegative(event.deaths),
             "Population number births and deaths must be finite and nonnegative.");
         const auto i = population_index(event.population);
-        births[i] += event.births;
-        deaths[i] += event.deaths;
+        // Original events feed independent endpoint/change/death-margin sums.
+        // No incoming birth finances any gross death, regardless of event order.
+        endpoints[i].add(event.births);
+        endpoints[i].add(-static_cast<long double>(event.deaths));
+        changes[i].add(event.births);
+        changes[i].add(-static_cast<long double>(event.deaths));
+        deathMargins[i].add(-static_cast<long double>(event.deaths));
+        hasBirth[i] = hasBirth[i] || event.births > 0;
     }
+    for (const auto& margin : deathMargins)
+        require_result(std::isfinite(margin.value()) && margin.value() >= 0,
+            "Competing population events exceed the jointly available original number donor.");
     std::vector<Reacting::ReactionDefinition> reactions;
     Reacting::ReactionSourceInput sources;
     for (std::size_t i = 0; i < packet.transfers.size(); ++i)
@@ -547,34 +579,41 @@ MultispeciesPopulationResult advance_multispecies_population_exchange(const Reac
     const Reacting::ReactionMechanism mechanism(std::make_shared<const Reacting::SpeciesCatalog>(catalog),
         std::move(reactions), Reacting::EnergyConvention::IncludesFormationEnergy);
     const auto advance = Reacting::advance_reactions(mechanism, initial, environment, 0.0, sources);
-    MultispeciesPopulationResult result{advance.state, numbers, advance.ledger, std::vector<double>(numbers.size())};
+    MultispeciesPopulationResult result{advance.state, numbers, advance.ledger, std::vector<double>(numbers.size()),
+        std::vector<PopulationNumberChangeReceipt>(numbers.size())};
     for (std::size_t i = 0; i < numbers.size(); ++i)
     {
-        require_result(deaths[i].value() <= numbers[i].number,
-            "Competing population events exceed the jointly available number donor.");
-        Sum number, change, moles;
-        change += births[i].value();
-        change += -deaths[i].value();
-        number += numbers[i].number;
-        number += change.value();
+        require_result(std::isfinite(deathMargins[i].value()) && deathMargins[i].value() >= 0,
+            "Competing population events exceed the jointly available original number donor.");
+        Sum moles;
         for (const auto value : result.state.dispersedPopulations[i].amounts)
             moles += value;
-        require_result(nonnegative(number.value()) && nonnegative(moles.value()),
+        require_result(std::isfinite(endpoints[i].value()) && endpoints[i].value() >= 0 && nonnegative(moles.value()),
             "Population exchange produced invalid number/species amounts.");
-        if (moles.value() == 0.0)
+        if (moles.value() == 0)
         {
-            // Exact disappearance is a physical count-death event, not a positivity repair.
-            change += -number.value();
-            result.numbers[i].number = 0.0;
+            // Preserve the existing full-dissolution policy in this narrowly scoped
+            // arithmetic fix. Its separate explicit-event policy migration is not changed here.
+            const auto remaining = endpoints[i].receipt();
+            changes[i].add(-remaining.high);
+            changes[i].add(-remaining.correction);
+            result.numbers[i].number = 0;
         }
         else
         {
-            require_result(number.value() > 0.0, "Nonempty gas populations require positive paired bubble number.");
-            result.numbers[i].number = number.value();
+            const auto number = static_cast<double>(endpoints[i].value());
+            require_result(std::isfinite(number) && number > 0,
+                "Nonempty gas populations require a representable positive paired bubble number.");
+            result.numbers[i].number = number;
         }
-        require_result(
-            births[i].value() == 0.0 || moles.value() > 0.0, "A bubble birth must carry a positive gas inventory.");
-        result.numberChanges[i] = change.value();
+        const auto change = changes[i].receipt();
+        require_result(std::isfinite(change.high) && std::isfinite(change.correction),
+            "Population local number-change receipt is nonfinite.");
+        const auto report = static_cast<double>(changes[i].value());
+        require_result(std::isfinite(report), "Population number-change report overflows its representation.");
+        require_result(!hasBirth[i] || moles.value() > 0, "A bubble birth must carry a positive gas inventory.");
+        result.numberChanges[i] = report;
+        result.localNumberChanges[i] = change;
     }
     return result;
 }

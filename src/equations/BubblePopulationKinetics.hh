@@ -254,12 +254,22 @@ struct MultispeciesPopulationPacket
     std::vector<PopulationNumberEvent> numberEvents;
 };
 
+/** Local original-event sum, before reporting narrows into numberChanges.
+ * Replay MUST append both components to a stock-seeded accumulator. The pair
+ * is transient local data, not an MPI serialization or persistent state format.
+ */
+struct PopulationNumberChangeReceipt
+{
+    long double high = 0, correction = 0;
+};
+
 struct MultispeciesPopulationResult
 {
     Reacting::CellSpeciesState state;
     std::vector<PopulationNumberState> numbers;
     Reacting::SpeciesSourceLedger ledger;
-    std::vector<double> numberChanges;
+    std::vector<double> numberChanges; ///< Rounded reporting only; never replay into a stock.
+    std::vector<PopulationNumberChangeReceipt> localNumberChanges; ///< Exact population order, finite components.
 };
 
 /** Atomic joint donor reservation, including competing populations and all gases.
