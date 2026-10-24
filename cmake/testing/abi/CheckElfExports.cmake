@@ -236,7 +236,7 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::IncompressibleIsothermalSolver<.*>[ ]*::(isothermal_momentum_equation|isothermal_velocity_boundary_cache|isothermal_pressure_face_flux_workspace|isothermal_coupled_pressure_velocity_solver|stored_material_properties|stored_turbulence_model|solution_writer)[(]"
     "PhysicalModelTag"
     "SimpleFluid::PlanarALEMeshMotion<.*>[ ]*::(detect_family|current_axis_edges|geometry_edge_coordinates|geometry_motion_available|geometry_motion_owned|claim_geometry_motion|release_geometry_motion|replace_axis_edges|candidate_axis_edges|candidate_geometry_edges|capture_cell_volumes|capture_face_centroids|validate_collective_construction|validate_collective_trial|validate_collective_transaction|compute_trial_state|rollback_impl|reset_stationary_state)[(]"
-    "^SimpleFluid::MeshHandle<.*>[ ]*::(require_mesh|checked_local|checked_global_ids|local_output_filename|add_geometry_cell_data|collect_vtu_points|write_vtu|legacy_vtu_topology|orthogonal_vtu_topology|semi_structured_vtu_topology|unstructured_vtu_topology|geometry_cell_lid|geometry_face_lid|visit_geometry_cell|visit_geometry_face|adjacent_cell|cell_local_id|face_local_id|initialize_orthogonal|initialize_semi_structured|initialize_contiguous_semi_structured_maps|initialize_unstructured|initialize_stk|initialize_serial|initialize_cells|initialize_faces|initialize_indexer|initialize_cell_faces|materialize_legacy_indexer|initialize_boundary_batches|make_map|create_maps|check_cell|check_face|visit_indexed_cell|visit_indexed_face|geometry_to_local_cell|geometry_to_local_face)[(]"
+    "^SimpleFluid::MeshHandle<.*>[ ]*::(require_mesh|checked_local|checked_global_ids|local_output_filename|add_geometry_cell_data|collect_vtu_points|write_vtu|legacy_vtu_topology|orthogonal_vtu_topology|semi_structured_vtu_topology|unstructured_vtu_topology|geometry_cell_lid|geometry_face_lid|visit_geometry_cell|visit_geometry_face|adjacent_cell|cell_local_id|face_local_id|initialize_orthogonal|initialize_semi_structured|initialize_contiguous_native_maps|initialize_unstructured|initialize_stk|initialize_serial|initialize_cells|initialize_faces|initialize_indexer|initialize_cell_faces|materialize_legacy_indexer|initialize_boundary_batches|make_map|create_maps|check_cell|check_face|visit_indexed_cell|visit_indexed_face|geometry_to_local_cell|geometry_to_local_face)[(]"
     "SimpleFluid::VesselVolumeMap::boundAndEvaluate[(]"
     "SimpleFluid::(ConstantAreaVesselVolumeMap|TabulatedVesselVolumeMap)::(volumeBelowInRange|areaAtInRange|levelForVolumeInRange|heightSegment|volumeSegment)[(]"
     "SimpleFluid::PlanarFreeSurfaceModel::(solveClosure|solveVented|solveClosed|evaluateClosedTrial|makeDiagnostics|validateUpdate)[(]"
@@ -263,6 +263,12 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
 endforeach()
 
 set(simplefluid_required_api_patterns
+    "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::OrthogonalMeshDecomposition[(]"
+    "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::owned_begin[(]"
+    "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::owned_end[(]"
+    "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::num_owned_cells[(]"
+    "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::owner[(]"
+    "^SimpleFluid::Meshes::OrthogonalMeshDecomposition::storage_bytes[(]"
     "^SimpleFluid::BoilingSourceModel<.*>[ ]*::update[(]"
     "^SimpleFluid::DelayedNeutronPrecursorModel<.*>[ ]*::advance[(]"
     "^SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::update_explicit[(]"

@@ -35,8 +35,9 @@ instead of converting a supplied native mesh into a legacy mesh.
 This avoids hidden conversions and duplicated storage while preserving compatibility
 consumers.
 
-Within the native path, Cartesian and cylindrical meshes construct their
-distributed slab views directly. An `UnstructuredMesh` must first be
+Within the native path, Cartesian and cylindrical meshes construct
+[count-balanced, width-aware tensor decompositions](docs/architecture/orthogonal_decomposition.md)
+with initially contiguous owned cell/face algebraic maps. An `UnstructuredMesh` must first be
 partitioned with `MeshPartitioner` and adapted through `PartitionedMesh` on a
 multi-rank communicator. `SemiStructuredXY_Z` constructs native owned/overlap
 maps from Zoltan2/ParMETIS XY graph partitions crossed with balanced Z slabs.

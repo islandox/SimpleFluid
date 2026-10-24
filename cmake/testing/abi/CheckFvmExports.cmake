@@ -101,7 +101,7 @@ foreach(index RANGE ${last_symbol})
     endif()
     if(name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(view|source_entity|position_in_view|lookup|band_for_local)([(]|$)"
        OR name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(View|Group)::"
-       OR name MATCHES "^SimpleFluid::MeshHandle<.*>[ ]*::initialize_contiguous_semi_structured_maps([(]|$)")
+       OR name MATCHES "^SimpleFluid::MeshHandle<.*>[ ]*::initialize_contiguous_native_maps([(]|$)")
         message(FATAL_ERROR "Private mesh implementation exported: ${name}")
     endif()
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::(FVM::)?detail::")

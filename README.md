@@ -198,6 +198,9 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
     distributed extruded and swept R–Z providers with common affine Z motion
   - **STK adapter** — `HEX_8` and `WEDGE_6` meshes via Exodus II files;
     other volume topologies are rejected during assembly
+- Cartesian/cylindrical [multidimensional decomposition](docs/architecture/orthogonal_decomposition.md)
+  balances cell counts first, uses geometric widths for rank-grid/cut selection,
+  and creates contiguous owned cell/face Tpetra maps
 - Owned + ghost cell decomposition for distributed-memory assembly
 - CRS-style neighbor connectivity for FVM stencil construction
 - Kokkos-based geometry storage — portable across CPU and GPU backends

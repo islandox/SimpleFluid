@@ -90,8 +90,8 @@ public:
      * to the overlap map. Callback failure is agreed collectively before any
      * rank proceeds to another collective operation.
      *
-     * Native decomposed XY/Z handles retain their compact topology and compose
-     * an optional local permutation. Existing algebraic GIDs stay attached to
+     * Native decomposed orthogonal and XY/Z handles preserve their source
+     * geometry lookup when composing a local permutation. Existing algebraic GIDs stay attached to
      * physical cells, so owned maps may cease to be contiguous after this
      * explicit selection; initial partition-time contiguous numbering is not
      * repeated. Face and node identities/order remain unchanged.

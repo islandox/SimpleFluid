@@ -15,6 +15,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     explicit_instantiation/OrthogonalLocalGlobalIndexer.cc
     explicit_instantiation/PartitionedMeshBase.cc
     mesh/OrthoMeshPartitioner.cc
+    mesh/OrthogonalMeshDecomposition.cc
     mesh/OrthoMeshTopo.cc
     mesh/OrthogonalCartesian3D.cc
     mesh/OrthogonalCylindrial3D.cc

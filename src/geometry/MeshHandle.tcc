@@ -17,6 +17,8 @@
 
 #include <array>
 #include <cmath>
+#include <numeric>
+#include <tuple>
 #include <Teuchos_CommHelpers.hpp>
 
 namespace SimpleFluid
@@ -145,7 +147,7 @@ template<TpetraTypePack Pack>
 MeshHandle<Pack>::MeshHandle(
     CartesianPtr mesh,
     DistributionOptions options)
-    : d_mesh(require_mesh(std::move(mesh)))
+    : d_mesh(std::move(mesh))
 {
     initialize_orthogonal(std::get<CartesianPtr>(d_mesh), options);
 }
@@ -175,7 +177,7 @@ template<TpetraTypePack Pack>
 MeshHandle<Pack>::MeshHandle(
     CylindricalPtr mesh,
     DistributionOptions options)
-    : d_mesh(require_mesh(std::move(mesh)))
+    : d_mesh(std::move(mesh))
 {
     initialize_orthogonal(std::get<CylindricalPtr>(d_mesh), options);
 }
@@ -322,8 +324,8 @@ MeshHandle<Pack>::MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh)
  * @brief Initialize ownership, overlap, connectivity, and maps for an
  * orthogonal mesh.
  *
- * The mesh is partitioned along its largest coordinate when more than one
- * partition is requested.
+ * Tensor factors balance cell counts first; physical widths select rank grids
+ * and equally count-balanced cuts. Serial virtual partitions retain source-ID maps.
  *
  * @tparam MeshType Cartesian or cylindrical orthogonal mesh type.
  * @param mesh Orthogonal mesh to initialize from.
@@ -333,150 +335,203 @@ MeshHandle<Pack>::MeshHandle(SP<SimpleFluid::Mesh<Pack>> mesh)
  */
 template<TpetraTypePack Pack>
 template<class MeshType>
-void MeshHandle<Pack>::initialize_orthogonal(
-    SP<const MeshType> mesh,
-    DistributionOptions options)
+void MeshHandle<Pack>::initialize_orthogonal(SP<const MeshType> mesh, DistributionOptions options)
 {
     const auto comm = Tpetra::getDefaultComm();
-    const int allow_empty = options.allow_empty_partitions ? 1 : 0;
-    int empty_options_count = 0;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &allow_empty, &empty_options_count);
-    if (empty_options_count != 0 && empty_options_count != comm->getSize())
+    const size_t communicator_rank = static_cast<size_t>(comm->getRank());
+    const size_t communicator_size = static_cast<size_t>(comm->getSize());
+    const size_t rank = options.partition.value_or(communicator_rank);
+    const size_t ranks = options.partitions.value_or(communicator_size);
+    const auto collective_error = [&](const std::exception_ptr& error, const char* message)
     {
-        throw std::invalid_argument(
-            "Orthogonal allow_empty_partitions must agree on every rank.");
-    }
-    const auto rank = options.partition.value_or(
-        static_cast<size_t>(comm->getRank()));
-    const auto ranks = options.partitions.value_or(
-        static_cast<size_t>(comm->getSize()));
-    if (options.partition.has_value() != options.partitions.has_value())
+        const int failed = error ? 1 : 0;
+        int any_failed = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &failed, &any_failed);
+        if (any_failed)
+        {
+            if (error)
+                std::rethrow_exception(error);
+            throw std::invalid_argument(message);
+        }
+    };
+    std::exception_ptr error;
+    Meshes::OrthogonalMeshDecomposition::Edges physical_edges;
+    std::optional<GeometryExecutionGuard::ReadLease> execution;
+    unsigned long long fingerprint = 14695981039346656037ull;
+    const auto bytes = [&](const void* source, size_t count)
     {
-        throw std::invalid_argument(
-            "Mesh distribution override requires both partition "
-            "and partition count.");
-    }
-    if (rank >= ranks)
+        const auto* data = static_cast<const unsigned char*>(source);
+        for (size_t i = 0; i < count; ++i)
+        {
+            fingerprint ^= data[i];
+            fingerprint *= 1099511628211ull;
+        }
+    };
+    const auto ordinal = [&](size_t value)
     {
-        throw std::invalid_argument(
-            "Mesh distribution partition index is out of range.");
+        const auto encoded = static_cast<unsigned long long>(value);
+        bytes(&encoded, sizeof(encoded));
+    };
+    try
+    {
+        if (!mesh || options.partition.has_value() != options.partitions.has_value() || ranks == 0 || rank >= ranks ||
+            (communicator_size > 1 && (rank != communicator_rank || ranks != communicator_size)))
+            throw std::invalid_argument("Orthogonal distribution requires matching communicator ranks in MPI.");
+        execution.emplace(mesh->acquire_geometry_read());
+        if (mesh->num_cells() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max()) ||
+            mesh->num_faces() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max()) ||
+            mesh->num_nodes() > static_cast<size_t>(std::numeric_limits<global_ordinal_type>::max()))
+            throw std::overflow_error("Orthogonal geometry IDs exceed the Tpetra ordinal range.");
+        ordinal(ranks);
+        ordinal(options.partition.has_value());
+        ordinal(options.allow_empty_partitions);
+        ordinal(options.ghost_layers);
+        ordinal(options.orthogonal_partitions.has_value());
+        if (options.orthogonal_partitions)
+            for (const auto factor : *options.orthogonal_partitions)
+                ordinal(factor);
+        const auto& source_edges = mesh->cell_edges();
+        double angular_scale = 1;
+        if constexpr (std::is_same_v<MeshType, Cylindrical>)
+            angular_scale = std::midpoint(source_edges[0].front(), source_edges[0].back());
+        for (size_t axis = 0; axis < 3; ++axis)
+        {
+            ordinal(mesh->indexer().num_cells_per_dim[axis]);
+            ordinal(mesh->indexer().periodic_dimensions[axis]);
+            ordinal(source_edges[axis].size());
+            for (const auto value : source_edges[axis])
+            {
+                bytes(&value, sizeof(value));
+                physical_edges[axis].push_back(static_cast<double>(value) * (axis == 1 ? angular_scale : 1));
+            }
+        }
+        ordinal(mesh->geometry_epoch());
+        auto batches = mesh->boundary_batch_ids();
+        std::sort(batches.begin(), batches.end());
+        ordinal(batches.size());
+        for (const auto id : batches)
+        {
+            bytes(&id, sizeof(id));
+            const auto name = mesh->boundary_batch_name(id);
+            ordinal(name.size());
+            bytes(name.data(), name.size());
+        }
+        d_orthogonal_decomposition = std::make_shared<Meshes::OrthogonalMeshDecomposition>(
+            mesh->indexer(), physical_edges, ranks, options.allow_empty_partitions, options.orthogonal_partitions);
     }
-
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_error(error, "Orthogonal geometry or distribution failed on another rank.");
+    unsigned long long minimum = 0, maximum = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &fingerprint, &minimum);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &fingerprint, &maximum);
+    if (minimum != maximum)
+        throw std::invalid_argument("Orthogonal geometry or distribution differs across ranks.");
     if (ranks == 1)
     {
         initialize_serial(*mesh);
         return;
     }
-
-    const auto& dimensions = mesh->indexer().num_cells_per_dim;
-    size_t coordinate = 0;
-    for (size_t candidate = 1; candidate < 3; ++candidate)
+    error = {};
+    try
     {
-        if (dimensions[candidate] > dimensions[coordinate])
+        const auto begin = d_orthogonal_decomposition->owned_begin(rank);
+        const auto end = d_orthogonal_decomposition->owned_end(rank);
+        const auto& source_indexer = mesh->indexer();
+        std::vector<size_t> owned, ghost;
+        std::map<size_t, size_t> distance;
+        std::vector<size_t> frontier;
+        for (size_t k = begin[2]; k < end[2]; ++k)
+            for (size_t j = begin[1]; j < end[1]; ++j)
+                for (size_t i = begin[0]; i < end[0]; ++i)
+                {
+                    const auto id = source_indexer.cell_ordinal({static_cast<unsigned>(i),
+                        static_cast<unsigned>(j), static_cast<unsigned>(k)});
+                    owned.push_back(id);
+                    frontier.push_back(id);
+                    distance.emplace(id, 0);
+                }
+        for (size_t depth = 0; depth < options.ghost_layers && !frontier.empty(); ++depth)
         {
-            coordinate = candidate;
-        }
-    }
-    if (ranks > dimensions[coordinate] && !options.allow_empty_partitions)
-    {
-        throw std::invalid_argument(
-            "Orthogonal mesh has fewer cells than MPI ranks along "
-            "its largest coordinate.");
-    }
-
-    // Keep the partitioner's nonempty-slab contract, while allowing callers to
-    // retain the full communicator for transfers involving a very coarse mesh.
-    const auto active_partitions =
-        std::min(ranks, static_cast<size_t>(dimensions[coordinate]));
-    Meshes::OrthoMeshPartitioner partitioner(
-        mesh->topology(),
-        static_cast<typename Meshes::OrthoMeshPartitioner::Dimension>(
-            coordinate),
-        active_partitions,
-        static_cast<Meshes::OrthoMeshPartitioner::Ordinal>(
-            options.ghost_layers));
-
-    std::vector<size_t> owned_cells;
-    std::vector<size_t> ghost_cells;
-    if (rank < active_partitions)
-    {
-        for (const auto id : partitioner.owned_cells(rank))
-        {
-            owned_cells.push_back(mesh->cell_local_id(id));
-        }
-        for (const auto id : partitioner.ghost_cells(rank))
-        {
-            ghost_cells.push_back(mesh->cell_local_id(id));
-        }
-    }
-    initialize_cells(std::move(owned_cells), std::move(ghost_cells));
-
-    std::unordered_set<size_t> seen_faces;
-    std::vector<size_t> owned_faces;
-    std::vector<size_t> overlap_faces;
-    for (const auto cell_geometry_lid : d_indexer.cell_global_ids())
-    {
-        const typename MeshType::cell_id_t typed_cell =
-            mesh->indexer().cell_id(cell_geometry_lid);
-        const auto typed_faces = mesh->cell_faces(typed_cell);
-        for (const auto face : typed_faces)
-        {
-            const auto face_geometry_lid =
-                mesh->indexer().face_ordinal(face);
-            if (!seen_faces.insert(face_geometry_lid).second)
+            std::vector<size_t> next;
+            for (const auto id : frontier)
             {
-                continue;
+                const auto adjacent = mesh->topology().neighbor_cells(source_indexer.cell_id(id));
+                for (size_t entry = 0; entry < adjacent.num; ++entry)
+                {
+                    const auto neighbor = source_indexer.cell_ordinal(adjacent.neighbors[entry]);
+                    if (distance.emplace(neighbor, depth + 1).second)
+                        next.push_back(neighbor);
+                }
             }
-            if (partitioner.is_owned_face(rank, face))
-            {
-                owned_faces.push_back(face_geometry_lid);
-            }
-            else
-            {
-                overlap_faces.push_back(face_geometry_lid);
-            }
+            frontier = std::move(next);
         }
-    }
-    initialize_faces(std::move(owned_faces), std::move(overlap_faces));
+        for (const auto& [id, depth] : distance)
+            if (depth != 0)
+                ghost.push_back(id);
+        initialize_cells(owned, ghost);
+        d_orthogonal_cell_geometry_lids.assign(owned.begin(), owned.end());
+        d_orthogonal_cell_geometry_lids.insert(d_orthogonal_cell_geometry_lids.end(), ghost.begin(), ghost.end());
+        for (size_t local = 0; local < d_orthogonal_cell_geometry_lids.size(); ++local)
+            d_orthogonal_cell_local_lids.emplace(d_orthogonal_cell_geometry_lids[local], checked_local(local));
 
-    constexpr std::array<std::array<unsigned, 3>, 8> corners{{
-        {{0, 0, 0}},
-        {{1, 0, 0}},
-        {{1, 1, 0}},
-        {{0, 1, 0}},
-        {{0, 0, 1}},
-        {{1, 0, 1}},
-        {{1, 1, 1}},
-        {{0, 1, 1}}
-    }};
-    std::unordered_set<size_t> seen_nodes;
-    std::vector<size_t> local_nodes;
-    for (const auto cell_geometry_lid : d_indexer.cell_global_ids())
-    {
-        const auto cell = mesh->cell_id(
-            static_cast<size_t>(cell_geometry_lid));
-        for (const auto& corner : corners)
+        std::unordered_set<size_t> seen_faces, seen_nodes;
+        std::vector<size_t> owned_faces, overlap_faces, nodes;
+        constexpr std::array<std::array<unsigned, 3>, 8> corners{{
+            {{0, 0, 0}}, {{1, 0, 0}}, {{1, 1, 0}}, {{0, 1, 0}},
+            {{0, 0, 1}}, {{1, 0, 1}}, {{1, 1, 1}}, {{0, 1, 1}}}};
+        for (const auto geometry : d_orthogonal_cell_geometry_lids)
         {
-            const typename MeshType::NodeID node{
-                static_cast<unsigned>(
-                    (cell.i + corner[0])
-                    % mesh->indexer().num_nodes_per_dim[0]),
-                static_cast<unsigned>(
-                    (cell.j + corner[1])
-                    % mesh->indexer().num_nodes_per_dim[1]),
-                static_cast<unsigned>(
-                    (cell.k + corner[2])
-                    % mesh->indexer().num_nodes_per_dim[2])};
-            const auto global_node = mesh->node_local_id(node);
-            if (seen_nodes.insert(global_node).second)
+            const auto cell = source_indexer.cell_id(static_cast<size_t>(geometry));
+            for (const auto face : mesh->cell_faces(cell))
             {
-                local_nodes.push_back(global_node);
+                const auto id = source_indexer.face_ordinal(face);
+                if (seen_faces.insert(id).second)
+                    (d_orthogonal_decomposition->owner(mesh->topology().owner_cell(face)) == rank ?
+                        owned_faces : overlap_faces).push_back(id);
+            }
+            for (const auto& corner : corners)
+            {
+                const typename MeshType::NodeID node{
+                    static_cast<unsigned>((cell.i + corner[0]) % source_indexer.num_nodes_per_dim[0]),
+                    static_cast<unsigned>((cell.j + corner[1]) % source_indexer.num_nodes_per_dim[1]),
+                    static_cast<unsigned>((cell.k + corner[2]) % source_indexer.num_nodes_per_dim[2])};
+                const auto id = source_indexer.node_ordinal(node);
+                if (seen_nodes.insert(id).second)
+                    nodes.push_back(id);
             }
         }
+        const auto face_order = [&](size_t a, size_t b)
+        {
+            const auto left = source_indexer.face_id(a), right = source_indexer.face_id(b);
+            return std::tuple{left.orientation, left.k, left.j, left.i} <
+                std::tuple{right.orientation, right.k, right.j, right.i};
+        };
+        std::sort(owned_faces.begin(), owned_faces.end(), face_order);
+        std::sort(overlap_faces.begin(), overlap_faces.end(), face_order);
+        initialize_faces(owned_faces, overlap_faces);
+        d_orthogonal_face_geometry_lids.assign(owned_faces.begin(), owned_faces.end());
+        d_orthogonal_face_geometry_lids.insert(d_orthogonal_face_geometry_lids.end(),
+            overlap_faces.begin(), overlap_faces.end());
+        for (size_t local = 0; local < d_orthogonal_face_geometry_lids.size(); ++local)
+            d_orthogonal_face_local_lids.emplace(d_orthogonal_face_geometry_lids[local], checked_local(local));
+        d_node_global_ids = checked_global_ids(std::move(nodes));
+        d_indexer.set_nodes(d_node_global_ids);
+        initialize_boundary_batches(*mesh);
     }
-    d_indexer.set_nodes(checked_global_ids(std::move(local_nodes)));
-    initialize_boundary_batches(*mesh);
-    create_maps(comm);
+    catch (...)
+    {
+        error = std::current_exception();
+    }
+    collective_error(error, "Orthogonal local layout failed on another rank.");
+    // Serial virtual partitions are compatibility views, not communicating
+    // partitions: retain canonical source IDs in their maps.
+    if (communicator_size == 1)
+        create_maps(comm);
+    else
+        initialize_contiguous_native_maps(comm);
 }
 
 /**
@@ -725,15 +780,15 @@ void MeshHandle<Pack>::initialize_semi_structured(SemiStructuredPtr mesh, Distri
         error = std::current_exception();
     }
     collective_error(error, "SemiStructuredXY_Z local compact topology failed on another rank.");
-    initialize_contiguous_semi_structured_maps(comm);
+    initialize_contiguous_native_maps(comm);
 }
 
-/** Assign algebraic IDs only after the shared XY order and compact topology are fixed.
+/** Assign algebraic IDs after a native owned-first geometry layout is fixed.
  * Canonical owned maps exist transiently for integer owner/local-row queries;
  * no canonical 3D map or expanded owner table is retained by the handle.
  */
 template<TpetraTypePack Pack>
-void MeshHandle<Pack>::initialize_contiguous_semi_structured_maps(
+void MeshHandle<Pack>::initialize_contiguous_native_maps(
     const Teuchos::RCP<const typename Pack::comm_type>& comm)
 {
     const auto collective_error = [&](const std::exception_ptr& error)
@@ -745,7 +800,7 @@ void MeshHandle<Pack>::initialize_contiguous_semi_structured_maps(
         {
             if (error)
                 std::rethrow_exception(error);
-            throw std::invalid_argument("Contiguous XY/Z algebraic map setup failed on another rank.");
+            throw std::invalid_argument("Contiguous native algebraic map setup failed on another rank.");
         }
     };
     const auto invalid_size = Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid();
@@ -782,7 +837,7 @@ void MeshHandle<Pack>::initialize_contiguous_semi_structured_maps(
         for (size_t rank = 0; rank < rank_counts.size(); ++rank)
         {
             if (rank_counts[rank] < 0 || rank_counts[rank] > std::numeric_limits<global_ordinal_type>::max() - total)
-                throw std::overflow_error("XY/Z algebraic global IDs exceed the ordinal range.");
+                throw std::overflow_error("Native algebraic global IDs exceed the ordinal range.");
             rank_offsets[rank] = total;
             total += rank_counts[rank];
         }
@@ -798,7 +853,7 @@ void MeshHandle<Pack>::initialize_contiguous_semi_structured_maps(
         try
         {
             if (status == Tpetra::IDNotPresent)
-                throw std::invalid_argument("A canonical XY/Z halo entity has no owner.");
+                throw std::invalid_argument("A canonical native halo entity has no owner.");
             for (size_t row = 0; row < owned; ++row)
                 overlap_algebraic[row] = algebraic_owned->getGlobalElement(checked_local(row));
             for (size_t row = 0; row < ghost_geometry.size(); ++row)
@@ -807,7 +862,7 @@ void MeshHandle<Pack>::initialize_contiguous_semi_structured_maps(
                 const auto owner_row = owner_rows[row];
                 if (rank < 0 || rank >= comm->getSize() || owner_row < 0 ||
                     static_cast<global_ordinal_type>(owner_row) >= rank_counts[static_cast<size_t>(rank)])
-                    throw std::invalid_argument("Invalid canonical XY/Z owner/local-row lookup.");
+                    throw std::invalid_argument("Invalid canonical native owner/local-row lookup.");
                 overlap_algebraic[owned + row] =
                     rank_offsets[static_cast<size_t>(rank)] + static_cast<global_ordinal_type>(owner_row);
             }
@@ -1384,7 +1439,8 @@ void MeshHandle<Pack>::add_geometry_cell_data(VTUWriter& writer) const
     {
         const auto local_id = checked_local(lid);
         cell_ids.push_back(static_cast<global_index_t>(
-            d_semi_structured_topology ? cell_geometry_global_id(local_id) : cell_global_id(local_id)));
+            (d_semi_structured_topology || d_orthogonal_decomposition) ?
+                cell_geometry_global_id(local_id) : cell_global_id(local_id)));
         cell_volumes.push_back(cell_volume(local_id));
         cell_centroids.push_back(cell_centroid(local_id));
     }

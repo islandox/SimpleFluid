@@ -180,3 +180,9 @@ foreach(_semi_ranks IN ITEMS 2 4)
         TARGET testSemiStructuredDistributedOperators PROCS ${_semi_ranks}
         LABELS "mpi;semi_structured;fields;transport;diffusion;conservation;empty_rank" TIMEOUT 120)
 endforeach()
+
+foreach(_ortho_ranks IN ITEMS 2 4 8)
+    simplefluid_add_mpi_test(NAME OrthogonalDistributedOperators_${_ortho_ranks}procs
+        TARGET testOrthogonalDistributedOperators PROCS ${_ortho_ranks}
+        LABELS "mpi;orthogonal;fields;transport;conservation;empty_rank" TIMEOUT 120)
+endforeach()
