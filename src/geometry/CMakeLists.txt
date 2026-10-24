@@ -20,6 +20,14 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/MixedAMR.cc
     ConvexCellGeometry.cc
     BoundedConvexGeometry.cc
+    details/BoundedConvexArithmetic.inc
+    details/BoundedConvexPredicates.inc
+    details/BoundedConvexMeasures.inc
+    details/BoundedConvexConstruction.inc
+    details/BoundedConvexClipping.inc
+    details/BoundedConvexPartitions.inc
+    details/BoundedConvexTrajectories.inc
+    details/BoundedConvexPackets.inc
     details/BoundedPlanarFace.inc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
@@ -59,6 +67,18 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/MultiRegionMeshSparse.cc
     mesh/MultiRegionMeshPartition.cc
 )
+
+# Private implementation fragments are included only by BoundedConvexGeometry.cc.
+set_source_files_properties(
+    details/BoundedConvexArithmetic.inc
+    details/BoundedConvexPredicates.inc
+    details/BoundedConvexMeasures.inc
+    details/BoundedConvexConstruction.inc
+    details/BoundedConvexClipping.inc
+    details/BoundedConvexPartitions.inc
+    details/BoundedConvexTrajectories.inc
+    details/BoundedConvexPackets.inc
+    PROPERTIES HEADER_FILE_ONLY TRUE)
 
 simplefluid_absolute_sources(SIMPLEFLUID_MESH_SOURCES)
 list(APPEND SIMPLEFLUID_MESH_SOURCES ${SIMPLEFLUID_IO_SOURCES} ${SIMPLEFLUID_PARALLEL_SOURCES})

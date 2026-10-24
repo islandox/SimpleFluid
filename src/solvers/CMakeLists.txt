@@ -6,6 +6,7 @@ set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     details/ConservativeVoFExactTransport.inc
     details/VoFProjectionWorkspace.cc
     details/GeneralVoFPhiClosure.cc
+    details/GeneralVoFBoundedPhiClosure.inc
     details/GeneralVoFExactPhiClosure.inc
     details/GeneralVoFProjectionArithmetic.cc
     details/GeneralVoFExactPressure.cc
