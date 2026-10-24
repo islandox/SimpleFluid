@@ -485,6 +485,23 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::preview_interphase_exchange[(]${simplefluid_reacting_phase_span}, (unsigned long|unsigned long long), (unsigned long|unsigned long long), std::(__[0-9]+::)?function<SimpleFluid::Reacting::InterphaseExchange [(]SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&, SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&[)]> const&, SimpleFluid::Reacting::PhaseThermalMode[)]$" 1)
 
+# Caloric feasibility adds exactly five functions (including two constructor
+# entries) and the three RTTI/vtable definitions of its typed unresolved error.
+# The original EOS constructor and every earlier thermodynamic anchor remain.
+set(simplefluid_caloric_domain_public_symbol_budget 8)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::MixtureThermodynamics::MixtureThermodynamics[(]${simplefluid_reacting_catalog_pointer_pattern}, SimpleFluid::Reacting::ThermodynamicBounds, SimpleFluid::Reacting::EOSKind, SimpleFluid::Reacting::EnthalpyPressureDependence, std::(__[0-9]+::)?function<SimpleFluid::Reacting::MixtureThermodynamicPoint [(]double, double, ${simplefluid_reacting_const_double_span}[)]>, SimpleFluid::Reacting::EnergyConvention, std::(__[0-9]+::)?function<.* [(]double, double, ${simplefluid_reacting_const_double_span}[)]>[)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::MixtureThermodynamics::enthalpy_pressure_dependence[(][)] const$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::exact_caloric_pressure_domain[(]SimpleFluid::Reacting::CaloricPressureQuery const&[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::evaluate_caloric_pressure_margins[(]SimpleFluid::Reacting::CaloricPressureQuery const&, double[)]$" 1)
+foreach(simplefluid_caloric_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
+    simplefluid_require_exact_api(
+        "^${simplefluid_caloric_rtti} SimpleFluid::Reacting::CaloricDomainUnresolved$" 1)
+endforeach()
+
 # Sixteen public field-model operations for each of the two supported meshes,
 # three inventory-follower operations for each mesh and one pure multispecies
 # population kernel: exactly 39 additional definitions.
@@ -1069,6 +1086,12 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
         endif()
     endif()
 
+    if(simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::"
+       AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::CaloricDomainUnresolved$")
+        message(FATAL_ERROR
+            "Unreviewed reacting RTTI definition: ${simplefluid_demangled_symbol}")
+    endif()
+
     if(simplefluid_demangled_symbol MATCHES "^SimpleFluid::VariableDensityMomentumEquation<")
         set(simplefluid_reviewed_variable_density_api FALSE)
         foreach(simplefluid_variable_density_api_pattern
@@ -1132,13 +1155,15 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # Source/history and EOS/material pressure linearization add twelve reviewed
 # definitions (1541 disabled); the three-entry headroom remains unchanged
 # (disabled ceiling 1544; opt-in ceiling 1686).
+# Caloric discovery adds eight exactly anchored API/RTTI definitions: measured
+# GCC Debug 1549, disabled ceiling 1552, with the same three-entry headroom.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

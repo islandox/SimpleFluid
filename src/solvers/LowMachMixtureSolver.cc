@@ -226,6 +226,15 @@ struct LowMachMixtureSolver::Implementation
                           options.maximum_pressure_iterations > 0 && options.volume_relative_tolerance > 0 &&
                           options.conservation_relative_tolerance > 0,
                     "Low-Mach mixture options/providers are incomplete.");
+                check(options.maximum_caloric_seed_evaluations > 0 && options.maximum_caloric_seed_evaluations <= 4096,
+                    "Caloric seed-search budget must be between 1 and 4096.");
+                if (options.caloric_domain_provider)
+                    check(!options.caloric_domain_provider->identity.empty() &&
+                              options.caloric_domain_provider->identity.size() <=
+                                  static_cast<size_t>(std::numeric_limits<int>::max()) &&
+                              options.caloric_domain_provider->revision > 0 &&
+                              bool(options.caloric_domain_provider->evaluate),
+                        "Caloric domain provider identity/revision/callback is invalid.");
                 check(options.thermal_mode == PhaseThermalMode::Equilibrium ||
                           options.thermal_mode == PhaseThermalMode::SeparatePhaseTemperatures,
                     "Unknown low-Mach phase thermal mode.");
@@ -262,6 +271,23 @@ struct LowMachMixtureSolver::Implementation
             *mesh, options.conservation_relative_tolerance, "Low-Mach conservation gate");
         collective_detail::require_uniform_value(*mesh, options.source_relative_tolerance, "Low-Mach source gate");
         collective_detail::require_uniform_value(*mesh, options.thermal_relative_tolerance, "Low-Mach thermal gate");
+        collective_detail::require_uniform_value(
+            *mesh, options.maximum_caloric_seed_evaluations, "Caloric seed-search budget");
+        collective_detail::require_uniform_value(
+            *mesh, int(bool(options.caloric_domain_provider)), "Caloric domain provider presence");
+        if (options.caloric_domain_provider)
+        {
+            const auto& provider = *options.caloric_domain_provider;
+            collective_detail::require_uniform_value(*mesh, provider.identity.size(), "Caloric domain identity length");
+            collective_detail::require_uniform_value(*mesh, provider.revision, "Caloric domain provider revision");
+            std::string identity;
+            collective_detail::collective_local_validation(
+                *mesh, "Caloric domain metadata preparation", [&] { identity = provider.identity; });
+            Teuchos::broadcast(
+                *mesh->owned_cell_map()->getComm(), 0, static_cast<int>(identity.size()), identity.data());
+            collective_detail::collective_local_validation(*mesh, "Caloric domain metadata", [&]
+                { check(identity == provider.identity, "Caloric domain provider identity differs across ranks."); });
+        }
         collective_detail::require_uniform_value(*mesh, eos.size(), "Low-Mach phase count");
         collective_detail::require_uniform_value(
             *mesh, eos.front()->catalog().revision(), "Low-Mach species schema revision");
@@ -279,6 +305,8 @@ struct LowMachMixtureSolver::Implementation
                 *mesh, static_cast<int>(provider->kind()), "Low-Mach phase EOS kind");
             collective_detail::require_uniform_value(
                 *mesh, static_cast<int>(provider->energy_convention()), "Low-Mach caloric convention");
+            collective_detail::require_uniform_value(*mesh, static_cast<int>(provider->enthalpy_pressure_dependence()),
+                "Immutable EOS enthalpy-pressure capability");
             const auto& bounds = provider->bounds();
             collective_detail::require_uniform_value(
                 *mesh, bounds.minimum_temperature, "Low-Mach EOS minimum temperature");
@@ -1006,10 +1034,156 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             double last_feasible_pressure = p0;
             bool have_feasible_pressure = false;
             const double domain_volume = d->sum(local_domain_volume);
+            // Only an actual initial CaloricRangeError enters discovery. Source
+            // callbacks are NOT evaluated during these inner pressure trials.
+            const auto discover_seed = [&](const std::exception_ptr& initial_error)
+            {
+                double local_cert_lower = lower, local_cert_upper = upper;
+                double local_search_lower = lower, local_search_upper = upper;
+                int local_empty = 0;
+                std::vector<unsigned char> supplied_certification;
+                collective_detail::collective_local_validation(mesh, "Local caloric domain discovery",
+                    [&]
+                    {
+                        supplied_certification.assign(nc, 0);
+                        for (size_t c = 0; c < nc; ++c)
+                        {
+                            std::vector<double> offsets(np, trial.cells[c].mechanical_pressure);
+                            const CaloricPressureQuery query{trial.cells[c].phases, adv_volumes[c], offsets,
+                                {lower, upper}, d->options.thermal_mode};
+                            auto domain = exact_caloric_pressure_domain(query);
+                            bool supplied = false;
+                            if (domain.knowledge == CaloricDomainKnowledge::Unresolved &&
+                                d->options.caloric_domain_provider)
+                            {
+                                // MPI-free supplied hook, fenced before global interval work.
+                                domain = d->options.caloric_domain_provider->evaluate(query);
+                                supplied = true;
+                            }
+                            check(domain.knowledge == CaloricDomainKnowledge::CertifiedConnected ||
+                                      domain.knowledge == CaloricDomainKnowledge::CertifiedEmpty ||
+                                      domain.knowledge == CaloricDomainKnowledge::Unresolved,
+                                "Invalid supplied caloric domain knowledge.");
+                            if (domain.knowledge == CaloricDomainKnowledge::CertifiedEmpty)
+                            {
+                                check(!domain.interval, "A certified empty caloric domain cannot carry an interval.");
+                                local_empty = 1;
+                                continue;
+                            }
+                            check(domain.knowledge != CaloricDomainKnowledge::CertifiedConnected ||
+                                      domain.interval.has_value(),
+                                "A connected caloric certificate requires an interval.");
+                            if (!domain.interval)
+                                continue;
+                            const auto interval = *domain.interval;
+                            check(std::isfinite(interval.lower) && std::isfinite(interval.upper) &&
+                                      interval.lower >= lower && interval.upper <= upper &&
+                                      interval.lower <= interval.upper,
+                                "Supplied caloric interval is outside query bounds.");
+                            local_search_lower = std::max(local_search_lower, interval.lower);
+                            local_search_upper = std::min(local_search_upper, interval.upper);
+                            if (domain.knowledge == CaloricDomainKnowledge::CertifiedConnected)
+                            {
+                                local_cert_lower = std::max(local_cert_lower, interval.lower);
+                                local_cert_upper = std::min(local_cert_upper, interval.upper);
+                                supplied_certification[c] = supplied ? 1 : 0;
+                            }
+                        }
+                    });
+                int certified_empty = 0;
+                double cert_lower = 0, cert_upper = 0, search_lower = 0, search_upper = 0;
+                const auto comm = mesh.owned_cell_map()->getComm();
+                Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_empty, &certified_empty);
+                Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_cert_lower, &cert_lower);
+                Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_cert_upper, &cert_upper);
+                Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_search_lower, &search_lower);
+                Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_search_upper, &search_upper);
+                if (certified_empty || cert_lower > cert_upper)
+                {
+                    // Preserve the actual initial caloric error on its originating
+                    // rank; peers receive the ordinary collective error context.
+                    collective_detail::collective_local_validation(mesh, "Initial caloric domain certified empty",
+                        [&]
+                        {
+                            if (initial_error)
+                                std::rethrow_exception(initial_error);
+                        });
+                    throw CaloricRangeError("Initial caloric domain certified empty without a retained range error.");
+                }
+                lower = cert_lower;
+                upper = cert_upper;
+                if (search_lower > search_upper)
+                    throw CaloricDomainUnresolved(
+                        "Supplied uncertified caloric search brackets have no common interval.");
+                std::vector<CaloricPressureInterval> pending;
+                collective_detail::collective_local_validation(
+                    mesh, "Caloric seed-search preparation", [&] { pending.push_back({search_lower, search_upper}); });
+                for (int attempt = 0; attempt < d->options.maximum_caloric_seed_evaluations; ++attempt)
+                {
+                    double candidate = 0;
+                    int candidate_available = 1;
+                    collective_detail::collective_local_validation(mesh, "Caloric seed candidate",
+                        [&]
+                        {
+                            if (attempt == 1)
+                            {
+                                candidate = search_lower;
+                                return;
+                            }
+                            if (attempt == 2)
+                            {
+                                candidate = search_upper;
+                                return;
+                            }
+                            if (pending.empty())
+                            {
+                                candidate_available = 0;
+                                return;
+                            }
+                            const auto next = std::max_element(pending.begin(), pending.end(),
+                                [](const auto& a, const auto& b) { return a.upper - a.lower < b.upper - b.lower; });
+                            const auto interval = *next;
+                            pending.erase(next);
+                            candidate = std::midpoint(interval.lower, interval.upper);
+                            if (candidate != interval.lower && candidate != interval.upper)
+                            {
+                                pending.push_back({interval.lower, candidate});
+                                pending.push_back({candidate, interval.upper});
+                            }
+                        });
+                    if (!candidate_available)
+                        break;
+                    int local_outside = 0;
+                    collective_detail::collective_local_validation(mesh, "Caloric seed evaluation",
+                        [&]
+                        {
+                            for (size_t c = 0; c < nc; ++c)
+                                try
+                                {
+                                    thermal[c] =
+                                        recover_enthalpy(trial.cells[c], adv_volumes[c], candidate, d->options);
+                                }
+                                catch (const CaloricRangeError&)
+                                {
+                                    check(!supplied_certification[c],
+                                        "Supplied connected caloric certificate contradicts actual EOS recovery.");
+                                    local_outside = 1;
+                                }
+                        });
+                    int outside = 0;
+                    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_outside, &outside);
+                    if (!outside)
+                        return candidate;
+                }
+                // Finite samples cannot rule out a narrow/disconnected branch.
+                throw CaloricDomainUnresolved(
+                    "Initial caloric domain unresolved within the bounded seed-search budget.");
+            };
             for (int pressure_iteration = 0;; ++pressure_iteration)
             {
                 double local_volume = 0, local_derivative = 0;
                 int local_outside_caloric_range = 0;
+                std::exception_ptr local_caloric_error;
                 collective_detail::collective_local_validation(mesh, "Low-Mach p0 caloric closure",
                     [&]
                     {
@@ -1026,6 +1200,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 // Only this known validity-range condition is a
                                 // search signal. Provider/derivative errors escape.
                                 local_outside_caloric_range = 1;
+                                if (!local_caloric_error)
+                                    local_caloric_error = std::current_exception();
                             }
                         }
                     });
@@ -1034,7 +1210,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     &local_outside_caloric_range, &outside_caloric_range);
                 if (outside_caloric_range)
                 {
-                    check(have_feasible_pressure, "The initial low-Mach pressure has no feasible caloric trial.");
+                    if (!have_feasible_pressure)
+                    {
+                        p0 = discover_seed(local_caloric_error);
+                        continue;
+                    }
                     check(pressure_iteration < d->options.maximum_pressure_iterations,
                         "Low-Mach caloric pressure backtracking did not converge.");
                     const double next = std::midpoint(p0, last_feasible_pressure);

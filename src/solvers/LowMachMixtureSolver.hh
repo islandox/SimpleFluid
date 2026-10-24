@@ -31,6 +31,8 @@ public:
         double continuity_tolerance = 1e-10;
         int maximum_correctors = 80, maximum_pressure_iterations = 100;
         double source_relative_tolerance = 1e-8, thermal_relative_tolerance = 2e-9;
+        int maximum_caloric_seed_evaluations = 64;
+        std::shared_ptr<const CaloricPressureDomainProvider> caloric_domain_provider;
         LinearSolverOptions linear;
         std::function<double(std::span<const PhaseThermalState>, std::span<const double>)> mixture_dynamic_viscosity;
     };

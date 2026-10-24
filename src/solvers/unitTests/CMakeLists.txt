@@ -42,6 +42,9 @@ foreach(_mixture_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME LowMachSourceContracts_${_mixture_ranks}procs
         TARGET testLowMachSourceContracts PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;reacting;conservation;transaction;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME LowMachCaloricFeasibility_${_mixture_ranks}procs
+        TARGET testLowMachCaloricFeasibility PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;thermodynamics;transaction;empty_rank" TIMEOUT 120)
     simplefluid_add_mpi_test(NAME LowMachPressureContracts_${_mixture_ranks}procs
         TARGET testLowMachPressureContracts PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;pressure;conservation;transaction;empty_rank" TIMEOUT 120)

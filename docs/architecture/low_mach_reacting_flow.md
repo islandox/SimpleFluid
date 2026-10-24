@@ -225,10 +225,34 @@ remain disabled by default and excluded from the supported reacting-flow scope
 while their qualification remains incomplete.
 
 Thermodynamic pressure uses a safeguarded solve within supplied EOS bounds.
-Caloric range failures may backtrack from a previously feasible state; arbitrary
-constitutive-provider errors remain hard failures. The initial source trial must
-be calorically feasible at the initial pressure guess. Discovery of a different
-feasible pressure branch is not implemented in this stage.
+A typed caloric range failure at the initial pressure now starts bounded feasible
+seed discovery. Explicit `EnthalpyPressureDependence::PressureIndependent`
+metadata permits an exact affine pressure-domain calculation; the ideal-gas
+factory supplies that capability, while a generic gas EOS does not imply it.
+The old EOS constructor retains unspecified capability. Each evaluation checks
+the declared derivative identity. Common-temperature mode treats the complete
+physical phase group together; separate-temperature mode constrains each phase.
+The query retains mechanical offsets, actual transported/source energy and the
+advected volume used in pressure work. An exactly empty phase contributes its
+work/energy equation without calling an EOS or inserting an inventory floor.
+
+For other EOS, an optional immutable `CaloricPressureDomainProvider` supplies a
+certified connected feasible interval, a certified empty domain, or an unresolved
+result with an optional search bracket. Its identity, positive revision and
+presence agree across ranks. Hooks are MPI-free and local failures are fenced
+before global interval intersection, including on ranks with no owned cells.
+A connected certificate that contradicts actual caloric recovery rejects.
+`maximum_caloric_seed_evaluations` bounds generic discovery (default 64, valid
+range 1 through 4096). Exhausted sampling throws `CaloricDomainUnresolved`;
+finite samples cannot prove that a narrow or disconnected feasible branch is
+absent. Certified emptiness retains the original caloric failure. Real EOS,
+derivative and provider errors remain hard failures, never search signals.
+
+Discovery and pressure iteration do not invoke the reaction source. Finding a
+calorically feasible seed does not establish a physical volume root: the same
+pressure, occupancy, energy and continuity gates still decide acceptance.
+Once a feasible state exists, later caloric range failures use safeguarded
+backtracking within the retained pressure domain.
 
 MPI configuration and source failures are validated collectively. Regression
 fixtures cover empty owners, rejected-source replay, independent heat, two gas

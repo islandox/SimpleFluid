@@ -124,15 +124,31 @@ template<class Energy> double invert_energy(double lower, double upper, double t
 
 MixtureThermodynamics::MixtureThermodynamics(std::shared_ptr<const SpeciesCatalog> catalog, ThermodynamicBounds bounds,
     EOSKind kind, Evaluator evaluator, EnergyConvention convention, ChemicalPotentialEvaluator chemical_potentials)
-    : catalog_(std::move(catalog)), bounds_(bounds), kind_(kind), evaluator_(std::move(evaluator)),
-      convention_(convention), chemical_potentials_(std::move(chemical_potentials))
+    : MixtureThermodynamics(std::move(catalog), bounds, kind, EnthalpyPressureDependence::Unspecified,
+          std::move(evaluator), convention, std::move(chemical_potentials))
+{
+}
+
+MixtureThermodynamics::MixtureThermodynamics(std::shared_ptr<const SpeciesCatalog> catalog, ThermodynamicBounds bounds,
+    EOSKind kind, EnthalpyPressureDependence dependence, Evaluator evaluator, EnergyConvention convention,
+    ChemicalPotentialEvaluator chemical_potentials)
+    : catalog_(std::move(catalog)), bounds_(bounds), kind_(kind), enthalpy_pressure_dependence_(dependence),
+      evaluator_(std::move(evaluator)), convention_(convention), chemical_potentials_(std::move(chemical_potentials))
 {
     require(static_cast<bool>(catalog_) && !catalog_->species().empty(), "Mixture EOS species catalog is empty.");
     require(kind_ == EOSKind::Liquid || kind_ == EOSKind::Gas, "Unknown mixture EOS kind.");
     require(convention_ == EnergyConvention::SensibleEnergy || convention_ == EnergyConvention::IncludesFormationEnergy,
         "Unknown mixture caloric energy convention.");
+    require(enthalpy_pressure_dependence_ == EnthalpyPressureDependence::Unspecified ||
+                enthalpy_pressure_dependence_ == EnthalpyPressureDependence::PressureIndependent,
+        "Unknown immutable enthalpy-pressure capability.");
     validate_bounds(bounds_);
     require(static_cast<bool>(evaluator_), "Mixture EOS callback is null.");
+}
+
+EnthalpyPressureDependence MixtureThermodynamics::enthalpy_pressure_dependence() const noexcept
+{
+    return enthalpy_pressure_dependence_;
 }
 
 const ThermodynamicBounds& MixtureThermodynamics::bounds() const noexcept
@@ -192,6 +208,13 @@ MixtureThermodynamicPoint MixtureThermodynamics::evaluate(
                         point.internal_energy_pressure * point.density_temperature / point.density_pressure >
                     0,
             "Mixture EOS has nonpositive isochoric heat capacity.");
+    if (enthalpy_pressure_dependence_ == EnthalpyPressureDependence::PressureIndependent)
+    {
+        const double v = 1 / point.density, thermal = temperature * point.density_temperature / rho2;
+        require(
+            std::abs(v + thermal) <= 256 * std::numeric_limits<double>::epsilon() * (std::abs(v) + std::abs(thermal)),
+            "EOS contradicts its immutable pressure-independent enthalpy capability.");
+    }
     if (chemical_potentials_)
         point.chemical_potentials = chemical_potentials_(temperature, pressure, x);
     if (!point.fugacities.empty())
@@ -242,8 +265,8 @@ std::shared_ptr<const MixtureThermodynamics> make_ideal_gas_mixture(std::shared_
             result.fugacities.push_back(fraction * p);
         return result;
     };
-    return std::make_shared<const MixtureThermodynamics>(
-        std::move(catalog), bounds, EOSKind::Gas, std::move(evaluate), convention);
+    return std::make_shared<const MixtureThermodynamics>(std::move(catalog), bounds, EOSKind::Gas,
+        EnthalpyPressureDependence::PressureIndependent, std::move(evaluate), convention);
 }
 
 std::shared_ptr<const MixtureThermodynamics> make_linear_compressible_mixture_liquid(
@@ -276,6 +299,178 @@ std::shared_ptr<const MixtureThermodynamics> make_linear_compressible_mixture_li
     };
     return std::make_shared<const MixtureThermodynamics>(
         std::move(catalog), bounds, EOSKind::Liquid, std::move(evaluate), convention);
+}
+
+namespace
+{
+struct CaloricGroup
+{
+    std::vector<std::size_t> phases;
+    double minimum_temperature = 0, maximum_temperature = 0;
+};
+struct CaloricDescription
+{
+    CaloricPressureInterval pressure;
+    std::vector<Composition> mixtures;
+    std::vector<CaloricGroup> groups;
+    bool empty = false;
+};
+CaloricDescription describe_caloric_query(const CaloricPressureQuery& query)
+{
+    require(!query.phases.empty() && query.phases.size() == query.advected_volumes.size() &&
+                query.phases.size() == query.pressure_offsets.size(),
+        "Caloric query phase/volume/offset layouts differ.");
+    require(query.mode == PhaseThermalMode::Equilibrium || query.mode == PhaseThermalMode::SeparatePhaseTemperatures,
+        "Unknown caloric query thermal mode.");
+    require(finite(query.pressure.lower) && finite(query.pressure.upper) && query.pressure.lower > 0 &&
+                query.pressure.lower <= query.pressure.upper,
+        "Invalid caloric query pressure interval.");
+    CaloricDescription result;
+    result.pressure = query.pressure;
+    result.mixtures.reserve(query.phases.size());
+    CaloricGroup common;
+    common.maximum_temperature = std::numeric_limits<double>::infinity();
+    for (std::size_t a = 0; a < query.phases.size(); ++a)
+    {
+        const auto& phase = query.phases[a];
+        require(bool(phase.thermodynamics) && finite(phase.internal_energy) && finite(query.advected_volumes[a]) &&
+                    finite(query.pressure_offsets[a]),
+            "Invalid caloric query inventory, volume packet or offset.");
+        require(phase.thermodynamics->energy_convention() == query.phases.front().thermodynamics->energy_convention(),
+            "Caloric query phases use different formation-energy conventions.");
+        result.mixtures.push_back(composition(phase.thermodynamics->catalog(), phase.moles));
+        const auto& bounds = phase.thermodynamics->bounds();
+        if (result.mixtures.back().amount > 0)
+        {
+            result.pressure.lower =
+                std::max(result.pressure.lower, bounds.minimum_pressure - query.pressure_offsets[a]);
+            result.pressure.upper =
+                std::min(result.pressure.upper, bounds.maximum_pressure - query.pressure_offsets[a]);
+            if (query.mode == PhaseThermalMode::Equilibrium)
+            {
+                common.phases.push_back(a);
+                common.minimum_temperature = std::max(common.minimum_temperature, bounds.minimum_temperature);
+                common.maximum_temperature = std::min(common.maximum_temperature, bounds.maximum_temperature);
+            }
+            else
+                result.groups.push_back({{a}, bounds.minimum_temperature, bounds.maximum_temperature});
+        }
+        else
+            result.groups.push_back({{a}, 0, 0}); // Exact empty-phase work/energy equation, no EOS call.
+    }
+    if (!common.phases.empty())
+    {
+        result.empty = common.minimum_temperature > common.maximum_temperature;
+        result.groups.push_back(std::move(common));
+    }
+    result.empty = result.empty || result.pressure.lower > result.pressure.upper;
+    return result;
+}
+CaloricPressureMargins caloric_margins(
+    const CaloricPressureQuery& query, const CaloricDescription& description, double p0)
+{
+    require(!description.empty && finite(p0) && p0 >= description.pressure.lower && p0 <= description.pressure.upper,
+        "Caloric margin query is outside the supplied pressure/temperature domain.");
+    CaloricPressureMargins result;
+    for (const auto& group : description.groups)
+    {
+        long double target = 0, low = 0, high = 0;
+        for (const auto a : group.phases)
+        {
+            const auto& phase = query.phases[a];
+            const double pressure = p0 + query.pressure_offsets[a];
+            target += static_cast<long double>(phase.internal_energy) +
+                      static_cast<long double>(pressure) * query.advected_volumes[a];
+            const auto& mix = description.mixtures[a];
+            if (mix.amount == 0)
+                continue;
+            const auto low_point = phase.thermodynamics->evaluate(group.minimum_temperature, pressure, mix.fractions);
+            const auto high_point = phase.thermodynamics->evaluate(group.maximum_temperature, pressure, mix.fractions);
+            require(high_point.enthalpy >= low_point.enthalpy, "Caloric endpoint enthalpy is not monotone.");
+            low += static_cast<long double>(mix.mass) * low_point.enthalpy;
+            high += static_cast<long double>(mix.mass) * high_point.enthalpy;
+        }
+        require(std::isfinite(target) && std::isfinite(low) && std::isfinite(high), "Caloric margin overflow.");
+        result.lower.push_back(target - low);
+        result.upper.push_back(high - target);
+    }
+    return result;
+}
+struct AffineCaloricConstraint
+{
+    long double constant = 0, coefficient = 0;
+};
+CaloricPressureDomain intersect_affine_caloric_constraints(
+    CaloricPressureInterval supplied, std::span<const AffineCaloricConstraint> constraints)
+{
+    long double lower = supplied.lower, upper = supplied.upper;
+    for (const auto constraint : constraints)
+    {
+        require(std::isfinite(constraint.constant) && std::isfinite(constraint.coefficient),
+            "Nonfinite affine caloric constraint.");
+        const auto at_lower = std::fma(constraint.coefficient, lower, constraint.constant);
+        const auto at_upper = std::fma(constraint.coefficient, upper, constraint.constant);
+        require(std::isfinite(at_lower) && std::isfinite(at_upper), "Affine caloric margin overflow.");
+        if (constraint.coefficient == 0)
+        {
+            if (constraint.constant < 0)
+                return {CaloricDomainKnowledge::CertifiedEmpty, std::nullopt};
+            continue;
+        }
+        if (constraint.coefficient > 0)
+        {
+            if (at_upper < 0)
+                return {CaloricDomainKnowledge::CertifiedEmpty, std::nullopt};
+            if (at_lower < 0)
+                lower = std::max(lower, -constraint.constant / constraint.coefficient);
+        }
+        else
+        {
+            if (at_lower < 0)
+                return {CaloricDomainKnowledge::CertifiedEmpty, std::nullopt};
+            if (at_upper < 0)
+                upper = std::min(upper, -constraint.constant / constraint.coefficient);
+        }
+        if (lower > upper)
+            return {CaloricDomainKnowledge::CertifiedEmpty, std::nullopt};
+    }
+    double lo = static_cast<double>(lower), hi = static_cast<double>(upper);
+    if (static_cast<long double>(lo) < lower)
+        lo = std::nextafter(lo, std::numeric_limits<double>::infinity());
+    if (static_cast<long double>(hi) > upper)
+        hi = std::nextafter(hi, -std::numeric_limits<double>::infinity());
+    if (lo > hi)
+        return {CaloricDomainKnowledge::Unresolved, std::nullopt};
+    return {CaloricDomainKnowledge::CertifiedConnected, CaloricPressureInterval{lo, hi}};
+}
+} // namespace
+
+CaloricPressureMargins evaluate_caloric_pressure_margins(const CaloricPressureQuery& query, double pressure)
+{
+    return caloric_margins(query, describe_caloric_query(query), pressure);
+}
+
+CaloricPressureDomain exact_caloric_pressure_domain(const CaloricPressureQuery& query)
+{
+    const auto description = describe_caloric_query(query);
+    if (description.empty)
+        return {CaloricDomainKnowledge::CertifiedEmpty, std::nullopt};
+    for (std::size_t a = 0; a < query.phases.size(); ++a)
+        if (description.mixtures[a].amount > 0 && query.phases[a].thermodynamics->enthalpy_pressure_dependence() !=
+                                                      EnthalpyPressureDependence::PressureIndependent)
+            return {CaloricDomainKnowledge::Unresolved, std::nullopt};
+    const double anchor = description.pressure.lower;
+    const auto margins = caloric_margins(query, description, anchor);
+    std::vector<AffineCaloricConstraint> constraints;
+    for (std::size_t g = 0; g < description.groups.size(); ++g)
+    {
+        long double volume = 0;
+        for (const auto a : description.groups[g].phases)
+            volume += query.advected_volumes[a];
+        constraints.push_back({std::fma(-volume, static_cast<long double>(anchor), margins.lower[g]), volume});
+        constraints.push_back({std::fma(volume, static_cast<long double>(anchor), margins.upper[g]), -volume});
+    }
+    return intersect_affine_caloric_constraints(description.pressure, constraints);
 }
 
 PhaseThermalRecovery recover_phase_temperatures(
