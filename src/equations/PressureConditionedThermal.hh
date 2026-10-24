@@ -70,6 +70,7 @@ struct FrozenInterphasePlan
     std::vector<std::vector<double>> amounts; ///< Material nonnegative mol; heat signed J, configured slot order.
     std::vector<std::vector<long double>> raw_static_energy; ///< Original per-phase channels, never rounded sums.
     std::vector<long double> raw_declared_energy;
+    std::vector<std::vector<std::array<long double, 2>>> raw_pre_moles; ///< Owner-local predecessor high/correction.
 };
 struct ConditionedCaloricQuery
 {
@@ -145,6 +146,14 @@ SIMPLEFLUID_SOLVERS_EXPORT void validate_interphase_configuration(
     std::shared_ptr<const InterphaseConfiguration> configuration, std::span<const PhaseThermalState> pre_phases,
     std::vector<std::vector<double>> amounts, std::vector<std::vector<long double>> raw_static_energy,
     std::vector<long double> raw_declared_energy);
+/** Actual raw predecessor from earlier accepted local source stages. Phase/catalog
+ * dimensions and double projection must match pre_phases. No MPI serialization.
+ */
+[[nodiscard]] SIMPLEFLUID_SOLVERS_EXPORT FrozenInterphasePlan compile_interphase_plan(
+    std::shared_ptr<const InterphaseConfiguration> configuration, std::span<const PhaseThermalState> pre_phases,
+    std::vector<std::vector<double>> amounts, std::vector<std::vector<long double>> raw_static_energy,
+    std::vector<long double> raw_declared_energy,
+    std::span<const std::vector<std::array<long double, 2>>> predecessor_parts);
 /** Pressure-only constitutive/anchor evaluation; transferred amounts NEVER change here.
  * final_templates carries the applied rounded material endpoint. No kinetic/count provider is callable here.
  */

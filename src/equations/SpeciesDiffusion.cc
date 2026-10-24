@@ -66,6 +66,23 @@ SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
     std::span<const CellSpeciesState> owned, const SpeciesDiffusionBinding& binding,
     std::span<const CanonicalDiffusionFace> faces)
 {
+    std::vector<std::vector<std::array<long double, 2>>> represented;
+    represented.reserve(owned.size());
+    for (const auto& state : owned)
+    {
+        auto& parts = represented.emplace_back();
+        for (const auto value : flatten(state))
+            parts.push_back({value, 0});
+    }
+    return preview_species_diffusion(catalog, owned, binding, faces, represented);
+}
+
+SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
+    std::span<const CellSpeciesState> owned, const SpeciesDiffusionBinding& binding,
+    std::span<const CanonicalDiffusionFace> faces,
+    std::span<const std::vector<std::array<long double, 2>>> owner_parts)
+{
+    require(owner_parts.size() == owned.size(), "Raw diffusion predecessor rows differ from actual owned cells.");
     validate_compartment(binding.transported);
     validate_compartment(binding.counter);
     require(!binding.identity.empty() && binding.revision != 0 && binding.schemaFingerprint == catalog.fingerprint(),
@@ -93,10 +110,18 @@ SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
         changes.emplace_back(initial.back().size());
         donor_margins.emplace_back(initial.back().size());
         stocks.emplace_back(initial.back().size());
+        const auto& parts = owner_parts[initial.size() - 1];
+        require(parts.size() == initial.back().size(), "Raw diffusion predecessor compartments differ.");
         for (std::size_t i = 0; i < initial.back().size(); ++i)
         {
-            stocks.back()[i] += initial.back()[i];
-            donor_margins.back()[i] += initial.back()[i];
+            require(std::isfinite(parts[i][0]) && std::isfinite(parts[i][1]),
+                "Raw diffusion predecessor contains a nonfinite part.");
+            stocks.back()[i] += parts[i][0];
+            stocks.back()[i] += parts[i][1];
+            const auto value = stocks.back()[i].value();
+            require(std::isfinite(value) && value >= 0 && narrow(value) == initial.back()[i],
+                "Raw diffusion predecessor does not project to its actual schema state.");
+            donor_margins.back()[i] = stocks.back()[i];
         }
     }
     SpeciesDiffusionPreview result;

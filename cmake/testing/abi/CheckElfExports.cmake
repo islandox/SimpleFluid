@@ -512,9 +512,19 @@ endforeach()
 
 # The distributed face adapter stays private. Its pure finite-counter packet
 # kernel adds exactly one public function; raw reaction receipts are aggregates.
-set(simplefluid_species_diffusion_public_symbol_budget 1)
+set(simplefluid_species_diffusion_public_symbol_budget 2)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::preview_species_diffusion[(]SimpleFluid::Reacting::SpeciesCatalog const&, std::(__[0-9]+::)?span<SimpleFluid::Reacting::CellSpeciesState const, [0-9]+u?l*>, SimpleFluid::Reacting::SpeciesDiffusionBinding const&, std::(__[0-9]+::)?span<SimpleFluid::Reacting::CanonicalDiffusionFace const, [0-9]+u?l*>[)]$" 1)
+
+# The explicit local-predecessor overload retains the original represented-state API.
+set(simplefluid_raw_amount_array
+    "std::(__[0-9]+::)?array<long double, 2u?l*>")
+set(simplefluid_raw_amount_vector
+    "std::(__[0-9]+::)?vector<${simplefluid_raw_amount_array}, std::(__[0-9]+::)?allocator<${simplefluid_raw_amount_array}[ ]*>[ ]*>")
+set(simplefluid_raw_amount_span
+    "std::(__[0-9]+::)?span<${simplefluid_raw_amount_vector} const, [0-9]+u?l*>")
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::preview_species_diffusion[(]SimpleFluid::Reacting::SpeciesCatalog const&, std::(__[0-9]+::)?span<SimpleFluid::Reacting::CellSpeciesState const, [0-9]+u?l*>, SimpleFluid::Reacting::SpeciesDiffusionBinding const&, std::(__[0-9]+::)?span<SimpleFluid::Reacting::CanonicalDiffusionFace const, [0-9]+u?l*>, ${simplefluid_raw_amount_span}[)]$" 1)
 
 # Sixteen public field-model operations for each of the two supported meshes,
 # three inventory-follower operations for each mesh and one pure multispecies
@@ -718,7 +728,7 @@ simplefluid_require_reacting_api(
 
 # Pressure-conditioned local thermal transfer: four pure kernels, two receipt
 # queries and the three definitions of the typed caloric-range error.
-set(simplefluid_conditioned_thermal_public_symbol_budget 9)
+set(simplefluid_conditioned_thermal_public_symbol_budget 10)
 set(simplefluid_thermal_double_vector
     "${simplefluid_stage3_std}vector<double, ${simplefluid_stage3_std}allocator<double>[ ]*>")
 set(simplefluid_thermal_long_vector
@@ -731,6 +741,8 @@ simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::validate_interphase_configuration[(]SimpleFluid::Reacting::InterphaseConfiguration const&, ${simplefluid_reacting_phase_span}[)]$" 1)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::compile_interphase_plan[(]${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::InterphaseConfiguration const>, ${simplefluid_reacting_phase_span}, ${simplefluid_thermal_double_vectors}, ${simplefluid_thermal_long_vectors}, ${simplefluid_thermal_long_vector}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::compile_interphase_plan[(]${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::InterphaseConfiguration const>, ${simplefluid_reacting_phase_span}, ${simplefluid_thermal_double_vectors}, ${simplefluid_thermal_long_vectors}, ${simplefluid_thermal_long_vector}, ${simplefluid_raw_amount_span}[)]$" 1)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::evaluate_pressure_conditioned_thermal[(]SimpleFluid::Reacting::FrozenInterphasePlan const&, ${simplefluid_reacting_phase_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, double, SimpleFluid::Reacting::PhaseThermalMode, SimpleFluid::Reacting::ThermalEvaluationControls[)]$" 1)
 simplefluid_require_reacting_api(
@@ -1303,6 +1315,8 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # Conditioned thermal transfer adds nine anchors: measured GCC Debug 1591,
 # disabled ceiling 1594; no earlier definition or private guard is removed.
 # Finite vapor adds ten exact anchors: GCC Debug 1601, disabled ceiling 1604.
+# Local donor predecessor overloads add two exact anchors: ceiling 1606;
+# their private composition helpers remain forbidden above.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)

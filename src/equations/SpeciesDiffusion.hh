@@ -111,4 +111,14 @@ struct SpeciesDiffusionPreview
     const SpeciesCatalog& catalog, std::span<const CellSpeciesState> owned, const SpeciesDiffusionBinding& binding,
     std::span<const CanonicalDiffusionFace> faces);
 
+/** Explicit owner-local raw predecessor overload. Both parts are retained for all
+ * original outgoing primary/counter packets after canonical face exchange.
+ * Dimensions/order match each owned CellSpeciesState; its double projection must
+ * equal that state. The caller supplies actual predecessor authority, not a donor
+ * tolerance. These local long-double parts are never serialized by this kernel.
+ */
+[[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT SpeciesDiffusionPreview preview_species_diffusion(
+    const SpeciesCatalog& catalog, std::span<const CellSpeciesState> owned, const SpeciesDiffusionBinding& binding,
+    std::span<const CanonicalDiffusionFace> faces,
+    std::span<const std::vector<std::array<long double, 2>>> owner_parts);
 } // namespace SimpleFluid::Reacting

@@ -475,3 +475,91 @@ TEST(SpeciesDiffusionTest, GrossCounterDemandRetainsOneMoleAboveHugeStockDespite
     EXPECT_DOUBLE_EQ(initial[0].amount(*catalog, 17, P::Liquid), 1e20);
     EXPECT_DOUBLE_EQ(initial[0].amount(*catalog, 41, P::Dissolved), 1e20);
 }
+
+namespace
+{
+TEST(SpeciesDiffusionTest, RawPredecessorRejectsHiddenPrimaryAndCounterDebitsOnTheirActualOwnedRows)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {0, "synthetic primary", 1e-20, {{"X", 1}}, {P::Liquid}},
+        {17, "synthetic finite counter", 1e-20, {{"X", 1}}, {P::Liquid}}});
+    std::vector<R::CellSpeciesState> owned(2, R::CellSpeciesState(*catalog));
+    owned[0].set_amount(*catalog, 0, P::Liquid, 1e20);
+    owned[1].set_amount(*catalog, 17, P::Liquid, 1e20);
+    R::SpeciesDiffusionBinding law;
+    law.identity = "raw predecessor donor audit";
+    law.schemaFingerprint = catalog->fingerprint();
+    law.transported = law.counter = {P::Liquid, {}};
+    law.counterSpecies = 17;
+    R::CanonicalDiffusionFace event;
+    event.identity = 31;
+    event.owner = 0;
+    event.neighbor = 1;
+    event.moles = {1e20, 0};
+    event.ownerMolarEnthalpy = event.neighborMolarEnthalpy = {0, 0};
+    const std::array events{event};
+    EXPECT_NO_THROW((void) R::preview_species_diffusion(*catalog, owned, law, events));
+    for (const bool primary : {false, true})
+    {
+        std::vector<std::vector<std::array<long double, 2>>> raw(2);
+        for (std::size_t c = 0; c < owned.size(); ++c)
+            for (double value : owned[c].amounts)
+                raw[c].push_back({value, 0});
+        raw[primary ? 0 : 1][catalog->index(primary ? 0 : 17)][1] = -1;
+        EXPECT_THROW((void) R::preview_species_diffusion(*catalog, owned, law, events, raw), std::runtime_error);
+        EXPECT_DOUBLE_EQ(owned[0].amount(*catalog, 0, P::Liquid), 1e20);
+        EXPECT_DOUBLE_EQ(owned[1].amount(*catalog, 17, P::Liquid), 1e20);
+    }
+}
+TEST(SpeciesDiffusionTest, RawPredecessorFundsJointHighAndCorrectionOutgoingPacketsWithoutIncomingBorrowing)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {0, "synthetic primary", 1e-20, {{"X", 1}}, {P::Liquid}},
+        {17, "synthetic finite counter", 1e-20, {{"X", 1}}, {P::Liquid}}});
+    std::vector<R::CellSpeciesState> owned(3, R::CellSpeciesState(*catalog));
+    owned[0].set_amount(*catalog, 0, P::Liquid, 1e20);
+    owned[1].set_amount(*catalog, 17, P::Liquid, 1e20);
+    owned[2].set_amount(*catalog, 17, P::Liquid, 1);
+    R::SpeciesDiffusionBinding law;
+    law.identity = "raw predecessor joint credit audit";
+    law.schemaFingerprint = catalog->fingerprint();
+    law.transported = law.counter = {P::Liquid, {}};
+    law.counterSpecies = 17;
+    R::CanonicalDiffusionFace large;
+    large.identity = 31;
+    large.owner = 0;
+    large.neighbor = 1;
+    large.moles = {1e20, 0};
+    large.ownerMolarEnthalpy = large.neighborMolarEnthalpy = {0, 0};
+    auto small = large;
+    small.identity = 47;
+    small.neighbor = 2;
+    small.moles[0] = 1;
+    const std::array events{large, small};
+    EXPECT_THROW((void) R::preview_species_diffusion(*catalog, owned, law, events), std::runtime_error);
+    std::vector<std::vector<std::array<long double, 2>>> raw(owned.size());
+    for (std::size_t c = 0; c < owned.size(); ++c)
+        for (double value : owned[c].amounts)
+            raw[c].push_back({value, 0});
+    raw[0][catalog->index(0)][1] = 1; // Genuine predecessor credit, not an incoming face credit.
+    const auto result = R::preview_species_diffusion(*catalog, owned, law, events, raw);
+    EXPECT_DOUBLE_EQ(result.state[0].amount(*catalog, 0, P::Liquid), 0);
+    EXPECT_DOUBLE_EQ(result.state[1].amount(*catalog, 0, P::Liquid), 1e20);
+    EXPECT_DOUBLE_EQ(result.state[2].amount(*catalog, 0, P::Liquid), 1);
+    EXPECT_DOUBLE_EQ(result.state[1].amount(*catalog, 17, P::Liquid), 0);
+    EXPECT_DOUBLE_EQ(result.state[2].amount(*catalog, 17, P::Liquid), 0);
+    auto malformed = raw;
+    malformed.pop_back();
+    EXPECT_THROW((void) R::preview_species_diffusion(*catalog, owned, law, events, malformed), std::invalid_argument);
+    malformed = raw;
+    malformed[0][0][1] = std::numeric_limits<long double>::quiet_NaN();
+    EXPECT_THROW((void) R::preview_species_diffusion(*catalog, owned, law, events, malformed), std::invalid_argument);
+    malformed = raw;
+    malformed[2][catalog->index(17)] = {2, 0};
+    EXPECT_THROW((void) R::preview_species_diffusion(*catalog, owned, law, events, malformed), std::invalid_argument);
+}
+} // namespace

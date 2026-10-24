@@ -172,6 +172,21 @@ identical integer-indexed packets imported to incident ranks. Each owned cell
 applies its own signed side. Optional stages consume the actual finite endpoint
 of their predecessor, never independently reserve one shared original state.
 
+Within a source evaluation, the controller retains the high/correction parts of
+`ReactionLocalReceipt::postSourceAmounts` through ordered face and interphase
+stages. Each actual cell owner reserves original outgoing primary and counter
+packets against those local stocks before incoming credit. EOS concentrations
+and canonical MPI face packets retain their existing double representation;
+the local predecessor parts are never serialized to halo ranks.
+
+The explicit raw-predecessor overloads of `preview_species_diffusion` and
+`compile_interphase_plan` validate schema, dimensions and projection to the
+represented state. The original overloads still accept an explicitly represented
+initial state. A frozen interphase plan retains its raw predecessor for every
+pressure-domain and caloric replay; reconstructing it from a rounded stage
+endpoint would lose earlier donor debits. `FrozenInterphasePlan` exposes an
+appended member, so downstream consumers must rebuild against matching headers.
+
 The donor partial-molar enthalpy of every signed primary and counter transfer is
 explicitly supplied at actual donor T/p/composition. No ideal-gas or bulk-mixture
 enthalpy surrogate is inferred. Identical raw molar/enthalpy terms enter the two

@@ -31,6 +31,7 @@ struct Fixture
     Flow::TransportSnapshot transport;
     Flow::State thermal;
     std::vector<R::CellSpeciesState> accepted, post_chemistry;
+    std::vector<std::vector<std::array<long double, 2>>> post_source_parts;
     std::vector<R::SpeciesSourceLedger> chemistry_ledgers;
     R::SpeciesId finite_counter;
     explicit Fixture(std::size_t count = 2, R::SpeciesId counter_id = solvent) : finite_counter(counter_id)
@@ -82,6 +83,7 @@ struct Fixture
             const auto produced =
                 R::advance_reactions(chemistry, state, {0, 300, 100000, v, v}, transport.time_step, input);
             post_chemistry.push_back(produced.state); // Actual pure chemistry is the finite donor base.
+            post_source_parts.push_back(produced.localReceipt.postSourceAmounts);
             chemistry_ledgers.push_back(produced.ledger);
             const double temperature = count == 2 && gid == 1 ? 400. : 300.;
             std::vector<double> moles{state.amount(*catalog, finite_counter, R::SpeciesPhase::Liquid),
@@ -360,6 +362,7 @@ TEST(LowMachFaceTransportTest, RawChemistryAndFourierChannelsComposeBeforeRoundi
                 const auto chemistry =
                     R::advance_reactions(mechanism, initial, environment, context.transport.time_step, input);
                 stage.post_chemistry.push_back(chemistry.state);
+                stage.post_chemistry_parts.push_back(chemistry.localReceipt.postSourceAmounts);
                 stage.ledgers.push_back(chemistry.ledger);
                 for (std::size_t s = 0; s < 3; ++s)
                 {
@@ -428,6 +431,7 @@ TEST(LowMachFaceTransportTest, OrderedStagesConsumeActualPriorStateInsteadOfRese
         [&](const Flow::SourceStageContext& context, F::LocalChemistryStage& prepared)
         {
             prepared.post_chemistry = f.post_chemistry;
+            prepared.post_chemistry_parts = f.post_source_parts;
             prepared.ledgers = f.chemistry_ledgers;
             prepared.caloric_guesses = context.thermodynamic_trial.cells;
             prepared.gross_events.resize(context.mesh.num_owned_cells(), std::vector<double>(2));

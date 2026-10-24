@@ -410,4 +410,77 @@ TEST(PressureConditionedThermalTest, UpstreamStaticDepletionIsExplicitlyUnsuppor
         std::invalid_argument);
     EXPECT_EQ(f.before[0].moles, std::vector<double>({.4, 0}));
 }
+
+TEST(PressureConditionedThermalTest, RawPredecessorDebitSurvivesCompilationAndPressureReplay)
+{
+    Fixture f;
+    auto configuration = *f.configuration;
+    auto partial = std::make_shared<const R::PartialMolarEnthalpyLaw>(
+        R::PartialMolarEnthalpyLaw{{"raw ideal gas partials", 1, f.catalog->fingerprint()}, f.gas->bounds(),
+            [](double t, double, std::span<const double>)
+            { return R::PartialMolarEnthalpyPoint{{cp * t, cp * t}, {cp, cp}, {0, 0}}; }});
+    configuration.phase_enthalpy = {partial, nullptr, nullptr};
+    const auto shared = std::make_shared<const R::InterphaseConfiguration>(configuration);
+    const std::vector<R::PhaseThermalState> before{
+        {f.gas, {1e20, 0}, p_old, 1e20 * cv * T0, T0}, {f.gas, {0, 0}, p_old, 0, 0},
+        {f.gas, {0, 0}, p_old, 0, 0}};
+    std::vector<std::vector<std::array<long double, 2>>> raw(3, std::vector<std::array<long double, 2>>(2));
+    raw[0][0] = {1e20, -1};
+    EXPECT_THROW(
+        (void) R::compile_interphase_plan(shared, before, {{1e20}}, {{}, {}, {}}, {}, raw), std::invalid_argument);
+    auto forged = R::compile_interphase_plan(shared, before, {{0}}, {{}, {}, {}}, {}, raw);
+    EXPECT_EQ(forged.raw_pre_moles, raw);
+    forged.amounts = {{1e20}};
+    forged.final_moles = {{0, 0}, {1e20, 0}, {0, 0}};
+    auto templates = before;
+    for (std::size_t a = 0; a < templates.size(); ++a)
+        templates[a].moles = forged.final_moles[a];
+    const std::vector<double> energy{1e20 * cv * T0, 0, 0},
+        volume{1e20 * gas_constant * T0 / p_old, 0, 0};
+    EXPECT_THROW((void) R::interphase_pressure_bounds(forged, templates), std::invalid_argument);
+    EXPECT_THROW((void) R::evaluate_pressure_conditioned_thermal(
+                     forged, templates, energy, volume, p_old, R::PhaseThermalMode::Equilibrium),
+        std::invalid_argument);
+    EXPECT_DOUBLE_EQ(before[0].moles[0], 1e20);
+}
+TEST(PressureConditionedThermalTest, RawPredecessorCreditFundsHighAndCorrectionOutgoingMaterialEvents)
+{
+    Fixture f;
+    auto configuration = *f.configuration;
+    auto partial = std::make_shared<const R::PartialMolarEnthalpyLaw>(
+        R::PartialMolarEnthalpyLaw{{"funded raw ideal gas partials", 1, f.catalog->fingerprint()}, f.gas->bounds(),
+            [](double t, double, std::span<const double>)
+            { return R::PartialMolarEnthalpyPoint{{cp * t, cp * t}, {cp, cp}, {0, 0}}; }});
+    configuration.phase_enthalpy = {partial, nullptr, nullptr};
+    configuration.stages = {{"joint predecessor funding", R::InterphaseStageKind::Material,
+        {{44, 0, 1}, {44, 0, 2}}, {}}};
+    const auto shared = std::make_shared<const R::InterphaseConfiguration>(configuration);
+    const std::vector<R::PhaseThermalState> before{
+        {f.gas, {1e20, 0}, p_old, 1e20 * cv * T0, T0}, {f.gas, {0, 0}, p_old, 0, 0},
+        {f.gas, {0, 0}, p_old, 0, 0}};
+    std::vector<std::vector<std::array<long double, 2>>> raw(3, std::vector<std::array<long double, 2>>(2));
+    raw[0][0] = {1e20, 1};
+    EXPECT_THROW(
+        (void) R::compile_interphase_plan(shared, before, {{1e20, 1}}, {{}, {}, {}}, {}), std::invalid_argument);
+    const auto plan = R::compile_interphase_plan(shared, before, {{1e20, 1}}, {{}, {}, {}}, {}, raw);
+    EXPECT_EQ(plan.final_moles, std::vector<std::vector<double>>({{0, 0}, {1e20, 0}, {1, 0}}));
+    auto templates = before;
+    for (std::size_t a = 0; a < templates.size(); ++a)
+        templates[a].moles = plan.final_moles[a];
+    const std::vector<double> energy{1e20 * cv * T0, 0, 0},
+        volume{1e20 * gas_constant * T0 / p_old, 0, 0};
+    const auto evaluated = R::evaluate_pressure_conditioned_thermal(
+        plan, templates, energy, volume, p_old, R::PhaseThermalMode::Equilibrium);
+    EXPECT_DOUBLE_EQ(evaluated.phases[2].moles[0], 1);
+    EXPECT_EQ(evaluated.material_events.size(), 2u);
+    EXPECT_EQ(plan.raw_pre_moles, raw);
+    const auto bounds = R::interphase_pressure_bounds(plan, templates);
+    EXPECT_LE(bounds.lower, p_old);
+    EXPECT_GE(bounds.upper, p_old);
+    auto malformed = raw;
+    malformed[0][0] = {2e20, 0};
+    EXPECT_THROW((void) R::compile_interphase_plan(shared, before, {{0, 0}}, {{}, {}, {}}, {}, malformed),
+        std::invalid_argument);
+}
+
 } // namespace

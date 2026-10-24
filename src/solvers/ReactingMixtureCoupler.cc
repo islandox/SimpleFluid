@@ -141,6 +141,7 @@ struct SourceEngine
         stage.gross_events.resize(transport.cells.size());
         stage.ledgers.reserve(transport.cells.size());
         stage.post_chemistry.reserve(transport.cells.size());
+        stage.post_chemistry_parts.reserve(transport.cells.size());
         stage.caloric_guesses.reserve(transport.cells.size());
         for (size_t c = 0; c < transport.cells.size(); ++c)
         {
@@ -258,6 +259,7 @@ struct SourceEngine
             require(raw.schemaFingerprint == catalog.fingerprint() &&
                         raw.reactionHeatContributions.size() == options.mechanism->reactions().size(),
                 "Local reaction receipt does not match the immutable mechanism/schema.");
+            stage.post_chemistry_parts.push_back(raw.postSourceAmounts);
             for (const auto& change : raw.chemicalChanges)
             {
                 // The receipt is sparse; an unbound zero compartment never reaches phase_for.
@@ -331,7 +333,9 @@ struct SourceEngine
                     thermal_batch->source = conditioned_thermal_detail::identity(context.transport);
                     thermal_batch->cells.reserve(context.transport.cells.size());
                     interphase_stage = [this, thermal_batch](const Solver::SourceStageContext& current,
-                                           std::vector<CellSpeciesState>& donors, Faces::LocalSourceAccumulator& sums,
+                                           std::vector<CellSpeciesState>& donors,
+                                           std::vector<Faces::RawAmounts>& raw_donors,
+                                           Faces::LocalSourceAccumulator& sums,
                                            std::vector<std::vector<double>>& gross,
                                            std::span<const Solver::CellState> guesses)
                     {
@@ -372,11 +376,20 @@ struct SourceEngine
                             const auto amounts = options.interphase->integrate(
                                 {catalog, donors[c], current.transport.cells[c], guess, current.transport.stage, c,
                                     current.transport.time_step, current.transport.accepted_time, location});
+                            require(raw_donors.size() == donors.size(), "Raw interphase predecessor rows differ.");
+                            std::vector<std::vector<std::array<long double, 2>>> phase_parts(
+                                np, std::vector<std::array<long double, 2>>(catalog.species().size()));
+                            for (size_t a = 0; a < np; ++a)
+                                for (size_t i = 0; i < catalog.species().size(); ++i)
+                                    phase_parts[a][i] = raw_donors[c].at(Faces::raw_amount_slot(catalog, donors[c],
+                                        catalog.species()[i].id,
+                                        {compartment(options.phases[a], i), options.phases[a].population}));
                             auto plan = compile_interphase_plan(options.interphase->configuration, guess.phases,
-                                amounts, sums.raw_energy(c), sums.raw_declared(c));
+                                amounts, sums.raw_energy(c), sums.raw_declared(c), phase_parts);
                             for (size_t j = 0; j < plan.amounts.size(); ++j)
                             {
                                 const auto& stage = plan.configuration->stages[j];
+                                std::vector<Faces::MolarTerm> material_terms;
                                 for (size_t i = 0; i < plan.amounts[j].size(); ++i)
                                 {
                                     const double amount = plan.amounts[j][i];
@@ -386,6 +399,12 @@ struct SourceEngine
                                         const auto species = catalog.index(slot.species);
                                         sums.add_material(c, slot.donor, species, -static_cast<long double>(amount));
                                         sums.add_material(c, slot.recipient, species, amount);
+                                        material_terms.push_back({slot.species,
+                                            {compartment(options.phases[slot.donor], species),
+                                                options.phases[slot.donor].population}, -amount});
+                                        material_terms.push_back({slot.species,
+                                            {compartment(options.phases[slot.recipient], species),
+                                                options.phases[slot.recipient].population}, amount});
                                         gross[c].push_back(amount);
                                     }
                                     else
@@ -394,12 +413,16 @@ struct SourceEngine
                                         gross[c].push_back(std::max(-amount, 0.));
                                     }
                                 }
+                                if (stage.kind == InterphaseStageKind::Material)
+                                    donors[c] = Faces::apply_raw_material(
+                                        catalog, donors[c], raw_donors[c], material_terms);
                             }
                             for (size_t a = 0; a < np; ++a)
                                 for (size_t i = 0; i < catalog.species().size(); ++i)
-                                    donors[c].set_amount(catalog, catalog.species()[i].id,
-                                        compartment(options.phases[a], i), plan.final_moles[a][i],
-                                        options.phases[a].population);
+                                    require(donors[c].amount(catalog, catalog.species()[i].id,
+                                                compartment(options.phases[a], i), options.phases[a].population) ==
+                                                plan.final_moles[a][i],
+                                        "Raw interphase replay differs from its frozen material plan.");
                             donors[c].validate(catalog);
                             thermal_batch->cells.push_back(std::move(plan));
                         }

@@ -101,9 +101,16 @@ public:
      */
     Receipt preview(const Flow::SourceStageContext& context, std::span<const CellSpeciesState> post_chemistry,
         std::span<const Flow::CellState> prepared_caloric_guesses) const;
+    /** Actual owner-local predecessor parts; never included in halo sampling/packets. */
+    Receipt preview(const Flow::SourceStageContext& context, std::span<const CellSpeciesState> post_chemistry,
+        std::span<const Flow::CellState> prepared_caloric_guesses,
+        std::span<const std::vector<std::array<long double, 2>>> owner_parts) const;
     void validate_receipt(const Receipt& receipt, const Flow::SourceStageContext& context) const;
 
 private:
+    Receipt preview_impl(const Flow::SourceStageContext& context, std::span<const CellSpeciesState> post_chemistry,
+        std::span<const Flow::CellState> prepared_caloric_guesses,
+        std::span<const std::vector<std::array<long double, 2>>> owner_parts, bool raw_authority) const;
     std::shared_ptr<const Mesh> mesh_;
     std::shared_ptr<const SpeciesCatalog> catalog_;
     Options options_;

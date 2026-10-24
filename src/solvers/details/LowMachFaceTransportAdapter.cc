@@ -2,6 +2,7 @@
  * Conservative distributed source packets with explicit immutable supplied laws.
  */
 #include "solvers/details/LowMachFaceTransportAdapter.hh"
+#include "solvers/details/LowMachRawSpeciesInventory.hh"
 #include "equations/CollectiveValidation.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -233,6 +234,19 @@ Receipt LowMachFaceTransportAdapter::preview(
 Receipt LowMachFaceTransportAdapter::preview(const Flow::SourceStageContext& context,
     std::span<const CellSpeciesState> post_chemistry, std::span<const Flow::CellState> prepared_caloric_guesses) const
 {
+    return preview_impl(context, post_chemistry, prepared_caloric_guesses, {}, false);
+}
+Receipt LowMachFaceTransportAdapter::preview(const Flow::SourceStageContext& context,
+    std::span<const CellSpeciesState> post_chemistry, std::span<const Flow::CellState> prepared_caloric_guesses,
+    std::span<const std::vector<std::array<long double, 2>>> owner_parts) const
+{
+    return preview_impl(context, post_chemistry, prepared_caloric_guesses, owner_parts, true);
+}
+Receipt LowMachFaceTransportAdapter::preview_impl(const Flow::SourceStageContext& context,
+    std::span<const CellSpeciesState> post_chemistry, std::span<const Flow::CellState> prepared_caloric_guesses,
+    std::span<const std::vector<std::array<long double, 2>>> owner_parts, bool raw_authority) const
+{
+    collective_detail::require_uniform_value(*mesh_, int(raw_authority), "Face raw predecessor authority");
     const auto ns = catalog_->species().size(), np = compartments_.size(), physical = options_.physical_phase;
     const std::size_t sample_columns = 2 * ns + 6, packet_columns = 3 * ns + 4;
     const std::size_t t = 2 * ns, p = t + 1, volume = t + 2, density = t + 3;
@@ -258,6 +272,12 @@ Receipt LowMachFaceTransportAdapter::preview(const Flow::SourceStageContext& con
                     prepared_caloric_guesses.size() == mesh_->num_owned_cells() &&
                     post_chemistry.size() == mesh_->num_owned_cells(),
                 "Face stage is stale, foreign or malformed.");
+            if (raw_authority)
+            {
+                require(owner_parts.size() == post_chemistry.size(), "Raw face predecessor owned rows differ.");
+                for (std::size_t c = 0; c < post_chemistry.size(); ++c)
+                    validate_raw_inventory(*catalog_, post_chemistry[c], owner_parts[c]);
+            }
             require(mesh_->owned_cell_map().getRawPtr() == owned_cells_.getRawPtr() &&
                         mesh_->overlap_cell_map().getRawPtr() == overlap_cells_.getRawPtr() &&
                         mesh_->owned_face_map().getRawPtr() == owned_faces_.getRawPtr() &&
@@ -530,8 +550,11 @@ Receipt LowMachFaceTransportAdapter::preview(const Flow::SourceStageContext& con
             }
             std::ranges::sort(result.raw_diffusion_faces, {}, &CanonicalDiffusionFace::identity);
             if (options_.diffusion)
-                result.diffusion = preview_species_diffusion(
-                    *catalog_, post_chemistry, options_.diffusion->binding, result.raw_diffusion_faces);
+                result.diffusion = raw_authority
+                    ? preview_species_diffusion(*catalog_, post_chemistry, options_.diffusion->binding,
+                          result.raw_diffusion_faces, owner_parts)
+                    : preview_species_diffusion(
+                          *catalog_, post_chemistry, options_.diffusion->binding, result.raw_diffusion_faces);
             else
             {
                 result.diffusion.state.assign(post_chemistry.begin(), post_chemistry.end());

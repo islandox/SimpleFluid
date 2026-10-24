@@ -130,17 +130,29 @@ struct MaterialStocks
     const SpeciesCatalog& catalog;
     std::vector<std::vector<Acc>> amounts;
 
-    MaterialStocks(const SpeciesCatalog& schema, std::span<const std::vector<double>> before)
+    MaterialStocks(const SpeciesCatalog& schema, std::span<const std::vector<double>> before,
+        std::span<const std::vector<std::array<long double, 2>>> raw = {})
         : catalog(schema), amounts(before.size())
     {
+        require(raw.empty() || raw.size() == before.size(), "Raw thermal predecessor phase layout differs.");
         for (size_t p = 0; p < before.size(); ++p)
         {
             require(before[p].size() == catalog.species().size(), "Material donor species layout differs.");
+            require(raw.empty() || raw[p].size() == before[p].size(),
+                "Raw thermal predecessor species layout differs.");
             amounts[p].resize(before[p].size());
             for (size_t s = 0; s < before[p].size(); ++s)
             {
                 require(std::isfinite(before[p][s]) && before[p][s] >= 0, "Invalid material predecessor stock.");
-                amounts[p][s].add(before[p][s]);
+                if (raw.empty())
+                    amounts[p][s].add(before[p][s]);
+                else
+                {
+                    amounts[p][s].add(raw[p][s][0]);
+                    amounts[p][s].add(raw[p][s][1]);
+                    require(amounts[p][s].value() >= 0 && narrow(amounts[p][s].value()) == before[p][s],
+                        "Raw thermal predecessor does not project to its actual represented phase.");
+                }
             }
         }
     }
@@ -245,7 +257,25 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     std::span<const PhaseThermalState> pre_phases, std::vector<std::vector<double>> amounts,
     std::vector<std::vector<long double>> raw_static_energy, std::vector<long double> raw_declared_energy)
 {
+    std::vector<std::vector<std::array<long double, 2>>> represented;
+    represented.reserve(pre_phases.size());
+    for (const auto& phase : pre_phases)
+    {
+        auto& parts = represented.emplace_back();
+        for (double value : phase.moles)
+            parts.push_back({value, 0});
+    }
+    return compile_interphase_plan(std::move(configuration), pre_phases, std::move(amounts),
+        std::move(raw_static_energy), std::move(raw_declared_energy), represented);
+}
+
+FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseConfiguration> configuration,
+    std::span<const PhaseThermalState> pre_phases, std::vector<std::vector<double>> amounts,
+    std::vector<std::vector<long double>> raw_static_energy, std::vector<long double> raw_declared_energy,
+    std::span<const std::vector<std::array<long double, 2>>> predecessor_parts)
+{
     require(configuration != nullptr, "Missing immutable interphase configuration.");
+    require(predecessor_parts.size() == pre_phases.size(), "Raw thermal predecessor requires every actual phase.");
     validate_interphase_configuration(*configuration, pre_phases);
     require(amounts.size() == configuration->stages.size() && raw_static_energy.size() == pre_phases.size(),
         "Interphase stage/energy layout differs.");
@@ -254,6 +284,7 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     result.amounts = std::move(amounts);
     result.raw_static_energy = std::move(raw_static_energy);
     result.raw_declared_energy = std::move(raw_declared_energy);
+    result.raw_pre_moles.assign(predecessor_parts.begin(), predecessor_parts.end());
     Acc allocated, declared;
     for (size_t p = 0; p < pre_phases.size(); ++p)
     {
@@ -269,7 +300,7 @@ FrozenInterphasePlan compile_interphase_plan(std::shared_ptr<const InterphaseCon
     require(std::abs(mismatch.value()) <=
                 64 * std::numeric_limits<double>::epsilon() * (allocated.magnitude + declared.magnitude),
         "Raw allocated static energy differs from its declared physical channels.");
-    MaterialStocks stocks(pre_phases.front().thermodynamics->catalog(), result.pre_moles);
+    MaterialStocks stocks(pre_phases.front().thermodynamics->catalog(), result.pre_moles, result.raw_pre_moles);
     result.final_moles = stocks.project();
     for (size_t j = 0; j < result.amounts.size(); ++j)
     {
@@ -316,7 +347,7 @@ PressureConditionedThermalEvaluation evaluate_pressure_conditioned_thermal(const
     result.raw_equilibrium_redistribution.resize(np);
     std::vector<Acc> sources(np), targets(np), material(np), heat(np), equilibrium(np), empty_roundoff(np);
     std::vector<long double> target_derivative(np), last_caloric(np), temperature_derivative(np);
-    MaterialStocks stocks(catalog, plan.pre_moles);
+    MaterialStocks stocks(catalog, plan.pre_moles, plan.raw_pre_moles);
     auto moles = stocks.project();
     for (size_t a = 0; a < np; ++a)
     {
@@ -697,7 +728,7 @@ CaloricPressureInterval interphase_pressure_bounds(
     validate_interphase_configuration(*plan.configuration, phases);
     CaloricPressureInterval result{0, std::numeric_limits<double>::infinity()};
     const auto& catalog = phases.front().thermodynamics->catalog();
-    MaterialStocks stocks(catalog, plan.pre_moles);
+    MaterialStocks stocks(catalog, plan.pre_moles, plan.raw_pre_moles);
     auto moles = stocks.project();
     auto include_phases = [&]()
     {

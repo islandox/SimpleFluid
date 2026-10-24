@@ -4,6 +4,7 @@
 #pragma once
 #include "equations/CollectiveValidation.hh"
 #include "solvers/details/LowMachFaceTransportAdapter.hh"
+#include "solvers/details/LowMachRawSpeciesInventory.hh"
 #include "utils/CompensatedSum.hh"
 #include <array>
 #include <cmath>
@@ -156,6 +157,7 @@ inline void validate_source_endpoint(double transported, double packet, double a
 struct LocalChemistryStage
 {
     std::vector<CellSpeciesState> post_chemistry; ///< Copy the actual advance_reactions(...).state.
+    std::vector<RawAmounts> post_chemistry_parts; ///< Actual localReceipt.postSourceAmounts, owner-local only.
     std::vector<SpeciesSourceLedger> ledgers;
     std::vector<Flow::CellState> caloric_guesses; ///< Prepared candidate T/p/EOS; donor moles are separate.
     LocalSourceAccumulator sums; ///< Raw chemistry/external/allocated heat channels go here before any narrowing.
@@ -180,7 +182,8 @@ struct ComposedSourceStage
  * No outer collective_local_validation may wrap this function: face adapters communicate.
  */
 using PostFaceLocalStage = std::function<void(const Flow::SourceStageContext&, std::vector<CellSpeciesState>&,
-    LocalSourceAccumulator&, std::vector<std::vector<double>>&, std::span<const Flow::CellState>)>;
+    std::vector<RawAmounts>&, LocalSourceAccumulator&, std::vector<std::vector<double>>&,
+    std::span<const Flow::CellState>)>;
 inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageContext& context,
     const SpeciesCatalog& catalog, std::span<const LowMachFaceTransportAdapter* const> adapters,
     const std::function<void(const Flow::SourceStageContext&, LocalChemistryStage&)>& prepare_chemistry,
@@ -199,20 +202,29 @@ inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageC
             prepare_chemistry(context, chemistry);
             if (chemistry.post_chemistry.size() != context.mesh.num_owned_cells() ||
                 chemistry.gross_events.size() != context.mesh.num_owned_cells() ||
-                chemistry.caloric_guesses.size() != context.mesh.num_owned_cells())
+                chemistry.caloric_guesses.size() != context.mesh.num_owned_cells() ||
+                chemistry.post_chemistry_parts.size() != context.mesh.num_owned_cells())
                 throw std::invalid_argument("Pure chemistry receipt must follow actual owned rows.");
+            for (std::size_t c = 0; c < chemistry.post_chemistry.size(); ++c)
+                validate_raw_inventory(catalog, chemistry.post_chemistry[c], chemistry.post_chemistry_parts[c]);
             result.faces.reserve(adapters.size());
         });
     auto donors = std::move(chemistry.post_chemistry);
+    auto donor_parts = std::move(chemistry.post_chemistry_parts);
     for (const auto* adapter : adapters)
     {
-        auto face = adapter->preview(context, donors, chemistry.caloric_guesses); // Collective internal stage.
+        auto face = adapter->preview(context, donors, chemistry.caloric_guesses, donor_parts); // Collective stage.
         collective_detail::collective_local_validation(context.mesh, "Accumulate one ordered canonical face stage",
             [&]
             {
                 chemistry.sums.add_faces(face, catalog);
-                donors =
-                    face.diffusion.state; // Actual finite state, never endpoint-differenced or original-base reuse.
+                if (face.cells.size() != donors.size() || face.diffusion.state.size() != donors.size())
+                    throw std::invalid_argument("Owned raw face receipts have the wrong row layout.");
+                for (std::size_t c = 0; c < donors.size(); ++c)
+                {
+                    donors[c] = apply_raw_material(catalog, donors[c], donor_parts[c], face.cells[c].material);
+                    validate_raw_inventory(catalog, face.diffusion.state[c], donor_parts[c]);
+                }
                 if (face.rounded.gross_events.size() != chemistry.gross_events.size())
                     throw std::invalid_argument("Face gross events do not match chemistry owned rows.");
                 for (std::size_t c = 0; c < chemistry.gross_events.size(); ++c)
@@ -227,7 +239,8 @@ inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageC
         [&]
         {
             if (post_faces)
-                post_faces(context, donors, chemistry.sums, chemistry.gross_events, chemistry.caloric_guesses);
+                post_faces(context, donors, donor_parts, chemistry.sums, chemistry.gross_events,
+                    chemistry.caloric_guesses);
         });
     collective_detail::collective_local_validation(context.mesh, "Finalize composed raw source channels",
         [&]
