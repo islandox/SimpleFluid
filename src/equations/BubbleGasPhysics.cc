@@ -41,37 +41,8 @@ real_t require_non_negative(real_t value, std::string_view label)
     return value;
 }
 
-real_t ideal_gas_alpha_source(real_t liquid_fraction, real_t release_efficiency,
-                              real_t yield_mol_per_j, real_t power_density, real_t gas_constant,
-                              real_t temperature, real_t absolute_pressure, real_t max_source_rate)
-{
-    require_non_negative(liquid_fraction, "liquid fraction");
-    require_non_negative(release_efficiency, "release efficiency");
-    if (release_efficiency > 1.0)
-    {
-        throw std::invalid_argument("release efficiency cannot exceed one.");
-    }
-    require_non_negative(yield_mol_per_j, "hydrogen yield");
-    require_non_negative(power_density, "prescribed_heat power density");
-    require_positive(gas_constant, "gas constant");
-    require_positive(temperature, "temperature");
-    require_positive(absolute_pressure, "absolute pressure");
-    if (max_source_rate < 0.0 || std::isnan(max_source_rate))
-    {
-        throw std::invalid_argument("maximum alpha source rate must be non-negative.");
-    }
-
-    const auto raw = liquid_fraction * release_efficiency * yield_mol_per_j * power_density *
-                     gas_constant * temperature / absolute_pressure;
-    if (!std::isfinite(raw))
-    {
-        throw std::invalid_argument("ideal-gas alpha source is non-finite.");
-    }
-    return std::min(raw, max_source_rate);
-}
-
-real_t henry_equilibrium_concentration(real_t henry_coefficient, real_t liquid_pressure,
-                                       real_t surface_tension, real_t bubble_radius)
+real_t henry_equilibrium_concentration(
+    real_t henry_coefficient, real_t liquid_pressure, real_t surface_tension, real_t bubble_radius)
 {
     require_non_negative(henry_coefficient, "Henry coefficient");
     require_positive(liquid_pressure, "liquid pressure");
@@ -95,37 +66,6 @@ real_t surface_tension(const ReactingGasOptions& options, real_t temperature_kel
     throw std::invalid_argument("Unknown surface tension mode.");
 }
 
-real_t nucleation_radius(const ReactingGasOptions& options, real_t temperature_kelvin, real_t absolute_pressure)
-{
-    switch (options.nucleation_radius_mode)
-    {
-    case NucleationRadiusMode::Constant:
-        return require_positive(options.nucleation_radius, "nucleation radius");
-    case NucleationRadiusMode::External:
-        require_positive(temperature_kelvin, "temperature");
-        require_positive(absolute_pressure, "absolute pressure");
-        if (!options.nucleation_radius_correlation)
-            throw std::invalid_argument("External nucleation radius requires a correlation callback.");
-        return require_positive(options.nucleation_radius_correlation(temperature_kelvin, absolute_pressure), "nucleation radius");
-    }
-    throw std::invalid_argument("Unknown nucleation radius mode.");
-}
-
-real_t hydrogen_diffusivity(const ReactingGasOptions& options, real_t temperature_kelvin)
-{
-    switch (options.diffusivity_mode)
-    {
-    case HydrogenDiffusivityMode::Constant:
-        return require_positive(options.hydrogen_diffusivity, "hydrogen diffusivity");
-    case HydrogenDiffusivityMode::External:
-        require_positive(temperature_kelvin, "temperature");
-        if (!options.hydrogen_diffusivity_correlation)
-            throw std::invalid_argument("External hydrogen diffusivity requires a correlation callback.");
-        return require_positive(options.hydrogen_diffusivity_correlation(temperature_kelvin), "hydrogen diffusivity");
-    }
-    throw std::invalid_argument("Unknown hydrogen diffusivity mode.");
-}
-
 real_t hughmark_sherwood(real_t reynolds, real_t schmidt)
 {
     require_non_negative(reynolds, "Reynolds number");
@@ -144,7 +84,7 @@ real_t hughmark_sherwood(real_t reynolds, real_t schmidt)
 real_t hughmark_mass_transfer_coefficient(real_t diffusivity, real_t radius, real_t liquid_density,
                                           real_t dynamic_viscosity, real_t relative_speed)
 {
-    require_positive(diffusivity, "hydrogen diffusivity");
+    require_positive(diffusivity, "species diffusivity");
     require_positive(radius, "bubble radius");
     require_positive(liquid_density, "liquid density");
     require_positive(dynamic_viscosity, "dynamic viscosity");
@@ -160,7 +100,7 @@ BubbleMassTransferResult initialize_bubble_mass_transfer(
     BubbleMassTransferMode model, real_t diffusivity, real_t radius,
     real_t liquid_density, real_t dynamic_viscosity, real_t relative_speed)
 {
-    require_positive(diffusivity, "molecular hydrogen diffusivity");
+    require_positive(diffusivity, "molecular diffusivity");
     require_positive(radius, "bubble radius");
     require_positive(liquid_density, "liquid density");
     require_positive(dynamic_viscosity, "liquid dynamic viscosity");
@@ -251,14 +191,11 @@ BubbleMassTransferResult selected_bubble_mass_transfer(
     real_t dynamic_viscosity, real_t relative_speed);
 
 template<>
-BubbleMassTransferResult
-selected_bubble_mass_transfer<BubbleMassTransferMode::LegacyHughmark>(
-    real_t diffusivity, real_t radius, real_t liquid_density,
-    real_t dynamic_viscosity, real_t relative_speed)
+BubbleMassTransferResult selected_bubble_mass_transfer<BubbleMassTransferMode::Hughmark>(
+    real_t diffusivity, real_t radius, real_t liquid_density, real_t dynamic_viscosity, real_t relative_speed)
 {
     auto result = initialize_bubble_mass_transfer(
-        BubbleMassTransferMode::LegacyHughmark, diffusivity, radius,
-        liquid_density, dynamic_viscosity, relative_speed);
+        BubbleMassTransferMode::Hughmark, diffusivity, radius, liquid_density, dynamic_viscosity, relative_speed);
     if (result.schmidt >= 250.0)
     {
         std::ostringstream message;
@@ -334,14 +271,14 @@ BubbleMassTransferEvaluator select_bubble_mass_transfer_evaluator(
 {
     switch (model)
     {
-    case BubbleMassTransferMode::LegacyHughmark:
-        return &selected_bubble_mass_transfer<BubbleMassTransferMode::LegacyHughmark>;
-    case BubbleMassTransferMode::SphericalDiffusion:
-        return &selected_bubble_mass_transfer<BubbleMassTransferMode::SphericalDiffusion>;
-    case BubbleMassTransferMode::FengMichaelidesClean:
-        return &selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesClean>;
-    case BubbleMassTransferMode::FengMichaelidesRigid:
-        return &selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesRigid>;
+        case BubbleMassTransferMode::Hughmark:
+            return &selected_bubble_mass_transfer<BubbleMassTransferMode::Hughmark>;
+        case BubbleMassTransferMode::SphericalDiffusion:
+            return &selected_bubble_mass_transfer<BubbleMassTransferMode::SphericalDiffusion>;
+        case BubbleMassTransferMode::FengMichaelidesClean:
+            return &selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesClean>;
+        case BubbleMassTransferMode::FengMichaelidesRigid:
+            return &selected_bubble_mass_transfer<BubbleMassTransferMode::FengMichaelidesRigid>;
     }
     throw std::invalid_argument("Unknown bubble mass-transfer mode.");
 }

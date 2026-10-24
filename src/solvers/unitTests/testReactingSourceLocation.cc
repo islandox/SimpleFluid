@@ -107,13 +107,13 @@ R::ReactionSourceInput spatial_source(const R::ReactionContext& context, double 
 S::ReactingGasOptions field_options(const Chemistry& chemistry, const S::SP<Grid>& grid)
 {
     S::ReactingGasOptions options;
-    options.mode = S::ReactingGasMode::TwoPopulation;
+    options.mode = S::ReactingGasMode::Species;
     options.reference_pressure = 100000.;
     options.reaction_mechanism = chemistry.mechanism;
     options.liquid_thermodynamics = chemistry.liquid;
     options.gas_thermodynamics = chemistry.gas;
     options.mass_transfer_mode = S::BubbleMassTransferMode::SphericalDiffusion;
-    options.dissolved_transport = S::ReactingTransportMode::Advective;
+    options.solution_transport = S::ReactingTransportMode::Advective;
     options.initial_species_state = [schema = chemistry.catalog, grid](const auto& environment, std::int64_t)
     {
         validate_location(environment, *grid);
@@ -161,7 +161,7 @@ struct FieldFixture
     }
     void advance(double dt, const S::FVM::ALEControlVolumeState* ale = nullptr)
     {
-        model.advance(dt, dt, temperature, pressure, velocity, relative_flux, material, nullptr, ale);
+        model.advance(dt, dt, temperature, pressure, velocity, relative_flux, material, ale);
     }
     void expect_source(double dt) const
     {

@@ -42,8 +42,8 @@ P::BubblePopulationKernels manufactured_kernels()
 
 void expect_closed(const P::BubblePopulationStepResult& result, double total)
 {
-    EXPECT_NEAR(result.hydrogen_after, total, 2e-13 * std::max(total, 1e-300));
-    EXPECT_NEAR(result.hydrogen_error, 0.0, 2e-13 * std::max(total, 1e-300));
+    EXPECT_NEAR(result.moles_after, total, 2e-13 * std::max(total, 1e-300));
+    EXPECT_NEAR(result.molar_error, 0.0, 2e-13 * std::max(total, 1e-300));
     EXPECT_NEAR(result.number_error, 0.0, 2e-13);
     for (const auto number : result.state.number_density)
         EXPECT_GE(number, 0.0);
@@ -150,7 +150,7 @@ TEST(BubblePopulationKineticsTest, FixedPivotBirthsPreserveNumberAndMolesOnANonu
     const auto moments = P::population_moments(grid, result.state);
     EXPECT_DOUBLE_EQ(moments.number_density, 2.0);
     EXPECT_DOUBLE_EQ(moments.molar_inventory, 4.0);
-    EXPECT_DOUBLE_EQ(result.hydrogen_added_by_births, 4.0);
+    EXPECT_DOUBLE_EQ(result.moles_added_by_births, 4.0);
     expect_closed(result, 9.0);
 }
 
@@ -388,18 +388,18 @@ TEST(BubblePopulationKineticsTest, TinyBirthAndGrowthLedgersRemainConservativeBe
     const P::UpperBubblePopulation initial{1e20, {1e20, 0.0, 0.0}};
     const auto identity = P::advance_upper_bubble_population(grid, initial, {}, 1.0);
     EXPECT_EQ(identity.number_change, (std::vector<double>{0.0, 0.0, 0.0}));
-    EXPECT_EQ(identity.hydrogen_change, (std::vector<double>{0.0, 0.0, 0.0}));
+    EXPECT_EQ(identity.molar_change, (std::vector<double>{0.0, 0.0, 0.0}));
     const auto birth = P::advance_upper_bubble_population(grid, initial, {}, 1.0, {}, {{1.0, 1.0}});
     EXPECT_DOUBLE_EQ(birth.state.number_density[0], initial.number_density[0]);
     EXPECT_EQ(birth.number_change, (std::vector<double>{1.0, 0.0, 0.0}));
-    EXPECT_EQ(birth.hydrogen_change, (std::vector<double>{1.0, 0.0, 0.0}));
+    EXPECT_EQ(birth.molar_change, (std::vector<double>{1.0, 0.0, 0.0}));
     auto kernels = manufactured_kernels();
     kernels.growth_rate = [](std::size_t i, const auto&) { return i == 0 ? 1e-20 : 0.0; };
     const auto growth = P::advance_upper_bubble_population(grid, initial, {}, 1.0, kernels);
     EXPECT_DOUBLE_EQ(growth.state.number_density[0], initial.number_density[0]);
     EXPECT_NEAR(growth.number_change[0], -1.0, 2e-15);
     EXPECT_NEAR(growth.number_change[1], 1.0, 2e-15);
-    EXPECT_NEAR(growth.hydrogen_change[0] + growth.hydrogen_change[1], growth.dissolved_to_gas_moles, 2e-15);
+    EXPECT_NEAR(growth.molar_change[0] + growth.molar_change[1], growth.dissolved_to_gas_moles, 2e-15);
     EXPECT_NEAR(growth.number_change[0] + growth.number_change[1], 0.0, 2e-15);
 }
 
@@ -414,7 +414,7 @@ TEST(BubblePopulationKineticsTest, TinyCollisionAndBreakupLedgersDebitTheirUncha
     EXPECT_NEAR(coalesced.coalescence_events, 1.0, 2e-15);
     EXPECT_NEAR(coalesced.number_change[0], -2.0, 4e-15);
     EXPECT_NEAR(coalesced.number_change[1], 1.0, 2e-15);
-    EXPECT_DOUBLE_EQ(coalesced.hydrogen_change[0] + coalesced.hydrogen_change[1], 0.0);
+    EXPECT_DOUBLE_EQ(coalesced.molar_change[0] + coalesced.molar_change[1], 0.0);
     kernels = manufactured_kernels();
     kernels.breakup_frequency = [](std::size_t, const auto&) { return 1e-20; };
     kernels.breakup_daughters = [](std::size_t, const auto&)
@@ -423,7 +423,7 @@ TEST(BubblePopulationKineticsTest, TinyCollisionAndBreakupLedgersDebitTheirUncha
     EXPECT_DOUBLE_EQ(broken.state.number_density[1], 1e20);
     EXPECT_NEAR(broken.number_change[0], 2.0, 4e-15);
     EXPECT_NEAR(broken.number_change[1], -1.0, 2e-15);
-    EXPECT_DOUBLE_EQ(broken.hydrogen_change[0] + broken.hydrogen_change[1], 0.0);
+    EXPECT_DOUBLE_EQ(broken.molar_change[0] + broken.molar_change[1], 0.0);
 }
 
 } // namespace

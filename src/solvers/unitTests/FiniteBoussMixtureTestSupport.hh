@@ -37,7 +37,7 @@ struct Mixture
     ReactingGasOptions options(double alpha = 0, double maximum = .95) const
     {
         ReactingGasOptions result;
-        result.mode = ReactingGasMode::TwoPopulation;
+        result.mode = ReactingGasMode::Species;
         result.reaction_mechanism = mechanism;
         result.bouss_reference = reference;
         auto sources = std::make_shared<R::BoussCoordinatedSources>();

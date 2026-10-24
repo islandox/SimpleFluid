@@ -107,24 +107,9 @@ inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
         }
     }
     integer(static_cast<std::uint64_t>(options.mode));
-    integer(static_cast<std::uint64_t>(options.heaviside_mode));
-    integer(static_cast<std::uint64_t>(options.kinetics_mode));
-    integer(static_cast<std::uint64_t>(options.diffusivity_mode));
-    integer(static_cast<std::uint64_t>(options.nucleation_radius_mode));
-    integer(static_cast<bool>(options.hydrogen_diffusivity_correlation));
-    integer(static_cast<bool>(options.nucleation_radius_correlation));
-    for (const double value : {options.hydrogen_yield_mol_per_j, options.gas_release_efficiency, options.gas_constant,
-             options.max_source_alpha_rate, options.henry_coefficient, options.hydrogen_diffusivity,
-             options.nucleation_radius, options.microbubble_lifetime, options.large_bubble_dissolution_time,
-             options.micro_to_large_conversion_coefficient, options.smooth_heaviside_width, options.bubble_gas_density,
-             options.initial_dissolved_hydrogen, options.initial_micro_number_density, options.initial_micro_moles,
-             options.initial_large_number_density, options.initial_large_moles, options.min_population,
-             options.max_population, options.max_concentration, options.local_ode_tolerance,
-             options.liquid_compressibility, options.liquid_thermal_expansion})
-        number(value);
-    integer(options.max_radius_iterations);
+    integer(static_cast<std::uint64_t>(options.source_schedule));
     integer(static_cast<std::uint64_t>(options.pressure_mode));
-    integer(static_cast<std::uint64_t>(options.dissolved_transport));
+    integer(static_cast<std::uint64_t>(options.solution_transport));
     integer(static_cast<std::uint64_t>(options.bulk_diffusion));
     integer(static_cast<std::uint64_t>(options.bubble_transport));
     integer(static_cast<std::uint64_t>(options.rise_velocity_mode));
@@ -196,6 +181,28 @@ inline Reacting::CellSpeciesState zero_like(const Reacting::CellSpeciesState& st
 }
 } // namespace reacting_species_detail
 
+template<TpetraTypePack Pack, class MeshType>
+void ReactingGasModel<Pack, MeshType>::allocate_species_generation(bool configuration_change)
+{
+    collective_detail::require_uniform_value(*d_mesh, d_species_generation, "Reacting active initialization authority");
+    collective_detail::require_uniform_value(
+        *d_mesh, d_species_generation_allocator, "Reacting initialization authority allocator");
+    collective_detail::require_uniform_value(
+        *d_mesh, d_source_configuration_generation, "Reacting source/configuration authority");
+    collective_detail::require_uniform_value(*d_mesh, int(configuration_change), "Reacting authority allocation kind");
+    collective_detail::collective_local_validation(*d_mesh, "Reacting authority allocation",
+        [&]
+        {
+            reacting_species_detail::require(d_species_generation <= d_species_generation_allocator &&
+                    d_species_generation_allocator != std::numeric_limits<std::uint64_t>::max() &&
+                    (!configuration_change ||
+                        d_source_configuration_generation != std::numeric_limits<std::uint64_t>::max()),
+                "Reacting initialization/configuration authority is invalid or exhausted.");
+        });
+    if (configuration_change)
+        ++d_source_configuration_generation;
+    d_species_generation = ++d_species_generation_allocator;
+}
 template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::configure_species_fields()
 {
     collective_detail::require_uniform_value(
@@ -205,7 +212,13 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
         collective_detail::require_uniform_value(*d_mesh,
             static_cast<unsigned long long>(reacting_species_detail::configuration_signature(d_options)),
             "Reacting species mechanism/property/source control-flow metadata");
-    ++d_species_generation;
+    allocate_species_generation(true);
+    // Full configuration discards the prior physical event chain. The private
+    // publication nonce allocator intentionally survives this reset.
+    d_species_event_receipt = {false, 0, d_species_generation,
+        species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0, 0, 0};
+    d_liquid_transport_volume_receipt = {d_species_event_receipt, 0, false};
+    register_output_fields(); // Disabling/reconfiguring must not retain old schema field pointers.
     d_species_fields.clear();
     d_additional_population_numbers.clear();
     d_bouss_diagnostics.clear();
@@ -217,6 +230,7 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
     d_species_history = {};
     d_bouss_receipts.clear();
     d_active_bouss_wall_heat = nullptr;
+    d_population_escape_receipt = {d_species_event_receipt, {}};
     d_species_thermal_source.put_scalar(0.0);
     d_species_material_source.put_scalar(0.0);
     d_species_liquid_mass.put_scalar(0.0);
@@ -242,7 +256,6 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
     }
     collective_detail::require_uniform_value(
         *d_mesh, static_cast<unsigned long long>(populations), "Reacting ordered population schema");
-    register_output_fields();
     for (const auto& species : catalog.species())
     {
         auto& bundle = d_species_fields.emplace_back();
@@ -417,6 +430,12 @@ void ReactingGasModel<Pack, MeshType>::initialize_species(
                 for (std::size_t owned = 0; owned < states.size(); ++owned)
                 {
                     states[owned].validate(catalog);
+                    if (d_options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
+                        for (const auto& species : catalog.species())
+                            require(
+                                states[owned].amount(catalog, species.id, Reacting::SpeciesPhase::Liquid) == 0.0 &&
+                                    states[owned].amount(catalog, species.id, Reacting::SpeciesPhase::Dissolved) == 0.0,
+                                "Prescribed-carrier gas references cannot initialize finite solution inventory.");
                     volumes[owned] = d_mesh->cell_volume(static_cast<local_ordinal_type>(owned));
                     require(std::isfinite(volumes[owned]) && volumes[owned] > 0.0 &&
                                 states[owned].dispersedPopulations.size() == d_options.population_ids.size(),
@@ -447,19 +466,15 @@ void ReactingGasModel<Pack, MeshType>::initialize_species(
         d_history_initialized = false;
         publish_species_history(states, {}, true);
         sync_all_fields();
-        collective_detail::collective_local_validation(*d_mesh, "Reacting initialized receipt generation",
-            [&]
-            {
-                require(d_species_generation != std::numeric_limits<std::uint64_t>::max(),
-                    "Reacting initialization generation exhausted.");
-            });
-        ++d_species_generation;
+        allocate_species_generation(false);
         d_species_event_receipt = {
             false, 0, d_species_generation, d_options.reaction_mechanism->catalog().fingerprint(), 0, 0};
+        d_population_escape_receipt = {d_species_event_receipt, {}};
+        d_liquid_transport_volume_receipt = {d_species_event_receipt, 0, false};
     }
     catch (...)
     {
-        restore(prior);
+        restore_for_initialization_rollback(prior);
         throw;
     }
 }
@@ -626,6 +641,9 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_species_derived(
                     dissolved[i] = state.amount(catalog, id, Reacting::SpeciesPhase::Dissolved);
                     liquid[i] = state.amount(catalog, id, Reacting::SpeciesPhase::Liquid) + dissolved[i];
                     resolved[i] = state.amount(catalog, id, Reacting::SpeciesPhase::Resolved);
+                    if (d_options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
+                        require(liquid[i] == 0.0,
+                            "Prescribed-carrier gas references cannot own finite Liquid or Dissolved inventory.");
                     require(state.amount(catalog, id, Reacting::SpeciesPhase::Dispersed) == 0.0,
                         "Bubble fields require named population ownership for every dispersed species.");
                 }
@@ -676,10 +694,6 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_species_derived(
                 d_alpha_g.owned_write_view()(owned, 0) = gasFraction;
                 d_alpha_g_raw.owned_write_view()(owned, 0) = gasVolume / volume;
                 d_alpha_g_excess.owned_write_view()(owned, 0) = 0.0;
-                d_dissolved_hydrogen_inventory.owned_write_view()(owned, 0) =
-                    reacting_species_detail::total(dissolved) / volume;
-                d_dissolved_hydrogen.owned_write_view()(owned, 0) =
-                    liquidVolume > 0.0 ? reacting_species_detail::total(dissolved) / liquidVolume : 0.0;
                 d_micro_moles.owned_write_view()(owned, 0) = microMoles / volume;
                 d_large_moles.owned_write_view()(owned, 0) = largeMoles / volume;
                 d_previous_temperature.owned_write_view()(owned, 0) = environment.temperature;
@@ -731,6 +745,12 @@ BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>:
     {
         const auto& population = populations[p];
         const auto& amounts = chemistry.state.dispersedPopulations[p].amounts;
+        const bool occupied = std::ranges::any_of(amounts, [](double moles) { return moles > 0; });
+        require((occupied && population.number > 0) || (!occupied && population.number == 0),
+            "The default population process needs paired predecessor gas/count; upstream chemistry requires an "
+            "explicit number owner.");
+        if (!occupied)
+            continue;
         const double frequency = population.id == "micro"   ? d_options.micro_dissolution_frequency
                                  : population.id == "large" ? d_options.large_dissolution_frequency
                                                             : 0.0;
@@ -742,7 +762,10 @@ BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>:
         if (fraction > 0.0 || conversion > 0.0)
         {
             double convertedNumber = population.number * conversion;
-            packet.numberEvents.push_back({population.id, 0.0, population.number * fraction + convertedNumber});
+            if (population.number * fraction > 0)
+                packet.numberEvents.push_back({population.id, 0.0, population.number * fraction});
+            if (convertedNumber > 0)
+                packet.numberEvents.push_back({population.id, 0.0, convertedNumber});
             if (conversion > 0.0)
                 packet.numberEvents.push_back({"large", convertedNumber, 0.0});
             for (std::size_t s = 0; s < amounts.size(); ++s)
@@ -796,6 +819,47 @@ BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>:
             else if (amount < 0.0)
                 packet.transfers.push_back({property.species, P::Dispersed, P::Dissolved, population.id, {}, -amount});
         }
+    }
+    // Only this declared built-in operator may own a complete dissolution
+    // death. User callbacks returned above; chemistry-empty bins never qualify.
+    // Replay each original transfer/count event, not a rounded net ledger.
+    for (std::size_t p = 0; p < populations.size(); ++p)
+    {
+        const auto& population = populations[p];
+        const auto& original = chemistry.state.dispersedPopulations[p].amounts;
+        const bool initiallyOccupied = std::ranges::any_of(original, [](double moles) { return moles > 0; });
+        if (!initiallyOccupied)
+            continue;
+        std::vector<detail::CompensatedSum<long double>> endpoint(original.size());
+        for (std::size_t species = 0; species < original.size(); ++species)
+            endpoint[species] += original[species];
+        for (const auto& event : packet.transfers)
+        {
+            const auto species = chemistry.catalog.index(event.species);
+            if (event.donor == P::Dispersed && event.donorPopulation == population.id)
+                endpoint[species] += -static_cast<long double>(event.moles);
+            if (event.receiver == P::Dispersed && event.receiverPopulation == population.id)
+                endpoint[species] += event.moles;
+        }
+        const bool completelyDissolved =
+            std::ranges::all_of(endpoint, [](const auto& moles) { return moles.value() == 0; });
+        if (!completelyDissolved)
+            continue;
+        detail::CompensatedSum<long double> remaining;
+        remaining += population.number;
+        for (const auto& event : packet.numberEvents)
+            if (event.population == population.id)
+            {
+                remaining += event.births;
+                remaining += -static_cast<long double>(event.deaths);
+            }
+        const auto death = remaining.value();
+        const double representedDeath = static_cast<double>(death);
+        require(std::isfinite(death) && death >= 0 && std::isfinite(representedDeath) &&
+                    static_cast<long double>(representedDeath) == death,
+            "Declared complete dissolution needs a representable explicit remaining-count death.");
+        if (representedDeath > 0)
+            packet.numberEvents.push_back({population.id, 0, representedDeath});
     }
     return packet;
 }
@@ -852,6 +916,8 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
 
                 require(d_options.bubble_transport == BubbleTransportMode::General,
                     "General multispecies transport requires the owner-oriented general carrier/slip flux.");
+                require(d_options.source_schedule != ReactingSourceSchedule::PrescribedCarrierAfterTemperature || !ale,
+                    "Prescribed-carrier gas references reject ALE storage.");
                 if (ale)
                     ale->validate(*d_mesh, dt);
             });
@@ -875,14 +941,24 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
         const auto oldVolumes = ale ? ale->old_cell_volumes() : std::span<const real_t>{};
         reconstruct_species_derived(temperature, oldVolumes);
         const auto& catalog = d_options.reaction_mechanism->catalog();
-        std::vector<double> volumes(d_mesh->num_owned_cells());
+        std::vector<double> volumes;
         std::vector<Reacting::CellSpeciesState> before;
-        for (std::size_t owned = 0; owned < volumes.size(); ++owned)
-        {
-            const auto cell = static_cast<local_ordinal_type>(owned);
-            volumes[owned] = ale ? ale->new_cell_volumes()[owned] : d_mesh->cell_volume(cell);
-            before.push_back(cell_species_state(cell, ale ? oldVolumes[owned] : volumes[owned]));
-        }
+        std::vector<std::vector<BubbleGasPhysics::PopulationNumberState>> beforeNumbers;
+        collective_detail::collective_local_validation(*d_mesh, "Reacting accepted transport predecessor",
+            [&]
+            {
+                volumes.resize(d_mesh->num_owned_cells());
+                before.reserve(volumes.size());
+                beforeNumbers.reserve(volumes.size());
+                for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                {
+                    const auto cell = static_cast<local_ordinal_type>(owned);
+                    volumes[owned] = ale ? ale->new_cell_volumes()[owned] : d_mesh->cell_volume(cell);
+                    const double oldVolume = ale ? oldVolumes[owned] : volumes[owned];
+                    before.push_back(cell_species_state(cell, oldVolume));
+                    beforeNumbers.push_back(cell_population_numbers(cell, oldVolume));
+                }
+            });
         if (!d_transport_workspace)
             d_transport_workspace = std::make_unique<TransportWorkspace>(d_mesh);
         auto& workspace = *d_transport_workspace;
@@ -969,7 +1045,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 workspace.operator_ready.at(slot) = false;
             }
             transport_scalar(field, dt, flux, slip, 0.0, diffuse, liquidWeighted, escape, ale, axis, slot, reuse,
-                nullptr, nullptr, diffuse ? &d_species_diffusivity : nullptr, active_liquid_packet);
+                diffuse ? &d_species_diffusivity : nullptr, active_liquid_packet);
         };
         for (auto& species : d_species_fields)
         {
@@ -1000,7 +1076,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 liquid_molar_packets[species_index][liquid_packet_scratch->owned_row(face)] +=
                     liquid_packet_scratch->value(face);
             const auto& dissolvedFlux =
-                d_options.dissolved_transport == ReactingTransportMode::Advective ? liquid_flux : workspace.zero_flux;
+                d_options.solution_transport == ReactingTransportMode::Advective ? liquid_flux : workspace.zero_flux;
             transport_one(*species.phases[1], *species.escape, dissolvedFlux, nullptr, true, false, 0,
                 false); // Film D never silently enables an unclosed bulk mass/energy diffusion model.
             record_escape(species.id, P::Dissolved, {}, *species.escape);
@@ -1013,6 +1089,17 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
             // Advecting resolved interfaces are owned by the VoF phase-flux backend.
             transport_one(*species.phases[3], *species.escape, workspace.zero_flux, nullptr, false, false, 3, false);
         }
+        Reacting::PopulationNumberEscapeReceipt number_escape;
+        std::vector<double> local_number_escape, global_number_escape;
+        collective_detail::collective_local_validation(*d_mesh, "Population number escape allocation",
+            [&]
+            {
+                require(d_options.population_ids.size() <= std::size_t(std::numeric_limits<int>::max()),
+                    "Population escape schema exceeds MPI count range.");
+                local_number_escape.resize(d_options.population_ids.size());
+                global_number_escape.resize(d_options.population_ids.size());
+                number_escape.events.resize(d_options.population_ids.size());
+            });
         for (std::size_t p = 0; p < d_options.population_ids.size(); ++p)
         {
             const auto& id = d_options.population_ids[p];
@@ -1025,8 +1112,9 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                         const auto cell = static_cast<local_ordinal_type>(owned);
                         const auto environment = species_environment(
                             cell, time - dt, temperature.value(cell), ale ? oldVolumes[owned] : volumes[owned]);
-                        const auto conditions = population_conditions(before[owned],
-                            cell_population_numbers(cell, ale ? oldVolumes[owned] : volumes[owned]), environment);
+                        // Every bin sees one accepted-old material/count predecessor,
+                        // even after an earlier bin has published transported counts.
+                        const auto conditions = population_conditions(before[owned], beforeNumbers[owned], environment);
                         const auto& condition = conditions[p];
                         double speed = 0.0;
                         if (condition.number > 0.0 &&
@@ -1052,12 +1140,40 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
             workspace.operator_ready[1] = false;
             transport_one(
                 mutable_population_number(id), d_escape_number_rate, liquid_flux, &slip, false, false, 1, false);
+            // Capture this actual number solve before the next population reuses its escape scratch.
+            collective_detail::collective_local_validation(*d_mesh, "Population number boundary packet",
+                [&]
+                {
+                    detail::CompensatedSum<long double> escaped;
+                    for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                    {
+                        const auto cell = static_cast<local_ordinal_type>(owned);
+                        const double rate = d_escape_number_rate.value(cell);
+                        require(std::isfinite(rate) && rate >= 0, "Population escape rate must be finite/nonnegative.");
+                        escaped += static_cast<long double>(rate) * volumes[owned] * dt;
+                    }
+                    local_number_escape[p] = narrow(escaped.value());
+                    require(local_number_escape[p] >= 0, "Population escaped number must be nonnegative.");
+                });
             for (auto& species : d_species_fields)
             {
                 transport_one(*species.populations[p], *species.escape, liquid_flux, &slip, false, false, 1, true);
                 record_escape(species.id, P::Dispersed, id, *species.escape);
             }
         }
+        if (!local_number_escape.empty()) // Population schema size is already rank-uniform.
+            Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+                static_cast<int>(local_number_escape.size()), local_number_escape.data(), global_number_escape.data());
+        collective_detail::collective_local_validation(*d_mesh, "Population number escape report",
+            [&]
+            {
+                for (std::size_t p = 0; p < number_escape.events.size(); ++p)
+                {
+                    require(std::isfinite(global_number_escape[p]) && global_number_escape[p] >= 0,
+                        "Global population number escape is invalid.");
+                    number_escape.events[p] = {d_options.population_ids[p], global_number_escape[p]};
+                }
+            });
         reconstruct_species_derived(temperature);
         collective_detail::collective_local_validation(*d_mesh, "Reacting transported mixture boundary energy",
             [&]
@@ -1126,7 +1242,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                         mass_rate += signed_rate * catalog.species()[i].molarMass;
                         dissolved += species_field(id, P::Dissolved).local_value(donor);
                     }
-                    if (d_options.dissolved_transport != ReactingTransportMode::Advective && dissolved.value() > 0)
+                    if (d_options.solution_transport != ReactingTransportMode::Advective && dissolved.value() > 0)
                     {
                         // Selectively moving part of a nonideal solution requires
                         // supplied partial molar volumes. Existing ALE gates require
@@ -1246,6 +1362,11 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                             *d_options.reaction_mechanism, state, environment, dt, source, d_options.reaction_advance);
                         state = chemistry.state;
                     }
+                    if (d_options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
+                        for (const auto& species : catalog.species())
+                            require(state.amount(catalog, species.id, P::Liquid) == 0.0 &&
+                                        state.amount(catalog, species.id, P::Dissolved) == 0.0,
+                                "Post-temperature chemistry cannot create finite Liquid or Dissolved stock.");
                     d_species_source_ledgers[owned] = chemistry.ledger;
                     // Reporting ledgers may round away a channel before a later physical cancellation.
                     // Accumulate the accepted local receipt and each original reservoir packet before one division.
@@ -1255,6 +1376,16 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                                 raw.reactionHeatContributions.size() ==
                                     d_options.reaction_mechanism->reactions().size(),
                         "Field thermal receipt does not match its mechanism/schema.");
+                    if (d_options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
+                    {
+                        require(raw.externalHeat == 0.0L &&
+                                    std::ranges::all_of(
+                                        raw.reactionHeatContributions, [](long double heat) { return heat == 0.0L; }) &&
+                                    std::ranges::all_of(chemistry.ledger.externalTransfers,
+                                        [](const auto& transfer) { return transfer.energy == 0.0; }),
+                            "Post-temperature gas references require exactly zero applied source heat "
+                            "in every channel.");
+                    }
                     detail::CompensatedSum<long double> thermalEnergy;
                     if (bouss)
                     {
@@ -1706,6 +1837,8 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
         d_species_event_receipt = {true, d_species_event_receipt.revision + 1, d_species_generation,
             catalog.fingerprint(), time, dt, ++d_species_publication_nonce};
         d_liquid_transport_volume_receipt.event = d_species_event_receipt;
+        number_escape.event = d_species_event_receipt;
+        d_population_escape_receipt = std::move(number_escape);
     }
     catch (...)
     {

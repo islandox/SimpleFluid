@@ -60,12 +60,12 @@ struct MicrobubbleSubstepResult
  * Preserve the existing source, analytic micro decay, then supersaturation
  * conversion arithmetic. This function supplies no material correlation,
  * upper-population growth law, clipping, transport, or MPI side effect.
- * ExactInactive selection remains in the legacy model's enclosing integrator.
+ * Callers explicitly own the chosen source law and subcycle schedule.
  */
 [[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT MicrobubbleSubstepResult advance_microbubble_substep(
     const MicrobubbleState& initial, const MicrobubbleSubstep& step);
 
-/** Strictly increasing positive hydrogen moles per representative bubble. */
+/** Strictly increasing positive gas species moles moles per representative bubble. */
 struct MolarPivotGrid
 {
     std::vector<real_t> mol_per_bubble;
@@ -98,7 +98,7 @@ struct BubblePopulationEnvironment
     real_t liquid_density = 0.0;
     real_t dynamic_viscosity = 0.0;
     real_t surface_tension = 0.0;
-    real_t hydrogen_diffusivity = 0.0;
+    real_t diffusivity = 0.0;
     real_t gas_constant = 8.31446261815324;
 };
 
@@ -129,7 +129,7 @@ struct BubblePopulationKernels
     std::string model_name;
     std::string validity_description;
     std::function<void(const BubblePopulationContext&)> validate;
-    /** Signed mol/(bubble s); positive growth consumes dissolved hydrogen. */
+    /** Signed mol/(bubble s); positive growth consumes dissolved gas species moles. */
     std::function<real_t(std::size_t, const BubblePopulationContext&)> growth_rate;
     /** Physical symmetric collision kernel [m3/s], evaluated for i<=j.
      * Centers have host concentration N_i/carrier_fraction, so bulk event
@@ -163,8 +163,8 @@ struct BubblePopulationMoments
 struct BubblePopulationStepResult
 {
     UpperBubblePopulation state;
-    std::vector<real_t> number_change;   ///< Compensated per-bin birth/consumption event sums, per bulk volume.
-    std::vector<real_t> hydrogen_change; ///< mol_per_bubble[i]*number_change[i]; never subtracts stored endpoints.
+    std::vector<real_t> number_change; ///< Compensated per-bin birth/consumption event sums, per bulk volume.
+    std::vector<real_t> molar_change;  ///< mol_per_bubble[i]*number_change[i]; never subtracts stored endpoints.
     BubblePopulationBirth returned_to_micro;
     real_t dissolved_to_gas_moles = 0.0;
     real_t gas_to_dissolved_moles = 0.0;
@@ -172,10 +172,10 @@ struct BubblePopulationStepResult
     real_t breakup_events = 0.0;
     real_t breakup_created_number = 0.0; ///< Daughter count minus parent count.
     real_t dissolved_bubble_number = 0.0;
-    real_t hydrogen_before = 0.0;
-    real_t hydrogen_added_by_births = 0.0;
-    real_t hydrogen_after = 0.0; ///< Includes explicitly returned microbubble moles.
-    real_t hydrogen_error = 0.0;
+    real_t moles_before = 0.0;
+    real_t moles_added_by_births = 0.0;
+    real_t moles_after = 0.0; ///< Includes explicitly returned microbubble moles.
+    real_t molar_error = 0.0;
     real_t number_error = 0.0;
 };
 
@@ -198,7 +198,7 @@ struct BubblePopulationStepResult
  * breakup uses its declared daughter count. Exact zero-size dissolution
  * removes a bubble and returns its gas to dissolved inventory.
  *
- * Insufficient dissolved hydrogen, excessive donor-number consumption,
+ * Insufficient dissolved gas species moles, excessive donor-number consumption,
  * negative post-growth size, above-grid particles and disallowed underflow
  * throw without modifying the input. The caller must reduce the substep or
  * extend its physical size grid; no moles or number are silently clipped.
@@ -273,9 +273,9 @@ struct MultispeciesPopulationResult
 };
 
 /** Atomic joint donor reservation, including competing populations and all gases.
- * Exact complete dissolution removes its remaining count as a physical collapse
- * event. A nonempty population must have positive count; empty populations have
- * zero count. No mass is created and no number/species inventory is clipped.
+ * Exact complete dissolution requires its declared operator's explicit number-death
+ * event; arbitrary material disappearance never removes counts. A nonempty population must have positive count; empty
+ * populations have zero count. No mass is created and no number/species inventory is clipped.
  */
 [[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT MultispeciesPopulationResult advance_multispecies_population_exchange(
     const Reacting::SpeciesCatalog& catalog, const Reacting::CellSpeciesState& initial,

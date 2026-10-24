@@ -142,7 +142,7 @@ BubblePopulationContext context(
     const MolarPivotGrid& grid, const UpperBubblePopulation& state, const BubblePopulationEnvironment& environment)
 {
     require(environment.liquid_fraction > 0.0 || state.dissolved_inventory == 0.0,
-        "Dissolved hydrogen requires positive aqueous liquid volume.");
+        "Dissolved gas species moles requires positive aqueous liquid volume.");
     require(environment.carrier_fraction > 0.0 || std::all_of(state.number_density.begin(), state.number_density.end(),
                                                       [](real_t number) { return number == 0.0; }),
         "Populated bubble bins require positive nonresolved carrier volume.");
@@ -159,8 +159,8 @@ void validate_environment(const BubblePopulationEnvironment& e)
                 nonnegative(e.liquid_fraction) && nonnegative(e.carrier_fraction) &&
                 e.liquid_fraction <= e.carrier_fraction + fraction_roundoff &&
                 e.carrier_fraction <= 1.0 + fraction_roundoff && nonnegative(e.liquid_density) &&
-                nonnegative(e.dynamic_viscosity) && nonnegative(e.surface_tension) &&
-                nonnegative(e.hydrogen_diffusivity) && std::isfinite(e.gas_constant) && e.gas_constant > 0.0,
+                nonnegative(e.dynamic_viscosity) && nonnegative(e.surface_tension) && nonnegative(e.diffusivity) &&
+                std::isfinite(e.gas_constant) && e.gas_constant > 0.0,
         "Bubble population environment contains an invalid value.");
 }
 
@@ -237,7 +237,7 @@ MicrobubbleSubstepResult advance_microbubble_substep(const MicrobubbleState& ini
     balance += -produced;
     result.inventory_error = balance.value();
     check_balance(result.inventory_error, initial.dissolved_inventory + initial.molar_inventory + produced,
-        "Microbubble substep failed its hydrogen balance.");
+        "Microbubble substep failed its gas species moles balance.");
     Sum number_balance;
     number_balance += state.number_density;
     number_balance += number_to_large;
@@ -381,7 +381,7 @@ BubblePopulationStepResult advance_upper_bubble_population(const MolarPivotGrid&
         }
         require_result(std::isfinite(uptake.value()) && std::isfinite(release.value()) &&
                            uptake.value() <= state.dissolved_inventory + release.value(),
-            "Bubble growth substep exhausts dissolved hydrogen; reduce the substep.");
+            "Bubble growth substep exhausts dissolved gas species moles; reduce the substep.");
         state.dissolved_inventory = (state.dissolved_inventory + release.value()) - uptake.value();
         state.number_density = values(grown);
         accounting.growth += uptake.value();
@@ -468,12 +468,12 @@ BubblePopulationStepResult advance_upper_bubble_population(const MolarPivotGrid&
 
     const auto final_moments = population_moments(grid, state);
     result.number_change.resize(changes.size());
-    result.hydrogen_change.resize(changes.size());
+    result.molar_change.resize(changes.size());
     for (std::size_t i = 0; i < changes.size(); ++i)
     {
         result.number_change[i] = changes[i].value();
-        result.hydrogen_change[i] = grid.mol_per_bubble[i] * result.number_change[i];
-        require_result(std::isfinite(result.number_change[i]) && std::isfinite(result.hydrogen_change[i]),
+        result.molar_change[i] = grid.mol_per_bubble[i] * result.number_change[i];
+        require_result(std::isfinite(result.number_change[i]) && std::isfinite(result.molar_change[i]),
             "Bubble population event ledger overflowed.");
     }
     result.returned_to_micro = {accounting.micro_number.value(), accounting.micro_moles.value()};
@@ -489,17 +489,17 @@ BubblePopulationStepResult advance_upper_bubble_population(const MolarPivotGrid&
                        nonnegative(result.coalescence_events) && nonnegative(result.breakup_events) &&
                        nonnegative(result.breakup_created_number) && nonnegative(result.dissolved_bubble_number),
         "Bubble reaction accounting overflowed.");
-    result.hydrogen_before = initial.dissolved_inventory + initial_moments.molar_inventory;
-    result.hydrogen_added_by_births = accounting.birth_moles.value();
-    result.hydrogen_after =
+    result.moles_before = initial.dissolved_inventory + initial_moments.molar_inventory;
+    result.moles_added_by_births = accounting.birth_moles.value();
+    result.moles_after =
         state.dissolved_inventory + final_moments.molar_inventory + result.returned_to_micro.molar_inventory;
-    Sum hydrogen_error, number_error;
-    hydrogen_error += state.dissolved_inventory;
-    hydrogen_error += final_moments.molar_inventory;
-    hydrogen_error += result.returned_to_micro.molar_inventory;
-    hydrogen_error += -initial.dissolved_inventory;
-    hydrogen_error += -initial_moments.molar_inventory;
-    hydrogen_error += -result.hydrogen_added_by_births;
+    Sum molar_error, number_error;
+    molar_error += state.dissolved_inventory;
+    molar_error += final_moments.molar_inventory;
+    molar_error += result.returned_to_micro.molar_inventory;
+    molar_error += -initial.dissolved_inventory;
+    molar_error += -initial_moments.molar_inventory;
+    molar_error += -result.moles_added_by_births;
     number_error += final_moments.number_density;
     number_error += result.returned_to_micro.number_density;
     number_error += -initial_moments.number_density;
@@ -507,11 +507,10 @@ BubblePopulationStepResult advance_upper_bubble_population(const MolarPivotGrid&
     number_error += result.coalescence_events;
     number_error += -result.breakup_created_number;
     number_error += result.dissolved_bubble_number;
-    result.hydrogen_error = hydrogen_error.value();
+    result.molar_error = molar_error.value();
     result.number_error = number_error.value();
-    check_balance(result.hydrogen_error,
-        result.hydrogen_before + result.hydrogen_added_by_births + result.hydrogen_after,
-        "Upper-population reactions failed the hydrogen ledger.");
+    check_balance(result.molar_error, result.moles_before + result.moles_added_by_births + result.moles_after,
+        "Upper-population reactions failed the gas species moles ledger.");
     check_balance(result.number_error,
         initial_moments.number_density + accounting.birth_number.value() + final_moments.number_density +
             result.returned_to_micro.number_density + result.coalescence_events + result.breakup_created_number +
@@ -592,11 +591,8 @@ MultispeciesPopulationResult advance_multispecies_population_exchange(const Reac
             "Population exchange produced invalid number/species amounts.");
         if (moles.value() == 0)
         {
-            // Preserve the existing full-dissolution policy in this narrowly scoped
-            // arithmetic fix. Its separate explicit-event policy migration is not changed here.
-            const auto remaining = endpoints[i].receipt();
-            changes[i].add(-remaining.high);
-            changes[i].add(-remaining.correction);
+            require_result(endpoints[i].value() == 0,
+                "Empty gas population requires an explicit number-death owner; material disappearance never clears N.");
             result.numbers[i].number = 0;
         }
         else

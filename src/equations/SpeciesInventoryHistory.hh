@@ -24,6 +24,23 @@ struct SpeciesEventReceipt
     bool operator==(const SpeciesEventReceipt&) const = default;
 };
 
+/** Exact accepted outward number transport, independent of every species/molar receipt.
+ * Values are positive counts, integrated from actual number FV boundary fluxes.
+ * The shared accepted event identity rolls back with this receipt; no cumulative difference is used.
+ */
+struct PopulationNumberEscapeEvent
+{
+    std::string population;
+    double number = 0;
+    bool operator==(const PopulationNumberEscapeEvent&) const = default;
+};
+struct PopulationNumberEscapeReceipt
+{
+    SpeciesEventReceipt event;
+    std::vector<PopulationNumberEscapeEvent> events;
+    bool operator==(const PopulationNumberEscapeReceipt&) const = default;
+};
+
 /** Identity of a captured pre-source liquid face-volume packet.
  * Geometry refresh does not reconstruct the packet; a consumer must require its
  * active geometry epoch and accepted event receipt before using it.

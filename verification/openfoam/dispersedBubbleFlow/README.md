@@ -99,18 +99,21 @@ production: c_new = c* + q dt
 U_b = U_liquid + U_slip = 0.5 m/s
 ```
 
-The SimpleFluid path invokes `ReactingGasModel::advance`, including its
-production finite-volume transport, local kinetics, radius reconstruction,
-and escape accounting. Microbubble lifetime and large-bubble dissolution
-time are `1e100 s`, so the computed microbubble decay is zero at this time
-step; conversion is zero, both large-bubble moments and dissolved hydrogen
-start at zero, and there is exactly one local kinetics substep. These
-choices suppress interpopulation and dissolved-gas mass transfer while
-retaining the actual production/transport path. No fields are overwritten
-with an expected solution after an advance.
-The existing constant hydrogen diffusivity and Henry coefficient remain
-inactive auxiliary gas-model inputs in this suppressed-transfer limit;
-IF97 does not supply hydrogen transport or solubility properties.
+The SimpleFluid path invokes the schema-based ReactingGasModel transport and radius
+reconstruction with an explicitly catalogued H2 species and supplied ideal-gas EOS.
+A named external H2 reservoir supplies the declared mass; an explicit population
+law supplies the paired number births. There is no internal water-to-H2 reaction.
+IF97 water remains the externally prescribed carrier material, with no model-owned
+finite liquid stock, inlet inventory closure, gas energy equation or momentum debit.
+The adapter deliberately selects no film, dissolution or interpopulation conversion
+laws, matching the original suppressed-transfer reference. Every source and population
+stage executes once per interval. No fields are overwritten with an expected solution.
+
+Actual count escape is captured from the population-number transport flux and
+retained in its own accepted-step receipt; it is never inferred from molar escape
+or endpoint differences. The independent mole and number budgets below therefore
+remain independent. Physical gas escape carries an explicitly supplied enthalpy trace,
+without claiming a conservative debit from phase-energy storage.
 
 `q = release_efficiency × yield_mol_per_j × power_density`. All generated
 hydrogen enters the microbubble moment, and the source number increment is

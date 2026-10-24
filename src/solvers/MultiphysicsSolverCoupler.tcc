@@ -267,61 +267,90 @@ namespace
     }
 
     scalar(gas != nullptr);
-    if (gas != nullptr)
+    if (gas)
     {
         scalar(static_cast<int>(gas->mode));
+        scalar(static_cast<int>(gas->source_schedule));
         scalar(static_cast<int>(gas->pressure_mode));
-        scalar(static_cast<int>(gas->dissolved_transport));
+        scalar(static_cast<int>(gas->solution_transport));
         scalar(static_cast<int>(gas->bubble_transport));
-        scalar(static_cast<int>(gas->heaviside_mode));
-        scalar(static_cast<int>(gas->kinetics_mode));
         scalar(static_cast<int>(gas->rise_velocity_mode));
         scalar(static_cast<int>(gas->surface_tension_mode));
-        scalar(static_cast<int>(gas->diffusivity_mode));
         scalar(static_cast<int>(gas->mass_transfer_mode));
-        scalar(gas->hydrogen_diffusivity_correlation != nullptr);
-        scalar(gas->hydrogen_yield_mol_per_j);
-        scalar(gas->gas_release_efficiency);
+        scalar(static_cast<int>(gas->bulk_diffusion));
         scalar(gas->reference_pressure);
-        scalar(gas->gas_constant);
+        scalar(gas->minimum_absolute_pressure);
         scalar(gas->alpha_min);
         scalar(gas->alpha_max);
-        scalar(gas->max_source_alpha_rate);
-        scalar(gas->henry_coefficient);
         scalar(gas->surface_tension);
-        scalar(gas->hydrogen_diffusivity);
-        scalar(static_cast<int>(gas->nucleation_radius_mode));
-        scalar(gas->nucleation_radius);
-        scalar(static_cast<bool>(gas->surface_tension_correlation));
-        scalar(static_cast<bool>(gas->nucleation_radius_correlation));
-        scalar(gas->microbubble_lifetime);
-        scalar(gas->large_bubble_dissolution_time);
-        scalar(gas->micro_to_large_conversion_coefficient);
-        scalar(gas->smooth_heaviside_width);
         scalar(gas->constant_slip_velocity);
-        scalar(gas->bubble_gas_density);
         scalar(gas->bubble_gravity);
         scalar(gas->rise_velocity_tolerance);
         scalar(gas->max_rise_velocity_iterations);
-        scalar(gas->initial_dissolved_hydrogen);
-        scalar(gas->initial_micro_number_density);
-        scalar(gas->initial_micro_moles);
-        scalar(gas->initial_large_number_density);
-        scalar(gas->initial_large_moles);
         scalar(gas->min_radius);
         scalar(gas->max_radius);
-        scalar(gas->min_population);
-        scalar(gas->max_population);
-        scalar(gas->max_concentration);
-        scalar(gas->local_ode_tolerance);
         scalar(gas->transport_solver_tolerance);
         scalar(gas->max_subcycles);
-        scalar(gas->max_radius_iterations);
-        scalar(gas->liquid_compressibility);
-        scalar(gas->liquid_thermal_expansion);
-        scalar(gas->minimum_absolute_pressure);
+        scalar(gas->micro_dissolution_frequency);
+        scalar(gas->large_dissolution_frequency);
+        scalar(gas->micro_conversion_frequency);
+        scalar(static_cast<bool>(gas->species_source));
+        scalar(static_cast<bool>(gas->population_process));
+        scalar(static_cast<bool>(gas->initial_species_state));
+        scalar(static_cast<bool>(gas->initial_population_numbers));
+        scalar(static_cast<bool>(gas->surface_tension_correlation));
+        scalar(gas->reaction_advance.maximumSubstep);
+        scalar(gas->reaction_advance.maximumSubsteps);
+        scalar(gas->reaction_advance.maximumRetries);
+        scalar(static_cast<bool>(gas->reaction_mechanism));
+        if (gas->reaction_mechanism)
+        {
+            scalar(gas->reaction_mechanism->catalog().fingerprint());
+            scalar(static_cast<int>(gas->reaction_mechanism->energy_convention()));
+            for (const auto& reaction : gas->reaction_mechanism->reactions())
+            {
+                scalar(reaction.id);
+                string(reaction.name);
+                scalar(reaction.heatPerExtent);
+                scalar(reaction.changes.size());
+                for (const auto& term : reaction.changes)
+                {
+                    scalar(term.species);
+                    scalar(static_cast<int>(term.phase));
+                    scalar(term.coefficient);
+                    string(term.population);
+                }
+            }
+        }
+        scalar(gas->species_properties.size());
+        for (const auto& property : gas->species_properties)
+        {
+            scalar(property.species);
+            scalar(property.diffusivity);
+            scalar(property.henry_coefficient);
+            scalar(static_cast<bool>(property.diffusivity_provider));
+            scalar(static_cast<bool>(property.equilibrium_concentration));
+            scalar(static_cast<bool>(property.carried_molar_enthalpy));
+        }
+        for (const auto& eos : {gas->liquid_thermodynamics, gas->gas_thermodynamics})
+        {
+            scalar(static_cast<bool>(eos));
+            if (!eos)
+                continue;
+            scalar(eos->catalog().fingerprint());
+            scalar(static_cast<int>(eos->kind()));
+            scalar(static_cast<int>(eos->energy_convention()));
+            scalar(eos->bounds().minimum_temperature);
+            scalar(eos->bounds().maximum_temperature);
+            scalar(eos->bounds().minimum_pressure);
+            scalar(eos->bounds().maximum_pressure);
+        }
+        scalar(static_cast<bool>(gas->bouss_reference));
+        if (gas->bouss_reference)
+            scalar(Reacting::bouss_configuration_signature(*gas->bouss_reference, *gas->bouss_sources));
         real_array(gas->pressure_history_times);
         real_array(gas->pressure_history_values);
+        string_array(gas->population_ids);
         string_array(gas->free_surface_patches);
     }
 
@@ -506,6 +535,11 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
     collective_detail::collective_local_validation(*d_solver->d_mesh, "Reacting coupled support preflight",
         [&]
         {
+            if (options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature &&
+                ((d_boiling_source_model && d_boiling_source_model->enabled()) || d_free_surface_model ||
+                    d_thermal_participant || options.bouss_reference || options.bouss_sources))
+                throw std::invalid_argument(
+                    "Post-temperature reference setup cannot own boiling, surface geometry or thermal participation.");
             if (d_bouss_wall_trial)
                 throw std::logic_error("Cannot replace a reacting model during certified wall admission.");
             if (d_free_surface_model && d_free_surface_model->initialized())
@@ -513,14 +547,11 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
             if (options.reaction_mechanism && options.mode != ReactingGasMode::Disabled &&
                 options.reaction_mechanism->energy_convention() != Reacting::EnergyConvention::SensibleEnergy)
                 throw std::invalid_argument("Boussinesq temperature storage requires sensible-energy chemistry.");
-            if (d_free_surface_model && options.mode == ReactingGasMode::IdealGasSource)
-                throw std::invalid_argument("Planar surface closure needs an actual conservative gas inventory.");
-            if (d_free_surface_model && options.mode == ReactingGasMode::TwoPopulation &&
+            if (d_free_surface_model && options.mode == ReactingGasMode::Species &&
                 options.pressure_mode != ReactingPressureMode::Constant &&
                 options.pressure_mode != ReactingPressureMode::Reconstructed)
                 throw std::invalid_argument("Planar surface closure requires constant or reconstructed gas pressure.");
-            if (options.mode == ReactingGasMode::TwoPopulation && d_boiling_source_model &&
-                d_boiling_source_model->enabled())
+            if (options.mode == ReactingGasMode::Species && d_boiling_source_model && d_boiling_source_model->enabled())
                 throw std::invalid_argument("Independent boiling cannot also own coupled gas/vapor inventory.");
             if (options.bouss_reference &&
                 (d_free_surface_model || d_thermal_participant || d_active_ale ||
@@ -529,7 +560,7 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
                     options.bouss_reference->thermalDensity != d_solver->d_model_options.reference_density))
                 throw std::invalid_argument("Finite Bouss sources require fixed reference-density/cp temperature "
                                             "storage without surface/ALE/native thermal participation.");
-            if (options.mode == ReactingGasMode::TwoPopulation && !replace_mirror)
+            if (options.mode == ReactingGasMode::Species && !replace_mirror)
             {
                 const auto& mirror = d_scalar_void_fraction_model->options();
                 if (mirror.alpha_min != options.alpha_min || mirror.alpha_max != options.alpha_max)
@@ -566,7 +597,7 @@ auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOp
         d_reacting_gas_model = std::make_unique<reacting_gas_model_type>(d_solver->d_mesh, options);
     else
         d_reacting_gas_model->configure(options);
-    if (options.mode == ReactingGasMode::TwoPopulation && d_solver->d_primary_fields_initialized)
+    if (options.mode == ReactingGasMode::Species && d_solver->d_primary_fields_initialized)
         initialize_reacting_gas_state();
     return *d_reacting_gas_model;
 }
@@ -681,7 +712,7 @@ auto MultiphysicsSolverCoupler<Pack>::configure_boiling_source(const BoilingSour
     if ((options.enable_bulk_boiling || options.enable_wall_boiling) && d_reacting_gas_model &&
         d_reacting_gas_model->supplies_void_fraction())
     {
-        throw std::invalid_argument("Boiling cannot be combined with Sheng two-population "
+        throw std::invalid_argument("Independent boiling cannot be combined with schema-owned "
                                     "reacting_gas until vapor mass is coupled to bubble inventories.");
     }
     d_solver->d_physical_model_enabled = true;
@@ -758,7 +789,7 @@ auto MultiphysicsSolverCoupler<Pack>::find_boiling_source_model() const noexcept
  * @tparam Pack Tpetra type pack.
  * @param options Void bounds, initial value, and collapse options.
  * @return Configured scalar void-fraction model.
- * @throws std::invalid_argument if options conflict with Sheng reacting_gas.
+ * @throws std::invalid_argument if options conflict with Schema-owned reacting gas.
  */
 template<TpetraTypePack Pack>
 auto MultiphysicsSolverCoupler<Pack>::configure_scalar_void_fraction(const ScalarVoidFractionOptions& options)
@@ -780,12 +811,12 @@ auto MultiphysicsSolverCoupler<Pack>::configure_scalar_void_fraction(const Scala
         (options.alpha_min != d_reacting_gas_model->options().alpha_min ||
             options.alpha_max != d_reacting_gas_model->options().alpha_max))
     {
-        throw std::invalid_argument("A Sheng reacting_gas mirror requires its scalar void bounds.");
+        throw std::invalid_argument("A Schema-owned reacting gas mirror requires its scalar void bounds.");
     }
     if (d_reacting_gas_model && d_reacting_gas_model->supplies_void_fraction() &&
         std::isfinite(options.alpha_collapse_time))
     {
-        throw std::invalid_argument("Sheng reacting_gas cannot use scalar void collapse until "
+        throw std::invalid_argument("Schema-owned reacting gas cannot use scalar void collapse until "
                                     "bubble inventory removal is coupled conservatively.");
     }
     d_solver->d_physical_model_enabled = true;
@@ -1470,9 +1501,7 @@ void MultiphysicsSolverCoupler<Pack>::write_free_surface_history_csv(const std::
               "headspace_total_moles,overflow_volume_m3,dryout_volume_deficit_m3,"
               "configured_level_underflow_m,configured_level_overflow_m,occupancy_volume_error_m3,"
               "volume_closure_residual_m3,volume_closure_residual_normalized,nonlinear_iterations,"
-              "nonlinear_residual_pa,h2_generated_mol,h2_dissolved_mol,h2_microbubble_submerged_mol,"
-              "h2_large_bubble_submerged_mol,h2_submerged_mol,h2_headspace_mol,h2_vented_mol,"
-              "h2_escaped_this_step_mol,h2_other_sink_mol,h2_closure_mol,h2_closure_normalized,"
+              "nonlinear_residual_pa,"
               "gas_closure_mol,gas_closure_normalized,"
               "boiling_requested_mass_kg,"
               "boiling_accepted_mass_kg,boiling_rejected_mass_kg,boiling_condensed_mass_kg,"
@@ -1500,8 +1529,6 @@ void MultiphysicsSolverCoupler<Pack>::write_free_surface_history_csv(const std::
         const auto& surface = record.free_surface;
         const auto& liquid = record.liquid_mass;
         const auto boiling = record.boiling.value_or(boiling_diagnostics_type{});
-        auto gas = [&](const GasMolesBySpecies& values, std::string_view species)
-        { return free_surface_species_moles(values, species); };
         output << surface.time << ',' << surface.time_step << ',' << liquid.total_mass << ','
                << liquid.cumulative_evaporated_mass << ',' << liquid.cumulative_condensed_mass << ','
                << liquid.dryout_mass_deficit << ',' << liquid.mass_balance_residual << ','
@@ -1515,18 +1542,12 @@ void MultiphysicsSolverCoupler<Pack>::write_free_surface_history_csv(const std::
                << ',' << surface.configured_level_overflow << ',' << record.pool_occupancy_volume_error << ','
                << surface.volume_closure_residual << ',' << surface.normalized_volume_closure_residual << ','
                << surface.nonlinear_iterations << ',' << surface.nonlinear_residual << ','
-               << gas(surface.generated_gas_moles, "H2") << ',' << gas(surface.dissolved_gas_moles, "H2") << ','
-               << record.microbubble_hydrogen_moles << ',' << record.large_bubble_hydrogen_moles << ','
-               << gas(surface.submerged_gas_moles, "H2") << ',' << gas(surface.headspace_gas_moles, "H2") << ','
-               << gas(surface.vented_gas_moles, "H2") << ',' << gas(surface.escaped_gas_moles_this_step, "H2") << ','
-               << gas(surface.other_sink_gas_moles, "H2") << ',' << gas(surface.gas_closure_by_species, "H2") << ','
-               << gas(surface.normalized_gas_closure_by_species, "H2") << ',' << surface.gas_closure_residual << ','
-               << surface.normalized_gas_closure_residual << ',' << boiling.requested_evaporation_mass << ','
-               << boiling.accepted_evaporation_mass << ',' << boiling.rejected_vapor_mass << ','
-               << boiling.condensed_liquid_mass << ',' << boiling.submerged_steam_mass << ','
-               << boiling.submerged_steam_volume << ',' << boiling.condensation_latent_energy_release << ','
-               << boiling.mass_balance_residual << ',' << boiling.void_balance_residual << ','
-               << boiling.latent_energy_balance_residual;
+               << surface.gas_closure_residual << ',' << surface.normalized_gas_closure_residual << ','
+               << boiling.requested_evaporation_mass << ',' << boiling.accepted_evaporation_mass << ','
+               << boiling.rejected_vapor_mass << ',' << boiling.condensed_liquid_mass << ','
+               << boiling.submerged_steam_mass << ',' << boiling.submerged_steam_volume << ','
+               << boiling.condensation_latent_energy_release << ',' << boiling.mass_balance_residual << ','
+               << boiling.void_balance_residual << ',' << boiling.latent_energy_balance_residual;
         if (include_planar_ale)
         {
             const auto ale = record.planar_ale.value_or(PlanarALEStepDiagnostics{});
@@ -1612,7 +1633,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::refresh_phys
     }
     // Explicit primary-field initialization owns typed finite inventories. A
     // first-step material refresh must not reset them or invalidate the snapshot
-    // already captured for rollback. The legacy derived-state refresh is retained.
+    // already captured for rollback. The no-gas refresh behavior is retained.
     initialize_reacting_gas_state(d_solver->d_step_index == 0 &&
         !(d_free_surface_model && d_free_surface_model->initialized()) &&
         !(d_reacting_gas_model && d_reacting_gas_model->species_enabled()));
@@ -1621,7 +1642,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::refresh_phys
 }
 
 /**
- * @brief Initialize Sheng reacting_gas inventories and dependent liquid fractions.
+ * @brief Initialize Schema-owned reacting gas inventories and dependent liquid fractions.
  *
  * @tparam Pack Tpetra type pack.
  * @param force Whether to reinitialize an already initialized model.
@@ -1708,7 +1729,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_col
  * @brief Validate free-surface ownership and pressure-coupling seams.
  *
  * Scalar void is accepted only when a conservative model owns it.  The
- * two-population reacting_gas model owns its bounded mirror; boiling owns only
+ * schema-owned reacting gas model owns its bounded mirror; standalone boiling owns only
  * the globally tracked submerged-steam volume.
  */
 template<TpetraTypePack Pack>
@@ -1725,6 +1746,9 @@ void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(
     }
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
     {
+        if (d_reacting_gas_model->options().source_schedule ==
+            ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
+            throw std::invalid_argument("Post-temperature gas references cannot configure a free-surface owner.");
         if (options.liquid_mass.mode != LiquidVolumeMode::CellMassInventory ||
             options.liquid_mass.depletion_policy != FreeSurfaceRangePolicy::Error ||
             (d_boiling_source_model && d_boiling_source_model->enabled()))
@@ -1755,12 +1779,8 @@ void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(
     {
         validate_planar_ale_support(options);
     }
-    if (d_reacting_gas_model && d_reacting_gas_model->mode() == ReactingGasMode::IdealGasSource)
-    {
-        throw std::invalid_argument("The planar free-surface budget cannot use idealGasSource "
-                                    "reacting_gas because it does not own a conservative gas inventory.");
-    }
-    if (d_reacting_gas_model && d_reacting_gas_model->mode() == ReactingGasMode::TwoPopulation &&
+
+    if (d_reacting_gas_model && d_reacting_gas_model->mode() == ReactingGasMode::Species &&
         d_reacting_gas_model->options().pressure_mode != ReactingPressureMode::Constant &&
         d_reacting_gas_model->options().pressure_mode != ReactingPressureMode::Reconstructed)
     {
@@ -1943,24 +1963,23 @@ void MultiphysicsSolverCoupler<Pack>::validate_planar_ale_support(const FreeSurf
     {
         if (!d_reacting_gas_model->species_enabled() && !d_prescribed_heat_source)
         {
-            throw std::invalid_argument(
-                "planarALE Sheng reacting_gas requires an authoritative prescribed_heat-power source before setup.");
+            throw std::invalid_argument("planarALE Schema-owned reacting gas requires an authoritative "
+                                        "prescribed_heat-power source before setup.");
         }
         if (options.ale.maximum_correctors < 2)
         {
-            throw std::invalid_argument(
-                "planarALE Sheng reacting_gas requires at least two outer correctors to couple gas state and geometry.");
+            throw std::invalid_argument("planarALE Schema-owned reacting gas requires at least two outer correctors to "
+                                        "couple gas state and geometry.");
         }
         const auto& gas = d_reacting_gas_model->options();
-        if (gas.mode != ReactingGasMode::TwoPopulation ||
-            gas.dissolved_transport != ReactingTransportMode::Advective ||
+        if (gas.mode != ReactingGasMode::Species || gas.solution_transport != ReactingTransportMode::Advective ||
             gas.bubble_transport != BubbleTransportMode::General ||
             (gas.pressure_mode != ReactingPressureMode::Constant &&
                 gas.pressure_mode != ReactingPressureMode::Reconstructed) ||
             gas.free_surface_patches != std::vector<std::string>{options.ale.top_boundary})
         {
             throw std::invalid_argument(
-                "planarALE reacting_gas requires TwoPopulation, advective dissolved H2, general bubble "
+                "planarALE reacting_gas requires Species, advective solution, general bubble "
                 "transport, constant/reconstructed pressure, and exactly the configured moving-top escape patch.");
         }
     }
@@ -2421,45 +2440,6 @@ auto MultiphysicsSolverCoupler<Pack>::make_free_surface_update(
             update.time_step = initializing ? real_t{} : d_solver->time_step();
             return update;
         }
-        update.gas.generated_moles["H2"] = d_reacting_gas_model->cumulative_hydrogen_produced();
-        update.gas.dissolved_moles["H2"] = d_reacting_gas_model->global_dissolved_hydrogen_moles();
-        const auto microbubble_moles = d_reacting_gas_model->global_microbubble_hydrogen_moles();
-        const auto large_bubble_moles = d_reacting_gas_model->global_large_bubble_hydrogen_moles();
-        update.gas.submerged_population_moles["microbubble"]["H2"] = microbubble_moles;
-        update.gas.submerged_population_moles["largeBubble"]["H2"] = large_bubble_moles;
-        update.gas.submerged_moles["H2"] = microbubble_moles + large_bubble_moles;
-        update.gas.other_sink_moles["H2"] = d_reacting_gas_model->cumulative_dissolved_hydrogen_outflow();
-        update.minimum_valid_absolute_pressure =
-            static_cast<real_t>(d_reacting_gas_model->minimum_valid_absolute_pressure_offset());
-        if (d_free_surface_options.mode == FreeSurfaceMode::PlanarALE &&
-            d_reacting_gas_model->options().pressure_mode == ReactingPressureMode::Reconstructed)
-        {
-            update.minimum_valid_absolute_pressure -= static_cast<real_t>(volume_weighted_mean_pressure());
-        }
-        if (!initializing)
-        {
-            const auto cumulative_escape =
-                static_cast<scalar_type>(d_reacting_gas_model->cumulative_submerged_bubble_hydrogen_escaped());
-            const auto committed_escape = static_cast<scalar_type>(
-                free_surface_species_moles(d_free_surface_model->committedEscapedMoles(), "H2"));
-            auto pending_escape = cumulative_escape - committed_escape;
-            const auto roundoff = scalar_type{64} * std::numeric_limits<scalar_type>::epsilon() *
-                                  std::max({scalar_type{1}, std::abs(cumulative_escape), std::abs(committed_escape)});
-            const int local_invalid_escape = !std::isfinite(pending_escape) || pending_escape < -roundoff ? 1 : 0;
-            int any_invalid_escape = 0;
-            Teuchos::reduceAll(*d_solver->d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1,
-                &local_invalid_escape, &any_invalid_escape);
-            if (any_invalid_escape != 0)
-            {
-                throw std::runtime_error(
-                    "Cumulative submerged-bubble escape is smaller than the committed headspace/vent transfer.");
-            }
-            if (pending_escape < scalar_type{})
-            {
-                pending_escape = scalar_type{};
-            }
-            update.gas.escaped_moles_this_step["H2"] = static_cast<real_t>(pending_escape);
-        }
     }
     update.headspace_temperature = headspace_temperature(time);
     update.time = time;
@@ -2834,21 +2814,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::record_free_
         record.catalogued_species = true;
         record.species_event = d_reacting_gas_model->species_event_receipt();
     }
-    if (!species_surface_enabled() && d_reacting_gas_model && d_reacting_gas_model->enabled() &&
-        d_reacting_gas_model->supplies_void_fraction())
-    {
-        auto population_moles = [&record](const std::string& population, const std::string& species)
-        {
-            const auto population_iterator = record.free_surface.submerged_population_gas_moles.find(population);
-            if (population_iterator == record.free_surface.submerged_population_gas_moles.end())
-            {
-                return real_t{};
-            }
-            return free_surface_species_moles(population_iterator->second, species);
-        };
-        record.microbubble_hydrogen_moles = population_moles("microbubble", "H2");
-        record.large_bubble_hydrogen_moles = population_moles("largeBubble", "H2");
-    }
+
     if (d_boiling_source_model && d_boiling_source_model->enabled())
     {
         record.boiling = d_boiling_source_model->last_phase_change_diagnostics();
@@ -2945,12 +2911,6 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::update_void_
         d_boiling_source_model->complete_void_fraction_update(
             time_step, *d_scalar_void_fraction_model, d_free_surface_model != nullptr);
     }
-
-    if (d_reacting_gas_model && d_reacting_gas_model->enabled())
-    {
-        d_reacting_gas_model->synchronize_void_fraction(
-            d_scalar_void_fraction_model->alpha_g(), d_scalar_void_fraction_model->options().alpha_max);
-    }
 }
 
 /**
@@ -2964,6 +2924,18 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::update_void_
 template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_step_coupling() const
 {
     validate_collective_model_state();
+    collective_detail::collective_local_validation(*d_solver->d_mesh, "Post-temperature reference support",
+        [&]
+        {
+            if (d_reacting_gas_model && d_reacting_gas_model->species_enabled() &&
+                d_reacting_gas_model->options().source_schedule ==
+                    ReactingSourceSchedule::PrescribedCarrierAfterTemperature &&
+                ((d_boiling_source_model && d_boiling_source_model->enabled()) || d_free_surface_model ||
+                    planar_ale_enabled() || d_thermal_participant))
+                throw std::invalid_argument(
+                    "Post-temperature gas references require fixed-grid carrier storage without boiling "
+                    "or surface ownership.");
+        });
     collective_detail::collective_local_validation(*d_solver->d_mesh, "Coupled nonlinear model support",
         [&]
         {
@@ -3014,7 +2986,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
         d_reacting_gas_model->supplies_void_fraction() && d_boiling_source_model && d_boiling_source_model->enabled())
     {
-        throw std::logic_error("Sheng two-population reacting_gas cannot advance with boiling "
+        throw std::logic_error("Schema-owned reacting gas cannot advance with boiling "
                                "until vapor mass is coupled to bubble inventories.");
     }
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
@@ -3022,14 +2994,14 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
         (d_scalar_void_fraction_model->options().alpha_min != d_reacting_gas_model->options().alpha_min ||
             d_scalar_void_fraction_model->options().alpha_max != d_reacting_gas_model->options().alpha_max))
     {
-        throw std::logic_error("Sheng reacting_gas cannot advance with mismatched scalar mirror "
+        throw std::logic_error("Schema-owned reacting gas cannot advance with mismatched scalar mirror "
                                "void-fraction bounds.");
     }
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
         d_reacting_gas_model->supplies_void_fraction() && d_scalar_void_fraction_model &&
         std::isfinite(d_scalar_void_fraction_model->options().alpha_collapse_time))
     {
-        throw std::logic_error("Sheng reacting_gas cannot advance with scalar void collapse "
+        throw std::logic_error("Schema-owned reacting gas cannot advance with scalar void collapse "
                                "until bubble inventory removal is coupled conservatively.");
     }
     if (d_free_surface_model)
@@ -3043,7 +3015,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
  *
  * @tparam Pack Tpetra type pack.
  * @param time_step Physical time-step size.
- * @return true when Sheng reacting_gas must be advanced after temperature.
+ * @return true when Schema-owned reacting gas must be advanced after temperature.
  */
 template<TpetraTypePack Pack>
 bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type time_step)
@@ -3063,10 +3035,11 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
             });
 
     const bool species_before_temperature =
-        d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled();
-    const auto two_population_after_temperature = d_reacting_gas_model && d_reacting_gas_model->enabled() &&
-                                                  d_reacting_gas_model->supplies_void_fraction() &&
-                                                  !species_before_temperature;
+        d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled() &&
+        d_reacting_gas_model->options().source_schedule == ReactingSourceSchedule::BeforeTemperature;
+    const auto species_after_temperature = d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+                                           d_reacting_gas_model->supplies_void_fraction() &&
+                                           !species_before_temperature;
     if (species_before_temperature)
     {
         if (species_surface_enabled())
@@ -3079,27 +3052,10 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
         const auto gas_timing = d_solver->d_solver_timings.scope(SolverPhase::Gas);
         d_reacting_gas_model->advance(d_solver->d_time + time_step, time_step, d_solver->temperature(),
             d_solver->pressure(), d_solver->velocity(), d_solver->projected_face_fluxes(),
-            d_solver->stored_material_properties(), nullptr);
+            d_solver->stored_material_properties());
     }
 
-    if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
-        !two_population_after_temperature && !species_before_temperature)
-    {
-        if (!d_scalar_void_fraction_model)
-        {
-            throw std::runtime_error("Ideal reacting_gas requires the authoritative scalar void model.");
-        }
-        {
-            const auto gas_timing = d_solver->d_solver_timings.scope(SolverPhase::Gas);
-            d_reacting_gas_model->advance(d_solver->d_time + time_step, time_step, d_solver->temperature(),
-                d_solver->pressure(), d_solver->velocity(), d_solver->projected_face_fluxes(),
-                d_solver->stored_material_properties(),
-                d_prescribed_heat_source ? &d_prescribed_heat_source->field() : nullptr,
-                d_scalar_void_fraction_model->alpha_g(), d_scalar_void_fraction_model->options().alpha_max);
-        }
-    }
-
-    if (!two_population_after_temperature)
+    if (!species_after_temperature)
     {
         if (d_boiling_source_model)
         {
@@ -3116,7 +3072,7 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
         update_void_fraction_models(time_step);
     }
 
-    return two_population_after_temperature;
+    return species_after_temperature;
 }
 
 /**
@@ -3127,25 +3083,23 @@ bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type
  *
  * @tparam Pack Tpetra type pack.
  * @param time_step Physical time-step size.
- * @param two_population_after_temperature Whether Sheng reacting_gas advances in this phase.
+ * @param species_after_temperature Whether Schema-owned reacting gas advances in this phase.
  */
 template<TpetraTypePack Pack>
 void MultiphysicsSolverCoupler<Pack>::advance_post_temperature_models(
-    scalar_type time_step, bool two_population_after_temperature)
+    scalar_type time_step, bool species_after_temperature)
 {
     const auto phase_timing = d_solver->d_solver_timings.scope(SolverPhase::PostTemperatureModels);
-    if (two_population_after_temperature)
+    if (species_after_temperature)
     {
         {
             const auto gas_timing = d_solver->d_solver_timings.scope(SolverPhase::Gas);
             d_reacting_gas_model->advance(d_solver->d_time + time_step, time_step, d_solver->temperature(),
                 d_solver->pressure(), d_solver->velocity(), d_solver->projected_face_fluxes(),
-                d_solver->stored_material_properties(),
-                d_prescribed_heat_source ? &d_prescribed_heat_source->field() : nullptr);
+                d_solver->stored_material_properties());
         }
         update_void_fraction_models(time_step);
     }
-
 
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
     {
@@ -3255,7 +3209,6 @@ template<TpetraTypePack Pack> std::string MultiphysicsSolverCoupler<Pack>::coupl
     for (const auto& [name, source] : d_solver->stored_temperature_sources().entries())
         sources.emplace_back(name, true); // Enabled flags are checkpointed physical source state.
     return (d_thermal_participant ? d_thermal_participant->configuration_signature() : std::string{}) +
-           std::to_string(d_reacting_gas_model && d_reacting_gas_model->donor_hydrogen_deficit_tracking_enabled()) +
            (d_free_surface_model ? encode_headspace_metadata(d_free_surface_model->headspace().metadata())
                                  : std::string{}) +
            encode_free_surface_options(d_free_surface_options) +
@@ -3480,7 +3433,7 @@ void MultiphysicsSolverCoupler<Pack>::set_coupling_interval_energy(
  * after the updates.
  *
  * @tparam Pack Tpetra type pack.
- * @throws std::logic_error if incompatible Sheng reacting_gas coupling is active.
+ * @throws std::logic_error if incompatible Schema-owned reacting gas coupling is active.
  * @throws std::runtime_error if an enabled model lacks its required fraction field.
  */
 template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
@@ -3526,7 +3479,8 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
         if (d_scalar_void_fraction_model)
             physics_rollback.capture_model(*d_scalar_void_fraction_model);
         if (d_reacting_gas_model)
-            physics_rollback.capture_model(*d_reacting_gas_model);
+            physics_rollback.add([this, saved = d_reacting_gas_model->snapshot()]
+                { d_reacting_gas_model->restore_for_initialization_rollback(saved); });
         if (d_boiling_source_model)
             physics_rollback.capture_model(*d_boiling_source_model);
         if (d_free_surface_model)
@@ -3571,11 +3525,12 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
             [this, saved = d_solver->d_last_nonlinear_result] { d_solver->d_last_nonlinear_result = saved; });
         physics_rollback.add(
             [this, time = d_solver->d_time, step = d_solver->d_step_index,
-                statistics = d_solver->d_last_step_statistics]
+                statistics = d_solver->d_last_step_statistics, primary_initialized = d_solver->d_primary_fields_initialized]
             {
                 d_solver->d_time = time;
                 d_solver->d_step_index = step;
                 d_solver->d_last_step_statistics = statistics;
+                d_solver->d_primary_fields_initialized = primary_initialized;
             });
     }
     const bool nonlinear_flow =
@@ -3621,9 +3576,9 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
         flow_accepted = true;
         const auto time_step = d_solver->d_problem.time_options().time_step;
         d_solver->advance_turbulence(time_step);
-        const auto two_population_after_temperature = advance_pre_temperature_models(time_step);
+        const auto species_after_temperature = advance_pre_temperature_models(time_step);
         advance_temperature_transport(time_step);
-        advance_post_temperature_models(time_step, two_population_after_temperature);
+        advance_post_temperature_models(time_step, species_after_temperature);
 
         if (d_solver->uses_legacy_backend())
         {

@@ -3,6 +3,8 @@
  * @brief Deterministic solver-integrated checks for constrained planar ALE.
  */
 
+#include "FiniteGasVerificationSupport.hh"
+#include "equations/CollectiveValidation.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
@@ -26,6 +28,8 @@
 namespace
 {
 
+namespace FG = SimpleFluid::Verification::FiniteGas;
+namespace R = SimpleFluid::Reacting;
 using Pack = SimpleFluid::DefaultTpetraTypes;
 using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Solver = SimpleFluid::BoussinesqSolver<Pack>;
@@ -37,6 +41,7 @@ constexpr scalar_type initial_temperature = 300.0;
 constexpr scalar_type density = 10.0;
 constexpr scalar_type heat_capacity = 2.0;
 constexpr scalar_type thermal_expansion = 1.0e-3;
+constexpr scalar_type gas_injection_per_joule = 2.0e-7;
 
 struct ConfiguredCase
 {
@@ -99,7 +104,15 @@ std::shared_ptr<Mesh> make_mesh()
 {
     auto geometry = std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 0.5, 1.0}}});
-    return std::make_shared<Mesh>(std::move(geometry));
+    Mesh::DistributionOptions distribution;
+    distribution.allow_empty_partitions = true;
+    auto grid = std::make_shared<Mesh>(std::move(geometry), distribution);
+    const auto comm = grid->owned_cell_map()->getComm();
+    int local_empty = grid->num_owned_cells() == 0, actual_empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &actual_empty);
+    if (actual_empty != std::max(0, comm->getSize() - 2))
+        throw std::runtime_error("Two physical cells must retain actual empty owners when oversubscribed.");
+    return grid;
 }
 
 SimpleFluid::BoundaryConditionSet boundaries()
@@ -186,29 +199,18 @@ SimpleFluid::FreeSurfaceOptions surface_options(int maximum_correctors)
     return result;
 }
 
-SimpleFluid::ReactingGasOptions gas_options(scalar_type slip_velocity)
+FG::Parameters gas_parameters(scalar_type slip_velocity)
 {
-    SimpleFluid::ReactingGasOptions result;
-    result.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
-    result.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    result.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    result.bubble_transport = SimpleFluid::BubbleTransportMode::General;
-    result.rise_velocity_mode = slip_velocity > 0.0 ? SimpleFluid::BubbleRiseVelocityMode::ConstantSlip
-                                                    : SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
-    result.constant_slip_velocity = slip_velocity;
-    result.hydrogen_yield_mol_per_j = 2.0e-7;
-    result.max_source_alpha_rate = 1.0;
-    result.henry_coefficient = 1.0e-5;
-    result.surface_tension = 0.07;
-    result.hydrogen_diffusivity = 1.0e-5;
-    result.nucleation_radius = 6.6359547089482127e-8;
-
-    result.reference_pressure = 101325.0;
-    result.initial_dissolved_hydrogen = 1.0;
-    result.free_surface_patches = {"zmax"};
-    return result;
+    return {initial_temperature, 101325., density, heat_capacity, thermal_expansion, .01, 0., .07, 1., 0., 0., 0., 0.,
+        1e-5, 50e-6, slip_velocity, 1e-5, 1e-5};
 }
 
+SimpleFluid::ReactingGasOptions gas_options(scalar_type slip_velocity, FG::Rate rate)
+{
+    const auto parameters = gas_parameters(slip_velocity);
+    return FG::options(FG::mixture(parameters), parameters, std::move(rate),
+        [](const R::ReactionContext& c) { return c.environment.temperature; });
+}
 ConfiguredCase make_case(
     scalar_type heat, int maximum_correctors, bool include_gas = false, scalar_type slip_velocity = {})
 {
@@ -222,8 +224,16 @@ ConfiguredCase make_case(
     auto* heat_source = &solver->add_temperature_source("ale_heat", heat);
     if (include_gas)
     {
-        solver_coupling->add_prescribed_heat_source().initialize_constant(0.0);
-        solver_coupling->configure_reacting_gas(gas_options(slip_velocity));
+        auto* feed = &solver_coupling->add_prescribed_heat_source();
+        feed->initialize_constant(0.0);
+        solver_coupling->configure_reacting_gas(gas_options(slip_velocity,
+            [feed](const R::ReactionContext& context)
+            {
+                if (!context.environment.location || !context.environment.location->ownedCell)
+                    throw std::invalid_argument("The material-following ALE feed needs its actual source frame.");
+                return gas_injection_per_joule *
+                       feed->field().value(static_cast<local_ordinal_type>(*context.environment.location->ownedCell));
+            }));
     }
     solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
     if (solver_coupling->configure_free_surface(surface_options(maximum_correctors)) == nullptr)
@@ -246,18 +256,17 @@ ConfiguredCase make_complete_escape_case()
     auto* heat_source = &solver->add_temperature_source("ale_heat", 0.0);
     solver_coupling->add_prescribed_heat_source().initialize_constant(0.0);
 
-    auto gas = gas_options(slip_velocity);
-    gas.initial_dissolved_hydrogen = 0.0;
-    gas.initial_micro_number_density = 1.0e10;
-    gas.initial_micro_moles = 2.0e-6;
-    gas.initial_large_number_density = 2.0e8;
-    gas.initial_large_moles = 6.0e-7;
-    gas.microbubble_lifetime = 1.0e100;
-    gas.large_bubble_dissolution_time = 1.0e100;
-    gas.micro_to_large_conversion_coefficient = 0.0;
-    // Keep the required positive Henry coefficient while making the residual
-    // mass-transfer term negligible compared with the explicit molar checks.
-    gas.henry_coefficient = 1.0e-100;
+    auto parameters = gas_parameters(slip_velocity);
+    parameters.dissolved_moles_per_bulk_volume = 0;
+    parameters.micro_moles_per_bulk_volume = 2e-6;
+    parameters.micro_numbers_per_bulk_volume = 1e10;
+    parameters.large_moles_per_bulk_volume = 6e-7;
+    parameters.large_numbers_per_bulk_volume = 1e6;
+    parameters.micro_lifetime = parameters.large_lifetime = 1e100;
+    parameters.large_film_henry = 1e-100;
+    auto gas = FG::options(
+        FG::mixture(parameters), parameters, [](const R::ReactionContext&) { return 0.; },
+        [](const R::ReactionContext& c) { return c.environment.temperature; });
     solver_coupling->configure_reacting_gas(gas);
     solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
 
@@ -308,12 +317,6 @@ scalar_type global_liquid_energy(const ConfiguredCase& state)
     return global;
 }
 
-scalar_type species_value(const SimpleFluid::GasMolesBySpecies& values, std::string_view species)
-{
-    const auto iterator = values.find(std::string(species));
-    return iterator == values.end() ? scalar_type{} : iterator->second;
-}
-
 VerificationResult result(std::string_view name, const ConfiguredCase& state)
 {
     const auto surface = state.coupling->free_surface_diagnostics();
@@ -330,9 +333,8 @@ VerificationResult result(std::string_view name, const ConfiguredCase& state)
     require_residual("ALE liquid-mass closure", value.liquid_mass_residual, 1.0e-12,
         state.coupling->liquid_mass_inventory().totalMass(), 1.0e-13);
     require_residual("ALE gas-inventory closure", value.gas_inventory_residual, 1.0e-12,
-        state.coupling->find_reacting_gas_model() == nullptr
-            ? 0.0
-            : state.coupling->find_reacting_gas_model()->global_submerged_hydrogen_moles(),
+        state.coupling->find_reacting_gas_model() == nullptr ? 0.0
+                                                             : FG::total(*state.coupling->find_reacting_gas_model()),
         1.0e-12);
     require_residual("ALE mesh/pool closure", value.mesh_pool_mismatch, 1.0e-12, value.mesh_volume, 2.0e-12);
     require_residual("ALE source/pool closure", value.source_pool_residual, 1.0e-12, volume_rate_scale, 2.0e-12);
@@ -357,11 +359,14 @@ VerificationResult run_uniform_heating()
     const auto expected_temperature = initial_temperature + temperature_change;
     const auto expected_density = density * (1.0 - thermal_expansion * temperature_change);
     const auto expected_level = initial_mass / expected_density;
-    for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
-    {
-        require_near("ALE heated temperature",
-            state.solver->temperature().value(static_cast<local_ordinal_type>(owned)), expected_temperature, 3.0e-9);
-    }
+    SimpleFluid::collective_detail::collective_local_validation(*state.mesh, "ALE heated local temperature oracle",
+        [&]
+        {
+            for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+                require_near("ALE heated temperature",
+                    state.solver->temperature().value(static_cast<local_ordinal_type>(owned)), expected_temperature,
+                    3e-9);
+        });
     require_near("ALE heated level", state.coupling->free_surface_diagnostics().pool_level, expected_level, 3.0e-12);
     require_near("ALE heated mesh volume", global_mesh_volume(*state.mesh), expected_level, 3.0e-12);
     require_near(
@@ -383,46 +388,65 @@ VerificationResult run_gas_generation()
         throw std::runtime_error("ALE gas verification lacks its model owners");
     }
     prescribed_heat->initialize_constant(power_density);
-    const auto before = gas->cumulative_hydrogen_produced();
-    const auto before_submerged = gas->global_submerged_hydrogen_moles();
+    const auto before = FG::produced(*gas);
+    const auto before_submerged = FG::total(*gas);
+    const std::array<double, 2> before_species{
+        gas->global_species_moles(FG::gas_ids[0]), gas->global_species_moles(FG::gas_ids[1])};
     const auto initial_mass = state.coupling->liquid_mass_inventory().totalMass();
     state.coupling->step();
     const auto surface = state.coupling->free_surface_diagnostics();
-    const auto expected_generation = power_density * global_mesh_volume(*state.mesh) *
-                                     gas->options().hydrogen_yield_mol_per_j * gas->options().gas_release_efficiency *
-                                     time_step;
-    const auto old_volume_generation =
-        power_density * gas->options().hydrogen_yield_mol_per_j * gas->options().gas_release_efficiency * time_step;
+    const auto expected_generation =
+        power_density * global_mesh_volume(*state.mesh) * gas_injection_per_joule * time_step;
+    const auto old_volume_generation = power_density * gas_injection_per_joule * time_step;
     if (!(std::abs(expected_generation - old_volume_generation) > 5.0e-14))
     {
         throw std::runtime_error("ALE gas source case cannot distinguish accepted-new from old volume");
     }
-    require_near(
-        "ALE generated H2", gas->cumulative_hydrogen_produced() - before, expected_generation, 5.0e-15, 5.0e-11);
-    require_near("ALE generated H2 inventory", gas->global_submerged_hydrogen_moles() - before_submerged,
-        expected_generation, 5.0e-13, 5.0e-11);
+    require_near("ALE generated gas species", FG::produced(*gas) - before, expected_generation, 5.0e-15, 5.0e-11);
+    require_near("ALE generated gas species inventory", FG::total(*gas) - before_submerged, expected_generation,
+        5.0e-13, 5.0e-11);
+    for (std::size_t s = 0; s < FG::gas_ids.size(); ++s)
+        require_near("ALE independent species source", gas->global_species_moles(FG::gas_ids[s]) - before_species[s],
+            expected_generation * (s == 0 ? FG::one_fraction : 1 - FG::one_fraction), 5e-13, 5e-11);
     const auto raw_bubble_volume = gas->global_submerged_bubble_volume();
     require_positive("ALE generated raw bubble volume", raw_bubble_volume);
-    require_positive("ALE retained dissolved H2", gas->global_dissolved_hydrogen_moles());
+    require_positive("ALE retained dissolved gas species", FG::phase(*gas, R::SpeciesPhase::Dissolved));
     require_near("ALE gas raw-volume ownership", surface.submerged_bubble_volume, raw_bubble_volume, 1.0e-14, 1.0e-11);
     require_near(
         "ALE gas pool decomposition", surface.pool_volume, surface.liquid_volume + raw_bubble_volume, 1.0e-12, 1.0e-12);
-    require_near("ALE gas displacement excludes dissolved H2", surface.pool_volume - surface.liquid_volume,
+    require_near("ALE gas displacement excludes dissolved gas species", surface.pool_volume - surface.liquid_volume,
         raw_bubble_volume, 1.0e-14, 1.0e-11);
     require_near("ALE gas pool/mesh", surface.pool_volume, global_mesh_volume(*state.mesh), 3.0e-12);
     require_near("ALE gas pressure offset", gas->absolute_pressure_offset(), gas->options().reference_pressure, 1.0e-10,
         1.0e-13);
     const auto expected_temperature = initial_temperature + power_density * global_mesh_volume(*state.mesh) *
                                                                 time_step / (initial_mass * heat_capacity);
-    for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+    SimpleFluid::collective_detail::collective_local_validation(*state.mesh, "ALE species local thermo oracle",
+        [&]
+        {
+            for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                require_near("ALE gas thermal response", state.solver->temperature().value(cell), expected_temperature,
+                    2e-9, 1e-11);
+                require_near("ALE gas absolute pressure", gas->absolute_pressure().value(cell),
+                    gas->options().reference_pressure, 1e-10, 1e-13);
+            }
+        });
+    scalar_type local_carried_sensible = 0, carried_sensible = 0;
+    for (std::size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
     {
         const auto cell = static_cast<local_ordinal_type>(owned);
-        require_near(
-            "ALE gas thermal response", state.solver->temperature().value(cell), expected_temperature, 2.0e-9, 1.0e-11);
-        require_near("ALE gas absolute pressure", gas->absolute_pressure().value(cell),
-            gas->options().reference_pressure, 1.0e-10, 1.0e-13);
+        local_carried_sensible += gas->thermal_source().value(cell) * state.mesh->cell_volume(cell) * time_step;
     }
-    require_near("ALE gas inventory", gas->last_statistics().inventory_error, 0.0, 1.0e-12);
+    Teuchos::reduceAll(
+        *state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_carried_sensible, &carried_sensible);
+    const double tau = 1e-5;
+    const double dissolved_feed_fraction = 1 - tau / time_step * (1 - std::exp(-time_step / tau));
+    const double expected_carried_sensible =
+        expected_generation * dissolved_feed_fraction * FG::molar_feed_mass * heat_capacity * expected_temperature;
+    require_near("ALE incoming material sensible input", carried_sensible, expected_carried_sensible, 1e-9, 1e-11);
+    require_near("ALE gas inventory", FG::inventory_error(*gas), 0.0, 1.0e-12);
     return result("aleGasGeneration", state);
 }
 
@@ -449,8 +473,8 @@ VerificationResult run_complete_escape()
         8.0 * std::numeric_limits<scalar_type>::epsilon() * std::abs(initial_surface.pool_level);
     const auto initial_raw_bubble_volume = gas->global_submerged_bubble_volume();
     const auto initial_liquid_volume = initial_surface.liquid_volume;
-    const auto initial_micro = gas->global_microbubble_hydrogen_moles();
-    const auto initial_large = gas->global_large_bubble_hydrogen_moles();
+    const auto initial_micro = FG::phase(*gas, R::SpeciesPhase::Dispersed, "micro");
+    const auto initial_large = FG::phase(*gas, R::SpeciesPhase::Dispersed, "large");
     const auto initial_total = initial_micro + initial_large;
     const auto completion_tolerance = completion_absolute_tolerance + completion_relative_tolerance * initial_total;
     require_near("ALE seeded microbubble inventory", initial_micro, seeded_micro_moles, 1.0e-18, 1.0e-12);
@@ -459,53 +483,54 @@ VerificationResult run_complete_escape()
         "ALE initial pool/mesh match", initial_surface.pool_volume, global_mesh_volume(*state.mesh), 1.0e-12, 1.0e-12);
     require_near("ALE initial pool decomposition", initial_surface.pool_volume,
         initial_liquid_volume + initial_raw_bubble_volume, 1.0e-12, 1.0e-12);
-    require_near("ALE complete-escape dissolved seed", gas->global_dissolved_hydrogen_moles(), 0.0, 0.0);
-    require_near("ALE complete-escape initial generation", gas->cumulative_hydrogen_produced(), 0.0, 0.0);
+    require_near("ALE complete-escape dissolved seed", FG::phase(*gas, R::SpeciesPhase::Dissolved), 0.0, 0.0);
+    require_near("ALE complete-escape initial generation", FG::produced(*gas), 0.0, 0.0);
 
     scalar_type accumulated_micro_escape{};
     scalar_type accumulated_large_escape{};
     int completed_steps = 0;
     bool observed_resolved_level_drop = false;
     auto remaining_bubble_moles = [gas]
-    { return gas->global_microbubble_hydrogen_moles() + gas->global_large_bubble_hydrogen_moles(); };
+    {
+        return FG::phase(*gas, R::SpeciesPhase::Dispersed, "micro") +
+               FG::phase(*gas, R::SpeciesPhase::Dispersed, "large");
+    };
     while (remaining_bubble_moles() > completion_tolerance && completed_steps < maximum_escape_steps)
     {
         const auto before_surface = state.coupling->free_surface_diagnostics();
-        const auto before_micro = gas->global_microbubble_hydrogen_moles();
-        const auto before_large = gas->global_large_bubble_hydrogen_moles();
+        const auto before_micro = FG::phase(*gas, R::SpeciesPhase::Dispersed, "micro");
+        const auto before_large = FG::phase(*gas, R::SpeciesPhase::Dispersed, "large");
         const auto before_raw_bubble_volume = gas->global_submerged_bubble_volume();
-        const auto before_cumulative_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
-        const auto before_vent = species_value(before_surface.vented_gas_moles, "H2");
+        const auto before_cumulative_escape = FG::escaped(*gas);
+        const auto before_produced = FG::produced(*gas);
+        const auto before_vent = FG::vented(before_surface.vented_gas_moles);
 
         state.coupling->step();
         ++completed_steps;
 
-        const auto& statistics = gas->last_statistics();
+        const double micro_escape = FG::step_escape(*gas, "micro");
+        const double large_escape = FG::step_escape(*gas, "large");
+        const double total_escape = FG::step_escape_total(*gas);
         const auto after_surface = state.coupling->free_surface_diagnostics();
-        const auto after_micro = gas->global_microbubble_hydrogen_moles();
-        const auto after_large = gas->global_large_bubble_hydrogen_moles();
+        const auto after_micro = FG::phase(*gas, R::SpeciesPhase::Dispersed, "micro");
+        const auto after_large = FG::phase(*gas, R::SpeciesPhase::Dispersed, "large");
         const auto after_raw_bubble_volume = gas->global_submerged_bubble_volume();
         const auto population_tolerance =
-            5.0e-18 + 5.0e-10 * std::max({std::abs(before_micro), std::abs(before_large),
-                                    std::abs(statistics.submerged_bubble_hydrogen_escaped)});
-        require_positive("ALE complete-escape step transfer", statistics.submerged_bubble_hydrogen_escaped);
-        require_near("ALE microbubble transport decrement", before_micro - after_micro,
-            statistics.microbubble_hydrogen_escaped, population_tolerance);
-        require_near("ALE large-bubble transport decrement", before_large - after_large,
-            statistics.large_bubble_hydrogen_escaped, population_tolerance);
-        require_near("ALE population escape split",
-            statistics.microbubble_hydrogen_escaped + statistics.large_bubble_hydrogen_escaped,
-            statistics.submerged_bubble_hydrogen_escaped, population_tolerance);
-        require_near("ALE cumulative escape",
-            gas->cumulative_submerged_bubble_hydrogen_escaped() - before_cumulative_escape,
-            statistics.submerged_bubble_hydrogen_escaped, population_tolerance);
-        require_near("ALE vent transfer", species_value(after_surface.vented_gas_moles, "H2") - before_vent,
-            statistics.submerged_bubble_hydrogen_escaped, population_tolerance);
-        require_near("ALE accepted escaped-gas transfer",
-            species_value(after_surface.escaped_gas_moles_this_step, "H2"),
-            statistics.submerged_bubble_hydrogen_escaped, population_tolerance);
-        require_near("ALE zero-generation escape step", statistics.hydrogen_produced, 0.0, 0.0);
-        require_near("ALE zero cumulative generation", gas->cumulative_hydrogen_produced(), 0.0, 0.0);
+            5.0e-18 + 5.0e-10 * std::max({std::abs(before_micro), std::abs(before_large), std::abs(total_escape)});
+        require_positive("ALE complete-escape step transfer", total_escape);
+        require_near(
+            "ALE microbubble transport decrement", before_micro - after_micro, micro_escape, population_tolerance);
+        require_near(
+            "ALE large-bubble transport decrement", before_large - after_large, large_escape, population_tolerance);
+        require_near("ALE population escape split", micro_escape + large_escape, total_escape, population_tolerance);
+        require_near(
+            "ALE cumulative escape", FG::escaped(*gas) - before_cumulative_escape, total_escape, population_tolerance);
+        require_near("ALE vent transfer", FG::vented(after_surface.vented_gas_moles) - before_vent, total_escape,
+            population_tolerance);
+        require_near("ALE accepted escaped-gas transfer", FG::vented(after_surface.escaped_gas_moles_this_step),
+            total_escape, population_tolerance);
+        require_near("ALE zero-generation escape step", (FG::produced(*gas) - before_produced), 0.0, 0.0);
+        require_near("ALE zero cumulative generation", FG::produced(*gas), 0.0, 0.0);
         require_near("ALE constant liquid volume during escape", after_surface.liquid_volume, initial_liquid_volume,
             1.0e-12, 1.0e-12);
         require_near("ALE escape pool displacement", before_surface.pool_volume - after_surface.pool_volume,
@@ -524,12 +549,12 @@ VerificationResult run_complete_escape()
                     << ", level_roundoff_tolerance=" << level_roundoff_tolerance;
             throw std::runtime_error(message.str());
         }
-        accumulated_micro_escape += statistics.microbubble_hydrogen_escaped;
-        accumulated_large_escape += statistics.large_bubble_hydrogen_escaped;
+        accumulated_micro_escape += micro_escape;
+        accumulated_large_escape += large_escape;
     }
 
-    const auto final_micro = gas->global_microbubble_hydrogen_moles();
-    const auto final_large = gas->global_large_bubble_hydrogen_moles();
+    const auto final_micro = FG::phase(*gas, R::SpeciesPhase::Dispersed, "micro");
+    const auto final_large = FG::phase(*gas, R::SpeciesPhase::Dispersed, "large");
     const auto final_total = final_micro + final_large;
     const auto final_level_drop = initial_surface.pool_level - state.coupling->free_surface_diagnostics().pool_level;
     if (!(completed_steps > 1) || final_total > completion_tolerance || !observed_resolved_level_drop ||
@@ -545,12 +570,10 @@ VerificationResult run_complete_escape()
         "ALE complete microbubble escape", accumulated_micro_escape, initial_micro - final_micro, 5.0e-18, 5.0e-10);
     require_near(
         "ALE complete large-bubble escape", accumulated_large_escape, initial_large - final_large, 5.0e-18, 5.0e-10);
-    require_near("ALE complete cumulative escape", gas->cumulative_submerged_bubble_hydrogen_escaped(),
+    require_near("ALE complete cumulative escape", FG::escaped(*gas), initial_total - final_total, 5.0e-18, 5.0e-10);
+    require_near("ALE complete vent transfer", FG::vented(state.coupling->free_surface_diagnostics().vented_gas_moles),
         initial_total - final_total, 5.0e-18, 5.0e-10);
-    require_near("ALE complete vent transfer",
-        species_value(state.coupling->free_surface_diagnostics().vented_gas_moles, "H2"), initial_total - final_total,
-        5.0e-18, 5.0e-10);
-    require_near("ALE complete-escape residual dissolved inventory", gas->global_dissolved_hydrogen_moles(), 0.0,
+    require_near("ALE complete-escape residual dissolved inventory", FG::phase(*gas, R::SpeciesPhase::Dissolved), 0.0,
         completion_absolute_tolerance);
     require_near("ALE complete pool/raw-volume drop",
         initial_surface.pool_volume - state.coupling->free_surface_diagnostics().pool_volume,
@@ -586,12 +609,14 @@ VerificationResult run_failure_rollback()
         throw std::runtime_error(
             "ALE rollback verification expected outer-corrector nonconvergence; got '" + rejection + "'");
     }
-    for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
-    {
-        require_near("ALE rollback temperature",
-            state.solver->temperature().value(static_cast<local_ordinal_type>(owned)), accepted_temperature[owned],
-            0.0);
-    }
+    SimpleFluid::collective_detail::collective_local_validation(*state.mesh, "ALE local rollback oracle",
+        [&]
+        {
+            for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
+                require_near("ALE rollback temperature",
+                    state.solver->temperature().value(static_cast<local_ordinal_type>(owned)),
+                    accepted_temperature[owned], 0.);
+        });
     require_near("ALE rollback volume", global_mesh_volume(*state.mesh), accepted_volume, 0.0);
     require_near("ALE rollback liquid mass", state.coupling->liquid_mass_inventory().totalMass(), accepted_mass, 0.0);
     if (state.solver->step_index() != 0 || state.solver->time() != 0.0 ||

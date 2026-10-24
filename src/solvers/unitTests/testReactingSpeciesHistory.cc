@@ -43,12 +43,12 @@ S::ReactingGasOptions options()
     using P = R::SpeciesPhase;
     auto catalog = schema();
     S::ReactingGasOptions result;
-    result.mode = S::ReactingGasMode::TwoPopulation;
+    result.mode = S::ReactingGasMode::Species;
     result.reference_pressure = 100000.;
     result.surface_tension = 0.;
     result.min_radius = 1e-9;
     result.max_radius = .1;
-    result.dissolved_transport = S::ReactingTransportMode::Advective;
+    result.solution_transport = S::ReactingTransportMode::Advective;
     result.mass_transfer_mode = S::BubbleMassTransferMode::SphericalDiffusion;
     result.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(
         catalog, std::vector<R::ReactionDefinition>{{8, "A to B plus G1 plus G2",
@@ -140,7 +140,7 @@ struct Fixture
         model.initialize_species(states, numbers);
         model.initialize_state(0., temperature, pressure, velocity, material);
     }
-    void advance(double dt = .01) { model.advance(dt, dt, temperature, pressure, velocity, flux, material, nullptr); }
+    void advance(double dt = .01) { model.advance(dt, dt, temperature, pressure, velocity, flux, material); }
     double sum(double local) const
     {
         double result = 0.;

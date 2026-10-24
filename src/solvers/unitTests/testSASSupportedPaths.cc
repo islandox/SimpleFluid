@@ -5,6 +5,8 @@
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
+#include "solvers/ClosedMixtureHeadspaceModel.hh"
+#include "solvers/unitTests/ReactingMixtureTestSupport.hh"
 #include "utils/testing_environment.hh"
 #include <gtest/gtest.h>
 #include <limits>
@@ -327,27 +329,31 @@ TEST(SASSupportedPathsTest, ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSA
 
 namespace
 {
-ReactingGasOptions seeded_reacting_gas_options(ReactingGasMode mode)
+ReactingGasOptions manufactured_reacting_gas_options(bool nonideal)
 {
-    ReactingGasOptions options; options.mode=mode; options.max_source_alpha_rate=1.;
-    options.hydrogen_yield_mol_per_j=2e-7; options.reference_pressure=1e5;
-    // Unit-density fixture has molecular nu=.001; D=1e-5 gives admissible Sc=100.
-    options.henry_coefficient=1e-5; options.surface_tension=.07; options.hydrogen_diffusivity=1e-5;
-    options.nucleation_radius = 6.6359547089482127e-8;
-    options.dissolved_transport=ReactingTransportMode::Advective;
-    options.rise_velocity_mode=BubbleRiseVelocityMode::ConstantSlip; options.constant_slip_velocity=.05;
-    options.initial_dissolved_hydrogen=1e-5; options.initial_micro_number_density=1e10;
-    options.initial_micro_moles=1e-5; options.initial_large_number_density=1e8; options.initial_large_moles=5e-6;
-    options.microbubble_lifetime=1e30; options.large_bubble_dissolution_time=1e30;
-    options.micro_to_large_conversion_coefficient=0; options.min_radius=1e-12; options.max_radius=1e-3;
-    options.min_population=1e-40; options.max_population=1e40;
+    namespace Mixture = SimpleFluid::Testing::ReactingMixture;
+    const Mixture::Mixture chemistry(false, nonideal);
+    Mixture::InitialMixture initial;
+    initial.dissolved_one_concentration = 1e-5;
+    initial.dissolved_two_concentration = 2e-5;
+    initial.populations = {{"micro", 1e10, 1e-15, .25}, {"large", 1e8, 5e-14, .6}};
+    auto options = Mixture::field_options(chemistry, initial, 2e-7, .5);
+    for (auto& species : options.species_properties)
+        species.diffusivity = 0;
+    options.micro_conversion_frequency = .25;
+    options.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+    options.constant_slip_velocity = .05;
+    options.min_radius = 1e-12;
+    options.max_radius = 1e-3;
     return options;
 }
+
+
 }
 
-TEST(SASSupportedPathsTest, ReactingGasAndHydrogenLedgersRollBackWithSAS)
+TEST(SASSupportedPathsTest, ReactingGasAndSpeciesLedgersRollBackWithSAS)
 {
-    for(auto mode:{ReactingGasMode::IdealGasSource,ReactingGasMode::TwoPopulation})
+    for (const bool nonideal : {false, true})
     {
         auto mesh = box_mesh();
         auto solver_shared =
@@ -357,34 +363,48 @@ TEST(SASSupportedPathsTest, ReactingGasAndHydrogenLedgersRollBackWithSAS)
         solver_coupling.initialize_heated_box(300, 300);
         solver.configure_turbulence(sas_options());
         initialize_circulation(solver);
-        PrescribedHeatSourceOptions power; power.profile=PrescribedHeatProfile::Constant; power.power_density=1.;
+        PrescribedHeatSourceOptions power;
+        power.profile = PrescribedHeatProfile::Constant;
+        power.power_density = 1.;
         solver_coupling.configure_prescribed_heat_source(power);
-        auto options=seeded_reacting_gas_options(mode);
+        auto options = manufactured_reacting_gas_options(nonideal);
         auto& gas = solver_coupling.configure_reacting_gas(options);
+        namespace Mixture = SimpleFluid::Testing::ReactingMixture;
+        gas.refresh_species_thermodynamics(
+            solver.time(), solver.temperature(), solver.pressure(), solver.velocity(), solver.material_properties());
+        const auto gas_one_before = gas.global_species_moles(Mixture::gas_one);
+        const auto gas_two_before = gas.global_species_moles(Mixture::gas_two);
+        const auto reactant_before = gas.global_species_moles(Mixture::reactant);
         expect_active_bounded_step(solver, &solver_coupling);
-        if(mode==ReactingGasMode::TwoPopulation)
+        EXPECT_EQ(gas.source_ledgers().size(), mesh->num_owned_cells());
+        EXPECT_EQ(gas.population_ledgers().size(), mesh->num_owned_cells());
+        std::array<double, 5> local{}, totals{};
+        for (const auto& ledger : gas.source_ledgers())
         {
-            EXPECT_GT(gas.last_statistics().hydrogen_produced,0);
-            EXPECT_NEAR(gas.last_statistics().inventory_error,0,1e-14);
+            EXPECT_EQ(ledger.reactionExtents.size(), options.reaction_mechanism->reactions().size());
+            if (!ledger.reactionExtents.empty())
+                local[0] += ledger.reactionExtents.front();
+            local[1] += ledger.externalHeat;
+            local[2] += ledger.reactionHeat;
         }
-        else
-        {
-            double local=0,global=0;
-            for (size_t i = 0; i < mesh->num_owned_cells(); ++i)
-                local += solver_coupling.find_scalar_void_fraction_model()->alpha_g().value(i);
-            Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(),Teuchos::REDUCE_SUM,1,&local,&global);
-            EXPECT_GT(global,0);
-        }
-        const auto statistics=gas.last_statistics();
-        const auto inventory=gas.global_submerged_hydrogen_moles();
-        expect_late_multiphysics_rollback(solver_coupling,
-            [&]
-            {
-                EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after, statistics.hydrogen_after);
-                EXPECT_DOUBLE_EQ(
-                    gas.last_statistics().cumulative_hydrogen_produced, statistics.cumulative_hydrogen_produced);
-                EXPECT_DOUBLE_EQ(gas.global_submerged_hydrogen_moles(), inventory);
-            });
+        for (const auto& ledger : gas.population_ledgers())
+            for (const auto& population : ledger.chemicalChange.dispersedPopulations)
+                for (const auto amount : population.amounts)
+                    local[3] += std::abs(amount);
+        for (std::size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+            local[4] += gas.alpha_g().value(cell) * mesh->cell_volume(cell);
+        Teuchos::reduceAll(
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, int(local.size()), local.data(), totals.data());
+        EXPECT_GT(totals[0], 0);
+        EXPECT_GT(totals[1], 0);
+        EXPECT_GT(totals[2], 0);
+        EXPECT_GT(totals[3], 0);
+        EXPECT_GT(totals[4], 0);
+        EXPECT_NEAR(gas.global_species_moles(Mixture::gas_one), gas_one_before + totals[0], 1e-14);
+        EXPECT_NEAR(gas.global_species_moles(Mixture::gas_two), gas_two_before + totals[0], 1e-14);
+        EXPECT_NEAR(gas.global_species_moles(Mixture::reactant), reactant_before - totals[0], 1e-14);
+        const Mixture::SavedReactingState accepted(gas);
+        expect_late_multiphysics_rollback(solver_coupling, [&] { accepted.expect_restored(gas); });
     }
 }
 
@@ -514,6 +534,7 @@ TEST(SASSupportedPathsTest, LazyFreeSurfaceInitializationRemainsOwnedAfterReject
 
 TEST(SASSupportedPathsTest, FixedFreeSurfaceReactingGasRestoresClosedHeadspaceAndEscape)
 {
+    namespace Mixture = SimpleFluid::Testing::ReactingMixture;
     auto mesh = box_mesh();
     auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, closed_boundaries(*mesh), transient_options());
     auto& solver = *solver_shared;
@@ -521,30 +542,65 @@ TEST(SASSupportedPathsTest, FixedFreeSurfaceReactingGasRestoresClosedHeadspaceAn
     solver_coupling.initialize_heated_box(300, 300);
     solver.configure_turbulence(sas_options());
     initialize_circulation(solver);
-    auto gas_options=seeded_reacting_gas_options(ReactingGasMode::TwoPopulation);
-    gas_options.free_surface_patches={"zmax"};
+    auto gas_options = manufactured_reacting_gas_options(true);
+    gas_options.free_surface_patches = {"zmax"};
     auto& gas = solver_coupling.configure_reacting_gas(gas_options);
     solver_coupling.add_prescribed_heat_source().initialize_constant(1.);
-    auto options=fixed_surface_options(); options.headspace.mode=HeadspaceMode::Closed;
-    options.coupling.maximum_absolute_pressure=2e5;
-    options.headspace.temperature_mode=HeadspaceTemperatureMode::Prescribed;
-    options.headspace.prescribed_temperature_times={0.,.0015};
-    options.headspace.prescribed_temperature_values={300.,300.};
-    ASSERT_NE(solver_coupling.configure_free_surface(options), nullptr);
+    auto options = fixed_surface_options();
+    options.headspace.mode = HeadspaceMode::Closed;
+    options.vessel.top_elevation = 2.;
+    options.vessel.total_internal_volume = 2.;
+    options.headspace.total_internal_volume = 2.;
+    options.headspace.ambient_pressure = Mixture::reference_pressure;
+    options.headspace.initial_pressure = Mixture::reference_pressure;
+    options.headspace.infer_initial_moles = false;
+    // This explicit EOS also owns the pressure bracket endpoints used by the closed solve.
+    options.coupling.minimum_absolute_pressure = Mixture::bounds.minimum_pressure;
+    options.coupling.maximum_absolute_pressure = 2e5;
+    options.headspace.temperature_mode = HeadspaceTemperatureMode::Prescribed;
+    options.headspace.prescribed_temperature_times = {0., .0015};
+    options.headspace.prescribed_temperature_values = {300., 300.};
+    gas.initialize_state(0., solver.temperature(), solver.pressure(), solver.velocity(), solver.material_properties());
+    double local_mass = 0, global_mass = 0;
+    for (size_t cell = 0; cell < mesh->num_owned_cells(); ++cell)
+        local_mass += gas.liquid_mass_density().value(cell) * mesh->cell_volume(cell);
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_mass,
+        &global_mass);
+    options.liquid_mass.initial_liquid_mass = global_mass;
+    options.initial_liquid_volume = gas.evaluate_liquid_volume(Mixture::reference_pressure);
+    const double pool = *options.initial_liquid_volume +
+        gas.evaluate_submerged_bubble_volume(Mixture::reference_pressure);
+    // Independent excluded-volume law for an explicit 50/50 mixture, not inferred initial headspace.
+    const double n = Mixture::reference_pressure * (2. - pool) /
+        (Mixture::gas_constant * 300. + .002 * Mixture::reference_pressure);
+    options.headspace.initial_moles = {{"gas_one", .5 * n}, {"gas_two", .5 * n}};
+    ASSERT_NE(solver_coupling.configure_free_surface(options, std::make_unique<ClosedMixtureHeadspaceModel>(
+        options.headspace, gas_options.gas_thermodynamics, "sas-explicit-two-gas-headspace", 1)), nullptr);
     expect_active_bounded_step(solver, &solver_coupling);
     const SavedSASFields saved(solver_coupling);
+    const Mixture::SavedReactingState accepted_gas(gas);
+    const auto accepted_receipt = gas.species_event_receipt(); // Required frozen typed-surface API.
     const auto headspace = solver_coupling.free_surface_diagnostics().headspace.pressure;
     const auto history = solver_coupling.free_surface_history().size();
-    const auto escape=gas.last_statistics().cumulative_hydrogen_escaped;
-    EXPECT_GT(escape,0);
-    EXPECT_ANY_THROW(solver_coupling.step());
+    const auto accepted_histories = gas.species_histories();
+    for (const auto id : {Mixture::gas_one, Mixture::gas_two})
+    {
+        const auto found = std::ranges::find(accepted_histories, id, &Reacting::SpeciesInventoryHistory::species);
+        EXPECT_NE(found, accepted_histories.end());
+        if (found != accepted_histories.end())
+            EXPECT_GT(found->physical_outflow, 0.);
+    }
+    EXPECT_ANY_THROW(solver_coupling.step()); // Prescribed headspace T ends at .0015; the .002 trial must reject.
     saved.expect_restored();
-    EXPECT_DOUBLE_EQ(gas.last_statistics().cumulative_hydrogen_escaped,escape);
+    accepted_gas.expect_restored(gas);
+    EXPECT_EQ(gas.species_histories(), accepted_histories);
+    EXPECT_EQ(gas.species_event_receipt(), accepted_receipt);
     EXPECT_DOUBLE_EQ(solver_coupling.free_surface_diagnostics().headspace.pressure, headspace);
     EXPECT_EQ(solver_coupling.free_surface_history().size(), history);
     solver.set_time_step(.00025);
     expect_active_bounded_step(solver, &solver_coupling);
 }
+
 
 TEST(SASSupportedPathsTest, FixedFreeSurfaceStillRejectsSASALE)
 {
@@ -713,26 +769,33 @@ TEST(SASSupportedPathsTest, NoxRejectedFlowRestoresSASAndRetries)
 
 TEST(SASSupportedPathsTest, NoxBoussinesqRestoresActiveSourceAndMultiphysicsAfterLateRejection)
 {
-    auto mesh=box_mesh(); auto time=nox_options();
-    time.thermal_expansion=.001; time.gravity_z=-9.81; time.reference_temperature=300;
+    auto mesh = box_mesh();
+    auto time = nox_options();
+    time.thermal_expansion = .001;
+    time.gravity_z = -9.81;
+    time.reference_temperature = 300;
     auto solver_shared = std::make_shared<BoussinesqSolver<Pack>>(mesh, nox_box_boundaries(), time);
     auto& solver = *solver_shared;
     SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver_coupling.initialize_heated_box(300, 300);
     solver.configure_turbulence(sas_options());
     initialize_circulation(solver);
-    ScalarVoidFractionOptions phase; phase.initial_alpha=.1; phase.alpha_collapse_time=1.;
+    ScalarVoidFractionOptions phase;
+    phase.initial_alpha = .1;
+    // Typed population inventories own the gas; scalar removal stays disabled.
+    phase.alpha_collapse_time = std::numeric_limits<real_t>::infinity();
     solver_coupling.configure_scalar_void_fraction(phase);
-    MaterialFeedbackOptions feedback; feedback.reference_dynamic_viscosity=.001;
+    MaterialFeedbackOptions feedback;
+    feedback.reference_dynamic_viscosity = .001;
     solver_coupling.configure_material_feedback(feedback);
-    auto options=seeded_reacting_gas_options(ReactingGasMode::IdealGasSource);
+    auto options = manufactured_reacting_gas_options(true);
     auto& gas = solver_coupling.configure_reacting_gas(options);
     solver_coupling.add_prescribed_heat_source().initialize_constant(1.);
     ASSERT_NO_FATAL_FAILURE(expect_active_bounded_step(solver, &solver_coupling));
     ASSERT_TRUE(solver.last_nonlinear_result().converged);
-    const auto report=solver.last_nonlinear_result();
-    const auto velocity=owned_values(solver.velocity()), flux=owned_values(solver.pressure_corrected_face_fluxes());
-    const auto gas_before=gas.last_statistics();
+    const auto report = solver.last_nonlinear_result();
+    const auto velocity = owned_values(solver.velocity()), flux = owned_values(solver.pressure_corrected_face_fluxes());
+    const SimpleFluid::Testing::ReactingMixture::SavedReactingState accepted_gas(gas);
     expect_late_multiphysics_rollback(solver_coupling,
         [&]
         {
@@ -740,9 +803,9 @@ TEST(SASSupportedPathsTest, NoxBoussinesqRestoresActiveSourceAndMultiphysicsAfte
             EXPECT_EQ(owned_values(solver.pressure_corrected_face_fluxes()), flux);
             EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().total_seconds, report.total_seconds);
             EXPECT_EQ(solver.last_nonlinear_result().residual_evaluations, report.residual_evaluations);
-            EXPECT_DOUBLE_EQ(gas.last_statistics().hydrogen_after, gas_before.hydrogen_after);
+            accepted_gas.expect_restored(gas);
         });
-    EXPECT_EQ(solver.step_index(),2);
+    EXPECT_EQ(solver.step_index(), 2);
     EXPECT_TRUE(solver.last_nonlinear_result().converged);
 }
 

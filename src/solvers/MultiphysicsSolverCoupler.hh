@@ -128,8 +128,6 @@ public:
         scalar_type pool_occupancy_volume_error = {};
         bool catalogued_species = false;
         Reacting::SpeciesEventReceipt species_event;
-        scalar_type microbubble_hydrogen_moles = {};
-        scalar_type large_bubble_hydrogen_moles = {};
         std::optional<boiling_diagnostics_type> boiling;
         std::optional<PlanarALEStepDiagnostics> planar_ale;
     };
@@ -516,57 +514,22 @@ private:
     void validate_step_coupling() const;
     SIMPLEFLUID_SOLVERS_LOCAL
     /**
-     * @brief Order optional model updates around temperature transport.
+     * @brief Order explicitly owned species and thermal updates.
      *
-     * This diagram combines this helper, the bound temperature transport, and
-     * advance_post_temperature_models(). Ideal reacting_gas and boiling consume
-     * the temperature accepted at the start of the step. Sheng reacting_gas is
-     * intentionally delayed until after temperature transport because it owns
-     * the authoritative gas void fraction. All branches are sequential.
+     * Normal finite chemistry and coordinated Bouss vapor advance before
+     * temperature; their actual raw thermal receipts enter once. Standalone
+     * boiling owns its existing separate sink when no typed gas owner is active.
+     * The explicit PrescribedCarrierAfterTemperature reference schedule advances
+     * gas-only zero-heat inventory after temperature. It cannot own finite liquid,
+     * film, boiling, free-surface/ALE or coordinated Bouss vapor.
      *
-     * @par Algorithm
-     * @if SIMPLEFLUID_DIAGRAMS
-     * @startuml
-     * start
-     * if (Reacting gas enabled and\nnot Sheng void owner?) then (yes)
-     *   :ReactingGasModel::advance()\nwith lagged temperature;
-     * endif
-     * if (Sheng void owner?) then (yes)
-     *   :Defer gas/void update;
-     * else (no)
-     *   if (BoilingSourceModel configured?) then (yes)
-     *     :update() boiling source\nfrom lagged temperature;
-     *   endif
-     *   if (ScalarVoidFractionModel configured?) then (yes)
-     *     :Mirror reacting alpha_g or\nupdate_explicit(gas + boiling sources);
-     *     :Complete boiling void/inventory update;
-     *   endif
-     * endif
-     * :Solve temperature transport with projected flux,\nregistered sources, and optional boiling sink;
-     * note right
-     *   Uses effective thermal conductivity when turbulent;
-     *   otherwise material conductivity or legacy diffusivity.
-     * end note
-     * if (Sheng void owner?) then (yes)
-     *   :ReactingGasModel::advance()\nwith updated temperature;
-     *   :Mirror authoritative alpha_g into scalar void model;
-     * endif
-     * if (MaterialFeedbackModel configured?) then (yes)
-     *   :Apply feedback at time + time_step\nusing updated temperature/void state;
-     * endif
-     * if (free surface configured?) then (yes)
-     *   :Advance liquid inventory and free-surface state;
-     * endif
-     * if (turbulence enabled?) then (yes)
-     *   :Refresh effective properties for next step;
-     * endif
-     * stop
-     * @enduml
-     * @endif
+     * Temperature uses actual effective material/turbulence conductivity and
+     * its immutable boundary heat snapshot. Accepted species void is mirrored,
+     * then material/surface ownership and effective properties are refreshed.
      */
     bool advance_pre_temperature_models(scalar_type time_step);
     SIMPLEFLUID_SOLVERS_LOCAL
-    void advance_post_temperature_models(scalar_type time_step, bool two_population_after_temperature);
+    void advance_post_temperature_models(scalar_type time_step, bool species_after_temperature);
     SIMPLEFLUID_SOLVERS_LOCAL
     void validate_collective_model_state() const;
     SIMPLEFLUID_SOLVERS_LOCAL

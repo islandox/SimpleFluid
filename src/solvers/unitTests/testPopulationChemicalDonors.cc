@@ -48,11 +48,11 @@ S::ReactingGasOptions options(Case selected)
         std::vector<R::SpeciesDefinition>{{left, "synthetic isomer left", 1e-20, {{"X", 1}}, {P::Liquid, P::Dissolved}},
             {right, "synthetic isomer right", 1e-20, {{"X", 1}}, {P::Liquid, P::Dissolved}}});
     S::ReactingGasOptions result;
-    result.mode = S::ReactingGasMode::TwoPopulation; // Current pre-Stage10 API.
+    result.mode = S::ReactingGasMode::Species;
     result.population_ids.clear();
     result.reference_pressure = 100000;
     result.surface_tension = 0;
-    result.dissolved_transport = S::ReactingTransportMode::Advective;
+    result.solution_transport = S::ReactingTransportMode::Advective;
     result.reaction_advance.maximumRetries = 0;
     result.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(catalog,
         std::vector<R::ReactionDefinition>{
@@ -138,7 +138,7 @@ struct Fixture
         for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
             EXPECT_DOUBLE_EQ(mesh->cell_volume(static_cast<LO>(c)), 1);
     }
-    void advance() { model.advance(.01, .01, temperature, pressure, velocity, flux, material, nullptr); }
+    void advance() { model.advance(.01, .01, temperature, pressure, velocity, flux, material); }
     auto fields() const
     {
         std::map<std::string, std::vector<double>> result;

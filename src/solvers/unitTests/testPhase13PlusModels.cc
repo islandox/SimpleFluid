@@ -2409,8 +2409,7 @@ TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
     EXPECT_NE(contents.find("Name=\"species_709_population_micro\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"species_thermal_source\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"species_material_volume_source\""), std::string::npos);
-    // The transitional mirror is removed in the following shared API cleanup.
-    EXPECT_NE(contents.find("Name=\"C_H2\""), std::string::npos);
+    EXPECT_EQ(contents.find("Name=\"C_H2\""), std::string::npos);
     std::filesystem::remove(output);
 }
 

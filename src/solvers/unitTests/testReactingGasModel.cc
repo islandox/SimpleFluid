@@ -1,7 +1,7 @@
 /**
  * @file testReactingGasModel.cc
  * @author islandox(59904740+islandox@users.noreply.github.com)
- * @brief Unit tests for ideal and Sheng-style reacting gas models.
+ * @brief General finite-species, supplied-event and transport/rollback regression tests.
  * @version 0.1
  * @date 2026-07-21
  *
@@ -13,6 +13,7 @@
 #include <memory>
 
 #include "FVM/FaceFlux.hh"
+#include "GeneralGasModelTestSupport.hh"
 #include "equations/ReactingGasModel.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
@@ -34,8 +35,8 @@
 #include <iterator>
 #include <limits>
 #include <map>
-#include <stdexcept>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -45,6 +46,7 @@ namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
+namespace GeneralGas = SimpleFluid::Testing::GeneralGasModel;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
@@ -52,18 +54,14 @@ using FaceFieldType = SimpleFluid::FaceField<Pack>;
 using ReactingModelType = SimpleFluid::ReactingGasModel<Pack>;
 using ALEMeshType = SimpleFluid::MeshHandle<Pack>;
 using ALEFieldType = SimpleFluid::ScalarCellFieldStored<Pack, ALEMeshType>;
-using ALEVelocityFieldType =
-    SimpleFluid::VectorCellFieldStored<Pack, ALEMeshType>;
-using ALEFaceFieldType =
-    SimpleFluid::ScalarFaceFieldStored<Pack, ALEMeshType>;
-using ALEReactingModelType =
-    SimpleFluid::ReactingGasModel<Pack, ALEMeshType>;
+using ALEVelocityFieldType = SimpleFluid::VectorCellFieldStored<Pack, ALEMeshType>;
+using ALEFaceFieldType = SimpleFluid::ScalarFaceFieldStored<Pack, ALEMeshType>;
+using ALEReactingModelType = SimpleFluid::ReactingGasModel<Pack, ALEMeshType>;
 using ALEMotionType = SimpleFluid::PlanarALEMeshMotion<Pack>;
 
 using utils_test::KokkosEnvironment;
 
-testing::Environment* const kokkos_environment =
-    testing::AddGlobalTestEnvironment(new KokkosEnvironment);
+testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /**
  * @brief Build the one-cell mesh used by local reacting_gas checks.
@@ -72,16 +70,14 @@ testing::Environment* const kokkos_environment =
  */
 SimpleFluid::SP<MeshType> make_single_cell_mesh()
 {
-    return SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_single_hex_database());
+    return SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_single_hex_database());
 }
 
 /** @brief Build a mutable unit-area, one-cell Cartesian column. */
 SimpleFluid::SP<ALEMeshType> make_ale_single_cell_column()
 {
     auto geometry = std::make_shared<ALEMeshType::Cartesian>(
-        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
-            {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
     return std::make_shared<ALEMeshType>(std::move(geometry));
 }
 
@@ -89,9 +85,9 @@ SimpleFluid::SP<ALEMeshType> make_ale_single_cell_column()
 SimpleFluid::SP<SimpleFluid::Meshes::MultiRegionMesh> make_gas_composite_column()
 {
     using Composite = SimpleFluid::Meshes::MultiRegionMesh;
-    return std::make_shared<Composite>(std::vector<Composite::Region>{
-        SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
-        SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
+    return std::make_shared<Composite>(
+        std::vector<Composite::Region>{SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
+            SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
         std::vector<Composite::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}},
         SimpleFluid::Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
 }
@@ -104,18 +100,27 @@ class MutableGasALEView final : public SimpleFluid::MeshMotionModel
 public:
     MutableGasALEView(SimpleFluid::SP<ALEMeshType> mesh, ALEMotionType& motion)
         : mesh_(std::move(mesh)), motion_(motion),
-          flux_(motion.face_mesh_fluxes().begin(), motion.face_mesh_fluxes().end()) {}
+          flux_(motion.face_mesh_fluxes().begin(), motion.face_mesh_fluxes().end())
+    {
+    }
     void begin_trial(SimpleFluid::real_t top, SimpleFluid::real_t dt) override { motion_.begin_trial(top, dt); }
     void accept_trial() override { motion_.accept_trial(); }
     void rollback_trial() override { motion_.rollback_trial(); }
     bool has_active_trial() const noexcept override { return motion_.has_active_trial(); }
     std::string_view mesh_family() const noexcept override { return motion_.mesh_family(); }
-    std::span<const SimpleFluid::real_t> old_cell_volumes() const noexcept override { return motion_.old_cell_volumes(); }
-    std::span<const SimpleFluid::real_t> new_cell_volumes() const noexcept override { return motion_.new_cell_volumes(); }
+    std::span<const SimpleFluid::real_t> old_cell_volumes() const noexcept override
+    {
+        return motion_.old_cell_volumes();
+    }
+    std::span<const SimpleFluid::real_t> new_cell_volumes() const noexcept override
+    {
+        return motion_.new_cell_volumes();
+    }
     std::span<const SimpleFluid::real_t> face_mesh_fluxes() const noexcept override { return flux_; }
     const SimpleFluid::MeshMotionDiagnostics& diagnostics() const noexcept override { return motion_.diagnostics(); }
     const SimpleFluid::SP<ALEMeshType>& mesh_ptr() const noexcept { return mesh_; }
     void invalidate_flux() { flux_.front() += 1.0; }
+
 private:
     SimpleFluid::SP<ALEMeshType> mesh_;
     ALEMotionType& motion_;
@@ -143,8 +148,7 @@ double gas_diffusivity_with_gcl_fault(double)
  * @param mesh Mesh owning the material fields.
  * @return Initialized water-property fields.
  */
-SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
-    const SimpleFluid::SP<MeshType>& mesh)
+SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(const SimpleFluid::SP<MeshType>& mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -157,8 +161,8 @@ SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
 }
 
 /** @brief Create water-like material fields on a mutable mesh handle. */
-SimpleFluid::MaterialPropertyFields<Pack, ALEMeshType>
-make_ale_water_properties(const SimpleFluid::SP<ALEMeshType>& mesh)
+SimpleFluid::MaterialPropertyFields<Pack, ALEMeshType> make_ale_water_properties(
+    const SimpleFluid::SP<ALEMeshType>& mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -170,319 +174,11 @@ make_ale_water_properties(const SimpleFluid::SP<ALEMeshType>& mesh)
     return {mesh, options, time_options};
 }
 
-/**
- * @brief Baseline ideal-gas reacting_gas options with bounded alpha source.
- *
- * @return Configured ideal-gas source options.
- */
-SimpleFluid::ReactingGasOptions ideal_options()
-{
-    SimpleFluid::ReactingGasOptions options;
-    options.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-    options.hydrogen_yield_mol_per_j = 2.0e-7;
-    options.max_source_alpha_rate = 1.0;
-    options.reference_pressure = 1.0e5;
-    return options;
-}
-
-/**
- * @brief Sheng two-population options with finite correlation bounds.
- *
- * @return Configured Sheng-model options.
- */
-SimpleFluid::ReactingGasOptions sheng_options()
-{
-    auto options = ideal_options();
-    options.mode =
-        SimpleFluid::ReactingGasMode::TwoPopulation;
-    options.henry_coefficient = 1.0e-5;
-    options.surface_tension = 0.07;
-    options.hydrogen_diffusivity = 1.0e-8;
-    options.nucleation_radius = 6.6359547089482127e-8;
-
-    options.min_radius = 1.0e-12;
-    options.max_radius = 1.0e-3;
-    options.min_population = 1.0e-40;
-    options.max_population = 1.0e40;
-    return options;
-}
-
-/** @brief Two-population setup isolating ALE-relative bubble escape. */
-SimpleFluid::ReactingGasOptions ale_escape_options()
-{
-    auto options = sheng_options();
-    options.pressure_mode =
-        SimpleFluid::ReactingPressureMode::Constant;
-    options.dissolved_transport =
-        SimpleFluid::ReactingTransportMode::Advective;
-    options.bubble_transport =
-        SimpleFluid::BubbleTransportMode::General;
-    options.rise_velocity_mode =
-        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 0.4;
-    options.free_surface_patches = {"zmax"};
-    options.hydrogen_diffusivity = 1.0e-8;
-    options.microbubble_lifetime = 1.0e100;
-    options.large_bubble_dissolution_time = 1.0e100;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    options.initial_dissolved_hydrogen = 0.2;
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 2.0e-6;
-    options.initial_large_number_density = 2.0e8;
-    options.initial_large_moles = 6.0e-7;
-    return options;
-}
-
-/**
- * @brief Sum a scalar diagnostic across the mesh communicator.
- *
- * @param mesh Mesh providing the communicator.
- * @param local_value Local rank contribution.
- * @return Global sum across ranks.
- */
-template<class TestMesh>
-double global_sum(const TestMesh& mesh, double local_value)
-{
-    double global_value = 0.0;
-    Teuchos::reduceAll(
-        *mesh.owned_cell_map()->getComm(),
-        Teuchos::REDUCE_SUM,
-        1,
-        &local_value,
-        &global_value);
-    return global_value;
-}
-
-/**
- * @brief Compute the distributed cell-volume integral of a cell field.
- *
- * @param field Cell field to integrate.
- * @return Global volume integral.
- */
-double global_integral(const FieldType& field)
-{
-    double local_integral = 0.0;
-    const auto& mesh = field.mesh();
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        local_integral +=
-            field.value(cell_lid) * mesh.cell_volume(cell_lid);
-    }
-    return global_sum(mesh, local_integral);
-}
-
-/** @brief Integrate a mesh-handle scalar field over current cell volumes. */
-double global_ale_integral(const ALEFieldType& field)
-{
-    double local_integral = 0.0;
-    const auto& mesh = field.mesh();
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        local_integral +=
-            field.value(cell_lid) * mesh.cell_volume(cell_lid);
-    }
-    return global_sum(mesh, local_integral);
-}
-
-/**
- * @brief Return a named reacting output field or fail the test helper.
- *
- * @param model Model publishing diagnostic fields.
- * @param name Requested field name.
- * @return Published field reference.
- * @throws std::runtime_error if the field is absent or null.
- */
-const FieldType& model_field(
-    const ReactingModelType& model,
-    const std::string& name)
-{
-    const auto fields = model.output_fields();
-    const auto iterator = fields.find(name);
-    if (iterator == fields.end() || iterator->second == nullptr)
-    {
-        throw std::runtime_error(
-            "ReactingGasModel did not publish field '" + name + "'.");
-    }
-    return *iterator->second;
-}
-
-/**
- * @brief Expect every owned field value to be finite.
- *
- * @param field Field to inspect.
- * @param name Diagnostic name included in assertion messages.
- */
-void expect_field_finite(
-    const FieldType& field,
-    const std::string& name)
-{
-    const auto& mesh = field.mesh();
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        EXPECT_TRUE(std::isfinite(field.value(cell_lid)))
-            << name << " at owned cell " << owned;
-    }
-}
-
-/**
- * @brief Expect every owned field value to be finite and non-negative.
- *
- * @param field Field to inspect.
- * @param name Diagnostic name included in assertion messages.
- */
-void expect_field_finite_non_negative(
-    const FieldType& field,
-    const std::string& name)
-{
-    const auto& mesh = field.mesh();
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        const auto value = field.value(cell_lid);
-        EXPECT_TRUE(std::isfinite(value))
-            << name << " at owned cell " << owned;
-        EXPECT_GE(value, 0.0) << name << " at owned cell " << owned;
-    }
-}
-
-/**
- * @brief Check all published Sheng-model state and diagnostic bounds.
- *
- * @param model Model whose published state is inspected.
- */
-void expect_state_fields_finite_bounded(
-    const ReactingModelType& model)
-{
-    const auto& options = model.options();
-    const std::array<std::string, 21> non_negative_fields{
-        "C_H2",
-        "I_H2",
-        "I_H2_excluded",
-        "N_micro",
-        "M_micro",
-        "N_large",
-        "M_large",
-        "r_nuc",
-        "r_micro",
-        "r_large",
-        "C_H2_crit",
-        "C_H2_eq",
-        "K_L",
-        "alpha_g_micro",
-        "alpha_g_large",
-        "alpha_g_raw",
-        "alpha_g_excess",
-        "r_characteristic",
-        "H2_production_rate",
-        "H2_escape_molar_rate",
-        "bubble_escape_number_rate"};
-
-    for (const auto& name : non_negative_fields)
-    {
-        expect_field_finite_non_negative(model_field(model, name), name);
-    }
-
-    const std::array<std::string, 4> finite_diagnostics{
-        "micro_to_large_number_rate",
-        "micro_to_large_molar_rate",
-        "large_growth_rate",
-        "H2_dissolution_rate"};
-    for (const auto& name : finite_diagnostics)
-    {
-        expect_field_finite(model_field(model, name), name);
-    }
-
-    const auto& alpha_g = model.alpha_g();
-    const auto& alpha_l = model.alpha_l();
-    for (size_t owned = 0; owned < alpha_g.mesh().num_owned_cells();
-         ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        EXPECT_GE(alpha_g.value(cell_lid), options.alpha_min);
-        EXPECT_LE(alpha_g.value(cell_lid), options.alpha_max);
-        EXPECT_GE(alpha_l.value(cell_lid), 1.0 - options.alpha_max);
-        EXPECT_LE(alpha_l.value(cell_lid), 1.0 - options.alpha_min);
-    }
-}
-
-/**
- * @brief Evaluate the pressure-dependent critical H2 concentration.
- *
- * @param options ReactingGas correlation options.
- * @param pressure Absolute pressure.
- * @param temperature Liquid temperature.
- * @return Critical dissolved-hydrogen concentration.
- */
-double critical_concentration(
-    const SimpleFluid::ReactingGasOptions& options,
-    double pressure,
-    double temperature)
-{
-    const auto radius = SimpleFluid::BubbleGasPhysics::nucleation_radius(options, temperature, pressure);
-    return SimpleFluid::BubbleGasPhysics::
-        henry_equilibrium_concentration(
-            options.henry_coefficient,
-            pressure,
-            options.surface_tension,
-            radius);
-}
-
-/**
- * @brief Advance the model and assert that the primary void field stays finite.
- *
- * @param model Model to advance.
- * @param mesh Mesh defining owned cells.
- * @param time End-of-step time.
- * @param time_step Physical time-step size.
- * @param temperature Temperature field.
- * @param pressure Gauge-pressure field.
- * @param power Prescribed heat power-density field.
- * @param velocity Liquid velocity field.
- * @param flux Liquid face-flux field.
- * @param material Material-property fields.
- */
-void advance_model(
-    ReactingModelType& model,
-    const SimpleFluid::SP<MeshType>& mesh,
-    double time,
-    double time_step,
-    FieldType& temperature,
-    FieldType& pressure,
-    FieldType& power,
-    VelocityFieldType& velocity,
-    FaceFieldType& flux,
-    SimpleFluid::MaterialPropertyFields<Pack>& material)
-{
-    model.advance(
-        time,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        ASSERT_TRUE(std::isfinite(model.alpha_g().value(cell_lid)));
-    }
-}
-
-/** @brief Solver policies preserve configured tolerances and reset on configure. */
+/** General species transport policy retains explicit finite source ownership. */
 TEST(ReactingGasModelTest, TransportSolverPolicyDefaultsAndConfigureReset)
 {
     auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
+    auto options = GeneralGas::options();
     options.transport_solver_tolerance = 3.0e-9;
     ReactingModelType model(mesh, options);
     auto linear = model.transport_linear_solver_options();
@@ -501,7 +197,9 @@ TEST(ReactingGasModelTest, TransportSolverPolicyDefaultsAndConfigureReset)
     EXPECT_EQ(model.transport_linear_solver_options().max_iterations, linear.max_iterations);
     EXPECT_DOUBLE_EQ(model.options().transport_solver_tolerance, linear.tolerance);
 
+    const auto before_configuration = model.snapshot();
     model.configure(options);
+    EXPECT_THROW(model.restore(before_configuration), std::invalid_argument);
     EXPECT_EQ(model.transport_linear_solver_options().backend, SimpleFluid::LinearSolverBackend::Gmres);
     EXPECT_EQ(model.transport_linear_solver_options().preconditioner, SimpleFluid::LinearPreconditioner::None);
     EXPECT_EQ(model.transport_linear_solver_options().max_iterations, 200);
@@ -511,7 +209,7 @@ TEST(ReactingGasModelTest, TransportSolverPolicyDefaultsAndConfigureReset)
 /** @brief Invalid solver changes leave the accepted policy and tolerance intact. */
 TEST(ReactingGasModelTest, TransportSolverPolicyRejectsInvalidOptions)
 {
-    ReactingModelType model(make_single_cell_mesh(), sheng_options());
+    ReactingModelType model(make_single_cell_mesh(), GeneralGas::options());
     const auto original = model.transport_linear_solver_options();
     const auto expect_rejected = [&](auto change)
     {
@@ -532,11 +230,11 @@ TEST(ReactingGasModelTest, TransportSolverPolicyRejectsInvalidOptions)
     expect_rejected([](auto& value) { value.backend = SimpleFluid::LinearSolverBackend::Cg; });
 }
 
-/** @brief GS-preconditioned transport matches the default five-scalar update. */
+/** @brief GS-preconditioned transport matches the same full-schema update. */
 TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    const auto options = ale_escape_options();
+    const auto options = GeneralGas::options(GeneralGas::populated());
     ReactingModelType reference(mesh, options);
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
@@ -546,21 +244,23 @@ TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
     for (const auto face_lid : flux.owned_face_ids())
         flux.set_value(face_lid, 0.1 * mesh->face_area_vector(face_lid).x);
     auto material = make_water_properties(mesh);
-    reference.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material, &power);
-    ASSERT_EQ(reference.last_statistics().transport_linear.solves, 5);
+    reference.initialize_state(0.0, temperature, pressure, velocity, material);
+    reference.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material);
+    ASSERT_EQ(reference.last_statistics().transport_linear.solves, 9);
 
-    for (const auto preconditioner : {SimpleFluid::LinearPreconditioner::GaussSeidel,
-             SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel})
+    for (const auto preconditioner :
+        {SimpleFluid::LinearPreconditioner::GaussSeidel, SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel})
     {
         ReactingModelType model(mesh, options);
         auto linear = model.transport_linear_solver_options();
         linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
         linear.preconditioner = preconditioner;
         model.set_transport_linear_solver_options(linear);
-        model.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material, &power);
+        model.initialize_state(0.0, temperature, pressure, velocity, material);
+        model.advance(1.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material);
         const auto summary = model.last_statistics().transport_linear;
         EXPECT_TRUE(summary.converged);
-        EXPECT_EQ(summary.solves, 5);
+        EXPECT_EQ(summary.solves, 9);
         EXPECT_GT(summary.iterations, 0);
         EXPECT_LE(summary.achieved_tolerance, linear.tolerance);
         for (const auto& [name, expected_field] : reference.output_fields())
@@ -575,7 +275,7 @@ TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
             }
         }
         const auto accepted = model.snapshot();
-        model.advance(2.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material, &power);
+        model.advance(2.0e-4, 1.0e-4, temperature, pressure, velocity, flux, material);
         model.restore(accepted);
         EXPECT_EQ(model.last_statistics().transport_linear.solves, summary.solves);
         EXPECT_EQ(model.last_statistics().transport_linear.iterations, summary.iterations);
@@ -587,7 +287,7 @@ TEST(ReactingGasModelTest, BiCGStabGaussSeidelTransportMatchesDefault)
 TEST(ReactingGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    auto options = ale_escape_options();
+    auto options = GeneralGas::options(GeneralGas::populated());
     ReactingModelType model(mesh, options);
     ReactingModelType fresh(mesh, options);
     FieldType temperature(mesh, 300.0, "temperature");
@@ -609,20 +309,15 @@ TEST(ReactingGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
     {
         SCOPED_TRACE(step);
         const auto accepted = model.snapshot();
-        // configure() clears every transport cache; restore only this model's
-        // own physical snapshot, retaining independent checkpoint ownership.
-        const auto fresh_accepted = fresh.snapshot();
-        fresh.configure(options);
+        // Force numeric reassembly without replacing physical initialization or its receipts.
+        GeneralGas::force_numeric_reassembly(fresh);
         fresh.set_transport_linear_solver_options(linear);
-        fresh.restore(fresh_accepted);
         const double speed = step % 2 == 0 ? 0.1 : -0.2;
         const double dt = (step + 1) * 1.0e-4;
         for (const auto face : flux.owned_face_ids())
             flux.set_value(face, speed * mesh->face_area_vector(face).x);
         const auto advance = [&](auto& candidate)
-        {
-            candidate.advance(time + dt, dt, temperature, pressure, velocity, flux, material, &power);
-        };
+        { candidate.advance(time + dt, dt, temperature, pressure, velocity, flux, material); };
         advance(model);
         advance(fresh);
         if (step == 2)
@@ -630,7 +325,7 @@ TEST(ReactingGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
             model.restore(accepted);
             advance(model);
         }
-        EXPECT_EQ(model.last_statistics().transport_linear.solves, 5);
+        EXPECT_EQ(model.last_statistics().transport_linear.solves, 9);
         EXPECT_TRUE(model.last_statistics().transport_linear.converged);
         for (const auto& [name, expected] : fresh.output_fields())
         {
@@ -642,56 +337,39 @@ TEST(ReactingGasModelTest, TransportWorkspaceMatchesFreshAssemblyAcrossStages)
                 EXPECT_DOUBLE_EQ(actual.value(cell), expected->value(cell));
             }
         }
-        EXPECT_DOUBLE_EQ(model.last_statistics().hydrogen_escaped, fresh.last_statistics().hydrogen_escaped);
+        EXPECT_DOUBLE_EQ(GeneralGas::step_escape(model), GeneralGas::step_escape(fresh));
         time += dt;
     }
 }
 
 /**
- * @brief Ideal-gas source computes alpha production without changing alpha.
+ * @brief A supplied gas feed computes EOS volume production without mutating an external void field.
  */
-TEST(ReactingGasModelTest,
-     IdealSourceRequiresAndDoesNotAdvanceAuthoritativeVoid)
+TEST(ReactingGasModelTest, IdealSourceRequiresAndDoesNotAdvanceAuthoritativeVoid)
 {
-    auto mesh = make_single_cell_mesh();
-    SimpleFluid::ReactingGasModel<Pack> model(
-        mesh, ideal_options());
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 4.0e6, "qdot_external");
-    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    EXPECT_THROW(
-        model.advance(
-            0.1,
-            0.1,
-            temperature,
-            pressure,
-            velocity,
-            flux,
-            material,
-            &power),
-        std::logic_error);
-    model.advance(
-        0.1,
-        0.1,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power,
-        authoritative_alpha,
-        model.options().alpha_max);
-
-    const auto expected =
-        2.0e-7 * 4.0e6 * 8.31446261815324 * 300.0 / 1.0e5;
-    EXPECT_NEAR(model.source_alpha_reaction().value(0), expected, 1.0e-14);
-    EXPECT_DOUBLE_EQ(model.alpha_g().value(0), 0.0);
-    EXPECT_DOUBLE_EQ(model.alpha_l().value(0), 1.0);
+    GeneralGas::Parameters p;
+    p.source = [](const GeneralGas::R::ReactionContext& c, double dt)
+    {
+        GeneralGas::R::ReactionSourceInput input;
+        const double n = 2e-7 * 4e6 * dt * c.environment.bulkVolume;
+        input.externalTransfers = {
+            {"test.explicit_resolved_gas_feed", GeneralGas::one, GeneralGas::Phase::Resolved, n, .002 * n, 0, {}, {}}};
+        return input;
+    };
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    FieldType external_alpha(f.grid, 0., "unowned_external_alpha");
+    f.initialize();
+    f.advance(.1, .1);
+    const double expected = 2e-7 * 4e6 * GeneralGas::gas_constant * 300 / 1e5;
+    EXPECT_NEAR(f.model.source_alpha_reaction().value(0), expected, 1e-14);
+    EXPECT_NEAR(f.model.alpha_g().value(0), .1 * expected, 1e-14);
+    EXPECT_DOUBLE_EQ(external_alpha.value(0), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::history(f.model).chemical_production, 0);
+    EXPECT_NEAR(GeneralGas::history(f.model).external_supply, 2e-7 * 4e6 * .1, 1e-14);
+    // The retired enabled/null-mechanism fallback must not recreate this physical source implicitly.
+    SimpleFluid::ReactingGasOptions missing;
+    missing.mode = SimpleFluid::ReactingGasMode::Species;
+    EXPECT_THROW(ReactingModelType(f.grid, missing), std::invalid_argument);
 }
 
 /**
@@ -699,378 +377,281 @@ TEST(ReactingGasModelTest,
  */
 TEST(ReactingGasModelTest, IdealSourceHonorsAlphaAndRateLimits)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = ideal_options();
-    options.alpha_max = 0.2;
-    options.max_source_alpha_rate = 0.01;
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 1.0e12, "qdot_external");
-    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    model.advance(
-        0.1, 0.1, temperature, pressure, velocity, flux, material,
-        &power, authoritative_alpha, options.alpha_max);
-    EXPECT_DOUBLE_EQ(model.source_alpha_reaction().value(0), 0.01);
-
-    authoritative_alpha.put_scalar(options.alpha_max);
-    model.advance(
-        0.2, 0.1, temperature, pressure, velocity, flux, material,
-        &power, authoritative_alpha, options.alpha_max);
-    EXPECT_DOUBLE_EQ(model.source_alpha_reaction().value(0), 0.0);
-    EXPECT_DOUBLE_EQ(model.alpha_g().value(0), options.alpha_max);
+    const auto reference = GeneralGas::options();
+    const auto gas = reference.gas_thermodynamics;
+    const auto catalog = std::make_shared<const GeneralGas::R::SpeciesCatalog>(reference.reaction_mechanism->catalog());
+    const auto capacity = [gas, catalog](const GeneralGas::R::ReactionEnvironment& e)
+    {
+        std::vector<double> x(catalog->species().size());
+        x[catalog->index(GeneralGas::one)] = 1;
+        const double rho = gas->evaluate(e.temperature, e.absolutePressure, x).density;
+        const double limit = .2 * e.bulkVolume;
+        double n = limit * rho / .002;
+        while (n * .002 / rho > limit)
+            n = std::nextafter(n, 0.);
+        while (std::nextafter(n, std::numeric_limits<double>::infinity()) * .002 / rho <= limit)
+            n = std::nextafter(n, std::numeric_limits<double>::infinity());
+        return n;
+    };
+    GeneralGas::Parameters p;
+    p.controls.alpha_max = .2;
+    p.source = [capacity](const GeneralGas::R::ReactionContext& c, double dt)
+    {
+        const double requested = 2e-7 * 1e12 * dt * c.environment.bulkVolume;
+        const double rate_limit = .01 * dt * c.environment.bulkVolume * c.environment.absolutePressure /
+                                  (GeneralGas::gas_constant * c.environment.temperature);
+        const double stock = c.state.amount(c.catalog, GeneralGas::one, GeneralGas::Phase::Resolved);
+        const double limit = capacity(c.environment);
+        GeneralGas::M::require(stock <= limit, "Source admission received an already overcapacity state.");
+        const double accepted = std::min({requested, rate_limit, limit - stock});
+        GeneralGas::R::ReactionSourceInput result;
+        if (accepted > 0)
+            result.externalTransfers = {{"test.supplied_rate_and_phase_admission", GeneralGas::one,
+                GeneralGas::Phase::Resolved, accepted, .002 * accepted, 0, {}, {}}};
+        return result;
+    };
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    f.advance(.1, .1);
+    EXPECT_DOUBLE_EQ(f.model.source_alpha_reaction().value(0), .01);
+    EXPECT_NEAR(f.model.alpha_g().value(0), .001, 1e-14);
+    const double accepted = GeneralGas::step_supply(f.model);
+    EXPECT_LT(accepted, 2e-7 * 1e12 * .1);
+    EXPECT_GT(accepted, 0);
+    GeneralGas::R::ReactionEnvironment e{.1, 300, 100000, 1, 1};
+    GeneralGas::R::CellSpeciesState full(*catalog);
+    full.dispersedPopulations = {{"micro", std::vector<double>(catalog->species().size())},
+        {"large", std::vector<double>(catalog->species().size())}};
+    const double n = capacity(e);
+    full.set_amount(*catalog, GeneralGas::one, GeneralGas::Phase::Resolved, n);
+    full.set_amount(*catalog, GeneralGas::solvent, GeneralGas::Phase::Liquid, 800 / .018);
+    f.model.initialize_species(
+        std::vector<GeneralGas::R::CellSpeciesState>{full}, std::vector<std::vector<double>>{{0, 0}});
+    f.model.initialize_state(.1, f.temperature, f.pressure, f.velocity, f.material);
+    f.advance(.2, .1);
+    EXPECT_DOUBLE_EQ(GeneralGas::step_supply(f.model), 0);
+    EXPECT_DOUBLE_EQ(f.model.source_alpha_reaction().value(0), 0);
+    EXPECT_DOUBLE_EQ(f.model.alpha_g().value(0), .2);
 }
 
 /**
- * @brief Initial Sheng inventories publish derived void without a fake source.
+ * @brief Initial catalogued inventories publish derived void without a fake source.
  */
-TEST(ReactingGasModelTest,
-     InitialPopulationsAreReconstructedBeforeFirstKinetics)
+TEST(ReactingGasModelTest, InitialPopulationsAreReconstructedBeforeFirstKinetics)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 2.5;
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 1.0e-3;
-    options.microbubble_lifetime = 1.0e30;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    ASSERT_FALSE(model.initial_state_initialized());
-    model.initialize_state(
-        0.0, temperature, pressure, velocity, material);
-
-    ASSERT_TRUE(model.initial_state_initialized());
-    const auto micro_radius = model_field(model, "r_micro").value(0);
-    const auto expected_raw_void =
-        SimpleFluid::BubbleGasPhysics::bubble_void_fraction(
-            options.initial_micro_number_density, micro_radius);
-    const auto expected_void = std::clamp(
-        expected_raw_void, options.alpha_min, options.alpha_max);
-    ASSERT_GT(micro_radius, 0.0);
-    ASSERT_GT(expected_void, options.alpha_min);
-    EXPECT_NEAR(model.alpha_g().value(0), expected_void, 1.0e-14);
-    EXPECT_NEAR(model.alpha_l().value(0), 1.0 - expected_void, 1.0e-14);
-    EXPECT_NEAR(
-        model.dissolved_hydrogen().value(0),
-        options.initial_dissolved_hydrogen,
-        1.0e-14);
-    EXPECT_NEAR(
-        model.dissolved_hydrogen_inventory().value(0),
-        (1.0 - expected_void) * options.initial_dissolved_hydrogen,
-        1.0e-14);
-    EXPECT_DOUBLE_EQ(model.source_alpha_reaction().value(0), 0.0);
-
-    constexpr double time_step = 1.0e-6;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    EXPECT_NEAR(model.alpha_g().value(0), expected_void, 1.0e-14);
-    EXPECT_NEAR(model.source_alpha_reaction().value(0), 0.0, 1.0e-14);
+    GeneralGas::Parameters parameters;
+    parameters.dissolved_one = 2.5;
+    parameters.number_density[0] = 1e10;
+    parameters.molar_one[0] = 1e-3;
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), parameters);
+    EXPECT_FALSE(f.model.initial_state_initialized());
+    f.initialize();
+    EXPECT_TRUE(f.model.initial_state_initialized());
+    EXPECT_EQ(&f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).mesh(), f.grid.get());
+    const double gas_volume = GeneralGas::volume(1e-3, 1e10, 300, 100000, .07);
+    ASSERT_GT(gas_volume, 0);
+    EXPECT_NEAR(f.model.alpha_g().value(0), gas_volume, 1e-14);
+    EXPECT_NEAR(f.model.alpha_l().value(0), 1 - gas_volume, 1e-14);
+    const auto& dissolved = f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved);
+    EXPECT_NEAR(dissolved.value(0) / f.model.alpha_l().value(0), 2.5, 1e-14);
+    EXPECT_NEAR(dissolved.value(0), 2.5 * (1 - gas_volume), 1e-14);
+    EXPECT_FALSE(f.model.species_event_receipt().accepted);
+    EXPECT_DOUBLE_EQ(f.model.source_alpha_reaction().value(0), 0);
+    f.advance(1e-6, 1e-6);
+    EXPECT_NEAR(f.model.alpha_g().value(0), gas_volume, 1e-14);
+    EXPECT_NEAR(f.model.source_alpha_reaction().value(0), 0, 1e-14);
+    EXPECT_DOUBLE_EQ(GeneralGas::step_supply(f.model), 0);
 }
 
-/** @brief Global inventory accessors keep dissolved and bubble H2 distinct. */
+/** @brief Per-species inventory accessors keep dissolved and dispersed compartments distinct. */
 TEST(ReactingGasModelTest, SubmergedInventoryAccessorsResolveBothBubblePopulations)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 2.5;
-    options.initial_micro_number_density = 2.0e8;
-    options.initial_micro_moles = 3.0e-6;
-    options.initial_large_number_density = 4.0e6;
-    options.initial_large_moles = 5.0e-6;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    auto material = make_water_properties(mesh);
-
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-
-    const auto dissolved = global_integral(model.dissolved_hydrogen_inventory());
-    const auto micro = global_integral(model.micro_moles());
-    const auto large = global_integral(model.large_moles());
-    const auto micro_volume = global_integral(model_field(model, "alpha_g_micro"));
-    const auto large_volume = global_integral(model_field(model, "alpha_g_large"));
-
-    EXPECT_DOUBLE_EQ(model.global_dissolved_hydrogen_moles(), dissolved);
-    EXPECT_DOUBLE_EQ(model.global_microbubble_hydrogen_moles(), micro);
-    EXPECT_DOUBLE_EQ(model.global_large_bubble_hydrogen_moles(), large);
-    EXPECT_DOUBLE_EQ(model.global_submerged_bubble_hydrogen_moles(), micro + large);
-    EXPECT_DOUBLE_EQ(model.global_submerged_hydrogen_moles(), dissolved + micro + large);
-    EXPECT_NEAR(model.global_submerged_bubble_volume(), micro_volume + large_volume, 1.0e-15);
+    GeneralGas::Parameters p;
+    p.dissolved_one = 2.5;
+    p.number_density = {2e8, 4e6};
+    p.molar_one = {3e-6, 5e-6};
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    const auto dissolved = GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved);
+    const auto micro = GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+    const auto large = GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large");
+    EXPECT_DOUBLE_EQ(f.model.global_species_moles(GeneralGas::one), dissolved + micro + large);
+    EXPECT_NEAR(micro, 3e-6, 1e-15);
+    EXPECT_NEAR(large, 5e-6, 1e-15);
+    const auto micro_volume = GeneralGas::volume(micro, 2e8, 300, 100000, .07);
+    const auto large_volume = GeneralGas::volume(large, 4e6, 300, 100000, .07);
+    EXPECT_NEAR(f.model.global_submerged_bubble_volume(), micro_volume + large_volume, 1e-15);
+    EXPECT_NEAR(dissolved, 2.5 * (1 - micro_volume - large_volume), 1e-14);
 }
 
 /** @brief Candidate EOS volume responds to pressure and stored temperature. */
 TEST(ReactingGasModelTest, CandidateSubmergedBubbleVolumeRespondsToPressureAndTemperature)
 {
-    auto options = sheng_options();
-    options.initial_micro_number_density = 2.0e8;
-    options.initial_micro_moles = 3.0e-6;
-    options.initial_large_number_density = 4.0e6;
-    options.initial_large_moles = 5.0e-6;
-
-    const auto initialized_volume = [&](double temperature_value)
+    GeneralGas::Parameters p;
+    p.number_density = {2e8, 4e6};
+    p.molar_one = {3e-6, 5e-6};
+    const auto initialized_volume = [&](double temperature)
     {
-        auto mesh = make_single_cell_mesh();
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, temperature_value, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        auto material = make_water_properties(mesh);
-        EXPECT_THROW(model.evaluate_submerged_bubble_volume(options.reference_pressure), std::logic_error);
-        model.initialize_state(0.0, temperature, pressure, velocity, material);
-        const auto accepted = model.global_submerged_bubble_volume();
-        const auto evaluated = model.evaluate_submerged_bubble_volume(options.reference_pressure);
-        EXPECT_NEAR(evaluated, accepted, accepted * 1.0e-11);
-        return std::pair{evaluated, model.evaluate_submerged_bubble_volume(2.0 * options.reference_pressure)};
+        auto selected = p;
+        selected.temperature = temperature;
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), selected);
+        EXPECT_THROW(f.model.evaluate_submerged_bubble_volume(p.pressure), std::logic_error);
+        f.initialize();
+        const auto actual = f.model.evaluate_submerged_bubble_volume(p.pressure);
+        const auto expected = GeneralGas::volume(3e-6, 2e8, temperature, p.pressure, p.sigma) +
+                              GeneralGas::volume(5e-6, 4e6, temperature, p.pressure, p.sigma);
+        EXPECT_NEAR(actual, expected, expected * 1e-11);
+        EXPECT_NEAR(actual, f.model.global_submerged_bubble_volume(), actual * 1e-11);
+        return std::pair{actual, f.model.evaluate_submerged_bubble_volume(2 * p.pressure)};
     };
-
-    const auto [cold_volume, compressed_cold_volume] = initialized_volume(300.0);
-    const auto [hot_volume, compressed_hot_volume] = initialized_volume(360.0);
-    EXPECT_GT(cold_volume, compressed_cold_volume);
-    EXPECT_GT(hot_volume, compressed_hot_volume);
-    EXPECT_GT(hot_volume, cold_volume);
+    const auto [cold, compressed_cold] = initialized_volume(300);
+    const auto [hot, compressed_hot] = initialized_volume(360);
+    EXPECT_GT(cold, compressed_cold);
+    EXPECT_GT(hot, compressed_hot);
+    EXPECT_GT(hot, cold);
 }
 
 /** @brief Dissolved H2 is excluded from every submerged bubble-volume API. */
 TEST(ReactingGasModelTest, DissolvedHydrogenDoesNotOccupyBubbleVolume)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 100.0;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    auto material = make_water_properties(mesh);
-
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-
-    EXPECT_GT(model.global_dissolved_hydrogen_moles(), 0.0);
-    EXPECT_DOUBLE_EQ(model.global_submerged_bubble_hydrogen_moles(), 0.0);
-    EXPECT_DOUBLE_EQ(model.global_submerged_bubble_volume(), 0.0);
-    EXPECT_DOUBLE_EQ(model.evaluate_submerged_bubble_volume(options.reference_pressure), 0.0);
+    GeneralGas::Parameters p;
+    p.dissolved_one = 100;
+    p.dissolved_two = 50;
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved), 0);
+    EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::two, GeneralGas::Phase::Dissolved), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro"), 0);
+    EXPECT_DOUBLE_EQ(f.model.global_submerged_bubble_volume(), 0);
+    EXPECT_DOUBLE_EQ(f.model.evaluate_submerged_bubble_volume(p.pressure), 0);
 }
 
 /**
- * @brief Sheng two-population update conserves the produced hydrogen inventory.
+ * @brief Named external reservoirs conserve both catalogued gas inventories.
  */
 TEST(ReactingGasModelTest, TwoPopulationStepConservesHydrogen)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 1.0e5, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    constexpr double time_step = 1.0e-6;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    const auto statistics = model.last_statistics();
-    EXPECT_NEAR(
-        statistics.hydrogen_produced,
-        options.hydrogen_yield_mol_per_j * 1.0e5 * time_step,
-        1.0e-15);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_hydrogen_produced, statistics.hydrogen_produced);
-    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), statistics.cumulative_hydrogen_produced);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_dissolved_hydrogen_outflow, 0.0);
-    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-14);
-    EXPECT_GT(statistics.hydrogen_after, 0.0);
-    EXPECT_GT(model.alpha_g().value(0), 0.0);
-    EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
-    EXPECT_GE(model.micro_moles().value(0), 0.0);
-
-    model.advance(2.0 * time_step, time_step, temperature, pressure, velocity, flux, material, &power);
-    const auto second = model.last_statistics();
-    EXPECT_DOUBLE_EQ(second.cumulative_hydrogen_produced, statistics.hydrogen_produced + second.hydrogen_produced);
-    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), second.cumulative_hydrogen_produced);
-
-    model.configure(options);
-    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), 0.0);
-    EXPECT_DOUBLE_EQ(model.cumulative_dissolved_hydrogen_outflow(), 0.0);
-    EXPECT_DOUBLE_EQ(model.cumulative_submerged_bubble_hydrogen_escaped(), 0.0);
-    EXPECT_DOUBLE_EQ(model.last_statistics().cumulative_hydrogen_produced, 0.0);
+    GeneralGas::Parameters p;
+    p.reservoir_mol_per_joule = {2e-7, 3e-7};
+    p.nucleate_supplied_gas = true;
+    p.independent_heat_rate = 7;
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.power.put_scalar(1e5);
+    f.initialize();
+    EXPECT_EQ(&f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).mesh(), f.grid.get());
+    const auto initial = f.model.snapshot();
+    constexpr double dt = 1e-6;
+    f.advance(dt, dt);
+    const auto first = f.model.species_histories();
+    for (const auto [species, coefficient] :
+        std::array<std::pair<GeneralGas::R::SpeciesId, double>, 2>{{{GeneralGas::one, 2e-7}, {GeneralGas::two, 3e-7}}})
+    {
+        const double expected = coefficient * 1e5 * dt;
+        const auto& history = GeneralGas::history(f.model, species);
+        EXPECT_NEAR(history.external_supply, expected, 1e-15);
+        EXPECT_DOUBLE_EQ(history.chemical_production, 0);
+        EXPECT_NEAR(history.current_moles, expected, 1e-15);
+        EXPECT_NEAR(history.inventory_error, 0, 1e-14);
+        EXPECT_NEAR(GeneralGas::step_supply(f.model, species), expected, 1e-15);
+        EXPECT_GT(GeneralGas::compartment(f.model, species, GeneralGas::Phase::Dispersed, "micro"), 0);
+    }
+    EXPECT_NEAR(GeneralGas::integral(f.model.thermal_source()), 7, 1e-14);
+    const auto accepted = f.model.species_event_receipt();
+    EXPECT_EQ(accepted.revision, 1u);
+    f.advance(2 * dt, dt);
+    EXPECT_EQ(f.model.species_event_receipt().revision, 2u);
+    EXPECT_NEAR(GeneralGas::history(f.model).external_supply, 2 * 2e-7 * 1e5 * dt, 1e-15);
+    f.model.restore(initial);
+    EXPECT_FALSE(f.model.species_event_receipt().accepted);
+    EXPECT_DOUBLE_EQ(GeneralGas::history(f.model).external_supply, 0);
+    f.advance(dt, dt);
+    EXPECT_EQ(f.model.species_histories(), first);
+    EXPECT_EQ(f.model.species_event_receipt().revision, accepted.revision);
+    EXPECT_GT(f.model.species_event_receipt().publication_nonce, accepted.publication_nonce);
 }
 
 /** Both diffusivity providers route high-Sc transfer and reconstructed K_L through the selected law. */
 TEST(ReactingGasModelTest, HighScSphericalDiffusionUsesSelectedLawAndConservesHydrogen)
 {
-    constexpr double density = 1546.23563;
-    constexpr double viscosity = 0.00243878721;
-    const auto check = [&](bool external, double expected_diffusivity)
+    std::array<double, 2> transfers{};
+    for (std::size_t external = 0; external < 2; ++external)
     {
-        auto mesh = make_single_cell_mesh();
-        auto options = sheng_options();
-        options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::SphericalDiffusion;
-        options.hydrogen_diffusivity = 4.5e-9;
+        GeneralGas::Parameters p;
+        p.temperature = 298.85;
+        p.density = 1546.23563;
+        p.viscosity = .00243878721;
+        p.diffusivity[0] = 4.5e-9;
+        p.dissolved_one = 10;
+        p.number_density[1] = 1e6;
+        p.molar_one[1] = 1e-7;
+        p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::SphericalDiffusion;
         if (external)
-        {
-            options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-            // Fixed external-provider stand-in. Hydra-TF separately tests Winter2022.
-            options.hydrogen_diffusivity_correlation = +[](double) { return 5.1886e-9; };
-        }
-        options.initial_dissolved_hydrogen = 10.0;
-        options.initial_large_number_density = 1.0e6;
-        options.initial_large_moles = 1.0e-7;
-        options.micro_to_large_conversion_coefficient = 0.0;
-        options.microbubble_lifetime = 1.0e9;
-        options.large_bubble_dissolution_time = 1.0e9;
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 298.85, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        FieldType power(mesh, 0.0, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-        material.density.set_owned_value(0, density);
-        material.dynamic_viscosity.set_owned_value(0, viscosity);
-
-        model.initialize_state(0.0, temperature, pressure, velocity, material);
-        const auto initial_radius = model_field(model, "r_large").value(0);
-        ASSERT_GT(initial_radius, 0.0);
-        EXPECT_DOUBLE_EQ(model_field(model, "r_characteristic").value(0), initial_radius);
-        EXPECT_NEAR(model_field(model, "K_L").value(0),
-                    expected_diffusivity / initial_radius,
-                    expected_diffusivity / initial_radius * 1.0e-12);
-        EXPECT_GT(model.evaluate_submerged_bubble_volume(options.reference_pressure), 0.0);
-
-        constexpr double time_step = 1.0e-6;
-        model.advance(time_step, time_step, temperature, pressure, velocity,
-                      flux, material, &power);
-        const auto final_radius = model_field(model, "r_large").value(0);
-        ASSERT_GT(final_radius, 0.0);
-        EXPECT_NEAR(model_field(model, "K_L").value(0),
-                    expected_diffusivity / final_radius,
-                    expected_diffusivity / final_radius * 1.0e-12);
-        EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-12);
-        EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
-        EXPECT_GT(model.large_moles().value(0), 0.0);
-    };
-
-    check(false, 4.5e-9);
-    check(true, 5.1886e-9);
+            p.diffusivity_one = [](const auto&) { return 5.1886e-9; };
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
+        const double before = f.model.global_species_moles(GeneralGas::one);
+        constexpr double dt = 1e-6;
+        const auto observed = GeneralGas::advance_film(f, dt, dt).front();
+        transfers[external] = observed.transfer;
+        ASSERT_GT(observed.transfer, 0);
+        const double D = external ? 5.1886e-9 : 4.5e-9;
+        // D/r film flux independently determines r when the supplied Henry/Laplace law is included.
+        const double inferred =
+            (observed.transfer / (dt * 4 * std::numbers::pi * D * 1e6) + 2 * 1e-5 * p.sigma) / (10 - 1e-5 * p.pressure);
+        const double eos_volume =
+            1e-7 * GeneralGas::gas_constant * p.temperature / (p.pressure + 2 * p.sigma / inferred);
+        const double sphere = 1e6 * 4 * std::numbers::pi * inferred * inferred * inferred / 3;
+        EXPECT_LE(std::abs(sphere - eos_volume), (4e-12 + 128 * std::numeric_limits<double>::epsilon()) * eos_volume);
+        EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), before, 1e-12);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-12);
+    }
+    EXPECT_NEAR(transfers[1] / transfers[0], 5.1886e-9 / 4.5e-9, 128 * std::numeric_limits<double>::epsilon());
 }
 
 /** Finite-slip Feng endpoint selection reaches population kinetics and K_L at high Sc. */
 TEST(ReactingGasModelTest, HighScFengEndpointsTransferAndConserveAtPrescribedSlip)
 {
-    constexpr double density = 1546.23563;
-    constexpr double viscosity = 0.00243878721;
-    constexpr double diffusivity = 4.5e-9;
-    constexpr double slip = 0.0045;
-    const std::array cases{
-        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, 0.322},
-        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, 0.435}};
     std::array<double, 2> coefficients{};
-    for (size_t index = 0; index < cases.size(); ++index)
+    const std::array cases{std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, .322},
+        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, .435}};
+    for (std::size_t index = 0; index < cases.size(); ++index)
     {
         const auto [mode, exponent] = cases[index];
-        auto mesh = make_single_cell_mesh();
-        auto options = sheng_options();
-        options.mass_transfer_mode = mode;
-        options.hydrogen_diffusivity = diffusivity;
-        options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-        options.constant_slip_velocity = slip;
-        options.initial_dissolved_hydrogen = 10.0;
-        options.initial_large_number_density = 1.0e6;
-        // EOS at R=1.2e-4 m, p=1e5 Pa, T=298.85 K, sigma=0.07 N/m.
-        options.initial_large_moles = 0.0002947014976484349;
-        options.micro_to_large_conversion_coefficient = 0.0;
-        options.microbubble_lifetime = 1.0e9;
-        options.large_bubble_dissolution_time = 1.0e9;
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 298.85, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        FieldType power(mesh, 0.0, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-        material.density.set_owned_value(0, density);
-        material.dynamic_viscosity.set_owned_value(0, viscosity);
-
-        model.initialize_state(0.0, temperature, pressure, velocity, material);
-        const auto initial_radius = model_field(model, "r_large").value(0);
-        ASSERT_GT(initial_radius, 0.0);
-        const auto initial_peclet_a = slip * initial_radius / diffusivity;
-        const auto initial_reynolds_d = density * slip * 2.0 * initial_radius / viscosity;
-        ASSERT_GE(initial_peclet_a, 100.0);
-        ASSERT_LE(initial_peclet_a, 5000.0);
-        ASSERT_LT(initial_reynolds_d, 1.0);
-        EXPECT_NEAR(model_field(model, "K_L").value(0),
-            1.49 * std::pow(initial_peclet_a, exponent) * diffusivity / (2.0 * initial_radius),
-            1.0e-12);
-        EXPECT_GT(model.evaluate_submerged_bubble_volume(options.reference_pressure), 0.0);
-
-        const auto before = model.global_submerged_hydrogen_moles();
-        const auto initial_large_moles = model.large_moles().value(0);
-        const auto initial_state = model.snapshot();
-        constexpr double time_step = 1.0e-6;
-        model.advance(time_step, time_step, temperature, pressure, velocity,
-                      flux, material, &power);
-        const auto final_radius = model_field(model, "r_large").value(0);
-        ASSERT_GT(final_radius, 0.0);
-        coefficients[index] = model_field(model, "K_L").value(0);
-        EXPECT_NEAR(coefficients[index],
-            1.49 * std::pow(slip * final_radius / diffusivity, exponent)
-                * diffusivity / (2.0 * final_radius),
-            1.0e-12);
-        EXPECT_GT(model.last_statistics().mass_transfer.evaluations, 0);
-        EXPECT_EQ(model.last_statistics().mass_transfer.minimum.model, mode);
-        EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
-        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
-        EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
-        EXPECT_GT(model.large_moles().value(0), 0.0);
+        GeneralGas::Parameters p;
+        p.temperature = 298.85;
+        p.density = 1546.23563;
+        p.viscosity = .00243878721;
+        p.diffusivity[0] = 4.5e-9;
+        p.dissolved_one = 10;
+        p.number_density[1] = 1e6;
+        p.molar_one[1] = .0002947014976484349;
+        p.controls.mass_transfer_mode = mode;
+        p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+        p.controls.constant_slip_velocity = .0045;
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
+        const auto start = f.model.snapshot();
+        const double before = f.model.global_species_moles(GeneralGas::one);
+        constexpr double dt = 1e-6;
+        const auto observed = GeneralGas::advance_film(f, dt, dt).front();
+        const double pe = .0045 * observed.radius / 4.5e-9, re = 2 * p.density * .0045 * observed.radius / p.viscosity;
+        ASSERT_GE(pe, 100);
+        ASSERT_LE(pe, 5000);
+        ASSERT_LT(re, 1);
+        coefficients[index] = observed.coefficient;
+        EXPECT_NEAR(observed.coefficient, 1.49 * std::pow(pe, exponent) * 4.5e-9 / (2 * observed.radius), 1e-12);
+        EXPECT_GT(observed.transfer, 0);
+        EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), before, 1e-10);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-10);
         if (index == 0)
         {
-            const auto full_large_moles = model.large_moles().value(0);
-            ASSERT_GT(full_large_moles, initial_large_moles);
-            model.restore(initial_state);
-            EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
-            model.advance(time_step / 2.0, time_step / 2.0,
-                          temperature, pressure, velocity, flux, material, &power);
-            EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
-            EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
-            EXPECT_GT(model.large_moles().value(0), 0.0);
-            model.advance(time_step, time_step / 2.0,
-                          temperature, pressure, velocity, flux, material, &power);
-            EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
-            EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
-            EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
-            EXPECT_GT(model.large_moles().value(0), 0.0);
-            // Compare changes, not the much larger initial inventory: the
-            // two schedules should agree within 5% of this step's transfer.
-            const auto transfer = full_large_moles - initial_large_moles;
-            EXPECT_NEAR(model.large_moles().value(0), full_large_moles,
-                        std::max(1.0e-13, 0.05 * transfer));
+            const double full = observed.gas_after;
+            f.model.restore(start);
+            GeneralGas::advance_film(f, dt / 2, dt / 2);
+            GeneralGas::advance_film(f, dt, dt / 2);
+            EXPECT_NEAR(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), full,
+                std::max(1e-13, .05 * observed.transfer));
+            EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), before, 1e-10);
         }
     }
     EXPECT_GT(coefficients[1], coefficients[0]);
@@ -1079,71 +660,37 @@ TEST(ReactingGasModelTest, HighScFengEndpointsTransferAndConserveAtPrescribedSli
 /** The active one-cell path also uses Feng's selected low-Pe Eq. (4) branch. */
 TEST(ReactingGasModelTest, HighScFengLowPecletEndpointsTransferAndConserve)
 {
-    constexpr double density = 1546.23563;
-    constexpr double viscosity = 0.00243878721;
-    constexpr double diffusivity = 4.5e-9;
-    constexpr double slip = 9.375e-6; // Pe_d=0.5 at the initial R=1.2e-4 m.
-    const std::array cases{
-        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, 1.0 / 8.0},
-        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, 1.0 / 12.0}};
     std::array<double, 2> coefficients{};
-    for (size_t index = 0; index < cases.size(); ++index)
+    const std::array cases{std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, 1. / 8},
+        std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, 1. / 12}};
+    for (std::size_t index = 0; index < cases.size(); ++index)
     {
-        const auto [mode, logarithmic_coefficient] = cases[index];
-        auto mesh = make_single_cell_mesh();
-        auto options = sheng_options();
-        options.mass_transfer_mode = mode;
-        options.hydrogen_diffusivity = diffusivity;
-        options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-        options.constant_slip_velocity = slip;
-        options.initial_dissolved_hydrogen = 10.0;
-        options.initial_large_number_density = 1.0e6;
-        options.initial_large_moles = 0.0002947014976484349;
-        options.micro_to_large_conversion_coefficient = 0.0;
-        options.microbubble_lifetime = 1.0e9;
-        options.large_bubble_dissolution_time = 1.0e9;
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 298.85, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        FieldType power(mesh, 0.0, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-        material.density.set_owned_value(0, density);
-        material.dynamic_viscosity.set_owned_value(0, viscosity);
-
-        const auto expected_coefficient = [&](double radius)
-        {
-            const auto peclet_d = 2.0 * slip * radius / diffusivity;
-            return (2.0 + 0.5 * peclet_d
-                    + logarithmic_coefficient * peclet_d * peclet_d * std::log(peclet_d))
-                   * diffusivity / (2.0 * radius);
-        };
-        model.initialize_state(0.0, temperature, pressure, velocity, material);
-        const auto initial_radius = model_field(model, "r_large").value(0);
-        ASSERT_GT(initial_radius, 0.0);
-        const auto initial_peclet_d = 2.0 * slip * initial_radius / diffusivity;
-        ASSERT_GT(initial_peclet_d, 0.0);
-        ASSERT_LT(initial_peclet_d, 1.0);
-        EXPECT_NEAR(initial_peclet_d, 0.5, 1.0e-8);
-        EXPECT_NEAR(model_field(model, "K_L").value(0),
-                    expected_coefficient(initial_radius), 1.0e-12);
-
-        const auto before = model.global_submerged_hydrogen_moles();
-        constexpr double time_step = 1.0e-6;
-        model.advance(time_step, time_step, temperature, pressure, velocity,
-                      flux, material, &power);
-        const auto final_radius = model_field(model, "r_large").value(0);
-        ASSERT_GT(final_radius, 0.0);
-        coefficients[index] = model_field(model, "K_L").value(0);
-        EXPECT_NEAR(coefficients[index], expected_coefficient(final_radius), 1.0e-12);
-        EXPECT_GT(model.last_statistics().mass_transfer.evaluations, 0);
-        EXPECT_EQ(model.last_statistics().mass_transfer.minimum.applicability,
-                  SimpleFluid::BubbleGasPhysics::BubbleMassTransferApplicability::SourceLowPeAsymptotic);
-        EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
-        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1.0e-10);
-        EXPECT_GE(model.dissolved_hydrogen_inventory().value(0), 0.0);
-        EXPECT_GT(model.large_moles().value(0), 0.0);
+        const auto [mode, logarithmic] = cases[index];
+        GeneralGas::Parameters p;
+        p.temperature = 298.85;
+        p.density = 1546.23563;
+        p.viscosity = .00243878721;
+        p.diffusivity[0] = 4.5e-9;
+        p.dissolved_one = 10;
+        p.number_density[1] = 1e6;
+        p.molar_one[1] = .0002947014976484349;
+        p.controls.mass_transfer_mode = mode;
+        p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+        p.controls.constant_slip_velocity = 9.375e-6;
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
+        const double before = f.model.global_species_moles(GeneralGas::one);
+        const auto observed = GeneralGas::advance_film(f, 1e-6, 1e-6).front();
+        const double pe = 2 * 9.375e-6 * observed.radius / 4.5e-9;
+        ASSERT_GT(pe, 0);
+        ASSERT_LT(pe, 1);
+        EXPECT_NEAR(pe, .5, 1e-8);
+        coefficients[index] = observed.coefficient;
+        EXPECT_NEAR(observed.coefficient,
+            (2 + .5 * pe + logarithmic * pe * pe * std::log(pe)) * 4.5e-9 / (2 * observed.radius), 1e-12);
+        EXPECT_GT(observed.transfer, 0);
+        EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), before, 1e-10);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-10);
     }
     EXPECT_GT(coefficients[1], coefficients[0]);
 }
@@ -1151,178 +698,115 @@ TEST(ReactingGasModelTest, HighScFengLowPecletEndpointsTransferAndConserve)
 /** One selected law must retain the local Pe regime in every active field cell. */
 TEST(ReactingGasModelTest, FengFieldSelectionKeepsBothPecletRegimesCellLocal)
 {
-    constexpr double density = 1546.23563;
-    constexpr double viscosity = 0.00243878721;
-    constexpr double slip = 0.0045;
-    constexpr double fit_diffusivity = 4.5e-9;
-    constexpr double low_peclet_diffusivity = 2.0e-6;
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_two_hex_database());
-    auto options = sheng_options();
-    options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid;
-    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-    // Separate the source-supported Pe branches without changing the chosen law.
-    options.hydrogen_diffusivity_correlation = +[](double temperature)
+    GeneralGas::Parameters p;
+    p.temperature = 298.85;
+    p.density = 1546.23563;
+    p.viscosity = .00243878721;
+    p.diffusivity_one = [](const auto& c) { return c.environment.temperature < 299 ? 4.5e-9 : 2e-6; };
+    p.dissolved_one = 10;
+    p.number_density[1] = 1e6;
+    p.molar_one[1] = .0002947014976484349;
+    p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = .0045;
+    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    f.temperature.set_owned_value(1, 300);
+    f.temperature.sync_ghosts();
+    f.initialize();
+    const double before = f.model.global_species_moles(GeneralGas::one);
+    const auto values = GeneralGas::advance_film(f, 1e-6, 1e-6);
+    ASSERT_EQ(values.size(), 2u);
+    for (std::size_t row = 0; row < values.size(); ++row)
     {
-        return temperature < 299.0 ? 4.5e-9 : 2.0e-6;
-    };
-    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = slip;
-    options.initial_dissolved_hydrogen = 10.0;
-    options.initial_large_number_density = 1.0e6;
-    options.initial_large_moles = 0.0002947014976484349;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    options.microbubble_lifetime = 1.0e9;
-    options.large_bubble_dissolution_time = 1.0e9;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 298.85, "temperature");
-    temperature.set_owned_value(1, 300.0);
-    temperature.sync_ghosts();
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
-        material.density.set_owned_value(cell, density);
-        material.dynamic_viscosity.set_owned_value(cell, viscosity);
+        const double D = row == 0 ? 4.5e-9 : 2e-6, r = values[row].radius, pe = 2 * .0045 * r / D;
+        EXPECT_LT(2 * p.density * .0045 * r / p.viscosity, 1);
+        double expected = 0;
+        if (row == 0)
+        {
+            EXPECT_GE(pe / 2, 100);
+            EXPECT_LE(pe / 2, 5000);
+            expected = 1.49 * std::pow(pe / 2, .322) * D / (2 * r);
+        }
+        else
+        {
+            EXPECT_GT(pe, 0);
+            EXPECT_LT(pe, 1);
+            expected = (2 + .5 * pe + .125 * pe * pe * std::log(pe)) * D / (2 * r);
+        }
+        EXPECT_NEAR(values[row].coefficient, expected, expected * 1e-11);
+        EXPECT_GT(values[row].transfer, 0);
     }
-    material.density.sync_ghosts();
-    material.dynamic_viscosity.sync_ghosts();
-
-    const auto expected_coefficient = [&](size_t owned, double radius)
-    {
-        const auto diffusivity = owned == 0 ? fit_diffusivity : low_peclet_diffusivity;
-        const auto peclet_d = 2.0 * slip * radius / diffusivity;
-        const auto reynolds_d = 2.0 * density * slip * radius / viscosity;
-        EXPECT_LT(reynolds_d, 1.0);
-        if (owned == 0)
-        {
-            EXPECT_GE(peclet_d / 2.0, 100.0);
-            EXPECT_LE(peclet_d / 2.0, 5000.0);
-            return 1.49 * std::pow(peclet_d / 2.0, 0.322)
-                * diffusivity / (2.0 * radius);
-        }
-        EXPECT_GE(peclet_d, 0.0);
-        EXPECT_LT(peclet_d, 1.0);
-        const auto sherwood = 2.0 + 0.5 * peclet_d
-            + 0.125 * peclet_d * peclet_d * std::log(peclet_d);
-        return sherwood * diffusivity / (2.0 * radius);
-    };
-    const auto check_coefficients = [&]
-    {
-        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
-            const auto radius = model_field(model, "r_large").value(cell);
-            ASSERT_GT(radius, 0.0);
-            EXPECT_DOUBLE_EQ(model_field(model, "r_characteristic").value(cell), radius);
-            const auto expected = expected_coefficient(owned, radius);
-            EXPECT_NEAR(model_field(model, "K_L").value(cell), expected,
-                        expected * 1.0e-11);
-        }
-    };
-
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-    check_coefficients();
-    const auto hydrogen_before = model.global_submerged_hydrogen_moles();
-    constexpr double time_step = 1.0e-6;
-    model.advance(time_step, time_step, temperature, pressure, velocity,
-                  flux, material, &power);
-    check_coefficients();
-    const auto& transfer = model.last_statistics().mass_transfer;
-    EXPECT_EQ(transfer.evaluations, 2);
-    EXPECT_EQ(transfer.low_peclet_evaluations, 1);
-    EXPECT_EQ(transfer.fit_evaluations, 1);
-    EXPECT_EQ(transfer.minimum.model, options.mass_transfer_mode);
-    EXPECT_EQ(transfer.minimum.applicability,
-              SimpleFluid::BubbleGasPhysics::BubbleMassTransferApplicability::MixedSourceRegimes);
-    EXPECT_NEAR(model.global_submerged_hydrogen_moles(), hydrogen_before, 1.0e-10);
-    EXPECT_NEAR(model.last_statistics().inventory_error, 0.0, 1.0e-10);
+    EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), before, 1e-10);
+    EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-10);
 }
 
 TEST(ReactingGasModelTest, SnapshotRestoresEveryInventoryAndCumulativeLedger)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 1.0e5, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-    const auto accepted = model.snapshot();
-    const auto initial_inventory = model.global_submerged_hydrogen_moles();
-
-    constexpr double time_step = 1.0e-6;
-    model.advance(time_step, time_step, temperature, pressure, velocity, flux, material, &power);
-    ASSERT_GT(model.cumulative_hydrogen_produced(), 0.0);
-    ASSERT_GT(model.global_submerged_hydrogen_moles(), initial_inventory);
-
-    model.restore(accepted);
-    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), 0.0);
-    EXPECT_DOUBLE_EQ(model.cumulative_dissolved_hydrogen_outflow(), 0.0);
-    EXPECT_DOUBLE_EQ(model.cumulative_submerged_bubble_hydrogen_escaped(), 0.0);
-    EXPECT_DOUBLE_EQ(model.global_submerged_hydrogen_moles(), initial_inventory);
-    EXPECT_TRUE(model.initial_state_initialized());
+    auto p = GeneralGas::populated();
+    p.reservoir_mol_per_joule = {2e-7, 3e-7};
+    p.nucleate_supplied_gas = true;
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.power.put_scalar(1e5);
+    f.initialize();
+    const auto checkpoint = f.model.snapshot();
+    const auto histories = f.model.species_histories();
+    const auto receipt = f.model.species_event_receipt();
+    std::map<std::string, std::vector<double>> fields;
+    for (const auto& [name, field] : f.model.output_fields())
+        for (std::size_t row = 0; row < f.grid->num_local_cells(); ++row)
+            fields[name].push_back(field->local_value(static_cast<Pack::local_ordinal_type>(row)));
+    f.advance(1e-6, 1e-6);
+    EXPECT_GT(GeneralGas::history(f.model).external_supply, 0);
+    f.model.restore(checkpoint);
+    EXPECT_EQ(f.model.species_histories(), histories);
+    EXPECT_EQ(f.model.species_event_receipt(), receipt);
+    for (const auto& [name, values] : fields)
+        for (std::size_t row = 0; row < values.size(); ++row)
+            EXPECT_DOUBLE_EQ(
+                f.model.output_fields().at(name)->local_value(static_cast<Pack::local_ordinal_type>(row)), values[row]);
+    EXPECT_TRUE(f.model.initial_state_initialized());
 }
 
 /** @brief Sheng transport runs directly on MeshHandle/FieldStored storage. */
 TEST(ReactingGasModelTest, NativeTwoPopulationStepConservesHydrogen)
 {
-    using Handle = SimpleFluid::MeshHandle<Pack>;
-    auto cartesian =
-        std::make_shared<SimpleFluid::Meshes::OrthogonalCartesian3D>(
-            SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
-                {0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0}}});
-    auto mesh = std::make_shared<Handle>(std::move(cartesian));
-    auto options = sheng_options();
-    SimpleFluid::ReactingGasModel<Pack, Handle> model(mesh, options);
-    SimpleFluid::ScalarCellFieldStored<Pack> temperature(
-        mesh, 300.0, "temperature");
-    SimpleFluid::ScalarCellFieldStored<Pack> pressure(
-        mesh, 0.0, "pressure");
-    SimpleFluid::ScalarCellFieldStored<Pack> power(
-        mesh, 1.0e5, "qdot_external");
-    SimpleFluid::VectorCellFieldStored<Pack> velocity(
-        mesh, Handle::Vec3{}, "velocity");
-    SimpleFluid::ScalarFaceFieldStored<Pack> flux(
-        mesh, 0.0, "flux");
-    SimpleFluid::TimeStepperOptions time_options;
-    SimpleFluid::BoussinesqModelOptions material_options;
-    material_options.reference_density = 1000.0;
-    material_options.density = 1000.0;
-    material_options.specific_heat_capacity = 4200.0;
-    material_options.dynamic_viscosity = 1.0e-3;
-    material_options.thermal_conductivity = 0.6;
-    SimpleFluid::MaterialPropertyFields<Pack, Handle> material(
-        mesh, material_options, time_options);
-
-    constexpr double time_step = 1.0e-6;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    const auto& statistics = model.last_statistics();
-    EXPECT_FALSE(mesh->legacy_mesh());
-    EXPECT_EQ(model.alpha_g().mesh_ptr(), mesh);
-    EXPECT_NEAR(
-        statistics.hydrogen_produced,
-        options.hydrogen_yield_mol_per_j * 1.0e5 * time_step,
-        1.0e-15);
-    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-14);
-    EXPECT_GT(statistics.hydrogen_after, 0.0);
-    EXPECT_GT(model.alpha_g().value(0), 0.0);
+    GeneralGas::Parameters p;
+    p.reservoir_mol_per_joule = {2e-7, 3e-7};
+    p.nucleate_supplied_gas = true;
+    p.independent_heat_rate = 7;
+    GeneralGas::Fixture<ALEMeshType> f(make_ale_single_cell_column(), p);
+    f.power.put_scalar(1e5);
+    f.initialize();
+    EXPECT_EQ(&f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).mesh(), f.grid.get());
+    const auto initial = f.model.snapshot();
+    constexpr double dt = 1e-6;
+    f.advance(dt, dt);
+    const auto first = f.model.species_histories();
+    for (const auto [species, coefficient] :
+        std::array<std::pair<GeneralGas::R::SpeciesId, double>, 2>{{{GeneralGas::one, 2e-7}, {GeneralGas::two, 3e-7}}})
+    {
+        const double expected = coefficient * 1e5 * dt;
+        const auto& history = GeneralGas::history(f.model, species);
+        EXPECT_NEAR(history.external_supply, expected, 1e-15);
+        EXPECT_DOUBLE_EQ(history.chemical_production, 0);
+        EXPECT_NEAR(history.current_moles, expected, 1e-15);
+        EXPECT_NEAR(history.inventory_error, 0, 1e-14);
+        EXPECT_NEAR(GeneralGas::step_supply(f.model, species), expected, 1e-15);
+        EXPECT_GT(GeneralGas::compartment(f.model, species, GeneralGas::Phase::Dispersed, "micro"), 0);
+    }
+    EXPECT_NEAR(GeneralGas::integral(f.model.thermal_source()), 7, 1e-14);
+    const auto accepted = f.model.species_event_receipt();
+    EXPECT_EQ(accepted.revision, 1u);
+    f.advance(2 * dt, dt);
+    EXPECT_EQ(f.model.species_event_receipt().revision, 2u);
+    EXPECT_NEAR(GeneralGas::history(f.model).external_supply, 2 * 2e-7 * 1e5 * dt, 1e-15);
+    f.model.restore(initial);
+    EXPECT_FALSE(f.model.species_event_receipt().accepted);
+    EXPECT_DOUBLE_EQ(GeneralGas::history(f.model).external_supply, 0);
+    f.advance(dt, dt);
+    EXPECT_EQ(f.model.species_histories(), first);
+    EXPECT_EQ(f.model.species_event_receipt().revision, accepted.revision);
+    EXPECT_GT(f.model.species_event_receipt().publication_nonce, accepted.publication_nonce);
 }
 
 /**
@@ -1330,182 +814,131 @@ TEST(ReactingGasModelTest, NativeTwoPopulationStepConservesHydrogen)
  */
 TEST(ReactingGasModelTest, MicrobubbleDecayIsAnalyticAndConservative)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 1.0e-6;
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    constexpr double time_step = 5.0e-6;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    const auto retention =
-        std::exp(-time_step / options.microbubble_lifetime);
-    EXPECT_NEAR(
-        model.micro_number_density().value(0),
-        options.initial_micro_number_density * retention,
-        options.initial_micro_number_density * 1.0e-12);
-    EXPECT_NEAR(
-        model.micro_moles().value(0),
-        options.initial_micro_moles * retention,
-        1.0e-16);
-    EXPECT_NEAR(
-        model.dissolved_hydrogen_inventory().value(0)
-          + model.micro_moles().value(0),
-        options.initial_micro_moles,
-        1.0e-15);
+    GeneralGas::Parameters p;
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 1e-6;
+    p.micro_decay_time = 1e-5;
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    constexpr double dt = 5e-6;
+    f.advance(dt, dt);
+    const double retention = std::exp(-dt / *p.micro_decay_time);
+    EXPECT_NEAR(f.model.population_number_field("micro").value(0), 1e10 * retention, 1e10 * 1e-12);
+    EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0),
+        1e-6 * retention, 1e-16);
+    EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).value(0) +
+                    f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0),
+        1e-6, 1e-15);
+    EXPECT_DOUBLE_EQ(GeneralGas::history(f.model).external_supply, 0);
+    EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-15);
 }
 
-/** @brief Captured local state for analytic kinetics and fallback comparisons. */
-struct LocalKineticsSnapshot
-{
-    std::array<double, 5> state;
-    double initial_inventory, initial_liquid_fraction, initial_donor, dissolution_rate, donor;
-    SimpleFluid::ReactingGasStepStatistics<double> statistics;
-};
-
-/** @brief Advance one closed, isothermal cell with an independently specified source. */
-LocalKineticsSnapshot local_kinetics_snapshot(
-    const SimpleFluid::ReactingGasOptions& options, double dt, double power_value)
-{
-    auto mesh = make_single_cell_mesh();
-    ReactingModelType model(mesh, options);
-    model.enable_donor_hydrogen_deficit_tracking();
-    FieldType temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure"),
-        power(mesh, power_value, "power");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-    const auto initial_inventory = model.dissolved_hydrogen_inventory().value(0);
-    const auto initial_liquid_fraction = model.alpha_l().value(0);
-    const auto initial_donor = model.donor_hydrogen_deficit().value(0);
-    model.advance(dt, dt, temperature, pressure, velocity, flux, material, &power);
-    return {{model.dissolved_hydrogen_inventory().value(0), model.micro_number_density().value(0),
-                model.micro_moles().value(0), model.large_number_density().value(0), model.large_moles().value(0)},
-        initial_inventory, initial_liquid_fraction, initial_donor, model_field(model, "H2_dissolution_rate").value(0),
-        model.donor_hydrogen_deficit().value(0), model.last_statistics()};
-}
-
-/** @brief Direct C++ configuration rejects invalid integration policies. */
+/** Supplied kinetic metadata validates before any numerical event. */
 TEST(ReactingGasModelTest, RejectsUnknownKineticsMode)
 {
-    auto options = sheng_options();
-    options.kinetics_mode = static_cast<SimpleFluid::ReactingKineticsMode>(-1);
-    EXPECT_THROW(ReactingModelType(make_single_cell_mesh(), options), std::invalid_argument);
+    GeneralGas::Parameters p;
+    SimpleFluid::Database retired;
+    retired.set("reacting_kinetics_mode", std::string("exactInactive"));
+    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(retired), std::invalid_argument);
+    p.micro_decay_time = 0;
+    EXPECT_THROW((void) GeneralGas::options(p), std::invalid_argument);
 }
 
 /** @brief Continuous production/decay is exact across small and very large lifetime ratios. */
 TEST(ReactingGasModelTest, ExactInactiveMatchesContinuousProductionAndDecay)
 {
-    for (const double lifetime : {1.e-5, 5.e9, 1.e-300, std::numeric_limits<double>::denorm_min()})
+    for (const double lifetime : {1e-5, 5e9, 1e-300, std::numeric_limits<double>::denorm_min()})
     {
         SCOPED_TRACE(lifetime);
-        auto options = sheng_options();
-        options.kinetics_mode = SimpleFluid::ReactingKineticsMode::ExactInactive;
-        options.microbubble_lifetime = lifetime;
-        options.initial_micro_number_density = 2.e8;
-        options.initial_micro_moles = 3.e-6;
-        constexpr double dt = 0.005, power = 1.e5;
-        const auto result = local_kinetics_snapshot(options, dt, power);
-        const long double source = options.gas_release_efficiency * options.hydrogen_yield_mol_per_j * power;
-        const long double x = static_cast<long double>(dt) / lifetime;
-        const long double retention = std::exp(-x);
-        const long double source_moles = source * lifetime * (-std::expm1(-x));
-        const long double expected_moles = options.initial_micro_moles * retention + source_moles;
-        const long double radius = options.nucleation_radius;
-        const long double nucleation_moles = 4.L * std::acos(-1.L) / 3.L
-            * (options.reference_pressure * radius * radius * radius
-                + 2.L * options.surface_tension * radius * radius) / (options.gas_constant * 300.L);
-        const long double expected_number = options.initial_micro_number_density * retention
-            + source_moles / nucleation_moles;
-        // Integrate the positive decay flux; a series oracle preserves its tiny
-        // contribution when direct subtraction of total minus gas would cancel.
-        const long double source_decay = x < 1.e-3L
-            ? source * dt * (x / 2.L - x * x / 6.L + x * x * x / 24.L)
-            : source * dt - source_moles;
-        const long double expected_dissolved = options.initial_micro_moles * (-std::expm1(-x)) + source_decay;
-        EXPECT_NEAR(result.state[2], expected_moles,
-            std::max(1.e-315, static_cast<double>(expected_moles) * 2.e-12));
-        EXPECT_NEAR(result.state[1], expected_number,
-            std::max(1.e-290, static_cast<double>(expected_number) * 2.e-12));
-        EXPECT_NEAR(result.state[0] - result.initial_inventory, expected_dissolved,
-            std::max(1.e-30, static_cast<double>(expected_dissolved) * 2.e-12));
-        EXPECT_NEAR(result.dissolution_rate * dt, expected_dissolved,
-            std::max(1.e-30, static_cast<double>(expected_dissolved) * 2.e-12));
-        EXPECT_EQ(result.statistics.maximum_subcycles, 1);
-        EXPECT_DOUBLE_EQ(result.state[3], 0.0);
-        EXPECT_DOUBLE_EQ(result.state[4], 0.0);
-        EXPECT_NEAR(result.donor - result.initial_donor, source * dt, 1.e-18);
-        EXPECT_NEAR(result.statistics.inventory_error, 0.0, 1.e-18);
-        EXPECT_NEAR(result.statistics.donor_inventory_error, 0.0, 1.e-18);
+        GeneralGas::Parameters p;
+        p.micro_decay_time = lifetime;
+        p.number_density[0] = 2e8;
+        p.molar_one[0] = 3e-6;
+        p.reservoir_mol_per_joule[0] = 2e-7;
+        p.nucleate_supplied_gas = true;
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.power.put_scalar(1e5);
+        f.initialize();
+        const auto checkpoint = f.model.snapshot();
+        constexpr double dt = .005;
+        if (lifetime == std::numeric_limits<double>::denorm_min())
+        {
+            // Positive gas survival is below double representation: no count-only ghost phase.
+            const auto histories = f.model.species_histories();
+            EXPECT_THROW(f.advance(dt, dt), std::exception);
+            EXPECT_EQ(f.model.species_histories(), histories);
+            f.model.restore(checkpoint);
+            EXPECT_DOUBLE_EQ(f.model.population_number_field("micro").value(0), 2e8);
+            continue;
+        }
+        f.advance(dt, dt);
+        const long double source = 2e-7L * 1e5L, x = static_cast<long double>(dt) / lifetime;
+        const long double retained = source * lifetime * (-std::expm1(-x));
+        const long double gas = 3e-6L * std::exp(-x) + retained;
+        const long double r = p.nucleation_radius;
+        const long double per_bubble = 4 * std::numbers::pi_v<long double> / 3 *
+                                       (p.pressure * r * r * r + 2 * p.sigma * r * r) /
+                                       (GeneralGas::gas_constant * 300.L);
+        const long double count = 2e8L * std::exp(-x) + retained / per_bubble;
+        const long double source_decay =
+            x < 1e-3L ? source * dt * (x / 2 - x * x / 6 + x * x * x / 24) : source * dt - retained;
+        const long double dissolved = 3e-6L * (-std::expm1(-x)) + source_decay;
+        EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0), gas,
+            std::max(1e-315, static_cast<double>(gas) * 2e-12));
+        EXPECT_NEAR(f.model.population_number_field("micro").value(0), count,
+            std::max(1e-290, static_cast<double>(count) * 2e-12));
+        EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).value(0), dissolved,
+            std::max(1e-30, static_cast<double>(dissolved) * 2e-12));
+        EXPECT_NEAR(GeneralGas::history(f.model).external_supply, 2e-7 * 1e5 * dt, 1e-15);
     }
 }
 
 /** @brief Zero and negative prescribed_heat power retain only conservative initial-population decay. */
 TEST(ReactingGasModelTest, ExactInactiveDecaysInitialPopulationWithoutPositivePower)
 {
-    auto options = sheng_options();
-    options.kinetics_mode = SimpleFluid::ReactingKineticsMode::ExactInactive;
-    options.initial_micro_number_density = 2.e8;
-    options.initial_micro_moles = 3.e-6;
-    constexpr double dt = 3.e-6;
-    for (const auto power : {0.0, -1.e5})
+    for (const double power : {0., -1e5})
     {
-        const auto result = local_kinetics_snapshot(options, dt, power);
-        const auto retention = std::exp(-dt / options.microbubble_lifetime);
-        EXPECT_NEAR(result.state[2], options.initial_micro_moles * retention, 1.e-18);
-        EXPECT_NEAR(result.state[1], options.initial_micro_number_density * retention, 1.e-5);
-        EXPECT_NEAR(result.state[0], options.initial_micro_moles * (1.0 - retention), 1.e-18);
-        EXPECT_EQ(result.statistics.maximum_subcycles, 1);
-        EXPECT_DOUBLE_EQ(result.donor, result.initial_donor);
-        EXPECT_DOUBLE_EQ(result.statistics.hydrogen_produced, 0.0);
-        EXPECT_NEAR(result.statistics.inventory_error, 0.0, 1.e-18);
+        GeneralGas::Parameters p;
+        p.micro_decay_time = .01;
+        p.number_density[0] = 2e8;
+        p.molar_one[0] = 3e-6;
+        p.reservoir_mol_per_joule[0] = 2e-7;
+        p.nucleate_supplied_gas = true;
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.power.put_scalar(power);
+        f.initialize();
+        f.advance(.005, .005);
+        const auto retention = std::exp(-.5);
+        EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").value(0),
+            3e-6 * retention, 3e-6 * 2e-12);
+        EXPECT_NEAR(f.model.population_number_field("micro").value(0), 2e8 * retention, 2e8 * 2e-12);
+        EXPECT_DOUBLE_EQ(GeneralGas::history(f.model).external_supply, 0);
     }
 }
 
 /** @brief Crossing, saturated and populated-large states preserve the legacy local update exactly. */
 TEST(ReactingGasModelTest, ExactInactiveFallsBackAtConversionOrExistingLargePopulation)
 {
-    for (int scenario = 0; scenario < 5; ++scenario)
+    // Specialized dispatch is retired. The same supplied conservative operator
+    // must handle active conversion and existing large bins without losing categories.
+    for (const bool conversion : {false, true})
     {
-        SCOPED_TRACE(scenario);
-        auto options = sheng_options();
-        const auto critical = critical_concentration(options, options.reference_pressure, 300.0);
-        if (scenario < 2)
-            options.initial_dissolved_hydrogen = critical * (scenario == 0 ? 0.999999 : 1.0);
-        else
-        {
-            // Either member being nonzero disables the exact branch, even
-            // if the other member is zero or the number is below its floor.
-            options.initial_large_number_density = scenario == 3 ? 0.0 : 1.e-41;
-            options.initial_large_moles = scenario == 2 ? 0.0 : 1.e-20;
-        }
-        constexpr double dt = 0.005, power = 1.e6;
-        const auto legacy = local_kinetics_snapshot(options, dt, power);
-        options.kinetics_mode = SimpleFluid::ReactingKineticsMode::ExactInactive;
-        const auto exact = local_kinetics_snapshot(options, dt, power);
-        EXPECT_EQ(exact.state, legacy.state);
-        EXPECT_DOUBLE_EQ(exact.dissolution_rate, legacy.dissolution_rate);
-        EXPECT_EQ(exact.statistics.maximum_subcycles, legacy.statistics.maximum_subcycles);
-        EXPECT_GT(exact.statistics.maximum_subcycles, 1);
-        EXPECT_DOUBLE_EQ(exact.statistics.inventory_error, legacy.statistics.inventory_error);
-        if (scenario == 0)
-            EXPECT_GT(exact.state[3], 0.0);
+        auto p = GeneralGas::populated();
+        p.micro_decay_time = .01;
+        p.micro_conversion_frequency = conversion ? 2 : 0;
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
+        const auto before_one = f.model.global_species_moles(GeneralGas::one);
+        const auto before_two = f.model.global_species_moles(GeneralGas::two);
+        f.advance(.001, .001);
+        // Conversion and dissolution are internal transfers; prescribed slip
+        // still removes the exact material recorded by accepted escape events.
+        EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one) + GeneralGas::step_escape(f.model, GeneralGas::one),
+            before_one, 1e-14);
+        EXPECT_NEAR(f.model.global_species_moles(GeneralGas::two) + GeneralGas::step_escape(f.model, GeneralGas::two),
+            before_two, 1e-14);
+        EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), 0);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-14);
     }
 }
 
@@ -1514,51 +947,28 @@ TEST(ReactingGasModelTest, ExactInactiveFallsBackAtConversionOrExistingLargePopu
  */
 TEST(ReactingGasModelTest, MicroToLargeConversionConservesCategories)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 1.0e3;
-    options.initial_micro_number_density = 1.0e8;
-    options.initial_micro_moles = 1.0e-8;
-    options.microbubble_lifetime = 1.0e9;
-    options.large_bubble_dissolution_time = 1.0e9;
-    options.micro_to_large_conversion_coefficient = 1.0e-8;
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    const auto total_number_before =
-        model.micro_number_density().value(0)
-      + model.large_number_density().value(0);
-    const auto total_moles_before =
-        model.micro_moles().value(0)
-      + model.large_moles().value(0);
-    model.advance(
-        1.0e-7,
-        1.0e-7,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    EXPECT_LT(
-        model.micro_number_density().value(0),
-        options.initial_micro_number_density);
-    EXPECT_GT(model.large_number_density().value(0), 0.0);
-    EXPECT_NEAR(
-        model.micro_number_density().value(0)
-      + model.large_number_density().value(0),
-        total_number_before,
-        total_number_before * 1.0e-12);
-    EXPECT_NEAR(
-        model.micro_moles().value(0) + model.large_moles().value(0),
-        total_moles_before,
-        total_moles_before * 1.0e-10);
+    GeneralGas::Parameters p;
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 1e-6;
+    p.molar_two[0] = 2e-6;
+    p.micro_conversion_frequency = 10;
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    constexpr double dt = 1e-6;
+    f.advance(dt, dt);
+    const double converted = -std::expm1(-10 * dt);
+    for (const auto [id, initial] :
+        std::array<std::pair<GeneralGas::R::SpeciesId, double>, 2>{{{GeneralGas::one, 1e-6}, {GeneralGas::two, 2e-6}}})
+    {
+        EXPECT_NEAR(
+            GeneralGas::compartment(f.model, id, GeneralGas::Phase::Dispersed, "large"), initial * converted, 1e-16);
+        EXPECT_NEAR(f.model.global_species_moles(id), initial, 1e-15);
+        EXPECT_NEAR(GeneralGas::history(f.model, id).inventory_error, 0, 1e-15);
+    }
+    EXPECT_NEAR(GeneralGas::integral(f.model.population_number_field("large")), 1e10 * converted, 1e10 * 1e-12);
+    EXPECT_NEAR(GeneralGas::integral(f.model.population_number_field("micro")) +
+                    GeneralGas::integral(f.model.population_number_field("large")),
+        1e10, 1e10 * 1e-12);
 }
 
 /**
@@ -1566,52 +976,27 @@ TEST(ReactingGasModelTest, MicroToLargeConversionConservesCategories)
  */
 TEST(ReactingGasModelTest, LargeBubbleGrowthAndDissolutionFollowSaturation)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 1.0e3;
-    options.initial_large_number_density = 1.0e6;
-    options.initial_large_moles = 1.0e-7;
-    options.large_bubble_dissolution_time = 1.0e9;
-    SimpleFluid::ReactingGasModel<Pack> saturated(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    saturated.advance(
-        1.0e-6,
-        1.0e-6,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    EXPECT_GT(saturated.large_moles().value(0), 1.0e-7);
-    EXPECT_GT(saturated.alpha_g().value(0), 0.0);
-    EXPECT_NEAR(
-        saturated.large_number_density().value(0),
-        options.initial_large_number_density,
-        options.initial_large_number_density * 1.0e-12);
-
-    options.initial_dissolved_hydrogen = 0.0;
-    options.large_bubble_dissolution_time = 1.0e-5;
-    SimpleFluid::ReactingGasModel<Pack> undersaturated(mesh, options);
-    undersaturated.advance(
-        1.0e-6,
-        1.0e-6,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    EXPECT_LT(undersaturated.large_moles().value(0), 1.0e-7);
+    GeneralGas::Parameters p;
+    p.dissolved_one = 1e3;
+    p.number_density[1] = 1e6;
+    p.molar_one[1] = 1e-7;
+    p.diffusivity[0] = 1e-8;
+    p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::Hughmark;
+    GeneralGas::Fixture<MeshType> saturated(make_single_cell_mesh(), p);
+    saturated.initialize();
+    const auto growth = GeneralGas::advance_film(saturated, 1e-6, 1e-6).front();
+    EXPECT_GT(growth.transfer, 0);
+    EXPECT_GT(growth.gas_after, 1e-7);
+    EXPECT_NEAR(growth.count_after, 1e6, 1e6 * 1e-12);
+    p.dissolved_one = 0;
+    p.controls.large_dissolution_frequency = 1e5;
+    GeneralGas::Fixture<MeshType> undersaturated(make_single_cell_mesh(), p);
+    undersaturated.initialize();
+    undersaturated.advance(1e-6, 1e-6);
     EXPECT_LT(
-        undersaturated.large_number_density().value(0),
-        options.initial_large_number_density);
+        GeneralGas::compartment(undersaturated.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), 1e-7);
+    EXPECT_LT(GeneralGas::integral(undersaturated.model.population_number_field("large")), 1e6);
+    EXPECT_NEAR(GeneralGas::history(undersaturated.model).inventory_error, 0, 1e-14);
 }
 
 /**
@@ -1619,68 +1004,36 @@ TEST(ReactingGasModelTest, LargeBubbleGrowthAndDissolutionFollowSaturation)
  */
 TEST(ReactingGasModelTest, PrescribedPressureHistoryInterpolates)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = ideal_options();
-    options.pressure_mode =
-        SimpleFluid::ReactingPressureMode::PrescribedHistory;
-    options.pressure_history_times = {0.0, 1.0};
-    options.pressure_history_values = {1.0e5, 2.0e5};
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 8.0e4, "pressure");
-    FieldType power(mesh, 1.0, "qdot_external");
-    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    model.advance(
-        0.5, 0.1, temperature, pressure, velocity, flux, material,
-        &power, authoritative_alpha, options.alpha_max);
-    EXPECT_DOUBLE_EQ(model.absolute_pressure().value(0), 1.5e5);
+    GeneralGas::Parameters p;
+    p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::PrescribedHistory;
+    p.controls.pressure_history_times = {0, 1};
+    p.controls.pressure_history_values = {1e5, 2e5};
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.pressure.put_scalar(8e4);
+    f.initialize();
+    f.advance(.5, .1);
+    EXPECT_DOUBLE_EQ(f.model.absolute_pressure().value(0), 1.5e5);
+    EXPECT_THROW(f.model.set_absolute_pressure_offset(2e5), std::logic_error);
 }
 
 /**
  * @brief Reconstructed pressure uses the solver's gauge variation in Pa.
  */
-TEST(ReactingGasModelTest,
-     ReconstructedPressureUsesPascalGaugeVariation)
+TEST(ReactingGasModelTest, ReconstructedPressureUsesPascalGaugeVariation)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_two_hex_database());
-    ASSERT_EQ(mesh->num_owned_cells(), 2U);
-
-    auto options = ideal_options();
-    options.pressure_mode =
-        SimpleFluid::ReactingPressureMode::Reconstructed;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    pressure.set_owned_value(0, -1000.0);
-    pressure.set_owned_value(1, 1000.0);
-    pressure.sync_ghosts();
-    FieldType power(mesh, 0.0, "qdot_external");
-    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    material.initialize_density(800.0);
-    ASSERT_DOUBLE_EQ(material.density.value(0), 800.0);
-
-    model.advance(
-        0.1,
-        0.1,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power,
-        authoritative_alpha,
-        options.alpha_max);
-
-    EXPECT_NEAR(model.absolute_pressure().value(0), 9.9e4, 1.0e-10);
-    EXPECT_NEAR(model.absolute_pressure().value(1), 1.01e5, 1.0e-10);
+    GeneralGas::Parameters p;
+    p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
+    p.density = 800;
+    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    ASSERT_EQ(f.grid->num_owned_cells(), 2u);
+    f.pressure.set_owned_value(0, -1000);
+    f.pressure.set_owned_value(1, 1000);
+    f.pressure.sync_ghosts();
+    f.initialize();
+    f.advance(.1, .1);
+    EXPECT_DOUBLE_EQ(f.material.density.value(0), 800);
+    EXPECT_NEAR(f.model.absolute_pressure().value(0), 9.9e4, 1e-10);
+    EXPECT_NEAR(f.model.absolute_pressure().value(1), 1.01e5, 1e-10);
 }
 
 /**
@@ -1690,43 +1043,35 @@ TEST(ReactingGasModelTest,
  * a zero-gauge free surface has the prescribed headspace pressure only when
  * the externally owned offset is `p_headspace + mean(p_gauge)`.
  */
-TEST(ReactingGasModelTest,
-     ReconstructedOffsetIncludingGaugeMeanMatchesZeroGaugeTopPressure)
+TEST(ReactingGasModelTest, ReconstructedOffsetIncludingGaugeMeanMatchesZeroGaugeTopPressure)
 {
     auto geometry = std::make_shared<ALEMeshType::Cartesian>(
-        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
-            {0.0, 1.0}, {0.0, 1.0}, {0.0, 0.25, 1.0}}});
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 0.25, 1.0}}});
     auto mesh = std::make_shared<ALEMeshType>(std::move(geometry));
     ASSERT_EQ(mesh->num_owned_cells(), 2U);
 
-    auto options = ideal_options();
-    options.pressure_mode =
-        SimpleFluid::ReactingPressureMode::Reconstructed;
+    auto options = GeneralGas::options();
+    options.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
     ALEReactingModelType model(mesh, options);
     ALEFieldType temperature(mesh, 300.0, "temperature");
     ALEFieldType gauge_pressure(mesh, 0.0, "pressure");
     ALEFieldType power(mesh, 0.0, "qdot_external");
     ALEFieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
-    ALEVelocityFieldType velocity(
-        mesh, ALEMeshType::Vec3{}, "velocity");
+    ALEVelocityFieldType velocity(mesh, ALEMeshType::Vec3{}, "velocity");
     ALEFaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_ale_water_properties(mesh);
 
     Pack::local_ordinal_type top_cell = 0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        if (mesh->cell_centroid(cell_lid).z
-            > mesh->cell_centroid(top_cell).z)
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
+        if (mesh->cell_centroid(cell_lid).z > mesh->cell_centroid(top_cell).z)
         {
             top_cell = cell_lid;
         }
     }
     const auto bottom_cell =
-        top_cell == Pack::local_ordinal_type{0}
-            ? Pack::local_ordinal_type{1}
-            : Pack::local_ordinal_type{0};
+        top_cell == Pack::local_ordinal_type{0} ? Pack::local_ordinal_type{1} : Pack::local_ordinal_type{0};
     gauge_pressure.set_owned_value(bottom_cell, 4000.0);
     gauge_pressure.set_owned_value(top_cell, 0.0);
     gauge_pressure.sync_ghosts();
@@ -1735,415 +1080,189 @@ TEST(ReactingGasModelTest,
     double volume = 0.0;
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
+        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
         const auto cell_volume = mesh->cell_volume(cell_lid);
-        pressure_volume +=
-            gauge_pressure.value(cell_lid) * cell_volume;
+        pressure_volume += gauge_pressure.value(cell_lid) * cell_volume;
         volume += cell_volume;
     }
     const auto gauge_mean = pressure_volume / volume;
     ASSERT_DOUBLE_EQ(gauge_mean, 1000.0);
 
     constexpr double headspace_pressure = 125000.0;
-    model.set_absolute_pressure_offset(
-        headspace_pressure + gauge_mean);
-    model.advance(
-        0.1,
-        0.1,
-        temperature,
-        gauge_pressure,
-        velocity,
-        flux,
-        material,
-        &power,
-        authoritative_alpha,
-        options.alpha_max);
+    model.set_absolute_pressure_offset(headspace_pressure + gauge_mean);
+    model.initialize_state(0.0, temperature, gauge_pressure, velocity, material);
+    model.advance(0.1, 0.1, temperature, gauge_pressure, velocity, flux, material);
 
-    EXPECT_NEAR(
-        model.absolute_pressure().value(top_cell),
-        headspace_pressure,
-        1.0e-10);
-    EXPECT_NEAR(
-        model.absolute_pressure().value(bottom_cell),
-        headspace_pressure + 4000.0,
-        1.0e-10);
+    EXPECT_NEAR(model.absolute_pressure().value(top_cell), headspace_pressure, 1.0e-10);
+    EXPECT_NEAR(model.absolute_pressure().value(bottom_cell), headspace_pressure + 4000.0, 1.0e-10);
 }
 
 /** @brief Coupled pressure offsets preserve reconstructed gauge variations. */
 TEST(ReactingGasModelTest, AbsolutePressureOffsetSetterShiftsPublishedPressure)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    auto options = ideal_options();
-    options.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    pressure.set_owned_value(0, -1000.0);
-    pressure.set_owned_value(1, 1000.0);
-    pressure.sync_ghosts();
-    FieldType power(mesh, 0.0, "qdot_external");
-    FieldType authoritative_alpha(mesh, 0.0, "authoritative_alpha_g");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    model.advance(
-        0.1, 0.1, temperature, pressure, velocity, flux, material, &power, authoritative_alpha, options.alpha_max);
-
-    ASSERT_DOUBLE_EQ(model.absolute_pressure_offset(), options.reference_pressure);
-    const auto old_variation = model.absolute_pressure().value(1) - model.absolute_pressure().value(0);
-    model.set_absolute_pressure_offset(2.0e5);
-    EXPECT_DOUBLE_EQ(model.absolute_pressure_offset(), 2.0e5);
-    EXPECT_NEAR(model.absolute_pressure().value(0), 1.99e5, 1.0e-10);
-    EXPECT_NEAR(model.absolute_pressure().value(1), 2.01e5, 1.0e-10);
-    EXPECT_DOUBLE_EQ(model.absolute_pressure().value(1) - model.absolute_pressure().value(0), old_variation);
-
-    model.advance(
-        0.2, 0.1, temperature, pressure, velocity, flux, material, &power, authoritative_alpha, options.alpha_max);
-    EXPECT_NEAR(model.absolute_pressure().value(0), 1.99e5, 1.0e-10);
-    EXPECT_NEAR(model.absolute_pressure().value(1), 2.01e5, 1.0e-10);
-    EXPECT_THROW(model.set_absolute_pressure_offset(std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
-    EXPECT_THROW(model.set_absolute_pressure_offset(0.5), std::invalid_argument);
-
-    auto prescribed_options = ideal_options();
-    prescribed_options.pressure_mode = SimpleFluid::ReactingPressureMode::PrescribedHistory;
-    prescribed_options.pressure_history_times = {0.0, 1.0};
-    prescribed_options.pressure_history_values = {1.0e5, 1.0e5};
-    ReactingModelType prescribed(mesh, prescribed_options);
-    EXPECT_THROW(prescribed.set_absolute_pressure_offset(2.0e5), std::logic_error);
-    EXPECT_THROW(prescribed.minimum_valid_absolute_pressure_offset(), std::logic_error);
-
-    auto inertial_options = ideal_options();
-    inertial_options.pressure_mode = SimpleFluid::ReactingPressureMode::Inertial;
-    ReactingModelType inertial(mesh, inertial_options);
-    EXPECT_THROW(inertial.set_absolute_pressure_offset(2.0e5), std::logic_error);
-    EXPECT_THROW(inertial.minimum_valid_absolute_pressure_offset(), std::logic_error);
+    GeneralGas::Parameters p;
+    p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
+    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    f.pressure.set_owned_value(0, -1000);
+    f.pressure.set_owned_value(1, 1000);
+    f.pressure.sync_ghosts();
+    f.initialize();
+    f.advance(.1, .1);
+    EXPECT_DOUBLE_EQ(f.model.absolute_pressure_offset(), 1e5);
+    const double variation = f.model.absolute_pressure().value(1) - f.model.absolute_pressure().value(0);
+    const auto receipt = f.model.species_event_receipt();
+    const auto histories = f.model.species_histories();
+    f.model.set_absolute_pressure_offset(2e5);
+    EXPECT_DOUBLE_EQ(f.model.absolute_pressure_offset(), 2e5);
+    EXPECT_NEAR(f.model.absolute_pressure().value(0), 1.99e5, 1e-10);
+    EXPECT_NEAR(f.model.absolute_pressure().value(1), 2.01e5, 1e-10);
+    EXPECT_DOUBLE_EQ(f.model.absolute_pressure().value(1) - f.model.absolute_pressure().value(0), variation);
+    EXPECT_EQ(f.model.species_event_receipt(), receipt);
+    EXPECT_EQ(f.model.species_histories(), histories);
+    f.advance(.2, .1);
+    EXPECT_NEAR(f.model.absolute_pressure().value(0), 1.99e5, 1e-10);
+    EXPECT_NEAR(f.model.absolute_pressure().value(1), 2.01e5, 1e-10);
+    EXPECT_THROW(f.model.set_absolute_pressure_offset(std::numeric_limits<double>::quiet_NaN()), std::invalid_argument);
+    EXPECT_THROW(f.model.set_absolute_pressure_offset(.5), std::invalid_argument);
+    auto prescribed = p;
+    prescribed.controls.pressure_mode = SimpleFluid::ReactingPressureMode::PrescribedHistory;
+    prescribed.controls.pressure_history_times = {0, 1};
+    prescribed.controls.pressure_history_values = {1e5, 1e5};
+    ReactingModelType external(f.grid, GeneralGas::options(prescribed));
+    EXPECT_THROW(external.set_absolute_pressure_offset(2e5), std::logic_error);
+    EXPECT_THROW(external.minimum_valid_absolute_pressure_offset(), std::logic_error);
 }
 
 /** @brief Accepted offsets rebuild every pressure-dependent bubble field. */
 TEST(ReactingGasModelTest, ReconstructedOffsetRefreshesTwoPopulationDiagnostics)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database());
-    auto options = sheng_options();
-    options.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
-    options.minimum_absolute_pressure = 5.0e4;
-    options.alpha_max = 5.0e-5;
-    options.initial_micro_number_density = 2.0e8;
-    options.initial_micro_moles = 3.0e-6;
-    options.initial_large_number_density = 4.0e6;
-    options.initial_large_moles = 5.0e-6;
-    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 0.1;
-    options.free_surface_patches = {"zmax"};
-    options.microbubble_lifetime = 1.0e30;
-    options.large_bubble_dissolution_time = 1.0e30;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 330.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    pressure.set_owned_value(0, -1000.0);
-    pressure.set_owned_value(1, 1000.0);
-    pressure.sync_ghosts();
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-    model.advance(0.01, 0.01, temperature, pressure, velocity, flux, material, &power);
-
-    EXPECT_NEAR(model.minimum_valid_absolute_pressure_offset(), options.minimum_absolute_pressure + 1000.0, 1.0e-10);
-    EXPECT_THROW(model.evaluate_submerged_bubble_volume(5.05e4), std::invalid_argument);
-
-    const auto micro_moles_before = model.global_microbubble_hydrogen_moles();
-    const auto large_moles_before = model.global_large_bubble_hydrogen_moles();
-    const auto escaped_before = model.last_statistics().cumulative_hydrogen_escaped;
-    const auto count_escaped_before = model.last_statistics().cumulative_escaped_bubble_count;
-    const auto bubble_hydrogen_escaped_before = model.cumulative_submerged_bubble_hydrogen_escaped();
-    ASSERT_GT(escaped_before, 0.0);
-    ASSERT_GT(count_escaped_before, 0.0);
-    ASSERT_GT(bubble_hydrogen_escaped_before, 0.0);
-    const auto old_micro_radius = model_field(model, "r_micro").value(0);
-    const auto old_large_radius = model_field(model, "r_large").value(0);
-    const auto old_critical_concentration = model_field(model, "C_H2_crit").value(0);
-    constexpr double accepted_offset = 2.0e5;
-    const auto candidate_raw_volume = model.evaluate_submerged_bubble_volume(accepted_offset);
-
-    model.set_absolute_pressure_offset(accepted_offset);
-
-    EXPECT_DOUBLE_EQ(model.global_microbubble_hydrogen_moles(), micro_moles_before);
-    EXPECT_DOUBLE_EQ(model.global_large_bubble_hydrogen_moles(), large_moles_before);
-    EXPECT_DOUBLE_EQ(model.last_statistics().cumulative_hydrogen_escaped, escaped_before);
-    EXPECT_DOUBLE_EQ(model.last_statistics().cumulative_escaped_bubble_count, count_escaped_before);
-    EXPECT_DOUBLE_EQ(model.cumulative_submerged_bubble_hydrogen_escaped(), bubble_hydrogen_escaped_before);
-    EXPECT_NEAR(model.global_submerged_bubble_volume(), candidate_raw_volume, candidate_raw_volume * 1.0e-11);
-    EXPECT_LT(model_field(model, "r_micro").value(0), old_micro_radius);
-    EXPECT_LT(model_field(model, "r_large").value(0), old_large_radius);
-    EXPECT_NE(model_field(model, "C_H2_crit").value(0), old_critical_concentration);
-
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    GeneralGas::Parameters p;
+    p.temperature = 330;
+    p.number_density = {2e8, 4e6};
+    p.molar_one = {3e-6, 5e-6};
+    p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
+    p.controls.minimum_absolute_pressure = 5e4;
+    p.controls.alpha_max = 5e-5;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = .1;
+    p.controls.free_surface_patches = {"zmax"};
+    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    f.pressure.set_owned_value(0, -1000);
+    f.pressure.set_owned_value(1, 1000);
+    f.pressure.sync_ghosts();
+    f.initialize();
+    f.advance(.01, .01);
+    EXPECT_NEAR(f.model.minimum_valid_absolute_pressure_offset(), 51000, 1e-10);
+    EXPECT_THROW(f.model.evaluate_submerged_bubble_volume(50500), std::invalid_argument);
+    const auto histories = f.model.species_histories();
+    const auto receipt = f.model.species_event_receipt();
+    const auto old_volume = f.model.global_submerged_bubble_volume();
+    EXPECT_GT(GeneralGas::history(f.model).physical_outflow, 0);
+    const auto proposed = f.model.evaluate_submerged_bubble_volume(2e5);
+    f.model.set_absolute_pressure_offset(2e5);
+    EXPECT_EQ(f.model.species_histories(), histories);
+    EXPECT_EQ(f.model.species_event_receipt(), receipt);
+    EXPECT_NEAR(f.model.global_submerged_bubble_volume(), proposed, proposed * 1e-11);
+    EXPECT_LT(proposed, old_volume);
+    double expected_volume = 0;
+    for (std::size_t row = 0; row < f.grid->num_owned_cells(); ++row)
     {
-        const auto cell_lid = static_cast<Pack::local_ordinal_type>(owned);
-        const auto raw = model_field(model, "alpha_g_raw").value(cell_lid);
-        const auto component_sum =
-            model_field(model, "alpha_g_micro").value(cell_lid) + model_field(model, "alpha_g_large").value(cell_lid);
-        const auto bounded = model.alpha_g().value(cell_lid);
-        EXPECT_NEAR(raw, component_sum, std::abs(raw) * 1.0e-13);
-        EXPECT_DOUBLE_EQ(bounded, std::clamp(raw, options.alpha_min, options.alpha_max));
-        EXPECT_DOUBLE_EQ(model.alpha_l().value(cell_lid), 1.0 - bounded);
-        EXPECT_DOUBLE_EQ(model_field(model, "alpha_g_excess").value(cell_lid), std::max(raw - bounded, 0.0));
+        const auto cell = static_cast<Pack::local_ordinal_type>(row);
+        const double cv = f.grid->cell_volume(cell);
+        for (const auto& bin : f.model.options().population_ids)
+        {
+            const auto count = f.model.population_number_field(bin).value(cell) * cv;
+            const auto n = f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, bin).value(cell) * cv;
+            expected_volume += GeneralGas::volume(n, count, 330, f.model.absolute_pressure().value(cell), p.sigma);
+        }
+        // Reference CV is not a phase-occupancy closure: actual liquid mass is retained on pressure refresh.
+        EXPECT_NEAR(f.model.alpha_l().value(cell), f.model.liquid_mass_density().value(cell) / p.density, 1e-13);
     }
-    EXPECT_NEAR(model.last_statistics().void_volume, global_integral(model.alpha_g()), 1.0e-15);
+    EXPECT_NEAR(proposed, expected_volume, std::abs(expected_volume) * 1e-13);
 }
 
 /**
  * @brief ALE-relative top escape is exact and rollback-safe for either motion.
  */
-TEST(ReactingGasModelTest,
-     MovingTopRelativeEscapeIsExactForStationaryExpansionAndContraction)
+TEST(ReactingGasModelTest, MovingTopRelativeEscapeIsExactForStationaryExpansionAndContraction)
 {
-    struct Observation
+    constexpr double dt = .25;
+    for (const double target : {1., 1.2, .8})
     {
-        double micro_moles = 0.0;
-        double large_moles = 0.0;
-        double raw_bubble_volume = 0.0;
-        ALEReactingModelType::statistics_type statistics;
-    };
-
-    constexpr double time_step = 0.25;
-    constexpr std::array<double, 3> target_elevations{
-        1.0, 1.2, 0.8};
-    for (const auto target_elevation : target_elevations)
-    {
-        SCOPED_TRACE(
-            "target_elevation=" + std::to_string(target_elevation));
-        auto mesh = make_ale_single_cell_column();
-        const auto options = ale_escape_options();
-        ALEReactingModelType model(mesh, options);
-        ALEFieldType temperature(mesh, 300.0, "temperature");
-        ALEFieldType pressure(mesh, 0.0, "pressure");
-        ALEFieldType power(mesh, 0.0, "qdot_external");
-        ALEVelocityFieldType velocity(
-            mesh, ALEMeshType::Vec3{}, "velocity");
-        auto material = make_ale_water_properties(mesh);
-        model.initialize_state(
-            0.0, temperature, pressure, velocity, material);
-
-        ASSERT_EQ(mesh->num_owned_cells(), 1U);
-        std::vector<Pack::local_ordinal_type> top_faces;
-        for (const auto& [batch_id, batch] : mesh->boundary_batches())
-        {
-            if (mesh->boundary_batch_name(batch_id) == "zmax")
+        SCOPED_TRACE(target);
+        auto p = GeneralGas::populated();
+        GeneralGas::Fixture<ALEMeshType> f(make_ale_single_cell_column(), p);
+        f.initialize();
+        const auto checkpoint = f.model.snapshot();
+        const auto original_histories = f.model.species_histories();
+        const double initial_volume = f.model.global_submerged_bubble_volume();
+        std::array<double, 2> initial_moles{
+            GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro"),
+            GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large")};
+        const double initial_dissolved =
+            GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved);
+        ALEMotionType motion(f.grid);
+        Pack::local_ordinal_type top = -1;
+        for (const auto& [id, batch] : f.grid->boundary_batches())
+            if (f.grid->boundary_batch_name(id) == "zmax")
             {
-                top_faces = batch.face_lids;
-                break;
+                ASSERT_EQ(batch.face_lids.size(), 1u);
+                top = batch.face_lids.front();
             }
-        }
-        ASSERT_EQ(top_faces.size(), 1U);
-        const auto top_face = top_faces.front();
-        ASSERT_TRUE(mesh->is_owned_face(top_face));
-        const auto top_area = mesh->face_area(top_face);
-        ASSERT_DOUBLE_EQ(top_area, 1.0);
-
-        const auto initial_micro_moles =
-            model.global_microbubble_hydrogen_moles();
-        const auto initial_large_moles =
-            model.global_large_bubble_hydrogen_moles();
-        const auto initial_dissolved_moles =
-            model.global_dissolved_hydrogen_moles();
-        const auto initial_raw_bubble_volume =
-            model.global_submerged_bubble_volume();
-        ASSERT_GT(initial_micro_moles, 0.0);
-        ASSERT_GT(initial_large_moles, 0.0);
-        ASSERT_GT(initial_dissolved_moles, 0.0);
-        ASSERT_GT(initial_raw_bubble_volume, 0.0);
+        ASSERT_GE(top, 0);
+        EXPECT_DOUBLE_EQ(f.grid->face_area(top), 1);
+        const double factor = target / (target + dt * .4);
+        const auto run = [&]
         {
-            auto dissolved_free_options = options;
-            dissolved_free_options.initial_dissolved_hydrogen = 0.0;
-            ALEReactingModelType dissolved_free_model(
-                mesh, dissolved_free_options);
-            dissolved_free_model.initialize_state(
-                0.0, temperature, pressure, velocity, material);
-            EXPECT_DOUBLE_EQ(
-                dissolved_free_model.global_dissolved_hydrogen_moles(),
-                0.0);
-            EXPECT_DOUBLE_EQ(
-                dissolved_free_model.global_submerged_bubble_volume(),
-                initial_raw_bubble_volume);
-        }
-        const auto accepted = model.snapshot();
-        ALEMotionType motion(mesh);
-
-        const auto volume_factor =
-            target_elevation
-            / (target_elevation
-               + time_step * options.constant_slip_velocity * top_area);
-        const auto expected_micro_moles =
-            initial_micro_moles * volume_factor;
-        const auto expected_large_moles =
-            initial_large_moles * volume_factor;
-        const auto expected_micro_escape =
-            initial_micro_moles - expected_micro_moles;
-        const auto expected_large_escape =
-            initial_large_moles - expected_large_moles;
-        const auto expected_bubble_escape =
-            expected_micro_escape + expected_large_escape;
-        auto run_trial = [&]() -> Observation
-        {
-            motion.begin_trial(target_elevation, time_step);
-            const auto ale =
-                SimpleFluid::FVM::make_ale_control_volume_state(
-                    *mesh, motion);
-            EXPECT_DOUBLE_EQ(ale.old_cell_volumes()[0], 1.0);
-            EXPECT_DOUBLE_EQ(
-                ale.new_cell_volumes()[0], target_elevation);
-
-            ALEFaceFieldType absolute_flux(
-                mesh, 0.0, "absolute_liquid_flux");
-            for (const auto face_lid : absolute_flux.owned_face_ids())
+            motion.begin_trial(target, dt);
+            const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*f.grid, motion);
+            EXPECT_DOUBLE_EQ(ale.old_cell_volumes()[0], 1);
+            EXPECT_DOUBLE_EQ(ale.new_cell_volumes()[0], target);
+            ALEFaceFieldType absolute(f.grid, 0., "absolute"), relative(f.grid, 0., "relative");
+            for (const auto face : absolute.owned_face_ids())
+                absolute.set_owned_value(face, ale.face_mesh_fluxes()[static_cast<std::size_t>(face)]);
+            absolute.sync_ghosts();
+            SimpleFluid::FVM::mesh_relative_face_fluxes(absolute, ale, relative);
+            EXPECT_DOUBLE_EQ(relative.value(top), 0);
+            f.model.refresh_geometry();
+            f.model.advance(
+                dt, dt, f.temperature, f.pressure, f.velocity, relative, f.material, &ale, SimpleFluid::Dimension::Z);
+            for (std::size_t bin = 0; bin < 2; ++bin)
             {
-                absolute_flux.set_owned_value(
-                    face_lid,
-                    ale.face_mesh_fluxes()[static_cast<size_t>(face_lid)]);
+                const auto name = bin == 0 ? "micro" : "large";
+                EXPECT_NEAR(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, name),
+                    initial_moles[bin] * factor, 2e-18);
+                double escaped = 0;
+                for (const auto& e : f.model.physical_escape_events())
+                    if (e.species == GeneralGas::one && e.population == name)
+                        escaped += e.moles;
+                EXPECT_NEAR(escaped, initial_moles[bin] * (1 - factor), 2e-18);
+                EXPECT_NEAR(GeneralGas::number_escape(f.model, name), p.number_density[bin] * (1 - factor), 1e-2);
             }
-            absolute_flux.sync_ghosts();
-            ALEFaceFieldType relative_flux(
-                mesh, 0.0, "relative_liquid_flux");
-            SimpleFluid::FVM::mesh_relative_face_fluxes(
-                absolute_flux, ale, relative_flux);
-            EXPECT_DOUBLE_EQ(relative_flux.value(top_face), 0.0);
-
-            ALEFaceFieldType slip_volume_flux(
-                mesh, 0.0, "bubble_slip_volume_flux");
-            model.bubble_slip_volume_flux(
-                temperature,
-                material,
-                SimpleFluid::Dimension::Z,
-                slip_volume_flux);
-            const auto owner = mesh->owner_cell(top_face);
-            const auto expected_slip_volume_flux =
-                options.constant_slip_velocity * top_area
-                * (model.raw_microbubble_volume_fraction().value(owner)
-                   + model.raw_large_bubble_volume_fraction().value(owner));
-            EXPECT_NEAR(
-                slip_volume_flux.value(top_face),
-                expected_slip_volume_flux,
-                std::max(1.0e-20,
-                    std::abs(expected_slip_volume_flux) * 1.0e-13));
-
-            model.refresh_geometry();
-            model.advance(
-                time_step,
-                time_step,
-                temperature,
-                pressure,
-                velocity,
-                relative_flux,
-                material,
-                &power,
-                &ale,
-                SimpleFluid::Dimension::Z);
-
-            const auto& statistics = model.last_statistics();
-            const auto expected_transport_slip_volume_flux =
-                options.constant_slip_velocity * top_area *
-                model.transported_raw_bubble_volume_fraction().value(owner);
-            EXPECT_NEAR(
-                model.transported_bubble_slip_volume_flux().value(top_face),
-                expected_transport_slip_volume_flux,
-                std::max(1.0e-20,
-                    std::abs(expected_transport_slip_volume_flux) * 1.0e-12));
-            EXPECT_DOUBLE_EQ(
-                model.transported_bubble_carrier_volume_flux().value(top_face),
-                0.0);
-            EXPECT_NEAR(
-                model.global_microbubble_hydrogen_moles(),
-                expected_micro_moles,
-                2.0e-18);
-            EXPECT_NEAR(
-                statistics.microbubble_hydrogen_escaped,
-                expected_micro_escape,
-                2.0e-18);
-            EXPECT_NEAR(
-                statistics.large_bubble_hydrogen_escaped,
-                expected_large_escape,
-                2.0e-18);
-            EXPECT_NEAR(
-                statistics.submerged_bubble_hydrogen_escaped,
-                expected_bubble_escape,
-                3.0e-18);
-            EXPECT_NEAR(
-                statistics.dissolved_hydrogen_outflow, 0.0, 5.0e-17);
-            EXPECT_NEAR(
-                statistics.cumulative_submerged_bubble_hydrogen_escaped,
-                expected_bubble_escape,
-                3.0e-18);
-            EXPECT_NEAR(
-                model.cumulative_submerged_bubble_hydrogen_escaped(),
-                expected_bubble_escape,
-                3.0e-18);
-            EXPECT_NEAR(
-                statistics.cumulative_hydrogen_escaped,
-                statistics.cumulative_dissolved_hydrogen_outflow
-                    + statistics.cumulative_submerged_bubble_hydrogen_escaped,
-                1.0e-20);
-            EXPECT_NEAR(statistics.inventory_error, 0.0, 5.0e-14);
-
-            const auto& escape_rate =
-                *model.output_fields().at("H2_escape_molar_rate");
-            EXPECT_NEAR(
-                time_step * global_ale_integral(escape_rate),
-                expected_bubble_escape,
-                3.0e-18);
-            EXPECT_NEAR(
-                model.global_submerged_bubble_volume(),
-                global_ale_integral(
-                    model.raw_microbubble_volume_fraction())
-                    + global_ale_integral(
-                        model.raw_large_bubble_volume_fraction()),
-                1.0e-20);
-
-            return {
-                model.global_microbubble_hydrogen_moles(),
-                model.global_large_bubble_hydrogen_moles(),
-                model.global_submerged_bubble_volume(),
-                statistics};
+            EXPECT_NEAR(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved),
+                initial_dissolved, 5e-17);
+            const double escaped = GeneralGas::step_escape(f.model, GeneralGas::one, true);
+            EXPECT_NEAR(escaped, (initial_moles[0] + initial_moles[1]) * (1 - factor), 3e-18);
+            EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 5e-14);
+            EXPECT_NEAR(f.model.global_submerged_bubble_volume(), initial_volume * factor,
+                std::max(1e-20, std::abs(initial_volume * factor) * 2e-8));
+            EXPECT_NEAR(f.model.transported_bubble_slip_volume_flux().value(top), .4 * initial_volume * factor / target,
+                std::max(1e-20, std::abs(.4 * initial_volume * factor / target) * 1e-12));
+            EXPECT_DOUBLE_EQ(f.model.transported_bubble_carrier_volume_flux().value(top), 0);
+            return f.model.species_histories();
         };
-
-        const auto first = run_trial();
-        model.restore(accepted);
+        const auto first = run();
+        f.model.restore(checkpoint);
         motion.rollback_trial();
-        model.refresh_geometry();
+        f.model.refresh_geometry();
+        EXPECT_EQ(f.model.species_histories(), original_histories);
         EXPECT_DOUBLE_EQ(
-            model.global_microbubble_hydrogen_moles(),
-            initial_micro_moles);
-        EXPECT_DOUBLE_EQ(
-            model.global_large_bubble_hydrogen_moles(),
-            initial_large_moles);
-        EXPECT_DOUBLE_EQ(
-            model.global_dissolved_hydrogen_moles(),
-            initial_dissolved_moles);
-        EXPECT_DOUBLE_EQ(
-            model.global_submerged_bubble_volume(),
-            initial_raw_bubble_volume);
-        EXPECT_DOUBLE_EQ(
-            model.cumulative_submerged_bubble_hydrogen_escaped(), 0.0);
-
-        const auto repeated = run_trial();
-        EXPECT_NEAR(repeated.micro_moles, first.micro_moles, 2.0e-18);
-        EXPECT_NEAR(repeated.large_moles, first.large_moles, 2.0e-18);
-        EXPECT_NEAR(
-            repeated.raw_bubble_volume,
-            first.raw_bubble_volume,
-            std::max(1.0e-20,
-                std::abs(first.raw_bubble_volume) * 2.0e-8));
-        EXPECT_NEAR(
-            repeated.statistics.cumulative_submerged_bubble_hydrogen_escaped,
-            expected_bubble_escape,
-            3.0e-18);
-
-        model.restore(accepted);
+            GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro"), initial_moles[0]);
+        const auto repeated = run();
+        EXPECT_EQ(repeated, first);
+        f.model.restore(checkpoint);
         motion.rollback_trial();
-        model.refresh_geometry();
+        f.model.refresh_geometry();
     }
 }
 
@@ -2152,267 +1271,154 @@ TEST(ReactingGasModelTest,
  */
 TEST(ReactingGasModelTest, FreeSurfaceEscapeAccumulatesGlobally)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 1.0e-6;
-    options.rise_velocity_mode =
-        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 10.0;
-    options.free_surface_patches = {"zmax"};
-    options.microbubble_lifetime = 1.0e30;
-    options.large_bubble_dissolution_time = 1.0e30;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    constexpr double time_step = 0.1;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    const auto first = model.last_statistics();
-    EXPECT_NEAR(first.hydrogen_escaped, 5.0e-7, 1.0e-14);
-    EXPECT_DOUBLE_EQ(first.dissolved_hydrogen_outflow, 0.0);
-    EXPECT_NEAR(first.microbubble_hydrogen_escaped, first.hydrogen_escaped, 1.0e-14);
-    EXPECT_DOUBLE_EQ(first.large_bubble_hydrogen_escaped, 0.0);
-    EXPECT_NEAR(first.submerged_bubble_hydrogen_escaped, first.hydrogen_escaped, 1.0e-14);
-    EXPECT_NEAR(first.escaped_bubble_count, 5.0e9, 1.0e-2);
-    EXPECT_NEAR(first.escaped_microbubble_count, first.escaped_bubble_count, 1.0e-2);
-    EXPECT_DOUBLE_EQ(first.escaped_large_bubble_count, 0.0);
+    GeneralGas::Parameters p;
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 1e-6;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = 10;
+    p.controls.free_surface_patches = {"zmax"};
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    const auto start = f.model.snapshot();
+    constexpr double dt = .1;
+    f.advance(dt, dt);
+    EXPECT_NEAR(GeneralGas::step_escape(f.model), 5e-7, 1e-14);
+    EXPECT_NEAR(GeneralGas::step_escape(f.model, GeneralGas::one, true), 5e-7, 1e-14);
+    EXPECT_NEAR(GeneralGas::number_escape(f.model, "micro"), 5e9, 1e-2);
+    EXPECT_DOUBLE_EQ(GeneralGas::number_escape(f.model, "large"), 0);
+    EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one) + GeneralGas::step_escape(f.model), 1e-6, 1e-14);
     EXPECT_NEAR(
-        first.hydrogen_after + first.hydrogen_escaped,
-        first.hydrogen_before + first.hydrogen_produced,
-        1.0e-14);
-    EXPECT_NEAR(first.inventory_error, 0.0, 1.0e-14);
-    EXPECT_NEAR(
-        time_step
-          * global_integral(
-              model_field(model, "H2_escape_molar_rate")),
-        first.hydrogen_escaped,
-        1.0e-14);
-    EXPECT_NEAR(
-        time_step
-          * global_integral(
-              model_field(model, "bubble_escape_number_rate")),
-        first.escaped_bubble_count,
-        1.0e-2);
-    EXPECT_DOUBLE_EQ(
-        first.cumulative_hydrogen_escaped,
-        first.hydrogen_escaped);
-    EXPECT_DOUBLE_EQ(first.cumulative_submerged_bubble_hydrogen_escaped, first.submerged_bubble_hydrogen_escaped);
-    EXPECT_DOUBLE_EQ(first.cumulative_hydrogen_escaped,
-        first.cumulative_dissolved_hydrogen_outflow + first.cumulative_submerged_bubble_hydrogen_escaped);
-    EXPECT_DOUBLE_EQ(model.cumulative_submerged_bubble_hydrogen_escaped(), first.submerged_bubble_hydrogen_escaped);
-
-    model.advance(
-        2.0 * time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    const auto second = model.last_statistics();
-    EXPECT_LT(model.source_alpha_reaction().value(0), 0.0);
-    EXPECT_NEAR(
-        second.cumulative_hydrogen_escaped,
-        first.cumulative_hydrogen_escaped + second.hydrogen_escaped,
-        1.0e-14);
-    EXPECT_NEAR(
-        second.cumulative_escaped_bubble_count,
-        first.cumulative_escaped_bubble_count
-          + second.escaped_bubble_count,
-        1.0e-2);
-    EXPECT_DOUBLE_EQ(second.cumulative_submerged_bubble_hydrogen_escaped,
-        first.submerged_bubble_hydrogen_escaped + second.submerged_bubble_hydrogen_escaped);
-    EXPECT_DOUBLE_EQ(
-        model.cumulative_submerged_bubble_hydrogen_escaped(), second.cumulative_submerged_bubble_hydrogen_escaped);
+        GeneralGas::integral(f.model.population_number_field("micro")) + GeneralGas::number_escape(f.model, "micro"),
+        1e10, 1e-2);
+    const auto first = f.model.population_escape_receipt();
+    const double first_molar = GeneralGas::step_escape(f.model);
+    EXPECT_EQ(first.event, f.model.species_event_receipt());
+    f.advance(2 * dt, dt);
+    EXPECT_NEAR(GeneralGas::history(f.model).physical_outflow, first_molar + GeneralGas::step_escape(f.model), 1e-14);
+    EXPECT_NEAR(GeneralGas::integral(f.model.population_number_field("micro")) + first.events.front().number +
+                    GeneralGas::number_escape(f.model, "micro"),
+        1e10, 1e-2);
+    // Escape is already transport; do not debit it again as local kinetic gas destruction.
+    EXPECT_NEAR(f.model.source_alpha_reaction().value(0), 0, 1e-14);
+    f.model.restore(start);
+    f.advance(dt, dt);
+    EXPECT_EQ(f.model.population_escape_receipt().events, first.events);
+    EXPECT_GT(f.model.population_escape_receipt().event.publication_nonce, first.event.publication_nonce);
 }
 
 /** @brief Dissolved boundary outflow is not reported as escaped bubbles. */
 TEST(ReactingGasModelTest, DissolvedBoundaryOutflowIsSeparateFromBubbleEscape)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 1.0e-3;
-    options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    options.free_surface_patches = {"zmax"};
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    for (size_t face = 0; face < mesh->num_faces(); ++face)
-    {
-        const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
-        if (flux.is_owned_face(face_lid) && mesh->is_boundary_face(face_lid) &&
-            mesh->boundary_batch_name(mesh->boundary_id(face_lid)) == "zmax")
-        {
-            flux.set_value(face_lid, 1.0);
-        }
-    }
-    auto material = make_water_properties(mesh);
-
-    model.advance(0.1, 0.1, temperature, pressure, velocity, flux, material, &power);
-
-    const auto& statistics = model.last_statistics();
-    EXPECT_GT(statistics.dissolved_hydrogen_outflow, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.microbubble_hydrogen_escaped, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.large_bubble_hydrogen_escaped, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.submerged_bubble_hydrogen_escaped, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.escaped_bubble_count, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.hydrogen_escaped, statistics.dissolved_hydrogen_outflow);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_dissolved_hydrogen_outflow, statistics.dissolved_hydrogen_outflow);
-    EXPECT_DOUBLE_EQ(model.cumulative_dissolved_hydrogen_outflow(), statistics.dissolved_hydrogen_outflow);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_submerged_bubble_hydrogen_escaped, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_hydrogen_escaped,
-        statistics.cumulative_dissolved_hydrogen_outflow + statistics.cumulative_submerged_bubble_hydrogen_escaped);
-    EXPECT_DOUBLE_EQ(model.cumulative_submerged_bubble_hydrogen_escaped(), 0.0);
-    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-14);
+    GeneralGas::Parameters p;
+    p.dissolved_one = 1e-3;
+    p.controls.free_surface_patches = {"zmax"};
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    for (const auto face : f.flux.owned_face_ids())
+        if (f.grid->is_boundary_face(face) && f.grid->boundary_batch_name(f.grid->boundary_id(face)) == "zmax")
+            f.flux.set_value(face, 1);
+    f.advance(.1, .1);
+    EXPECT_GT(GeneralGas::step_escape(f.model), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::step_escape(f.model, GeneralGas::one, true), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::number_escape(f.model, "micro"), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::number_escape(f.model, "large"), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::history(f.model).physical_outflow, GeneralGas::step_escape(f.model));
+    for (const auto& event : f.model.physical_escape_events())
+        if (event.species == GeneralGas::one)
+            EXPECT_EQ(event.phase, GeneralGas::Phase::Dissolved);
+    EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-14);
 }
 
 /** @brief Many cells must not turn summation error into apparent bubble creation. */
 TEST(ReactingGasModelTest, LargeCartesianTransportInventoryIsStable)
 {
     SimpleFluid::ArrReal x, y, z;
-    for (int i = 0; i <= 20; ++i) x.push_back(0.2 * i / 20);
-    for (int i = 0; i <= 10; ++i) y.push_back(0.02 * i / 10);
-    for (int i = 0; i <= 80; ++i) z.push_back(0.2 * i / 80);
-    auto geometry = std::make_shared<ALEMeshType::Cartesian>(
-        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, y, z}});
-    auto mesh = std::make_shared<ALEMeshType>(std::move(geometry));
-    auto options = ale_escape_options();
-    options.free_surface_patches.clear();
-    options.initial_dissolved_hydrogen = 0;
-    options.initial_large_number_density = options.initial_large_moles = 0;
-    options.initial_micro_number_density = 1.2345678912345e15;
-    options.initial_micro_moles = 3.141592653589793e-5;
-    options.constant_slip_velocity = 0.005;
-    options.transport_solver_tolerance = 1e-14;
-    ALEReactingModelType model(mesh, options);
-    ALEFieldType temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure");
-    ALEFieldType power(mesh, 0.0, "power");
-    ALEVelocityFieldType velocity(mesh, ALEMeshType::Vec3{}, "velocity");
-    ALEFaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_ale_water_properties(mesh);
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-    const double expected = options.initial_micro_moles * 0.2 * 0.02 * 0.2;
+    for (int i = 0; i <= 20; ++i)
+        x.push_back(.2 * i / 20);
+    for (int i = 0; i <= 10; ++i)
+        y.push_back(.02 * i / 10);
+    for (int i = 0; i <= 80; ++i)
+        z.push_back(.2 * i / 80);
+    auto mesh = std::make_shared<ALEMeshType>(
+        std::make_shared<ALEMeshType::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{x, y, z}}));
+    GeneralGas::Parameters p;
+    p.number_density[0] = 1.2345678912345e15;
+    p.molar_one[0] = 3.141592653589793e-5;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = .005;
+    p.controls.transport_solver_tolerance = 1e-14;
+    GeneralGas::Fixture<ALEMeshType> f(mesh, p);
+    f.initialize();
+    const double expected = p.molar_one[0] * .2 * .02 * .2;
     const double roundoff = 64 * std::numeric_limits<double>::epsilon() * expected;
-    EXPECT_NEAR(model.global_microbubble_hydrogen_moles(), expected, roundoff);
-    ASSERT_NO_THROW(model.advance(0.02, 0.02, temperature, pressure, velocity, flux, material, &power));
-    EXPECT_NEAR(model.global_microbubble_hydrogen_moles(), expected, roundoff);
-    EXPECT_LE(model.last_statistics().hydrogen_escaped, roundoff);
+    EXPECT_NEAR(
+        GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro"), expected, roundoff);
+    ASSERT_NO_THROW(f.advance(.02, .02));
+    EXPECT_NEAR(
+        GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro"), expected, roundoff);
+    EXPECT_LE(GeneralGas::step_escape(f.model), roundoff);
 }
 
 /** @brief Positive escape below the old relative cutoff remains observable. */
 TEST(ReactingGasModelTest, SmallPositiveEscapeIsNotDiscarded)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 1.0e9;
-    options.max_concentration = 1.0e12;
-    options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    options.free_surface_patches = {"zmax"};
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    for (size_t face = 0; face < mesh->num_faces(); ++face)
-    {
-        const auto face_lid = static_cast<Pack::local_ordinal_type>(face);
-        if (flux.is_owned_face(face_lid) && mesh->is_boundary_face(face_lid) &&
-            mesh->boundary_batch_name(mesh->boundary_id(face_lid)) == "zmax")
-        {
-            flux.set_value(face_lid, 1.0e-13);
-        }
-    }
-    auto material = make_water_properties(mesh);
-
-    model.advance(0.1, 0.1, temperature, pressure, velocity, flux, material, &power);
-
-    const auto& statistics = model.last_statistics();
-    const auto old_cutoff = 64.0 * std::numeric_limits<double>::epsilon() * statistics.hydrogen_before;
-    EXPECT_GT(statistics.dissolved_hydrogen_outflow, 0.0);
-    EXPECT_LT(statistics.dissolved_hydrogen_outflow, old_cutoff);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_dissolved_hydrogen_outflow, statistics.dissolved_hydrogen_outflow);
+    GeneralGas::Parameters p;
+    p.dissolved_one = 1e9;
+    p.molar_mass_one = 1e-9;
+    // Explicit synthetic light tracer preserves the original1e9mol/m3 stress at
+    // finite1000kg/m3 solution mass. A hydrogen-weight stock at that concentration was impossible.
+    p.controls.free_surface_patches = {"zmax"};
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    for (const auto face : f.flux.owned_face_ids())
+        if (f.grid->is_boundary_face(face) && f.grid->boundary_batch_name(f.grid->boundary_id(face)) == "zmax")
+            f.flux.set_value(face, 1e-13);
+    const double before = f.model.global_species_moles(GeneralGas::one);
+    f.advance(.1, .1);
+    const double escaped = GeneralGas::step_escape(f.model);
+    EXPECT_GT(escaped, 0);
+    EXPECT_LT(escaped, 64 * std::numeric_limits<double>::epsilon() * before);
+    EXPECT_DOUBLE_EQ(GeneralGas::history(f.model).physical_outflow, escaped);
+    EXPECT_DOUBLE_EQ(GeneralGas::step_escape(f.model, GeneralGas::one, true), 0);
 }
 
 /** @brief Verify escape-rate diagnostics are localized to free-surface cells. */
 TEST(ReactingGasModelTest, EscapeRateFieldsAreBoundaryLocalized)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(1, 1, 2));
-    auto options = sheng_options();
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 1.0e-6;
-    options.rise_velocity_mode =
-        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 1.0;
-    options.free_surface_patches = {"zmax"};
-    options.microbubble_lifetime = 1.0e30;
-    options.large_bubble_dissolution_time = 1.0e30;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    constexpr double time_step = 0.1;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    const auto& molar_rate =
-        model_field(model, "H2_escape_molar_rate");
-    const auto& number_rate =
-        model_field(model, "bubble_escape_number_rate");
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    GeneralGas::Parameters p;
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 1e-6;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = 1;
+    p.controls.free_surface_patches = {"zmax"};
+    GeneralGas::Fixture<MeshType> f(
+        SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(1, 1, 2)), p);
+    f.initialize();
+    constexpr double dt = .1;
+    f.advance(dt, dt);
+    const auto& catalog = f.model.options().reaction_mechanism->catalog();
+    double molar = 0, number = 0;
+    for (std::size_t row = 0; row < f.grid->num_owned_cells(); ++row)
     {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        if (mesh->cell_centroid(cell_lid).z > 1.0)
+        const auto cell = static_cast<Pack::local_ordinal_type>(row);
+        const double cv = f.grid->cell_volume(cell);
+        const double escaped = -f.model.escape_ledgers()[row].externalChange.amount(
+            catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+        if (f.grid->cell_centroid(cell).z > 1)
         {
-            EXPECT_GT(molar_rate.value(cell_lid), 0.0);
-            EXPECT_GT(number_rate.value(cell_lid), 0.0);
+            EXPECT_GT(escaped, 0);
+            // Independent owner-oriented top-face N flux: dt*u*A*N_new, area1m2.
+            const double face_number = dt * f.model.population_number_field("micro").value(cell);
+            EXPECT_GT(face_number, 0);
+            number += face_number;
         }
         else
-        {
-            EXPECT_DOUBLE_EQ(molar_rate.value(cell_lid), 0.0);
-            EXPECT_DOUBLE_EQ(number_rate.value(cell_lid), 0.0);
-        }
+            EXPECT_DOUBLE_EQ(escaped, 0);
+        const double rate = escaped / (dt * cv);
+        molar += dt * cv * rate;
     }
-    EXPECT_NEAR(
-        time_step * global_integral(molar_rate),
-        model.last_statistics().hydrogen_escaped,
-        1.0e-14);
-    EXPECT_NEAR(
-        time_step * global_integral(number_rate),
-        model.last_statistics().escaped_bubble_count,
-        1.0e-2);
+    EXPECT_NEAR(molar, GeneralGas::step_escape(f.model), 1e-14);
+    EXPECT_NEAR(number, GeneralGas::number_escape(f.model, "micro"), 1e-2);
 }
 
 /**
@@ -2420,34 +1426,19 @@ TEST(ReactingGasModelTest, EscapeRateFieldsAreBoundaryLocalized)
  */
 TEST(ReactingGasModelTest, CelataSelectorDrivesBubbleEscape)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_large_number_density = 100.0;
-    options.initial_large_moles = 1.0e-6;
-    options.rise_velocity_mode =
-        SimpleFluid::BubbleRiseVelocityMode::Celata2007;
-    options.bubble_gas_density = 1.2;
-    options.free_surface_patches = {"zmax"};
-    SimpleFluid::ReactingGasModel<Pack> model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    model.advance(
-        1.0e-6,
-        1.0e-6,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    EXPECT_GT(model.last_statistics().hydrogen_escaped, 0.0);
-    EXPECT_GT(model.last_statistics().escaped_bubble_count, 0.0);
+    GeneralGas::Parameters p;
+    p.number_density[1] = 100;
+    p.molar_one[1] = 1e-6;
+    const double r = GeneralGas::radius(1e-6, 100, 300, p.pressure, p.sigma);
+    p.molar_mass_one = 1.2 * GeneralGas::gas_constant * 300 / (p.pressure + 2 * p.sigma / r);
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::Celata2007;
+    p.controls.free_surface_patches = {"zmax"};
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    f.advance(1e-6, 1e-6);
+    EXPECT_GT(GeneralGas::step_escape(f.model), 0);
+    EXPECT_GT(GeneralGas::number_escape(f.model, "large"), 0);
+    EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-14);
 }
 
 /**
@@ -2455,57 +1446,28 @@ TEST(ReactingGasModelTest, CelataSelectorDrivesBubbleEscape)
  */
 TEST(ReactingGasModelTest, AxialTransportDropsTransverseLiquidFlux)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.initial_large_number_density = 100.0;
-    options.initial_large_moles = 1.0e-6;
-    options.free_surface_patches = {"xmax"};
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(
-        mesh, MeshType::Vec3{0.1, 0.0, 0.0}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    for (size_t face = 0; face < mesh->num_faces(); ++face)
+    GeneralGas::Parameters p;
+    p.number_density[1] = 100;
+    p.molar_one[1] = 1e-6;
+    p.controls.free_surface_patches = {"xmax"};
+    GeneralGas::Fixture<MeshType> general(make_single_cell_mesh(), p), axial(make_single_cell_mesh(), p);
+    general.velocity.put_scalar(MeshType::Vec3{.1, 0, 0});
+    axial.velocity.put_scalar(MeshType::Vec3{.1, 0, 0});
+    for (const auto face : general.flux.owned_face_ids())
+        general.flux.set_value(face, .1 * general.grid->face_area_vector(face).x);
+    // Axial filtering is explicit caller ownership, not an ignored specialized backend selector.
+    for (const auto face : axial.flux.owned_face_ids())
     {
-        const auto face_lid =
-            static_cast<Pack::local_ordinal_type>(face);
-        if (flux.is_owned_face(face_lid))
-        {
-            flux.set_value(
-                face_lid,
-                0.1 * mesh->face_area_vector(face_lid).x);
-        }
+        const auto normal = axial.grid->face_area_vector(face);
+        axial.flux.set_value(face, normal.z == 0 ? 0 : .1 * normal.x);
     }
-    auto material = make_water_properties(mesh);
-
-    options.bubble_transport =
-        SimpleFluid::BubbleTransportMode::General;
-    SimpleFluid::ReactingGasModel<Pack> general(mesh, options);
-    general.advance(
-        1.0e-6,
-        1.0e-6,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    EXPECT_GT(general.last_statistics().hydrogen_escaped, 0.0);
-
-    options.bubble_transport =
-        SimpleFluid::BubbleTransportMode::Axial;
-    SimpleFluid::ReactingGasModel<Pack> axial(mesh, options);
-    axial.advance(
-        1.0e-6,
-        1.0e-6,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-    EXPECT_DOUBLE_EQ(axial.last_statistics().hydrogen_escaped, 0.0);
+    general.initialize();
+    axial.initialize();
+    general.advance(1e-6, 1e-6);
+    axial.advance(1e-6, 1e-6);
+    EXPECT_GT(GeneralGas::step_escape(general.model), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::step_escape(axial.model), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::number_escape(axial.model, "large"), 0);
 }
 
 /**
@@ -2513,96 +1475,30 @@ TEST(ReactingGasModelTest, AxialTransportDropsTransverseLiquidFlux)
  */
 TEST(ReactingGasModelTest, PopulationTransportConservesInventoryWithoutEscape)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_two_hex_database());
-    auto options = sheng_options();
-    options.initial_large_number_density = 1.0e6;
-    options.initial_large_moles = 1.0e-7;
-    options.microbubble_lifetime = 1.0e9;
-    options.large_bubble_dissolution_time = 1.0e9;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    const auto large_radius =
-        SimpleFluid::BubbleGasPhysics::solve_bubble_radius(
-            options.initial_large_moles
-                / options.initial_large_number_density,
-            options.reference_pressure,
-            options.surface_tension,
-            options.gas_constant,
-            300.0,
-            options.min_radius,
-            options.max_radius);
-    ASSERT_TRUE(large_radius.converged);
-    options.initial_dissolved_hydrogen =
-        SimpleFluid::BubbleGasPhysics::
-            henry_equilibrium_concentration(
-                options.henry_coefficient,
-                options.reference_pressure,
-                options.surface_tension,
-                large_radius.radius);
-
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{0.1, 0.0, 0.0}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    for (size_t face = 0; face < mesh->num_faces(); ++face)
-    {
-        const auto face_lid =
-            static_cast<Pack::local_ordinal_type>(face);
-        if (flux.is_owned_face(face_lid))
-        {
-            flux.set_value(
-                face_lid,
-                0.1 * mesh->face_area_vector(face_lid).x);
-        }
-    }
-    auto material = make_water_properties(mesh);
-    model.initialize_state(
-        0.0, temperature, pressure, velocity, material);
-
-    const auto number_before =
-        global_integral(model.large_number_density());
-    const auto moles_before =
-        global_integral(model.large_moles());
-    const auto hydrogen_before =
-        global_integral(model.dissolved_hydrogen_inventory())
-      + global_integral(model.micro_moles())
-      + global_integral(model.large_moles());
-
-    model.advance(
-        1.0e-4,
-        1.0e-4,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    const auto number_after =
-        global_integral(model.large_number_density());
-    const auto moles_after =
-        global_integral(model.large_moles());
-    const auto hydrogen_after =
-        global_integral(model.dissolved_hydrogen_inventory())
-      + global_integral(model.micro_moles())
-      + global_integral(model.large_moles());
-
-    EXPECT_NEAR(number_after, number_before, number_before * 1.0e-9);
-    EXPECT_NEAR(moles_after, moles_before, moles_before * 1.0e-9);
-    EXPECT_NEAR(hydrogen_after, hydrogen_before, hydrogen_before * 1.0e-9);
-    EXPECT_DOUBLE_EQ(model.last_statistics().hydrogen_escaped, 0.0);
-    EXPECT_DOUBLE_EQ(model.last_statistics().escaped_bubble_count, 0.0);
-
-    ASSERT_GE(mesh->num_owned_cells(), 2U);
-    const auto first = model.large_number_density().value(0);
-    const auto second = model.large_number_density().value(1);
-    EXPECT_GT(
-        std::max(
-            std::abs(first - options.initial_large_number_density),
-            std::abs(second - options.initial_large_number_density)),
-        options.initial_large_number_density * 1.0e-8);
+    GeneralGas::Parameters p;
+    p.number_density[1] = 1e6;
+    p.molar_one[1] = 1e-7;
+    const double radius = GeneralGas::radius(1e-7, 1e6, 300, p.pressure, p.sigma);
+    p.dissolved_one = 1e-5 * (p.pressure + 2 * p.sigma / radius);
+    GeneralGas::Fixture<MeshType> f(SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_two_hex_database()), p);
+    f.initialize();
+    for (const auto face : f.flux.owned_face_ids())
+        f.flux.set_value(face, f.grid->is_boundary_face(face) ? 0 : .1 * f.grid->face_area_vector(face).x);
+    const double number = GeneralGas::integral(f.model.population_number_field("large"));
+    const double moles = GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large");
+    const double total = f.model.global_species_moles(GeneralGas::one);
+    f.advance(1e-4, 1e-4);
+    EXPECT_NEAR(GeneralGas::integral(f.model.population_number_field("large")), number, number * 1e-9);
+    EXPECT_NEAR(
+        GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), moles, moles * 1e-9);
+    EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), total, total * 1e-9);
+    EXPECT_DOUBLE_EQ(GeneralGas::step_escape(f.model), 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::number_escape(f.model, "large"), 0);
+    double change = 0;
+    for (std::size_t row = 0; row < f.grid->num_owned_cells(); ++row)
+        change = std::max(change,
+            std::abs(f.model.population_number_field("large").value(static_cast<Pack::local_ordinal_type>(row)) - 1e6));
+    EXPECT_GT(change, 1e6 * 1e-8);
 }
 
 /**
@@ -2610,58 +1506,46 @@ TEST(ReactingGasModelTest, PopulationTransportConservesInventoryWithoutEscape)
  */
 TEST(ReactingGasModelTest, HigherPressureRaisesCriticalConcentrationAndDelaysConversion)
 {
-    constexpr double temperature_value = 300.0;
-    constexpr double low_pressure = 1.0e5;
-    constexpr double high_pressure = 5.0e5;
-    auto base_options = sheng_options();
-    base_options.initial_micro_number_density = 1.0e8;
-    base_options.initial_micro_moles = 1.0e-8;
-    base_options.microbubble_lifetime = 1.0e9;
-    base_options.large_bubble_dissolution_time = 1.0e9;
-    base_options.micro_to_large_conversion_coefficient = 1.0e-4;
-    const auto low_critical = critical_concentration(
-        base_options, low_pressure, temperature_value);
-    const auto high_critical = critical_concentration(
-        base_options, high_pressure, temperature_value);
-    ASSERT_GT(high_critical, low_critical);
-    base_options.initial_dissolved_hydrogen =
-        0.5 * (low_critical + high_critical);
-
-    auto run_case = [&](double reference_pressure)
+    constexpr double low = 1e5, high = 5e5;
+    GeneralGas::Parameters base;
+    base.number_density[0] = 1e8;
+    base.molar_one[0] = 1e-8;
+    const auto critical = [&](double pressure) { return 1e-5 * (pressure + 2 * base.sigma / base.nucleation_radius); };
+    EXPECT_GT(critical(high), critical(low));
+    base.dissolved_one = .5 * (critical(low) + critical(high));
+    const auto run = [&](double pressure)
     {
-        auto options = base_options;
-        options.reference_pressure = reference_pressure;
-        auto mesh = make_single_cell_mesh();
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, temperature_value, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        FieldType power(mesh, 0.0, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-        model.advance(
-            1.0e-6,
-            1.0e-6,
-            temperature,
-            pressure,
-            velocity,
-            flux,
-            material,
-            &power);
-        return std::tuple{
-            model_field(model, "C_H2_crit").value(0),
-            model.large_number_density().value(0),
-            model_field(model, "micro_to_large_number_rate").value(0)};
+        auto p = base;
+        p.pressure = pressure;
+        p.population = [sigma = p.sigma, rn = p.nucleation_radius](
+                           const SimpleFluid::BubbleGasPhysics::MultispeciesPopulationContext& c, double dt)
+        {
+            const auto& e = c.chemistry.environment;
+            const auto& catalog = c.chemistry.catalog;
+            const double concentration =
+                c.chemistry.state.amount(catalog, GeneralGas::one, GeneralGas::Phase::Dissolved) / e.liquidVolume;
+            SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket result;
+            if (concentration > 1e-5 * (e.absolutePressure + 2 * sigma / rn))
+            {
+                const double fraction = -std::expm1(-1e-4 * e.absolutePressure * dt);
+                const double n =
+                    c.chemistry.state.amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+                result.transfers = {{GeneralGas::one, GeneralGas::Phase::Dispersed, GeneralGas::Phase::Dispersed,
+                    "micro", "large", n * fraction}};
+                const double count = c.populations.front().number * fraction;
+                result.numberEvents = {{"micro", 0, count}, {"large", count, 0}};
+            }
+            return result;
+        };
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
+        f.advance(1e-6, 1e-6);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-14);
+        return GeneralGas::integral(f.model.population_number_field("large"));
     };
-
-    const auto [low_c_critical, low_large_number, low_rate] =
-        run_case(low_pressure);
-    const auto [high_c_critical, high_large_number, high_rate] =
-        run_case(high_pressure);
-
-    EXPECT_GT(high_c_critical, low_c_critical);
-    EXPECT_GT(low_large_number, high_large_number);
-    EXPECT_GT(low_rate, high_rate);
+    const double converted_low = run(low), converted_high = run(high);
+    EXPECT_GT(converted_low, converted_high);
+    EXPECT_GT(converted_low / 1e-6, converted_high / 1e-6);
 }
 
 /**
@@ -2669,115 +1553,57 @@ TEST(ReactingGasModelTest, HigherPressureRaisesCriticalConcentrationAndDelaysCon
  */
 TEST(ReactingGasModelTest, ConstantAndPrescribedPressureModesRegressTogether)
 {
-    auto base_options = sheng_options();
-    base_options.initial_micro_number_density = 1.0e8;
-    base_options.initial_micro_moles = 1.0e-8;
-    base_options.initial_dissolved_hydrogen = 1.0e3;
-    base_options.microbubble_lifetime = 1.0e9;
-    base_options.large_bubble_dissolution_time = 1.0e9;
-    base_options.micro_to_large_conversion_coefficient = 1.0e-8;
-
-    auto run_case = [&](SimpleFluid::ReactingPressureMode pressure_mode)
+    GeneralGas::Parameters base;
+    base.number_density[0] = 1e8;
+    base.molar_one[0] = 1e-8;
+    base.dissolved_one = 1e3;
+    base.micro_decay_time = 1e9;
+    base.micro_conversion_frequency = .001;
+    const auto run = [&](bool history)
     {
-        auto options = base_options;
-        options.pressure_mode = pressure_mode;
-        if (pressure_mode
-            == SimpleFluid::ReactingPressureMode::PrescribedHistory)
+        auto p = base;
+        if (history)
         {
-            options.pressure_history_times = {0.0, 1.0};
-            options.pressure_history_values = {
-                options.reference_pressure,
-                options.reference_pressure};
+            p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::PrescribedHistory;
+            p.controls.pressure_history_times = {0, 1};
+            p.controls.pressure_history_values = {p.pressure, p.pressure};
         }
-        auto mesh = make_single_cell_mesh();
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 300.0, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        FieldType power(mesh, 0.0, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-        model.advance(
-            0.25,
-            1.0e-7,
-            temperature,
-            pressure,
-            velocity,
-            flux,
-            material,
-            &power);
-        return std::array<double, 4>{
-            model.absolute_pressure().value(0),
-            model_field(model, "C_H2_crit").value(0),
-            model.alpha_g().value(0),
-            model.dissolved_hydrogen_inventory().value(0)
-              + model.micro_moles().value(0)
-              + model.large_moles().value(0)};
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
+        f.advance(.25, 1e-7);
+        return std::array<double, 4>{f.model.absolute_pressure().value(0),
+            1e-5 * (f.model.absolute_pressure().value(0) + 2 * p.sigma / p.nucleation_radius),
+            f.model.alpha_g().value(0), f.model.global_species_moles(GeneralGas::one)};
     };
-
-    const auto constant =
-        run_case(SimpleFluid::ReactingPressureMode::Constant);
-    const auto prescribed =
-        run_case(SimpleFluid::ReactingPressureMode::PrescribedHistory);
-    for (size_t index = 0; index < constant.size(); ++index)
-    {
-        EXPECT_NEAR(
-            prescribed[index],
-            constant[index],
-            std::max(1.0e-12, std::abs(constant[index]) * 1.0e-12));
-    }
+    const auto fixed = run(false), prescribed = run(true);
+    for (std::size_t i = 0; i < fixed.size(); ++i)
+        EXPECT_NEAR(prescribed[i], fixed[i], std::max(1e-12, std::abs(fixed[i]) * 1e-12));
 }
 
 /**
- * @brief Constant and inertial pressure modes run from one case definition.
+ * @brief Supplied pressure evolution stays positive; unsupported inertial ownership rejects explicitly.
  */
 TEST(ReactingGasModelTest, ConstantAndInertialPressureModesRunFromSameCase)
 {
-    auto base_options = sheng_options();
-    base_options.initial_large_number_density = 1.0e6;
-    base_options.initial_large_moles = 1.0e-7;
-    base_options.initial_dissolved_hydrogen = 5.0;
-    base_options.microbubble_lifetime = 1.0e-4;
-    base_options.large_bubble_dissolution_time = 1.0e-4;
-    base_options.micro_to_large_conversion_coefficient = 1.0e-8;
-    base_options.liquid_thermal_expansion = 2.0e-4;
-
-    auto run_case = [&](SimpleFluid::ReactingPressureMode pressure_mode)
+    GeneralGas::Parameters p;
+    p.number_density[1] = 1e6;
+    p.molar_one[1] = 1e-7;
+    p.dissolved_one = 5;
+    GeneralGas::Fixture<MeshType> fixed(make_single_cell_mesh(), p);
+    fixed.initialize();
+    for (int step = 0; step < 2; ++step)
     {
-        auto options = base_options;
-        options.pressure_mode = pressure_mode;
-        auto mesh = make_single_cell_mesh();
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 300.0, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        FieldType power(mesh, 2.0e4, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-        for (int step = 0; step < 2; ++step)
-        {
-            temperature.put_scalar(300.0 + 0.5 * step);
-            ASSERT_NO_FATAL_FAILURE(advance_model(
-                model,
-                mesh,
-                (step + 1) * 1.0e-5,
-                1.0e-5,
-                temperature,
-                pressure,
-                power,
-                velocity,
-                flux,
-                material));
-        }
-        expect_state_fields_finite_bounded(model);
-        EXPECT_TRUE(std::isfinite(model.absolute_pressure().value(0)));
-        EXPECT_GE(
-            model.absolute_pressure().value(0),
-            options.minimum_absolute_pressure);
-    };
-
-    run_case(SimpleFluid::ReactingPressureMode::Constant);
-    run_case(SimpleFluid::ReactingPressureMode::Inertial);
+        fixed.temperature.put_scalar(300 + .5 * step);
+        fixed.advance((step + 1) * 1e-5, 1e-5);
+        EXPECT_TRUE(std::isfinite(fixed.model.absolute_pressure().value(0)));
+        EXPECT_GE(fixed.model.absolute_pressure().value(0), fixed.model.options().minimum_absolute_pressure);
+        EXPECT_NEAR(GeneralGas::history(fixed.model).inventory_error, 0, 1e-14);
+    }
+    // A general species backend cannot silently freeze the retired specialized
+    // inertial pressure history. Its physical evolution belongs to a supplied flow/EOS owner.
+    SimpleFluid::Database retired;
+    retired.set("reacting_pressure_mode", std::string("inertial"));
+    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(retired), std::invalid_argument);
 }
 
 /**
@@ -2785,106 +1611,95 @@ TEST(ReactingGasModelTest, ConstantAndInertialPressureModesRunFromSameCase)
  */
 TEST(ReactingGasModelTest, StiffLocalKineticsConvergesWithSubcycles)
 {
-    auto run_case = [](int max_subcycles)
+    const auto run = [](int resolution)
     {
-        auto options = sheng_options();
-        options.initial_dissolved_hydrogen = 1.0e3;
-        options.initial_micro_number_density = 1.0e8;
-        options.initial_micro_moles = 1.0e-8;
-        options.initial_large_number_density = 1.0e6;
-        options.initial_large_moles = 1.0e-7;
-        options.microbubble_lifetime = 1.0e-7;
-        options.large_bubble_dissolution_time = 1.0e-7;
-        options.micro_to_large_conversion_coefficient = 1.0e-8;
-        options.max_subcycles = max_subcycles;
-        auto mesh = make_single_cell_mesh();
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 300.0, "temperature");
-        FieldType pressure(mesh, 0.0, "pressure");
-        FieldType power(mesh, 1.0e5, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-        model.advance(
-            2.0e-6,
-            2.0e-6,
-            temperature,
-            pressure,
-            velocity,
-            flux,
-            material,
-            &power);
-        return std::array<double, 4>{
-            model.dissolved_hydrogen_inventory().value(0),
-            model.micro_moles().value(0),
-            model.large_moles().value(0),
-            model.alpha_g().value(0)};
-    };
-    auto error = [](const auto& value, const auto& reference)
-    {
-        double result = 0.0;
-        for (size_t index = 0; index < value.size(); ++index)
+        constexpr double lifetime = 1e-7;
+        GeneralGas::Parameters p;
+        p.reactant_concentration = 1e3;
+        p.controls.reaction_advance.maximumSubstep = lifetime / resolution;
+        p.source = [](const GeneralGas::R::ReactionContext& c, double)
         {
-            result += std::abs(value[index] - reference[index]);
-        }
-        return result;
+            GeneralGas::R::ReactionRateProvider provider;
+            provider.identity = "test.supplied_stiff_finite_reactant";
+            provider.schemaRevision = c.catalog.revision();
+            provider.schemaFingerprint = c.catalog.fingerprint();
+            provider.validityDescription = "Finite A solution, k=1e7/s";
+            provider.parameterUnits = "mol/(m3 liquid s)";
+            provider.validate = [](const auto& context)
+            { GeneralGas::M::require(context.environment.liquidVolume > 0, "Finite reactant needs actual liquid."); };
+            provider.evaluate = [](const auto& context)
+            {
+                return std::vector<GeneralGas::R::ReactionRate>{{GeneralGas::M::conversion,
+                    1e7 * context.state.amount(context.catalog, GeneralGas::M::reactant, GeneralGas::Phase::Liquid) /
+                        context.environment.liquidVolume,
+                    GeneralGas::R::SourceVolumeBasis::LiquidVolume}};
+            };
+            GeneralGas::R::ReactionSourceInput input;
+            input.rates = std::move(provider);
+            return input;
+        };
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
+        f.advance(2e-6, 2e-6);
+        return std::array<double, 3>{
+            GeneralGas::compartment(f.model, GeneralGas::M::reactant, GeneralGas::Phase::Liquid),
+            GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved),
+            GeneralGas::compartment(f.model, GeneralGas::two, GeneralGas::Phase::Dissolved)};
     };
-
-    const auto coarse = run_case(1);
-    const auto medium = run_case(5);
-    const auto fine = run_case(100);
-    const auto coarse_error = error(coarse, fine);
-    const auto medium_error = error(medium, fine);
-
-    EXPECT_GT(coarse_error, 0.0);
-    EXPECT_LT(medium_error, coarse_error);
+    const auto coarse = run(1), medium = run(5), fine = run(100);
+    const auto error = [&](const auto& value)
+    {
+        double e = 0;
+        for (std::size_t i = 0; i < value.size(); ++i)
+            e += std::abs(value[i] - fine[i]);
+        return e;
+    };
+    EXPECT_GT(error(coarse), 0);
+    EXPECT_LT(error(medium), error(coarse));
+    const double exact = 1e3 * std::exp(-20.);
+    EXPECT_NEAR(fine[0], exact, exact * .001);
 }
 
 /**
- * @brief Concentration and void clipping report excluded inventory fields.
+ * @brief Explicit admission retains declined requests outside the finite accepted inventories.
  */
 TEST(ReactingGasModelTest, ClippedConcentrationAndVoidBoundsReportExcludedInventory)
 {
-    auto mesh = make_single_cell_mesh();
-    auto options = sheng_options();
-    options.alpha_max = 0.01;
-    options.max_concentration = 1.0;
-    options.initial_dissolved_hydrogen = 5.0;
-    options.initial_large_number_density = 1.0e12;
-    options.initial_large_moles = 1.0;
-    options.microbubble_lifetime = 1.0e9;
-    options.large_bubble_dissolution_time = 1.0e9;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    model.advance(
-        1.0e-9,
-        1.0e-9,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    EXPECT_DOUBLE_EQ(model.alpha_g().value(0), options.alpha_max);
-    EXPECT_GT(model_field(model, "alpha_g_excess").value(0), 0.0);
-    const auto bounded_volume = global_integral(model.alpha_g());
-    const auto raw_volume = model.global_submerged_bubble_volume();
-    const auto unrepresented_volume = model.global_unrepresented_bubble_volume();
-    EXPECT_GT(raw_volume, bounded_volume);
-    EXPECT_NEAR(unrepresented_volume, raw_volume - bounded_volume, raw_volume * 1.0e-12);
+    constexpr double requested_dissolved = 5, admitted_dissolved = 1, requested_gas = 1, alpha_max = .01, number = 1e12;
+    const double radius = std::cbrt(3 * alpha_max / (4 * std::numbers::pi * number));
+    // This explicit initial admission law retains rejected requests in its named
+    // external reservoir. It never stores an overcapacity phase then clips its display.
+    const double capacity_moles = alpha_max * (1e5 + 2 * .07 / radius) / (GeneralGas::gas_constant * 300);
+    const double admitted_gas =
+        capacity_moles * (1 - 8e-12); // Reserve the declared4e-12 EOS inversion residual, twice.
+    GeneralGas::Parameters p;
+    p.dissolved_one = admitted_dissolved;
+    p.number_density[1] = number;
+    p.molar_one[1] = admitted_gas;
+    p.controls.alpha_max = alpha_max;
+    GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+    f.initialize();
+    EXPECT_LE(f.model.alpha_g().value(0), alpha_max);
+    EXPECT_GT(f.model.alpha_g().value(0), 0);
+    EXPECT_NEAR(f.model.global_submerged_bubble_volume(), f.model.evaluate_submerged_bubble_volume(p.pressure),
+        f.model.global_submerged_bubble_volume() * 1e-11);
+    const double liquid = f.model.alpha_l().value(0);
+    EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).value(0) / liquid,
+        admitted_dissolved, 1e-14);
+    const double reservoir_dissolved = (requested_dissolved - admitted_dissolved) * liquid;
+    const double reservoir_gas = requested_gas - admitted_gas;
+    EXPECT_GT(reservoir_dissolved, 0);
+    EXPECT_GT(reservoir_gas, 0);
     EXPECT_NEAR(
-        model.evaluate_submerged_bubble_volume(model.absolute_pressure_offset()), raw_volume, raw_volume * 1.0e-11);
-    EXPECT_DOUBLE_EQ(model.global_large_bubble_hydrogen_moles(), global_integral(model.large_moles()));
-    EXPECT_LE(model_field(model, "C_H2").value(0), options.max_concentration);
-    EXPECT_GT(model_field(model, "I_H2_excluded").value(0), 0.0);
+        GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large") + reservoir_gas,
+        requested_gas, 1e-12);
+    EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).value(0) + reservoir_dissolved,
+        requested_dissolved * liquid, 1e-12);
+    auto invalid = p;
+    invalid.molar_one[1] = requested_gas;
+    GeneralGas::Fixture<MeshType> overcapacity(make_single_cell_mesh(), invalid);
+    EXPECT_THROW(overcapacity.initialize(), std::exception);
+    EXPECT_FALSE(overcapacity.model.initial_state_initialized());
 }
 
 /**
@@ -2892,49 +1707,34 @@ TEST(ReactingGasModelTest, ClippedConcentrationAndVoidBoundsReportExcludedInvent
  */
 TEST(ReactingGasModelTest, StateFieldsRemainFiniteNonNegativeAndBoundedAcrossPressureModes)
 {
-    const std::array<SimpleFluid::ReactingPressureMode, 4> modes{
-        SimpleFluid::ReactingPressureMode::Constant,
-        SimpleFluid::ReactingPressureMode::PrescribedHistory,
-        SimpleFluid::ReactingPressureMode::Reconstructed,
-        SimpleFluid::ReactingPressureMode::Inertial};
-
-    for (const auto mode : modes)
+    for (const auto mode : {SimpleFluid::ReactingPressureMode::Constant,
+             SimpleFluid::ReactingPressureMode::PrescribedHistory, SimpleFluid::ReactingPressureMode::Reconstructed})
     {
-        auto mesh = make_single_cell_mesh();
-        auto options = sheng_options();
-        options.pressure_mode = mode;
-        options.initial_dissolved_hydrogen = 1.0e3;
-        options.initial_micro_number_density = 1.0e8;
-        options.initial_micro_moles = 1.0e-8;
-        options.initial_large_number_density = 1.0e6;
-        options.initial_large_moles = 1.0e-7;
-        options.liquid_thermal_expansion = 2.0e-4;
+        auto p = GeneralGas::populated();
+        p.controls.pressure_mode = mode;
         if (mode == SimpleFluid::ReactingPressureMode::PrescribedHistory)
         {
-            options.pressure_history_times = {0.0, 1.0};
-            options.pressure_history_values = {1.0e5, 1.2e5};
+            p.controls.pressure_history_times = {0, 1};
+            p.controls.pressure_history_values = {1e5, 2e5};
         }
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 300.0, "temperature");
-        FieldType pressure(mesh, 1.0e4, "pressure");
-        FieldType power(mesh, 1.0e5, "qdot_external");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0.0, "flux");
-        auto material = make_water_properties(mesh);
-
+        GeneralGas::Fixture<MeshType> f(make_single_cell_mesh(), p);
+        f.initialize();
         for (int step = 0; step < 3; ++step)
         {
-            temperature.put_scalar(300.0 + step);
-            model.advance(
-                (step + 1) * 1.0e-6,
-                1.0e-6,
-                temperature,
-                pressure,
-                velocity,
-                flux,
-                material,
-                &power);
-            expect_state_fields_finite_bounded(model);
+            f.temperature.put_scalar(300 + step * .5);
+            f.advance((step + 1) * 1e-6, 1e-6);
+            for (const auto& [name, field] : f.model.output_fields())
+                for (std::size_t row = 0; row < f.grid->num_owned_cells(); ++row)
+                    EXPECT_TRUE(std::isfinite(field->value(static_cast<Pack::local_ordinal_type>(row)))) << name;
+            const auto state = f.model.cell_species_state(0);
+            state.validate(f.model.options().reaction_mechanism->catalog());
+            for (const auto value : state.amounts)
+                EXPECT_GE(value, 0);
+            for (const auto& population : state.dispersedPopulations)
+                for (const auto value : population.amounts)
+                    EXPECT_GE(value, 0);
+            EXPECT_GE(f.model.alpha_g().value(0), 0);
+            EXPECT_LE(f.model.alpha_g().value(0), p.controls.alpha_max);
         }
     }
 }
@@ -2942,49 +1742,38 @@ TEST(ReactingGasModelTest, StateFieldsRemainFiniteNonNegativeAndBoundedAcrossPre
 /**
  * @brief Solver startup publishes initial bubble void and the scalar mirror.
  */
-TEST(ReactingGasModelTest,
-     SolverPublishesInitialShengStateInEitherConfigurationOrder)
+TEST(ReactingGasModelTest, SolverPublishesInitialShengStateInEitherConfigurationOrder)
 {
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 2.5;
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 1.0e-3;
+    GeneralGas::Parameters p;
+    p.dissolved_one = 2.5;
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 1e-3;
+    auto options = GeneralGas::options(p);
 
     SimpleFluid::TimeStepperOptions time_options;
     time_options.time_step = 1.0e-6;
     time_options.reference_temperature = 300.0;
-    auto model_options =
-        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
-            time_options);
+    auto model_options = SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
     model_options.reference_density = 1000.0;
     model_options.density = 1000.0;
     model_options.specific_heat_capacity = 4200.0;
     model_options.dynamic_viscosity = 1.0e-3;
     model_options.thermal_conductivity = 0.6;
 
-    const auto expect_published =
-        [&](const auto& reacting_gas,
-            const auto& scalar_void)
+    const auto expect_published = [&](const auto& reacting_gas, const auto& scalar_void)
     {
         ASSERT_TRUE(reacting_gas.initial_state_initialized());
         const auto alpha_g = reacting_gas.alpha_g().value(0);
         ASSERT_GT(alpha_g, options.alpha_min);
-        EXPECT_NEAR(
-            scalar_void.alpha_g().value(0), alpha_g, 1.0e-14);
-        EXPECT_NEAR(
-            scalar_void.alpha_l().value(0), 1.0 - alpha_g, 1.0e-14);
-        EXPECT_DOUBLE_EQ(
-            reacting_gas.source_alpha_reaction().value(0), 0.0);
-        EXPECT_DOUBLE_EQ(
-            scalar_void.source_alpha_total().value(0), 0.0);
-        EXPECT_NEAR(
-            reacting_gas.dissolved_hydrogen().value(0),
-            options.initial_dissolved_hydrogen,
-            1.0e-14);
-        EXPECT_NEAR(
-            reacting_gas.dissolved_hydrogen_inventory().value(0),
-            (1.0 - alpha_g) * options.initial_dissolved_hydrogen,
-            1.0e-14);
+        EXPECT_NEAR(scalar_void.alpha_g().value(0), alpha_g, 1.0e-14);
+        EXPECT_NEAR(scalar_void.alpha_l().value(0), 1.0 - alpha_g, 1.0e-14);
+        EXPECT_DOUBLE_EQ(reacting_gas.source_alpha_reaction().value(0), 0.0);
+        EXPECT_DOUBLE_EQ(scalar_void.source_alpha_total().value(0), 0.0);
+        EXPECT_NEAR(reacting_gas.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).value(0) /
+                        reacting_gas.alpha_l().value(0),
+            p.dissolved_one, 1.0e-14);
+        EXPECT_NEAR(reacting_gas.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).value(0),
+            (1.0 - alpha_g) * p.dissolved_one, 1.0e-14);
     };
 
     {
@@ -3020,8 +1809,7 @@ TEST(ReactingGasModelTest,
 /**
  * @brief First temperature solve uses feedback from reconstructed initial void.
  */
-TEST(ReactingGasModelTest,
-     FirstPhysicalSolveUsesReconstructedShengVoidFeedback)
+TEST(ReactingGasModelTest, FirstPhysicalSolveUsesReconstructedShengVoidFeedback)
 {
     auto mesh = make_single_cell_mesh();
     SimpleFluid::TimeStepperOptions time_options;
@@ -3049,18 +1837,16 @@ TEST(ReactingGasModelTest,
     constexpr double power_density = 1.0e6;
     solver.add_temperature_source("startup_heating", power_density);
 
-    auto options = sheng_options();
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 5.0;
-    options.microbubble_lifetime = 1.0e30;
-    options.micro_to_large_conversion_coefficient = 0.0;
+    GeneralGas::Parameters p;
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 5;
+    auto options = GeneralGas::options(p);
     const auto& reacting_gas = solver_coupling.configure_reacting_gas(options);
     const auto initial_alpha = reacting_gas.alpha_g().value(0);
     ASSERT_GT(initial_alpha, 0.05);
 
     SimpleFluid::MaterialFeedbackOptions feedback;
-    feedback.density_mode =
-        SimpleFluid::DensityFeedbackMode::Mixture;
+    feedback.density_mode = SimpleFluid::DensityFeedbackMode::Mixture;
     feedback.reference_density = 1000.0;
     feedback.liquid_density = 1000.0;
     feedback.gas_density = 1.0;
@@ -3070,21 +1856,13 @@ TEST(ReactingGasModelTest,
     solver_coupling.step();
 
     const auto initial_mixture_density =
-        feedback.liquid_density * (1.0 - initial_alpha)
-      + feedback.gas_density * initial_alpha;
-    const auto expected_temperature =
-        300.0
-      + time_options.time_step * power_density
-        / (initial_mixture_density
-           * model_options.specific_heat_capacity);
-    EXPECT_NEAR(
-        solver.temperature().value(0), expected_temperature, 1.0e-10);
+        feedback.liquid_density * (1.0 - initial_alpha) + feedback.gas_density * initial_alpha;
+    const auto expected_temperature = 300.0 + time_options.time_step * power_density /
+                                                  (initial_mixture_density * model_options.specific_heat_capacity);
+    EXPECT_NEAR(solver.temperature().value(0), expected_temperature, 1.0e-10);
     EXPECT_GT(
-        solver.temperature().value(0),
-        300.0
-          + time_options.time_step * power_density
-            / (model_options.density
-               * model_options.specific_heat_capacity));
+        solver.temperature().value(0), 300.0 + time_options.time_step * power_density /
+                                                   (model_options.density * model_options.specific_heat_capacity));
 }
 
 /**
@@ -3094,31 +1872,23 @@ TEST(ReactingGasModelTest, SolverOwnsAndPublishesOptionalModel)
 {
     auto mesh = make_single_cell_mesh();
     SimpleFluid::TimeStepperOptions time_options;
-    auto model_options =
-        SimpleFluid::BoussinesqModelOptions::legacy_defaults(
-            time_options);
+    auto model_options = SimpleFluid::BoussinesqModelOptions::legacy_defaults(time_options);
     auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
         mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
     auto& solver = *solver_shared;
     SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-    solver_coupling.configure_reacting_gas(ideal_options());
+    solver_coupling.configure_reacting_gas(GeneralGas::options());
     ASSERT_NE(solver_coupling.find_reacting_gas_model(), nullptr);
 
-    const auto unique_id =
-        std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto unique_id = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto output =
-        std::filesystem::temp_directory_path()
-        / ("SimpleFluid_reacting_gas_" + std::to_string(unique_id)
-           + ".vtu");
+        std::filesystem::temp_directory_path() / ("SimpleFluid_reacting_gas_" + std::to_string(unique_id) + ".vtu");
     solver_coupling.write_solution_vtu(output.string(),
         SimpleFluid::SolutionOutputOptions{.include_sources = true, .include_reacting_gas_fields = true});
 
     std::ifstream input(output);
-    const std::string contents{
-        std::istreambuf_iterator<char>(input),
-        std::istreambuf_iterator<char>()};
-    EXPECT_NE(
-        contents.find("Name=\"S_alpha_reaction\""), std::string::npos);
+    const std::string contents{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+    EXPECT_NE(contents.find("Name=\"S_alpha_reaction\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"alpha_g\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"p_abs\""), std::string::npos);
 
@@ -3135,11 +1905,10 @@ TEST(ReactingGasModelTest, CompositeTransportLeaseMatchesExplicitReference)
     if (mesh->owned_cell_map()->getComm()->getSize() != 1)
         GTEST_SKIP() << "The independent explicit geometry oracle uses one rank.";
     auto explicit_mesh = std::make_shared<ALEMeshType>(SimpleFluid::test::explicit_reference(*composite));
-    const auto options = ale_escape_options();
+    const auto options = GeneralGas::options(GeneralGas::populated());
     const auto advance = [&](const SimpleFluid::SP<ALEMeshType>& selected)
     {
         ALEReactingModelType model(selected, options);
-        model.enable_donor_hydrogen_deficit_tracking();
         ALEFieldType temperature(selected, 300., "temperature"), pressure(selected, 0., "pressure"),
             power(selected, 0., "power");
         ALEVelocityFieldType velocity(selected, ALEMeshType::Vec3{}, "velocity");
@@ -3150,14 +1919,14 @@ TEST(ReactingGasModelTest, CompositeTransportLeaseMatchesExplicitReference)
         flux.sync_ghosts();
         auto material = make_ale_water_properties(selected);
         model.initialize_state(0., temperature, pressure, velocity, material);
-        const double before = model.global_submerged_hydrogen_moles();
-        model.advance(.01, .01, temperature, pressure, velocity, flux, material, &power);
+        const double before = model.global_species_moles(GeneralGas::one);
+        model.advance(.01, .01, temperature, pressure, velocity, flux, material);
         const auto& statistics = model.last_statistics();
         EXPECT_GE(statistics.transport_linear.solves, 6);
-        EXPECT_GT(statistics.submerged_bubble_hydrogen_escaped, 0.);
-        EXPECT_NEAR(model.global_submerged_hydrogen_moles() + statistics.hydrogen_escaped, before, 1e-12);
-        EXPECT_NEAR(statistics.inventory_error, 0., 1e-12);
-        EXPECT_NEAR(statistics.donor_inventory_error, 0., 1e-12);
+        EXPECT_GT(GeneralGas::step_escape(model, GeneralGas::one, true), 0.);
+        EXPECT_NEAR(model.global_species_moles(GeneralGas::one) + GeneralGas::step_escape(model), before, 1e-12);
+        EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0., 1e-12);
+        EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0., 1e-12);
         std::map<std::string, std::vector<double>> result;
         for (const auto& [name, field] : model.output_fields())
             for (size_t row = 0; row < selected->num_owned_cells(); ++row)
@@ -3193,18 +1962,17 @@ TEST(ReactingGasModelTest, CompositeTransportLeasePreservesALEReplayAndAssemblyG
         gas_gcl_fault_motion = nullptr;
         gas_gcl_fault_armed = false;
         gas_gcl_fault_injected = false;
-        auto options = ale_escape_options();
-        options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-        options.hydrogen_diffusivity_correlation = &gas_diffusivity_with_gcl_fault;
+        auto p = GeneralGas::populated();
+        p.diffusivity_two = [](const auto& c) { return gas_diffusivity_with_gcl_fault(c.environment.temperature); };
+        auto options = GeneralGas::options(p);
         ALEReactingModelType model(mesh, options);
-        model.enable_donor_hydrogen_deficit_tracking();
         ALEFieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
         ALEVelocityFieldType velocity(mesh, ALEMeshType::Vec3{}, "velocity");
         ALEFaceFieldType relative_flux(mesh, 0., "relative_flux");
         auto material = make_ale_water_properties(mesh);
         model.initialize_state(0., temperature, pressure, velocity, material);
         const auto checkpoint = model.snapshot();
-        const double before = model.global_submerged_hydrogen_moles();
+        const double before = model.global_species_moles(GeneralGas::one);
         ALEMotionType motion(mesh);
         constexpr double dt = .01;
         const auto fields = [&]
@@ -3220,11 +1988,10 @@ TEST(ReactingGasModelTest, CompositeTransportLeasePreservesALEReplayAndAssemblyG
             motion.begin_trial(target, dt);
             const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
             model.refresh_geometry();
-            model.advance(dt, dt, temperature, pressure, velocity, relative_flux, material, &power,
-                &ale, SimpleFluid::Dimension::Z);
-            EXPECT_NEAR(model.global_submerged_hydrogen_moles() + model.last_statistics().hydrogen_escaped,
-                before, 1e-12);
-            EXPECT_NEAR(model.last_statistics().donor_inventory_error, 0., 1e-12);
+            model.advance(
+                dt, dt, temperature, pressure, velocity, relative_flux, material, &ale, SimpleFluid::Dimension::Z);
+            EXPECT_NEAR(model.global_species_moles(GeneralGas::one) + GeneralGas::step_escape(model), before, 1e-12);
+            EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0., 1e-12);
             EXPECT_NO_THROW(composite->require_geometry_writable());
             return fields();
         };
@@ -3256,10 +2023,13 @@ TEST(ReactingGasModelTest, CompositeTransportLeasePreservesALEReplayAndAssemblyG
             std::string message;
             try
             {
-                model.advance(dt, dt, temperature, pressure, velocity, relative_flux, material, &power,
-                    &ale, SimpleFluid::Dimension::Z);
+                model.advance(
+                    dt, dt, temperature, pressure, velocity, relative_flux, material, &ale, SimpleFluid::Dimension::Z);
             }
-            catch (const std::invalid_argument& error) { message = error.what(); }
+            catch (const std::invalid_argument& error)
+            {
+                message = error.what();
+            }
             EXPECT_TRUE(gas_gcl_fault_injected);
             EXPECT_NE(message.find("geometric conservation law"), std::string::npos);
             EXPECT_NO_THROW(composite->require_geometry_writable());
@@ -3278,70 +2048,83 @@ TEST(ReactingGasModelTest, CompositeTransportLeasePreservesALEReplayAndAssemblyG
     }
 }
 
-SimpleFluid::ReactingGasOptions zero_ale_transport_options()
+GeneralGas::Parameters zero_ale_transport_options()
 {
-    auto options = ale_escape_options();
-    options.initial_dissolved_hydrogen = 0;
-    options.initial_micro_number_density = options.initial_micro_moles = 0;
-    options.initial_large_number_density = options.initial_large_moles = 0;
-    return options;
+    GeneralGas::Parameters p;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = .4;
+    p.controls.free_surface_patches = {"zmax"};
+    return p;
 }
-
-/** Two independent models share only prescribed mesh/field inputs. */
+/** Cached and independently refreshed numeric operators share only prescribed inputs. */
 struct ALEZeroTransportPair
 {
     SimpleFluid::SP<ALEMeshType> mesh = std::make_shared<ALEMeshType>(make_gas_composite_column());
-    ALEReactingModelType full, reduced;
+    GeneralGas::Parameters parameters;
     ALEFieldType temperature{mesh, 300., "temperature"}, pressure{mesh, 0., "pressure"}, power{mesh, 0., "power"};
     ALEVelocityFieldType velocity{mesh, ALEMeshType::Vec3{}, "velocity"};
     ALEFaceFieldType flux{mesh, 0., "relative_flux"};
     SimpleFluid::MaterialPropertyFields<Pack, ALEMeshType> material = make_ale_water_properties(mesh);
+    ALEReactingModelType full, reduced;
     ALEMotionType motion{mesh};
-
-    explicit ALEZeroTransportPair(SimpleFluid::ReactingGasOptions options)
-        : full(mesh, options), reduced(mesh, options)
+    explicit ALEZeroTransportPair(GeneralGas::Parameters p)
+        : parameters(std::move(p)), full(mesh, GeneralGas::options(parameters, &power)),
+          reduced(mesh, GeneralGas::options(parameters, &power))
     {
-        full.enable_donor_hydrogen_deficit_tracking();
-        reduced.enable_donor_hydrogen_deficit_tracking();
-        reduced.set_skip_zero_auxiliary_transport(true);
-        full.initialize_state(0., temperature, pressure, velocity, material);
-        reduced.initialize_state(0., temperature, pressure, velocity, material);
+        full.initialize_state(0, temperature, pressure, velocity, material);
+        reduced.initialize_state(0, temperature, pressure, velocity, material);
     }
-
     void advance(double top, double time, double dt)
     {
         motion.begin_trial(top, dt);
         const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+        full.refresh_geometry();
+        GeneralGas::force_numeric_reassembly(reduced);
         for (auto* model : {&full, &reduced})
         {
-            model->refresh_geometry();
-            model->advance(time, dt, temperature, pressure, velocity, flux, material, &power, &ale);
+            model->advance(time, dt, temperature, pressure, velocity, flux, material, &ale);
         }
     }
-
     void compare() const
     {
         for (const auto& [name, field] : full.output_fields())
         {
-            SCOPED_TRACE(name);
             const auto* actual = reduced.output_fields().at(name);
-            for (size_t row = 0; row < mesh->num_local_cells(); ++row)
+            for (std::size_t row = 0; row < mesh->num_local_cells(); ++row)
             {
-                const auto lid = static_cast<Pack::local_ordinal_type>(row);
-                const double expected = field->local_value(lid);
-                EXPECT_NEAR(actual->local_value(lid), expected, std::max(1e-20, std::abs(expected) * 1e-12));
+                const auto cell = static_cast<Pack::local_ordinal_type>(row);
+                const auto expected = field->local_value(cell);
+                EXPECT_NEAR(actual->local_value(cell), expected, std::max(1e-20, std::abs(expected) * 1e-12)) << name;
             }
         }
-        EXPECT_NEAR(reduced.last_statistics().inventory_error, 0., 1e-12);
-        EXPECT_NEAR(reduced.last_statistics().donor_inventory_error, 0., 1e-12);
+        for (const auto& h : reduced.species_histories())
+        {
+            SCOPED_TRACE(h.species);
+            if (h.species == GeneralGas::one || h.species == GeneralGas::two)
+                EXPECT_NEAR(h.inventory_error, 0, 1e-12);
+            else
+            {
+                // The historical absolute oracle concerns transported gas.
+                // Finite solution stocks have no sources or outward carrier
+                // flux here and retain their independently initialized amount.
+                // Their total is about 5e4 mol, where one double ULP exceeds
+                // the gas-only absolute gate; use floating-point equality for
+                // this additional solvent check, with every event exactly zero.
+                EXPECT_DOUBLE_EQ(h.current_moles, h.initial_moles);
+                EXPECT_DOUBLE_EQ(h.chemical_production, 0.0);
+                EXPECT_DOUBLE_EQ(h.chemical_consumption, 0.0);
+                EXPECT_DOUBLE_EQ(h.external_supply, 0.0);
+                EXPECT_DOUBLE_EQ(h.external_withdrawal, 0.0);
+                EXPECT_DOUBLE_EQ(h.physical_outflow, 0.0);
+            }
+        }
+        EXPECT_EQ(reduced.population_escape_receipt().events, full.population_escape_receipt().events);
     }
-
-    void rollback(const ALEReactingModelType::StateSnapshot& full_state,
-                  const ALEReactingModelType::StateSnapshot& reduced_state)
+    void rollback(const ALEReactingModelType::StateSnapshot& a, const ALEReactingModelType::StateSnapshot& b)
     {
         motion.rollback_trial();
-        full.restore(full_state);
-        reduced.restore(reduced_state);
+        full.restore(a);
+        reduced.restore(b);
         full.refresh_geometry();
         reduced.refresh_geometry();
     }
@@ -3350,96 +2133,96 @@ struct ALEZeroTransportPair
 TEST(ReactingGasModelTest, ALEZeroAuxiliaryMatchesFullAcrossMotionAndReplay)
 {
     ALEZeroTransportPair state(zero_ale_transport_options());
-    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    const auto a = state.full.snapshot(), b = state.reduced.snapshot();
     for (const double top : {.8, 1.2, .8})
     {
-        SCOPED_TRACE(top);
         state.advance(top, .001, .001);
         state.compare();
-        EXPECT_EQ(state.full.last_statistics().transport_linear.solves, 6);
-        EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 1);
-        EXPECT_EQ(state.reduced.last_statistics().donor_transport_work.skipped, 1);
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[1].solves, 1);
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[2].solves, 1);
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[3].skipped, 1);
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 1);
-        EXPECT_DOUBLE_EQ(state.reduced.global_submerged_hydrogen_moles(), 0.);
-        state.rollback(full_start, reduced_start);
+        EXPECT_GT(state.full.last_statistics().transport_linear.solves, 0);
+        EXPECT_EQ(state.full.last_statistics().transport_linear.solves,
+            state.reduced.last_statistics().transport_linear.solves);
+        EXPECT_DOUBLE_EQ(state.reduced.global_species_moles(GeneralGas::one), 0);
+        EXPECT_DOUBLE_EQ(GeneralGas::integral(state.reduced.population_number_field("large")), 0);
+        state.rollback(a, b);
     }
 }
 
 TEST(ReactingGasModelTest, ALEZeroAuxiliaryPreservesSharedMicroEscape)
 {
-    auto options = zero_ale_transport_options();
-    options.initial_micro_number_density = 1e10;
-    options.initial_micro_moles = 1e-6;
-    ALEZeroTransportPair state(options);
-    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    auto p = zero_ale_transport_options();
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 1e-6;
+    ALEZeroTransportPair state(p);
+    const auto a = state.full.snapshot(), b = state.reduced.snapshot();
     for (const double top : {.8, 1.2})
     {
         state.advance(top, .01, .01);
         state.compare();
-        const auto& statistics = state.reduced.last_statistics();
-        EXPECT_EQ(statistics.transport_work[0].skipped, 1);
-        EXPECT_EQ(statistics.transport_work[3].skipped, 1);
-        EXPECT_EQ(statistics.transport_work[4].skipped, 1);
-        EXPECT_GT(statistics.microbubble_hydrogen_escaped, 0.);
-        EXPECT_DOUBLE_EQ(statistics.large_bubble_hydrogen_escaped, 0.);
-        EXPECT_DOUBLE_EQ(statistics.submerged_bubble_hydrogen_escaped, statistics.microbubble_hydrogen_escaped);
-        EXPECT_NEAR(statistics.microbubble_hydrogen_escaped,
-            state.full.last_statistics().microbubble_hydrogen_escaped, 1e-20);
-        state.rollback(full_start, reduced_start);
+        EXPECT_GT(GeneralGas::step_escape(state.reduced, GeneralGas::one, true), 0);
+        EXPECT_GT(GeneralGas::number_escape(state.reduced, "micro"), 0);
+        EXPECT_DOUBLE_EQ(GeneralGas::number_escape(state.reduced, "large"), 0);
+        EXPECT_NEAR(GeneralGas::step_escape(state.reduced), GeneralGas::step_escape(state.full), 1e-20);
+        state.rollback(a, b);
     }
 }
 
 TEST(ReactingGasModelTest, ALEZeroLargeNumberReassemblesPopulatedMoles)
 {
-    auto options = zero_ale_transport_options();
-    options.initial_large_moles = 1e-6;
-    ALEZeroTransportPair state(options);
+    auto p = zero_ale_transport_options();
+    p.reservoir_mol_per_joule[0] = 2e-7;
+    p.nucleate_supplied_gas = true;
+    p.nucleation_population = "large";
+    ALEZeroTransportPair state(p);
     double time = 0;
     for (int step = 1; step <= 2; ++step)
     {
+        if (step == 2)
+            state.power.put_scalar(1000);
         const double dt = step * .001;
         time += dt;
         state.advance(step == 1 ? 1.2 : .8, time, dt);
         state.compare();
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[3].skipped, 1);
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[4].assemblies, 1);
-        EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 0);
-        EXPECT_GT(state.reduced.global_large_bubble_hydrogen_moles(), 0.);
+        if (step == 1)
+            EXPECT_DOUBLE_EQ(
+                GeneralGas::compartment(state.reduced, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), 0);
+        else
+        {
+            EXPECT_GT(
+                GeneralGas::compartment(state.reduced, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), 0);
+            EXPECT_GT(GeneralGas::integral(state.reduced.population_number_field("large")), 0);
+        }
         state.motion.accept_trial();
     }
+    auto invalid = p;
+    invalid.molar_one[1] = 1e-6;
+    invalid.number_density[1] = 0;
+    EXPECT_THROW(ALEZeroTransportPair malformed(invalid), std::invalid_argument);
 }
 
 TEST(ReactingGasModelTest, ALEZeroAuxiliaryRetainsMotionAndPostCallbackGCLGuards)
 {
-    auto options = zero_ale_transport_options();
-    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-    options.hydrogen_diffusivity_correlation = &gas_diffusivity_with_gcl_fault;
+    auto p = zero_ale_transport_options();
+    p.diffusivity_two = [](const auto& c) { return gas_diffusivity_with_gcl_fault(c.environment.temperature); };
     gas_gcl_fault_armed = false;
     gas_gcl_fault_motion = nullptr;
-    ALEZeroTransportPair state(options);
-    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    ALEZeroTransportPair state(p);
+    const auto a = state.full.snapshot(), b = state.reduced.snapshot();
     constexpr double dt = .001;
     state.motion.begin_trial(1.2, dt);
     const auto old = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
-    auto advance = [&](const auto& ale, double step = .001)
+    const auto advance = [&](const auto& ale, double step = .001)
     {
-        state.reduced.advance(dt, step, state.temperature, state.pressure, state.velocity, state.flux,
-            state.material, &state.power, &ale);
+        state.reduced.advance(
+            dt, step, state.temperature, state.pressure, state.velocity, state.flux, state.material, &ale);
     };
     EXPECT_THROW(advance(old, 2 * dt), std::invalid_argument);
     state.motion.rollback_trial();
     EXPECT_THROW(advance(old), std::logic_error);
     state.motion.begin_trial(1.1, dt);
     EXPECT_THROW(advance(old), std::invalid_argument);
-    state.rollback(full_start, reduced_start);
-
+    state.rollback(a, b);
     for (const bool after_callback : {false, true})
     {
-        SCOPED_TRACE(after_callback);
         state.motion.begin_trial(1.2, dt);
         {
             MutableGasALEView altered(state.mesh, state.motion);
@@ -3447,29 +2230,37 @@ TEST(ReactingGasModelTest, ALEZeroAuxiliaryRetainsMotionAndPostCallbackGCLGuards
             state.reduced.refresh_geometry();
             gas_gcl_fault_motion = &altered;
             gas_gcl_fault_injected = false;
-            if (after_callback) gas_gcl_fault_armed = true;
-            else altered.invalidate_flux();
+            if (after_callback)
+                gas_gcl_fault_armed = true;
+            else
+                altered.invalidate_flux();
             std::string message;
-            try { advance(ale); }
-            catch (const std::invalid_argument& error) { message = error.what(); }
+            try
+            {
+                advance(ale);
+            }
+            catch (const std::invalid_argument& e)
+            {
+                message = e.what();
+            }
             EXPECT_NE(message.find("geometric conservation law"), std::string::npos);
-            if (after_callback) EXPECT_TRUE(gas_gcl_fault_injected);
-            EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
+            if (after_callback)
+                EXPECT_TRUE(gas_gcl_fault_injected);
             EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 0);
             gas_gcl_fault_armed = false;
             gas_gcl_fault_motion = nullptr;
         }
-        state.rollback(full_start, reduced_start);
+        state.rollback(a, b);
     }
     state.advance(1.1, dt, dt);
     state.compare();
-    state.rollback(full_start, reduced_start);
+    state.rollback(a, b);
 }
 
 TEST(ReactingGasModelTest, ALEZeroAuxiliaryRetainsLiquidStorageValidation)
 {
     ALEZeroTransportPair state(zero_ale_transport_options());
-    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    const auto a = state.full.snapshot(), b = state.reduced.snapshot();
     state.motion.begin_trial(1.1, .001);
     const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
     std::array<std::string, 2> messages;
@@ -3477,22 +2268,26 @@ TEST(ReactingGasModelTest, ALEZeroAuxiliaryRetainsLiquidStorageValidation)
     for (auto* model : {&state.full, &state.reduced})
     {
         model->refresh_geometry();
-        // Test-only corruption of this non-const model's stored coefficient.
-        // The full assembly is the reference for category and diagnostic.
-        const_cast<ALEFieldType&>(model->alpha_l()).put_scalar(std::numeric_limits<double>::quiet_NaN());
+        // Poison actual conserved liquid storage; derived alpha_l is correctly rebuilt from this stock.
+        const_cast<ALEFieldType&>(model->species_field(GeneralGas::solvent, GeneralGas::Phase::Liquid))
+            .put_scalar(std::numeric_limits<double>::quiet_NaN());
         try
         {
-            model->advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
-                state.material, &state.power, &ale);
+            model->advance(
+                .001, .001, state.temperature, state.pressure, state.velocity, state.flux, state.material, &ale);
         }
-        catch (const std::invalid_argument& error) { messages[index] = error.what(); }
+        catch (const std::exception& error)
+        {
+            messages[index] = error.what();
+        }
         ++index;
     }
     EXPECT_FALSE(messages[0].empty());
     EXPECT_EQ(messages[0], messages[1]);
-    EXPECT_NE(messages[1].find("finite positive storage"), std::string::npos);
-    EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
-    state.rollback(full_start, reduced_start);
+    state.rollback(a, b);
+    state.advance(1.1, .001, .001);
+    state.compare();
+    state.rollback(a, b);
 }
 
 } // namespace

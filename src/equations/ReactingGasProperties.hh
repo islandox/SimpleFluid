@@ -30,8 +30,7 @@ namespace SimpleFluid
 enum class ReactingGasMode
 {
     Disabled,
-    IdealGasSource,        ///< Convert hydrogen production directly to void source.
-    TwoPopulation ///< Evolve dissolved, micro-, and large-bubble inventories.
+    Species ///< Schema-owned finite species and explicitly named population inventories.
 };
 
 /**
@@ -41,17 +40,16 @@ enum class ReactingPressureMode
 {
     Constant,          ///< Use a constant reference pressure.
     PrescribedHistory, ///< Interpolate pressure from a supplied time history.
-    Reconstructed,     ///< Add solver gauge pressure to the reference pressure.
-    Inertial           ///< Include transient inertial pressure corrections.
+    Reconstructed      ///< Add solver gauge pressure to the reference pressure.
 };
 
 /**
- * @brief Dissolved-hydrogen transport selection.
+ * @brief Solution (Liquid plus Dissolved) transport selection.
  */
 enum class ReactingTransportMode
 {
-    NoAdvection, ///< Keep dissolved inventory cell-local.
-    Advective    ///< Transport dissolved inventory with liquid flux.
+    NoAdvection, ///< Keep solution inventory cell-local.
+    Advective    ///< Transport solution inventory with liquid flux.
 };
 
 /**
@@ -70,13 +68,6 @@ enum class ReactingHeavisideMode
 {
     Exact,   ///< Use a discontinuous threshold switch.
     Smoothed ///< Use a hyperbolic-tangent transition.
-};
-
-/** @brief Local two-population kinetics integration policy. */
-enum class ReactingKineticsMode
-{
-    LegacySubcycled, ///< Retain the original source/decay splitting and subcycles.
-    ExactInactive   ///< Integrate subcritical microbubble production/decay exactly; otherwise use legacy subcycles.
 };
 
 /**
@@ -98,29 +89,13 @@ enum class SurfaceTensionMode
     External ///< Evaluate a caller-supplied surface-tension correlation.
 };
 
-/**
- * @brief Hydrogen diffusivity correlation selection.
- */
-enum class HydrogenDiffusivityMode
-{
-    Constant,
-    External   ///< Evaluate a caller-supplied temperature correlation.
-};
-
 /** @brief Liquid-side transfer law for the representative bubbles. */
 enum class BubbleMassTransferMode
 {
-    LegacyHughmark,   ///< Historical model, requiring Sc < 250.
-    SphericalDiffusion, ///< Steady diffusion-only reference: Sh = 2.
+    Hughmark,             ///< Historical model, requiring Sc < 250.
+    SphericalDiffusion,   ///< Steady diffusion-only reference: Sh = 2.
     FengMichaelidesClean, ///< Feng 2000 inviscid, mobile-interface endpoint.
-    FengMichaelidesRigid ///< Feng 2000 rigid, immobilized-interface endpoint.
-};
-
-/** @brief Nucleation-radius property selection. */
-enum class NucleationRadiusMode
-{
-    Constant,
-    External
+    FengMichaelidesRigid  ///< Feng 2000 rigid, immobilized-interface endpoint.
 };
 
 namespace BubbleGasPhysics
@@ -153,8 +128,19 @@ struct ReactingSpeciesProperties
         carried_molar_enthalpy; ///< Required when this species crosses an open boundary, J/mol.
 };
 /**
- * @brief Runtime configuration for ideal and two-population reacting_gas.
+ * @brief Runtime configuration for schema-owned reacting gas.
  */
+/** Source ordering for an explicitly prescribed carrier reference.
+ * Normal finite chemistry supplies thermal input before temperature transport.
+ * The post-temperature path owns gas amounts/counts only and must apply exactly
+ * zero chemical, external and transfer heat; it has no finite liquid/film owner.
+ */
+enum class ReactingSourceSchedule
+{
+    BeforeTemperature,
+    PrescribedCarrierAfterTemperature
+};
+
 struct ReactingGasOptions
 {
     /** Typed general chemistry. Its catalog defines every authoritative chemical field.
@@ -168,6 +154,7 @@ struct ReactingGasOptions
      */
     std::shared_ptr<const Reacting::BoussReferenceVolume> bouss_reference;
     std::shared_ptr<const Reacting::BoussCoordinatedSources> bouss_sources;
+    ReactingSourceSchedule source_schedule = ReactingSourceSchedule::BeforeTemperature;
     std::shared_ptr<const Reacting::MixtureThermodynamics> gas_thermodynamics;
     std::shared_ptr<const Reacting::MixtureThermodynamics> liquid_thermodynamics;
     std::function<Reacting::ReactionSourceInput(const Reacting::ReactionContext&, double)> species_source;
@@ -185,66 +172,30 @@ struct ReactingGasOptions
     double micro_conversion_frequency = 0.0;  ///< 1/s, micro->large transfer, preserving each species.
     ReactingGasMode mode = ReactingGasMode::Disabled;
     ReactingPressureMode pressure_mode = ReactingPressureMode::Constant;
-    ReactingTransportMode dissolved_transport = ReactingTransportMode::NoAdvection;
+    ReactingTransportMode solution_transport = ReactingTransportMode::NoAdvection;
     BubbleTransportMode bubble_transport = BubbleTransportMode::General;
-    ReactingHeavisideMode heaviside_mode = ReactingHeavisideMode::Exact;
-    ReactingKineticsMode kinetics_mode = ReactingKineticsMode::LegacySubcycled;
     BubbleRiseVelocityMode rise_velocity_mode = BubbleRiseVelocityMode::ZeroSlip;
     SurfaceTensionMode surface_tension_mode = SurfaceTensionMode::Constant;
-    HydrogenDiffusivityMode diffusivity_mode = HydrogenDiffusivityMode::Constant;
-    BubbleMassTransferMode mass_transfer_mode = BubbleMassTransferMode::LegacyHughmark;
-    NucleationRadiusMode nucleation_radius_mode = NucleationRadiusMode::Constant;
+    BubbleMassTransferMode mass_transfer_mode = BubbleMassTransferMode::Hughmark;
 
-    real_t hydrogen_yield_mol_per_j = 0.0;
-    real_t gas_release_efficiency = 1.0;  ///< Fraction of generated hydrogen released to gas.
     real_t reference_pressure = 101325.0; ///< Reference absolute pressure.
-    real_t gas_constant = 8.31446261815324;
-    real_t alpha_min = 0.0;  ///< Lower gas void-fraction bound.
-    real_t alpha_max = 0.95; ///< Upper gas void-fraction bound.
-    real_t max_source_alpha_rate =
-        std::numeric_limits<real_t>::infinity(); ///< Ideal-mode void-source cap.
+    real_t alpha_min = 0.0;               ///< Lower gas void-fraction bound.
+    real_t alpha_max = 0.95;              ///< Upper gas void-fraction bound.
 
-    // H = C/p in mol/(m^3 Pa), matching Sheng et al. Eq. (9).
-    real_t henry_coefficient = 0.0;
-    real_t surface_tension = 0.0;           ///< Constant gas-liquid surface tension.
-    real_t hydrogen_diffusivity = 0.0;      ///< Constant dissolved-hydrogen diffusivity.
-    // External mode: input K, output m2/s, finite and positive. The function
-    // must be reentrant and implement the same correlation on every MPI rank.
-    real_t (*hydrogen_diffusivity_correlation)(real_t) = nullptr;
-    // Material callbacks own any composition/model parameters they capture.
-    // Inputs are K and Pa; outputs are N/m and m. Captures must remain valid,
-    // reentrant and physically identical on every MPI rank.
+    real_t surface_tension = 0.0; ///< Supplied constant gas-liquid surface tension [N/m].
+    // Captures own immutable material parameters; the callback is reentrant and
+    // physically identical across ranks. Input K, output N/m.
     std::function<real_t(real_t)> surface_tension_correlation;
-    std::function<real_t(real_t, real_t)> nucleation_radius_correlation;
-    real_t nucleation_radius = 0.0; ///< Required supplied value for Constant mode.
 
-    real_t microbubble_lifetime = 10.0e-6;
-    real_t large_bubble_dissolution_time = 50.0e-6;
-    real_t micro_to_large_conversion_coefficient = 1.0e-4;
-    real_t smooth_heaviside_width = 0.0;
     real_t constant_slip_velocity = 0.0;
-    real_t bubble_gas_density = 0.0;
     real_t bubble_gravity = 9.80665;          ///< Gravity magnitude in rise correlations.
     real_t rise_velocity_tolerance = 1.0e-10; ///< Relative terminal-speed solver tolerance.
     int max_rise_velocity_iterations = 100;
 
-    real_t initial_dissolved_hydrogen = 0.0;
-    real_t initial_micro_number_density = 0.0;
-    real_t initial_micro_moles = 0.0;
-    real_t initial_large_number_density = 0.0;
-    real_t initial_large_moles = 0.0;
-
     real_t min_radius = 1.0e-10;
     real_t max_radius = 1.0e-2;
-    real_t min_population = 1.0e-30;
-    real_t max_population = 1.0e30;
-    real_t max_concentration = 1.0e6;
-    real_t local_ode_tolerance = 1.0e-8; ///< Local kinetics relative tolerance.
     int max_subcycles = 10000;
-    int max_radius_iterations = 100;
 
-    real_t liquid_compressibility = 4.5e-10;
-    real_t liquid_thermal_expansion = 0.0;
     real_t minimum_absolute_pressure = 1.0;
 
     std::vector<real_t> pressure_history_times;
@@ -268,31 +219,12 @@ require_positive(real_t value, std::string_view label);
 SIMPLEFLUID_EQUATIONS_EXPORT real_t
 require_non_negative(real_t value, std::string_view label);
 
-/** @brief Convert prescribed_heat power density to an ideal-gas alpha source rate. */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-ideal_gas_alpha_source(real_t liquid_fraction, real_t release_efficiency,
-                       real_t yield_mol_per_j, real_t power_density,
-                       real_t gas_constant, real_t temperature,
-                       real_t absolute_pressure, real_t max_source_rate);
-
-/** @brief Henry-law equilibrium H2 concentration including Laplace pressure. */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-henry_equilibrium_concentration(real_t henry_coefficient,
-                                real_t liquid_pressure,
-                                real_t surface_tension,
-                                real_t bubble_radius);
+/** @brief Henry-law equilibrium concentration including Laplace pressure. */
+SIMPLEFLUID_EQUATIONS_EXPORT real_t henry_equilibrium_concentration(
+    real_t henry_coefficient, real_t liquid_pressure, real_t surface_tension, real_t bubble_radius);
 
 /** @brief Evaluate supplied surface tension (N/m) at temperature (K). */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-surface_tension(const ReactingGasOptions& options, real_t temperature_kelvin);
-
-/** @brief Evaluate supplied nucleation radius (m) at temperature (K), pressure (Pa). */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-nucleation_radius(const ReactingGasOptions& options, real_t temperature_kelvin, real_t absolute_pressure);
-
-/** @brief Evaluate and validate the selected dissolved-hydrogen diffusivity. */
-SIMPLEFLUID_EQUATIONS_EXPORT real_t
-hydrogen_diffusivity(const ReactingGasOptions& options, real_t temperature_kelvin);
+SIMPLEFLUID_EQUATIONS_EXPORT real_t surface_tension(const ReactingGasOptions& options, real_t temperature_kelvin);
 
 /** @brief Hughmark Sherwood-number correlation. */
 SIMPLEFLUID_EQUATIONS_EXPORT real_t
@@ -307,7 +239,7 @@ hughmark_mass_transfer_coefficient(
 /** @brief How to interpret the selected transfer result. */
 enum class BubbleMassTransferApplicability
 {
-    LegacyScGuardPassed, ///< Existing Sc guard passed; no new Re qualification.
+    HughmarkSchmidtDomain,  ///< Existing Sc guard passed; no new Re qualification.
     DiffusionOnlyReference, ///< Steady radial diffusion with Pe = 0.
     SourceLowPeAsymptotic, ///< Feng 2000 p. 64 Eq. (4), Pe_d < 1.
     SourceFitOperationalWindow, ///< Feng 2000 p. 67 Eq. (19), gated high Pe.
@@ -317,9 +249,8 @@ enum class BubbleMassTransferApplicability
 /** @brief Diameter-based dimensionless groups and liquid-side coefficient. */
 struct BubbleMassTransferResult
 {
-    BubbleMassTransferMode model = BubbleMassTransferMode::LegacyHughmark;
-    BubbleMassTransferApplicability applicability =
-        BubbleMassTransferApplicability::LegacyScGuardPassed;
+    BubbleMassTransferMode model = BubbleMassTransferMode::Hughmark;
+    BubbleMassTransferApplicability applicability = BubbleMassTransferApplicability::HughmarkSchmidtDomain;
     real_t radius = 0.0;
     real_t diameter = 0.0;
     real_t relative_speed = 0.0;

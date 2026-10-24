@@ -39,12 +39,12 @@ std::shared_ptr<Grid> grid()
 S::ReactingGasOptions options(Case selected)
 {
     S::ReactingGasOptions o;
-    o.mode = S::ReactingGasMode::TwoPopulation;
+    o.mode = S::ReactingGasMode::Species;
     o.reference_pressure = 100000;
     o.surface_tension = 0;
     o.min_radius = 1e-12;
     o.max_radius = .1;
-    o.dissolved_transport = S::ReactingTransportMode::Advective;
+    o.solution_transport = S::ReactingTransportMode::Advective;
     o.mass_transfer_mode = S::BubbleMassTransferMode::SphericalDiffusion;
     auto catalog = std::make_shared<const R::SpeciesCatalog>(
         std::vector<R::SpeciesDefinition>{{solvent, "finite solvent", .018, {{"S", 1}}, {P::Liquid}},
@@ -143,7 +143,7 @@ struct Fixture
     }
     void advance(double end, double dt = .001)
     {
-        model.advance(end, dt, temperature, pressure, velocity, flux, material, nullptr);
+        model.advance(end, dt, temperature, pressure, velocity, flux, material);
     }
     void expect_tiny() const
     {

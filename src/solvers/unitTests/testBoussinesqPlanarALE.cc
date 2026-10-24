@@ -3,10 +3,11 @@
  * @brief Solver-level acceptance and rollback tests for constrained planar ALE.
  */
 
-#include <gtest/gtest.h>
 #include "solvers/unitTests/CoupledBackendTestSupport.hh"
+#include <gtest/gtest.h>
 
 #include "ReactingMixtureTestSupport.hh"
+#include "SurfaceGasFixtureSupport.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
@@ -27,6 +28,7 @@
 #include <map>
 #include <memory>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -54,10 +56,7 @@ public:
         return SimpleFluid::FluidSolver<Pack>::native_velocity_boundary_cache();
     }
 
-    auto& mutable_pressure_corrected_face_fluxes()
-    {
-        return SimpleFluid::FluidSolver<Pack>::projected_face_fluxes();
-    }
+    auto& mutable_pressure_corrected_face_fluxes() { return SimpleFluid::FluidSolver<Pack>::projected_face_fluxes(); }
 
     auto solution_topology() const { return SimpleFluid::FluidSolver<Pack>::fluid_solution_writer().topology_handle(); }
 };
@@ -66,6 +65,7 @@ using FaceFlux = SimpleFluid::ScalarFaceFieldStored<Pack>;
 using FaceVelocity = SimpleFluid::VectorFaceFieldStored<Pack>;
 using Source = SimpleFluid::VolumetricScalarSource<Pack, Handle>;
 using Coupling = SimpleFluid::PressureVelocityCoupling;
+namespace SurfaceGas = SimpleFluid::Testing::SurfaceGas;
 
 testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
@@ -161,24 +161,11 @@ SimpleFluid::FreeSurfaceOptions free_surface_options(int maximum_correctors)
     return options;
 }
 
-SimpleFluid::ReactingGasOptions gas_options()
+SimpleFluid::ReactingGasOptions gas_options(const ScalarField* prescribed = nullptr)
 {
-    SimpleFluid::ReactingGasOptions options;
-    options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
+    auto options = SurfaceGas::options({}, prescribed ? SurfaceGas::prescribed_power(prescribed) : SurfaceGas::Power{});
     options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
     options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
-    options.hydrogen_yield_mol_per_j = 2.0e-7;
-    options.max_source_alpha_rate = 1.0;
-    options.henry_coefficient = 1.0e-5;
-    options.surface_tension = 0.07;
-    // mu/(rho*D)=100, inside the implemented Hughmark Sc range.
-    options.hydrogen_diffusivity = 1.0e-5;
-    options.nucleation_radius = 6.6359547089482127e-8;
-
-    options.reference_pressure = 101325.0;
-    options.initial_dissolved_hydrogen = 1.0;
     options.free_surface_patches = {"zmax"};
     return options;
 }
@@ -199,7 +186,7 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
     SimpleFluid::CoupledWorkspacePolicy workspace = SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
     SimpleFluid::FVM::CellGradientScheme gradient = SimpleFluid::FVM::CellGradientScheme::LeastSquares,
     bool track_donor = false,
-    SimpleFluid::BubbleMassTransferMode mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::LegacyHughmark)
+    SimpleFluid::BubbleMassTransferMode mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::Hughmark)
 {
     auto mesh = make_column();
     SimpleFluid::LinearSolverOptions linear_options;
@@ -217,7 +204,7 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
     if (include_gas)
     {
         solver_coupling->add_prescribed_heat_source().initialize_constant(0.0);
-        auto gas = gas_options();
+        auto gas = gas_options(&solver_coupling->find_prescribed_heat_source()->field());
         gas.pressure_mode = pressure_mode;
         gas.mass_transfer_mode = mass_transfer_mode;
         if (bubble_slip_velocity > 0.0)
@@ -230,7 +217,8 @@ ConfiguredCase make_case(Coupling coupling, double power_density, int maximum_co
             gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::Celata2007;
         }
         auto& gas_model = solver_coupling->configure_reacting_gas(gas);
-        if (track_donor) gas_model.enable_donor_hydrogen_deficit_tracking();
+        (void) gas_model;
+        (void) track_donor; // Typed histories retain actual finite inventories, never a fabricated deficit.
     }
     solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
     auto surface_options = free_surface_options(maximum_correctors);
@@ -1173,7 +1161,8 @@ TEST(BoussinesqPlanarALETest, StationaryGasCanConvergeOnTheFirstAleTrial)
         EXPECT_EQ(observations.back().blocking_mask, 0u);
         for (const auto value : observations.back().gas_relative_change)
             EXPECT_LE(value, 8 * std::numeric_limits<double>::epsilon());
-        EXPECT_NEAR(state.coupling->find_reacting_gas_model()->global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
+        EXPECT_NEAR(SurfaceGas::compartment(*state.coupling->find_reacting_gas_model(), SurfaceGas::Phase::Dissolved),
+            1.0, 1.e-14);
         expect_zero_relative_top_flux(state);
     }
     state.coupling->accept_coupling_checkpoint(checkpoint);
@@ -1199,16 +1188,15 @@ TEST(BoussinesqPlanarALETest, GasProductionStillRequiresAConvergedTrialCompariso
     {
         const auto& row = observations[i];
         EXPECT_EQ(row.corrector, i + 1);
-        EXPECT_DOUBLE_EQ(*std::max_element(row.gas_relative_change.begin(), row.gas_relative_change.end()),
-                         diagnostics.gas_state_residual_history[i]);
-        EXPECT_EQ((row.blocking_mask & (size_t{1} << 6)) != 0,
-                  diagnostics.gas_state_residual_history[i] > row.gas_tolerance);
+        for (const auto legacy : row.gas_relative_change)
+            EXPECT_DOUBLE_EQ(legacy, 0);
+        EXPECT_EQ(
+            (row.blocking_mask & (size_t{1} << 6)) != 0, diagnostics.gas_state_residual_history[i] > row.gas_tolerance);
     }
     const auto* gas = state.coupling->find_reacting_gas_model();
-    const double produced = gas->cumulative_hydrogen_produced();
+    const double produced = SurfaceGas::supplied(*gas);
     EXPECT_NEAR(produced, 2000.0 * 0.01 * 2.e-7 * global_mesh_volume(*state.mesh), 1.e-15);
-    EXPECT_NEAR(gas->global_submerged_hydrogen_moles() +
-        gas->cumulative_submerged_bubble_hydrogen_escaped(), 1.0 + produced, 1.e-12);
+    EXPECT_NEAR(gas->global_species_moles(SurfaceGas::gas_id) + SurfaceGas::escaped(*gas), 1.0 + produced, 1.e-12);
 }
 
 TEST(BoussinesqPlanarALETest, AitkenGasProductionKeepsUnrelaxedDiagnosticsAndInventoryGates)
@@ -1233,16 +1221,15 @@ TEST(BoussinesqPlanarALETest, AitkenGasProductionKeepsUnrelaxedDiagnosticsAndInv
     {
         const auto& row = observations[i];
         EXPECT_EQ(row.corrector, i + 1);
-        EXPECT_DOUBLE_EQ(*std::max_element(row.gas_relative_change.begin(), row.gas_relative_change.end()),
-                         diagnostics.gas_state_residual_history[i]);
-        EXPECT_EQ((row.blocking_mask & (size_t{1} << 6)) != 0,
-                  diagnostics.gas_state_residual_history[i] > row.gas_tolerance);
+        for (const auto legacy : row.gas_relative_change)
+            EXPECT_DOUBLE_EQ(legacy, 0);
+        EXPECT_EQ(
+            (row.blocking_mask & (size_t{1} << 6)) != 0, diagnostics.gas_state_residual_history[i] > row.gas_tolerance);
     }
     const auto* gas = state.coupling->find_reacting_gas_model();
-    const double produced = gas->cumulative_hydrogen_produced();
+    const double produced = SurfaceGas::supplied(*gas);
     EXPECT_NEAR(produced, 2000.0 * 0.01 * 2.e-7 * global_mesh_volume(*state.mesh), 1.e-15);
-    EXPECT_NEAR(gas->global_submerged_hydrogen_moles() +
-        gas->cumulative_submerged_bubble_hydrogen_escaped(), 1.0 + produced, 1.e-12);
+    EXPECT_NEAR(gas->global_species_moles(SurfaceGas::gas_id) + SurfaceGas::escaped(*gas), 1.0 + produced, 1.e-12);
 }
 
 TEST(BoussinesqPlanarALETest, ConvergenceObserverFailureRejectsTheStepCollectively)
@@ -1264,14 +1251,12 @@ TEST(BoussinesqPlanarALETest, ConvergenceObserverFailureRejectsTheStepCollective
     EXPECT_DOUBLE_EQ(state.solver->time(), .01);
 }
 
-TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeometryAndClosesInventory)
+TEST(BoussinesqPlanarALETest, SuppliedGasGenerationUsesTheAcceptedMovingGeometryAndClosesInventory)
 {
-    // This unchanged zero-slip fixture has Sc=100; selection checks ALE dispatch,
-    // accepted-state conservation and reconstruction, not high-Sc qualification.
-    auto state = make_case(Coupling::PISO, 0.0, 8, true, 0.0, false,
-        SimpleFluid::ReactingPressureMode::Constant, false,
-        SimpleFluid::CoupledOperatorBackend::Assembled,
-        SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
+    // The explicitly supplied external-feed/count law checks ALE dispatch,
+    // accepted-state conservation and independent ideal-mixture/Laplace reconstruction.
+    auto state = make_case(Coupling::PISO, 0.0, 8, true, 0.0, false, SimpleFluid::ReactingPressureMode::Constant, false,
+        SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
         SimpleFluid::FVM::CellGradientScheme::LeastSquares, false,
         SimpleFluid::BubbleMassTransferMode::SphericalDiffusion);
     auto* gas = state.coupling->find_reacting_gas_model();
@@ -1280,7 +1265,7 @@ TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeomet
     ASSERT_NE(prescribed_heat, nullptr);
     EXPECT_EQ(gas->options().mass_transfer_mode, SimpleFluid::BubbleMassTransferMode::SphericalDiffusion);
     prescribed_heat->initialize_constant(1.0e-3);
-    const auto old_generated = gas->cumulative_hydrogen_produced();
+    const auto old_generated = SurfaceGas::supplied(*gas);
     const auto old_epoch = state.mesh->geometry_epoch();
 
     ASSERT_NO_THROW(state.coupling->step());
@@ -1288,28 +1273,58 @@ TEST(BoussinesqPlanarALETest, ShengHydrogenGenerationUsesTheAcceptedMovingGeomet
     const auto surface = state.coupling->free_surface_diagnostics();
     const auto& ale = state.coupling->planar_ale_diagnostics();
     record_ale_residuals(ale);
-    EXPECT_GT(gas->cumulative_hydrogen_produced(), old_generated);
+    EXPECT_GT(SurfaceGas::supplied(*gas), old_generated);
     EXPECT_GT(state.mesh->geometry_epoch(), old_epoch);
     EXPECT_NEAR(global_mesh_volume(*state.mesh), surface.pool_volume, 2.0e-12);
     EXPECT_NEAR(top_elevation(*state.mesh), surface.pool_level, 2.0e-12);
-    EXPECT_NEAR(gas->last_statistics().inventory_error, 0.0, 1.0e-12);
+    EXPECT_NEAR(SurfaceGas::inventory_error(*gas), 0.0, 1.0e-12);
     EXPECT_NEAR(ale.gas_inventory_residual, 0.0, 1.0e-12);
     EXPECT_GE(ale.outer_correctors, 2);
     EXPECT_LE(ale.gas_state_residual, 1.0e-10);
     EXPECT_EQ(ale.gas_state_residual_history.size(), static_cast<size_t>(ale.outer_correctors));
     EXPECT_NEAR(ale.volume_source.source_pool_closure_residual, 0.0, 1.0e-10);
     EXPECT_LE(ale.continuity.maximum, 3.0e-10);
-    const auto gas_fields = gas->output_fields();
-    const auto* characteristic_radius = gas_fields.at("r_characteristic");
-    const auto* coefficient = gas_fields.at("K_L");
+    // The D/r accepted-transfer oracle is the two-gas fixed-grid test. Here retain
+    // the moving geometry/radius reconstruction purpose independently of legacy fields.
+    double local_bubble_volume = 0;
     for (size_t owned = 0; owned < state.mesh->num_owned_cells(); ++owned)
     {
         const auto cell = static_cast<Pack::local_ordinal_type>(owned);
-        const auto radius = characteristic_radius->value(cell);
-        ASSERT_GT(radius, 0.0);
-        EXPECT_NEAR(coefficient->value(cell), 1.0e-5 / radius,
-                    1.0e-5 / radius * 1.0e-12);
+        const double volume = state.mesh->cell_volume(cell);
+        const double pressure = gas->absolute_pressure().value(cell);
+        const double temperature = state.solver->temperature().value(cell);
+        const auto material = gas->cell_species_state(cell, volume);
+        for (const auto& population : gas->options().population_ids)
+        {
+            const double count = gas->population_number_field(population).value(cell) * volume;
+            double moles = 0;
+            for (const auto& species : gas->options().reaction_mechanism->catalog().species())
+                moles += material.amount(
+                    gas->options().reaction_mechanism->catalog(), species.id, SurfaceGas::Phase::Dispersed, population);
+            if (count == 0)
+            {
+                EXPECT_DOUBLE_EQ(moles, 0);
+                continue;
+            }
+            const double rhs = 3 * moles * SurfaceGas::M::gas_constant * temperature / (4 * std::numbers::pi * count);
+            double lo = 0, hi = .1;
+            for (int iteration = 0; iteration < 100; ++iteration)
+            {
+                const double radius = std::midpoint(lo, hi);
+                if (pressure * radius * radius * radius + 2 * .07 * radius * radius < rhs)
+                    lo = radius;
+                else
+                    hi = radius;
+            }
+            const double radius = std::midpoint(lo, hi);
+            ASSERT_GT(radius, 0);
+            local_bubble_volume += count * 4 * std::numbers::pi * radius * radius * radius / 3;
+        }
     }
+    double global_bubble_volume = 0;
+    Teuchos::reduceAll(
+        *state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_bubble_volume, &global_bubble_volume);
+    EXPECT_NEAR(surface.submerged_bubble_volume, global_bubble_volume, global_bubble_volume * 1e-12);
     expect_zero_relative_top_flux(state);
 }
 
@@ -1322,27 +1337,26 @@ TEST(BoussinesqPlanarALETest, MovingTopBubbleEscapeTransfersToTheVentExactlyOnce
     ASSERT_NE(prescribed_heat, nullptr);
     prescribed_heat->initialize_constant(1.0e3);
 
-    // The Sheng split transports accepted populations before applying this
-    // step's local kinetics.  Prime one accepted step so the following
+    // Accepted populations are transported before this step's supplied
+    // reservoir/nucleation packets.  Prime one accepted step so the following
     // moving-mesh transport step has a nonzero bubble population to vent.
     ASSERT_NO_THROW(state.coupling->step());
-    const auto old_cumulative_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
+    const auto old_cumulative_escape = SurfaceGas::escaped(*gas);
     const auto old_vented = state.coupling->free_surface_diagnostics().vented_gas_moles;
-    const auto old_vented_h2 = old_vented.contains("H2") ? old_vented.at("H2") : 0.0;
+    const auto old_vented_h2 = old_vented.contains(SurfaceGas::gas_name) ? old_vented.at(SurfaceGas::gas_name) : 0.0;
 
     ASSERT_NO_THROW(state.coupling->step());
 
     const auto statistics = gas->last_statistics();
     const auto surface = state.coupling->free_surface_diagnostics();
     record_ale_residuals(state.coupling->planar_ale_diagnostics());
-    ASSERT_GT(statistics.submerged_bubble_hydrogen_escaped, 0.0);
-    ASSERT_TRUE(surface.escaped_gas_moles_this_step.contains("H2"));
-    ASSERT_TRUE(surface.vented_gas_moles.contains("H2"));
-    EXPECT_NEAR(surface.escaped_gas_moles_this_step.at("H2"), statistics.submerged_bubble_hydrogen_escaped, 1.0e-14);
-    EXPECT_NEAR(gas->cumulative_submerged_bubble_hydrogen_escaped() - old_cumulative_escape,
-        statistics.submerged_bubble_hydrogen_escaped, 1.0e-14);
+    ASSERT_GT(SurfaceGas::step_escaped(*gas), 0.0);
+    ASSERT_TRUE(surface.escaped_gas_moles_this_step.contains(SurfaceGas::gas_name));
+    ASSERT_TRUE(surface.vented_gas_moles.contains(SurfaceGas::gas_name));
+    EXPECT_NEAR(surface.escaped_gas_moles_this_step.at(SurfaceGas::gas_name), SurfaceGas::step_escaped(*gas), 1.0e-14);
+    EXPECT_NEAR(SurfaceGas::escaped(*gas) - old_cumulative_escape, SurfaceGas::step_escaped(*gas), 1.0e-14);
     EXPECT_NEAR(
-        surface.vented_gas_moles.at("H2") - old_vented_h2, statistics.submerged_bubble_hydrogen_escaped, 1.0e-14);
+        surface.vented_gas_moles.at(SurfaceGas::gas_name) - old_vented_h2, SurfaceGas::step_escaped(*gas), 1.0e-14);
     EXPECT_NEAR(state.coupling->planar_ale_diagnostics().gas_inventory_residual, 0.0, 1.0e-12);
     EXPECT_GE(state.coupling->planar_ale_diagnostics().outer_correctors, 2);
     EXPECT_LE(state.coupling->planar_ale_diagnostics().gas_state_residual, 1.0e-10);
@@ -1352,8 +1366,7 @@ TEST(BoussinesqPlanarALETest, MovingTopBubbleEscapeTransfersToTheVentExactlyOnce
 
 TEST(BoussinesqPlanarALETest, ReconstructedPressureRunsInsideTheAcceptedAleTransaction)
 {
-    auto state =
-        make_case(Coupling::PISO, 0.0, 10, true, 0.0, false, SimpleFluid::ReactingPressureMode::Reconstructed);
+    auto state = make_case(Coupling::PISO, 0.0, 10, true, 0.0, false, SimpleFluid::ReactingPressureMode::Reconstructed);
     auto* gas = state.coupling->find_reacting_gas_model();
     auto* prescribed_heat = state.coupling->find_prescribed_heat_source();
     ASSERT_NE(gas, nullptr);
@@ -1365,7 +1378,7 @@ TEST(BoussinesqPlanarALETest, ReconstructedPressureRunsInsideTheAcceptedAleTrans
     {
         EXPECT_GT(gas->absolute_pressure().value(static_cast<Pack::local_ordinal_type>(owned)), 0.0);
     }
-    EXPECT_NEAR(gas->last_statistics().inventory_error, 0.0, 1.0e-12);
+    EXPECT_NEAR(SurfaceGas::inventory_error(*gas), 0.0, 1.0e-12);
     EXPECT_LE(state.coupling->planar_ale_diagnostics().continuity.maximum, 3.0e-10);
 }
 
@@ -1381,8 +1394,8 @@ TEST(BoussinesqPlanarALETest, CelataSlipRunsThroughSolverIntegratedMovingTopEsca
 
     ASSERT_NO_THROW(state.coupling->step());
     ASSERT_NO_THROW(state.coupling->step());
-    EXPECT_GT(gas->last_statistics().submerged_bubble_hydrogen_escaped, 0.0);
-    EXPECT_NEAR(gas->last_statistics().inventory_error, 0.0, 1.0e-12);
+    EXPECT_GT(SurfaceGas::step_escaped(*gas), 0.0);
+    EXPECT_NEAR(SurfaceGas::inventory_error(*gas), 0.0, 1.0e-12);
     EXPECT_LE(state.coupling->planar_ale_diagnostics().continuity.maximum, 3.0e-10);
 }
 
@@ -1396,8 +1409,8 @@ TEST(BoussinesqPlanarALETest, StrictGasStepClosureFailureRollsBackTheWholeTransa
     prescribed_heat->initialize_constant(1.0e-3);
     const auto geometry = capture_geometry(*state.mesh);
     const auto primary = capture_primary(*state.solver);
-    const auto old_generated = gas->cumulative_hydrogen_produced();
-    const auto old_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
+    const auto old_generated = SurfaceGas::supplied(*gas);
+    const auto old_escape = SurfaceGas::escaped(*gas);
     const auto old_history = state.coupling->free_surface_history().size();
 
     std::string failure;
@@ -1410,11 +1423,11 @@ TEST(BoussinesqPlanarALETest, StrictGasStepClosureFailureRollsBackTheWholeTransa
     {
         failure = error.what();
     }
-    EXPECT_NE(failure.find("reacting H2 step-inventory closure"), std::string::npos) << failure;
+    EXPECT_NE(failure.find("gas-inventory closure for species"), std::string::npos) << failure;
     expect_geometry_restored(*state.mesh, geometry);
     expect_primary_restored(*state.solver, primary);
-    EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), old_generated);
-    EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), old_escape);
+    EXPECT_DOUBLE_EQ(SurfaceGas::supplied(*gas), old_generated);
+    EXPECT_DOUBLE_EQ(SurfaceGas::escaped(*gas), old_escape);
     EXPECT_EQ(state.solver->step_index(), 0);
     EXPECT_DOUBLE_EQ(state.solver->time(), 0.0);
     EXPECT_EQ(state.coupling->free_surface_history().size(), old_history);
@@ -1541,11 +1554,14 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     auto* gas = state.coupling->find_reacting_gas_model();
     ASSERT_NE(gas, nullptr);
     const auto initial_gas_fields = capture_gas_fields(*gas);
-    const auto initial_dissolved = gas->global_dissolved_hydrogen_moles();
-    const auto initial_micro = gas->global_microbubble_hydrogen_moles();
-    const auto initial_large = gas->global_large_bubble_hydrogen_moles();
-    const auto initial_generated = gas->cumulative_hydrogen_produced();
-    const auto initial_escape = gas->cumulative_submerged_bubble_hydrogen_escaped();
+    const auto initial_species_receipt = gas->species_event_receipt();
+    const auto initial_species_histories = gas->species_histories();
+    const auto initial_source_ledgers = gas->source_ledgers();
+    const auto initial_dissolved = SurfaceGas::compartment(*gas, SurfaceGas::Phase::Dissolved);
+    const auto initial_micro = SurfaceGas::compartment(*gas, SurfaceGas::Phase::Dispersed, SurfaceGas::micro);
+    const auto initial_large = SurfaceGas::compartment(*gas, SurfaceGas::Phase::Dispersed, SurfaceGas::large);
+    const auto initial_generated = SurfaceGas::supplied(*gas);
+    const auto initial_escape = SurfaceGas::escaped(*gas);
     const auto initial_pressure_offset = gas->absolute_pressure_offset();
     const auto initial_committed_escape = state.coupling->find_free_surface_model()->committedEscapedMoles();
 
@@ -1609,11 +1625,14 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     expect_owned_values(restored_feedback->viscosity_feedback(), initial_feedback_viscosity);
 
     expect_gas_fields_restored(*gas, initial_gas_fields);
-    EXPECT_DOUBLE_EQ(gas->global_dissolved_hydrogen_moles(), initial_dissolved);
-    EXPECT_DOUBLE_EQ(gas->global_microbubble_hydrogen_moles(), initial_micro);
-    EXPECT_DOUBLE_EQ(gas->global_large_bubble_hydrogen_moles(), initial_large);
-    EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), initial_generated);
-    EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), initial_escape);
+    EXPECT_EQ(gas->species_event_receipt(), initial_species_receipt);
+    EXPECT_EQ(gas->species_histories(), initial_species_histories);
+    SurfaceGas::M::expect_same_ledgers(gas->source_ledgers(), initial_source_ledgers);
+    EXPECT_DOUBLE_EQ(SurfaceGas::compartment(*gas, SurfaceGas::Phase::Dissolved), initial_dissolved);
+    EXPECT_DOUBLE_EQ(SurfaceGas::compartment(*gas, SurfaceGas::Phase::Dispersed, SurfaceGas::micro), initial_micro);
+    EXPECT_DOUBLE_EQ(SurfaceGas::compartment(*gas, SurfaceGas::Phase::Dispersed, SurfaceGas::large), initial_large);
+    EXPECT_DOUBLE_EQ(SurfaceGas::supplied(*gas), initial_generated);
+    EXPECT_DOUBLE_EQ(SurfaceGas::escaped(*gas), initial_escape);
     EXPECT_DOUBLE_EQ(gas->absolute_pressure_offset(), initial_pressure_offset);
 
     const auto& rejected = state.coupling->planar_ale_diagnostics();
@@ -1628,8 +1647,8 @@ TEST(BoussinesqPlanarALETest, FailedOuterTrialRestoresGeometryFieldsLedgersAndCa
     EXPECT_EQ(state.coupling->free_surface_history().size(), initial_history + 1);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), initial_surface.pool_level);
     EXPECT_DOUBLE_EQ(state.coupling->liquid_mass_inventory().totalMass(), initial_liquid.total_mass);
-    EXPECT_DOUBLE_EQ(gas->global_dissolved_hydrogen_moles(), initial_dissolved);
-    EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), initial_escape);
+    EXPECT_DOUBLE_EQ(SurfaceGas::compartment(*gas, SurfaceGas::Phase::Dissolved), initial_dissolved);
+    EXPECT_DOUBLE_EQ(SurfaceGas::escaped(*gas), initial_escape);
     EXPECT_EQ(state.coupling->planar_ale_diagnostics().rejected_transactions, 1U);
     EXPECT_TRUE(state.solver->last_step_statistics().converged);
     expect_zero_relative_top_flux(state);
@@ -2218,7 +2237,7 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsNonadiabaticAndOpenNonmovingBo
     }
 }
 
-TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactingGasWithoutPrescribedHeatSourceAtSetup)
+TEST(BoussinesqPlanarALESupportMatrixTest, AcceptsTypedIndependentGasWithoutPrescribedHeatSourceAtSetup)
 {
     auto mesh = make_column();
     auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
@@ -2227,13 +2246,13 @@ TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactingGasWithoutPrescri
     solver_coupling->configure_material_feedback(material_feedback_options());
     solver_coupling->configure_reacting_gas(gas_options());
     solver_coupling->initialize_linear_temperature({0.0, 0.0, 1.0}, 300.0, 300.0);
-    EXPECT_THROW(
-        static_cast<void>(solver_coupling->configure_free_surface(free_surface_options(4))), std::invalid_argument);
-    EXPECT_FALSE(solver_coupling->planar_ale_enabled());
-    EXPECT_EQ(solver_coupling->find_free_surface_model(), nullptr);
+    ASSERT_NE(solver_coupling->configure_free_surface(free_surface_options(4)), nullptr);
+    EXPECT_TRUE(solver_coupling->planar_ale_enabled());
+    EXPECT_NO_THROW(solver_coupling->step());
+    EXPECT_DOUBLE_EQ(SurfaceGas::supplied(*solver_coupling->find_reacting_gas_model()), 0);
 }
 
-TEST(BoussinesqPlanarALESupportMatrixTest, RejectsShengReactingGasWithOnlyOneOuterCorrector)
+TEST(BoussinesqPlanarALESupportMatrixTest, RejectsTypedReactingGasWithOnlyOneOuterCorrector)
 {
     auto mesh = make_column();
     auto solver = std::make_shared<Solver>(mesh, planar_boundaries(), time_options(Coupling::PISO),
@@ -2414,16 +2433,15 @@ double coupling_sensible_energy(const ConfiguredCase& state)
 
 TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwoAcceptedSubsteps)
 {
-    auto state = make_case(Coupling::PISO, 0.0, 25, true, 0.0, false,
-        SimpleFluid::ReactingPressureMode::Constant, false,
-        SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
+    auto state = make_case(Coupling::PISO, 0.0, 25, true, 0.0, false, SimpleFluid::ReactingPressureMode::Constant,
+        false, SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
         SimpleFluid::FVM::CellGradientScheme::LeastSquares, true);
     auto& solver = *state.solver;
     auto& solver_coupling = *state.coupling;
     auto& coupling = solver_coupling;
     auto* gas = coupling.find_reacting_gas_model();
     const auto initial_energy = coupling_sensible_energy(state);
-    const auto initial_hydrogen = gas->global_submerged_hydrogen_moles();
+    const auto initial_species_moles = gas->global_species_moles(SurfaceGas::gas_id);
     const auto initial_history = solver_coupling.free_surface_history().size();
     std::vector<double> energy(state.mesh->num_owned_cells());
     for (size_t owned = 0; owned < energy.size(); ++owned)
@@ -2445,8 +2463,8 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
         solver.solver_phase_timing(SimpleFluid::SolverPhase::ALERestore).calls);
     const auto accepted_level = top_elevation(*state.mesh);
     const auto accepted_energy = coupling_sensible_energy(state);
-    const auto accepted_hydrogen = gas->global_submerged_hydrogen_moles();
-    const auto accepted_generation = gas->cumulative_hydrogen_produced();
+    const auto accepted_species_moles = gas->global_species_moles(SurfaceGas::gas_id);
+    const auto accepted_generation = SurfaceGas::supplied(*gas);
     const auto advanced_epoch = state.mesh->geometry_epoch();
     const auto accepted_geometry = capture_geometry(*state.mesh);
     const auto accepted_primary = capture_primary(solver);
@@ -2454,27 +2472,21 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     const auto accepted_relative_flux = capture_owned_face_values(solver_coupling.mesh_relative_face_fluxes());
     const auto accepted_mass = capture_owned_values(solver_coupling.liquid_mass_inventory().cellMassInventory());
     const auto accepted_gas_fields = capture_gas_fields(*gas);
+    const auto accepted_species_receipt = gas->species_event_receipt();
+    const auto accepted_species_histories = gas->species_histories();
+    const auto accepted_source_ledgers = gas->source_ledgers();
     const auto accepted_history = solver_coupling.free_surface_history();
     std::vector<double> accepted_temperature;
     for (size_t owned = 0; owned < energy.size(); ++owned)
         accepted_temperature.push_back(solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned)));
     EXPECT_NEAR(accepted_energy - initial_energy, 0.03, 2.e-8);
     EXPECT_GT(accepted_level, 1.0);
-    EXPECT_NEAR(accepted_generation, 0.03 * gas->options().hydrogen_yield_mol_per_j, 1.e-16);
-    EXPECT_NEAR(accepted_hydrogen - initial_hydrogen, accepted_generation, 2.e-12);
-    EXPECT_NEAR(gas->last_statistics().donor_inventory_error, 0.0, 2.e-12);
-    double local_donor = 0.0;
-    for (size_t owned = 0; owned < energy.size(); ++owned)
-    {
-        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
-        local_donor += state.mesh->cell_volume(cell) * gas->donor_hydrogen_deficit().value(cell);
-    }
-    double global_donor = 0.0;
-    Teuchos::reduceAll(*state.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
-        1, &local_donor, &global_donor);
-    EXPECT_NEAR(global_donor, initial_hydrogen + accepted_generation, 2.e-12);
-    EXPECT_THROW(solver_coupling.step(), std::invalid_argument);
-    EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
+    EXPECT_NEAR(accepted_generation, 0.03 * SurfaceGas::supplied_mol_per_joule, 1.e-16);
+    EXPECT_NEAR(accepted_species_moles - initial_species_moles, accepted_generation, 2.e-12);
+    EXPECT_NEAR(SurfaceGas::inventory_error(*gas), 0.0, 2.e-12);
+    EXPECT_NEAR(SurfaceGas::history(*gas).external_supply, accepted_generation, 2e-12);
+    EXPECT_NEAR(SurfaceGas::history(*gas).current_moles + SurfaceGas::history(*gas).physical_outflow,
+        SurfaceGas::history(*gas).initial_moles + accepted_generation, 2e-12);
 
     solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_GT(state.mesh->geometry_epoch(), advanced_epoch);
@@ -2482,12 +2494,13 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     EXPECT_EQ(solver.step_index(), 0);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
     EXPECT_EQ(solver_coupling.free_surface_history().size(), initial_history);
-    EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), 0.0);
-    EXPECT_NEAR(gas->global_submerged_hydrogen_moles(), initial_hydrogen, 1.e-14);
-    for (size_t owned = 0; owned < energy.size(); ++owned)
-        EXPECT_DOUBLE_EQ(gas->donor_hydrogen_deficit().value(static_cast<Pack::local_ordinal_type>(owned)), 1.0);
+    EXPECT_DOUBLE_EQ(SurfaceGas::supplied(*gas), 0.0);
+    EXPECT_NEAR(gas->global_species_moles(SurfaceGas::gas_id), initial_species_moles, 1.e-14);
+    EXPECT_DOUBLE_EQ(SurfaceGas::history(*gas).external_supply, 0);
+    EXPECT_NEAR(SurfaceGas::history(*gas).current_moles, initial_species_moles, 1e-14);
     auto alternate_energy = energy;
-    for (auto& value : alternate_energy) value *= 0.5;
+    for (auto& value : alternate_energy)
+        value *= 0.5;
     solver_coupling.set_coupling_interval_energy(alternate_energy, 0.02);
     solver_coupling.step();
     solver_coupling.step();
@@ -2495,14 +2508,14 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_DOUBLE_EQ(solver.time(), 0.0);
     EXPECT_DOUBLE_EQ(top_elevation(*state.mesh), 1.0);
-    EXPECT_DOUBLE_EQ(gas->cumulative_hydrogen_produced(), 0.0);
+    EXPECT_DOUBLE_EQ(SurfaceGas::supplied(*gas), 0.0);
     solver_coupling.set_coupling_interval_energy(energy, 0.02);
     solver_coupling.step();
     solver_coupling.step();
     EXPECT_DOUBLE_EQ(solver.time(), accepted_time);
     EXPECT_NEAR(top_elevation(*state.mesh), accepted_level, 1.e-13);
     EXPECT_NEAR(coupling_sensible_energy(state), accepted_energy, 2.e-8);
-    EXPECT_NEAR(gas->cumulative_hydrogen_produced(), accepted_generation, 1.e-16);
+    EXPECT_NEAR(SurfaceGas::supplied(*gas), accepted_generation, 1.e-16);
     EXPECT_EQ(solver_coupling.free_surface_history().size(), initial_history + 2);
     expect_geometry_restored(*state.mesh, accepted_geometry);
     expect_primary_restored(solver, accepted_primary);
@@ -2510,6 +2523,12 @@ TEST(BoussinesqCouplingIntervalTest, ReplaysMovingNonuniformEnergyAndGasAfterTwo
     expect_owned_face_values(solver_coupling.mesh_relative_face_fluxes(), accepted_relative_flux);
     expect_owned_values(solver_coupling.liquid_mass_inventory().cellMassInventory(), accepted_mass);
     expect_gas_fields_restored(*gas, accepted_gas_fields);
+    EXPECT_EQ(gas->species_histories(), accepted_species_histories);
+    SurfaceGas::M::expect_same_ledgers(gas->source_ledgers(), accepted_source_ledgers);
+    EXPECT_EQ(gas->species_event_receipt().revision, accepted_species_receipt.revision);
+    EXPECT_DOUBLE_EQ(gas->species_event_receipt().interval_end, accepted_species_receipt.interval_end);
+    EXPECT_DOUBLE_EQ(gas->species_event_receipt().time_step, accepted_species_receipt.time_step);
+    EXPECT_GT(gas->species_event_receipt().publication_nonce, accepted_species_receipt.publication_nonce);
     ASSERT_EQ(solver_coupling.free_surface_history().size(), accepted_history.size());
     for (size_t step = 0; step < accepted_history.size(); ++step)
     {
@@ -2785,20 +2804,18 @@ TEST(BoussinesqCouplingIntervalTest, RejectsEndpointOverrunAndUnresolvableSource
 
 TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydrogenBudgets)
 {
-    auto state = make_case(Coupling::PISO, 0.0, 25, true, 0.0, false,
-        SimpleFluid::ReactingPressureMode::Constant, false,
-        SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
+    auto state = make_case(Coupling::PISO, 0.0, 25, true, 0.0, false, SimpleFluid::ReactingPressureMode::Constant,
+        false, SimpleFluid::CoupledOperatorBackend::Assembled, SimpleFluid::CoupledWorkspacePolicy::CachedProducts,
         SimpleFluid::FVM::CellGradientScheme::LeastSquares, true);
     auto& solver = *state.solver;
     auto& solver_coupling = *state.coupling;
     auto* gas = solver_coupling.find_reacting_gas_model();
     const auto before_energy = coupling_sensible_energy(state);
-    const auto before_hydrogen = gas->global_submerged_hydrogen_moles();
+    const auto before_species_moles = gas->global_species_moles(SurfaceGas::gas_id);
     const auto history_size = solver_coupling.free_surface_history().size();
     std::vector<double> energy(state.mesh->num_owned_cells());
     for (size_t owned = 0; owned < energy.size(); ++owned)
-        energy[owned] = state.mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(owned)).z < 0.5
-            ? 0.01 : 0.02;
+        energy[owned] = state.mesh->cell_centroid(static_cast<Pack::local_ordinal_type>(owned)).z < 0.5 ? 0.01 : 0.02;
     auto checkpoint = solver_coupling.create_coupling_checkpoint();
     std::vector<double> first_temperatures;
     double first_level = 0.0;
@@ -2815,19 +2832,23 @@ TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydro
         }
         EXPECT_NEAR(solver.time(), 0.02, 1.e-17);
         EXPECT_NEAR(coupling_sensible_energy(state) - before_energy, 0.03, 2.e-8);
-        const double generated = 0.03 * gas->options().hydrogen_yield_mol_per_j;
-        EXPECT_NEAR(gas->cumulative_hydrogen_produced(), generated, 1.e-16);
-        EXPECT_NEAR(gas->global_submerged_hydrogen_moles() - before_hydrogen, generated, 2.e-12);
-        EXPECT_NEAR(gas->last_statistics().donor_inventory_error, 0.0, 2.e-12);
+        const double generated = 0.03 * SurfaceGas::supplied_mol_per_joule;
+        EXPECT_NEAR(SurfaceGas::supplied(*gas), generated, 1.e-16);
+        EXPECT_NEAR(gas->global_species_moles(SurfaceGas::gas_id) - before_species_moles, generated, 2.e-12);
+        EXPECT_NEAR(SurfaceGas::inventory_error(*gas), 0.0, 2.e-12);
         EXPECT_EQ(solver_coupling.free_surface_history().size(), history_size + 3);
         for (size_t owned = 0; owned < energy.size(); ++owned)
         {
             const double temperature = solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned));
-            if (attempt == 0) first_temperatures.push_back(temperature);
-            else EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
+            if (attempt == 0)
+                first_temperatures.push_back(temperature);
+            else
+                EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
         }
-        if (attempt == 0) first_level = top_elevation(*state.mesh);
-        else EXPECT_NEAR(top_elevation(*state.mesh), first_level, 1.e-13);
+        if (attempt == 0)
+            first_level = top_elevation(*state.mesh);
+        else
+            EXPECT_NEAR(top_elevation(*state.mesh), first_level, 1.e-13);
     }
     solver_coupling.accept_coupling_checkpoint(checkpoint);
 }
@@ -2844,9 +2865,8 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     constexpr double initial_temperature = 300.0;
     constexpr double interval_duration = 1.e-4;
     constexpr double interval_energy = 0.10133263268392909;
-    constexpr double hydrogen_yield = 1.5e-7;
-    const double area = std::numbers::pi *
-        (outer_radius * outer_radius - inner_radius * inner_radius);
+    constexpr double external_mol_per_joule = 1.5e-7;
+    const double area = std::numbers::pi * (outer_radius * outer_radius - inner_radius * inner_radius);
     const double density = initial_mass / (area * initial_height);
     const auto uniform_edges = [](double begin, double end, int cells)
     {
@@ -2856,10 +2876,8 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
         return result;
     };
     auto geometry = std::make_shared<Handle::Cylindrical>(
-        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
-            uniform_edges(inner_radius, outer_radius, 2),
-            uniform_edges(0.0, 2.0 * std::numbers::pi, 4),
-            uniform_edges(0.0, initial_height, 4)}});
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{uniform_edges(inner_radius, outer_radius, 2),
+            uniform_edges(0.0, 2.0 * std::numbers::pi, 4), uniform_edges(0.0, initial_height, 4)}});
     const auto communicator = Tpetra::getDefaultComm();
     Handle::DistributionOptions distribution;
     distribution.partition = static_cast<size_t>(communicator->getRank());
@@ -2906,26 +2924,21 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     thermal.reference_dynamic_viscosity = 1.e-3;
     solver_coupling.configure_material_feedback(thermal);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
-    SimpleFluid::ReactingGasOptions gas_options;
-    gas_options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
+    SurfaceGas::Initial initial;
+    initial.liquid_density = density;
+    initial.reference_temperature = initial_temperature;
+    initial.expansion = 2.1e-4;
+    initial.compressibility = 4.5e-10;
+    initial.dissolved_concentration = 0;
+    auto gas_options = SurfaceGas::options(
+        initial, SurfaceGas::prescribed_power(&solver_coupling.find_prescribed_heat_source()->field()),
+        external_mol_per_joule);
     gas_options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    gas_options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    gas_options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
-    gas_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
+    gas_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     gas_options.constant_slip_velocity = 0.0;
-    gas_options.hydrogen_yield_mol_per_j = hydrogen_yield;
-    gas_options.gas_release_efficiency = 1.0;
-
-    gas_options.max_source_alpha_rate = 10.0;
-    gas_options.henry_coefficient = 1.e-5;
-    gas_options.surface_tension = 0.07;
-    gas_options.hydrogen_diffusivity = 4.5e-9;
-    gas_options.nucleation_radius = 6.6359547089482127e-8;
-    gas_options.initial_dissolved_hydrogen = 0.0;
-    gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};
     auto& gas = solver_coupling.configure_reacting_gas(gas_options);
-    gas.enable_donor_hydrogen_deficit_tracking();
+    // Accepted catalog-keyed source/escape histories own replay, not a donor-deficit proxy.
     solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
     SimpleFluid::FreeSurfaceOptions surface;
     surface.enabled = true;
@@ -2965,7 +2978,8 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
     }
     double global_weight = 0.0;
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_weight, &global_weight);
-    for (auto& value : energy) value *= interval_energy / global_weight;
+    for (auto& value : energy)
+        value *= interval_energy / global_weight;
     const auto initial_sensible_energy = coupling_sensible_energy(state);
     const auto initial_history_size = solver_coupling.free_surface_history().size();
     EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), initial_mass, 2.e-11);
@@ -2983,18 +2997,16 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
             solver_coupling.set_coupling_interval_energy(energy, interval_duration);
             ASSERT_NO_THROW(solver_coupling.step());
             const double cumulative_energy = (interval + 1) * interval_energy;
-            const double produced = cumulative_energy * hydrogen_yield;
+            const double produced = cumulative_energy * external_mol_per_joule;
             EXPECT_NEAR(solver.time(), (interval + 1) * interval_duration, 1.e-19);
-            EXPECT_NEAR(coupling_sensible_energy(state) - initial_sensible_energy,
-                        cumulative_energy, 2.e-6);
+            EXPECT_NEAR(coupling_sensible_energy(state) - initial_sensible_energy, cumulative_energy, 2.e-6);
             // Keep the established cumulative liquid-mass conservation gate
             // at this 148 kg scale, independently of the transport solver.
             EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), initial_mass,
                 std::max(4096.0 * std::numeric_limits<double>::epsilon(), 1.e-10) * initial_mass);
-            EXPECT_NEAR(gas.cumulative_hydrogen_produced(), produced, 1.e-18);
-            EXPECT_NEAR(gas.global_submerged_hydrogen_moles() +
-                            gas.cumulative_submerged_bubble_hydrogen_escaped(), produced, 1.e-17);
-            EXPECT_NEAR(gas.last_statistics().donor_inventory_error, 0.0, 1.e-17);
+            EXPECT_NEAR(SurfaceGas::supplied(gas), produced, 1.e-18);
+            EXPECT_NEAR(gas.global_species_moles(SurfaceGas::gas_id) + SurfaceGas::escaped(gas), produced, 1.e-17);
+            EXPECT_NEAR(SurfaceGas::inventory_error(gas), 0.0, 1.e-17);
             EXPECT_NEAR(top_elevation(*mesh), solver_coupling.free_surface_diagnostics().pool_level,
                 surface.ale.level_absolute_tolerance + surface.ale.level_relative_tolerance);
             EXPECT_EQ(solver_coupling.free_surface_history().size(), initial_history_size + interval + 1);
@@ -3002,11 +3014,15 @@ TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnerg
             {
                 const auto cell = static_cast<Pack::local_ordinal_type>(owned);
                 const auto temperature = solver.temperature().value(cell);
-                if (attempt == 0) first_temperatures.push_back(temperature);
-                else EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
+                if (attempt == 0)
+                    first_temperatures.push_back(temperature);
+                else
+                    EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
             }
-            if (attempt == 0) first_level = top_elevation(*mesh);
-            else EXPECT_NEAR(top_elevation(*mesh), first_level, 1.e-13);
+            if (attempt == 0)
+                first_level = top_elevation(*mesh);
+            else
+                EXPECT_NEAR(top_elevation(*mesh), first_level, 1.e-13);
         }
         solver_coupling.accept_coupling_checkpoint(checkpoint);
     }
@@ -3025,10 +3041,9 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     constexpr double initial_temperature = 298.85;
     constexpr double interval_duration = 0.01;
     constexpr double interval_energy = 0.01;
-    constexpr double hydrogen_yield = 1.5e-7;
+    constexpr double external_mol_per_joule = 1.5e-7;
     constexpr int radial_cells = 4, angular_cells = 8, axial_cells = 8;
-    const double area = std::numbers::pi *
-        (outer_radius * outer_radius - inner_radius * inner_radius);
+    const double area = std::numbers::pi * (outer_radius * outer_radius - inner_radius * inner_radius);
     const double density = initial_mass / (area * (initial_top - bottom));
     const double mass_tolerance = 4096.0 * std::numeric_limits<double>::epsilon() * initial_mass;
     const auto uniform_edges = [](double begin, double end, int cells)
@@ -3039,8 +3054,7 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
         return result;
     };
     auto geometry = std::make_shared<Handle::Cylindrical>(
-        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
-            uniform_edges(inner_radius, outer_radius, radial_cells),
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{uniform_edges(inner_radius, outer_radius, radial_cells),
             uniform_edges(0.0, 2.0 * std::numbers::pi, angular_cells),
             uniform_edges(bottom, initial_top, axial_cells)}});
     const auto communicator = Tpetra::getDefaultComm();
@@ -3087,27 +3101,22 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     thermal.reference_dynamic_viscosity = 1.e-3;
     solver_coupling.configure_material_feedback(thermal);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
-    SimpleFluid::ReactingGasOptions gas_options;
-    gas_options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
+    SurfaceGas::Initial initial;
+    initial.liquid_density = density;
+    initial.reference_temperature = initial_temperature;
+    initial.expansion = 2.1e-4;
+    initial.compressibility = 4.5e-10;
+    initial.dissolved_concentration = 0;
+    auto gas_options = SurfaceGas::options(
+        initial, SurfaceGas::prescribed_power(&solver_coupling.find_prescribed_heat_source()->field()),
+        external_mol_per_joule);
     gas_options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    gas_options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    gas_options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
     gas_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
     gas_options.constant_slip_velocity = 0.01;
-    gas_options.hydrogen_yield_mol_per_j = hydrogen_yield;
-    gas_options.gas_release_efficiency = 1.0;
-
-    gas_options.max_source_alpha_rate = 10.0;
-    gas_options.henry_coefficient = 1.e-5;
-    gas_options.surface_tension = 0.07;
-    gas_options.hydrogen_diffusivity = 4.5e-9;
-    gas_options.transport_solver_tolerance = 1.e-14;
-    gas_options.nucleation_radius = 6.6359547089482127e-8;
-    gas_options.initial_dissolved_hydrogen = 0.0;
-    gas_options.reference_pressure = 101325.0;
     gas_options.free_surface_patches = {"zmax"};
+    gas_options.transport_solver_tolerance = 1e-14;
     auto& gas = solver_coupling.configure_reacting_gas(gas_options);
-    gas.enable_donor_hydrogen_deficit_tracking();
+    // Accepted catalog-keyed source/escape histories own replay, not a donor-deficit proxy.
     solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
     SimpleFluid::FreeSurfaceOptions surface;
     surface.enabled = true;
@@ -3145,7 +3154,8 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
     }
     double global_weight = 0.0;
     Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM, 1, &local_weight, &global_weight);
-    for (auto& value : energy) value *= interval_energy / global_weight;
+    for (auto& value : energy)
+        value *= interval_energy / global_weight;
     const auto initial_history_size = solver_coupling.free_surface_history().size();
     EXPECT_NEAR(solver_coupling.liquid_mass_inventory().totalMass(), initial_mass, mass_tolerance);
 
@@ -3161,7 +3171,7 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
         const int substeps = static_cast<int>(std::ceil(duration / time.time_step));
         auto checkpoint = solver_coupling.create_coupling_checkpoint();
         std::vector<double> first_temperatures;
-        double first_level = 0.0, first_mass = 0.0, first_hydrogen = 0.0;
+        double first_level = 0.0, first_mass = 0.0, first_external_supply = 0.0;
         const int attempts = interval == 5 ? 2 : 1;
         for (int attempt = 0; attempt < attempts; ++attempt)
         {
@@ -3171,18 +3181,16 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
             solver_coupling.set_coupling_interval_energy(energy, duration);
             for (int substep = 0; substep < substeps; ++substep)
             {
-                const double endpoint = substep + 1 == substeps ? end :
-                    start + duration * (substep + 1) / substeps;
+                const double endpoint = substep + 1 == substeps ? end : start + duration * (substep + 1) / substeps;
                 solver.set_time_step(endpoint - solver.time());
                 ASSERT_NO_THROW(solver_coupling.step());
             }
             const double mass = solver_coupling.liquid_mass_inventory().totalMass();
-            const double produced = (interval + 1) * interval_energy * hydrogen_yield;
+            const double produced = (interval + 1) * interval_energy * external_mol_per_joule;
             EXPECT_NEAR(mass, initial_mass, mass_tolerance);
             EXPECT_DOUBLE_EQ(solver.time(), end);
-            EXPECT_NEAR(gas.cumulative_hydrogen_produced(), produced, 1.e-18);
-            EXPECT_NEAR(gas.global_submerged_hydrogen_moles() +
-                            gas.cumulative_submerged_bubble_hydrogen_escaped(), produced, 1.e-17);
+            EXPECT_NEAR(SurfaceGas::supplied(gas), produced, 1.e-18);
+            EXPECT_NEAR(gas.global_species_moles(SurfaceGas::gas_id) + SurfaceGas::escaped(gas), produced, 1.e-17);
             EXPECT_EQ(
                 solver_coupling.free_surface_history().size(), initial_history_size + accepted_substeps + substeps);
             EXPECT_NEAR(top_elevation(*mesh), solver_coupling.free_surface_diagnostics().pool_level,
@@ -3192,20 +3200,22 @@ TEST(BoussinesqCouplingIntervalTest, R100ConsecutiveIntervalsPreserveLiquidMass)
                 for (size_t owned = 0; owned < energy.size(); ++owned)
                 {
                     const auto temperature = solver.temperature().value(static_cast<Pack::local_ordinal_type>(owned));
-                    if (attempt == 0) first_temperatures.push_back(temperature);
-                    else EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
+                    if (attempt == 0)
+                        first_temperatures.push_back(temperature);
+                    else
+                        EXPECT_NEAR(temperature, first_temperatures[owned], 1.e-11);
                 }
                 if (attempt == 0)
                 {
                     first_level = top_elevation(*mesh);
                     first_mass = mass;
-                    first_hydrogen = gas.cumulative_hydrogen_produced();
+                    first_external_supply = SurfaceGas::supplied(gas);
                 }
                 else
                 {
                     EXPECT_NEAR(top_elevation(*mesh), first_level, 1.e-13);
                     EXPECT_NEAR(mass, first_mass, mass_tolerance);
-                    EXPECT_NEAR(gas.cumulative_hydrogen_produced(), first_hydrogen, 1.e-18);
+                    EXPECT_NEAR(SurfaceGas::supplied(gas), first_external_supply, 1.e-18);
                 }
             }
         }
@@ -3290,15 +3300,15 @@ TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnl
     solver_coupling.find_prescribed_heat_source()->initialize_constant(1.e3);
     solver_coupling.step(); // Create populations that can escape during the coupled interval.
     const auto history_size = solver_coupling.free_surface_history().size();
-    const auto escape_before = gas->cumulative_submerged_bubble_hydrogen_escaped();
+    const auto escape_before = SurfaceGas::escaped(*gas);
     solver.reset_solver_phase_timings();
     auto checkpoint = solver_coupling.create_coupling_checkpoint();
     std::vector<double> no_energy(state.mesh->num_owned_cells(), 0.0);
     solver_coupling.set_coupling_interval_energy(no_energy, 0.02);
     solver_coupling.step();
     solver_coupling.step();
-    const auto escaped = gas->cumulative_submerged_bubble_hydrogen_escaped();
-    const auto vented = solver_coupling.free_surface_diagnostics().vented_gas_moles.at("H2");
+    const auto escaped = SurfaceGas::escaped(*gas);
+    const auto vented = solver_coupling.free_surface_diagnostics().vented_gas_moles.at(SurfaceGas::gas_name);
     ASSERT_GT(escaped, escape_before);
     const auto first_step_seconds = solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds;
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
@@ -3307,23 +3317,22 @@ TEST(BoussinesqCouplingIntervalTest, ReplayedBubbleEscapeCommitsTheVentLedgerOnl
     EXPECT_GT(gas_attempts, 0u);
     solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 2u);
-    EXPECT_EQ(solver_coupling.ale_convergence_statistics().checks,gate_attempts);
+    EXPECT_EQ(solver_coupling.ale_convergence_statistics().checks, gate_attempts);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
-    EXPECT_DOUBLE_EQ(gas->cumulative_submerged_bubble_hydrogen_escaped(), escape_before);
+    EXPECT_DOUBLE_EQ(SurfaceGas::escaped(*gas), escape_before);
     EXPECT_EQ(solver_coupling.free_surface_history().size(), history_size);
     solver_coupling.set_coupling_interval_energy(no_energy, 0.02);
     solver_coupling.step();
     solver_coupling.step();
     solver_coupling.accept_coupling_checkpoint(checkpoint);
     EXPECT_EQ(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).calls, 4u);
-    EXPECT_GT(solver_coupling.ale_convergence_statistics().checks,gate_attempts);
+    EXPECT_GT(solver_coupling.ale_convergence_statistics().checks, gate_attempts);
     EXPECT_GT(solver.solver_phase_timing(SimpleFluid::SolverPhase::Gas).calls, gas_attempts);
     EXPECT_GE(solver.solver_phase_timing(SimpleFluid::SolverPhase::Step).seconds, first_step_seconds);
-    EXPECT_NEAR(gas->cumulative_submerged_bubble_hydrogen_escaped(), escaped, 1.e-14);
-    EXPECT_NEAR(solver_coupling.free_surface_diagnostics().vented_gas_moles.at("H2"), vented, 1.e-14);
+    EXPECT_NEAR(SurfaceGas::escaped(*gas), escaped, 1.e-14);
+    EXPECT_NEAR(solver_coupling.free_surface_diagnostics().vented_gas_moles.at(SurfaceGas::gas_name), vented, 1.e-14);
     EXPECT_EQ(solver_coupling.free_surface_history().size(), history_size + 2);
 }
-
 
 TEST(BoussinesqCouplingIntervalTest, CheckpointInitializesLazyMaterialAndGasDependencies)
 {
@@ -3335,7 +3344,7 @@ TEST(BoussinesqCouplingIntervalTest, CheckpointInitializesLazyMaterialAndGasDepe
     solver_coupling.configure_material_feedback(material_feedback_options());
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
     auto& gas = solver_coupling.configure_reacting_gas(gas_options());
-    gas.enable_donor_hydrogen_deficit_tracking();
+    // Accepted catalog-keyed source/escape histories own replay, not a donor-deficit proxy.
     // Supported direct field initialization without initialize_linear_temperature().
     solver.temperature().put_scalar(300.0);
     ASSERT_NE(solver_coupling.configure_free_surface(free_surface_options(10)), nullptr);
@@ -3343,7 +3352,7 @@ TEST(BoussinesqCouplingIntervalTest, CheckpointInitializesLazyMaterialAndGasDepe
     auto checkpoint = solver_coupling.create_coupling_checkpoint();
     EXPECT_TRUE(gas.initial_state_initialized());
     EXPECT_TRUE(solver_coupling.find_free_surface_model()->initialized());
-    EXPECT_NEAR(gas.global_dissolved_hydrogen_moles(), 1.0, 1.e-14);
+    EXPECT_NEAR(SurfaceGas::compartment(gas, SurfaceGas::Phase::Dissolved), 1.0, 1.e-14);
     solver_coupling.restore_coupling_checkpoint(checkpoint);
     EXPECT_TRUE(solver_coupling.planar_ale_enabled());
     solver_coupling.accept_coupling_checkpoint(checkpoint);

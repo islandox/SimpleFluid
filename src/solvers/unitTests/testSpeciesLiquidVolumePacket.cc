@@ -44,12 +44,12 @@ struct Fixture
         catalog = std::make_shared<const R::SpeciesCatalog>(
             std::vector<R::SpeciesDefinition>{{a, "finite_A", .02, {{"X", 1}}, {R::SpeciesPhase::Liquid}},
                 {b, "finite_B", .02, {{"X", 1}}, {R::SpeciesPhase::Liquid}}});
-        options.mode = ReactingGasMode::TwoPopulation;
+        options.mode = ReactingGasMode::Species;
         options.reference_pressure = 100000;
         options.surface_tension = 0;
         options.min_radius = 1e-10;
         options.max_radius = .1;
-        options.dissolved_transport = ReactingTransportMode::Advective;
+        options.solution_transport = ReactingTransportMode::Advective;
         options.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(catalog,
             std::vector<R::ReactionDefinition>{
                 {7, "isomerization", {{a, R::SpeciesPhase::Liquid, -1, {}}, {b, R::SpeciesPhase::Liquid, 1, {}}}, 0}},
@@ -106,7 +106,7 @@ struct Fixture
 TEST(SpeciesLiquidVolumePacketTest, UsesCorrectedUpwindMolesAndPreSourceNonlinearComposition)
 {
     Fixture f;
-    f.model->advance(dt, dt, *f.temperature, *f.pressure, *f.velocity, *f.flux, *f.material, nullptr);
+    f.model->advance(dt, dt, *f.temperature, *f.pressure, *f.velocity, *f.flux, *f.material);
     const double expected = q / (1 + q * dt / volume);
     const auto& packet = f.model->transported_liquid_material_volume_flux();
     const auto& receipt = f.model->liquid_transport_volume_receipt();
@@ -141,7 +141,7 @@ TEST(SpeciesLiquidVolumePacketTest, UsesCorrectedUpwindMolesAndPreSourceNonlinea
 TEST(SpeciesLiquidVolumePacketTest, PressureThermalRefreshAndSnapshotDoNotInventNewTransport)
 {
     Fixture f;
-    f.model->advance(dt, dt, *f.temperature, *f.pressure, *f.velocity, *f.flux, *f.material, nullptr);
+    f.model->advance(dt, dt, *f.temperature, *f.pressure, *f.velocity, *f.flux, *f.material);
     const auto accepted = f.model->snapshot();
     const auto receipt = f.model->species_event_receipt();
     const auto packet_receipt = f.model->liquid_transport_volume_receipt();

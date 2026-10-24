@@ -116,7 +116,7 @@ struct Fixture
         initialSources->revision = 1;
         initialSources->schemaFingerprint = catalog->fingerprint();
         ReactingGasOptions options;
-        options.mode = ReactingGasMode::TwoPopulation;
+        options.mode = ReactingGasMode::Species;
         options.alpha_max = maximum;
         options.reaction_mechanism = mechanism;
         options.bouss_reference = reference;

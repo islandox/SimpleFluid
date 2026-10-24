@@ -2,6 +2,7 @@
  * @brief Matched OpenFOAM verification of the production microbubble moment transport.
  */
 #include "IF97ReferenceWater.hh"
+#include "PrescribedHydrogenReference.hh"
 #include "VerificationLinearSolvers.hh"
 #include "VerificationMesh.hh"
 #include "VerificationParallel.hh"
@@ -118,7 +119,6 @@ int run(int argc, char** argv)
     for (int i = 0; i < local_cells; ++i)
         samples[i] = grid.interval(z, mesh->cell_centroid(i).z);
     Field temperature(mesh, liquid.temperature, "T"), pressure(mesh, 0.0, "p");
-    Field power(mesh, mode == "steady" ? p("power_density") : 0.0, "qdot");
     Velocity velocity(mesh, Mesh::Vec3{0.0, 0.0, p("carrier_velocity")}, "U");
     Flux flux(mesh, 0.0, "phi");
     for (const auto face : flux.owned_face_ids())
@@ -134,39 +134,23 @@ int run(int argc, char** argv)
     material_options.thermal_conductivity = liquid.thermal_conductivity;
     SimpleFluid::MaterialPropertyFields<Pack, Mesh> material(mesh, material_options, time_options);
 
-    SimpleFluid::ReactingGasOptions options;
-    options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
-    options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
-    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = p("slip_velocity");
-    options.reference_pressure = liquid.absolute_pressure;
-    options.gas_constant = p("gas_constant");
-    options.surface_tension_mode = SimpleFluid::SurfaceTensionMode::Constant;
-    options.surface_tension = water.surface_tension;
-    options.henry_coefficient = 1e-5;
-    options.hydrogen_diffusivity = 1e-8;
-    options.hydrogen_yield_mol_per_j = p("yield_mol_per_j");
-    options.gas_release_efficiency = p("release_efficiency");
-    options.max_source_alpha_rate = 1.0;
-    options.microbubble_lifetime = options.large_bubble_dissolution_time = 1e100;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    options.max_subcycles = 1;
-    options.local_ode_tolerance = 1e-12;
-    options.min_radius = 1e-12;
-    options.max_radius = 1e-3;
-    options.free_surface_patches = {"zmax"};
+    namespace H2 = SimpleFluid::Verification::HydrogenReference;
     const double radius = p("nucleation_radius");
-    // Material reference value is supplied by the shared verification input.
-    options.nucleation_radius = radius;
     const double bubble_volume = 4.0 * std::numbers::pi / 3.0 * radius * radius * radius;
     const double moles_per_bubble = bubble_volume * (liquid.absolute_pressure + 2 * water.surface_tension / radius) /
                                     (p("gas_constant") * liquid.temperature);
     const double initial = p(mode + "_initial_moles");
     const double source = mode == "steady" ? p("power_density") * p("yield_mol_per_j") * p("release_efficiency") : 0.0;
-    options.initial_micro_moles = initial;
-    options.initial_micro_number_density = initial / moles_per_bubble;
+    // The externally prescribed IF97 carrier is not a conserved finite-water solution.
+    H2::Parameters reference{liquid.temperature, liquid.absolute_pressure, .00201588, p("gas_constant"),
+        water.surface_tension, liquid.density, liquid.specific_heat_capacity, liquid.dynamic_viscosity,
+        liquid.thermal_conductivity, p("slip_velocity"), initial};
+    auto options = H2::field_options(
+        reference, [source](const SimpleFluid::Reacting::ReactionContext&) { return source; },
+        [radius](double, double) { return radius; });
     Model gas(mesh, options);
+    const auto& micro_moles = gas.species_field(H2::hydrogen, SimpleFluid::Reacting::SpeciesPhase::Dispersed, "micro");
+    const auto& micro_number = gas.population_number_field("micro");
     linear_controls.apply_gas(gas);
     gas.initialize_state(0.0, temperature, pressure, velocity, material);
     const double volume = height * width * width;
@@ -196,10 +180,10 @@ int run(int argc, char** argv)
         << "time_s,inventory_mol,produced_mol,escaped_mol,outlet_mol_s,hydrogen_balance_mol,maximum_change_mol_m3\n";
     auto write = [&](double time)
     {
-        const double inventory = gas.global_microbubble_hydrogen_moles();
+        const double inventory = gas.global_species_moles(H2::hydrogen);
         double number = 0.0;
         for (int i = 0; i < local_cells; ++i)
-            number += gas.micro_number_density().value(i) * mesh->cell_volume(i);
+            number += micro_number.value(i) * mesh->cell_volume(i);
         number = parallel.sum(number);
         const double balance = inventory + escaped - initial_inventory - produced;
         const double number_balance = (number + escaped_number - (initial_inventory + produced) / moles_per_bubble) /
@@ -221,11 +205,11 @@ int run(int argc, char** argv)
                    << gas.alpha_g().value(i) << ',' << u.x << ',' << u.y << ',' << u.z << '\n';
             if (ix != grid.nx() / 2)
                 continue;
-            profiles << time << ',' << sample << ',' << 0.5 * (z[sample] + z[sample + 1]) << ','
-                     << gas.micro_moles().value(i) << ',' << gas.micro_number_density().value(i) << ','
-                     << gas.alpha_g().value(i) << ',' << temperature.value(i) << ',' << gas.absolute_pressure().value(i)
-                     << ',' << rho << ',' << cp << ',' << mu << ',' << k << ',' << mu / rho << ',' << k / (rho * cp)
-                     << ',' << options.surface_tension << ',' << balance << ',' << number_balance << '\n';
+            profiles << time << ',' << sample << ',' << 0.5 * (z[sample] + z[sample + 1]) << ',' << micro_moles.value(i)
+                     << ',' << micro_number.value(i) << ',' << gas.alpha_g().value(i) << ',' << temperature.value(i)
+                     << ',' << gas.absolute_pressure().value(i) << ',' << rho << ',' << cp << ',' << mu << ',' << k
+                     << ',' << mu / rho << ',' << k / (rho * cp) << ',' << options.surface_tension << ',' << balance
+                     << ',' << number_balance << '\n';
         }
         history << time << ',' << inventory << ',' << produced << ',' << escaped << ',' << last_escape / dt << ','
                 << balance << ',' << maximum_change << '\n';
@@ -237,22 +221,50 @@ int run(int argc, char** argv)
         std::vector<double> previous;
         previous.reserve(local_cells);
         for (int i = 0; i < local_cells; ++i)
-            previous.push_back(gas.micro_moles().value(i));
-        gas.advance(step * dt, dt, temperature, pressure, velocity, flux, material, &power);
+            previous.push_back(micro_moles.value(i));
+        gas.advance(step * dt, dt, temperature, pressure, velocity, flux, material);
         const auto& statistics = gas.last_statistics();
         linear_history.write_gas(step, step * dt, statistics.transport_linear);
-        require(statistics.clipped_cells == 0 && statistics.radius_solver_failures == 0 &&
-                    statistics.maximum_subcycles == 1,
-            "Bubble clipping, radius failure, or unexpected subcycling");
-        require(
-            std::abs(statistics.inventory_error) < 2e-13 * volume_scale, "Per-step hydrogen conservation gate failed");
-        escaped += statistics.microbubble_hydrogen_escaped;
-        escaped_number += statistics.escaped_microbubble_count;
-        produced += statistics.hydrogen_produced;
-        last_escape = statistics.microbubble_hydrogen_escaped;
+        bool admissible = true;
+        for (int i = 0; i < local_cells; ++i)
+        {
+            const double n = micro_moles.value(i), number = micro_number.value(i);
+            admissible = admissible && std::isfinite(n) && std::isfinite(number) && n >= 0 && number >= 0 &&
+                         ((n == 0) == (number == 0));
+            if (n > 0 && number > 0)
+            {
+                const auto amount_at_radius = [&](double r)
+                {
+                    return 4 * std::numbers::pi / (3 * H2::universal_gas_constant * temperature.value(i)) *
+                           (gas.absolute_pressure().value(i) * r * r * r + 2 * options.surface_tension * r * r);
+                };
+                const double amount_per_bubble = n / number;
+                admissible = admissible && std::isfinite(amount_per_bubble) &&
+                             amount_per_bubble >= amount_at_radius(options.min_radius) &&
+                             amount_per_bubble <= amount_at_radius(options.max_radius);
+            }
+        }
+        require(admissible, "Accepted gas moments must admit a finite capillary radius in the supplied bounds");
+        bool one_substep = true;
+        for (const auto& ledger : gas.source_ledgers())
+            one_substep = one_substep && ledger.substeps == 0;
+        for (const auto& ledger : gas.population_ledgers())
+            one_substep = one_substep && ledger.substeps == 1;
+        require(one_substep, "Unexpected direct-source integration or population subcycling");
+        require(std::abs(H2::history(gas).inventory_error) < 2e-13 * volume_scale,
+            "Per-step hydrogen conservation gate failed");
+        escaped = H2::history(gas).physical_outflow;
+        produced = H2::history(gas).external_supply;
+        last_escape = H2::step_escape(gas, "micro");
+        const auto& counts = gas.population_escape_receipt();
+        require(counts.event == gas.species_event_receipt() && counts.event.accepted,
+            "Number escape must belong to this exact accepted gas interval");
+        for (const auto& event : counts.events)
+            if (event.population == "micro")
+                escaped_number += event.number;
         maximum_change = 0.0;
         for (int i = 0; i < local_cells; ++i)
-            maximum_change = std::max(maximum_change, std::abs(gas.micro_moles().value(i) - previous[i]));
+            maximum_change = std::max(maximum_change, std::abs(micro_moles.value(i) - previous[i]));
         maximum_change = parallel.max(maximum_change);
         if (mode == "steady" && maximum_change < 1e-12 &&
             std::abs(last_escape / dt - source * volume) < 2e-11 * volume_scale)
@@ -275,7 +287,7 @@ int run(int argc, char** argv)
             const double continuum = source * 0.5 * (z[sample] + z[sample + 1]) / speed;
             const double truncation = source * (0.5 * dz / speed + dt);
             continuum_passed =
-                continuum_passed && std::abs(gas.micro_moles().value(i) - continuum) < truncation * 1.01 + 1e-12;
+                continuum_passed && std::abs(micro_moles.value(i) - continuum) < truncation * 1.01 + 1e-12;
         }
         require(parallel.all(continuum_passed),
             "Steady continuum profile exceeds upwind and split-source truncation bound");
@@ -288,7 +300,7 @@ int run(int argc, char** argv)
             const auto sample = samples[i];
             const double dz = z[sample + 1] - z[sample];
             const double exact_cell = initial * std::clamp((z[sample + 1] - speed * end) / dz, 0.0, 1.0);
-            l1 += std::abs(gas.micro_moles().value(i) - exact_cell) * mesh->cell_volume(i) / (initial * volume);
+            l1 += std::abs(micro_moles.value(i) - exact_cell) * mesh->cell_volume(i) / (initial * volume);
         }
         l1 = parallel.sum(l1);
         // Retained dz, dt and transient travel distance imply the same absolute

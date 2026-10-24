@@ -2,6 +2,7 @@
  * @brief Demonstrates buoyant circulation with localized heat and hydrogen sources.
  */
 #include "IF97ReferenceWater.hh"
+#include "PrescribedHydrogenReference.hh"
 #include "VerificationBackends.hh"
 #include "VerificationLinearSolvers.hh"
 #include "VerificationMesh.hh"
@@ -51,7 +52,6 @@ int run(int argc, char** argv)
     std::filesystem::path mesh_file = "verification/openfoam/bottomHeatedBubblyConvection/mesh.dat";
     int requested_steps = 0;
     double source_scale = 1.0;
-    bool skip_zero_auxiliary_gas = false;
     SimpleFluid::Verification::LinearSolverControls linear_controls;
     SimpleFluid::Verification::BackendControls backend_controls;
     for (int i = 1; i < argc; ++i)
@@ -73,9 +73,8 @@ int run(int argc, char** argv)
             source_scale = std::stod(value);
         else if (arg == "--gas-transport")
         {
-            require(value == "full" || value == "skip-zero-auxiliary",
-                "--gas-transport requires full or skip-zero-auxiliary");
-            skip_zero_auxiliary_gas = value == "skip-zero-auxiliary";
+            throw std::invalid_argument(
+                "--gas-transport is retired: typed reference transport skips exact zero schema components.");
         }
         else if (linear_controls.parse(arg, value))
             continue;
@@ -183,33 +182,28 @@ int run(int argc, char** argv)
     const double expected_power = source_scale * p("power_density") * (width / 3) * (height / 8) * depth;
     require(std::abs(prescribed_heat.integrated_power() - expected_power) < 1e-12 * volume_scale,
         "Mesh must align with source boundaries and preserve integrated heating");
-    SimpleFluid::ReactingGasOptions gas;
-    gas.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
-    gas.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    gas.reference_pressure = water.absolute_pressure;
-    gas.bubble_transport = SimpleFluid::BubbleTransportMode::General;
-    gas.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    gas.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    gas.constant_slip_velocity = p("slip_velocity");
-    gas.surface_tension_mode = SimpleFluid::SurfaceTensionMode::Constant;
-    gas.surface_tension = reference.surface_tension;
-    gas.hydrogen_yield_mol_per_j = p("yield_mol_per_j");
-    gas.nucleation_radius_mode = SimpleFluid::NucleationRadiusMode::External;
-    gas.nucleation_radius_correlation = [concentration = p("uranium_concentration"),
-        yield = p("yield_molecules_per_100_ev"), reference_pressure = water.absolute_pressure]
-        (double temperature, double pressure)
-    { return thermal_solution_nucleation_radius(temperature, concentration, yield, pressure, reference_pressure); };
-    gas.gas_constant = p("gas_constant");
-    gas.henry_coefficient = 1e-5;
-    gas.hydrogen_diffusivity = 1e-8;
-    gas.microbubble_lifetime = gas.large_bubble_dissolution_time = 1e100;
-    gas.micro_to_large_conversion_coefficient = 0;
-    gas.max_source_alpha_rate = 1;
-    gas.max_subcycles = 1;
+    namespace H2 = SimpleFluid::Verification::HydrogenReference;
+    // IF97 water is the documented prescribed carrier, not a fabricated finite-solvent stock.
+    H2::Parameters gas_reference{water.temperature, water.absolute_pressure, p("hydrogen_molar_mass"),
+        p("gas_constant"), reference.surface_tension, water.density, water.specific_heat_capacity,
+        water.dynamic_viscosity, water.thermal_conductivity, p("slip_velocity"), 0};
+    auto gas = H2::field_options(
+        gas_reference,
+        [&power, yield = p("yield_mol_per_j")](const SimpleFluid::Reacting::ReactionContext& context)
+        {
+            const auto& location = context.environment.location;
+            if (!location || !location->ownedCell)
+                throw std::invalid_argument("The spatial reference feed requires an actual owned source frame.");
+            return yield * power.value(static_cast<Pack::local_ordinal_type>(*location->ownedCell));
+        },
+        [reference_uranium_concentration_mol_per_m3 = p("uranium_concentration"),
+            reference_hydrogen_yield_molecules_per_100_ev = p("yield_molecules_per_100_ev"),
+            reference_pressure = water.absolute_pressure](double temperature, double pressure)
+        {
+            return thermal_solution_nucleation_radius(temperature, reference_uranium_concentration_mol_per_m3,
+                reference_hydrogen_yield_molecules_per_100_ev, pressure, reference_pressure);
+        });
     gas.transport_solver_tolerance = p("gas_transport_tolerance");
-    gas.min_radius = 1e-12;
-    gas.max_radius = 1e-3;
-    gas.free_surface_patches = {"zmax"};
     solver_coupling.configure_reacting_gas(gas);
     solver_coupling.initialize_linear_temperature({0, 0, 1}, water.temperature, water.temperature);
     // The source-off rest control also starts at the turbulence floor.
@@ -250,7 +244,11 @@ int run(int argc, char** argv)
     turbulence.restore_transported_state(
         initial_k, initial_omega, initial_nut, solver.velocity(), solver.material_properties(), water.density);
     auto* bubbles = solver_coupling.find_reacting_gas_model();
-    bubbles->set_skip_zero_auxiliary_transport(skip_zero_auxiliary_gas);
+    // Explicit policy for this localized gas reference; user overrides stay last.
+    auto gas_linear = bubbles->transport_linear_solver_options();
+    gas_linear.backend = SimpleFluid::LinearSolverBackend::BiCGStab;
+    gas_linear.preconditioner = SimpleFluid::LinearPreconditioner::SymmetricGaussSeidel;
+    bubbles->set_transport_linear_solver_options(gas_linear);
     linear_controls.apply_gas(*bubbles);
     SimpleFluid::Verification::LinearSolverHistory linear_history(output);
     std::ofstream gas_history(output / "gas_transport_statistics.csv");
@@ -338,9 +336,9 @@ int run(int argc, char** argv)
         uzmin = parallel.min(uzmin);
         uzmax = parallel.max(uzmax);
         max_div = parallel.max(max_div);
-        const double inventory = bubbles->global_submerged_hydrogen_moles();
-        const double produced = bubbles->cumulative_hydrogen_produced();
-        const double escaped = bubbles->cumulative_submerged_bubble_hydrogen_escaped();
+        const double inventory = bubbles->global_species_moles(H2::hydrogen);
+        const double produced = H2::history(*bubbles).external_supply;
+        const double escaped = H2::history(*bubbles).physical_outflow;
         const double balance = inventory + escaped - produced;
         require(std::abs(balance) < 1e-13 * volume_scale && max_div < 1e-6,
             "Hydrogen or incompressible continuity gate failed");
@@ -383,7 +381,7 @@ int run(int argc, char** argv)
         linear_history.flush();
         const auto& gas_statistics = bubbles->last_statistics();
         constexpr std::array<const char*, 5> gas_fields{
-            "dissolved", "micro_number", "micro_moles", "large_number", "large_moles"};
+            "operator_slot_0", "operator_slot_1", "operator_slot_2", "operator_slot_3", "operator_slot_4"};
         for (size_t field = 0; field < gas_fields.size(); ++field)
         {
             const auto& work = gas_statistics.transport_work[field];

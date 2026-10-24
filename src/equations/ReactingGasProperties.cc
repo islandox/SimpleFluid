@@ -40,187 +40,6 @@ std::string normalized(std::string value)
     return value;
 }
 
-/**
- * @brief Parse the configured reacting gas model.
- * @param value Model name.
- * @return Parsed model mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-ReactingGasMode parse_mode(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "disabled")
-        return ReactingGasMode::Disabled;
-    if (value == "idealgassource" || value == "ideal_gas_source")
-        return ReactingGasMode::IdealGasSource;
-    if (value == "twopopulation"
-        || value == "two_population")
-    {
-        return ReactingGasMode::TwoPopulation;
-    }
-    throw std::invalid_argument(
-        "Unknown reacting_bubble_model; expected disabled, "
-        "idealGasSource, or twoPopulation.");
-}
-
-/**
- * @brief Parse the absolute-pressure closure used by the gas model.
- * @param value Pressure-mode name.
- * @return Parsed pressure mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-ReactingPressureMode parse_pressure_mode(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "constant")
-        return ReactingPressureMode::Constant;
-    if (value == "prescribedhistory" || value == "prescribed_history")
-        return ReactingPressureMode::PrescribedHistory;
-    if (value == "reconstructed")
-        return ReactingPressureMode::Reconstructed;
-    if (value == "inertial")
-        return ReactingPressureMode::Inertial;
-    throw std::invalid_argument(
-        "Unknown reacting_pressure_mode; expected constant, "
-        "prescribedHistory, reconstructed, or inertial.");
-}
-
-/**
- * @brief Parse the dissolved-hydrogen transport mode.
- * @param value Transport-mode name.
- * @return Parsed dissolved transport mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-ReactingTransportMode parse_dissolved_transport(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "noadvection" || value == "no_advection")
-        return ReactingTransportMode::NoAdvection;
-    if (value == "advective")
-        return ReactingTransportMode::Advective;
-    throw std::invalid_argument(
-        "Unknown dissolved_hydrogen_transport_mode; expected "
-        "noAdvection or advective.");
-}
-
-/**
- * @brief Parse the bubble transport direction model.
- * @param value Transport-mode name.
- * @return Parsed bubble transport mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-BubbleTransportMode parse_bubble_transport(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "general")
-        return BubbleTransportMode::General;
-    if (value == "axial")
-        return BubbleTransportMode::Axial;
-    throw std::invalid_argument(
-        "Unknown bubble_transport_mode; expected general or axial.");
-}
-
-/**
- * @brief Parse the switching function used by population kinetics.
- * @param value Heaviside-mode name.
- * @return Parsed Heaviside mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-ReactingHeavisideMode parse_heaviside(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "exact")
-        return ReactingHeavisideMode::Exact;
-    if (value == "smoothed")
-        return ReactingHeavisideMode::Smoothed;
-    throw std::invalid_argument(
-        "Unknown reacting_heaviside_mode; expected exact or smoothed.");
-}
-
-/** @brief Parse the opt-in local kinetics integration policy. */
-ReactingKineticsMode parse_kinetics(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "legacysubcycled" || value == "legacy_subcycled")
-        return ReactingKineticsMode::LegacySubcycled;
-    if (value == "exactinactive" || value == "exact_inactive")
-        return ReactingKineticsMode::ExactInactive;
-    throw std::invalid_argument(
-        "Unknown reacting_kinetics_mode; expected legacySubcycled or exactInactive.");
-}
-
-/**
- * @brief Parse the bubble rise-velocity correlation.
- * @param value Correlation name.
- * @return Parsed rise-velocity mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-BubbleRiseVelocityMode parse_rise_velocity(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "zeroslip" || value == "zero_slip")
-        return BubbleRiseVelocityMode::ZeroSlip;
-    if (value == "constantslip" || value == "constant_slip")
-        return BubbleRiseVelocityMode::ConstantSlip;
-    if (value == "celata2007")
-        return BubbleRiseVelocityMode::Celata2007;
-    throw std::invalid_argument(
-        "Unknown bubble_rise_velocity_model; expected zeroSlip, "
-        "constantSlip, or celata2007.");
-}
-
-/**
- * @brief Parse the surface-tension property model.
- * @param value Property-model name.
- * @return Parsed surface-tension mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-SurfaceTensionMode parse_surface_tension(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "constant")
-        return SurfaceTensionMode::Constant;
-    throw std::invalid_argument(
-        "Unknown surface_tension_model; only constant is configured from a database. Set external callbacks in C++.");
-}
-
-/**
- * @brief Parse the dissolved-hydrogen diffusivity model.
- * @param value Property-model name.
- * @return Parsed diffusivity mode.
- * @throws std::invalid_argument if @p value is unknown.
- */
-HydrogenDiffusivityMode parse_diffusivity(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "constant")
-        return HydrogenDiffusivityMode::Constant;
-    throw std::invalid_argument("Unknown hydrogen_diffusivity_model; only constant is configured from a database. Set "
-                                "external callbacks in C++.");
-}
-
-/** @brief Parse the selected liquid-side bubble transfer law. */
-BubbleMassTransferMode parse_mass_transfer(std::string value)
-{
-    value = normalized(std::move(value));
-    if (value == "legacyhughmark" || value == "legacy_hughmark")
-        return BubbleMassTransferMode::LegacyHughmark;
-    if (value == "sphericaldiffusion" || value == "spherical_diffusion")
-        return BubbleMassTransferMode::SphericalDiffusion;
-    if (value == "fengmichaelidesclean" || value == "feng_michaelides_clean")
-        return BubbleMassTransferMode::FengMichaelidesClean;
-    if (value == "fengmichaelidesrigid" || value == "feng_michaelides_rigid")
-        return BubbleMassTransferMode::FengMichaelidesRigid;
-    throw std::invalid_argument(
-        "Unknown bubble_mass_transfer_model; expected legacyHughmark, sphericalDiffusion, "
-        "fengMichaelidesClean, or fengMichaelidesRigid.");
-}
-
-/**
- * @brief Validate a prescribed absolute-pressure history.
- * @param options Options containing the history arrays and pressure floor.
- * @throws std::invalid_argument if the arrays are inconsistent or invalid.
- */
 void require_history(const ReactingGasOptions& options)
 {
     const auto size = options.pressure_history_times.size();
@@ -254,188 +73,134 @@ void require_history(const ReactingGasOptions& options)
 
 } // namespace
 
-/**
- * @brief Parse and validate reacting gas options from a database.
- * @param database Source configuration database.
- * @return Validated reacting gas options.
- * @throws std::invalid_argument if an option is ill-typed or invalid.
- */
-ReactingGasOptions reacting_gas_options_from_database(
-    const Database& database)
+ReactingGasOptions reacting_gas_options_from_database(const Database& database)
 {
-    for (const auto* key : {
-             "enable_radiolysis",
-             "radiolytic_bubble_model",
-             "radiolytic_pressure_mode",
-             "radiolytic_heaviside_mode",
-             "radiolytic_kinetics_mode",
-             "radiolytic_transport_solver_tolerance",
-             "max_radiolytic_subcycles",
-             "radiolytic_free_surface_patches",
-             "precursor_group_count",
-             "precursor_decay_constants",
-             "precursor_initial_concentrations",
-             "precursor_source_terms",
-             "precursor_power_yields",
-             "precursor_effective_diffusivity"})
-    {
+    // Flat configuration has no chemistry catalog/provider factory. Enabling it
+    // must fail explicitly rather than manufacture an unnamed source/material.
+    for (const auto* key : {"enable_radiolysis", "radiolytic_bubble_model", "radiolytic_pressure_mode",
+             "radiolytic_heaviside_mode", "radiolytic_kinetics_mode", "radiolytic_transport_solver_tolerance",
+             "max_radiolytic_subcycles", "radiolytic_free_surface_patches", "precursor_group_count",
+             "precursor_decay_constants", "precursor_initial_concentrations", "precursor_source_terms",
+             "precursor_power_yields", "precursor_effective_diffusivity", "reacting_bubble_model",
+             "dissolved_hydrogen_transport_mode", "reacting_heaviside_mode", "reacting_kinetics_mode",
+             "hydrogen_diffusivity_model", "hydrogen_yield_mol_per_j", "gas_release_efficiency",
+             "max_source_alpha_rate", "henry_coefficient", "hydrogen_diffusivity", "microbubble_lifetime",
+             "large_bubble_dissolution_time", "micro_to_large_conversion_coefficient", "smooth_heaviside_width",
+             "bubble_gas_density", "initial_dissolved_hydrogen", "initial_micro_number_density", "initial_micro_moles",
+             "initial_large_number_density", "initial_large_moles", "min_population", "max_population",
+             "max_concentration", "local_ode_tolerance", "liquid_compressibility", "liquid_thermal_expansion",
+             "uranium_concentration_mol_per_m3", "hydrogen_yield_molecules_per_100_ev", "atmospheric_pressure",
+             "nucleation_radius", "nucleation_radius_model", "gas_constant", "max_radius_iterations"})
         if (database.contains(key))
-        {
             throw std::invalid_argument(
-                std::string(key) + " is retired; use reacting_* controls and standalone scalar source-decay transport.");
-        }
-    }
-
+                std::string(key) +
+                " is retired; supply explicit schema-owned ReactingGasOptions and actual inventories.");
+    const detail::DatabaseOptionReader reader(database, "Reacting species");
     ReactingGasOptions options;
-    const detail::DatabaseOptionReader reader(
-        database, "Reacting gas model");
-    const auto enabled =
-        reader.value_or<bool>("enable_reacting_gas", false);
-    if (reader.contains("reacting_bubble_model"))
-    {
-        options.mode = parse_mode(reader.required<std::string>(
-            "reacting_bubble_model"));
-    }
-    else if (enabled)
-    {
-        options.mode = ReactingGasMode::IdealGasSource;
-    }
-
-    options.pressure_mode = parse_pressure_mode(reader.value_or<std::string>(
-        "reacting_pressure_mode", "constant"));
-    options.dissolved_transport =
-        parse_dissolved_transport(reader.value_or<std::string>(
-            "dissolved_hydrogen_transport_mode",
-            "noAdvection"));
-    options.bubble_transport = parse_bubble_transport(
-        reader.value_or<std::string>(
-            "bubble_transport_mode", "general"));
-    options.heaviside_mode = parse_heaviside(reader.value_or<std::string>(
-        "reacting_heaviside_mode", "exact"));
-    options.kinetics_mode = parse_kinetics(reader.value_or<std::string>(
-        "reacting_kinetics_mode", "legacySubcycled"));
-    options.rise_velocity_mode =
-        parse_rise_velocity(reader.value_or<std::string>(
-            "bubble_rise_velocity_model", "zeroSlip"));
-    for (const auto* removed : {"uranium_concentration_mol_per_m3", "hydrogen_yield_molecules_per_100_ev", "atmospheric_pressure"})
-        if (database.contains(removed))
-            throw std::invalid_argument(std::string(removed) + " belongs to an external material provider; supply nucleation_radius or a C++ callback.");
-    options.surface_tension_mode =
-        parse_surface_tension(reader.value_or<std::string>(
-            "surface_tension_model", "constant"));
-    options.diffusivity_mode = parse_diffusivity(reader.value_or<std::string>(
-        "hydrogen_diffusivity_model", "constant"));
-    options.mass_transfer_mode = parse_mass_transfer(reader.value_or<std::string>(
-        "bubble_mass_transfer_model", "legacyHughmark"));
-
-#define SIMPLEFLUID_REACTING_REAL(member, key) options.member = reader.value_or<real_t>(key, options.member)
-    SIMPLEFLUID_REACTING_REAL(
-        hydrogen_yield_mol_per_j, "hydrogen_yield_mol_per_j");
-    SIMPLEFLUID_REACTING_REAL(
-        gas_release_efficiency, "gas_release_efficiency");
-    SIMPLEFLUID_REACTING_REAL(
-        reference_pressure, "reference_pressure");
-    SIMPLEFLUID_REACTING_REAL(gas_constant, "gas_constant");
-    SIMPLEFLUID_REACTING_REAL(alpha_min, "alpha_min");
-    SIMPLEFLUID_REACTING_REAL(alpha_max, "alpha_max");
-    SIMPLEFLUID_REACTING_REAL(
-        max_source_alpha_rate, "max_source_alpha_rate");
-    SIMPLEFLUID_REACTING_REAL(
-        henry_coefficient, "henry_coefficient");
-    SIMPLEFLUID_REACTING_REAL(
-        surface_tension, "surface_tension");
-    SIMPLEFLUID_REACTING_REAL(
-        hydrogen_diffusivity, "hydrogen_diffusivity");
-    SIMPLEFLUID_REACTING_REAL(nucleation_radius, "nucleation_radius");
-    SIMPLEFLUID_REACTING_REAL(
-        microbubble_lifetime, "microbubble_lifetime");
-    SIMPLEFLUID_REACTING_REAL(
-        large_bubble_dissolution_time,
-        "large_bubble_dissolution_time");
-    SIMPLEFLUID_REACTING_REAL(
-        micro_to_large_conversion_coefficient,
-        "micro_to_large_conversion_coefficient");
-    SIMPLEFLUID_REACTING_REAL(
-        smooth_heaviside_width, "smooth_heaviside_width");
-    SIMPLEFLUID_REACTING_REAL(
-        constant_slip_velocity, "constant_slip_velocity");
-    SIMPLEFLUID_REACTING_REAL(
-        bubble_gas_density, "bubble_gas_density");
-    SIMPLEFLUID_REACTING_REAL(
-        bubble_gravity, "bubble_gravity");
-    SIMPLEFLUID_REACTING_REAL(
-        rise_velocity_tolerance, "rise_velocity_tolerance");
-    SIMPLEFLUID_REACTING_REAL(
-        initial_dissolved_hydrogen,
-        "initial_dissolved_hydrogen");
-    SIMPLEFLUID_REACTING_REAL(
-        initial_micro_number_density,
-        "initial_micro_number_density");
-    SIMPLEFLUID_REACTING_REAL(
-        initial_micro_moles, "initial_micro_moles");
-    SIMPLEFLUID_REACTING_REAL(
-        initial_large_number_density,
-        "initial_large_number_density");
-    SIMPLEFLUID_REACTING_REAL(
-        initial_large_moles, "initial_large_moles");
-    SIMPLEFLUID_REACTING_REAL(min_radius, "min_radius");
-    SIMPLEFLUID_REACTING_REAL(max_radius, "max_radius");
-    SIMPLEFLUID_REACTING_REAL(min_population, "min_population");
-    SIMPLEFLUID_REACTING_REAL(max_population, "max_population");
-    SIMPLEFLUID_REACTING_REAL(
-        max_concentration, "max_concentration");
-    SIMPLEFLUID_REACTING_REAL(
-        local_ode_tolerance, "local_ode_tolerance");
-    SIMPLEFLUID_REACTING_REAL(
-        transport_solver_tolerance, "reacting_transport_solver_tolerance");
-    SIMPLEFLUID_REACTING_REAL(
-        liquid_compressibility, "liquid_compressibility");
-    SIMPLEFLUID_REACTING_REAL(
-        liquid_thermal_expansion, "liquid_thermal_expansion");
-    SIMPLEFLUID_REACTING_REAL(
-        minimum_absolute_pressure, "minimum_absolute_pressure");
-#undef SIMPLEFLUID_REACTING_REAL
-
-    options.max_subcycles =
-        reader.value_or<int>(
-            "max_reacting_subcycles", options.max_subcycles);
-    options.max_radius_iterations =
-        reader.value_or<int>(
-            "max_radius_iterations", options.max_radius_iterations);
+    const auto mode = normalized(reader.value_or<std::string>("reacting_species_model", "disabled"));
+    if (mode != "disabled" && mode != "species")
+        throw std::invalid_argument("reacting_species_model requires disabled or species; old modes are retired.");
+    if (reader.value_or<bool>("enable_reacting_gas", false) || mode == "species")
+        throw std::invalid_argument("Database enable requires an explicit C++ ReactionMechanism, EOS/reference "
+                                    "binding and actual species/count inventories; no source default exists.");
+    const auto pressure = normalized(reader.value_or<std::string>("reacting_pressure_mode", "constant"));
+    if (pressure == "constant")
+        options.pressure_mode = ReactingPressureMode::Constant;
+    else if (pressure == "reconstructed")
+        options.pressure_mode = ReactingPressureMode::Reconstructed;
+    else if (pressure == "prescribedhistory" || pressure == "prescribed_history")
+        options.pressure_mode = ReactingPressureMode::PrescribedHistory;
+    else
+        throw std::invalid_argument("Unsupported reacting pressure mode; inertial is retired.");
+    const auto transport = normalized(reader.value_or<std::string>("solution_transport_mode", "noAdvection"));
+    if (transport == "noadvection" || transport == "no_advection")
+        options.solution_transport = ReactingTransportMode::NoAdvection;
+    else if (transport == "advective")
+        options.solution_transport = ReactingTransportMode::Advective;
+    else
+        throw std::invalid_argument("solution_transport_mode requires noAdvection or advective.");
+    const auto bubble = normalized(reader.value_or<std::string>("bubble_transport_mode", "general"));
+    if (bubble != "general")
+        throw std::invalid_argument("Schema-owned bubble transport requires general; axial is retired.");
+    const auto surface = normalized(reader.value_or<std::string>("surface_tension_model", "constant"));
+    if (surface != "constant")
+        throw std::invalid_argument("Database surface tension requires constant; supplied laws belong to C++ options.");
+    const auto rise = normalized(reader.value_or<std::string>("bubble_rise_velocity_model", "zeroSlip"));
+    if (rise == "zeroslip" || rise == "zero_slip")
+        options.rise_velocity_mode = BubbleRiseVelocityMode::ZeroSlip;
+    else if (rise == "constantslip" || rise == "constant_slip")
+        options.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+    else if (rise == "celata2007")
+        options.rise_velocity_mode = BubbleRiseVelocityMode::Celata2007;
+    else
+        throw std::invalid_argument("Unknown bubble rise velocity law.");
+    const auto transfer = normalized(reader.value_or<std::string>("bubble_mass_transfer_model", "hughmark"));
+    if (transfer == "hughmark")
+        options.mass_transfer_mode = BubbleMassTransferMode::Hughmark;
+    else if (transfer == "sphericaldiffusion" || transfer == "spherical_diffusion")
+        options.mass_transfer_mode = BubbleMassTransferMode::SphericalDiffusion;
+    else if (transfer == "fengmichaelidesclean" || transfer == "feng_michaelides_clean")
+        options.mass_transfer_mode = BubbleMassTransferMode::FengMichaelidesClean;
+    else if (transfer == "fengmichaelidesrigid" || transfer == "feng_michaelides_rigid")
+        options.mass_transfer_mode = BubbleMassTransferMode::FengMichaelidesRigid;
+    else
+        throw std::invalid_argument("Unknown/retired bubble transfer law; use a neutral named correlation.");
+#define READ_REAL(member, key) options.member = reader.value_or<real_t>(key, options.member)
+    READ_REAL(reference_pressure, "reference_pressure");
+    READ_REAL(alpha_min, "alpha_min");
+    READ_REAL(alpha_max, "alpha_max");
+    READ_REAL(minimum_absolute_pressure, "minimum_absolute_pressure");
+    READ_REAL(transport_solver_tolerance, "reacting_transport_solver_tolerance");
+    READ_REAL(surface_tension, "surface_tension");
+    READ_REAL(constant_slip_velocity, "constant_slip_velocity");
+    READ_REAL(min_radius, "min_radius");
+    READ_REAL(max_radius, "max_radius");
+    READ_REAL(bubble_gravity, "bubble_gravity");
+    READ_REAL(rise_velocity_tolerance, "rise_velocity_tolerance");
+#undef READ_REAL
+    options.max_subcycles = reader.value_or<int>("max_reacting_subcycles", options.max_subcycles);
     options.max_rise_velocity_iterations =
-        reader.value_or<int>(
-            "max_rise_velocity_iterations",
-            options.max_rise_velocity_iterations);
-    options.pressure_history_times =
-        reader.value_or<ArrReal>(
-            "pressure_history_times",
-            options.pressure_history_times);
-    options.pressure_history_values =
-        reader.value_or<ArrReal>(
-            "pressure_history_values",
-            options.pressure_history_values);
+        reader.value_or<int>("max_rise_velocity_iterations", options.max_rise_velocity_iterations);
     options.free_surface_patches =
-        reader.value_or<ArrString>(
-            "reacting_free_surface_patches",
-            options.free_surface_patches);
-
+        reader.value_or<ArrString>("reacting_free_surface_patches", options.free_surface_patches);
+    options.pressure_history_times = reader.value_or<ArrReal>("pressure_history_times", {});
+    options.pressure_history_values = reader.value_or<ArrReal>("pressure_history_values", {});
+    BubbleGasPhysics::require_positive(options.transport_solver_tolerance, "reacting transport solver tolerance");
+    BubbleGasPhysics::require_positive(options.minimum_absolute_pressure, "minimum absolute pressure");
+    // Disabled flat setup retains these explicit public controls and their
+    // domains; it must not silently discard a malformed future configuration.
+    BubbleGasPhysics::require_non_negative(options.surface_tension, "surface tension");
+    BubbleGasPhysics::require_non_negative(options.constant_slip_velocity, "slip velocity");
+    BubbleGasPhysics::require_positive(options.min_radius, "minimum radius");
+    BubbleGasPhysics::require_positive(options.max_radius, "maximum radius");
+    BubbleGasPhysics::require_non_negative(options.bubble_gravity, "bubble gravity");
+    BubbleGasPhysics::require_positive(options.rise_velocity_tolerance, "rise-velocity tolerance");
+    if (options.max_radius <= options.min_radius || options.max_subcycles <= 0 ||
+        options.max_rise_velocity_iterations <= 0)
+        throw std::invalid_argument("Flat reacting radius bounds/subcycle/rise-iteration limits are invalid.");
+    if (options.rise_velocity_mode == BubbleRiseVelocityMode::Celata2007)
+        BubbleGasPhysics::require_positive(options.bubble_gravity, "bubble gravity");
+    if (options.pressure_mode == ReactingPressureMode::PrescribedHistory)
+        require_history(options);
     validate_reacting_gas_options(options);
     return options;
 }
 
-/**
- * @brief Validate reacting gas options for the selected model modes.
- * @param options Options to validate.
- * @throws std::invalid_argument if any active option is inconsistent.
- */
-void validate_reacting_gas_options(
-    const ReactingGasOptions& options)
+void validate_reacting_gas_options(const ReactingGasOptions& options)
 {
     using namespace BubbleGasPhysics;
     if ((options.bouss_reference || options.bouss_sources) && !options.reaction_mechanism)
         throw std::invalid_argument("Bouss finite material sources require an explicit canonical reaction schema.");
+    if (options.source_schedule != ReactingSourceSchedule::BeforeTemperature &&
+        options.source_schedule != ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
+        throw std::invalid_argument("Unknown reacting source schedule.");
+    if (options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature &&
+        !options.reaction_mechanism)
+        throw std::invalid_argument("Post-temperature reference scheduling requires an explicit species mechanism.");
+    if (options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature &&
+        (options.bouss_reference || options.bouss_sources))
+        throw std::invalid_argument("Post-temperature reference scheduling cannot own finite Bouss source/heat laws.");
     require_positive(options.reference_pressure, "reference pressure");
-    require_positive(options.gas_constant, "gas constant");
     require_non_negative(options.alpha_min, "minimum void fraction");
     require_non_negative(options.alpha_max, "maximum void fraction");
     if (options.alpha_max <= options.alpha_min
@@ -445,6 +210,12 @@ void validate_reacting_gas_options(
             "Reacting alpha bounds require 0 <= alpha_min < "
             "alpha_max < 1.");
     }
+    if (options.mode != ReactingGasMode::Disabled && options.mode != ReactingGasMode::Species)
+        throw std::invalid_argument("Unknown reacting species mode.");
+    if (options.pressure_mode != ReactingPressureMode::Constant &&
+        options.pressure_mode != ReactingPressureMode::PrescribedHistory &&
+        options.pressure_mode != ReactingPressureMode::Reconstructed)
+        throw std::invalid_argument("Unknown/retired reacting pressure mode; inertial is unsupported.");
     if (options.mode == ReactingGasMode::Disabled && !options.reaction_mechanism)
         return;
 
@@ -458,8 +229,8 @@ void validate_reacting_gas_options(
         if ((options.pressure_mode != ReactingPressureMode::Constant &&
                 options.pressure_mode != ReactingPressureMode::PrescribedHistory &&
                 options.pressure_mode != ReactingPressureMode::Reconstructed) ||
-            (options.dissolved_transport != ReactingTransportMode::NoAdvection &&
-                options.dissolved_transport != ReactingTransportMode::Advective) ||
+            (options.solution_transport != ReactingTransportMode::NoAdvection &&
+                options.solution_transport != ReactingTransportMode::Advective) ||
             options.bubble_transport != BubbleTransportMode::General ||
             (options.rise_velocity_mode != BubbleRiseVelocityMode::ZeroSlip &&
                 options.rise_velocity_mode != BubbleRiseVelocityMode::ConstantSlip &&
@@ -472,7 +243,7 @@ void validate_reacting_gas_options(
         (void) select_bubble_mass_transfer_evaluator(options.mass_transfer_mode);
         if (options.bouss_reference)
         {
-            if (!options.bouss_sources || options.mode != ReactingGasMode::TwoPopulation || options.alpha_min != 0 ||
+            if (!options.bouss_sources || options.mode != ReactingGasMode::Species || options.alpha_min != 0 ||
                 options.gas_thermodynamics || options.liquid_thermodynamics || options.population_process ||
                 options.surface_tension_mode != SurfaceTensionMode::Constant || options.surface_tension != 0 ||
                 options.rise_velocity_mode == BubbleRiseVelocityMode::Celata2007 ||
@@ -496,7 +267,7 @@ void validate_reacting_gas_options(
         }
         else if (options.bouss_sources)
             throw std::invalid_argument("Bouss sources require their explicit reference-volume/thermal owner.");
-        else if (options.mode != ReactingGasMode::TwoPopulation || !options.gas_thermodynamics ||
+        else if (options.mode != ReactingGasMode::Species || !options.gas_thermodynamics ||
                  !options.liquid_thermodynamics || options.gas_thermodynamics->kind() != Reacting::EOSKind::Gas ||
                  options.liquid_thermodynamics->kind() != Reacting::EOSKind::Liquid ||
                  options.gas_thermodynamics->catalog().fingerprint() != catalog.fingerprint() ||
@@ -505,9 +276,6 @@ void validate_reacting_gas_options(
                  options.liquid_thermodynamics->energy_convention() != options.reaction_mechanism->energy_convention())
             throw std::invalid_argument(
                 "General reacting fields require matching species/energy schemas and supplied liquid/gas EOS.");
-        if (options.pressure_mode == ReactingPressureMode::Inertial)
-            throw std::invalid_argument(
-                "General reacting fields use supplied mixture EOS pressure closure, not the scalar inertial law.");
         if (options.pressure_mode == ReactingPressureMode::PrescribedHistory)
             require_history(options);
         require_positive(options.minimum_absolute_pressure, "minimum absolute pressure");
@@ -530,6 +298,16 @@ void validate_reacting_gas_options(
             require_non_negative(property.diffusivity, "species diffusivity");
             require_non_negative(property.henry_coefficient, "species Henry coefficient");
         }
+        if (options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
+        {
+            if (options.micro_dissolution_frequency != 0. || options.large_dissolution_frequency != 0. ||
+                options.micro_conversion_frequency != 0.)
+                throw std::invalid_argument("Post-temperature gas references reject implicit interphase processes.");
+            for (const auto& property : options.species_properties)
+                if (property.diffusivity != 0. || property.diffusivity_provider || property.henry_coefficient != 0. ||
+                    property.equilibrium_concentration)
+                    throw std::invalid_argument("Post-temperature gas references reject finite-liquid film laws.");
+        }
         std::vector<std::string> populations;
         for (const auto& id : options.population_ids)
         {
@@ -539,143 +317,8 @@ void validate_reacting_gas_options(
         }
         return;
     }
-    require_positive(
-        options.hydrogen_yield_mol_per_j,
-        "hydrogen yield");
-    require_non_negative(
-        options.gas_release_efficiency,
-        "gas release efficiency");
-    if (options.gas_release_efficiency > 1.0)
-    {
-        throw std::invalid_argument(
-            "Gas release efficiency cannot exceed one.");
-    }
-    if (!std::isfinite(options.max_source_alpha_rate)
-        || options.max_source_alpha_rate < 0.0)
-    {
-        throw std::invalid_argument(
-            "Maximum source alpha rate must be explicitly finite and "
-            "non-negative.");
-    }
-    require_positive(
-        options.minimum_absolute_pressure,
-        "minimum absolute pressure");
-
-    if (options.pressure_mode
-        == ReactingPressureMode::PrescribedHistory)
-    {
-        require_history(options);
-    }
-    if (options.mode == ReactingGasMode::IdealGasSource)
-        return;
-
-    switch (options.kinetics_mode)
-    {
-    case ReactingKineticsMode::LegacySubcycled:
-    case ReactingKineticsMode::ExactInactive:
-        break;
-    default:
-        throw std::invalid_argument("Unknown reacting kinetics mode.");
-    }
-
-    switch (options.mass_transfer_mode)
-    {
-    case BubbleMassTransferMode::LegacyHughmark:
-    case BubbleMassTransferMode::SphericalDiffusion:
-    case BubbleMassTransferMode::FengMichaelidesClean:
-    case BubbleMassTransferMode::FengMichaelidesRigid:
-        break;
-    default:
-        throw std::invalid_argument("Unknown bubble mass-transfer mode.");
-    }
-
-    require_positive(options.henry_coefficient, "Henry coefficient");
-    if (options.surface_tension_mode == SurfaceTensionMode::Constant)
-        require_positive(options.surface_tension, "surface tension");
-    if (options.diffusivity_mode == HydrogenDiffusivityMode::Constant)
-        require_positive(
-            options.hydrogen_diffusivity,
-            "hydrogen diffusivity");
-    if (options.diffusivity_mode == HydrogenDiffusivityMode::External && !options.hydrogen_diffusivity_correlation)
-        throw std::invalid_argument("External hydrogen diffusivity requires a correlation callback.");
-    if (options.surface_tension_mode == SurfaceTensionMode::External && !options.surface_tension_correlation)
-        throw std::invalid_argument("External surface tension requires a correlation callback.");
-    if (options.nucleation_radius_mode == NucleationRadiusMode::Constant)
-        require_positive(options.nucleation_radius, "nucleation radius");
-    if (options.nucleation_radius_mode == NucleationRadiusMode::External && !options.nucleation_radius_correlation)
-        throw std::invalid_argument("External nucleation radius requires a correlation callback.");
-    require_positive(
-        options.microbubble_lifetime,
-        "microbubble lifetime");
-    require_positive(
-        options.large_bubble_dissolution_time,
-        "large-bubble dissolution time");
-    require_non_negative(
-        options.micro_to_large_conversion_coefficient,
-        "micro-to-large conversion coefficient");
-    if (options.heaviside_mode == ReactingHeavisideMode::Smoothed)
-        require_positive(
-            options.smooth_heaviside_width,
-            "smoothed Heaviside width");
-    require_non_negative(
-        options.constant_slip_velocity,
-        "constant slip velocity");
-    require_non_negative(
-        options.initial_dissolved_hydrogen,
-        "initial dissolved hydrogen");
-    require_non_negative(
-        options.initial_micro_number_density,
-        "initial microbubble number density");
-    require_non_negative(
-        options.initial_micro_moles,
-        "initial microbubble inventory");
-    require_non_negative(
-        options.initial_large_number_density,
-        "initial large-bubble number density");
-    require_non_negative(
-        options.initial_large_moles,
-        "initial large-bubble inventory");
-    require_positive(options.min_radius, "minimum radius");
-    require_positive(options.max_radius, "maximum radius");
-    if (options.max_radius <= options.min_radius)
-        throw std::invalid_argument(
-            "Maximum bubble radius must exceed minimum radius.");
-    require_positive(options.min_population, "minimum population");
-    require_positive(options.max_population, "maximum population");
-    if (options.max_population <= options.min_population)
-        throw std::invalid_argument(
-            "Maximum population must exceed minimum population.");
-    require_positive(
-        options.max_concentration,
-        "maximum hydrogen concentration");
-    require_positive(
-        options.local_ode_tolerance,
-        "local ODE tolerance");
-    if (options.max_subcycles < 1
-        || options.max_radius_iterations < 1
-        || options.max_rise_velocity_iterations < 1)
-    {
-        throw std::invalid_argument(
-            "Reacting iteration limits must be positive.");
-    }
-    require_positive(
-        options.liquid_compressibility,
-        "liquid compressibility");
-    require_non_negative(
-        options.liquid_thermal_expansion,
-        "liquid thermal expansion");
-
-    if (options.rise_velocity_mode
-        == BubbleRiseVelocityMode::Celata2007)
-    {
-        require_non_negative(
-            options.bubble_gas_density,
-            "bubble gas density");
-        require_positive(options.bubble_gravity, "bubble gravity");
-        require_positive(
-            options.rise_velocity_tolerance,
-            "rise-velocity tolerance");
-    }
+    throw std::invalid_argument(
+        "Enabled reacting species require an explicit ReactionMechanism and actual inventories.");
 }
 
 } // namespace SimpleFluid

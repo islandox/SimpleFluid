@@ -465,4 +465,45 @@ TEST(ReactingThermodynamicsTest, BubbleRadiusRestrictsBothEOSInvalidUserEndpoint
     EXPECT_THROW(
         (void) R::solve_bubble_radius(*gas, moles, t, liquid_pressure, sigma, number, .01, .1), std::invalid_argument);
 }
+TEST(ReactingThermodynamicsTest, BubbleRadiusRoundsPressureIntersectionInwardWithoutWideningEOSDomain)
+{
+    const auto species = catalog();
+    constexpr double sigma = .07, t = 330, number = 3;
+    for (const double lower_pressure : {1., 1e6})
+        for (const double liquid_pressure : {99000., 101000.})
+        {
+            SCOPED_TRACE(lower_pressure);
+            SCOPED_TRACE(liquid_pressure);
+            const R::ThermodynamicBounds domain{250, 600, lower_pressure, 3e7};
+            const auto base =
+                R::make_ideal_gas_mixture(species, {{25, 300, 60000}, {20, 300, 1200}, {30, 300, 2000}}, domain);
+            std::vector<double> evaluated_pressures;
+            const R::MixtureThermodynamics gas(species, domain, R::EOSKind::Gas,
+                [base, &evaluated_pressures](double temperature, double pressure, std::span<const double> fractions)
+                {
+                    evaluated_pressures.push_back(pressure);
+                    return base->evaluate(temperature, pressure, fractions);
+                });
+            const double radius = lower_pressure == 1 ? 1e-6 : 1e-7;
+            const double pressure = liquid_pressure + 2 * sigma / radius;
+            const double volume = number * 4 * std::numbers::pi * radius * radius * radius / 3;
+            const double moles = pressure * volume / (gas_constant * t);
+            const std::vector<double> amounts{.25 * moles, .75 * moles, 0};
+            const auto result = R::solve_bubble_radius(gas, amounts, t, liquid_pressure, sigma, number, 1e-12, 1e-3);
+            EXPECT_NEAR(result.radius, radius, 32 * std::numeric_limits<double>::epsilon() * radius);
+            EXPECT_GE(result.absolute_pressure, domain.minimum_pressure);
+            EXPECT_LE(result.absolute_pressure, domain.maximum_pressure);
+            ASSERT_FALSE(evaluated_pressures.empty());
+            for (const double evaluated : evaluated_pressures)
+            {
+                EXPECT_GE(evaluated, domain.minimum_pressure);
+                EXPECT_LE(evaluated, domain.maximum_pressure);
+            }
+            // A physically excluded radius still fails the signed volume bracket.
+            EXPECT_THROW(
+                (void) R::solve_bubble_radius(gas, amounts, t, liquid_pressure, sigma, number, 1.1 * radius, 1e-3),
+                std::invalid_argument);
+        }
+}
+
 } // namespace

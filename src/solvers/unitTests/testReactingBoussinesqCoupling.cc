@@ -21,7 +21,7 @@ S::ReactingGasOptions reacting_options(R::EnergyConvention convention = R::Energ
         {41, "first dissolved gas", .002, {{"X", 1}}, {P::Dissolved, P::Dispersed}},
         {97, "second dissolved gas", .004, {{"X", 2}}, {P::Dissolved, P::Dispersed}}});
     S::ReactingGasOptions result;
-    result.mode = S::ReactingGasMode::TwoPopulation;
+    result.mode = S::ReactingGasMode::Species;
     result.reference_pressure = 100000.;
     result.surface_tension = 0.;
     result.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(catalog,

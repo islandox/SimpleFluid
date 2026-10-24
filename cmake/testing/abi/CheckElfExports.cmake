@@ -218,6 +218,11 @@ string(REPLACE "\n" ";"
 
 set(simplefluid_forbidden_api_patterns
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::require_finite[(]"
+    # Removed source-specific APIs have no compatibility/export aliases.
+    "^SimpleFluid::(FissionPowerSource|RadiolyticGasModel|RadiolyticBubbleKinetics|DelayedNeutronPrecursorModel)(<|::)"
+    "^SimpleFluid::BubbleGasPhysics::(nucleation_radius|hydrogen_diffusivity|ideal_gas_alpha_source)[(]"
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::(synchronize_void_fraction|set_skip_zero_auxiliary_transport|enable_donor_hydrogen_deficit_tracking|dissolved_hydrogen|donor_hydrogen_deficit|bubble_slip_volume_flux|cumulative_hydrogen_produced|dissolved_hydrogen_inventory|global_dissolved_hydrogen_moles|global_submerged_hydrogen_moles|global_microbubble_hydrogen_moles|global_large_bubble_hydrogen_moles|cumulative_dissolved_hydrogen_outflow|global_submerged_bubble_hydrogen_moles|donor_hydrogen_deficit_tracking_enabled|cumulative_submerged_bubble_hydrogen_escaped)[(]"
+    "^SimpleFluid::NOXNonlinearSolver::Impl::"
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesMassClosureTolerance[(]"
     "^SimpleFluid::Reacting::(LowMachMixtureSolver|LowMachPressureEquation|ReactingMixtureCoupler)::Implementation::"
     "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::Data::"
@@ -233,9 +238,6 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::PlanarFreeSurfaceModel::(install_collective_guards|local_stage|replicated_update|replicated_headspace|checked_callback_volume)[(]"
     "^SimpleFluid::ReactingGasModel<.*>[ ]*::(species_compartment_index|publish_species_history|validate_species_pressure_metadata|validate_species_candidate_pressure|set_species_absolute_pressure_offset)[(]"
     "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::ControllerLease[(]SimpleFluid::Reacting::LowMachMixtureSolver[*], (unsigned long|unsigned long long)[)]$"
-    "SimpleFluid::VoFSolver::Impl::"
-    "SimpleFluid::AdaptiveVoFSolver::Impl::"
-    "SimpleFluid::ReactingVoFCoupler::Impl::"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(].*BoussinesqSolver<.*>&[)]$"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::PlanarALEStep::"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::BoussWallTrial::"
@@ -244,7 +246,7 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::ScalarSourceDecayTransport<.*>[ ]*::(validate_collective_configuration|validate_collective_advance_selection|validate_liquid_fraction_field|reconstruct_concentrations|transport|update_inventory_diagnostics)[(]"
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::(require_uniform_value|require_uniform_configuration|copy_scaled_field|integrate|apply_base_profile|apply_time_multiplier)[(]"
     "SimpleFluid::ScalarVoidFractionModel<.*>[ ]*::(diffuse|restore_for_ale_replay|restore_state)[(]"
-    "SimpleFluid::ReactingGasModel<.*>[ ]*::(restore_for_ale_replay|restore_state|invalidate_transport_operator)[(]"
+    "SimpleFluid::ReactingGasModel<.*>[ ]*::(restore_for_ale_replay|restore_state|restore_for_initialization_rollback|allocate_species_generation|invalidate_transport_operator)[(]"
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::(updateVolumeFromStoredDensity)[(]"
     "SimpleFluid::PlanarALEBoundary<.*>[ ]*::(validate|validate_collective_controls)[(]"
     "^SimpleFluid::detail::"
@@ -271,11 +273,6 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::TurbulenceWallTreatment<.*>[ ]*::(initialize|validate_velocity_cache)[(]"
     "SimpleFluid::AdaptiveSteadyStateController::adapted_time_step[(]"
     "SimpleFluid::SteadyStateFieldMonitor<.*>[ ]*::(require_mesh|require_field_mesh|capture_current_state)[(]")
-if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
-    list(APPEND simplefluid_forbidden_api_patterns
-        "^SimpleFluid::(VoFSolver|AdaptiveVoFSolver|GeneralVoFSolver|ReactingVoFCoupler)::"
-        "^SimpleFluid::VoF::")
-endif()
 
 set(simplefluid_forbidden_api_symbols)
 foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
@@ -369,44 +366,8 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
-# VoF configuration currently rejects ON. Disabled builds
 # must contain no solver/controller/caloric exports from that path; reusable FVM
 # geometry and transport kernels are audited separately in their owning library.
-if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
-    list(APPEND simplefluid_required_api_patterns
-    "^SimpleFluid::VoFSolver::VoFSolver[(]"
-    "^SimpleFluid::VoFSolver::initialize[(]"
-    "^SimpleFluid::VoFSolver::step[(]double[)]$"
-    "^SimpleFluid::VoFSolver::stable_timestep[(][)] const$"
-    "^SimpleFluid::VoFSolver::fraction_field[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::AdaptiveVoFSolver[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::step[(]double[)]$"
-    "^SimpleFluid::AdaptiveVoFSolver::regrid[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::checkpoint[(][)]$"
-    "^SimpleFluid::AdaptiveVoFSolver::fraction_field[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::initialize_low_mach[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::preview_low_mach_step[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::commit_low_mach_trial[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::state[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::preview_representation_change[(]"
-    "^SimpleFluid::AdaptiveVoFSolver::state_revision[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::pending_representation_relaxation[(][)] const$"
-    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::representation_diagnostics[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::ReactingVoFCoupler[(]"
-    "^SimpleFluid::ReactingVoFCoupler::preview[(]"
-    "^SimpleFluid::ReactingVoFCoupler::commit[(]"
-    "^SimpleFluid::ReactingVoFCoupler::checkpoint[(][)]$"
-    "^SimpleFluid::ReactingVoFCoupler::Trial::state[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::request_births[(]"
-    "^SimpleFluid::ReactingVoFCoupler::birth_registry[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::conversion_history[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::inspect_representation[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::preview_representation[(][)]$"
-    "^SimpleFluid::ReactingVoFCoupler::Trial::representation[(][)] const$"
-    "^SimpleFluid::VoF::LiquidThermodynamics::evaluate[(]double, double[)] const$"
-    "^SimpleFluid::VoF::make_linear_compressible_liquid[(]"
-)
-endif()
 
 # The standalone reacting schema adds exactly 21 reviewed definitions across
 # 18 signatures: SpeciesCatalog (7), ReactionMechanism (6), CellSpeciesState
@@ -707,6 +668,51 @@ foreach(simplefluid_stage4_mesh_kind IN ITEMS native legacy)
     simplefluid_require_exact_api(
         "^${simplefluid_stage4_model}::evaluate_liquid_volume[(]double[)] const$" 1)
 endforeach()
+
+# Final schema-only field API: exactly one heat-independent advance and one
+# accepted number-escape query per supported mesh. No old heat/void overload remains.
+set(simplefluid_final_species_native_cell "${simplefluid_stage3_scalar_cell}")
+set(simplefluid_final_species_native_face "${simplefluid_stage3_scalar_face}")
+set(simplefluid_final_species_native_velocity "${simplefluid_stage3_vector_cell}")
+set(simplefluid_final_species_legacy_cell
+    "SimpleFluid::CellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
+set(simplefluid_final_species_legacy_face
+    "SimpleFluid::FaceField<SimpleFluid::TpetraTypes<.*>[ ]*>")
+set(simplefluid_final_species_legacy_velocity
+    "SimpleFluid::VectorCellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
+foreach(simplefluid_final_mesh_kind IN ITEMS native legacy)
+    set(simplefluid_final_model
+        "SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_final_mesh_kind}_mesh}[ ]*>")
+    set(simplefluid_final_cell "${simplefluid_final_species_${simplefluid_final_mesh_kind}_cell}")
+    set(simplefluid_final_face "${simplefluid_final_species_${simplefluid_final_mesh_kind}_face}")
+    set(simplefluid_final_velocity "${simplefluid_final_species_${simplefluid_final_mesh_kind}_velocity}")
+    set(simplefluid_final_material
+        "SimpleFluid::MaterialPropertyFields<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_final_mesh_kind}_mesh}[ ]*>")
+    simplefluid_require_exact_api(
+        "^${simplefluid_final_model}::advance[(]double, double, ${simplefluid_final_cell} const&, ${simplefluid_final_cell} const&, ${simplefluid_final_velocity} const&, ${simplefluid_final_face} const&, ${simplefluid_final_material} const&, SimpleFluid::FVM::ALEControlVolumeState const[*], SimpleFluid::Dimension[)]$" 1)
+    simplefluid_require_exact_api(
+        "^${simplefluid_final_model}::population_escape_receipt[(][)] const$" 1)
+endforeach()
+simplefluid_require_exact_api("^SimpleFluid::ReactingGasModel<.*>[ ]*::advance[(].*[)]$" 2)
+
+# This preexisting facade has the same eleven definitions in NOX-OFF stubs and
+# NOX-ON implementations. Configuration alone grants no additional API budget.
+set(simplefluid_nox_vector
+    "Tpetra::Vector<double, int, long long, Tpetra::KokkosCompat::KokkosDeviceWrapperNode<.*>[ ]*>")
+simplefluid_require_exact_api(
+    "^SimpleFluid::NOXNonlinearSolver::NOXNonlinearSolver[(]SimpleFluid::NonlinearCallbacks[)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::NOXNonlinearSolver::NOXNonlinearSolver[(]SimpleFluid::NOXNonlinearSolver&&[)]$" 2)
+simplefluid_require_exact_api("^SimpleFluid::NOXNonlinearSolver::~NOXNonlinearSolver[(][)]$" 2)
+simplefluid_require_exact_api(
+    "^SimpleFluid::NOXNonlinearSolver::operator=[(]SimpleFluid::NOXNonlinearSolver&&[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::NOXNonlinearSolver::set_callbacks[(]SimpleFluid::NonlinearCallbacks[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::NOXNonlinearSolver::solve[(]${simplefluid_nox_vector}&, SimpleFluid::NonlinearSolverOptions const&, SimpleFluid::LinearSolverOptions const&[)]$" 1)
+simplefluid_require_exact_api("^SimpleFluid::NOXNonlinearSolver::cache_statistics[(][)] const$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::solve_nox[(]SimpleFluid::NonlinearCallbacks const&, ${simplefluid_nox_vector}&, SimpleFluid::NonlinearSolverOptions const&, SimpleFluid::LinearSolverOptions const&[)]$" 1)
 
 # Native prescribed closed planar ALE adds exactly six public entry points.
 # Trial geometry certificates and replay helpers remain private implementation.
@@ -1258,72 +1264,19 @@ endforeach()
 # The isothermal/adaptive, solid-conduction, and fixed-grid planar free-surface
 # APIs extend the reviewed library shape without widening the export map to
 # vendor or implementation-detail namespaces.
-# Explicitly compiled physical models and inventories extend the reviewed API.
-# Recounted at 813c481 after hiding the solver-only ALE replay helpers:
-# local GCC Debug/Release export 1325/1333 SimpleFluid symbols, and local
-# LLVM Debug/Release export 1341/1344. Keep about 6% downward and 4% upward
-# headroom around this measured range for configuration differences.
-# These counts do not qualify other toolchains or build configurations.
-# Private-family exclusions and exact API anchors above remain authoritative.
+# Fixed reviewed reacting API budgets retain develop's ten-percent headroom.
+# The preexisting substrate excludes the 142 definitions maintained on the
+# separate VoF branch. Exact API anchors and private-family guards above remain
+# authoritative; the ceiling never depends on the inspected library.
 set(simplefluid_api_symbol_lower_bound 1250)
-# Vented cavity, typed ALE thermal transactions and compiled traversal plans
-# extend the public surface. After hiding traversal implementation helpers,
-# GCC Release/LTO has 1414 API exports and LLVM Debug has 1426 (2026-10-14).
-# Keep modest toolchain headroom; private-family exclusions and exact API
-# anchors above remain authoritative.
-# The external multiphysics controller exports its own lifecycle/configuration
-# API; model forwarding APIs no longer belong to BoussinesqSolver. GCC Debug
-# exports 1453 API symbols (2026-10-15). Keep modest toolchain headroom while
-# exact API anchors and private-family exclusions remain authoritative.
-# The uniform VoF backend adds 25 reviewed public lifecycle/initialization/
-# stepping/query symbols. GCC Debug now exports 1483 SimpleFluid symbols;
-# extend the previous ceiling by that API contribution, retaining the same
-# toolchain headroom. The private Impl family stays forbidden above.
-# Low-Mach trial/state APIs (15), the reacting controller (21), caloric EOS
-# wrappers (5), and reactions-only kernels (4) add 45 reviewed definitions.
-# GCC Debug has 1513 exports versus the Stage 2 record's 1468. Extend the
-# previous ceiling by those APIs, keeping the existing toolchain headroom.
-# Required anchors and forbidden implementation families remain unchanged.
-# Neutral source migration preserves all other exports one-for-one and removes
-# five precursor coupler lifecycle definitions. The measured GCC Debug baseline
-# has 1552 definitions; 1552 + 21 reviewed schema entries - 5 removals = 1568.
-# The remaining preexisting substrate has 1547 entries and fits its unchanged
-# 1550 ceiling. Add only the separately anchored schema budget, retaining three
-# substrate headroom entries; do not absorb unrelated exports or widen any map.
-# Multispecies fields add exactly 13 thermodynamic and 39 adapter definitions.
-# VoF's unqualified solvers are default-off: 25 uniform solver, 58 adaptive,
-# 25 general, 29 reacting controller, and five scalar caloric definitions are
-# absent in that configuration (142 total). The disabled-family guard above
-# independently enforces this boundary. Preserve the same three-entry substrate
-# headroom: expected GCC Debug 1478 disabled / 1620 experimental-enabled.
-# The native mixture flow/controller stage adds only its 51 separately anchored
-# definitions: GCC Debug 1478 -> 1529 with VoF disabled, no removals. Keep the
-# substrate ceiling and 142-symbol disabled-family subtraction unchanged.
-# Source/history and EOS/material pressure linearization add twelve reviewed
-# definitions (1541 disabled); the three-entry headroom remains unchanged
-# (disabled ceiling 1544; opt-in ceiling 1686).
-# Caloric discovery adds eight exactly anchored API/RTTI definitions: measured
-# GCC Debug 1549, disabled ceiling 1552, with the same three-entry headroom.
-# The pure species-diffusion kernel adds one definition: measured GCC Debug
-# 1550, disabled ceiling 1553. Internal distributed face helpers stay hidden.
-# Explicit number events add one exactly anchored receipt query: measured GCC
-# Debug 1551, disabled ceiling 1554. Population helpers remain private.
-# Typed surface/headspace adds 25 anchored definitions: measured GCC Debug 1576,
-# disabled ceiling 1579. No previous export is removed and private helpers stay hidden.
-# Native ALE adds six exact anchors: measured GCC Debug 1582, disabled ceiling 1585.
-# The existing three-entry headroom and all earlier API anchors are retained.
-# Conditioned thermal transfer adds nine anchors: measured GCC Debug 1591,
-# disabled ceiling 1594; no earlier definition or private guard is removed.
-# Finite vapor adds ten exact anchors: GCC Debug 1601, disabled ceiling 1604.
-# Local donor predecessor overloads add two exact anchors: ceiling 1606;
-# their private composition helpers remain forbidden above.
-set(simplefluid_preexisting_api_symbol_upper_bound 1550)
-set(simplefluid_disabled_vof_symbol_count 0)
-if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
-    set(simplefluid_disabled_vof_symbol_count 142)
-endif()
+set(simplefluid_final_species_cleanup_symbol_delta -35)
+set(simplefluid_preexisting_api_symbol_upper_bound 1408)
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta}")
+math(EXPR simplefluid_api_symbol_reviewed_maximum
+    "${simplefluid_api_symbol_upper_bound} - 3")
+math(EXPR simplefluid_api_symbol_upper_bound
+    "(${simplefluid_api_symbol_reviewed_maximum} * 110 + 99) / 100")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

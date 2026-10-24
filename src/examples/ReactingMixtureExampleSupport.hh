@@ -296,7 +296,7 @@ inline ReactingGasOptions field_options(const Mixture& mixture, const InitialMix
     double molar_reaction_rate = 0, double independent_heat_rate = 0)
 {
     ReactingGasOptions options;
-    options.mode = ReactingGasMode::TwoPopulation;
+    options.mode = ReactingGasMode::Species;
     options.reference_pressure = reference_pressure;
     options.reaction_mechanism = mixture.mechanism;
     options.liquid_thermodynamics = mixture.liquid;
@@ -317,7 +317,7 @@ inline ReactingGasOptions field_options(const Mixture& mixture, const InitialMix
         input.heat = heat;
         return input;
     };
-    options.dissolved_transport = ReactingTransportMode::Advective;
+    options.solution_transport = ReactingTransportMode::Advective;
     options.bubble_transport = BubbleTransportMode::General;
     options.mass_transfer_mode = BubbleMassTransferMode::SphericalDiffusion;
     options.surface_tension = 0;

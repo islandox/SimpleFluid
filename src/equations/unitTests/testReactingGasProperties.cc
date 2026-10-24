@@ -11,7 +11,9 @@
 
 #include <gtest/gtest.h>
 
+#include "equations/BoussFiniteVapor.hh"
 #include "equations/ReactingGasProperties.hh"
+#include "equations/ReactingThermodynamics.hh"
 
 #include <cmath>
 #include <limits>
@@ -23,66 +25,74 @@ namespace
 {
 
 namespace Physics = SimpleFluid::BubbleGasPhysics;
-
-TEST(ReactingGasPropertiesTest, ExternalDiffusivityChecksCallbackAndValues)
+SimpleFluid::ReactingGasOptions explicit_options()
 {
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    auto catalog = std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{91, "finite_solvent", 1, {{"S", 1}}, {P::Liquid, P::Resolved}},
+            {317, "ordinary_gas", 1, {{"G", 1}}, {P::Dissolved, P::Dispersed, P::Resolved}}},
+        17);
     SimpleFluid::ReactingGasOptions options;
-    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 300), std::invalid_argument);
-    options.hydrogen_diffusivity_correlation = +[](double temperature) { return temperature * 1e-11; };
-    EXPECT_DOUBLE_EQ(Physics::hydrogen_diffusivity(options, 350), 350 * 1e-11);
-    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 0), std::invalid_argument);
-    options.hydrogen_diffusivity_correlation = +[](double) { return -1.0; };
-    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 300), std::invalid_argument);
-    options.hydrogen_diffusivity_correlation = +[](double) { return std::numeric_limits<double>::quiet_NaN(); };
-    EXPECT_THROW(Physics::hydrogen_diffusivity(options, 300), std::invalid_argument);
+    options.mode = SimpleFluid::ReactingGasMode::Species;
+    options.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(
+        catalog, std::vector<R::ReactionDefinition>{}, R::EnergyConvention::SensibleEnergy);
+    options.bouss_reference = std::make_shared<const R::BoussReferenceVolume>(
+        R::BoussReferenceVolume{"test.fixed_reference", 1, catalog->fingerprint(), 1000, 1000, 4000, {.001, .02}});
+    options.bouss_sources = std::make_shared<const R::BoussCoordinatedSources>(
+        R::BoussCoordinatedSources{"test.no_implicit_sources", 1, catalog->fingerprint()});
+    return options;
 }
 
-/** @brief Verifies the expected scaling of the ideal-gas reacting source. */
-TEST(ReactingGasPropertiesTest, IdealGasSourceHasExpectedScaling)
+TEST(ReactingGasPropertiesTest, PerSpeciesDiffusivityUsesCatalogIdentityWithoutMandatoryGasSlots)
 {
-    const auto base = Physics::ideal_gas_alpha_source(
-        0.8, 0.5, 2.0e-7, 4.0e6, 8.314462618, 300.0, 1.0e5, 10.0);
-    const auto double_temperature = Physics::ideal_gas_alpha_source(
-        0.8, 0.5, 2.0e-7, 4.0e6, 8.314462618, 600.0, 1.0e5, 10.0);
-    const auto double_pressure = Physics::ideal_gas_alpha_source(
-        0.8, 0.5, 2.0e-7, 4.0e6, 8.314462618, 300.0, 2.0e5, 10.0);
-    const auto double_power = Physics::ideal_gas_alpha_source(
-        0.8, 0.5, 2.0e-7, 8.0e6, 8.314462618, 300.0, 1.0e5, 10.0);
-    const auto double_yield = Physics::ideal_gas_alpha_source(
-        0.8, 0.5, 4.0e-7, 4.0e6, 8.314462618, 300.0, 1.0e5, 10.0);
+    namespace R = SimpleFluid::Reacting;
+    auto options = explicit_options();
+    options.species_properties = {{317, 2e-9, 0}};
+    // The fixed-reference vapor owner intentionally has no EOS film law.
+    EXPECT_THROW(SimpleFluid::validate_reacting_gas_options(options), std::invalid_argument);
+    options.bouss_reference.reset();
+    options.bouss_sources.reset();
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(options.reaction_mechanism->catalog());
+    const R::ThermodynamicBounds bounds{250, 600, 1000, 1e7};
+    options.liquid_thermodynamics = R::make_linear_compressible_mixture_liquid(
+        catalog, bounds, [](std::span<const double>)
+        { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4000, 0, 0, 0, 0, 0}; },
+        R::EnergyConvention::SensibleEnergy);
+    options.gas_thermodynamics = R::make_ideal_gas_mixture(
+        catalog, std::vector<R::IdealGasCaloricSpecies>{{20, 300, 0}, {20, 300, 0}}, bounds,
+        R::EnergyConvention::SensibleEnergy);
+    EXPECT_NO_THROW(SimpleFluid::validate_reacting_gas_options(options));
+    options.species_properties[0].diffusivity = -1;
+    EXPECT_THROW(SimpleFluid::validate_reacting_gas_options(options), std::invalid_argument);
+    options.species_properties[0].diffusivity = 0;
+    options.species_properties[0].species = 999;
+    EXPECT_THROW(SimpleFluid::validate_reacting_gas_options(options), std::invalid_argument);
+}
 
-    EXPECT_GT(base, 0.0);
-    EXPECT_NEAR(double_temperature, 2.0 * base, 1.0e-14);
-    EXPECT_NEAR(double_pressure, 0.5 * base, 1.0e-14);
-    EXPECT_NEAR(double_power, 2.0 * base, 1.0e-14);
-    EXPECT_NEAR(double_yield, 2.0 * base, 1.0e-14);
-    EXPECT_DOUBLE_EQ(
-        Physics::ideal_gas_alpha_source(
-            0.8, 0.5, 2.0e-7, 0.0, 8.314462618, 300.0, 1.0e5, 10.0),
-        0.0);
-    EXPECT_DOUBLE_EQ(
-        Physics::ideal_gas_alpha_source(
-            0.8, 0.5, 2.0e-7, 4.0e6, 8.314462618, 300.0, 1.0e5,
-            base / 3.0),
-        base / 3.0);
+/** @brief No heat/yield path manufactures a schema-owned source. */
+TEST(ReactingGasPropertiesTest, EnabledSpeciesCannotManufactureSchemaFromHeatOrDatabaseDefaults)
+{
+    SimpleFluid::ReactingGasOptions options;
+    options.mode = SimpleFluid::ReactingGasMode::Species;
+    EXPECT_THROW(SimpleFluid::validate_reacting_gas_options(options), std::invalid_argument);
+    for (const auto* selector : {"species", "idealGasSource", "twoPopulation"})
+    {
+        SimpleFluid::Database database;
+        database.set("reacting_species_model", std::string{selector});
+        EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    }
+    SimpleFluid::Database enabled;
+    enabled.set("enable_reacting_gas", true);
+    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(enabled), std::invalid_argument);
 }
 
 /** @brief Verifies rejection of invalid thermodynamic property inputs. */
-TEST(ReactingGasPropertiesTest, RejectsInvalidThermodynamicInputs)
+TEST(ReactingGasPropertiesTest, RejectsInvalidPhysicalScalarInputs)
 {
-    EXPECT_THROW(
-        Physics::ideal_gas_alpha_source(
-            1.0, 1.0, 1.0e-7, 1.0, 8.314, 0.0, 1.0e5, 1.0),
-        std::invalid_argument);
-    EXPECT_THROW(
-        Physics::ideal_gas_alpha_source(
-            1.0, 1.0, 1.0e-7, 1.0, 8.314, 300.0, 0.0, 1.0),
-        std::invalid_argument);
-    EXPECT_THROW(
-        Physics::ideal_gas_alpha_source(
-            1.0, 1.2, 1.0e-7, 1.0, 8.314, 300.0, 1.0e5, 1.0),
-        std::invalid_argument);
+    EXPECT_THROW(Physics::require_positive(0, "temperature"), std::invalid_argument);
+    EXPECT_THROW(Physics::require_positive(std::numeric_limits<double>::infinity(), "pressure"), std::invalid_argument);
+    EXPECT_THROW(Physics::require_non_negative(-1, "diffusivity"), std::invalid_argument);
 }
 
 /** @brief Verifies monotonic Henry-law and Laplace-pressure terms. */
@@ -102,24 +112,16 @@ TEST(ReactingGasPropertiesTest, HenryAndLaplaceTermsAreMonotone)
 }
 
 /** Material-specific correlations live in external libraries; test only the contract here. */
-TEST(ReactingGasPropertiesTest, ExternalSurfaceAndNucleationProperties)
+TEST(ReactingGasPropertiesTest, ExternalSurfacePropertyRetainsExplicitCallbackContract)
 {
     SimpleFluid::ReactingGasOptions options;
     options.surface_tension_mode = SimpleFluid::SurfaceTensionMode::External;
-    options.nucleation_radius_mode = SimpleFluid::NucleationRadiusMode::External;
     EXPECT_THROW(Physics::surface_tension(options, 300), std::invalid_argument);
-    EXPECT_THROW(Physics::nucleation_radius(options, 300, 1e5), std::invalid_argument);
-    const double scale = 2e-10;
     options.surface_tension_correlation = [](double t) { return .07 * t / 300; };
-    options.nucleation_radius_correlation = [scale](double t, double p) { return scale * t * 1e5 / p; };
     EXPECT_DOUBLE_EQ(Physics::surface_tension(options, 350), .07 * 350 / 300);
-    EXPECT_DOUBLE_EQ(Physics::nucleation_radius(options, 300, 2e5), scale * 300 / 2);
     EXPECT_THROW(Physics::surface_tension(options, 0), std::invalid_argument);
-    EXPECT_THROW(Physics::nucleation_radius(options, 300, 0), std::invalid_argument);
     options.surface_tension_correlation = [](double) { return std::numeric_limits<double>::quiet_NaN(); };
-    options.nucleation_radius_correlation = [](double, double) { return -1.; };
     EXPECT_THROW(Physics::surface_tension(options, 300), std::invalid_argument);
-    EXPECT_THROW(Physics::nucleation_radius(options, 300, 1e5), std::invalid_argument);
 }
 
 TEST(ReactingGasPropertiesTest, RemovedMaterialSelectorsAreRejected)
@@ -158,7 +160,7 @@ TEST(ReactingGasPropertiesTest, HughmarkBranchesAndValidity)
 }
 
 /** A finite-slip legacy fixture checks SI units and diameter-based groups. */
-TEST(ReactingGasPropertiesTest, LegacyReportsDiameterGroupsAndCoefficient)
+TEST(ReactingGasPropertiesTest, HughmarkReportsDiameterGroupsAndCoefficient)
 {
     constexpr double density = 1000.0;       // kg/m3
     constexpr double viscosity = 1.0e-3;     // Pa s
@@ -166,12 +168,10 @@ TEST(ReactingGasPropertiesTest, LegacyReportsDiameterGroupsAndCoefficient)
     constexpr double radius = 1.0e-4;        // m
     constexpr double slip = -5.0e-6;         // m/s; Pe = 0.1
     const auto result = Physics::bubble_mass_transfer(
-        SimpleFluid::BubbleMassTransferMode::LegacyHughmark,
-        diffusivity, radius, density, viscosity, slip);
+        SimpleFluid::BubbleMassTransferMode::Hughmark, diffusivity, radius, density, viscosity, slip);
 
-    EXPECT_EQ(result.model, SimpleFluid::BubbleMassTransferMode::LegacyHughmark);
-    EXPECT_EQ(result.applicability,
-              Physics::BubbleMassTransferApplicability::LegacyScGuardPassed);
+    EXPECT_EQ(result.model, SimpleFluid::BubbleMassTransferMode::Hughmark);
+    EXPECT_EQ(result.applicability, Physics::BubbleMassTransferApplicability::HughmarkSchmidtDomain);
     EXPECT_DOUBLE_EQ(result.radius, radius);
     EXPECT_DOUBLE_EQ(result.diameter, 2.0e-4);
     EXPECT_DOUBLE_EQ(result.relative_speed, -slip);
@@ -225,8 +225,7 @@ TEST(ReactingGasPropertiesTest, ZeroSlipAndWinterReferenceHighSc)
         std::domain_error);
 
     const auto legacy = Physics::bubble_mass_transfer(
-        SimpleFluid::BubbleMassTransferMode::LegacyHughmark,
-        1.0e-8, radius, 1000.0, 1.0e-3, 0.0);
+        SimpleFluid::BubbleMassTransferMode::Hughmark, 1.0e-8, radius, 1000.0, 1.0e-3, 0.0);
     EXPECT_DOUBLE_EQ(legacy.reynolds, 0.0);
     EXPECT_DOUBLE_EQ(legacy.peclet, 0.0);
     EXPECT_DOUBLE_EQ(legacy.sherwood, 2.0);
@@ -234,7 +233,7 @@ TEST(ReactingGasPropertiesTest, ZeroSlipAndWinterReferenceHighSc)
 }
 
 /** The selected legacy law retains both published code branches and its Sc gate. */
-TEST(ReactingGasPropertiesTest, SelectedLegacyHughmarkPreservesExistingResults)
+TEST(ReactingGasPropertiesTest, SelectedHughmarkPreservesExistingResults)
 {
     constexpr double radius = 1.0e-4;
     constexpr double diffusivity = 1.0e-8;
@@ -244,13 +243,10 @@ TEST(ReactingGasPropertiesTest, SelectedLegacyHughmarkPreservesExistingResults)
          {std::pair{0.5, 100.0}, std::pair{5.0, 1000.0}})
     {
         const auto result = Physics::bubble_mass_transfer(
-            SimpleFluid::BubbleMassTransferMode::LegacyHughmark,
-            diffusivity, radius, density, viscosity, speed);
-        const double expected_sherwood = reynolds < 776.06
-            ? 2.0 + 0.6 * std::sqrt(reynolds) * std::cbrt(100.0)
-            : 2.0 + 0.27 * std::pow(reynolds, 0.63) * std::cbrt(100.0);
-        EXPECT_EQ(result.applicability,
-                  Physics::BubbleMassTransferApplicability::LegacyScGuardPassed);
+            SimpleFluid::BubbleMassTransferMode::Hughmark, diffusivity, radius, density, viscosity, speed);
+        const double expected_sherwood = reynolds < 776.06 ? 2.0 + 0.6 * std::sqrt(reynolds) * std::cbrt(100.0)
+                                                           : 2.0 + 0.27 * std::pow(reynolds, 0.63) * std::cbrt(100.0);
+        EXPECT_EQ(result.applicability, Physics::BubbleMassTransferApplicability::HughmarkSchmidtDomain);
         EXPECT_NEAR(result.reynolds, reynolds, 1.0e-12);
         EXPECT_NEAR(result.sherwood, expected_sherwood, 1.0e-12);
         EXPECT_NEAR(result.coefficient, expected_sherwood * diffusivity / (2.0 * radius), 1.0e-14);
@@ -260,9 +256,8 @@ TEST(ReactingGasPropertiesTest, SelectedLegacyHughmarkPreservesExistingResults)
     }
     try
     {
-        (void)Physics::bubble_mass_transfer(
-            SimpleFluid::BubbleMassTransferMode::LegacyHughmark,
-            4.5e-9, radius, 1546.23563, 0.00243878721, 0.0);
+        (void) Physics::bubble_mass_transfer(
+            SimpleFluid::BubbleMassTransferMode::Hughmark, 4.5e-9, radius, 1546.23563, 0.00243878721, 0.0);
         FAIL() << "Expected the legacy high-Sc state to be rejected.";
     }
     catch (const std::domain_error& error)
@@ -334,12 +329,11 @@ TEST(ReactingGasPropertiesTest, FengEndpointsAcceptWinterReferenceBeyondLegacySc
     // Hydra-TF separately tests the actual Winter2022 provider at 298.85 K.
     constexpr double winter_diffusivity = 5.18858348242618e-9;
     constexpr double slip = 100.0 * winter_diffusivity / radius;
-    EXPECT_THROW(Physics::bubble_mass_transfer(
-        SimpleFluid::BubbleMassTransferMode::LegacyHughmark,
-        winter_diffusivity, radius, density, viscosity, slip), std::domain_error);
-    for (const auto [model, exponent] :
-         {std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, 0.322},
-          std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, 0.435}})
+    EXPECT_THROW(Physics::bubble_mass_transfer(SimpleFluid::BubbleMassTransferMode::Hughmark, winter_diffusivity,
+                     radius, density, viscosity, slip),
+        std::domain_error);
+    for (const auto [model, exponent] : {std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid, 0.322},
+             std::pair{SimpleFluid::BubbleMassTransferMode::FengMichaelidesClean, 0.435}})
     {
         const auto result = Physics::bubble_mass_transfer(
             model, winter_diffusivity, radius, density, viscosity, slip);
@@ -457,8 +451,7 @@ TEST(ReactingGasPropertiesTest, BubbleTransferRejectsInvalidPhysicalInputs)
 TEST(ReactingGasPropertiesTest, ParsesMassTransferSelectorAndRejectsUnknownValues)
 {
     using SimpleFluid::BubbleMassTransferMode;
-    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database({}).mass_transfer_mode,
-              BubbleMassTransferMode::LegacyHughmark);
+    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database({}).mass_transfer_mode, BubbleMassTransferMode::Hughmark);
     SimpleFluid::Database database;
     database.set("bubble_mass_transfer_model", std::string{"sphericalDiffusion"});
     EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database(database).mass_transfer_mode,
@@ -476,23 +469,16 @@ TEST(ReactingGasPropertiesTest, ParsesMassTransferSelectorAndRejectsUnknownValue
     EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
 }
 
-/** @brief Kinetics selectors retain the legacy default and reject unknown input. */
-TEST(ReactingGasPropertiesTest, ParsesKineticsSelectorAndRejectsUnknownValues)
+/** @brief Retired kinetics controls cannot silently select the disabled default. */
+TEST(ReactingGasPropertiesTest, RejectsRetiredKineticsControlsEvenWhenDisabled)
 {
-    using SimpleFluid::ReactingKineticsMode;
-    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database({}).kinetics_mode,
-        ReactingKineticsMode::LegacySubcycled);
-    SimpleFluid::Database database;
-    database.set("reacting_kinetics_mode", std::string{"exactInactive"});
-    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database(database).kinetics_mode,
-        ReactingKineticsMode::ExactInactive);
-    database.set("reacting_kinetics_mode", std::string{"legacySubcycled"});
-    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database(database).kinetics_mode,
-        ReactingKineticsMode::LegacySubcycled);
-    database.set("reacting_kinetics_mode", std::string{"unverified"});
-    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
-    database.set("reacting_kinetics_mode", 7);
-    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    for (const auto* key : {"reacting_kinetics_mode", "reacting_heaviside_mode", "initial_micro_moles",
+             "initial_large_moles", "initial_dissolved_hydrogen", "hydrogen_yield_mol_per_j"})
+    {
+        SimpleFluid::Database database;
+        database.set(key, std::string{"disabled"});
+        EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    }
 }
 
 /** @brief Verifies that the Celata bubble-rise velocity balances drag. */
@@ -602,26 +588,24 @@ TEST(ReactingGasPropertiesTest, VoidAndCharacteristicRadiusReconstruct)
 }
 
 /** @brief Verifies parsing of flat runtime correlation selectors. */
-TEST(ReactingGasPropertiesTest, ParsesFlatRuntimeSelectors)
+TEST(ReactingGasPropertiesTest, PreservesSubstantivePressureAndSolutionSelectors)
 {
     SimpleFluid::Database database;
-    database.set("enable_reacting_gas", true);
-    database.set(
-        "hydrogen_yield_mol_per_j", SimpleFluid::real_t{2.0e-7});
-    database.set(
-        "max_source_alpha_rate", SimpleFluid::real_t{0.2});
-    database.set(
-        "reacting_pressure_mode", std::string{"reconstructed"});
-
-    const auto options =
-        SimpleFluid::reacting_gas_options_from_database(database);
-    EXPECT_EQ(
-        options.mode, SimpleFluid::ReactingGasMode::IdealGasSource);
-    EXPECT_EQ(
-        options.pressure_mode,
-        SimpleFluid::ReactingPressureMode::Reconstructed);
-    EXPECT_DOUBLE_EQ(options.reference_pressure, 101325.0);
-    EXPECT_DOUBLE_EQ(options.alpha_max, 0.95);
+    database.set("reacting_pressure_mode", std::string{"reconstructed"});
+    database.set("solution_transport_mode", std::string{"advective"});
+    auto options = SimpleFluid::reacting_gas_options_from_database(database);
+    EXPECT_EQ(options.mode, SimpleFluid::ReactingGasMode::Disabled);
+    EXPECT_EQ(options.pressure_mode, SimpleFluid::ReactingPressureMode::Reconstructed);
+    EXPECT_EQ(options.solution_transport, SimpleFluid::ReactingTransportMode::Advective);
+    database.set("reacting_pressure_mode", std::string{"prescribedHistory"});
+    database.set("pressure_history_times", SimpleFluid::ArrReal{0, 2});
+    database.set("pressure_history_values", SimpleFluid::ArrReal{100000, 200000});
+    EXPECT_EQ(SimpleFluid::reacting_gas_options_from_database(database).pressure_mode,
+        SimpleFluid::ReactingPressureMode::PrescribedHistory);
+    database.set("pressure_history_times", SimpleFluid::ArrReal{0, 0});
+    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    database.set("reacting_pressure_mode", std::string{"inertial"});
+    EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
 }
 
 /** @brief Verifies contextual diagnostics for incorrectly typed gas options. */
@@ -638,39 +622,33 @@ TEST(ReactingGasPropertiesTest, ReportsWrongTypedOptionContext)
     catch (const std::invalid_argument& error)
     {
         const std::string message(error.what());
-        EXPECT_NE(message.find("Reacting gas model"), std::string::npos);
+        EXPECT_NE(message.find("Reacting species"), std::string::npos);
         EXPECT_NE(message.find("enable_reacting_gas"), std::string::npos);
         EXPECT_NE(message.find("wrong type"), std::string::npos);
     }
 }
 
-/** @brief Verifies that enabled reacting_gas requires yield and rate-limit inputs. */
-TEST(ReactingGasPropertiesTest, EnabledModeRequiresYieldAndRateLimit)
+/** @brief Enabled schema-owned gas requires actual laws and substantive pressure history. */
+TEST(ReactingGasPropertiesTest, EnabledSpeciesRequiresExplicitSchemaAndPreservesPressureHistory)
 {
-    SimpleFluid::Database missing;
-    missing.set("enable_reacting_gas", true);
-    EXPECT_THROW(
-        SimpleFluid::reacting_gas_options_from_database(missing),
-        std::invalid_argument);
-
-    SimpleFluid::ReactingGasOptions options;
-    options.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-    options.hydrogen_yield_mol_per_j = 1.0e-7;
-    EXPECT_THROW(
-        SimpleFluid::validate_reacting_gas_options(options),
-        std::invalid_argument);
+    auto options = explicit_options();
+    EXPECT_NO_THROW(SimpleFluid::validate_reacting_gas_options(options));
+    options.pressure_mode = SimpleFluid::ReactingPressureMode::PrescribedHistory;
+    EXPECT_THROW(SimpleFluid::validate_reacting_gas_options(options), std::invalid_argument);
+    options.pressure_history_times = {0, 1};
+    options.pressure_history_values = {100000, 120000};
+    EXPECT_NO_THROW(SimpleFluid::validate_reacting_gas_options(options));
+    options.reaction_mechanism.reset();
+    EXPECT_THROW(SimpleFluid::validate_reacting_gas_options(options), std::invalid_argument);
 }
 
 TEST(ReactingGasPropertiesTest, TransportToleranceIsOptionalValidatedAndParsed)
 {
     EXPECT_DOUBLE_EQ(SimpleFluid::ReactingGasOptions{}.transport_solver_tolerance,1e-10);
     SimpleFluid::Database database;
-    database.set("enable_reacting_gas",true);
-    database.set("hydrogen_yield_mol_per_j",SimpleFluid::real_t{2e-7});
-    database.set("max_source_alpha_rate",SimpleFluid::real_t{1});
-    database.set("reacting_transport_solver_tolerance",SimpleFluid::real_t{1e-14});
-    EXPECT_DOUBLE_EQ(SimpleFluid::reacting_gas_options_from_database(database).transport_solver_tolerance,1e-14);
-    for(double value:{0.0,-1.0,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()})
+    database.set("reacting_transport_solver_tolerance", SimpleFluid::real_t{1e-14});
+    EXPECT_DOUBLE_EQ(SimpleFluid::reacting_gas_options_from_database(database).transport_solver_tolerance, 1e-14);
+    for (double value : {0.0, -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
     {
         database.set("reacting_transport_solver_tolerance",value);
         EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database),std::invalid_argument);
@@ -714,5 +692,90 @@ TEST(ReactingGasPropertiesTest, RejectsRetiredTwoPopulationSelector)
         SimpleFluid::Database database;
         database.set("reacting_bubble_model", std::string{selector});
         EXPECT_THROW(SimpleFluid::reacting_gas_options_from_database(database), std::invalid_argument);
+    }
+}
+
+TEST(ReactingGasPropertiesTest, DisabledParserPreservesExplicitNeutralControls)
+{
+    using namespace SimpleFluid;
+    Database database;
+    database.set("enable_reacting_gas", false);
+    database.set("reacting_species_model", std::string{"disabled"});
+    database.set("bubble_rise_velocity_model", std::string{"constantSlip"});
+    database.set("constant_slip_velocity", real_t{.4});
+    database.set("surface_tension", real_t{.075});
+    database.set("min_radius", real_t{2e-8});
+    database.set("max_radius", real_t{.025});
+    database.set("bubble_gravity", real_t{7.2});
+    database.set("rise_velocity_tolerance", real_t{3e-11});
+    database.set("max_rise_velocity_iterations", 61);
+    database.set("max_reacting_subcycles", 37);
+    database.set("reacting_free_surface_patches", ArrString{"vent_a", "vent_b"});
+    const auto options = reacting_gas_options_from_database(database);
+    EXPECT_EQ(options.mode, ReactingGasMode::Disabled);
+    EXPECT_EQ(options.reaction_mechanism, nullptr);
+    EXPECT_EQ(options.rise_velocity_mode, BubbleRiseVelocityMode::ConstantSlip);
+    EXPECT_DOUBLE_EQ(options.constant_slip_velocity, .4);
+    EXPECT_DOUBLE_EQ(options.surface_tension, .075);
+    EXPECT_DOUBLE_EQ(options.min_radius, 2e-8);
+    EXPECT_DOUBLE_EQ(options.max_radius, .025);
+    EXPECT_DOUBLE_EQ(options.bubble_gravity, 7.2);
+    EXPECT_DOUBLE_EQ(options.rise_velocity_tolerance, 3e-11);
+    EXPECT_EQ(options.max_rise_velocity_iterations, 61);
+    EXPECT_EQ(options.max_subcycles, 37);
+    EXPECT_EQ(options.free_surface_patches, (ArrString{"vent_a", "vent_b"}));
+}
+TEST(ReactingGasPropertiesTest, DisabledParserRejectsMalformedRetainedNeutralControls)
+{
+    using namespace SimpleFluid;
+    for (const auto* key : {"constant_slip_velocity", "surface_tension", "min_radius", "max_radius", "bubble_gravity",
+             "rise_velocity_tolerance"})
+        for (const real_t value : {real_t{-1}, std::numeric_limits<real_t>::quiet_NaN()})
+        {
+            SCOPED_TRACE(key);
+            Database database;
+            database.set("reacting_species_model", std::string{"disabled"});
+            database.set(key, value);
+            EXPECT_THROW(reacting_gas_options_from_database(database), std::invalid_argument);
+        }
+    for (const auto* key : {"min_radius", "rise_velocity_tolerance"})
+    {
+        Database database;
+        database.set(key, real_t{0});
+        EXPECT_THROW(reacting_gas_options_from_database(database), std::invalid_argument);
+    }
+    for (const auto* key : {"max_reacting_subcycles", "max_rise_velocity_iterations"})
+    {
+        Database database;
+        database.set(key, 0);
+        EXPECT_THROW(reacting_gas_options_from_database(database), std::invalid_argument);
+        database.set(key, std::string{"not an integer"});
+        EXPECT_THROW(reacting_gas_options_from_database(database), std::invalid_argument);
+    }
+    Database reversed;
+    reversed.set("min_radius", real_t{.02});
+    reversed.set("max_radius", real_t{.01});
+    EXPECT_THROW(reacting_gas_options_from_database(reversed), std::invalid_argument);
+    Database malformed_patches;
+    malformed_patches.set("reacting_free_surface_patches", 7);
+    EXPECT_THROW(reacting_gas_options_from_database(malformed_patches), std::invalid_argument);
+
+    Database gravity;
+    gravity.set("bubble_gravity", real_t{0});
+    EXPECT_NO_THROW((void) reacting_gas_options_from_database(gravity)); // Unused by zero slip.
+    gravity.set("bubble_rise_velocity_model", std::string{"celata2007"});
+    EXPECT_THROW(reacting_gas_options_from_database(gravity), std::invalid_argument);
+}
+TEST(ReactingGasPropertiesTest, RetiredControlsStillRejectBesidePreservedDisabledSettings)
+{
+    using namespace SimpleFluid;
+    for (const auto* key : {"max_radius_iterations", "gas_constant", "initial_micro_moles", "reacting_kinetics_mode"})
+    {
+        Database database;
+        database.set("enable_reacting_gas", false);
+        database.set("constant_slip_velocity", real_t{.4});
+        database.set("reacting_free_surface_patches", ArrString{"vent"});
+        database.set(key, std::string{"disabled"});
+        EXPECT_THROW(reacting_gas_options_from_database(database), std::invalid_argument);
     }
 }

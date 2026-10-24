@@ -10,6 +10,7 @@
  */
 
 #include "examples/ExampleRunner.hh"
+#include "examples/ReactingMixtureExampleSupport.hh"
 
 #include <Tpetra_Core.hpp>
 
@@ -77,16 +78,18 @@ int main(int argc, char** argv)
             prescribed_heat.standard_deviation = {0.15, 0.15, 0.25};
             coupling.configure_prescribed_heat_source(prescribed_heat);
 
-            SimpleFluid::ReactingGasOptions reacting_gas;
-            reacting_gas.mode =
-                SimpleFluid::ReactingGasMode::IdealGasSource;
-            reacting_gas.hydrogen_yield_mol_per_j = 2.0e-7;
-            reacting_gas.max_source_alpha_rate = 10.0;
-            reacting_gas.reference_pressure = 101325.0;
+            namespace Mixture = SimpleFluid::Examples::ReactingMixture;
+            const Mixture::Mixture chemistry;
+            Mixture::InitialMixture initial;
+            initial.populations = {{"micro", 1e6, 1e-12, .25}, {"large", 1e4, 1e-9, .6}};
+            // The declared molar reaction rate is independent of prescribed heating.
+            auto reacting_gas = Mixture::field_options(chemistry, initial, 2e-4, 0);
+            reacting_gas.alpha_max = 0.5; // Preserve the demo's stricter physical cap at its schema owner.
             coupling.configure_reacting_gas(reacting_gas);
 
             SimpleFluid::ScalarVoidFractionOptions alpha_options;
-            alpha_options.alpha_max = 0.5;
+            alpha_options.alpha_min = reacting_gas.alpha_min;
+            alpha_options.alpha_max = reacting_gas.alpha_max;
             coupling.configure_scalar_void_fraction(alpha_options);
 
             SimpleFluid::BoilingSourceOptions boiling;

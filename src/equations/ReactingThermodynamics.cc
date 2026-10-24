@@ -679,6 +679,13 @@ BubbleThermodynamicState solve_bubble_radius(const MixtureThermodynamics& gas, s
         minimum = std::max(minimum, 2 * sigma / (bounds.maximum_pressure - liquid_pressure));
         if (bounds.minimum_pressure > liquid_pressure)
             maximum = std::min(maximum, 2 * sigma / (bounds.minimum_pressure - liquid_pressure));
+        // The inverse pressure bound can round outward when mapped back through
+        // p_l + 2*sigma/r. Move only the radius endpoint inward; the EOS domain
+        // and the subsequent signed volume bracket remain strict.
+        while (minimum <= maximum && liquid_pressure + 2 * sigma / minimum > bounds.maximum_pressure)
+            minimum = std::nextafter(minimum, std::numeric_limits<double>::infinity());
+        while (minimum <= maximum && liquid_pressure + 2 * sigma / maximum < bounds.minimum_pressure)
+            maximum = std::nextafter(maximum, 0.0);
     }
     require(minimum <= maximum, "Bubble radius and EOS pressure bounds do not intersect.");
     auto evaluate = [&](double radius)
@@ -697,7 +704,10 @@ BubbleThermodynamicState solve_bubble_radius(const MixtureThermodynamics& gas, s
         const double radius = std::midpoint(minimum, maximum);
         const auto trial = evaluate(radius);
         const double f = residual(trial);
-        if (std::abs(f) <= 4e-12 * trial.volume || radius == minimum || radius == maximum)
+        // Film k_L*A can depend directly on radius, so resolve this
+        // numerical inversion near arithmetic accuracy before using its area.
+        if (std::abs(f) <= 32 * std::numeric_limits<double>::epsilon() * trial.volume || radius == minimum ||
+            radius == maximum)
             return trial;
         if (f < 0)
             minimum = radius;

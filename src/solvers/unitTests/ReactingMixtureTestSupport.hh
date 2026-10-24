@@ -6,6 +6,7 @@
 #include "equations/BubblePopulationKinetics.hh"
 #include "equations/ReactingGasProperties.hh"
 #include "equations/ReactingThermodynamics.hh"
+#include "equations/SpeciesInventoryHistory.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -298,7 +299,7 @@ inline ReactingGasOptions field_options(const Mixture& mixture, const InitialMix
     double molar_reaction_rate = 0, double independent_heat_rate = 0)
 {
     ReactingGasOptions options;
-    options.mode = ReactingGasMode::TwoPopulation;
+    options.mode = ReactingGasMode::Species;
     options.reference_pressure = reference_pressure;
     options.reaction_mechanism = mixture.mechanism;
     options.liquid_thermodynamics = mixture.liquid;
@@ -319,7 +320,7 @@ inline ReactingGasOptions field_options(const Mixture& mixture, const InitialMix
         input.heat = heat;
         return input;
     };
-    options.dissolved_transport = ReactingTransportMode::Advective;
+    options.solution_transport = ReactingTransportMode::Advective;
     options.bubble_transport = BubbleTransportMode::General;
     options.mass_transfer_mode = BubbleMassTransferMode::SphericalDiffusion;
     options.surface_tension = 0;
@@ -350,6 +351,8 @@ inline void expect_same_ledger(const R::SpeciesSourceLedger& actual, const R::Sp
     expect_same_species_state(actual.chemicalChange, expected.chemicalChange);
     expect_same_species_state(actual.externalChange, expected.externalChange);
     EXPECT_EQ(actual.reactionExtents, expected.reactionExtents);
+    EXPECT_EQ(actual.forwardReactionExtents, expected.forwardReactionExtents);
+    EXPECT_EQ(actual.reverseReactionExtents, expected.reverseReactionExtents);
     EXPECT_EQ(actual.externalTransfers.size(), expected.externalTransfers.size());
     const auto count = std::min(actual.externalTransfers.size(), expected.externalTransfers.size());
     for (std::size_t event = 0; event < count; ++event)
@@ -389,7 +392,8 @@ inline void expect_same_ledgers(
 
 /** A local-only accepted-state witness. Empty owners retain empty arrays and
  * perform no differently ordered collective calls. Private model generations
- * and unavailable history metadata are deliberately outside this public-API witness.
+ * remain outside this public-API witness; public histories/events and the accepted pressure are included.
+ * A surface-dependent caller additionally requires its event-receipt API explicitly.
  */
 template<class Model> class SavedReactingState
 {
@@ -398,7 +402,9 @@ public:
         : fingerprint_(model.options().reaction_mechanism->catalog().fingerprint()),
           populations_(model.options().population_ids), initialized_(model.initial_state_initialized()),
           sources_(model.source_ledgers()), population_events_(model.population_ledgers()),
-          escapes_(model.escape_ledgers())
+          escapes_(model.escape_ledgers()), histories_(model.species_histories()),
+          step_events_(model.species_step_events()), physical_escapes_(model.physical_escape_events()),
+          pressure_offset_(model.absolute_pressure_offset())
     {
         const auto& mesh = model.alpha_g().mesh();
         for (std::size_t cell = 0; cell < mesh.num_owned_cells(); ++cell)
@@ -413,6 +419,12 @@ public:
         }
         for (const auto& [name, field] : model.output_fields())
             output_.emplace(name, field_values(*field));
+        if constexpr (requires { model.species_event_receipt(); })
+        {
+            const auto receipt = model.species_event_receipt();
+            receipt_check_ = [receipt](const Model& current)
+            { EXPECT_EQ(current.species_event_receipt(), receipt); };
+        }
         thermal_ = field_values(model.thermal_source());
         volume_source_ = field_values(model.material_volume_source());
         liquid_mass_ = field_values(model.liquid_mass_density());
@@ -453,6 +465,12 @@ public:
         expect_same_ledgers(model.source_ledgers(), sources_);
         expect_same_ledgers(model.population_ledgers(), population_events_);
         expect_same_ledgers(model.escape_ledgers(), escapes_);
+        EXPECT_EQ(model.species_histories(), histories_);
+        EXPECT_EQ(model.species_step_events(), step_events_);
+        EXPECT_EQ(model.physical_escape_events(), physical_escapes_);
+        EXPECT_DOUBLE_EQ(model.absolute_pressure_offset(), pressure_offset_);
+        if (receipt_check_)
+            receipt_check_(model);
     }
 
 private:
@@ -473,6 +491,11 @@ private:
     std::map<std::string, std::vector<double>> output_;
     std::vector<double> thermal_, volume_source_, liquid_mass_, liquid_density_;
     std::vector<R::SpeciesSourceLedger> sources_, population_events_, escapes_;
+    std::vector<R::SpeciesInventoryHistory> histories_;
+    std::vector<R::SpeciesCompartmentEvents> step_events_;
+    std::vector<R::SpeciesPhysicalEscapeEvent> physical_escapes_;
+    double pressure_offset_;
+    std::function<void(const Model&)> receipt_check_;
 };
 
 } // namespace SimpleFluid::Testing::ReactingMixture

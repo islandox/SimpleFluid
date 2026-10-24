@@ -13,11 +13,14 @@
 #include "solvers/IncompressibleIsothermalSolver.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
 #include "solvers/NoxNonlinearSolver.hh"
+#include "solvers/unitTests/ReactingMixtureTestSupport.hh"
 #include "utils/testing_environment.hh"
 
+#include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
@@ -35,59 +38,97 @@ using LO = Pack::local_ordinal_type;
 using NonlinearProblem = CoupledNonlinearProblem;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-const Vec3D<ArrReal> cavity_edges{{{0., .25, .5, .75, 1.}, {0., .3, .65, 1.}, {0., .5, 1.}}};
-
-SP<const NativeMesh> cavity_mesh()
+SP<const NativeMesh> cavity_mesh(bool interleaved_ownership = false)
 {
-    return std::make_shared<NativeMesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(cavity_edges));
-}
+    const Vec3D<ArrReal> coordinates{{{0., .25, .5, .75, 1.}, {0., .3, .65, 1.}, {0., .5, 1.}}};
+    const auto comm = Tpetra::getDefaultComm();
+    if (!interleaved_ownership || comm->getSize() == 1)
+        return std::make_shared<NativeMesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(coordinates));
 
+    // Preserve the same physical cavity and six boundary names, but use an
+    // explicitly partitioned test reference to exercise arbitrary distributed GIDs.
+    // Orthogonal partition selectors must match the actual communicator rank.
+    using Composite = Meshes::MultiRegionMesh;
+    const Composite source(std::vector<Composite::Region>{Meshes::cartesian_region("cavity", coordinates)},
+        std::vector<Composite::Interface>{}, Meshes::InterfaceTolerance{},
+        Composite::BoundaryNamePolicy::MergeMatchingNames);
+    auto geometry = SimpleFluid::test::explicit_reference(source);
+    const auto global_cells = static_cast<int>(geometry->num_cells());
+    auto partition = MeshPartitioner<Pack>::partition(*geometry, comm);
+    auto& indexer = partition.indexer;
+    using Indexer = MeshPartitioner<Pack>::indexer_type;
+    using GO = Pack::global_ordinal_type;
+    const int local_cells = static_cast<int>(indexer.num_owned_cells());
+    std::vector<int> counts(comm->getSize());
+    Teuchos::gatherAll(*comm, 1, &local_cells, comm->getSize(), counts.data());
+
+    // Integer-only relabeling interleaves owner-local rows in reverse rank order.
+    // At two ranks, rank 1 owns 0,2,... and rank 0 owns 1,3,...; no ownership override.
+    std::vector<GO> local_ids(global_cells, GO{-1}), global_ids(global_cells);
+    const auto local_stage = [&](auto&& operation)
+    {
+        std::exception_ptr failure;
+        try
+        {
+            operation();
+        }
+        catch (...)
+        {
+            failure = std::current_exception();
+        }
+        int local_failed = failure ? 1 : 0, any_failed = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_failed, &any_failed);
+        if (failure)
+            std::rethrow_exception(failure);
+        if (any_failed)
+            throw std::runtime_error("Explicit cavity ID preparation failed on another rank.");
+    };
+    local_stage([&]
+    {
+        for (int row = 0; row < local_cells; ++row)
+        {
+            GO gid = 0;
+            for (int rank = 0; rank < comm->getSize(); ++rank)
+            {
+                gid += std::min(counts[rank], row);
+                if (rank > comm->getRank() && counts[rank] > row)
+                    ++gid;
+            }
+            local_ids.at(static_cast<std::size_t>(indexer.cell_global_id(static_cast<LO>(row)))) = gid;
+        }
+    });
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, global_cells, local_ids.data(), global_ids.data());
+    std::vector<Indexer::CellMapping> owned, ghosts;
+    local_stage([&]
+    {
+        auto sorted = global_ids;
+        std::sort(sorted.begin(), sorted.end());
+        for (int cell = 0; cell < global_cells; ++cell)
+            if (sorted[cell] != cell)
+                throw std::logic_error("Explicit cavity global-ID permutation is not bijective.");
+        for (std::size_t row = 0; row < indexer.num_local_cells(); ++row)
+        {
+            const auto cell = static_cast<LO>(row);
+            const auto gid = global_ids.at(static_cast<std::size_t>(indexer.cell_global_id(cell)));
+            if (gid < 0)
+                throw std::logic_error("Explicit cavity global-ID permutation lost an actual cell owner.");
+            const auto local_id = indexer.global_to_local_cell_id(indexer.cell_id(cell));
+            Indexer::CellMapping mapping{local_id, static_cast<Indexer::global_cell_id_t>(gid), gid};
+            (row < indexer.num_owned_cells() ? owned : ghosts).push_back(mapping);
+        }
+        indexer.set_cells(std::move(owned), std::move(ghosts));
+        for (std::size_t row = 0; row < indexer.num_local_cells(); ++row)
+            if (indexer.local_to_global_cell_id(geometry->cell_id(row)) !=
+                indexer.cell_global_id(static_cast<LO>(row)))
+                throw std::logic_error("Explicit cavity geometry/global-ID association changed.");
+    });
+    using Partitioned = Meshes::PartitionedMesh<Meshes::UnstructuredMesh, Pack>;
+    return std::make_shared<NativeMesh>(
+        std::make_shared<Partitioned>(geometry, std::move(indexer), comm));
+}
 SP<const NativeMesh> noncontiguous_gauge_mesh()
 {
-    using Composite = Meshes::MultiRegionMesh;
-    using Partition = Meshes::PartitionedMesh<Meshes::UnstructuredMesh, Pack>;
-    using Indexer = NativeMesh::unstructured_indexer_type;
-    using CellID = Indexer::cell_id_t;
-    // Retain the complete connected cavity and its boundary names. Arbitrary
-    // global ownership belongs to the explicit partitioned-mesh path, not to
-    // native orthogonal rank/count overrides.
-    const Composite source(
-        {Meshes::cartesian_region("cavity", cavity_edges)}, {},
-        Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
-    auto geometry = test::explicit_reference(source);
-    const auto count = geometry->num_cells();
-    const auto comm = Tpetra::getDefaultComm();
-    auto partition = MeshPartitioner<Pack>::partition(*geometry, comm);
-
-    std::vector<int> local_owners(count, -1), owners(count);
-    for (const auto gid : partition.indexer.owned_cell_global_ids())
-        local_owners[gid] = comm->getRank();
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, static_cast<int>(count),
-                       local_owners.data(), owners.data());
-    std::vector<std::vector<CellID>> cells_by_rank(comm->getSize());
-    for (size_t gid = 0; gid < count; ++gid)
-        cells_by_rank.at(owners[gid]).push_back(static_cast<CellID>(gid));
-
-    // Interleave owners in reverse rank order, preserving the dense 0..N-1
-    // global ID universe while placing the pressure gauge on the last rank.
-    std::vector<CellID> permutation(count);
-    CellID next = 0;
-    for (size_t row = 0; row < count; ++row)
-        for (int rank = comm->getSize() - 1; rank >= 0; --rank)
-            if (row < cells_by_rank[rank].size())
-                permutation[cells_by_rank[rank][row]] = next++;
-    const auto remap = [&](const auto& ids)
-    {
-        std::vector<CellID> result;
-        for (const auto gid : ids)
-            result.push_back(permutation[gid]);
-        return result;
-    };
-    auto owned = remap(partition.indexer.owned_cell_global_ids());
-    auto ghosts = remap(partition.indexer.ghost_cell_global_ids());
-    partition.indexer.set_cells(std::move(owned), std::move(ghosts));
-    return std::make_shared<NativeMesh>(
-        std::make_shared<Partition>(geometry, std::move(partition.indexer), comm));
+    return cavity_mesh(true);
 }
 
 void expect_noncontiguous_gauge_ownership(const NativeMesh& mesh)
@@ -1549,17 +1590,29 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
     solver.temperature().put_value(300.);
     solver_coupling.add_prescribed_heat_source().initialize_constant(0.);
-    ReactingGasOptions gas_options;
-    gas_options.mode = ReactingGasMode::TwoPopulation;
-    gas_options.hydrogen_yield_mol_per_j = 2.e-7;
-    gas_options.max_source_alpha_rate = 1.;
-    gas_options.dissolved_transport = ReactingTransportMode::Advective;
-    gas_options.henry_coefficient = 1.e-5;
-    gas_options.surface_tension = .07;
-    gas_options.hydrogen_diffusivity = 4.e-4;
-    gas_options.initial_dissolved_hydrogen = 1.;
-    gas_options.nucleation_radius = 6.6359547089482127e-8;
+    namespace Mixture = SimpleFluid::Testing::ReactingMixture;
+    const Mixture::Mixture chemistry;
+    Mixture::InitialMixture initial;
+    initial.dissolved_one_concentration = 1;
+    initial.populations = {{"micro", 1e6, 1e-12, .25}, {"large", 1e4, 1e-9, .6}};
+    auto gas_options = Mixture::field_options(chemistry, initial, .01, .25);
+    gas_options.micro_conversion_frequency = .25;
+    for (auto& species : gas_options.species_properties)
+        species.diffusivity = 0;
 
+    std::size_t initial_calls = 0, source_calls = 0;
+    const auto initialize = gas_options.initial_species_state;
+    gas_options.initial_species_state = [initialize, &initial_calls](const auto& context, auto cell)
+    {
+        ++initial_calls;
+        return initialize(context, cell);
+    };
+    const auto source = gas_options.species_source;
+    gas_options.species_source = [source, &source_calls](const auto& context, double duration)
+    {
+        ++source_calls;
+        return source(context, duration);
+    };
     auto& gas = solver_coupling.configure_reacting_gas(gas_options);
     State::seed(solver.velocity(), solver.pressure());
     solver_coupling.set_material_updater([](const auto&, auto& properties) { properties.density.put_scalar(6.9); });
@@ -1568,10 +1621,10 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     const auto accepted_t = values(solver.temperature().owned_data());
     const auto accepted_rho = values(solver.material_properties().density.owned_data());
     const auto accepted_flux = values(solver.pressure_corrected_face_fluxes().owned_data());
-    std::vector<std::vector<double>> accepted_gas;
-    for (const auto& [name, field] : gas.output_fields())
-        accepted_gas.push_back(values(field->owned_data()));
+    const Mixture::SavedReactingState accepted_gas(gas);
     const bool accepted_initialization = gas.initial_state_initialized();
+    EXPECT_FALSE(accepted_initialization);
+    const auto accepted_number_escape = gas.population_escape_receipt();
     for (int attempt = 0; attempt < 2; ++attempt)
     {
         EXPECT_THROW(solver_coupling.step(), std::runtime_error);
@@ -1583,9 +1636,10 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
         EXPECT_EQ(values(solver.material_properties().density.owned_data()), accepted_rho);
         EXPECT_EQ(values(solver.pressure_corrected_face_fluxes().owned_data()), accepted_flux);
         EXPECT_EQ(gas.initial_state_initialized(), accepted_initialization);
-        size_t index = 0;
-        for (const auto& [name, field] : gas.output_fields())
-            EXPECT_EQ(values(field->owned_data()), accepted_gas.at(index++));
+        EXPECT_EQ(gas.population_escape_receipt(), accepted_number_escape);
+        accepted_gas.expect_restored(gas);
+        EXPECT_EQ(initial_calls, (attempt + 1) * state.mesh->num_owned_cells());
+        EXPECT_EQ(source_calls, 0U); // Rejected NOX flow never reaches material source advancement.
     }
     state.linear.max_iterations = 250;
     solver.set_linear_solver_options(state.linear);
@@ -1593,7 +1647,10 @@ TEST(CoupledNonlinearSolverTest, BoussinesqRejectedFlowRestoresGasMaterialAndSup
     EXPECT_EQ(solver.step_index(), 1);
     EXPECT_DOUBLE_EQ(solver.time(), state.time.time_step);
     EXPECT_TRUE(solver.last_nonlinear_result().converged);
+    EXPECT_EQ(initial_calls, 3 * state.mesh->num_owned_cells());
+    EXPECT_EQ(source_calls, state.mesh->num_owned_cells());
 }
+
 
 TEST(CoupledNonlinearSolverTest, RejectsPcgNonlinearCorrectionOverride)
 {

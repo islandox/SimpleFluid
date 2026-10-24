@@ -155,7 +155,7 @@ int main(int argc, char** argv)
             sources->vapor->admissionPolicy = R::BoussVaporAdmissionPolicy::ProportionalRequests;
             sources->vapor->walls = {{"zmax", wall_heat_flux, .2}};
             SimpleFluid::ReactingGasOptions reacting_gas;
-            reacting_gas.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
+            reacting_gas.mode = SimpleFluid::ReactingGasMode::Species;
             reacting_gas.alpha_max = .5;
             reacting_gas.reference_pressure = 100000;
             reacting_gas.reaction_mechanism = mechanism;
@@ -164,7 +164,7 @@ int main(int argc, char** argv)
             reacting_gas.population_ids = {"micro", "large"};
             reacting_gas.min_radius = 1e-10;
             reacting_gas.max_radius = .1;
-            reacting_gas.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
+            reacting_gas.solution_transport = SimpleFluid::ReactingTransportMode::Advective;
             reacting_gas.initial_species_state = [catalog, ordinaryGasMolarVolume, liquid_density](
                                                      const R::ReactionEnvironment& environment, std::int64_t)
             {

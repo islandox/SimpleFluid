@@ -6,8 +6,10 @@
  * directories. Gas repeats restore the same initial state outside the measured
  * advance; ALE measures checkpoint creation, all trials/replays, and acceptance.
  * CSV output and additional verification are outside the measured regions.
- * Defaults reproduce the stiff gas and R100 coupling regression parameters.
+ * Modes retain fixed-R100 chemistry and annular coupling/replay conservation workloads;
+ * the explicit finite two-gas fixture is versioned separately from retired H2 fallback timings.
  */
+#include "../examples/FiniteGasVerificationSupport.hh"
 #include "equations/ReactingGasModel.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/OrthogonalCylindrial3D.hh"
@@ -35,6 +37,9 @@
 
 namespace
 {
+namespace FG = SimpleFluid::Verification::FiniteGas;
+namespace M = SimpleFluid::Examples::ReactingMixture;
+namespace R = SimpleFluid::Reacting;
 using Pack = SimpleFluid::DefaultTpetraTypes;
 using Mesh = SimpleFluid::MeshHandle<Pack>;
 using Solver = SimpleFluid::BoussinesqSolver<Pack>;
@@ -163,23 +168,33 @@ void write_fields(const Options& options, const Mesh& mesh,
 void write_summary(const Options& options, const Mesh& mesh, double wall, double cpu, int advances,
     const Gas& gas, double time, double mass = 0.0, double energy = 0.0, double top = 0.0)
 {
-    const auto& statistics = gas.last_statistics();
     const double max_wall = reduce(wall, Teuchos::REDUCE_MAX);
     const double sum_cpu = reduce(cpu);
-    const double inventory = gas.global_submerged_hydrogen_moles();
+    const double inventory = FG::total(gas);
+    double local_substeps = 0, mass_error = 0;
+    for (const auto& ledger : gas.source_ledgers())
+        local_substeps = std::max(local_substeps, static_cast<double>(ledger.substeps));
+    const double maximum_substeps = reduce(local_substeps, Teuchos::REDUCE_MAX);
+    for (const auto& h : gas.species_histories())
+        mass_error += h.inventory_error * gas.options()
+                                              .reaction_mechanism->catalog()
+                                              .species()[gas.options().reaction_mechanism->catalog().index(h.species)]
+                                              .molarMass;
     const double bubble_volume = gas.global_submerged_bubble_volume();
     auto stream = output_file(options, "summary");
-    stream << "mode,rank,ranks,nx,ny,nz,global_cells,steps,trials_per_interval,advances,time_s,wall_s,max_rank_wall_s,"
-              "cpu_s,sum_rank_cpu_s,hydrogen_mol,produced_mol,escaped_mol,inventory_error_mol,donor_error_mol,"
-              "bubble_volume_m3,maximum_subcycles,clipped_cells,radius_solver_failures,mass_kg,energy_J,top_m\n";
-    stream << options.mode << ',' << Tpetra::getDefaultComm()->getRank() << ',' << Tpetra::getDefaultComm()->getSize()
-           << ',' << options.nx << ',' << options.ny << ',' << options.nz << ',' << mesh.owned_cell_map()->getGlobalNumElements()
-           << ',' << options.steps << ',' << (options.mode == "ale" ? options.replays : 1) << ',' << advances
-           << ',' << time << ',' << wall << ',' << max_wall << ',' << cpu << ',' << sum_cpu << ',' << inventory
-           << ',' << gas.cumulative_hydrogen_produced() << ',' << gas.cumulative_submerged_bubble_hydrogen_escaped()
-           << ',' << statistics.inventory_error << ',' << statistics.donor_inventory_error << ',' << bubble_volume
-           << ',' << statistics.maximum_subcycles << ',' << statistics.clipped_cells << ',' << statistics.radius_solver_failures
-           << ',' << mass << ',' << energy << ',' << top << '\n';
+    stream
+        << "fixture_schema,mode,rank,ranks,nx,ny,nz,global_cells,steps,trials_per_interval,advances,time_s,wall_s,max_"
+           "rank_wall_s,"
+           "cpu_s,sum_rank_cpu_s,gas_mol,gas_source_mol,gas_outflow_mol,species_inventory_error_mol,mass_budget_error_"
+           "kg,"
+           "bubble_volume_m3,maximum_reaction_substeps,mass_kg,energy_J,top_m\n";
+    stream << 2 << ',' << options.mode << ',' << Tpetra::getDefaultComm()->getRank() << ','
+           << Tpetra::getDefaultComm()->getSize() << ',' << options.nx << ',' << options.ny << ',' << options.nz << ','
+           << mesh.owned_cell_map()->getGlobalNumElements() << ',' << options.steps << ','
+           << (options.mode == "ale" ? options.replays : 1) << ',' << advances << ',' << time << ',' << wall << ','
+           << max_wall << ',' << cpu << ',' << sum_cpu << ',' << inventory << ',' << FG::produced(gas) << ','
+           << FG::escaped(gas) << ',' << FG::inventory_error(gas) << ',' << mass_error << ',' << bubble_volume << ','
+           << maximum_substeps << ',' << mass << ',' << energy << ',' << top << '\n';
     if (Tpetra::getDefaultComm()->getRank() == 0)
         std::cout << std::setprecision(17) << options.mode << ": " << advances << " advances, max-rank wall "
                   << max_wall << " s, summed CPU " << sum_cpu << " s; output " << options.output << '\n';
@@ -190,30 +205,43 @@ void run_gas(const Options& options)
     auto geometry = std::make_shared<Mesh::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
         edges(0, 1, options.nx), edges(0, 1, options.ny), edges(0, 1, options.nz)}});
     auto mesh = std::make_shared<Mesh>(geometry, distribution());
-    SimpleFluid::ReactingGasOptions settings;
-    settings.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
-    settings.hydrogen_yield_mol_per_j = 2.e-7;
-    settings.max_source_alpha_rate = 1.0;
-    settings.reference_pressure = 1.e5;
-    settings.henry_coefficient = 1.e-5;
-    settings.surface_tension = 0.07;
-    settings.hydrogen_diffusivity = 1.e-8;
-    settings.nucleation_radius = 6.6359547089482127e-8;
-
-    settings.min_radius = 1.e-12;
-    settings.max_radius = 1.e-3;
-    settings.min_population = 1.e-40;
-    settings.max_population = 1.e40;
-    settings.initial_dissolved_hydrogen = 1.e3;
-    settings.initial_micro_number_density = 1.e8;
-    settings.initial_micro_moles = 1.e-8;
-    settings.initial_large_number_density = 1.e6;
-    settings.initial_large_moles = 1.e-7;
-    settings.microbubble_lifetime = settings.large_bubble_dissolution_time = 1.e-7;
-    settings.micro_to_large_conversion_coefficient = 1.e-8;
+    constexpr double dt = 2e-6, reaction_rate = .01, reaction_frequency = 2.5e6;
+    M::Mixture mixture(false, false, R::EnergyConvention::SensibleEnergy, 0);
+    M::InitialMixture seed;
+    seed.reactant_concentration = 0;
+    seed.dissolved_one_concentration = seed.dissolved_two_concentration = 500;
+    seed.populations = {{"micro", 1e8, 1e-16, .25}, {"large", 1e6, 1e-13, .25}};
+    auto settings = M::field_options(mixture, seed, reaction_rate, 0);
+    settings.species_properties = {mixture.transport(M::gas_one, 0, 0), mixture.transport(M::gas_two, 0, 0)};
+    auto provider = mixture.reaction_rate(0, R::SourceVolumeBasis::BulkVolume);
+    provider.identity = "manufactured.finite_pulse_stiff_mass_action";
+    provider.parameterUnits = "reaction frequency 1/s; separately declared finite donor pulse mol/cell";
+    provider.evaluate = [reaction_frequency](const R::ReactionContext& context)
+    {
+        const double amount = context.state.amount(context.catalog, M::reactant, R::SpeciesPhase::Liquid);
+        return std::vector<R::ReactionRate>{{M::conversion,
+            reaction_frequency * amount / context.environment.bulkVolume, R::SourceVolumeBasis::BulkVolume}};
+    };
+    settings.species_source = [provider, reaction_rate](const R::ReactionContext& context, double duration)
+    {
+        R::ReactionSourceInput input;
+        input.rates = provider;
+        const double amount = reaction_rate * context.environment.bulkVolume * duration;
+        input.externalTransfers = {
+            {"manufactured finite donor feed", M::reactant, R::SpeciesPhase::Liquid, amount, .010 * amount, 0, {}, {}}};
+        return input;
+    };
+    settings.surface_tension = .07;
+    settings.min_radius = 1e-12;
+    settings.max_radius = 1e-3;
+    settings.micro_dissolution_frequency = settings.large_dissolution_frequency = 1e7;
     settings.max_subcycles = 100;
+    // This fixture keeps the R100 work oracle on the actual conservative SSPRK2 chemistry path.
+    // A half-step margin makes the count robust to floating interval endpoint representation.
+    settings.reaction_advance.maximumSubstep = dt / 99.5;
+    settings.reaction_advance.maximumSubsteps = 100;
     Gas gas(mesh, settings);
-    Field temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure"), power(mesh, 1.e5, "power");
+    Field temperature(mesh, 300.0, "temperature"), pressure(mesh, 0.0, "pressure");
     SimpleFluid::VectorCellFieldStored<Pack, Mesh> velocity(mesh, Mesh::Vec3{}, "velocity");
     SimpleFluid::ScalarFaceFieldStored<Pack, Mesh> flux(mesh, 0.0, "flux");
     SimpleFluid::BoussinesqModelOptions material_options;
@@ -233,28 +261,60 @@ void run_gas(const Options& options)
     material.density.sync_ghosts();
     gas.initialize_state(0.0, temperature, pressure, velocity, material);
     const auto initial = gas.snapshot();
-    constexpr double dt = 2.e-6;
     double elapsed = 0.0, cpu = 0.0;
     // A warmup builds transport workspaces but is excluded from all measurements.
-    gas.advance(dt, dt, temperature, pressure, velocity, flux, material, &power);
+    gas.advance(dt, dt, temperature, pressure, velocity, flux, material);
     for (int step = 0; step < options.steps; ++step)
     {
         gas.restore(initial);
         Tpetra::getDefaultComm()->barrier();
         const auto start = Clock::now();
         const auto cpu_start = std::clock();
-        gas.advance(dt, dt, temperature, pressure, velocity, flux, material, &power);
+        gas.advance(dt, dt, temperature, pressure, velocity, flux, material);
         cpu += double(std::clock() - cpu_start) / CLOCKS_PER_SEC;
         elapsed += std::chrono::duration<double>(Clock::now() - start).count();
-        const auto& statistics = gas.last_statistics();
-        require(statistics.maximum_subcycles == 100, "Gas benchmark did not exercise 100 subcycles");
-        require(std::isfinite(statistics.inventory_error) && std::abs(statistics.inventory_error) <=
-            1.e-10 * std::max(1.0, std::abs(statistics.hydrogen_before)), "Gas inventory closure failed");
+        bool hundred = true;
+        for (const auto& ledger : gas.source_ledgers())
+            hundred = hundred && ledger.substeps == 100 && ledger.retries == 0;
+        require(hundred, "Gas benchmark did not exercise 100 actual conservative chemistry substeps");
+        for (const auto& h : gas.species_histories())
+            require(std::isfinite(h.inventory_error) &&
+                        std::abs(h.inventory_error) <= 1e-10 * std::max(1., std::abs(h.initial_moles)),
+                "A finite species inventory closure failed");
+        const double feed = reaction_rate * dt; // The physical fixed cube is exactly 1 m3.
+        const auto amplification = [](long double z) { return 1 - z + .5L * z * z; };
+        const double full_step = settings.reaction_advance.maximumSubstep;
+        const double final_step = dt - 99 * full_step;
+        const long double remaining =
+            feed * std::pow(amplification(reaction_frequency * static_cast<long double>(full_step)), 99) *
+            amplification(reaction_frequency * static_cast<long double>(final_step));
+        const double extent = static_cast<double>(static_cast<long double>(feed) - remaining);
+        for (const auto& h : gas.species_histories())
+        {
+            const double production =
+                h.species == M::reactant
+                    ? static_cast<double>(remaining)
+                    : (h.species == M::product || h.species == M::gas_one || h.species == M::gas_two ? extent : 0.);
+            if (h.species == M::reactant)
+            {
+                const auto endpoint_scale = std::max(remaining, static_cast<long double>(h.current_moles));
+                const auto endpoint_bound = 4096 * std::numeric_limits<double>::epsilon() * endpoint_scale;
+                require(h.current_moles > 0 && h.current_moles < feed * .01 &&
+                            std::abs(static_cast<long double>(h.current_moles) - remaining) <= endpoint_bound &&
+                            std::abs(h.external_supply - feed) <= 1e-18,
+                    "The stiff donor must retain its discrete SSPRK2 endpoint and actual predecessor feed");
+            }
+            require(std::abs(h.current_moles - h.initial_moles - production) <=
+                        1e-10 * std::max(1., std::abs(h.initial_moles)),
+                "Independent manufactured reaction stoichiometry failed");
+            if (h.species == M::gas_one || h.species == M::gas_two)
+                require(std::abs(h.chemical_production - extent) <= 1e-10,
+                    "Each manufactured gas must have its own actual chemical source");
+        }
     }
-    auto fields = gas.output_fields();
+    auto fields = FG::fields(gas);
     fields.emplace("temperature_K", &temperature);
     fields.emplace("density_kg_m3", &material.density);
-    fields.emplace("power_W_m3", &power);
     write_fields(options, *mesh, fields);
     write_summary(options, *mesh, elapsed, cpu, options.steps, gas, dt);
 }
@@ -306,28 +366,21 @@ void run_ale(const Options& options)
     thermal.thermal_expansion = 2.1e-4;
     thermal.reference_dynamic_viscosity = 1.e-3;
     solver_coupling.configure_material_feedback(thermal);
-    solver_coupling.add_prescribed_heat_source().initialize_constant(0.0);
-    SimpleFluid::ReactingGasOptions gas_options;
-    gas_options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
-    gas_options.pressure_mode = SimpleFluid::ReactingPressureMode::Constant;
-    gas_options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
-    gas_options.bubble_transport = SimpleFluid::BubbleTransportMode::General;
-    gas_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    gas_options.constant_slip_velocity = 0.01;
-    gas_options.hydrogen_yield_mol_per_j = yield;
-    gas_options.gas_release_efficiency = 1.0;
-
-    gas_options.max_source_alpha_rate = 10.0;
-    gas_options.henry_coefficient = 1.e-5;
-    gas_options.surface_tension = 0.07;
-    gas_options.hydrogen_diffusivity = 4.5e-9;
-    gas_options.transport_solver_tolerance = 1.e-14;
-    gas_options.nucleation_radius = 6.6359547089482127e-8;
-    gas_options.initial_dissolved_hydrogen = 0.0;
-    gas_options.reference_pressure = 101325.0;
-    gas_options.free_surface_patches = {"zmax"};
+    auto* feed = &solver_coupling.add_prescribed_heat_source();
+    feed->initialize_constant(0.0);
+    FG::Parameters reference{initial_temperature, 101325., density, 4200., 2.1e-4, 1e-3, .6, .07, 0., 0., 0., 0., 0.,
+        1e-5, 50e-6, .01, 4.5e-9, 1e-5};
+    auto gas_options = FG::options(
+        FG::mixture(reference), reference,
+        [feed, yield](const R::ReactionContext& context)
+        {
+            if (!context.environment.location || !context.environment.location->ownedCell)
+                throw std::invalid_argument("A material-following gas feed requires its actual source frame.");
+            return yield * feed->field().value(static_cast<Local>(*context.environment.location->ownedCell));
+        },
+        [](const R::ReactionContext& c) { return c.environment.temperature; });
+    gas_options.transport_solver_tolerance = 1e-14;
     auto& gas = solver_coupling.configure_reacting_gas(gas_options);
-    gas.enable_donor_hydrogen_deficit_tracking();
     solver_coupling.initialize_linear_temperature({0.0, 0.0, 1.0}, initial_temperature, initial_temperature);
     SimpleFluid::FreeSurfaceOptions surface;
     surface.enabled = true;
@@ -364,7 +417,7 @@ void run_ale(const Options& options)
     const auto total_weight = reduce(local_weight);
     for (auto& value : energy) value *= interval_energy / total_weight;
     auto history = output_file(options, "history");
-    history << "interval,trial,time_s,mass_kg,produced_mol,hydrogen_mol,escaped_mol,top_m,gcl_m3_s,continuity_1_s\n";
+    history << "interval,trial,time_s,mass_kg,gas_source_mol,gas_mol,gas_outflow_mol,top_m,gcl_m3_s,continuity_1_s\n";
     const auto top = [&]
     {
         double result = bottom;
@@ -387,6 +440,8 @@ void run_ale(const Options& options)
         elapsed += std::chrono::duration<double>(Clock::now() - begin).count();
         cpu += double(std::clock() - cpu_begin) / CLOCKS_PER_SEC;
         std::vector<double> first_temperature;
+        std::vector<Mesh::Vec3> first_velocity;
+        std::map<std::string, std::vector<double>> first_species_state;
         double first_top = 0.0;
         for (int trial = 0; trial < options.replays; ++trial)
         {
@@ -406,25 +461,67 @@ void run_ale(const Options& options)
             cpu += double(std::clock() - cpu_begin) / CLOCKS_PER_SEC;
             const double mass = solver_coupling.liquid_mass_inventory().totalMass();
             const double produced = (interval + 1) * interval_energy * yield;
-            const double retained = gas.global_submerged_hydrogen_moles();
-            const double escaped = gas.cumulative_submerged_bubble_hydrogen_escaped();
+            const double retained = FG::total(gas);
+            const double escaped = FG::escaped(gas);
             const double height = top();
-            require(std::abs(mass - initial_mass) <= mass_tolerance && solver.time() == end &&
-                std::abs(gas.cumulative_hydrogen_produced() - produced) <= 1.e-18 &&
-                std::abs(retained + escaped - produced) <= 1.e-17, "ALE time/mass/hydrogen closure failed");
+            // The finite solution owns actual dissolved gas mass. No zero-mass solute approximation.
+            const double expected_liquid_mass =
+                initial_mass + FG::molar_feed_mass * produced - FG::gas_mass(gas) - FG::escaped_mass(gas);
+            require(std::abs(mass - expected_liquid_mass) <= mass_tolerance && solver.time() == end &&
+                        std::abs(FG::produced(gas) - produced) <= 1e-18 &&
+                        std::abs(retained + escaped - produced) <= 1e-17,
+                "ALE time/finite-mass/two-gas closure failed");
+            for (const auto& h : gas.species_histories())
+                if (std::ranges::find(FG::gas_ids, h.species) != FG::gas_ids.end())
+                {
+                    const double fraction = h.species == FG::gas_ids[0] ? FG::one_fraction : 1 - FG::one_fraction;
+                    require(std::abs(h.external_supply - fraction * produced) <= 1e-18 &&
+                                std::abs(h.current_moles + h.physical_outflow - fraction * produced) <= 1e-17,
+                        "Independent gas source/escape budget failed");
+                }
             bool replay_matches = true;
+            // These are actual schema fields and each bin's count, not the retired five-field mirror.
+            auto replay_fields = FG::fields(gas);
+            replay_fields.emplace("mechanical_pressure_Pa", &solver.pressure());
+            replay_fields.emplace("material_density_kg_m3", &solver.material_properties().density);
+            for (const auto& [name, field] : replay_fields)
+            {
+                auto& baseline = first_species_state[name];
+                for (std::size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+                {
+                    const double value = field->value(static_cast<Local>(owned));
+                    if (trial == 0)
+                        baseline.push_back(value);
+                    else
+                        replay_matches =
+                            replay_matches && std::abs(value - baseline.at(owned)) <=
+                                                  1e-18 + 1e-10 * std::max(std::abs(value), std::abs(baseline[owned]));
+                }
+            }
             for (size_t owned = 0; owned < energy.size(); ++owned)
             {
-                const double temperature = solver.temperature().value(static_cast<Local>(owned));
-                if (trial == 0) first_temperature.push_back(temperature);
-                else replay_matches = replay_matches && std::abs(temperature - first_temperature[owned]) <= 1.e-11;
+                const auto cell = static_cast<Local>(owned);
+                const double temperature = solver.temperature().value(cell);
+                const auto velocity = solver.velocity().value(cell);
+                if (trial == 0)
+                {
+                    first_temperature.push_back(temperature);
+                    first_velocity.push_back(velocity);
+                }
+                else
+                {
+                    replay_matches = replay_matches && std::abs(temperature - first_temperature[owned]) <= 1e-11;
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                        replay_matches = replay_matches && std::abs(velocity.component(axis) -
+                                                                    first_velocity[owned].component(axis)) <= 1e-11;
+                }
             }
             if (trial == 0) first_top = height;
             require(replay_matches && std::abs(height - first_top) <= 1.e-13, "ALE replay field mismatch");
             const auto& diagnostics = solver_coupling.planar_ale_diagnostics();
-            history << interval << ',' << trial << ',' << solver.time() << ',' << mass << ','
-                    << gas.cumulative_hydrogen_produced() << ',' << retained << ',' << escaped << ',' << height << ','
-                    << diagnostics.maximum_gcl_residual << ',' << diagnostics.continuity.maximum << '\n';
+            history << interval << ',' << trial << ',' << solver.time() << ',' << mass << ',' << FG::produced(gas)
+                    << ',' << retained << ',' << escaped << ',' << height << ',' << diagnostics.maximum_gcl_residual
+                    << ',' << diagnostics.continuity.maximum << '\n';
         }
         begin = Clock::now();
         cpu_begin = std::clock();
@@ -432,12 +529,11 @@ void run_ale(const Options& options)
         elapsed += std::chrono::duration<double>(Clock::now() - begin).count();
         cpu += double(std::clock() - cpu_begin) / CLOCKS_PER_SEC;
     }
-    auto fields = gas.output_fields();
+    auto fields = FG::fields(gas);
     fields.emplace("temperature_K", &solver.temperature());
     fields.emplace("pressure_Pa", &solver.pressure());
     fields.emplace("density_kg_m3", &solver.material_properties().density);
     fields.emplace("liquid_inventory_kg_m3", &solver_coupling.liquid_mass_inventory().cellMassInventory());
-    fields.emplace("donor_deficit_mol_m3", &gas.donor_hydrogen_deficit());
     fields.emplace("power_W_m3", &solver_coupling.find_prescribed_heat_source()->field());
     write_fields(options, *mesh, fields, &solver.velocity());
     long double local_energy = 0.0;

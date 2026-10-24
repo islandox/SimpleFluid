@@ -17,6 +17,7 @@
 #include "geometry/unitTests/test_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
+#include "solvers/unitTests/ReactingMixtureTestSupport.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -24,6 +25,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <map>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -263,43 +265,54 @@ double global_maximum_flux(const SimpleFluid::ScalarFaceFieldStored<Pack>& flux)
     return maximum;
 }
 
-/** @brief Compute global dissolved plus two-population hydrogen inventory. */
-template<class ReactingGas> double global_hydrogen_inventory(const ReactingGas& reacting_gas)
+/** Catalog-keyed closed-system inventories, including every named gas population. */
+template<class ReactingGas> std::map<SimpleFluid::Reacting::SpeciesId, double>
+global_species_inventory(const ReactingGas& gas)
 {
-    return global_integral(reacting_gas.dissolved_hydrogen_inventory()) + global_integral(reacting_gas.micro_moles()) +
-           global_integral(reacting_gas.large_moles());
+    std::map<SimpleFluid::Reacting::SpeciesId, double> result;
+    for (const auto& species : gas.options().reaction_mechanism->catalog().species())
+        result.emplace(species.id, gas.global_species_moles(species.id));
+    return result;
 }
 
-/** @brief Check one globally conservative reacting_gas update. */
+/** Preserve the original independent production/balance tolerances for each actual species. */
 template<class ReactingGas>
-void expect_global_hydrogen_balance(const ReactingGas& reacting_gas, double hydrogen_before, double expected_produced)
+void expect_global_species_balance(const ReactingGas& gas,
+    const std::map<SimpleFluid::Reacting::SpeciesId, double>& before, double expected_extent)
 {
-    const auto& statistics = reacting_gas.last_statistics();
-    const auto hydrogen_after = global_hydrogen_inventory(reacting_gas);
-    const auto balance_tolerance =
-        std::max(1.0e-13, 1.0e-9 * (std::abs(hydrogen_before) + std::abs(expected_produced)));
-    const auto production_tolerance = std::max(1.0e-14, std::abs(expected_produced) * 1.0e-10);
-
-    EXPECT_NEAR(statistics.hydrogen_before, hydrogen_before, balance_tolerance);
-    EXPECT_NEAR(statistics.hydrogen_produced, expected_produced, production_tolerance);
-    EXPECT_NEAR(statistics.hydrogen_escaped, 0.0, balance_tolerance);
-    EXPECT_NEAR(statistics.hydrogen_after, hydrogen_after, balance_tolerance);
-    EXPECT_NEAR(statistics.hydrogen_after + statistics.hydrogen_escaped,
-        statistics.hydrogen_before + statistics.hydrogen_produced, balance_tolerance);
-    EXPECT_NEAR(statistics.inventory_error, 0.0, balance_tolerance);
-    EXPECT_NEAR(statistics.void_volume, global_integral(reacting_gas.alpha_g()), balance_tolerance);
-
-    double minimum = 0.0;
-    double maximum = 0.0;
-    const auto& comm = *reacting_gas.alpha_g().mesh().owned_cell_map()->getComm();
-    for (auto value : {statistics.hydrogen_before, statistics.hydrogen_produced, statistics.hydrogen_after,
-             statistics.inventory_error, statistics.void_volume})
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    double local_extent = 0;
+    for (const auto& ledger : gas.source_ledgers())
     {
-        Teuchos::reduceAll(comm, Teuchos::REDUCE_MIN, 1, &value, &minimum);
-        Teuchos::reduceAll(comm, Teuchos::REDUCE_MAX, 1, &value, &maximum);
-        EXPECT_NEAR(maximum, minimum, std::max(1.0e-14, std::abs(maximum) * 1.0e-12));
+        EXPECT_EQ(ledger.reactionExtents.size(), 1U);
+        if (!ledger.reactionExtents.empty())
+            local_extent += ledger.reactionExtents.front();
+        EXPECT_DOUBLE_EQ(ledger.externalMass, 0.);
+        EXPECT_DOUBLE_EQ(ledger.externalHeat, 0.);
+        EXPECT_DOUBLE_EQ(ledger.reactionHeat, 0.); // This fixture's independent prescribed heat owns thermal input.
     }
+    const auto actual_extent = global_sum(gas.alpha_g().mesh(), local_extent);
+    EXPECT_NEAR(actual_extent, expected_extent, std::max(1e-14, std::abs(expected_extent) * 1e-10));
+    for (const auto& species : gas.options().reaction_mechanism->catalog().species())
+    {
+        SCOPED_TRACE(species.name);
+        const double coefficient = species.id == M::reactant ? -1. :
+            (species.id == M::product || species.id == M::gas_one || species.id == M::gas_two ? 1. : 0.);
+        const double delta = coefficient * expected_extent;
+        const double tolerance = std::max(1e-13, 1e-9 * (std::abs(before.at(species.id)) + std::abs(delta)));
+        EXPECT_NEAR(gas.global_species_moles(species.id), before.at(species.id) + delta, tolerance);
+        const auto found = std::ranges::find(gas.species_histories(), species.id,
+            &SimpleFluid::Reacting::SpeciesInventoryHistory::species);
+        EXPECT_NE(found, gas.species_histories().end());
+        if (found != gas.species_histories().end())
+        {
+            EXPECT_NEAR(found->inventory_error, 0., tolerance);
+            EXPECT_NEAR(found->physical_outflow, 0., tolerance);
+        }
+    }
+    EXPECT_TRUE(gas.physical_escape_events().empty());
 }
+
 
 /** @brief Exercise the combined turbulent-reacting_gas acceptance path. */
 void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
@@ -352,33 +365,80 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     prescribed_heat.standard_deviation = SimpleFluid::vec3<>{0.55, 0.75, 0.45};
     solver_coupling.configure_prescribed_heat_source(prescribed_heat);
 
-    SimpleFluid::ReactingGasOptions reacting_gas_options;
-    reacting_gas_options.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
-    reacting_gas_options.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
+    namespace Mixture = SimpleFluid::Testing::ReactingMixture;
+    const Mixture::Mixture chemistry(false, true, SimpleFluid::Reacting::EnergyConvention::SensibleEnergy, 0.);
+    Mixture::InitialMixture initial;
+    initial.dissolved_one_concentration = 1e-5;
+    initial.dissolved_two_concentration = 2e-5;
+    initial.populations = {{"micro", 1e10, 1e-15, .25}, {"large", 1e8, 5e-14, .6}};
+    auto reacting_gas_options = Mixture::field_options(chemistry, initial);
     reacting_gas_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    reacting_gas_options.constant_slip_velocity = 0.25;
-    reacting_gas_options.hydrogen_yield_mol_per_j = 2.0e-7;
-    reacting_gas_options.gas_release_efficiency = 1.0;
-    reacting_gas_options.max_source_alpha_rate = 1.0;
-    reacting_gas_options.reference_pressure = 1.0e5;
-    reacting_gas_options.henry_coefficient = 1.0e-5;
-    reacting_gas_options.surface_tension = 0.07;
-    reacting_gas_options.hydrogen_diffusivity = 1.0e-8;
-    reacting_gas_options.nucleation_radius = 6.6359547089482127e-8;
-
-    reacting_gas_options.microbubble_lifetime = 1.0e30;
-    reacting_gas_options.large_bubble_dissolution_time = 1.0e30;
-    reacting_gas_options.micro_to_large_conversion_coefficient = 0.0;
-    reacting_gas_options.initial_dissolved_hydrogen = 1.0e-5;
-    reacting_gas_options.initial_micro_number_density = 1.0e10;
-    reacting_gas_options.initial_micro_moles = 1.0e-5;
-    reacting_gas_options.initial_large_number_density = 1.0e8;
-    reacting_gas_options.initial_large_moles = 5.0e-6;
-    reacting_gas_options.min_radius = 1.0e-12;
-    reacting_gas_options.max_radius = 1.0e-3;
-    reacting_gas_options.min_population = 1.0e-40;
-    reacting_gas_options.max_population = 1.0e40;
+    reacting_gas_options.constant_slip_velocity = .25;
+    reacting_gas_options.min_radius = 1e-12;
+    reacting_gas_options.max_radius = 1e-3;
+    for (auto& species : reacting_gas_options.species_properties)
+        species.diffusivity = 0.; // Isolate matched transport/slip; no film exchange is requested.
+    reacting_gas_options.initial_species_state = [chemistry, initial, mesh](
+        const SimpleFluid::Reacting::ReactionEnvironment& environment, std::int64_t global_cell)
+    {
+        const auto cell = mesh->owned_cell_map()->getLocalElement(global_cell);
+        Mixture::require(cell >= 0, "Initial species callback requires an actual owned cell.");
+        const auto center = mesh->cell_centroid(cell);
+        const double shape = .25 + std::exp(-std::pow((center.x - .65) / .55, 2) -
+            std::pow((center.y - 1.1) / .75, 2) - std::pow((center.z - .65) / .45, 2));
+        auto local_seed = initial;
+        local_seed.reactant_concentration *= shape;
+        local_seed.dissolved_one_concentration *= shape;
+        local_seed.dissolved_two_concentration *= shape;
+        for (auto& population : local_seed.populations)
+            population.number_density *= shape;
+        return Mixture::initial_cell(chemistry, environment, local_seed).species;
+    };
+    reacting_gas_options.initial_population_numbers = [initial](const auto& context)
+    {
+        std::vector<double> numbers;
+        for (const auto& population : initial.populations)
+        {
+            const double amount = context.state.amount(context.catalog, Mixture::gas_one,
+                Mixture::Phase::Dispersed, population.name) +
+                context.state.amount(context.catalog, Mixture::gas_two, Mixture::Phase::Dispersed, population.name);
+            numbers.push_back(amount / population.moles_per_bubble);
+        }
+        return numbers;
+    };
+    constexpr double reaction_frequency = 2.; // 1/s acting on actual finite reactant, independent of heat.
+    reacting_gas_options.species_source = [reaction_frequency, time_step](const auto& context, double dt)
+    {
+        SimpleFluid::Reacting::ReactionSourceInput input;
+        // An explicit finite event in the first interval only; turning heat off never controls chemistry.
+        if (context.environment.time < .5 * time_step)
+            input.integratedExtents =
+                {{Mixture::conversion, reaction_frequency * dt *
+                    context.state.amount(context.catalog, Mixture::reactant, Mixture::Phase::Liquid)}};
+        return input;
+    };
+    reacting_gas_options.population_process = [time_step](const auto& context, double)
+    {
+        SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket packet;
+        if (context.chemistry.environment.time < .5 * time_step)
+        {
+            double transferred = 0;
+            for (const auto id : {Mixture::gas_one, Mixture::gas_two})
+            {
+                const double moles = .1 * context.chemistry.state.amount(
+                    context.chemistry.catalog, id, Mixture::Phase::Dissolved);
+                packet.transfers.push_back(
+                    {id, Mixture::Phase::Dissolved, Mixture::Phase::Dispersed, {}, "micro", moles});
+                transferred += moles;
+            }
+            // Explicit nucleation moment paired with actual finite two-gas transfers.
+            packet.numberEvents = {{"micro", transferred / 1e-15, 0.}};
+        }
+        return packet;
+    };
     auto& reacting_gas = solver_coupling.configure_reacting_gas(reacting_gas_options);
+    const auto& micro_one = reacting_gas.species_field(Mixture::gas_one, Mixture::Phase::Dispersed, "micro");
+    const auto& dissolved_one = reacting_gas.species_field(Mixture::gas_one, Mixture::Phase::Dissolved);
 
     SimpleFluid::MaterialFeedbackOptions feedback_options;
     feedback_options.density_mode = SimpleFluid::DensityFeedbackMode::Mixture;
@@ -402,24 +462,26 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     zero_slip_options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ZeroSlip;
     zero_slip_options.constant_slip_velocity = 0.0;
     auto& zero_slip_reacting_gas = zero_slip_solver_coupling.configure_reacting_gas(zero_slip_options);
+    const auto& zero_slip_micro_one =
+        zero_slip_reacting_gas.species_field(Mixture::gas_one, Mixture::Phase::Dispersed, "micro");
     zero_slip_solver_coupling.configure_material_feedback(feedback_options);
 
     // Matched microbubble kinetics leave axial slip as the centroid discriminator.
     const auto expect_upward_slip_shift = [&]
     {
         EXPECT_GT(global_maximum_flux(zero_slip_solver.transport_face_fluxes()), 1.0e-12);
-        const auto slip_inventory = global_integral(reacting_gas.micro_moles());
-        const auto zero_slip_inventory = global_integral(zero_slip_reacting_gas.micro_moles());
+        const auto slip_inventory = global_integral(micro_one);
+        const auto zero_slip_inventory = global_integral(zero_slip_micro_one);
         ASSERT_GT(slip_inventory, 0.0);
         ASSERT_GT(zero_slip_inventory, 0.0);
         EXPECT_NEAR(slip_inventory, zero_slip_inventory, std::max(slip_inventory, zero_slip_inventory) * 1.0e-10);
-        const auto slip_centroid = global_axial_moment(reacting_gas.micro_moles()) / slip_inventory;
-        const auto zero_slip_centroid = global_axial_moment(zero_slip_reacting_gas.micro_moles()) / zero_slip_inventory;
+        const auto slip_centroid = global_axial_moment(micro_one) / slip_inventory;
+        const auto zero_slip_centroid = global_axial_moment(zero_slip_micro_one) / zero_slip_inventory;
         EXPECT_GT(slip_centroid - zero_slip_centroid, 1.0e-7);
     };
 
-    ASSERT_EQ(reacting_gas.mode(), SimpleFluid::ReactingGasMode::TwoPopulation);
-    EXPECT_EQ(reacting_gas.options().dissolved_transport, SimpleFluid::ReactingTransportMode::Advective);
+    ASSERT_EQ(reacting_gas.mode(), SimpleFluid::ReactingGasMode::Species);
+    EXPECT_EQ(reacting_gas.options().solution_transport, SimpleFluid::ReactingTransportMode::Advective);
     EXPECT_EQ(reacting_gas.options().rise_velocity_mode, SimpleFluid::BubbleRiseVelocityMode::ConstantSlip);
     EXPECT_GT(reacting_gas.options().constant_slip_velocity, 0.0);
     EXPECT_EQ(zero_slip_reacting_gas.options().rise_velocity_mode, SimpleFluid::BubbleRiseVelocityMode::ZeroSlip);
@@ -441,15 +503,41 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
             EXPECT_TRUE(std::isfinite(alpha));
             EXPECT_GE(alpha, reacting_gas_options.alpha_min);
             EXPECT_LE(alpha, reacting_gas_options.alpha_max);
-            EXPECT_NEAR(reacting_gas.alpha_l().value(cell_lid), 1.0 - alpha, 1.0e-14);
+            // Physical liquid follows its supplied EOS; the scalar void mirror owns only its numerical complement.
+            const double specific_liquid_volume = .001 *
+                (1 + 2e-4 * (solver.temperature().value(cell_lid) - 300.) -
+                    5e-9 * (reacting_gas.absolute_pressure().value(cell_lid) - 100000.));
+            EXPECT_NEAR(reacting_gas.alpha_l().value(cell_lid),
+                reacting_gas.liquid_mass_density().value(cell_lid) * specific_liquid_volume, 1e-14);
+            EXPECT_NEAR(solver_coupling.find_scalar_void_fraction_model()->alpha_l().value(cell_lid),
+                1. - alpha, 1e-14);
             EXPECT_NEAR(solver_coupling.find_scalar_void_fraction_model()->alpha_g().value(cell_lid), alpha, 1.0e-14);
 
-            for (const auto value : {reacting_gas.dissolved_hydrogen_inventory().value(cell_lid),
-                     reacting_gas.micro_number_density().value(cell_lid), reacting_gas.micro_moles().value(cell_lid),
-                     reacting_gas.large_number_density().value(cell_lid), reacting_gas.large_moles().value(cell_lid)})
+            for (const auto& species : chemistry.catalog->species())
+                for (const auto phase : species.allowedPhases)
+                {
+                    if (phase == Mixture::Phase::Dispersed)
+                    {
+                        for (const auto& population : reacting_gas.options().population_ids)
+                        {
+                            const double value =
+                                reacting_gas.species_field(species.id, phase, population).value(cell_lid);
+                            EXPECT_TRUE(std::isfinite(value));
+                            EXPECT_GE(value, 0.);
+                        }
+                    }
+                    else
+                    {
+                        const double value = reacting_gas.species_field(species.id, phase).value(cell_lid);
+                        EXPECT_TRUE(std::isfinite(value));
+                        EXPECT_GE(value, 0.);
+                    }
+                }
+            for (const auto& population : reacting_gas.options().population_ids)
             {
+                const double value = reacting_gas.population_number_field(population).value(cell_lid);
                 EXPECT_TRUE(std::isfinite(value));
-                EXPECT_GE(value, 0.0);
+                EXPECT_GE(value, 0.);
             }
 
             const auto velocity = solver.velocity().value(cell_lid);
@@ -461,14 +549,12 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
             EXPECT_NEAR(solver.material_properties().density.value(cell_lid), expected_density, 1.0e-10);
             EXPECT_NEAR(feedback.density_feedback().value(cell_lid), expected_density, 1.0e-10);
         }
-        EXPECT_EQ(reacting_gas.last_statistics().clipped_cells, 0);
-        EXPECT_EQ(reacting_gas.last_statistics().pressure_floor_cells, 0);
-        EXPECT_EQ(reacting_gas.last_statistics().radius_solver_failures, 0);
+        EXPECT_EQ(reacting_gas.source_ledgers().size(), mesh->num_owned_cells());
+        EXPECT_EQ(reacting_gas.population_ledgers().size(), mesh->num_owned_cells());
     };
 
-    const auto hydrogen_before_prescribed_heat = global_hydrogen_inventory(reacting_gas);
-    const auto expected_produced = reacting_gas_options.gas_release_efficiency *
-                                   reacting_gas_options.hydrogen_yield_mol_per_j * total_prescribed_heat * time_step;
+    const auto species_before_prescribed_heat = global_species_inventory(reacting_gas);
+    const auto expected_extent = reaction_frequency * species_before_prescribed_heat.at(Mixture::reactant) * time_step;
     ASSERT_NO_THROW(solver_coupling.step());
     ASSERT_TRUE(solver.last_step_statistics().converged);
     EXPECT_EQ(solver.step_index(), 1);
@@ -477,7 +563,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     ASSERT_TRUE(zero_slip_solver.last_step_statistics().converged);
     EXPECT_EQ(zero_slip_solver.step_index(), 1);
     expect_upward_slip_shift();
-    expect_global_hydrogen_balance(reacting_gas, hydrogen_before_prescribed_heat, expected_produced);
+    expect_global_species_balance(reacting_gas, species_before_prescribed_heat, expected_extent);
     expect_coupled_state();
 
     double local_k_delta = 0.0;
@@ -520,21 +606,21 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     const auto [minimum_density, maximum_density] = global_range(feedback.density_feedback());
     EXPECT_GT(maximum_density, minimum_density);
 
-    std::vector<double> micro_moles_before_transport(mesh->num_owned_cells());
-    std::vector<double> dissolved_before_transport(mesh->num_owned_cells());
+    std::vector<double> micro_one_before_transport(mesh->num_owned_cells());
+    std::vector<double> dissolved_one_before_transport(mesh->num_owned_cells());
     std::vector<double> velocity_z_before_feedback_step(
         mesh->num_owned_cells());
     for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
     {
         const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
-        micro_moles_before_transport[owned] = reacting_gas.micro_moles().value(cell_lid);
-        dissolved_before_transport[owned] =
-            reacting_gas.dissolved_hydrogen_inventory().value(cell_lid);
+        micro_one_before_transport[owned] = micro_one.value(cell_lid);
+        dissolved_one_before_transport[owned] =
+            dissolved_one.value(cell_lid);
         velocity_z_before_feedback_step[owned] =
             solver.velocity().value(cell_lid).z;
     }
-    const auto global_micro_moles_before_transport = global_integral(reacting_gas.micro_moles());
-    const auto hydrogen_before_transport = global_hydrogen_inventory(reacting_gas);
+    const auto global_micro_one_before_transport = global_integral(micro_one);
+    const auto species_before_transport = global_species_inventory(reacting_gas);
 
     solver_coupling.find_prescribed_heat_source()->initialize_constant(0.0);
     EXPECT_DOUBLE_EQ(solver_coupling.find_prescribed_heat_source()->integrated_power(), 0.0);
@@ -548,7 +634,7 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     ASSERT_TRUE(zero_slip_solver.last_step_statistics().converged);
     EXPECT_EQ(zero_slip_solver.step_index(), 2);
     expect_upward_slip_shift();
-    expect_global_hydrogen_balance(reacting_gas, hydrogen_before_transport, 0.0);
+    expect_global_species_balance(reacting_gas, species_before_transport, 0.0);
     expect_coupled_state();
 
     double local_transport_delta = 0.0;
@@ -558,12 +644,12 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     {
         const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
         local_transport_delta +=
-            std::abs(reacting_gas.micro_moles().value(cell_lid) - micro_moles_before_transport[owned]) *
+            std::abs(micro_one.value(cell_lid) - micro_one_before_transport[owned]) *
             mesh->cell_volume(cell_lid);
         local_dissolved_transport_delta +=
             std::abs(
-                reacting_gas.dissolved_hydrogen_inventory().value(cell_lid)
-                - dissolved_before_transport[owned])
+                dissolved_one.value(cell_lid)
+                - dissolved_one_before_transport[owned])
           * mesh->cell_volume(cell_lid);
         local_feedback_velocity_delta +=
             std::abs(
@@ -579,8 +665,8 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
     EXPECT_GT(transport_delta, 1.0e-14);
     EXPECT_GT(dissolved_transport_delta, 1.0e-18);
     EXPECT_GT(feedback_velocity_delta, 1.0e-12);
-    EXPECT_NEAR(global_integral(reacting_gas.micro_moles()), global_micro_moles_before_transport,
-        std::max(1.0e-14, global_micro_moles_before_transport * 1.0e-9));
+    EXPECT_NEAR(global_integral(micro_one), global_micro_one_before_transport,
+        std::max(1.0e-14, global_micro_one_before_transport * 1.0e-9));
 
     auto no_advection_solver_shared = std::make_shared<InspectableTurbulentBoussinesqSolver>(
         mesh, slip_box_boundaries(), time_options, linear_options, model_options);
@@ -593,9 +679,11 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
         standard_k_epsilon_options());
     no_advection_solver_coupling.configure_prescribed_heat_source(prescribed_heat);
     auto no_advection_options = reacting_gas_options;
-    no_advection_options.dissolved_transport =
+    no_advection_options.solution_transport =
         SimpleFluid::ReactingTransportMode::NoAdvection;
     auto& no_advection_reacting_gas = no_advection_solver_coupling.configure_reacting_gas(no_advection_options);
+    const auto& no_advection_dissolved_one =
+        no_advection_reacting_gas.species_field(Mixture::gas_one, Mixture::Phase::Dissolved);
     no_advection_solver_coupling.configure_material_feedback(feedback_options);
     ASSERT_NO_THROW(no_advection_solver_coupling.step());
     no_advection_solver_coupling.find_prescribed_heat_source()->initialize_constant(0.0);
@@ -607,9 +695,8 @@ void exercise_combined_rans_reacting_gas(const SimpleFluid::SP<MeshType>& mesh,
         const auto cell_lid = static_cast<MeshType::local_ordinal_type>(owned);
         local_dissolved_advection_effect +=
             std::abs(
-                reacting_gas.dissolved_hydrogen_inventory().value(cell_lid)
-                - no_advection_reacting_gas
-                      .dissolved_hydrogen_inventory()
+                dissolved_one.value(cell_lid)
+                - no_advection_dissolved_one
                       .value(cell_lid))
           * mesh->cell_volume(cell_lid);
     }
@@ -914,8 +1001,8 @@ TEST(TurbulentBoussinesqSolverTest, TurbulenceFieldsAreOptInForSolutionOutput)
     std::filesystem::remove(turbulence_file);
 }
 
-/** @brief Accept combined sheared RANS, Sheng transport, prescribed_heat, and density feedback in serial. */
-TEST(TurbulentBoussinesqSolverTest, CouplesShearedRansShengTransportPrescribedHeatAndDensityFeedback)
+/** @brief Accept combined sheared RANS, explicit species transport, prescribed_heat, and density feedback in serial. */
+TEST(TurbulentBoussinesqSolverTest, CouplesShearedRansSpeciesTransportPrescribedHeatAndDensityFeedback)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(3, 3, 2));
     if (mesh->owned_cell_map()->getComm()->getSize() != 1)
@@ -926,7 +1013,7 @@ TEST(TurbulentBoussinesqSolverTest, CouplesShearedRansShengTransportPrescribedHe
 }
 
 /** @brief Accept the same combined path with globally conservative two-rank state. */
-TEST(TurbulentBoussinesqSolverTest, CouplesShearedRansShengTransportPrescribedHeatAndDensityFeedbackOnTwoRanks)
+TEST(TurbulentBoussinesqSolverTest, CouplesShearedRansSpeciesTransportPrescribedHeatAndDensityFeedbackOnTwoRanks)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(3, 3, 2));
     if (mesh->owned_cell_map()->getComm()->getSize() != 2)

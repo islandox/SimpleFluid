@@ -56,7 +56,7 @@ OpenFOAM assembles `C*fvm::ddt(T) + fvm::div(phi_C,T) - fvm::laplacian(k_eff,T)`
 `phi_C` uses upwind C, matching SimpleFluid. This is not nonlinear IF97
 enthalpy transport or a phase-resolved energy model.
 
-The source uses the production Sheng microbubble moment path. Microbubble
+The source uses an explicit catalogued H2 reservoir and supplied Sheng/Winter number law. Microbubble
 moles and number are transported with liquid flux plus upward slip, followed
 by local production. Number production uses the temperature-dependent
 nucleation correlation and capillary ideal-gas equation. Each implementation
@@ -158,6 +158,15 @@ All physical and linear tolerances remain unchanged. Explicit `--ranks` and
 `--policy` arguments override those experiment settings. The ordinary paired
 comparison launcher above retains its serial execution and solver defaults.
 
+The executable's component defaults are GMRES/none for momentum/temperature,
+GMRES/MueLu for pressure, and BiCGStab/SGS for typed gas transport. The gas choice
+is an explicit application policy for the localized number/species upwind
+system; it leaves the per-case gas tolerance, iteration limit and physical
+inventory/radius/conservation gates unchanged. The existing
+`--transport-solver` and `--transport-preconditioner` overrides still apply to
+both flow and gas after their component defaults; pressure overrides remain
+separate. The actual selected controls are printed at startup.
+
 The executable also accepts opt-in mesh and coupled-backend controls:
 
 ```sh
@@ -182,26 +191,29 @@ the case's physical acceptance checks and scalar transport tolerances. NOX
 adds nonlinear component/continuity convergence checks and uses inexact
 forcing tolerances for its individual Newton corrections.
 
-For the strict active-gas workload comparison, select
-`--gas-transport skip-zero-auxiliary`. The default `full` retains all five
-transport solves. The opt-in policy collectively checks dissolved hydrogen
-and each large-bubble moment for exact global zero and skips its fixed-mesh
-transport assembly/solve when zero. These transport stages have zero source,
-homogeneous boundaries and no incoming physical-boundary flux. Local kinetics
-still runs afterward; if it populates an auxiliary field, its transport resumes
-on the next step. Microbubble number and moles always execute, including the
-initial zero-inventory step, matching OpenFOAM's two calls per timestep. ALE
-retains the full path.
+The explicit prescribed-carrier reference keeps momentum -> temperature -> gas ->
+feedback ordering. It has no finite Liquid/Dissolved stock, film, boiling,
+free-surface geometry or ALE ownership. The fixed-grid post-temperature schedule
+rejects every nonzero raw chemical, external or transfer heat channel, including
+channels whose net happens to cancel, and rolls back the entire coupled step.
+Independent prescribed carrier heating remains in the existing temperature equation.
+The gas feed identifies an external mass reservoir; this is not closed water
+decomposition. The supplied gas escape enthalpy is a carried trace, not a debit of
+an owned phase-U field.
 
-Both executables export `gas_transport_statistics.csv` with per-field solve,
-skip, iteration and assembly counts plus matrix/RHS preparation, solver-call,
-and gas-update timers. Solver-call time includes preconditioning. Exported
-times are maximum-rank local durations; sums of these maxima are not an
-exclusive phase profile. The SimpleFluid number/moles pair shares one matrix;
-OpenFOAM assembles its two equations separately.
-See the [gas qualification contract](../../../docs/reacting-gas-models.md#numerical-and-performance-qualification)
-for full/strict numerical equivalence and the limits of the reduced fixture.
+The old full/skip-zero-auxiliary five-scalar policy switch is retired. Typed transport
+skips exact globally zero components and reports actual work buckets, not privileged
+dissolved/micro/large-H2 field slots. The schema/physical conservation gates remain
+unchanged; old policy aliases cannot silently select a fallback. The performance
+driver retains its PISO/coupled/NOX and operator variants but no longer treats
+old full/strict scalar policies as distinct supported physics.
 
+Both executables export gas_transport_statistics.csv. OpenFOAM retains per-moment
+rows; SimpleFluid names its reusable numerical work buckets operator_slot_0 through
+operator_slot_4 plus gas_update. These are not species identities. Reader checks
+require complete finite nonnegative work rows and actual active number/species solves;
+they do not claim that every typed component performs one solve on an empty first
+interval. Maximum-rank timers are not an exclusive phase profile.
 The optional NOX build supports this fixed-mesh physical Boussinesq case with
 temperature, material properties, SST coefficients, and gas state frozen during
 each nonlinear velocity-pressure solve. Their ordinary updates run once after

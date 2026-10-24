@@ -403,21 +403,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
             }
             return state;
         }
-        if (coupler.d_reacting_gas_model && coupler.d_reacting_gas_model->enabled())
-        {
-            const std::array<const field_type*, 5> fields{
-                &coupler.d_reacting_gas_model->dissolved_hydrogen_inventory(),
-                &coupler.d_reacting_gas_model->micro_number_density(), &coupler.d_reacting_gas_model->micro_moles(),
-                &coupler.d_reacting_gas_model->large_number_density(),
-                &coupler.d_reacting_gas_model->large_moles()};
-            state.reserve(fields.size() * d_solver.d_mesh->num_owned_cells());
-            for (const auto* field : fields)
-            {
-                const auto values = field->owned_read_view();
-                for (size_t owned = 0; owned < d_solver.d_mesh->num_owned_cells(); ++owned)
-                    state.push_back(values(owned, 0));
-            }
-        }
+
         return state;
     }
 
@@ -652,9 +638,8 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
                 const auto gas_timing = d_solver.d_solver_timings.scope(SolverPhase::Gas);
                 coupler.d_reacting_gas_model->advance(d_solver.d_time + time_step, time_step,
                     typed ? *thermal_guess : d_solver.temperature(), d_solver.pressure(), d_solver.velocity(),
-                    *coupler.d_mesh_relative_face_flux, d_solver.stored_material_properties(),
-                    !typed && coupler.d_prescribed_heat_source ? &coupler.d_prescribed_heat_source->field() : nullptr,
-                    &*coupler.d_active_ale, coupler.d_free_surface_options.gravity_axis);
+                    *coupler.d_mesh_relative_face_flux, d_solver.stored_material_properties(), &*coupler.d_active_ale,
+                    coupler.d_free_surface_options.gravity_axis);
             }
             {
                 const auto material_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEMaterial);
@@ -728,7 +713,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
             Teuchos::reduceAll(*d_solver.d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local,
                 &trial.gas_state_residual);
             trial.gas_field_residual.fill(
-                0); // Legacy H2/five-field observations are N/A; the full-schema gate above remains authoritative.
+                0); // The full-schema gate above is authoritative; no fixed-slot observation is retained.
             return;
         }
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALEResidual);
@@ -761,7 +746,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         std::copy(global.begin() + 1, global.end(), trial.gas_field_residual.begin());
     }
 
-    /** @brief Preview liquid and surface ledgers after validating hydrogen closure. */
+    /** @brief Preview liquid and surface ledgers after validating typed species closure. */
     void preview_surface(TrialState& trial)
     {
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALESurfacePreview);
@@ -805,25 +790,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         accounting.liquid = trial.liquid_preview->diagnostics();
 
         trial.gas_inventory_residual = {};
-        if (coupler.d_reacting_gas_model && coupler.d_reacting_gas_model->enabled())
-        {
-            const auto& gas_statistics = coupler.d_reacting_gas_model->last_statistics();
-            trial.gas_inventory_residual = gas_statistics.inventory_error;
-            const auto gas_scale = std::abs(gas_statistics.hydrogen_before) +
-                                   std::abs(gas_statistics.hydrogen_produced) +
-                                   std::abs(gas_statistics.hydrogen_escaped) + std::abs(gas_statistics.hydrogen_after);
-            const auto gas_tolerance =
-                static_cast<scalar_type>(coupler.d_free_surface_options.coupling.gas_absolute_tolerance) +
-                static_cast<scalar_type>(coupler.d_free_surface_options.coupling.gas_relative_tolerance) * gas_scale;
-            if (std::abs(trial.gas_inventory_residual) > gas_tolerance)
-            {
-                std::ostringstream message;
-                message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
-                        << "planarALE reacting H2 step-inventory closure exceeded its physical tolerance: residual="
-                        << trial.gas_inventory_residual << " mol, tolerance=" << gas_tolerance << " mol.";
-                throw std::runtime_error(message.str());
-            }
-        }
+
         trial.surface_preview.emplace(coupler.d_free_surface_model->previewUpdate(
             coupler.make_free_surface_update(d_solver.d_time + time_step, false, &accounting)));
     }

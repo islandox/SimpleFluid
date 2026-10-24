@@ -26,12 +26,12 @@ std::shared_ptr<Grid> grid()
 S::ReactingGasOptions options(bool fail_later)
 {
     S::ReactingGasOptions result;
-    result.mode = S::ReactingGasMode::TwoPopulation;
+    result.mode = S::ReactingGasMode::Species;
     result.reference_pressure = 100000;
     result.surface_tension = 0;
     result.min_radius = 1e-12;
     result.max_radius = .1;
-    result.dissolved_transport = S::ReactingTransportMode::Advective;
+    result.solution_transport = S::ReactingTransportMode::Advective;
     auto catalog = std::make_shared<const R::SpeciesCatalog>(
         std::vector<R::SpeciesDefinition>{{solvent, "finite solvent", .018, {{"S", 1}}, {P::Liquid}},
             {gas, "ordinary gas", .002, {{"G", 1}}, {P::Dissolved, P::Dispersed}}});
@@ -91,7 +91,7 @@ struct Fixture
     {
         model.initialize_state(0, temperature, pressure, velocity, material);
     }
-    void advance(double end) { model.advance(end, .001, temperature, pressure, velocity, flux, material, nullptr); }
+    void advance(double end) { model.advance(end, .001, temperature, pressure, velocity, flux, material); }
     void expect_density(double expected) const
     {
         for (std::size_t row = 0; row < mesh->num_local_cells(); ++row)

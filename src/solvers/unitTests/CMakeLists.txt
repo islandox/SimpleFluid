@@ -42,6 +42,17 @@ foreach(_bouss_vapor_ranks IN ITEMS 2 4)
         LABELS "mpi;species;boussinesq;boiling;wall_heat;conservation;transaction;empty_rank" TIMEOUT 180)
 endforeach()
 
+# Clean schema configuration and explicit gas-only reference scheduling.
+# Serial discovery uses TEST_SOURCES above; these are actual 2/4-rank groups.
+foreach(_schema_api_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME ReactingLegacyCleanup_${_schema_api_ranks}procs
+        TARGET testReactingLegacyCleanup PROCS ${_schema_api_ranks}
+        LABELS "mpi;species;configuration;conservation;transaction;empty_rank" TIMEOUT 180)
+    simplefluid_add_mpi_test(NAME ReactingReferenceSchedule_${_schema_api_ranks}procs
+        TARGET testReactingReferenceSchedule PROCS ${_schema_api_ranks}
+        LABELS "mpi;species;reference;conservation;transaction;empty_rank" TIMEOUT 180)
+endforeach()
+
 # Typed species surface coupling and exact transported liquid-volume packets.
 foreach(_species_surface_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME BoussinesqSpeciesFreeSurface_${_species_surface_ranks}procs
@@ -314,7 +325,7 @@ simplefluid_add_mpi_test(
     NAME CombinedTurbulentReactingGas_2procs
     TARGET testTurbulentBoussinesqSolver
     PROCS 2
-    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CouplesShearedRansShengTransportPrescribedHeatAndDensityFeedbackOnTwoRanks"
+    ARGS "--gtest_filter=TurbulentBoussinesqSolverTest.CouplesShearedRansSpeciesTransportPrescribedHeatAndDensityFeedbackOnTwoRanks"
     LABELS "mpi;turbulence;reacting_gas;physical_models;pressure_velocity;acceptance"
     TIMEOUT 120)
 
@@ -465,7 +476,7 @@ simplefluid_add_mpi_test(NAME SASScalarVoid_2procs TARGET testSASSupportedPaths 
     LABELS "mpi;turbulence;sas;void;small_fixture" TIMEOUT 120)
 
 simplefluid_add_mpi_test(NAME SASReactingGas_2procs TARGET testSASSupportedPaths PROCS 2
-    ARGS "--gtest_filter=SASSupportedPathsTest.ReactingGasAndHydrogenLedgersRollBackWithSAS"
+    ARGS "--gtest_filter=SASSupportedPathsTest.ReactingGasAndSpeciesLedgersRollBackWithSAS"
     LABELS "mpi;turbulence;sas;reacting_gas;small_fixture" TIMEOUT 120)
 
 simplefluid_add_mpi_test(NAME SASBoiling_2procs TARGET testSASSupportedPaths PROCS 2

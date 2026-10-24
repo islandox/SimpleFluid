@@ -42,12 +42,12 @@ S::ReactingGasOptions options()
     using P = R::SpeciesPhase;
     auto catalog = schema();
     S::ReactingGasOptions result;
-    result.mode = S::ReactingGasMode::TwoPopulation;
+    result.mode = S::ReactingGasMode::Species;
     result.reference_pressure = 100000.;
     result.surface_tension = 0.;
     result.min_radius = 1e-9;
     result.max_radius = .1;
-    result.dissolved_transport = S::ReactingTransportMode::Advective;
+    result.solution_transport = S::ReactingTransportMode::Advective;
     result.mass_transfer_mode = S::BubbleMassTransferMode::SphericalDiffusion;
     result.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(
         catalog, std::vector<R::ReactionDefinition>{{8, "A to B plus G1 plus G2",
@@ -137,7 +137,7 @@ struct Fixture
         model.initialize_species(states, numbers);
         model.initialize_state(0., temperature, pressure, velocity, material);
     }
-    void advance(double dt = .01) { model.advance(dt, dt, temperature, pressure, velocity, flux, material, nullptr); }
+    void advance(double dt = .01) { model.advance(dt, dt, temperature, pressure, velocity, flux, material); }
     double sum(double local) const
     {
         double result = 0.;
@@ -330,8 +330,8 @@ TEST(ReactingSpeciesModelTest, ALEUsesAcceptedOldAndTrialNewVolumesAndRestoresAc
         motion.begin_trial(1.1, .1);
         const auto ale = S::FVM::make_ale_control_volume_state(*fixture.grid, motion);
         fixture.model.refresh_geometry();
-        fixture.model.advance(.1, .1, fixture.temperature, fixture.pressure, fixture.velocity, fixture.flux,
-            fixture.material, nullptr, &ale);
+        fixture.model.advance(
+            .1, .1, fixture.temperature, fixture.pressure, fixture.velocity, fixture.flux, fixture.material, &ale);
         EXPECT_NEAR(fixture.model.global_species_moles(gasOne), .1, 2e-12);
         EXPECT_NEAR(fixture.model.global_species_moles(gasTwo), .1, 2e-12);
         for (std::size_t owned = 0; owned < fixture.grid->num_owned_cells(); ++owned)
@@ -380,7 +380,7 @@ TEST(ReactingSpeciesModelTest, LegacyMeshExecutesTheSameSchemaIndexedSourcePath)
     }
     model.initialize_species(states);
     model.initialize_state(0., temperature, pressure, velocity, material);
-    model.advance(.1, .1, temperature, pressure, velocity, flux, material, nullptr);
+    model.advance(.1, .1, temperature, pressure, velocity, flux, material);
     EXPECT_NEAR(model.global_species_moles(gasOne), .3, 1e-12);
     EXPECT_NEAR(model.global_species_moles(gasTwo), .3, 1e-12);
     EXPECT_NEAR(model.global_species_moles(donor), 99999.7, 1e-9);
@@ -428,7 +428,7 @@ TEST(ReactingSpeciesModelTest, StationaryResolvedCompartmentRetainsExtensiveMole
     const auto ale = S::FVM::make_ale_control_volume_state(*fixture.grid, motion);
     fixture.model.refresh_geometry();
     fixture.model.advance(
-        .1, .1, fixture.temperature, fixture.pressure, fixture.velocity, fixture.flux, fixture.material, nullptr, &ale);
+        .1, .1, fixture.temperature, fixture.pressure, fixture.velocity, fixture.flux, fixture.material, &ale);
     EXPECT_NEAR(fixture.model.global_species_moles(gasOne), .01, 1e-12);
     EXPECT_NEAR(fixture.model.global_species_moles(donor), 100000., 1e-9);
     motion.accept_trial();
@@ -442,4 +442,74 @@ TEST(ReactingSpeciesModelTest, UnclosedBulkMixtureDiffusionIsAnExplicitRejectedS
     selected.bulk_diffusion = S::ReactingBulkDiffusionMode::ConservativeMixture;
     EXPECT_ANY_THROW(Fixture unclosedBulkDiffusion(selected));
 }
+TEST(ReactingSpeciesModelTest, RankAsymmetricMicroAdvectionUsesFrozenCountsBeforeEmptyLarge)
+{
+    using P = R::SpeciesPhase;
+    auto selected = options();
+    selected.surface_tension = .07;
+    selected.rise_velocity_mode = S::BubbleRiseVelocityMode::ConstantSlip;
+    selected.constant_slip_velocity = .1;
+    Fixture fixture(selected, 2);
+    const auto& catalog = selected.reaction_mechanism->catalog();
+    constexpr double radius = 1e-5, dt = .125, carrier_rate = .25;
+    const double per_bubble = 4 * std::numbers::pi * radius * radius * radius / 3 *
+                              (100000 + 2 * selected.surface_tension / radius) / (gasConstant * 300);
+    auto states = fixture.initial();
+    std::vector<std::vector<double>> counts;
+    for (std::size_t c = 0; c < states.size(); ++c)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(c);
+        const double density = fixture.grid->cell_centroid(cell).z < .5 ? 1e6 : 1e-20;
+        const double number = density * fixture.grid->cell_volume(cell);
+        counts.push_back({number, 0});
+        states[c].set_amount(catalog, gasOne, P::Dispersed, .25 * per_bubble * number, "micro");
+        states[c].set_amount(catalog, gasTwo, P::Dispersed, .75 * per_bubble * number, "micro");
+    }
+    fixture.model.initialize_species(states, counts);
+    fixture.model.initialize_state(0, fixture.temperature, fixture.pressure, fixture.velocity, fixture.material);
+    const double initial_one = fixture.model.global_species_moles(gasOne);
+    const double initial_two = fixture.model.global_species_moles(gasTwo);
+    double local_number = 0;
+    for (const auto& row : counts)
+        local_number += row[0];
+    const double initial_number = fixture.sum(local_number);
+    for (const auto face : fixture.flux.owned_face_ids())
+        if (fixture.grid->is_interior_face(face))
+            fixture.flux.set_owned_value(
+                face, fixture.grid->face_area_vector(face).z > 0 ? carrier_rate : -carrier_rate);
+    fixture.flux.sync_ghosts();
+    ASSERT_NO_THROW(fixture.advance(dt));
+
+    // Two closed cells, unit face area and V=.5: backward-Euler upwind
+    // sends dt*(carrier+slip)*N_left into the right cell without a source.
+    const double beta = dt * (carrier_rate + selected.constant_slip_velocity) / .5;
+    const double left = 1e6 / (1 + beta), right = 1e-20 + beta * left;
+    double accepted_number = 0;
+    for (std::size_t c = 0; c < fixture.grid->num_owned_cells(); ++c)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(c);
+        const double volume = fixture.grid->cell_volume(cell);
+        const double expected = fixture.grid->cell_centroid(cell).z < .5 ? left : right;
+        const double number = fixture.model.population_number_field("micro").value(cell) * volume;
+        const double first = fixture.model.species_field(gasOne, P::Dispersed, "micro").value(cell) * volume;
+        const double second = fixture.model.species_field(gasTwo, P::Dispersed, "micro").value(cell) * volume;
+        EXPECT_GT(number, 0);
+        EXPECT_NEAR(number, expected * volume, expected * volume * 1e-13);
+        EXPECT_NEAR(first, .25 * per_bubble * number, first * 1e-13);
+        EXPECT_NEAR(second, .75 * per_bubble * number, second * 1e-13);
+        EXPECT_DOUBLE_EQ(fixture.model.population_number_field("large").value(cell), 0);
+        EXPECT_DOUBLE_EQ(fixture.model.species_field(gasOne, P::Dispersed, "large").value(cell), 0);
+        EXPECT_DOUBLE_EQ(fixture.model.species_field(gasTwo, P::Dispersed, "large").value(cell), 0);
+        accepted_number += number;
+    }
+    EXPECT_NEAR(fixture.sum(accepted_number), initial_number, initial_number * 1e-13);
+    EXPECT_NEAR(fixture.model.global_species_moles(gasOne), initial_one, initial_one * 1e-13);
+    EXPECT_NEAR(fixture.model.global_species_moles(gasTwo), initial_two, initial_two * 1e-13);
+    for (const auto& event : fixture.model.population_escape_receipt().events)
+        EXPECT_DOUBLE_EQ(event.number, 0);
+    const auto comm = fixture.grid->owned_cell_map()->getComm();
+    const double empty = fixture.grid->num_owned_cells() == 0 ? 1 : 0;
+    EXPECT_DOUBLE_EQ(fixture.sum(empty), std::max(0, comm->getSize() - 2));
+}
+
 } // namespace

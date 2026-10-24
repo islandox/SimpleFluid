@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Guard matched-build attribution and forcing-only performance probes."""
 import argparse
+import csv
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -11,6 +12,13 @@ import run_coupled_nonlinear_performance as performance
 
 
 class MatchedNonlinearPerformanceTest(unittest.TestCase):
+    def test_retired_scalar_gas_policy_variants_are_not_accepted_aliases(self):
+        for variant in ("piso-gas-full", "piso-gas-strict",
+                        "nox-composite-gas-full", "nox-composite-gas-strict"):
+            self.assertNotIn(variant, performance.VARIANTS)
+            with self.assertRaises(ValueError):
+                performance.solver_arguments(variant, Path("inputs"), Path("output"), 10, 80)
+
     def test_matched_order_reverses_both_build_and_variant(self):
         forward = performance.run_plan(["openfoam", "nox-composite"], True, 1)
         self.assertEqual(forward, [("openfoam", None), ("nox-composite", "baseline"),
@@ -34,15 +42,15 @@ class MatchedNonlinearPerformanceTest(unittest.TestCase):
                 performance.forcing_tolerance(invalid)
 
     def test_pressure_probe_preserves_strict_work_and_other_solvers(self):
-        base = performance.solver_arguments("piso-gas-strict", Path("inputs"), Path("output"), 10, 80)
-        tuned = performance.solver_arguments("piso-gas-strict", Path("inputs"), Path("output"), 10, 80,
+        base = performance.solver_arguments("piso", Path("inputs"), Path("output"), 10, 80)
+        tuned = performance.solver_arguments("piso", Path("inputs"), Path("output"), 10, 80,
                                              pressure_preconditioner="muelu")
         expected = base.copy()
         expected[expected.index("--pressure-preconditioner") + 1] = "muelu"
         self.assertEqual(tuned, expected)
-        nox = performance.solver_arguments("nox-composite-gas-strict", Path("inputs"), Path("output"), 10, 80)
+        nox = performance.solver_arguments("nox-composite", Path("inputs"), Path("output"), 10, 80)
         self.assertEqual(nox, performance.solver_arguments(
-            "nox-composite-gas-strict", Path("inputs"), Path("output"), 10, 80,
+            "nox-composite", Path("inputs"), Path("output"), 10, 80,
             pressure_preconditioner="muelu"))
 
     def test_pressure_override_is_candidate_only(self):
@@ -57,7 +65,7 @@ class MatchedNonlinearPerformanceTest(unittest.TestCase):
             for build, expected in [("baseline", "dic"), ("candidate", "muelu")]:
                 with self.subTest(build=build), patch.object(performance, "check_artifacts"), patch.object(
                         performance.subprocess, "run", return_value=SimpleNamespace(returncode=7)) as run:
-                    performance.run_one(args, 10752, "piso-gas-strict", 1, artifacts, build)
+                    performance.run_one(args, 10752, "piso", 1, artifacts, build)
                 command = run.call_args.args[0]
                 self.assertEqual(command[command.index("--pressure-preconditioner") + 1], expected)
 
@@ -102,9 +110,24 @@ class MatchedNonlinearPerformanceTest(unittest.TestCase):
             args = SimpleNamespace(output=root, fixtures=root, steps=10, nox_restart=80,
                                    nox_forcing_initial=None, timeout=10, executable=root / "candidate",
                                    library_dir=root / "candidate-lib", libraries={})
+            def merged_with_valid_gas_statistics(directory, *_):
+                # Synthetic successful typed-gas output clears its independent
+                # prerequisite gate; nonlinear statistics deliberately stay absent.
+                merged = directory / "merged"
+                merged.mkdir()
+                fields = ["gas_update", *(f"operator_slot_{i}" for i in range(5))]
+                with (merged / "gas_transport_statistics.csv").open("w", newline="") as stream:
+                    writer = csv.writer(stream)
+                    writer.writerow(["field", "skipped", "solves", "iterations", "assemblies",
+                                     "assembly_seconds", "solve_seconds", "total_seconds"])
+                    for _ in range(args.steps):
+                        for field in fields:
+                            writer.writerow([field, 0, 1, 1, 1, 0, 0, 0])
+                return {"loop_wall_s": 1.0}
+
             with patch.object(performance, "check_artifacts"), patch.object(
                     performance.subprocess, "run", return_value=SimpleNamespace(returncode=0)), patch.object(
-                    performance, "merge_outputs", return_value={"loop_wall_s": 1.0}):
+                    performance, "merge_outputs", side_effect=merged_with_valid_gas_statistics):
                 record = performance.run_one(args, 10752, "nox-composite", 1,
                                              {str(args.executable): "binary-hash"})
             self.assertFalse(record["qualified"])

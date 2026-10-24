@@ -56,13 +56,6 @@ ReactingGasModel<Pack, MeshType>::require_mesh(SP<const mesh_type> mesh)
     return mesh;
 }
 
-/**
- * @brief Construct and initialize a reacting gas model.
- * @tparam Pack Tpetra type pack used by the model.
- * @param mesh Computational mesh.
- * @param options Validated runtime physics options.
- * @throws std::invalid_argument if the mesh or options are invalid.
- */
 template<TpetraTypePack Pack, class MeshType>
 ReactingGasModel<Pack, MeshType>::ReactingGasModel(SP<const mesh_type> mesh, ReactingGasOptions options)
     : d_mesh(require_mesh(std::move(mesh))), d_transport_geometry_cache(*d_mesh),
@@ -74,106 +67,37 @@ ReactingGasModel<Pack, MeshType>::ReactingGasModel(SP<const mesh_type> mesh, Rea
       d_species_liquid_density(d_mesh, "species_pure_liquid_density"), d_alpha_g(d_mesh, "alpha_g"),
       d_alpha_l(d_mesh, "alpha_l"), d_source_alpha_reaction(d_mesh, "S_alpha_reaction"),
       d_absolute_pressure(d_mesh, "p_abs"), d_previous_temperature(d_mesh, "reacting_previous_temperature"),
-      d_previous_density(d_mesh, "reacting_previous_density"),
-      d_previous_dynamic_viscosity(d_mesh, "reacting_previous_dynamic_viscosity"),
-      d_previous_alpha_g(d_mesh, "reacting_previous_alpha_g"), d_donor_hydrogen_deficit(d_mesh, "donorH2Deficit"),
-      d_donor_escape_rate(d_mesh, "donorH2OutflowRate"), d_dissolved_hydrogen(d_mesh, "C_H2"),
-      d_dissolved_hydrogen_inventory(d_mesh, "I_H2"), d_excluded_dissolved_inventory(d_mesh, "I_H2_excluded"),
-      d_micro_number(d_mesh, "N_micro"), d_micro_moles(d_mesh, "M_micro"), d_large_number(d_mesh, "N_large"),
-      d_large_moles(d_mesh, "M_large"), d_nucleation_radius(d_mesh, "r_nuc"), d_micro_radius(d_mesh, "r_micro"),
-      d_large_radius(d_mesh, "r_large"), d_critical_concentration(d_mesh, "C_H2_crit"),
-      d_equilibrium_concentration(d_mesh, "C_H2_eq"), d_mass_transfer_coefficient(d_mesh, "K_L"),
-      d_alpha_g_micro(d_mesh, "alpha_g_micro"), d_alpha_g_large(d_mesh, "alpha_g_large"),
-      d_alpha_g_raw(d_mesh, "alpha_g_raw"), d_transport_alpha_g_raw(d_mesh, "alpha_g_transport_raw"),
-      d_alpha_g_excess(d_mesh, "alpha_g_excess"), d_characteristic_radius(d_mesh, "r_characteristic"),
-      d_hydrogen_production_rate(d_mesh, "H2_production_rate"),
-      d_micro_to_large_number_rate(d_mesh, "micro_to_large_number_rate"),
-      d_micro_to_large_molar_rate(d_mesh, "micro_to_large_molar_rate"),
-      d_large_growth_rate(d_mesh, "large_growth_rate"), d_dissolution_rate(d_mesh, "H2_dissolution_rate"),
-      d_escape_molar_rate(d_mesh, "H2_escape_molar_rate"), d_escape_number_rate(d_mesh, "bubble_escape_number_rate"),
-      d_inventory_error(d_mesh, "H2_inventory_error"),
+      d_previous_alpha_g(d_mesh, "reacting_previous_alpha_g"), d_micro_number(d_mesh, "N_micro"),
+      d_micro_moles(d_mesh, "M_micro"), d_large_number(d_mesh, "N_large"), d_large_moles(d_mesh, "M_large"),
+      d_micro_radius(d_mesh, "r_micro"), d_large_radius(d_mesh, "r_large"), d_alpha_g_micro(d_mesh, "alpha_g_micro"),
+      d_alpha_g_large(d_mesh, "alpha_g_large"), d_alpha_g_raw(d_mesh, "alpha_g_raw"),
+      d_transport_alpha_g_raw(d_mesh, "alpha_g_transport_raw"), d_alpha_g_excess(d_mesh, "alpha_g_excess"),
+      d_escape_number_rate(d_mesh, "bubble_escape_number_rate"),
       d_transport_bubble_slip_volume_flux(d_mesh, "bubble_transport_slip_volume_flux"),
       d_transport_bubble_carrier_volume_flux(d_mesh, "bubble_transport_carrier_volume_flux"),
       d_transport_liquid_material_volume_flux(d_mesh, "liquid_transport_material_volume_flux")
 {
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
-    if (!species_enabled() && d_options.mode
-            == ReactingGasMode::TwoPopulation
-        && d_options.micro_to_large_conversion_coefficient == 1.0e-4
-        && d_mesh->owned_cell_map()->getComm()->getRank() == 0)
-    {
-        std::clog
-            << "SimpleFluid reacting_gas: F=1e-4 Pa^-1 s^-1 is "
-               "SILENE-calibrated and requires case-specific validation.\n";
-    }
+
     register_output_fields();
     initialize_fields();
     configure_species_fields();
 }
 
-/**
- * @brief Reconfigure the model and reset its evolving state.
- * @tparam Pack Tpetra type pack used by the model.
- * @param options Replacement runtime physics options.
- * @throws std::invalid_argument if @p options is inconsistent.
- */
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::configure(
-    const ReactingGasOptions& options)
+void ReactingGasModel<Pack, MeshType>::configure(const ReactingGasOptions& options)
 {
     d_options = require_options(d_mesh, options);
-    d_donor_tracking_enabled = false;
-    d_output_fields.erase("donorH2Deficit");
     d_transport_workspace.reset();
-    d_skip_zero_auxiliary_transport = false;
     d_transport_linear_options = {};
     d_transport_linear_options.tolerance = d_options.transport_solver_tolerance;
     d_transport_solver.reset();
-    if (!species_enabled() && d_options.mode
-            == ReactingGasMode::TwoPopulation
-        && d_options.micro_to_large_conversion_coefficient == 1.0e-4
-        && d_mesh->owned_cell_map()->getComm()->getRank() == 0)
-    {
-        std::clog
-            << "SimpleFluid reacting_gas: F=1e-4 Pa^-1 s^-1 is "
-               "SILENE-calibrated and requires case-specific validation.\n";
-    }
-    d_history_initialized = false;
-    d_cumulative_hydrogen_produced = 0.0;
-    d_cumulative_dissolved_hydrogen_outflow = 0.0;
-    d_cumulative_submerged_bubble_hydrogen_escaped = 0.0;
-    d_cumulative_hydrogen_escaped = 0.0;
-    d_cumulative_escaped_bubble_count = 0.0;
-    d_last_statistics = {};
     initialize_fields();
     configure_species_fields();
 }
 
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::enable_donor_hydrogen_deficit_tracking()
-{
-    collective_detail::collective_local_validation(*d_mesh, "Reacting donor tracking setup", [&]
-    {
-        if (d_initial_state_initialized || d_history_initialized ||
-            d_options.mode != ReactingGasMode::TwoPopulation)
-            throw std::logic_error("Donor-H tracking requires Sheng mode before state initialization.");
-    });
-    d_donor_tracking_enabled = true;
-    d_output_fields.emplace("donorH2Deficit", &d_donor_hydrogen_deficit);
-}
-
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::set_skip_zero_auxiliary_transport(bool enabled)
-{
-    collective_detail::require_uniform_value(
-        *d_mesh, static_cast<int>(enabled), "Reacting zero auxiliary transport policy");
-    d_skip_zero_auxiliary_transport = enabled;
-}
-
-/** @brief Validate and install a rank-consistent FV transport solver policy. */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::set_transport_linear_solver_options(
-    LinearSolverOptions options)
+void ReactingGasModel<Pack, MeshType>::set_transport_linear_solver_options(LinearSolverOptions options)
 {
     constexpr auto context = "Reacting transport linear solver options";
     collective_detail::collective_local_validation(*d_mesh, context, [&]
@@ -200,110 +124,32 @@ void ReactingGasModel<Pack, MeshType>::set_transport_linear_solver_options(
     d_options.transport_solver_tolerance = d_transport_linear_options.tolerance;
 }
 
-/**
- * @brief Register stable output names for all model-owned fields.
- * @tparam Pack Tpetra type pack used by the model.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::register_output_fields()
+template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::register_output_fields()
 {
-    d_output_fields = {
-        {"alpha_g", &d_alpha_g},
-        {"alpha_l", &d_alpha_l},
-        {"S_alpha_reaction", &d_source_alpha_reaction},
-        {"p_abs", &d_absolute_pressure},
-        {"C_H2", &d_dissolved_hydrogen},
-        {"I_H2", &d_dissolved_hydrogen_inventory},
-        {"I_H2_excluded", &d_excluded_dissolved_inventory},
-        {"N_micro", &d_micro_number},
-        {"M_micro", &d_micro_moles},
-        {"N_large", &d_large_number},
-        {"M_large", &d_large_moles},
-        {"r_nuc", &d_nucleation_radius},
-        {"r_micro", &d_micro_radius},
-        {"r_large", &d_large_radius},
-        {"C_H2_crit", &d_critical_concentration},
-        {"C_H2_eq", &d_equilibrium_concentration},
-        {"K_L", &d_mass_transfer_coefficient},
-        {"alpha_g_micro", &d_alpha_g_micro},
-        {"alpha_g_large", &d_alpha_g_large},
-        {"alpha_g_raw", &d_alpha_g_raw},
-        {"alpha_g_excess", &d_alpha_g_excess},
-        {"r_characteristic", &d_characteristic_radius},
-        {"H2_production_rate", &d_hydrogen_production_rate},
-        {"micro_to_large_number_rate",
-         &d_micro_to_large_number_rate},
-        {"micro_to_large_molar_rate",
-         &d_micro_to_large_molar_rate},
-        {"large_growth_rate", &d_large_growth_rate},
-        {"H2_dissolution_rate", &d_dissolution_rate},
-        {"H2_escape_molar_rate", &d_escape_molar_rate},
-        {"bubble_escape_number_rate", &d_escape_number_rate},
-        {"H2_inventory_error", &d_inventory_error}};
+    d_output_fields = {{"alpha_g", &d_alpha_g}, {"alpha_l", &d_alpha_l}, {"S_alpha_reaction", &d_source_alpha_reaction},
+        {"p_abs", &d_absolute_pressure}, {"N_micro", &d_micro_number}, {"M_micro", &d_micro_moles},
+        {"N_large", &d_large_number}, {"M_large", &d_large_moles}, {"r_micro", &d_micro_radius},
+        {"r_large", &d_large_radius}, {"alpha_g_micro", &d_alpha_g_micro}, {"alpha_g_large", &d_alpha_g_large},
+        {"alpha_g_raw", &d_alpha_g_raw}, {"alpha_g_excess", &d_alpha_g_excess}};
 }
 
-/**
- * @brief Reset primary, history, diagnostic, and cumulative model fields.
- * @tparam Pack Tpetra type pack used by the model.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::initialize_fields()
+template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::initialize_fields()
 {
     d_history_initialized = false;
     d_initial_state_initialized = false;
     d_absolute_pressure_offset = d_options.reference_pressure;
-    d_cumulative_hydrogen_produced = scalar_type{};
-    d_cumulative_dissolved_hydrogen_outflow = scalar_type{};
-    d_cumulative_submerged_bubble_hydrogen_escaped = scalar_type{};
-    d_cumulative_hydrogen_escaped = scalar_type{};
-    d_cumulative_escaped_bubble_count = scalar_type{};
     d_last_statistics = {};
+    for (auto* field : mutable_state_fields())
+        field->put_scalar(0);
     d_alpha_g.put_scalar(d_options.alpha_min);
-    d_alpha_l.put_scalar(1.0 - d_options.alpha_min);
-    d_source_alpha_reaction.put_scalar(0.0);
-    d_absolute_pressure.put_scalar(d_absolute_pressure_offset);
-    d_previous_temperature.put_scalar(0.0);
-    d_previous_density.put_scalar(0.0);
-    d_previous_dynamic_viscosity.put_scalar(0.0);
-    d_previous_alpha_g.put_scalar(d_options.alpha_min);
-    d_dissolved_hydrogen.put_scalar(
-        d_options.initial_dissolved_hydrogen);
-    d_dissolved_hydrogen_inventory.put_scalar(
-        (1.0 - d_options.alpha_min)
-        * d_options.initial_dissolved_hydrogen);
-    d_excluded_dissolved_inventory.put_scalar(0.0);
-    d_donor_hydrogen_deficit.put_scalar(0.0);
-    d_donor_escape_rate.put_scalar(0.0);
-    d_micro_number.put_scalar(
-        d_options.initial_micro_number_density);
-    d_micro_moles.put_scalar(d_options.initial_micro_moles);
-    d_large_number.put_scalar(
-        d_options.initial_large_number_density);
-    d_large_moles.put_scalar(d_options.initial_large_moles);
-
-    d_nucleation_radius.put_scalar(0.0);
-    d_micro_radius.put_scalar(0.0);
-    d_large_radius.put_scalar(0.0);
-    d_critical_concentration.put_scalar(0.0);
-    d_equilibrium_concentration.put_scalar(0.0);
-    d_mass_transfer_coefficient.put_scalar(0.0);
-    d_alpha_g_micro.put_scalar(0.0);
-    d_alpha_g_large.put_scalar(0.0);
+    d_alpha_l.put_scalar(1 - d_options.alpha_min);
     d_alpha_g_raw.put_scalar(d_options.alpha_min);
     d_transport_alpha_g_raw.put_scalar(d_options.alpha_min);
-    d_alpha_g_excess.put_scalar(0.0);
-    d_characteristic_radius.put_scalar(0.0);
-    d_hydrogen_production_rate.put_scalar(0.0);
-    d_micro_to_large_number_rate.put_scalar(0.0);
-    d_micro_to_large_molar_rate.put_scalar(0.0);
-    d_large_growth_rate.put_scalar(0.0);
-    d_dissolution_rate.put_scalar(0.0);
-    d_escape_molar_rate.put_scalar(0.0);
-    d_escape_number_rate.put_scalar(0.0);
-    d_inventory_error.put_scalar(0.0);
-    d_transport_bubble_slip_volume_flux.put_scalar(0.0);
-    d_transport_bubble_carrier_volume_flux.put_scalar(0.0);
-    d_transport_liquid_material_volume_flux.put_scalar(0.0);
+    d_previous_alpha_g.put_scalar(d_options.alpha_min);
+    d_absolute_pressure.put_scalar(d_absolute_pressure_offset);
+    d_transport_bubble_slip_volume_flux.put_scalar(0);
+    d_transport_bubble_carrier_volume_flux.put_scalar(0);
+    d_transport_liquid_material_volume_flux.put_scalar(0);
     d_liquid_transport_volume_receipt = {};
     sync_all_fields();
     if constexpr (requires { d_transport_bubble_slip_volume_flux.sync_ghosts(); })
@@ -314,141 +160,57 @@ void ReactingGasModel<Pack, MeshType>::initialize_fields()
     }
 }
 
-/**
- * @brief Build the derived initial state for two-population reacting_gas.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time Initial physical time.
- * @param temperature Initial cell temperature.
- * @param gauge_pressure Initial gauge pressure in Pa.
- * @param velocity Initial liquid velocity.
- * @param material Initial material-property fields.
- * @param force Whether to discard an already initialized state.
- * @throws std::logic_error if the active mode is not two-population.
- * @throws std::invalid_argument if time or input meshes are invalid.
- * @throws std::runtime_error if a derived property cannot be reconstructed.
- */
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::initialize_state(
-    scalar_type time,
-    const field_type& temperature,
-    const field_type& gauge_pressure,
-    const velocity_field_type& velocity,
-    const material_type& material,
-    bool force)
+void ReactingGasModel<Pack, MeshType>::initialize_state(scalar_type time, const field_type& temperature,
+    const field_type& gauge_pressure, const velocity_field_type& velocity, const material_type& material, bool force)
 {
-    if (species_enabled())
+    if (!enabled())
+        return;
+
+    StateSnapshot prior;
+    collective_detail::collective_local_validation(*d_mesh, "Reacting complete initialization snapshot",
+        [&] { prior = snapshot(); });
+    try
     {
         reconstruct_absolute_pressure(time, gauge_pressure);
         if (!d_initial_state_initialized || (force && d_options.initial_species_state))
         {
             std::vector<Reacting::CellSpeciesState> states;
             std::vector<std::vector<double>> numbers;
-            collective_detail::collective_local_validation(*d_mesh, "Reacting typed initialization callback", [&]
-            {
-                if (!d_options.initial_species_state)
-                    throw std::logic_error("Supply initial_species_state or initialize_species before deriving typed fields.");
-                const auto& catalog = d_options.reaction_mechanism->catalog();
-                for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+            collective_detail::collective_local_validation(*d_mesh, "Reacting typed initialization callback",
+                [&]
                 {
-                    const auto cell = static_cast<local_ordinal_type>(owned);
-                    auto environment =
-                        species_environment(cell, time, temperature.value(cell), d_mesh->cell_volume(cell));
-                    environment.liquidVolume = 0.0; // Preserve the initial callback's existing volume contract.
-                    states.push_back(d_options.initial_species_state(environment,
-                        static_cast<std::int64_t>(d_mesh->cell_global_id(cell))));
-                    const Reacting::ReactionContext context{catalog, states.back(), environment};
-                    numbers.push_back(d_options.initial_population_numbers ? d_options.initial_population_numbers(context)
-                        : std::vector<double>(d_options.population_ids.size(), 0.0));
-                }
-            });
+                    if (!d_options.initial_species_state)
+                        throw std::logic_error("Supply initial_species_state or initialize_species before deriving typed fields.");
+                    const auto& catalog = d_options.reaction_mechanism->catalog();
+                    for (std::size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
+                    {
+                        const auto cell = static_cast<local_ordinal_type>(owned);
+                        auto environment =
+                            species_environment(cell, time, temperature.value(cell), d_mesh->cell_volume(cell));
+                        environment.liquidVolume = 0.0; // Preserve the initial callback's existing volume contract.
+                        states.push_back(d_options.initial_species_state(environment,
+                            static_cast<std::int64_t>(d_mesh->cell_global_id(cell))));
+                        const Reacting::ReactionContext context{catalog, states.back(), environment};
+                        numbers.push_back(d_options.initial_population_numbers ? d_options.initial_population_numbers(context)
+                            : std::vector<double>(d_options.population_ids.size(), 0.0));
+                    }
+                });
             initialize_species(states, numbers);
         }
         reconstruct_species_derived(temperature);
         sync_all_fields();
         return;
-    }    if (mode() != ReactingGasMode::TwoPopulation)
-    {
-        throw std::logic_error(
-            "Only Sheng two-population reacting_gas has a derived initial state.");
     }
-    if (!std::isfinite(time))
+    catch (...)
     {
-        throw std::invalid_argument(
-            "Reacting gas initialization time must be finite.");
+        restore_for_initialization_rollback(prior);
+        throw;
     }
-    if (&temperature.mesh() != d_mesh.get()
-        || &gauge_pressure.mesh() != d_mesh.get()
-        || &velocity.mesh() != d_mesh.get()
-        || &material.density.mesh() != d_mesh.get())
-    {
-        throw std::invalid_argument(
-            "Reacting gas initial fields are on the wrong mesh.");
-    }
-    if (d_initial_state_initialized && !force)
-    {
-        return;
-    }
-    if (force)
-    {
-        initialize_fields();
-        configure_species_fields();
-    }
-
-    reconstruct_absolute_pressure(time, gauge_pressure);
-    reconstruct_derived_fields(
-        temperature,
-        material.density,
-        material.dynamic_viscosity);
-
-    const auto published_concentration = std::min(
-        static_cast<scalar_type>(d_options.initial_dissolved_hydrogen),
-        static_cast<scalar_type>(d_options.max_concentration));
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        const auto liquid_fraction = d_alpha_l.value(cell_lid);
-        const auto dissolved_inventory =
-            liquid_fraction * d_options.initial_dissolved_hydrogen;
-        d_dissolved_hydrogen_inventory.set_owned_value(
-            cell_lid, dissolved_inventory);
-        if (d_donor_tracking_enabled)
-            d_donor_hydrogen_deficit.set_owned_value(cell_lid,
-                dissolved_inventory + d_micro_moles.value(cell_lid) + d_large_moles.value(cell_lid));
-        d_dissolved_hydrogen.set_owned_value(
-            cell_lid, published_concentration);
-        d_excluded_dissolved_inventory.set_owned_value(
-            cell_lid,
-            std::max(
-                dissolved_inventory
-                  - liquid_fraction * published_concentration,
-                scalar_type{}));
-        d_source_alpha_reaction.set_owned_value(cell_lid, scalar_type{});
-        d_previous_temperature.set_owned_value(
-            cell_lid, temperature.value(cell_lid));
-        d_previous_density.set_owned_value(
-            cell_lid, material.density.value(cell_lid));
-        d_previous_dynamic_viscosity.set_owned_value(
-            cell_lid, material.dynamic_viscosity.value(cell_lid));
-        d_previous_alpha_g.set_owned_value(
-            cell_lid, d_alpha_g.value(cell_lid));
-    }
-
-    d_history_initialized = true;
-    d_initial_state_initialized = true;
-    d_last_statistics = {};
-    sync_all_fields();
 }
 
-/**
- * @brief Sum one scalar value over the model communicator.
- * @tparam Pack Tpetra type pack used by the model.
- * @param local_value Rank-local contribution.
- * @return Communicator-wide sum.
- */
 template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::global_sum(
-    scalar_type local_value) const -> scalar_type
+auto ReactingGasModel<Pack, MeshType>::global_sum(scalar_type local_value) const -> scalar_type
 {
     scalar_type global_value{};
     const auto communicator = d_mesh->owned_cell_map()->getComm();
@@ -461,15 +223,8 @@ auto ReactingGasModel<Pack, MeshType>::global_sum(
     return global_value;
 }
 
-/**
- * @brief Compute the communicator-wide minimum of a scalar value.
- * @tparam Pack Tpetra type pack used by the model.
- * @param local_value Rank-local value.
- * @return Communicator-wide minimum.
- */
 template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::global_min(
-    scalar_type local_value) const -> scalar_type
+auto ReactingGasModel<Pack, MeshType>::global_min(scalar_type local_value) const -> scalar_type
 {
     scalar_type global_value{};
     const auto communicator = d_mesh->owned_cell_map()->getComm();
@@ -482,14 +237,7 @@ auto ReactingGasModel<Pack, MeshType>::global_min(
     return global_value;
 }
 
-/**
- * @brief Compute the communicator-wide maximum of an integer diagnostic.
- * @tparam Pack Tpetra type pack used by the model.
- * @param local_value Rank-local diagnostic.
- * @return Communicator-wide maximum.
- */
-template<TpetraTypePack Pack, class MeshType>
-int ReactingGasModel<Pack, MeshType>::global_max(int local_value) const
+template<TpetraTypePack Pack, class MeshType> int ReactingGasModel<Pack, MeshType>::global_max(int local_value) const
 {
     int global_value{};
     const auto communicator = d_mesh->owned_cell_map()->getComm();
@@ -502,106 +250,6 @@ int ReactingGasModel<Pack, MeshType>::global_max(int local_value) const
     return global_value;
 }
 
-/**
- * @brief Reduce local event counters into rank-consistent statistics.
- * @tparam Pack Tpetra type pack used by the model.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::reduce_event_statistics()
-{
-    const int local_counts[]{
-        d_last_statistics.clipped_cells,
-        d_last_statistics.pressure_floor_cells,
-        d_last_statistics.radius_solver_failures};
-    int global_counts[3]{};
-    const auto communicator = d_mesh->owned_cell_map()->getComm();
-    Teuchos::reduceAll(
-        *communicator,
-        Teuchos::REDUCE_SUM,
-        3,
-        local_counts,
-        global_counts);
-    d_last_statistics.maximum_subcycles = global_max(
-        d_last_statistics.maximum_subcycles);
-    d_last_statistics.clipped_cells = global_counts[0];
-    d_last_statistics.pressure_floor_cells = global_counts[1];
-    d_last_statistics.radius_solver_failures = global_counts[2];
-
-    auto& transfer = d_last_statistics.mass_transfer;
-    const std::array<long long, 3> local_transfer_counts{
-        transfer.evaluations, transfer.low_peclet_evaluations,
-        transfer.fit_evaluations};
-    std::array<long long, 3> global_transfer_counts{};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_SUM,
-                       static_cast<int>(local_transfer_counts.size()),
-                       local_transfer_counts.data(), global_transfer_counts.data());
-    constexpr auto absent_min = std::numeric_limits<scalar_type>::infinity();
-    constexpr auto absent_max = -std::numeric_limits<scalar_type>::infinity();
-    const auto values = [](const BubbleGasPhysics::BubbleMassTransferResult& value)
-    {
-        return std::array<scalar_type, 11>{
-            value.radius, value.diameter, value.relative_speed,
-            value.liquid_density, value.dynamic_viscosity, value.diffusivity,
-            value.reynolds, value.schmidt, value.peclet,
-            value.sherwood, value.coefficient};
-    };
-    std::array<scalar_type, 11> local_minimum{}, local_maximum{};
-    local_minimum.fill(absent_min);
-    local_maximum.fill(absent_max);
-    if (transfer.evaluations > 0)
-    {
-        local_minimum = values(transfer.minimum);
-        local_maximum = values(transfer.maximum);
-    }
-    std::array<scalar_type, 11> global_minimum{}, global_maximum{};
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MIN,
-                       static_cast<int>(local_minimum.size()),
-                       local_minimum.data(), global_minimum.data());
-    Teuchos::reduceAll(*communicator, Teuchos::REDUCE_MAX,
-                       static_cast<int>(local_maximum.size()),
-                       local_maximum.data(), global_maximum.data());
-    transfer.evaluations = global_transfer_counts[0];
-    transfer.low_peclet_evaluations = global_transfer_counts[1];
-    transfer.fit_evaluations = global_transfer_counts[2];
-    if (transfer.evaluations > 0)
-    {
-        const auto assign = [&](BubbleGasPhysics::BubbleMassTransferResult& result,
-                                const std::array<scalar_type, 11>& data)
-        {
-            result.model = d_options.mass_transfer_mode;
-            if (d_options.mass_transfer_mode == BubbleMassTransferMode::SphericalDiffusion)
-                result.applicability = BubbleGasPhysics::BubbleMassTransferApplicability::DiffusionOnlyReference;
-            else if (d_options.mass_transfer_mode == BubbleMassTransferMode::LegacyHughmark)
-                result.applicability = BubbleGasPhysics::BubbleMassTransferApplicability::LegacyScGuardPassed;
-            else if (transfer.low_peclet_evaluations > 0 && transfer.fit_evaluations > 0)
-                result.applicability = BubbleGasPhysics::BubbleMassTransferApplicability::MixedSourceRegimes;
-            else if (transfer.low_peclet_evaluations > 0)
-                result.applicability = BubbleGasPhysics::BubbleMassTransferApplicability::SourceLowPeAsymptotic;
-            else
-                result.applicability = BubbleGasPhysics::BubbleMassTransferApplicability::SourceFitOperationalWindow;
-            result.radius = data[0];
-            result.diameter = data[1];
-            result.relative_speed = data[2];
-            result.liquid_density = data[3];
-            result.dynamic_viscosity = data[4];
-            result.diffusivity = data[5];
-            result.reynolds = data[6];
-            result.schmidt = data[7];
-            result.peclet = data[8];
-            result.sherwood = data[9];
-            result.coefficient = data[10];
-        };
-        assign(transfer.minimum, global_minimum);
-        assign(transfer.maximum, global_maximum);
-    }
-}
-
-/**
- * @brief Integrate an owned cell field over the distributed mesh volume.
- * @tparam Pack Tpetra type pack used by the model.
- * @param field Cell field to integrate.
- * @return Global volume integral.
- */
 template<TpetraTypePack Pack, class MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_integral(
     const field_type& field, std::span<const real_t> cell_volumes) const -> scalar_type
@@ -625,117 +273,20 @@ auto ReactingGasModel<Pack, MeshType>::global_integral(
     return global_sum(static_cast<scalar_type>(local_integral.value()));
 }
 
-/** @brief Reduce the five independent transport inventories together. */
 template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::population_integrals(
-    std::span<const real_t> cell_volumes) const -> std::array<scalar_type, 5>
-{
-    if (!cell_volumes.empty() && cell_volumes.size() != d_mesh->num_local_cells())
-        throw std::invalid_argument("Reacting integral volume span must use mesh-local cell order.");
-    std::array<scalar_type, 5> local{}, global{};
-    // The transport guard resolves changes at tens of scalar epsilons.
-    // Compensate before rounding to the MPI scalar so cell count and changed
-    // spatial distributions do not create an apparent inventory increase.
-    std::array<detail::CompensatedSum<>, 5> accumulated{};
-    {
-        const std::array values{
-            d_dissolved_hydrogen_inventory.owned_read_view(), d_micro_moles.owned_read_view(),
-            d_large_moles.owned_read_view(), d_micro_number.owned_read_view(), d_large_number.owned_read_view()};
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto volume = cell_volumes.empty()
-                ? static_cast<scalar_type>(d_mesh->cell_volume(static_cast<local_ordinal_type>(owned)))
-                : static_cast<scalar_type>(cell_volumes[owned]);
-            for (size_t column = 0; column < values.size(); ++column)
-                accumulated[column] += static_cast<long double>(values[column](owned, 0)) * volume;
-        }
-    }
-    for (size_t column = 0; column < local.size(); ++column)
-        local[column] = static_cast<scalar_type>(accumulated[column].value());
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
-        static_cast<int>(local.size()), local.data(), global.data());
-    return global;
-}
-
-/**
- * @brief Compute dissolved plus bubble hydrogen inventory over the mesh.
- * @tparam Pack Tpetra type pack used by the model.
- * @return Global hydrogen inventory in moles.
- */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::total_hydrogen_inventory(
-    std::span<const real_t> cell_volumes) const
-    -> scalar_type
-{
-    return global_integral(d_dissolved_hydrogen_inventory, cell_volumes) +
-           global_integral(d_micro_moles, cell_volumes) +
-           global_integral(d_large_moles, cell_volumes);
-}
-
-/** @brief Return the global dissolved H2 inventory. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-global_dissolved_hydrogen_moles() const -> scalar_type
-{
-    return global_integral(d_dissolved_hydrogen_inventory);
-}
-
-/** @brief Return the global submerged microbubble H2 inventory. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-global_microbubble_hydrogen_moles() const -> scalar_type
-{
-    return global_integral(d_micro_moles);
-}
-
-/** @brief Return the global submerged large-bubble H2 inventory. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-global_large_bubble_hydrogen_moles() const -> scalar_type
-{
-    return global_integral(d_large_moles);
-}
-
-/** @brief Return the global H2 inventory in submerged gas-phase bubbles. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-global_submerged_bubble_hydrogen_moles() const -> scalar_type
-{
-    return global_microbubble_hydrogen_moles()
-         + global_large_bubble_hydrogen_moles();
-}
-
-/** @brief Return dissolved plus bubble H2 inventory still in the pool. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-global_submerged_hydrogen_moles() const -> scalar_type
-{
-    return global_dissolved_hydrogen_moles()
-         + global_submerged_bubble_hydrogen_moles();
-}
-
-/** @brief Return the volume integral of the unbounded EOS-derived void. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-global_submerged_bubble_volume() const -> scalar_type
+auto ReactingGasModel<Pack, MeshType>::global_submerged_bubble_volume() const -> scalar_type
 {
     return global_integral(d_alpha_g_raw);
 }
 
-/** @brief Return raw bubble volume hidden by the hydrodynamic alpha cap. */
 template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-global_unrepresented_bubble_volume() const -> scalar_type
+auto ReactingGasModel<Pack, MeshType>::global_unrepresented_bubble_volume() const -> scalar_type
 {
     return global_integral(d_alpha_g_excess);
 }
 
-/**
- * @brief Return the lowest pressure offset valid for the accepted gauge field.
- */
 template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-minimum_valid_absolute_pressure_offset() const -> scalar_type
+auto ReactingGasModel<Pack, MeshType>::minimum_valid_absolute_pressure_offset() const -> scalar_type
 {
     if (d_options.pressure_mode != ReactingPressureMode::Constant
         && d_options.pressure_mode != ReactingPressureMode::Reconstructed)
@@ -790,216 +341,15 @@ minimum_valid_absolute_pressure_offset() const -> scalar_type
     return minimum_offset;
 }
 
-/**
- * @brief Evaluate the submerged raw bubble volume at a candidate offset.
- */
 template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::
-evaluate_submerged_bubble_volume(
+auto ReactingGasModel<Pack, MeshType>::evaluate_submerged_bubble_volume(
     scalar_type candidate_absolute_pressure_offset) const -> scalar_type
 {
-    if (species_enabled()) return evaluate_species_bubble_volume(candidate_absolute_pressure_offset);
-    if (mode() != ReactingGasMode::TwoPopulation)
-    {
-        throw std::logic_error(
-            "Submerged bubble volume evaluation requires Sheng "
-            "two-population reacting_gas.");
-    }
-    if (!d_initial_state_initialized)
-    {
-        throw std::logic_error(
-            "Submerged bubble volume evaluation requires initialized state.");
-    }
-    if (d_options.pressure_mode != ReactingPressureMode::Constant
-        && d_options.pressure_mode != ReactingPressureMode::Reconstructed)
-    {
-        throw std::logic_error(
-            "Candidate pressure offsets require constant or reconstructed "
-            "reacting pressure mode.");
-    }
-    const int local_invalid_candidate =
-        !std::isfinite(candidate_absolute_pressure_offset);
-    if (global_max(local_invalid_candidate) != 0)
-    {
-        throw std::invalid_argument(
-            "Candidate absolute-pressure offset must be finite on every "
-            "rank.");
-    }
-    const auto minimum_offset =
-        minimum_valid_absolute_pressure_offset();
-    const int local_outside_domain =
-        candidate_absolute_pressure_offset < minimum_offset;
-    if (global_max(local_outside_domain) != 0)
-    {
-        throw std::invalid_argument(
-            "Candidate absolute-pressure offset is below the collective "
-            "minimum allowed by the configured pressure floor and accepted "
-            "gauge-pressure variation.");
-    }
-
-    const auto pressure_shift =
-        candidate_absolute_pressure_offset - d_absolute_pressure_offset;
-    scalar_type local_volume{};
-    int local_invalid_state = 0;
-    int local_radius_failure = 0;
-    int local_evaluation_failure = 0;
-    std::string local_evaluation_detail;
-    BubbleGasPhysics::BubbleMassTransferEvaluator transfer_evaluator = nullptr;
-    try
-    {
-        transfer_evaluator = BubbleGasPhysics::select_bubble_mass_transfer_evaluator(
-            d_options.mass_transfer_mode);
-    }
-    catch (const std::exception& error)
-    {
-        local_evaluation_failure = 1;
-        local_evaluation_detail = error.what();
-    }
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        if (local_evaluation_failure)
-            break;
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        try
-        {
-            const auto pressure =
-                d_absolute_pressure.value(cell_lid) + pressure_shift;
-            const auto temperature =
-                d_previous_temperature.value(cell_lid);
-            const auto surface_tension =
-                BubbleGasPhysics::surface_tension(d_options, temperature);
-            if (!std::isfinite(pressure)
-                || pressure < d_options.minimum_absolute_pressure
-                || !std::isfinite(temperature) || temperature <= 0.0
-                || !std::isfinite(surface_tension)
-                || surface_tension < 0.0)
-            {
-                local_invalid_state = 1;
-                continue;
-            }
-
-            const auto nucleation_radius =
-                BubbleGasPhysics::nucleation_radius(d_options, temperature, pressure);
-            if (!std::isfinite(nucleation_radius)
-                || nucleation_radius < d_options.min_radius
-                || nucleation_radius > d_options.max_radius)
-            {
-                local_invalid_state = 1;
-                continue;
-            }
-            const auto diffusivity = BubbleGasPhysics::hydrogen_diffusivity(d_options, temperature);
-            const auto density = d_previous_density.value(cell_lid);
-            const auto viscosity =
-                d_previous_dynamic_viscosity.value(cell_lid);
-
-            const auto population_radius =
-                [&](scalar_type number, scalar_type moles)
-            {
-                if (number <= d_options.min_population || moles <= 0.0)
-                    return scalar_type{};
-                const auto radius =
-                    BubbleGasPhysics::solve_bubble_radius(
-                        moles / number,
-                        pressure,
-                        surface_tension,
-                        d_options.gas_constant,
-                        temperature,
-                        d_options.min_radius,
-                        d_options.max_radius,
-                        d_options.max_radius_iterations,
-                        d_options.local_ode_tolerance);
-                if (!radius.converged)
-                {
-                    local_radius_failure = 1;
-                    return scalar_type{};
-                }
-                return static_cast<scalar_type>(radius.radius);
-            };
-            const auto micro_radius = population_radius(
-                d_micro_number.value(cell_lid),
-                d_micro_moles.value(cell_lid));
-            const auto large_radius = population_radius(
-                d_large_number.value(cell_lid),
-                d_large_moles.value(cell_lid));
-            const auto raw_void =
-                BubbleGasPhysics::bubble_void_fraction(
-                    d_micro_number.value(cell_lid), micro_radius)
-              + BubbleGasPhysics::bubble_void_fraction(
-                    d_large_number.value(cell_lid), large_radius);
-            const auto characteristic_radius =
-                BubbleGasPhysics::characteristic_radius(
-                    d_micro_number.value(cell_lid),
-                    micro_radius,
-                    d_large_number.value(cell_lid),
-                    large_radius);
-            const auto equilibrium_radius = large_radius > 0.0
-                ? large_radius : nucleation_radius;
-            (void)BubbleGasPhysics::henry_equilibrium_concentration(
-                d_options.henry_coefficient,
-                pressure,
-                surface_tension,
-                nucleation_radius);
-            (void)BubbleGasPhysics::henry_equilibrium_concentration(
-                d_options.henry_coefficient,
-                pressure,
-                surface_tension,
-                equilibrium_radius);
-            if (characteristic_radius > 0.0)
-            {
-                (void)evaluate_mass_transfer(
-                    transfer_evaluator, cell_lid, "characteristic-radius preflight",
-                    characteristic_radius, diffusivity, density, viscosity,
-                    rise_velocity(characteristic_radius, density, viscosity,
-                                  surface_tension));
-            }
-            local_volume += raw_void * d_mesh->cell_volume(cell_lid);
-        }
-        catch (const std::exception& error)
-        {
-            local_evaluation_failure = 1;
-            if (local_evaluation_detail.empty())
-                local_evaluation_detail = error.what();
-        }
-        catch (...)
-        {
-            local_evaluation_failure = 1;
-        }
-    }
-
-    if (global_max(local_invalid_state) != 0)
-    {
-        throw std::invalid_argument(
-            "Candidate pressure offset produces an invalid thermodynamic "
-            "state.");
-    }
-    if (global_max(local_radius_failure) != 0)
-    {
-        throw std::runtime_error(
-            "Candidate pressure offset could not reconstruct a bubble radius.");
-    }
-    if (global_max(local_evaluation_failure) != 0)
-    {
-        const int local_rank = local_evaluation_failure
-            ? d_mesh->owned_cell_map()->getComm()->getRank()
-            : std::numeric_limits<int>::max();
-        int first_rank = 0;
-        Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(),
-            Teuchos::REDUCE_MIN, 1, &local_rank, &first_rank);
-        throw std::runtime_error(local_evaluation_detail.empty()
-            ? "Candidate pressure offset failed a local correlation on rank "
-                + std::to_string(first_rank) + "; the candidate was not accepted."
-            : "Candidate pressure offset rejected: " + local_evaluation_detail);
-    }
-    return global_sum(local_volume);
+    return evaluate_species_bubble_volume(candidate_absolute_pressure_offset);
 }
 
-/**
- * @brief Shift the accepted absolute-pressure offset without changing gauge variation.
- */
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(
-    scalar_type pressure_offset)
+void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(scalar_type pressure_offset)
 {
     if (d_options.pressure_mode != ReactingPressureMode::Constant &&
         d_options.pressure_mode != ReactingPressureMode::Reconstructed)
@@ -1031,62 +381,23 @@ void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(
                                     "variation.");
     }
 
-    if (species_enabled() && d_initial_state_initialized)
+    if (d_initial_state_initialized)
     {
         set_species_absolute_pressure_offset(pressure_offset);
         return;
     }
-
-    if (mode() == ReactingGasMode::TwoPopulation && d_initial_state_initialized)
+    const auto shift = pressure_offset - d_absolute_pressure_offset;
+    for (std::size_t row = 0; row < d_mesh->num_owned_cells(); ++row)
     {
-        // Validate every EOS radius collectively before mutating accepted
-        // pressure or derived state.
-        (void)evaluate_submerged_bubble_volume(pressure_offset);
-    }
-
-    const auto pressure_shift =
-        pressure_offset - d_absolute_pressure_offset;
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        d_absolute_pressure.set_owned_value(
-            cell_lid,
-            d_absolute_pressure.value(cell_lid) + pressure_shift);
+        const auto cell = static_cast<local_ordinal_type>(row);
+        d_absolute_pressure.set_owned_value(cell, d_absolute_pressure.value(cell) + shift);
     }
     d_absolute_pressure_offset = pressure_offset;
-
-    if (mode() == ReactingGasMode::TwoPopulation
-        && d_initial_state_initialized)
-    {
-        reconstruct_derived_fields(
-            d_previous_temperature,
-            d_previous_density,
-            d_previous_dynamic_viscosity,
-            false);
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            d_previous_alpha_g.set_owned_value(
-                cell_lid, d_alpha_g.value(cell_lid));
-        }
-        d_last_statistics.void_volume = global_integral(d_alpha_g);
-        sync_all_fields();
-        return;
-    }
     d_absolute_pressure.sync_ghosts();
 }
 
-/**
- * @brief Interpolate the prescribed absolute-pressure history.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time Physical time at which to sample the history.
- * @return Clamped, linearly interpolated absolute pressure.
- */
 template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::prescribed_pressure(
-    scalar_type time) const -> scalar_type
+auto ReactingGasModel<Pack, MeshType>::prescribed_pressure(scalar_type time) const -> scalar_type
 {
     const auto& times = d_options.pressure_history_times;
     const auto& values = d_options.pressure_history_values;
@@ -1108,26 +419,11 @@ auto ReactingGasModel<Pack, MeshType>::prescribed_pressure(
          + fraction * (values[high] - values[low]);
 }
 
-/**
- * @brief Reconstruct absolute pressure for the configured pressure mode.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time Current physical time.
- * @param gauge_pressure Cell gauge pressure in Pa.
- */
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::reconstruct_absolute_pressure(
-    scalar_type time,
-    const field_type& gauge_pressure)
+void ReactingGasModel<Pack, MeshType>::reconstruct_absolute_pressure(scalar_type time, const field_type& gauge_pressure)
 {
-    if (d_options.pressure_mode == ReactingPressureMode::Inertial
-        && d_history_initialized)
-    {
-        return;
-    }
-
-    if (d_options.pressure_mode == ReactingPressureMode::Constant
-        || d_options.pressure_mode
-            == ReactingPressureMode::PrescribedHistory)
+    if (d_options.pressure_mode == ReactingPressureMode::Constant ||
+        d_options.pressure_mode == ReactingPressureMode::PrescribedHistory)
     {
         d_absolute_pressure.put_scalar(
             d_options.pressure_mode
@@ -1173,280 +469,21 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_absolute_pressure(
     d_absolute_pressure.sync_ghosts();
 }
 
-/**
- * @brief Update the ideal-gas void-fraction source from prescribed_heat power.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time_step Positive physical time step.
- * @param temperature Cell temperature field.
- * @param prescribed_heat_density Required prescribed_heat power-density field.
- * @param alpha_g Authoritative gas void fraction.
- * @param alpha_max Upper bound for gas void fraction.
- * @throws std::invalid_argument if required fields or values are invalid.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::update_ideal_gas_source(
-    scalar_type time_step,
-    const field_type& temperature,
-    const field_type* prescribed_heat_density,
-    const field_type& alpha_g,
-    scalar_type alpha_max)
-{
-    if (!prescribed_heat_density)
-    {
-        throw std::invalid_argument(
-            "Enabled reacting_gas requires a prescribed_heat power source.");
-    }
-    if (!std::isfinite(time_step) || time_step <= 0.0)
-    {
-        throw std::invalid_argument(
-            "Reacting gas timestep must be finite and positive.");
-    }
-
-    {
-        const auto alpha_values = alpha_g.owned_read_view();
-        const auto temperature_values = temperature.owned_read_view();
-        const auto pressure_values = d_absolute_pressure.owned_read_view();
-        const auto power_values = prescribed_heat_density->owned_read_view();
-        const auto source_values = d_source_alpha_reaction.owned_write_view();
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            const auto alpha = alpha_values(owned, 0);
-            BubbleGasPhysics::require_positive(temperature_values(owned, 0), "temperature");
-            BubbleGasPhysics::require_positive(pressure_values(owned, 0), "absolute pressure");
-            scalar_type source{};
-            if (alpha < alpha_max && power_values(owned, 0) > 0.0)
-            {
-                source = BubbleGasPhysics::ideal_gas_alpha_source(
-                    1.0 - alpha,
-                    d_options.gas_release_efficiency,
-                    d_options.hydrogen_yield_mol_per_j,
-                    power_values(owned, 0),
-                    d_options.gas_constant,
-                    temperature_values(owned, 0),
-                    pressure_values(owned, 0),
-                    d_options.max_source_alpha_rate);
-                source = std::min(source, (alpha_max - alpha) / time_step);
-            }
-            source_values(owned, 0) = source;
-        }
-    }
-    d_source_alpha_reaction.sync_ghosts();
-}
-
-/**
- * @brief Evaluate the configured bubble slip velocity.
- * @tparam Pack Tpetra type pack used by the model.
- * @param radius Bubble radius.
- * @param liquid_density Liquid density.
- * @param dynamic_viscosity Liquid dynamic viscosity.
- * @param surface_tension Liquid-gas surface tension.
- * @return Non-negative rise speed.
- * @throws std::invalid_argument if correlation inputs are invalid.
- * @throws std::runtime_error if the Celata iteration does not converge.
- */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::rise_velocity(
-    scalar_type radius,
-    scalar_type liquid_density,
-    scalar_type dynamic_viscosity,
-    scalar_type surface_tension) const -> scalar_type
-{
-    switch (d_options.rise_velocity_mode)
-    {
-        case BubbleRiseVelocityMode::ZeroSlip:
-            return 0.0;
-        case BubbleRiseVelocityMode::ConstantSlip:
-            return d_options.constant_slip_velocity;
-        case BubbleRiseVelocityMode::Celata2007:
-        {
-            const auto result =
-                BubbleGasPhysics::celata2007_bubble_rise_velocity(
-                    radius,
-                    liquid_density,
-                    d_options.bubble_gas_density,
-                    dynamic_viscosity,
-                    surface_tension,
-                    d_options.bubble_gravity,
-                    d_options.max_rise_velocity_iterations,
-                    d_options.rise_velocity_tolerance);
-            if (!result.converged)
-            {
-                throw std::runtime_error(
-                    "Celata 2007 bubble-rise solve did not converge.");
-            }
-            return result.velocity;
-        }
-    }
-    return 0.0;
-}
-
-/** Build the raw bubble-volume flux carried by the configured slip law. */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::bubble_slip_volume_flux(
-    const field_type& temperature, const material_type& material,
-    Dimension slip_axis, face_flux_field_type& output) const
-{
-    const auto component = static_cast<int>(slip_axis);
-    if (component < static_cast<int>(Dimension::X) || component > static_cast<int>(Dimension::Z) ||
-        temperature.mesh_ptr().get() != d_mesh.get() || material.density.mesh_ptr().get() != d_mesh.get() ||
-        material.dynamic_viscosity.mesh_ptr().get() != d_mesh.get() || output.mesh_ptr().get() != d_mesh.get())
-    {
-        throw std::invalid_argument(
-            "Reacting bubble slip-volume flux requires one mesh and an X, Y, or Z axis.");
-    }
-
-    auto is_free_surface = [&](local_ordinal_type face_lid)
-    {
-        if (!d_mesh->is_boundary_face(face_lid))
-            return false;
-        const auto& name = d_mesh->boundary_batch_name(d_mesh->boundary_id(face_lid));
-        return std::ranges::find(d_options.free_surface_patches, name) != d_options.free_surface_patches.end();
-    };
-    collective_detail::collective_local_validation(
-        *d_mesh, "Reacting bubble slip-volume flux", [&]
-        {
-            const auto temperature_values = temperature.local_read_view();
-            const auto density_values = material.density.local_read_view();
-            const auto viscosity_values = material.dynamic_viscosity.local_read_view();
-            const auto micro_radius_values = d_micro_radius.local_read_view();
-            const auto large_radius_values = d_large_radius.local_read_view();
-            const auto micro_alpha_values = d_alpha_g_micro.local_read_view();
-            const auto large_alpha_values = d_alpha_g_large.local_read_view();
-            const auto output_values = output.owned_write_view();
-            const auto cell_speed = [&](local_ordinal_type cell_lid, scalar_type radius)
-            {
-                if (!(radius > scalar_type{}))
-                    return scalar_type{};
-                const auto surface_tension = BubbleGasPhysics::surface_tension(d_options, temperature_values(cell_lid, 0));
-                return rise_velocity(radius, density_values(cell_lid, 0),
-                    viscosity_values(cell_lid, 0), surface_tension);
-            };
-            for (const auto face_lid : output.owned_face_ids())
-            {
-                const auto area_component = static_cast<scalar_type>(
-                    d_mesh->face_area_vector(face_lid).component(static_cast<size_t>(component)));
-                const auto owner = d_mesh->owner_cell(face_lid);
-                auto micro_speed = cell_speed(owner, micro_radius_values(owner, 0));
-                auto large_speed = cell_speed(owner, large_radius_values(owner, 0));
-                local_ordinal_type neighbor = owner;
-                if (d_mesh->is_interior_face(face_lid))
-                {
-                    neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
-                    micro_speed = scalar_type{0.5} *
-                                  (micro_speed + cell_speed(neighbor, micro_radius_values(neighbor, 0)));
-                    large_speed = scalar_type{0.5} *
-                                  (large_speed + cell_speed(neighbor, large_radius_values(neighbor, 0)));
-                }
-                const auto population_flux = [&](scalar_type speed, const auto& raw_alpha)
-                {
-                    const auto kinematic_flux = speed * area_component;
-                    const auto upwind = kinematic_flux >= scalar_type{} ? owner : neighbor;
-                    return kinematic_flux * raw_alpha(upwind, 0);
-                };
-                auto flux = population_flux(micro_speed, micro_alpha_values) +
-                            population_flux(large_speed, large_alpha_values);
-                if (d_mesh->is_boundary_face(face_lid))
-                {
-                    flux = is_free_surface(face_lid) ? std::max(flux, scalar_type{}) : scalar_type{};
-                }
-                output_values(output.owned_row(face_lid), 0) = flux;
-            }
-        });
-    if constexpr (requires { output.sync_ghosts(); })
-        output.sync_ghosts();
-}
-
-/** @brief Prove auxiliary zero fields with one transport-local collective. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::zero_auxiliary_transport_fields() const -> std::array<bool, 4>
-{
-    std::array<bool, 4> zero{};
-    if (!d_skip_zero_auxiliary_transport)
-        return zero;
-    const std::array<const field_type*, 4> fields{&d_dissolved_hydrogen_inventory,
-        d_donor_tracking_enabled ? &d_donor_hydrogen_deficit : nullptr, &d_large_number, &d_large_moles};
-    // The fifth entry propagates local view/acquisition failures in the same
-    // reduction, before any rank can branch into transport communication.
-    std::array<int, 5> local{}, global{};
-    std::exception_ptr error;
-    try
-    {
-        for (size_t field = 0; field < fields.size(); ++field)
-        {
-            if (!fields[field])
-            {
-                local[field] = 1;
-                continue;
-            }
-            const auto values = fields[field]->owned_read_view();
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-                local[field] |= values(owned, 0) != scalar_type{};
-        }
-    }
-    catch (...)
-    {
-        error = std::current_exception();
-        local[4] = 1;
-    }
-    Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
-        static_cast<int>(local.size()), local.data(), global.data());
-    if (global[4])
-    {
-        if (error) std::rethrow_exception(error);
-        throw std::runtime_error("Reacting auxiliary zero detection failed on another rank.");
-    }
-    for (size_t field = 0; field < zero.size(); ++field)
-        zero[field] = global[field] == 0;
-    return zero;
-}
-
-/** @brief Reject callback writes that would invalidate a pending zero proof. */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::validate_pending_zero_auxiliary_fields(
-    const std::array<bool, 4>& pending_zero) const
-{
-    const std::array<const field_type*, 4> fields{
-        &d_dissolved_hydrogen_inventory, &d_donor_hydrogen_deficit, &d_large_number, &d_large_moles};
-    for (size_t field = 0; field < fields.size(); ++field)
-    {
-        if (!pending_zero[field])
-            continue;
-        const auto values = fields[field]->owned_read_view();
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            if (values(owned, 0) != scalar_type{})
-                throw std::logic_error("Reacting material callback modified an untransported zero auxiliary inventory.");
-    }
-}
-
-/**
- * @brief Transport one non-negative reacting inventory field.
- * @tparam Pack Tpetra type pack used by the model.
- * @param[in,out] field Inventory or population field to transport.
- * @param time_step Positive physical time step.
- * @param liquid_face_flux Oriented liquid volumetric flux.
- * @param slip_velocity Optional cell slip speed added in the axial direction.
- * @param diffusivity Molecular diffusivity.
- * @param diffusivity_temperature Optional cell temperatures for the selected correlation.
- * @param diffuse Whether diffusion is active.
- * @param liquid_weighted Whether storage and advection use liquid fraction.
- * @param[in,out] escape_rate Accumulated free-surface escape rate.
- * @throws std::invalid_argument if a field or transport input is invalid.
- * @throws std::runtime_error if the transport solve does not converge.
- */
 template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scalar_type time_step,
     const face_flux_field_type& liquid_face_flux, field_type* slip_velocity, scalar_type diffusivity, bool diffuse,
     bool liquid_weighted, field_type& escape_rate, const FVM::ALEControlVolumeState* ale, Dimension slip_axis,
-    size_t operator_slot, bool reuse_population_operator, const field_type* diffusivity_temperature,
-    const std::array<bool, 4>* pending_zero, const field_type* species_diffusivity,
+    size_t operator_slot, bool reuse_population_operator, const field_type* species_diffusivity,
     face_flux_field_type* canonical_molar_packet)
 {
     const auto started = std::chrono::steady_clock::now();
     const auto elapsed = [](auto begin)
     { return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count(); };
-    const size_t field_index = operator_slot == 0 ? 0 : 2 * operator_slot - 1 + reuse_population_operator;
-    auto& work = operator_slot == 3 ? d_last_statistics.donor_transport_work
-                                    : d_last_statistics.transport_work.at(field_index);
+    // Four operator roles share five work lanes: solution, population
+    // number/material, the auxiliary scalar role, and stationary Resolved.
+    const size_t field_index =
+        operator_slot == 1 ? 1 + size_t(reuse_population_operator) : operator_slot + (operator_slot > 1 ? 1 : 0);
+    auto& work = d_last_statistics.transport_work.at(field_index);
 
     if (&escape_rate.mesh() != d_mesh.get())
     {
@@ -1462,58 +499,7 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
     {
         ale->validate(*d_mesh, static_cast<real_t>(time_step));
     }
-    // This transport stage has no source, homogeneous Neumann data, and no
-    // incoming physical-boundary flux. Exact global zero is an invariant of
-    // this stage, irrespective of kinetics that may populate it afterward.
-    // The caller proved all auxiliary fields in one collective for this stage.
-    // No transport or property callback may invalidate a pending zero proof.
-    if (pending_zero != nullptr && operator_slot != 1)
-    {
-        const size_t auxiliary = operator_slot == 0 ? 0 : operator_slot == 3 ? 1 : 2 + reuse_population_operator;
-        if (pending_zero->at(auxiliary))
-        {
-            if (ale != nullptr && diffuse)
-            {
-                // The ALE zero solution does not need an assembled operator,
-                // but retain the dissolved field's provider and coefficient
-                // checks. Unit-weight donor/large fields share the carrier
-                // checks performed by the always-active micro transport.
-                int invalid_coefficients = 0;
-                collective_detail::collective_local_validation(*d_mesh, "Reacting diffusivity evaluation", [&]
-                    {
-                        const auto temperatures = diffusivity_temperature ? diffusivity_temperature->owned_read_view()
-                            : decltype(field.owned_read_view()){};
-                        const auto liquid_values = d_alpha_l.owned_read_view();
-                        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-                        {
-                            const auto liquid_fraction = std::max(liquid_values(owned, 0), 1.0e-15);
-                            const auto cell_diffusivity = diffusivity_temperature
-                                ? BubbleGasPhysics::hydrogen_diffusivity(d_options, temperatures(owned, 0)) : diffusivity;
-                            const auto diffusion = liquid_fraction * cell_diffusivity;
-                            invalid_coefficients |= !std::isfinite(liquid_fraction) || liquid_fraction <= 0.0
-                                || !std::isfinite(diffusion) || diffusion < 0.0;
-                        }
-                        if (d_options.diffusivity_mode == HydrogenDiffusivityMode::External)
-                            validate_pending_zero_auxiliary_fields(*pending_zero);
-                    });
-                // A provider can invalidate borrowed swept-flux data without
-                // mutating mesh coordinates. Preserve the assembly boundary's
-                // post-provider GCL check even though assembly is skipped.
-                ale->validate(*d_mesh, static_cast<real_t>(time_step));
-                int any_invalid_coefficients = 0;
-                Teuchos::reduceAll(*d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX,
-                    1, &invalid_coefficients, &any_invalid_coefficients);
-                if (any_invalid_coefficients)
-                    throw std::invalid_argument("weighted_scalar_transport_system requires finite positive storage and finite "
-                                                "non-negative advection and diffusion coefficients.");
-            }
-            // Global zero supplies the overlap values without an import.
-            field.put_scalar(scalar_type{});
-            ++work.skipped;
-            work.total_seconds += elapsed(started);
-            return;
-        }
-    }
+
     auto is_free_surface = [&](local_ordinal_type face_lid)
     {
         if (!d_mesh->is_boundary_face(face_lid))
@@ -1579,8 +565,6 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
         diffusion_weight.put_scalar(0.0);
         const auto assemble_weights = [&]
         {
-            const auto temperature_values = diffusivity_temperature ? diffusivity_temperature->owned_read_view()
-                : decltype(field.owned_read_view()){};
             const auto liquid_values = d_alpha_l.owned_read_view();
             const auto explicit_diffusivity =
                 species_diffusivity ? species_diffusivity->owned_read_view() : decltype(field.owned_read_view()){};
@@ -1591,26 +575,16 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
                 const auto raw_liquid_fraction = liquid_values(owned, 0);
-                if (species_enabled() &&
-                    (!std::isfinite(raw_liquid_fraction) || raw_liquid_fraction < 0.0 ||
+                if ((!std::isfinite(raw_liquid_fraction) || raw_liquid_fraction < 0.0 ||
                         (raw_liquid_fraction == 0.0 && liquid_weighted && field_values(owned, 0) != 0.0)))
                     throw std::invalid_argument("Species transport needs a finite physical liquid carrier.");
-                const auto liquid_fraction = species_enabled()
-                                                 ? (raw_liquid_fraction == 0.0 ? scalar_type{1} : raw_liquid_fraction)
-                                                 : std::max(raw_liquid_fraction, 1.0e-15);
-                old(owned, 0) = liquid_weighted ? field_values(owned, 0) / liquid_fraction
-                                              : field_values(owned, 0);
+                const auto liquid_fraction = raw_liquid_fraction == 0 ? scalar_type{1} : raw_liquid_fraction;
+                old(owned, 0) = liquid_weighted ? field_values(owned, 0) / liquid_fraction : field_values(owned, 0);
                 if (liquid_weighted)
                     storage(owned, 0) = liquid_fraction;
-                const auto cell_diffusivity =
-                    species_diffusivity ? explicit_diffusivity(owned, 0)
-                    : diffuse && diffusivity_temperature
-                    ? BubbleGasPhysics::hydrogen_diffusivity(d_options, temperature_values(owned, 0)) : diffusivity;
-                diffusion(owned, 0) = diffuse ? (species_enabled() ? raw_liquid_fraction : liquid_fraction) * cell_diffusivity : 0.0;
+                const auto cell_diffusivity = species_diffusivity ? explicit_diffusivity(owned, 0) : diffusivity;
+                diffusion(owned, 0) = diffuse ? raw_liquid_fraction * cell_diffusivity : 0.0;
             }
-            if (pending_zero != nullptr && diffuse &&
-                d_options.diffusivity_mode == HydrogenDiffusivityMode::External)
-                validate_pending_zero_auxiliary_fields(*pending_zero);
         };
         if (diffuse)
             collective_detail::collective_local_validation(*d_mesh, "Reacting diffusivity evaluation", assemble_weights);
@@ -1704,25 +678,28 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
     {
         std::array<detail::CompensatedSum<>, 3> accumulated;
         int invalid_candidate = 0;
+        size_t first_invalid_row = d_mesh->num_owned_cells();
         {
             const auto previous = field.owned_read_view();
             const auto candidate = solution.owned_read_view();
             const auto storage = storage_weight.owned_read_view();
             const auto advection = storage_weight.local_read_view();
             const auto flux = transport_flux.owned_read_view();
-            // Match the existing publication path, including its nonnegative
-            // clipping, so publication cannot introduce a new balance defect.
+            // Match publication's nonnegative inventory gate. An invalid
+            // candidate is rejected, never repaired for the balance sum.
             const auto published_value = [&](size_t owned)
             {
                 auto value = candidate(owned, 0);
                 if (liquid_weighted)
                     value *= storage(owned, 0);
-                if (!std::isfinite(value) || (species_enabled() && value < scalar_type{}))
+                if (!std::isfinite(value) || value < scalar_type{})
                 {
                     invalid_candidate = 1;
+                    if (first_invalid_row == d_mesh->num_owned_cells())
+                        first_invalid_row = owned;
                     return scalar_type{};
                 }
-                return species_enabled() ? value : std::max(value, scalar_type{});
+                return value;
             };
             for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
             {
@@ -1758,7 +735,78 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
             static_cast<int>(local.size()), local.data(), global.data());
         if (global[3] != scalar_type{} || !std::isfinite(global[0]) ||
             !std::isfinite(global[1]) || !std::isfinite(global[2]))
+        {
+            const auto comm = d_mesh->owned_cell_map()->getComm();
+            const int local_bad_rank =
+                first_invalid_row < d_mesh->num_owned_cells() ? comm->getRank() : std::numeric_limits<int>::max();
+            int first_bad_rank = std::numeric_limits<int>::max();
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_bad_rank, &first_bad_rank);
+            // All ranks enter the same error fence, including empty owners.
+            // Only the first bad owner formats its original row; peers reject.
+            collective_detail::collective_local_validation(*d_mesh, "Reacting transport invalid candidate inventory",
+                [&]
+                {
+                    if (comm->getRank() != first_bad_rank)
+                        return;
+                    const auto cell = static_cast<local_ordinal_type>(first_invalid_row);
+                    const auto row_gid = system.matrix->getRowMap()->getGlobalElement(cell);
+                    typename Pack::matrix_type::local_inds_host_view_type columns;
+                    typename Pack::matrix_type::values_host_view_type coefficients;
+                    system.matrix->getLocalRowView(cell, columns, coefficients);
+                    scalar_type diagonal{}, off_min = std::numeric_limits<scalar_type>::infinity(),
+                                            off_max = -std::numeric_limits<scalar_type>::infinity();
+                    size_t off_count = 0, positive_off = 0, nonfinite_coefficients = 0;
+                    for (size_t entry = 0; entry < columns.extent(0); ++entry)
+                    {
+                        const auto value = coefficients(entry);
+                        nonfinite_coefficients += !std::isfinite(value);
+                        if (system.matrix->getColMap()->getGlobalElement(columns(entry)) == row_gid)
+                            diagonal += value;
+                        else
+                        {
+                            ++off_count;
+                            positive_off += value > 0;
+                            off_min = std::min(off_min, value);
+                            off_max = std::max(off_max, value);
+                        }
+                    }
+                    if (off_count == 0)
+                        off_min = off_max = 0;
+                    std::string_view field_name = "unregistered";
+                    for (const auto& [name, pointer] : d_output_fields)
+                        if (pointer == &field)
+                        {
+                            field_name = name;
+                            break;
+                        }
+                    auto geometry_gid = d_mesh->cell_global_id(cell);
+                    if constexpr (requires { d_mesh->cell_geometry_global_id(cell); })
+                        geometry_gid = d_mesh->cell_geometry_global_id(cell);
+                    const auto raw = solution.owned_read_view()(first_invalid_row, 0);
+                    const auto weight = storage_weight.owned_read_view()(first_invalid_row, 0);
+                    std::ostringstream message;
+                    message << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
+                            << "Reacting transport produced an invalid candidate inventory: field=" << field_name
+                            << " operator_slot=" << operator_slot << " work_lane=" << field_index
+                            << " rank=" << first_bad_rank << " cell_lid=" << first_invalid_row
+                            << " cell_gid=" << row_gid << " geometry_gid=" << geometry_gid
+                            << " old=" << field.owned_read_view()(first_invalid_row, 0) << " raw_candidate=" << raw
+                            << " published_candidate=" << (liquid_weighted ? raw * weight : raw)
+                            << " storage=" << weight
+                            << " rhs=" << system.rhs->getLocalViewHost(Tpetra::Access::ReadOnly)(first_invalid_row, 0)
+                            << " diagonal=" << diagonal << " offdiag_min=" << off_min << " offdiag_max=" << off_max
+                            << " positive_offdiagonals=" << positive_off
+                            << " nonfinite_coefficients=" << nonfinite_coefficients
+                            << " solver=" << to_string(solve_options.backend) << '/'
+                            << to_string(solve_options.preconditioner) << " iterations=" << solve_statistics.iterations
+                            << " rhs_norm=" << solve_statistics.rhs_norm
+                            << " achieved_tolerance=" << solve_statistics.achieved_tolerance
+                            << " requested_tolerance=" << solve_options.tolerance
+                            << " converged=" << solve_statistics.converged;
+                    throw std::runtime_error(message.str());
+                });
             throw std::runtime_error("Reacting transport produced an invalid candidate inventory.");
+        }
         return {global[0], global[1], global[2],
             (global[1] - global[0]) + global[2],
             // Below the normal range, epsilon * inventory can underflow to
@@ -1814,8 +862,7 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
                 transported *= storage(owned, 0);
             if (!std::isfinite(transported) || transported < 0.0)
             {
-                ++d_last_statistics.clipped_cells;
-                transported = 0.0;
+                throw std::runtime_error("Reacting transport cannot publish a negative or nonfinite inventory.");
             }
             field_values(owned, 0) = transported;
         }
@@ -1883,1396 +930,22 @@ void ReactingGasModel<Pack, MeshType>::transport_scalar(field_type& field, scala
     work.total_seconds += elapsed(started);
 }
 
-/**
- * @brief Transport dissolved hydrogen and both bubble populations.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time_step Positive physical time step.
- * @param temperature Cell temperature field.
- * @param velocity Liquid velocity field.
- * @param liquid_face_flux Oriented liquid volumetric flux.
- * @param material Material-property fields.
- * @throws std::invalid_argument if property or transport inputs are invalid.
- * @throws std::runtime_error if a radius, rise, or transport solve fails.
- */
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::transport_populations(
-    scalar_type time_step,
-    const field_type& temperature,
-    const velocity_field_type& velocity,
-    const face_flux_field_type& liquid_face_flux,
-    const material_type& material,
-    const FVM::ALEControlVolumeState* ale,
-    Dimension slip_axis)
+void ReactingGasModel<Pack, MeshType>::advance(scalar_type time, scalar_type time_step, const field_type& temperature,
+    const field_type& gauge_pressure, const velocity_field_type& velocity, const face_flux_field_type& liquid_face_flux,
+    const material_type& material, const FVM::ALEControlVolumeState* ale, Dimension slip_axis)
 {
-    if (ale != nullptr && d_options.bubble_transport == BubbleTransportMode::Axial)
-    {
-        throw std::invalid_argument(
-            "planar ALE reacting transport requires bubble_transport_mode='general'; the historical axial mode "
-            "reconstructs an absolute carrier flux.");
-    }
-    if (!d_transport_workspace)
-        d_transport_workspace = std::make_unique<TransportWorkspace>(d_mesh);
-    // Hold the immutable geometry across all population transport queries.
-    // Nested assembly/ALE leases remain valid, and every existing GCL check
-    // still executes. Release on return or failure, before any later ALE
-    // mutation. Acquire collectively so a stale constituent on one rank
-    // cannot strand peers in a subsequent field import or transport solve.
-    using Execution = decltype(acquire_mesh_execution(*d_mesh));
-    std::unique_ptr<Execution> execution;
-    collective_detail::collective_local_validation(*d_mesh, "Reacting transport geometry execution", [&]
-        {
-            // Direct prvalue construction preserves copy elision for the
-            // nonmovable, thread-affine composite execution view.
-            execution.reset(new Execution(acquire_mesh_execution(*d_mesh)));
-        });
-    auto& workspace = *d_transport_workspace;
-    workspace.operator_ready.fill(false);
-    auto pending_zero = zero_auxiliary_transport_fields();
-    const auto* zero_proofs = d_skip_zero_auxiliary_transport ? &pending_zero : nullptr;
-    const auto old_cell_volumes = ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes();
-    const auto new_cell_volumes = ale == nullptr ? std::span<const real_t>{} : ale->new_cell_volumes();
-    const auto inventories_before = population_integrals(old_cell_volumes);
-
-    d_escape_molar_rate.put_scalar(0.0);
-    d_escape_number_rate.put_scalar(0.0);
-    const auto& zero_flux = workspace.zero_flux;
-    const auto& dissolved_flux =
-        d_options.dissolved_transport
-                == ReactingTransportMode::Advective
-            ? liquid_face_flux
-            : zero_flux;
-    transport_scalar(
-        d_dissolved_hydrogen_inventory,
-        time_step,
-        dissolved_flux,
-        nullptr,
-        d_options.hydrogen_diffusivity,
-        true,
-        true,
-        d_escape_molar_rate,
-        ale,
-        slip_axis, 0, false, &temperature, zero_proofs);
-    pending_zero[0] = false;
-
-    if (d_donor_tracking_enabled)
-    {
-        d_donor_escape_rate.put_scalar(0.0);
-        transport_scalar(d_donor_hydrogen_deficit, time_step, liquid_face_flux, nullptr,
-            0.0, false, false, d_donor_escape_rate, ale, slip_axis, 3, false, nullptr, zero_proofs);
-        pending_zero[1] = false;
-    }
-
-    auto& axial_bubble_flux = workspace.axial_flux;
-    const face_flux_field_type* bubble_liquid_flux =
-        &liquid_face_flux;
-    if (d_options.bubble_transport == BubbleTransportMode::Axial)
-    {
-        {
-            const auto velocity_values = velocity.local_read_view();
-            const auto flux_values = axial_bubble_flux.owned_write_view();
-            for (size_t face = 0; face < d_mesh->num_faces(); ++face)
-            {
-                const auto face_lid = static_cast<local_ordinal_type>(face);
-                if (!axial_bubble_flux.is_owned_face(face_lid))
-                    continue;
-                const auto owner = d_mesh->owner_cell(face_lid);
-                auto axial_velocity = velocity_values(owner, 2);
-                if (!d_mesh->is_boundary_face(face_lid))
-                {
-                    const auto neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
-                    axial_velocity = 0.5 * (axial_velocity + velocity_values(neighbor, 2));
-                }
-                flux_values(axial_bubble_flux.owned_row(face_lid), 0) =
-                    axial_velocity * d_mesh->face_area_vector(face_lid).z;
-            }
-        }
-        if constexpr (requires { axial_bubble_flux.sync_ghosts(); })
-        {
-            axial_bubble_flux.sync_ghosts();
-        }
-        bubble_liquid_flux = &axial_bubble_flux;
-    }
-
-    auto& micro_slip = workspace.micro_slip;
-    auto& large_slip = workspace.large_slip;
-    collective_detail::collective_local_validation(*d_mesh, "Reacting bubble-slip evaluation",
-        [&]
-        {
-            const auto pressure_values = d_absolute_pressure.owned_read_view();
-            const auto temperature_values = temperature.owned_read_view();
-            const auto density_values = material.density.owned_read_view();
-            const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
-            const auto micro_number_values = d_micro_number.owned_read_view();
-            const auto micro_moles_values = d_micro_moles.owned_read_view();
-            const auto large_number_values = d_large_number.owned_read_view();
-            const auto large_moles_values = d_large_moles.owned_read_view();
-            const auto micro_slip_values = micro_slip.owned_write_view();
-            const auto large_slip_values = large_slip.owned_write_view();
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto properties =
-                    cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
-                        density_values(owned, 0), viscosity_values(owned, 0));
-                const auto category_slip = [&](scalar_type number, scalar_type moles)
-                {
-                    if (number <= d_options.min_population || moles <= 0.0)
-                        return scalar_type{};
-                    const auto radius = BubbleGasPhysics::solve_bubble_radius(moles / number, properties.pressure,
-                        properties.surface_tension, d_options.gas_constant, properties.temperature,
-                        d_options.min_radius, d_options.max_radius, d_options.max_radius_iterations,
-                        d_options.local_ode_tolerance);
-                    if (!radius.converged)
-                    {
-                        ++d_last_statistics.radius_solver_failures;
-                        return scalar_type{};
-                    }
-                    return rise_velocity(
-                        radius.radius, properties.density, properties.viscosity, properties.surface_tension);
-                };
-                micro_slip_values(owned, 0) = category_slip(micro_number_values(owned, 0), micro_moles_values(owned, 0));
-                large_slip_values(owned, 0) = category_slip(large_number_values(owned, 0), large_moles_values(owned, 0));
-            }
-            if (zero_proofs != nullptr &&
-                (d_options.diffusivity_mode == HydrogenDiffusivityMode::External ||
-                 d_options.surface_tension_mode == SurfaceTensionMode::External ||
-                 d_options.nucleation_radius_mode == NucleationRadiusMode::External))
-                validate_pending_zero_auxiliary_fields(pending_zero);
-        });
-    micro_slip.sync_ghosts();
-    large_slip.sync_ghosts();
-
-    transport_scalar(
-        d_micro_number,
-        time_step,
-        *bubble_liquid_flux,
-        &micro_slip,
-        0.0,
-        false,
-        false,
-        d_escape_number_rate,
-        ale,
-        slip_axis, 1);
-    transport_scalar(
-        d_micro_moles,
-        time_step,
-        *bubble_liquid_flux,
-        &micro_slip,
-        0.0,
-        false,
-        false,
-        d_escape_molar_rate,
-        ale,
-        slip_axis, 1, true);
-
-    transport_scalar(
-        d_large_number,
-        time_step,
-        *bubble_liquid_flux,
-        &large_slip,
-        0.0,
-        false,
-        false,
-        d_escape_number_rate,
-        ale,
-        slip_axis, 2, false, nullptr, zero_proofs);
-    pending_zero[2] = false;
-    transport_scalar(d_large_moles, time_step, *bubble_liquid_flux, &large_slip, 0.0, false, false, d_escape_molar_rate,
-        ale, slip_axis, 2, true, nullptr, zero_proofs);
-    pending_zero[3] = false;
-
-    // Retain the exact operator-split state used to remove transport from the
-    // later material-volume finite difference.  Kinetics below may create,
-    // dissolve, or convert bubbles; those changes are physical source terms
-    // and must not be retroactively included in this step's carrier/slip flux.
-    auto& transported_micro_alpha = workspace.micro_alpha;
-    auto& transported_large_alpha = workspace.large_alpha;
-    collective_detail::collective_local_validation(*d_mesh, "Reacting transported-volume reconstruction",
-        [&]
-        {
-            const auto pressure_values = d_absolute_pressure.owned_read_view();
-            const auto temperature_values = temperature.owned_read_view();
-            const auto density_values = material.density.owned_read_view();
-            const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
-            const auto micro_number_values = d_micro_number.owned_read_view();
-            const auto micro_moles_values = d_micro_moles.owned_read_view();
-            const auto large_number_values = d_large_number.owned_read_view();
-            const auto large_moles_values = d_large_moles.owned_read_view();
-            const auto micro_alpha_values = transported_micro_alpha.owned_write_view();
-            const auto large_alpha_values = transported_large_alpha.owned_write_view();
-            const auto raw_alpha_values = d_transport_alpha_g_raw.owned_write_view();
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto properties =
-                    cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
-                        density_values(owned, 0), viscosity_values(owned, 0));
-                const auto population_alpha = [&](scalar_type number, scalar_type moles)
-                {
-                    if (number <= d_options.min_population || moles <= scalar_type{})
-                    {
-                        return scalar_type{};
-                    }
-                    const auto radius = BubbleGasPhysics::solve_bubble_radius(moles / number, properties.pressure,
-                        properties.surface_tension, d_options.gas_constant, properties.temperature,
-                        d_options.min_radius, d_options.max_radius, d_options.max_radius_iterations,
-                        d_options.local_ode_tolerance);
-                    return radius.converged ? BubbleGasPhysics::bubble_void_fraction(number, radius.radius)
-                                            : scalar_type{};
-                };
-                const auto micro_alpha =
-                    population_alpha(micro_number_values(owned, 0), micro_moles_values(owned, 0));
-                const auto large_alpha =
-                    population_alpha(large_number_values(owned, 0), large_moles_values(owned, 0));
-                micro_alpha_values(owned, 0) = micro_alpha;
-                large_alpha_values(owned, 0) = large_alpha;
-                raw_alpha_values(owned, 0) = micro_alpha + large_alpha;
-            }
-        });
-    transported_micro_alpha.sync_ghosts();
-    transported_large_alpha.sync_ghosts();
-    d_transport_alpha_g_raw.sync_ghosts();
-
-    const auto is_free_surface = [&](local_ordinal_type face_lid)
-    {
-        if (!d_mesh->is_boundary_face(face_lid))
-        {
-            return false;
-        }
-        const auto& name = d_mesh->boundary_batch_name(d_mesh->boundary_id(face_lid));
-        return std::ranges::find(d_options.free_surface_patches, name) != d_options.free_surface_patches.end();
-    };
-    const auto slip_component = static_cast<size_t>(slip_axis);
-    {
-        const auto micro_slip_values = micro_slip.local_read_view();
-        const auto large_slip_values = large_slip.local_read_view();
-        const auto carrier_values = bubble_liquid_flux->owned_read_view();
-        const auto micro_alpha_values = transported_micro_alpha.local_read_view();
-        const auto large_alpha_values = transported_large_alpha.local_read_view();
-        const auto slip_flux_values = d_transport_bubble_slip_volume_flux.owned_write_view();
-        const auto carrier_flux_values = d_transport_bubble_carrier_volume_flux.owned_write_view();
-        for (const auto face_lid : d_transport_bubble_slip_volume_flux.owned_face_ids())
-        {
-            const auto owner = d_mesh->owner_cell(face_lid);
-            auto micro_speed = micro_slip_values(owner, 0);
-            auto large_speed = large_slip_values(owner, 0);
-            local_ordinal_type neighbor = owner;
-            if (d_mesh->is_interior_face(face_lid))
-            {
-                neighbor = d_mesh->opposite_or_periodic_neighbor_cell(face_lid, owner);
-                micro_speed = scalar_type{0.5} * (micro_speed + micro_slip_values(neighbor, 0));
-                large_speed = scalar_type{0.5} * (large_speed + large_slip_values(neighbor, 0));
-            }
-            const auto area_component =
-                static_cast<scalar_type>(d_mesh->face_area_vector(face_lid).component(slip_component));
-            const auto carrier_kinematic_flux =
-                bubble_liquid_flux->is_owned_face(face_lid)
-                    ? carrier_values(bubble_liquid_flux->owned_row(face_lid), 0)
-                    : scalar_type{};
-            const auto population_flux = [&](scalar_type speed, const auto& transported_alpha)
-            {
-                const auto slip_kinematic_flux = speed * area_component;
-                const auto total_kinematic_flux = carrier_kinematic_flux + slip_kinematic_flux;
-                if (d_mesh->is_boundary_face(face_lid) &&
-                    (!is_free_surface(face_lid) || total_kinematic_flux <= scalar_type{}))
-                {
-                    return std::array<scalar_type, 2>{};
-                }
-                const auto upwind = total_kinematic_flux >= scalar_type{} ? owner : neighbor;
-                const auto alpha = transported_alpha(upwind, 0);
-                return std::array<scalar_type, 2>{carrier_kinematic_flux * alpha, slip_kinematic_flux * alpha};
-            };
-            const auto micro_flux = population_flux(micro_speed, micro_alpha_values);
-            const auto large_flux = population_flux(large_speed, large_alpha_values);
-            const auto carrier_flux = micro_flux[0] + large_flux[0];
-            const auto slip_flux = micro_flux[1] + large_flux[1];
-            slip_flux_values(d_transport_bubble_slip_volume_flux.owned_row(face_lid), 0) = slip_flux;
-            carrier_flux_values(d_transport_bubble_carrier_volume_flux.owned_row(face_lid), 0) = carrier_flux;
-        }
-    }
-    if constexpr (requires { d_transport_bubble_slip_volume_flux.sync_ghosts(); })
-    {
-        d_transport_bubble_slip_volume_flux.sync_ghosts();
-        d_transport_bubble_carrier_volume_flux.sync_ghosts();
-        d_transport_liquid_material_volume_flux.sync_ghosts();
-    }
-
-    d_escape_molar_rate.sync_ghosts();
-    d_escape_number_rate.sync_ghosts();
-    const auto inventories_after = population_integrals(new_cell_volumes);
-    const auto inventory_decrement =
-        [this](
-            scalar_type before,
-            scalar_type after,
-            std::string_view inventory_name)
-    {
-        const auto decrement = before - after;
-        const auto roundoff =
-            64.0 * std::numeric_limits<scalar_type>::epsilon()
-          * std::max(std::abs(before), std::abs(after));
-        const int local_material_increase = decrement < -roundoff;
-        // Both operands already came from the same all-reduce on every rank.
-        if (local_material_increase != 0)
-        {
-            std::ostringstream message;
-            message << std::scientific << std::setprecision(std::numeric_limits<scalar_type>::max_digits10)
-                    << "Reacting escape transport increased the global " << inventory_name
-                    << " inventory beyond roundoff: before=" << before << ", after=" << after
-                    << ", increase=" << -decrement << ", roundoff=" << roundoff << '.';
-            throw std::runtime_error(message.str());
-        }
-        // Preserve every positive loss exactly, even when it is small beside
-        // a large retained inventory.  Only a negative roundoff artifact is
-        // clipped to zero.
-        return std::max(decrement, scalar_type{});
-    };
-    d_last_statistics.dissolved_hydrogen_outflow =
-        inventory_decrement(
-            inventories_before[0],
-            inventories_after[0],
-            "dissolved-hydrogen");
-    d_last_statistics.microbubble_hydrogen_escaped =
-        inventory_decrement(
-            inventories_before[1],
-            inventories_after[1],
-            "microbubble-moles");
-    d_last_statistics.large_bubble_hydrogen_escaped =
-        inventory_decrement(
-            inventories_before[2],
-            inventories_after[2],
-            "large-bubble-moles");
-    d_last_statistics.submerged_bubble_hydrogen_escaped =
-        d_last_statistics.microbubble_hydrogen_escaped
-      + d_last_statistics.large_bubble_hydrogen_escaped;
-    d_last_statistics.hydrogen_escaped =
-        d_last_statistics.dissolved_hydrogen_outflow
-      + d_last_statistics.submerged_bubble_hydrogen_escaped;
-    d_last_statistics.escaped_microbubble_count =
-        inventory_decrement(
-            inventories_before[3],
-            inventories_after[3],
-            "microbubble-count");
-    d_last_statistics.escaped_large_bubble_count =
-        inventory_decrement(
-            inventories_before[4],
-            inventories_after[4],
-            "large-bubble-count");
-    d_last_statistics.escaped_bubble_count =
-        d_last_statistics.escaped_microbubble_count
-      + d_last_statistics.escaped_large_bubble_count;
-    d_cumulative_dissolved_hydrogen_outflow +=
-        d_last_statistics.dissolved_hydrogen_outflow;
-    d_cumulative_submerged_bubble_hydrogen_escaped +=
-        d_last_statistics.submerged_bubble_hydrogen_escaped;
-    d_cumulative_hydrogen_escaped =
-        d_cumulative_dissolved_hydrogen_outflow
-      + d_cumulative_submerged_bubble_hydrogen_escaped;
-    d_cumulative_escaped_bubble_count +=
-        d_last_statistics.escaped_bubble_count;
-    d_last_statistics.cumulative_hydrogen_escaped =
-        d_cumulative_hydrogen_escaped;
-    d_last_statistics.cumulative_dissolved_hydrogen_outflow =
-        d_cumulative_dissolved_hydrogen_outflow;
-    d_last_statistics.cumulative_submerged_bubble_hydrogen_escaped =
-        d_cumulative_submerged_bubble_hydrogen_escaped;
-    d_last_statistics.cumulative_escaped_bubble_count =
-        d_cumulative_escaped_bubble_count;
-}
-
-/**
- * @brief Derive thermophysical and nucleation properties for one cell.
- * @tparam Pack Tpetra type pack used by the model.
- * @param cell_lid Local cell identifier.
- * @param temperature Cell temperature field.
- * @param density Liquid-density field.
- * @param dynamic_viscosity Liquid dynamic-viscosity field.
- * @return Derived cell properties used by kinetics.
- * @throws std::invalid_argument if a correlation input is invalid.
- * @throws std::runtime_error if the nucleation radius leaves configured bounds.
- */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::cell_properties(
-    local_ordinal_type cell_lid,
-    const field_type& temperature,
-    const field_type& density,
-    const field_type& dynamic_viscosity) const -> CellProperties
-{
-    return cell_properties(d_absolute_pressure.value(cell_lid), temperature.value(cell_lid),
-        density.value(cell_lid), dynamic_viscosity.value(cell_lid));
-}
-
-/** Derive properties from values acquired by a caller's scoped field views. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::cell_properties(scalar_type pressure, scalar_type temperature,
-    scalar_type density, scalar_type dynamic_viscosity) const -> CellProperties
-{
-    CellProperties properties;
-    properties.pressure = pressure;
-    properties.temperature = temperature;
-    properties.density = density;
-    properties.viscosity = dynamic_viscosity;
-    properties.surface_tension =
-        BubbleGasPhysics::surface_tension(d_options, properties.temperature);
-    properties.diffusivity = BubbleGasPhysics::hydrogen_diffusivity(d_options, properties.temperature);
-    properties.nucleation_radius =
-        BubbleGasPhysics::nucleation_radius(d_options, properties.temperature, properties.pressure);
-    if (!std::isfinite(properties.nucleation_radius)
-        || properties.nucleation_radius < d_options.min_radius
-        || properties.nucleation_radius > d_options.max_radius)
-    {
-        throw std::runtime_error(
-            "Sheng 2024 nucleation radius is outside configured bounds.");
-    }
-
-    const auto radius = properties.nucleation_radius;
-    properties.nucleation_moles =
-        4.0 * std::numbers::pi / 3.0
-        * (properties.pressure * radius * radius * radius
-           + 2.0 * properties.surface_tension
-                 * radius * radius)
-        / (d_options.gas_constant * properties.temperature);
-    return properties;
-}
-
-/**
- * @brief Recover dissolved concentration from liquid-volume inventory.
- * @tparam Pack Tpetra type pack used by the model.
- * @param state Conserved per-cell kinetics state.
- * @param liquid_fraction Local liquid volume fraction.
- * @return Dissolved concentration, or zero without liquid volume.
- */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::concentration(
-    const CellKineticsState& state,
-    scalar_type liquid_fraction) const -> scalar_type
-{
-    if (liquid_fraction <= 0.0)
-        return 0.0;
-    return state.dissolved_inventory / liquid_fraction;
-}
-
-/** @brief Add mesh identity to failures from the shared transfer evaluator. */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::evaluate_mass_transfer(
-    BubbleGasPhysics::BubbleMassTransferEvaluator transfer_evaluator,
-    local_ordinal_type cell_lid, std::string_view population,
-    scalar_type radius, scalar_type diffusivity, scalar_type density,
-    scalar_type viscosity, scalar_type relative_speed) const
-    -> BubbleGasPhysics::BubbleMassTransferResult
-{
-    try
-    {
-        return transfer_evaluator(diffusivity, radius, density,
-                                  viscosity, relative_speed);
-    }
-    catch (const std::exception& error)
-    {
-        std::ostringstream message;
-        message.precision(17);
-        message << "Reacting " << population << " transfer at rank "
-                << d_mesh->owned_cell_map()->getComm()->getRank()
-                << ", cell " << d_mesh->cell_global_id(cell_lid)
-                << ": R=" << radius << " m, u_rel=" << relative_speed
-                << " m/s, rho_l=" << density << " kg/m3, mu_l=" << viscosity
-                << " Pa s, D_m=" << diffusivity << " m2/s: " << error.what();
-        if (dynamic_cast<const std::domain_error*>(&error))
-            throw std::domain_error(message.str());
-        if (dynamic_cast<const std::invalid_argument*>(&error))
-            throw std::invalid_argument(message.str());
-        throw std::runtime_error(message.str());
-    }
-}
-
-/** @brief Accumulate active-population ranges once per kinetics evaluation. */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::record_mass_transfer(
-    const BubbleGasPhysics::BubbleMassTransferResult& result)
-{
-    auto& envelope = d_last_statistics.mass_transfer;
-    if (result.applicability == BubbleGasPhysics::BubbleMassTransferApplicability::SourceLowPeAsymptotic)
-        ++envelope.low_peclet_evaluations;
-    else if (result.applicability == BubbleGasPhysics::BubbleMassTransferApplicability::SourceFitOperationalWindow)
-        ++envelope.fit_evaluations;
-    if (envelope.evaluations++ == 0)
-    {
-        envelope.minimum = result;
-        envelope.maximum = result;
-        return;
-    }
-#define SIMPLEFLUID_TRANSFER_RANGE(member) \
-    envelope.minimum.member = std::min(envelope.minimum.member, result.member); \
-    envelope.maximum.member = std::max(envelope.maximum.member, result.member)
-    SIMPLEFLUID_TRANSFER_RANGE(radius);
-    SIMPLEFLUID_TRANSFER_RANGE(diameter);
-    SIMPLEFLUID_TRANSFER_RANGE(relative_speed);
-    SIMPLEFLUID_TRANSFER_RANGE(liquid_density);
-    SIMPLEFLUID_TRANSFER_RANGE(dynamic_viscosity);
-    SIMPLEFLUID_TRANSFER_RANGE(diffusivity);
-    SIMPLEFLUID_TRANSFER_RANGE(reynolds);
-    SIMPLEFLUID_TRANSFER_RANGE(schmidt);
-    SIMPLEFLUID_TRANSFER_RANGE(peclet);
-    SIMPLEFLUID_TRANSFER_RANGE(sherwood);
-    SIMPLEFLUID_TRANSFER_RANGE(coefficient);
-#undef SIMPLEFLUID_TRANSFER_RANGE
-}
-
-/**
- * @brief Integrate local hydrogen production, conversion, and dissolution.
- * @tparam Pack Tpetra type pack used by the model.
- * @param initial Transported inventories and populations.
- * @param time_step Positive physical time step.
- * @param production_rate Local hydrogen production rate.
- * @param liquid_fraction Liquid fraction frozen until derived-field reconstruction.
- * @param properties Derived thermophysical cell properties.
- * @param substeps Step-wide subcycle schedule and analytic decay coefficients.
- * @return Updated conserved cell kinetics state and diagnostic rates.
- * @throws std::invalid_argument if a correlation input is invalid.
- * @throws std::runtime_error if the selected rise-velocity solve fails.
- */
-template<TpetraTypePack Pack, class MeshType>
-auto ReactingGasModel<Pack, MeshType>::integrate_cell_kinetics(
-    const CellKineticsState& initial,
-    local_ordinal_type cell_lid,
-    BubbleGasPhysics::BubbleMassTransferEvaluator transfer_evaluator,
-    scalar_type time_step,
-    scalar_type production_rate,
-    scalar_type liquid_fraction,
-    const CellProperties& properties,
-    const KineticsSubsteps& substeps) -> CellKineticsResult
-{
-    CellKineticsResult result;
-    auto& state = result.state;
-    state = initial;
-    const auto substep = substeps.duration;
-    const auto conversion_pressure_factor =
-        d_options.micro_to_large_conversion_coefficient * properties.pressure;
-
-    scalar_type converted_number{};
-    scalar_type converted_moles{};
-    scalar_type large_growth{};
-    scalar_type dissolved_moles{};
-    const auto critical_concentration =
-        BubbleGasPhysics::henry_equilibrium_concentration(
-            d_options.henry_coefficient,
-            properties.pressure,
-            properties.surface_tension,
-            properties.nucleation_radius);
-
-    if (d_options.kinetics_mode == ReactingKineticsMode::ExactInactive
-        && initial.large_number == 0.0 && initial.large_moles == 0.0)
-    {
-        const auto total_produced = production_rate * time_step;
-        // Dissolved inventory grows monotonically in this subsystem and cannot
-        // exceed all initially available plus newly produced hydrogen. Round
-        // the bound outward so neither a crossing nor a borderline threshold
-        // can bypass the unchanged active-population integrator below.
-        const auto infinity = std::numeric_limits<scalar_type>::infinity();
-        const auto inventory_bound = std::nextafter(
-            std::nextafter(initial.dissolved_inventory + initial.micro_moles, infinity)
-                + total_produced, infinity);
-        const auto critical_inventory = std::nextafter(
-            liquid_fraction * critical_concentration, scalar_type{});
-        if (std::isfinite(inventory_bound) && inventory_bound < critical_inventory)
-        {
-            const auto ratio = time_step / d_options.microbubble_lifetime;
-            const auto retention = std::exp(-ratio);
-            const auto decay_fraction = -std::expm1(-ratio);
-            // 1 - (1-exp(-x))/x is the fraction of continuous production
-            // dissolved during the interval. Its series avoids cancellation
-            // for small x, including an underflowed x == 0.
-            const auto source_dissolved_fraction = ratio < scalar_type{1.e-3}
-                ? ratio * (scalar_type{0.5} + ratio * (scalar_type{-1.0 / 6.0}
-                    + ratio * (scalar_type{1.0 / 24.0} + ratio * (scalar_type{-1.0 / 120.0}
-                        + ratio * scalar_type{1.0 / 720.0}))))
-                : scalar_type{1} - decay_fraction / ratio;
-            // Select the multiplication order so large time/lifetime ratios
-            // retain the steady S*tau population without overflowing S*tau
-            // in the opposite, small-ratio limit.
-            const auto retained_production = ratio <= scalar_type{1}
-                ? total_produced * (scalar_type{1} - source_dissolved_fraction)
-                : (production_rate * d_options.microbubble_lifetime) * decay_fraction;
-            const auto dissolved = initial.micro_moles * decay_fraction
-                + total_produced * source_dissolved_fraction;
-            state.micro_moles = initial.micro_moles * retention + retained_production;
-            state.micro_number = initial.micro_number * retention
-                + retained_production / properties.nucleation_moles;
-            state.dissolved_inventory += dissolved;
-            result.dissolution_rate = dissolved / time_step;
-            result.inventory_error = (state.dissolved_inventory + state.micro_moles)
-                - (initial.dissolved_inventory + initial.micro_moles) - total_produced;
-            return result;
-        }
-    }
-
-    result.subcycles = substeps.count;
-    const BubbleGasPhysics::MicrobubbleSubstep micro_step{
-        .duration = substep,
-        .bulk_production_rate = production_rate,
-        .liquid_fraction = liquid_fraction,
-        .nucleation_moles = properties.nucleation_moles,
-        .critical_concentration = critical_concentration,
-        .micro_decay_fraction = substeps.micro_decay_fraction,
-        .micro_retention = substeps.micro_retention,
-        .conversion_pressure_factor = conversion_pressure_factor,
-        .heaviside_mode = d_options.heaviside_mode,
-        .smooth_heaviside_width = d_options.smooth_heaviside_width};
-    for (int cycle = 0; cycle < substeps.count; ++cycle)
-    {
-        const auto micro = BubbleGasPhysics::advance_microbubble_substep(
-            {state.dissolved_inventory, state.micro_number, state.micro_moles}, micro_step);
-        state.dissolved_inventory = micro.state.dissolved_inventory;
-        state.micro_number = micro.state.number_density;
-        state.micro_moles = micro.state.molar_inventory;
-        dissolved_moles += micro.dissolved_moles;
-        const auto number_to_large = micro.converted.number_density;
-        const auto moles_to_large = micro.converted.molar_inventory;
-        state.large_number += number_to_large;
-        state.large_moles += moles_to_large;
-        converted_number += number_to_large;
-        converted_moles += moles_to_large;
-
-        // The upper population still sees the same post-micro concentration
-        // in every legacy subcycle. Its existing transfer/lifetime law follows.
-        const auto dissolved_concentration = concentration(state, liquid_fraction);
-
-        if (state.large_number <= d_options.min_population
-            || state.large_moles <= 0.0)
-        {
-            continue;
-        }
-        const auto radius_result =
-            BubbleGasPhysics::solve_bubble_radius(
-                state.large_moles / state.large_number,
-                properties.pressure,
-                properties.surface_tension,
-                d_options.gas_constant,
-                properties.temperature,
-                d_options.min_radius,
-                d_options.max_radius,
-                d_options.max_radius_iterations,
-                d_options.local_ode_tolerance);
-        if (!radius_result.converged)
-        {
-            ++d_last_statistics.radius_solver_failures;
-            throw std::runtime_error("Active large-population bubble radius solve failed at rank "
-                + std::to_string(d_mesh->owned_cell_map()->getComm()->getRank())
-                + ", cell " + std::to_string(d_mesh->cell_global_id(cell_lid)) + ".");
-        }
-
-        const auto radius = radius_result.radius;
-        const auto equilibrium =
-            BubbleGasPhysics::henry_equilibrium_concentration(
-                d_options.henry_coefficient,
-                properties.pressure,
-                properties.surface_tension,
-                radius);
-        const auto relative_speed =
-            rise_velocity(
-                radius,
-                properties.density,
-                properties.viscosity,
-                properties.surface_tension);
-        const auto transfer = evaluate_mass_transfer(
-            transfer_evaluator, cell_lid, "large-population", radius, properties.diffusivity,
-            properties.density, properties.viscosity, relative_speed);
-        record_mass_transfer(transfer);
-        const auto transfer_coefficient = transfer.coefficient;
-        const auto interfacial_area =
-            4.0 * std::numbers::pi * radius * radius
-          * state.large_number;
-        const auto transfer_rate =
-            transfer_coefficient * interfacial_area
-          * (dissolved_concentration - equilibrium);
-        if (transfer_rate > 0.0)
-        {
-            const auto transfer =
-                std::min(
-                    state.dissolved_inventory,
-                    transfer_rate * substep);
-            state.dissolved_inventory -= transfer;
-            state.large_moles += transfer;
-            large_growth += transfer;
-        }
-        else if (transfer_rate < 0.0)
-        {
-            const auto analytic_decay =
-                state.large_moles
-              * substeps.large_decay_fraction;
-            const auto transfer = std::min(
-                state.large_moles,
-                -transfer_rate * substep + analytic_decay);
-            state.large_moles -= transfer;
-            state.large_number *= substeps.large_retention;
-            state.dissolved_inventory += transfer;
-            dissolved_moles += transfer;
-        }
-    }
-
-    result.converted_number_rate = converted_number / time_step;
-    result.converted_molar_rate = converted_moles / time_step;
-    result.large_growth_rate = large_growth / time_step;
-    result.dissolution_rate = dissolved_moles / time_step;
-
-    const auto before =
-        initial.dissolved_inventory
-      + initial.micro_moles + initial.large_moles;
-    const auto after =
-        state.dissolved_inventory
-      + state.micro_moles + state.large_moles;
-    result.inventory_error = after - before - production_rate * time_step;
-    return result;
-}
-
-/**
- * @brief Reconstruct radii, void fractions, concentrations, and diagnostics.
- * @tparam Pack Tpetra type pack used by the model.
- * @param temperature Cell temperature field.
- * @param density Liquid-density field.
- * @param dynamic_viscosity Liquid dynamic-viscosity field.
- * @param record_event_statistics Whether to count clipping and radius failures.
- * @throws std::invalid_argument if a correlation input is invalid.
- * @throws std::runtime_error if a derived-property solve fails.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::reconstruct_derived_fields(const field_type& temperature,
-    const field_type& density, const field_type& dynamic_viscosity, bool record_event_statistics)
-{
-    if (species_enabled()) { reconstruct_species_derived(temperature); return; }
-    collective_detail::collective_local_validation(*d_mesh, "Reacting derived-state reconstruction",
-        [&]
-        {
-            const auto transfer_evaluator =
-                BubbleGasPhysics::select_bubble_mass_transfer_evaluator(
-                    d_options.mass_transfer_mode);
-            const auto pressure_values = d_absolute_pressure.owned_read_view();
-            const auto temperature_values = temperature.owned_read_view();
-            const auto density_values = density.owned_read_view();
-            const auto viscosity_values = dynamic_viscosity.owned_read_view();
-            const auto micro_number_values = d_micro_number.owned_read_view();
-            const auto micro_moles_values = d_micro_moles.owned_read_view();
-            const auto large_number_values = d_large_number.owned_read_view();
-            const auto large_moles_values = d_large_moles.owned_read_view();
-            const auto inventory_values = d_dissolved_hydrogen_inventory.owned_read_view();
-            const auto nucleation_radius_values = d_nucleation_radius.owned_write_view();
-            const auto micro_radius_values = d_micro_radius.owned_write_view();
-            const auto large_radius_values = d_large_radius.owned_write_view();
-            const auto micro_void_values = d_alpha_g_micro.owned_write_view();
-            const auto large_void_values = d_alpha_g_large.owned_write_view();
-            const auto raw_void_values = d_alpha_g_raw.owned_write_view();
-            const auto bounded_void_values = d_alpha_g.owned_write_view();
-            const auto liquid_fraction_values = d_alpha_l.owned_write_view();
-            const auto excess_void_values = d_alpha_g_excess.owned_write_view();
-            const auto characteristic_radius_values = d_characteristic_radius.owned_write_view();
-            const auto concentration_values = d_dissolved_hydrogen.owned_write_view();
-            const auto excluded_inventory_values = d_excluded_dissolved_inventory.owned_write_view();
-            const auto critical_concentration_values = d_critical_concentration.owned_write_view();
-            const auto equilibrium_concentration_values = d_equilibrium_concentration.owned_write_view();
-            const auto transfer_coefficient_values = d_mass_transfer_coefficient.owned_write_view();
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto properties = cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
-                    density_values(owned, 0), viscosity_values(owned, 0));
-                const auto solve_radius = [&](scalar_type number, scalar_type moles,
-                                              std::string_view population)
-                {
-                    if (number <= d_options.min_population || moles <= 0.0)
-                        return scalar_type{};
-                    const auto result = BubbleGasPhysics::solve_bubble_radius(moles / number, properties.pressure,
-                        properties.surface_tension, d_options.gas_constant, properties.temperature,
-                        d_options.min_radius, d_options.max_radius, d_options.max_radius_iterations,
-                        d_options.local_ode_tolerance);
-                    if (!result.converged)
-                    {
-                        if (record_event_statistics)
-                            ++d_last_statistics.radius_solver_failures;
-                        throw std::runtime_error("Active " + std::string(population)
-                            + " bubble radius solve failed at rank "
-                            + std::to_string(d_mesh->owned_cell_map()->getComm()->getRank())
-                            + ", cell " + std::to_string(d_mesh->cell_global_id(
-                                static_cast<local_ordinal_type>(owned))) + ".");
-                    }
-                    return result.radius;
-                };
-
-                const auto micro_radius = solve_radius(micro_number_values(owned, 0), micro_moles_values(owned, 0), "micro-population");
-                const auto large_radius = solve_radius(large_number_values(owned, 0), large_moles_values(owned, 0), "large-population");
-                const auto micro_void =
-                    BubbleGasPhysics::bubble_void_fraction(micro_number_values(owned, 0), micro_radius);
-                const auto large_void =
-                    BubbleGasPhysics::bubble_void_fraction(large_number_values(owned, 0), large_radius);
-                const auto raw_void = micro_void + large_void;
-                const auto bounded_void = std::clamp(raw_void, d_options.alpha_min, d_options.alpha_max);
-                if (record_event_statistics && bounded_void != raw_void)
-                    ++d_last_statistics.clipped_cells;
-                const auto liquid_fraction = 1.0 - bounded_void;
-                const auto raw_concentration = inventory_values(owned, 0) / liquid_fraction;
-                const auto published_concentration = std::min(raw_concentration, d_options.max_concentration);
-                const auto characteristic_radius = BubbleGasPhysics::characteristic_radius(
-                    micro_number_values(owned, 0), micro_radius, large_number_values(owned, 0), large_radius);
-                const auto equilibrium_radius = large_radius > 0.0 ? large_radius : properties.nucleation_radius;
-
-                nucleation_radius_values(owned, 0) = properties.nucleation_radius;
-                micro_radius_values(owned, 0) = micro_radius;
-                large_radius_values(owned, 0) = large_radius;
-                micro_void_values(owned, 0) = micro_void;
-                large_void_values(owned, 0) = large_void;
-                raw_void_values(owned, 0) = raw_void;
-                bounded_void_values(owned, 0) = bounded_void;
-                liquid_fraction_values(owned, 0) = liquid_fraction;
-                excess_void_values(owned, 0) = std::max(raw_void - bounded_void, scalar_type{});
-                characteristic_radius_values(owned, 0) = characteristic_radius;
-                concentration_values(owned, 0) = published_concentration;
-                excluded_inventory_values(owned, 0) =
-                    std::max(inventory_values(owned, 0) - liquid_fraction * published_concentration, scalar_type{});
-                critical_concentration_values(owned, 0) =
-                    BubbleGasPhysics::henry_equilibrium_concentration(d_options.henry_coefficient,
-                        properties.pressure, properties.surface_tension, properties.nucleation_radius);
-                equilibrium_concentration_values(owned, 0) =
-                    BubbleGasPhysics::henry_equilibrium_concentration(d_options.henry_coefficient,
-                        properties.pressure, properties.surface_tension, equilibrium_radius);
-
-                if (characteristic_radius > 0.0)
-                {
-                    transfer_coefficient_values(owned, 0) = evaluate_mass_transfer(
-                        transfer_evaluator, static_cast<local_ordinal_type>(owned),
-                        "characteristic-radius K_L",
-                        characteristic_radius, properties.diffusivity,
-                        properties.density, properties.viscosity,
-                        rise_velocity(characteristic_radius, properties.density,
-                            properties.viscosity, properties.surface_tension)).coefficient;
-                }
-                else
-                {
-                    transfer_coefficient_values(owned, 0) = 0.0;
-                }
-            }
-        });
-}
-
-/**
- * @brief Advance the full two-population transport and kinetics model.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time_step Positive physical time step.
- * @param temperature Cell temperature field.
- * @param velocity Liquid velocity field.
- * @param liquid_face_flux Oriented liquid volumetric flux.
- * @param material Material-property fields.
- * @param prescribed_heat_density Required prescribed_heat power-density field.
- * @throws std::invalid_argument if required fields or values are invalid.
- * @throws std::runtime_error if a transport or property solve fails.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::advance_two_population(
-    scalar_type time_step,
-    const field_type& temperature,
-    const velocity_field_type& velocity,
-    const face_flux_field_type& liquid_face_flux,
-    const material_type& material,
-    const field_type* prescribed_heat_density,
-    const FVM::ALEControlVolumeState* ale,
-    Dimension slip_axis)
-{
-    if (!prescribed_heat_density)
-    {
-        throw std::invalid_argument(
-            "Sheng 2024 reacting_gas requires a prescribed_heat power source.");
-    }
-
-    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_donor_tracking_enabled),
-        "Reacting donor-H tracking selection");
-    collective_detail::require_uniform_value(*d_mesh, static_cast<int>(d_options.kinetics_mode),
-        "Reacting kinetics integration selection");
-    d_last_statistics.hydrogen_before =
-        total_hydrogen_inventory(ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes());
-    if (d_donor_tracking_enabled)
-        d_last_statistics.donor_hydrogen_before = global_integral(d_donor_hydrogen_deficit,
-            ale == nullptr ? std::span<const real_t>{} : ale->old_cell_volumes());
-    transport_populations(time_step, temperature, velocity, liquid_face_flux, material, ale, slip_axis);
-
-    collective_detail::collective_local_validation(*d_mesh, "Reacting local-kinetics integration",
-        [&]
-        {
-            const auto transfer_evaluator =
-                BubbleGasPhysics::select_bubble_mass_transfer_evaluator(
-                    d_options.mass_transfer_mode);
-            KineticsSubsteps substeps;
-            const auto controlling_time = std::min(
-                d_options.microbubble_lifetime, d_options.large_bubble_dissolution_time);
-            const auto required_substeps = std::ceil(time_step / (0.2 * controlling_time));
-            // Clamp before converting: an exact inactive update may span an
-            // arbitrarily large number of lifetimes, including an infinite ratio.
-            substeps.count = required_substeps >= d_options.max_subcycles
-                ? d_options.max_subcycles : std::max(1, static_cast<int>(required_substeps));
-            substeps.duration = time_step / substeps.count;
-            substeps.micro_decay_fraction =
-                1.0 - std::exp(-substeps.duration / d_options.microbubble_lifetime);
-            // Retain the original subtraction order for microbubble number.
-            substeps.micro_retention = 1.0 - substeps.micro_decay_fraction;
-            substeps.large_retention =
-                std::exp(-substeps.duration / d_options.large_bubble_dissolution_time);
-            substeps.large_decay_fraction = 1.0 - substeps.large_retention;
-            const auto pressure_values = d_absolute_pressure.owned_read_view();
-            const auto temperature_values = temperature.owned_read_view();
-            const auto density_values = material.density.owned_read_view();
-            const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
-            const auto power_values = prescribed_heat_density->owned_read_view();
-            const auto alpha_values = d_alpha_g.owned_read_view();
-            const auto inventory_values = d_dissolved_hydrogen_inventory.owned_write_view();
-            const auto micro_number_values = d_micro_number.owned_write_view();
-            const auto micro_moles_values = d_micro_moles.owned_write_view();
-            const auto large_number_values = d_large_number.owned_write_view();
-            const auto large_moles_values = d_large_moles.owned_write_view();
-            const auto production_values = d_hydrogen_production_rate.owned_write_view();
-            const auto converted_number_values = d_micro_to_large_number_rate.owned_write_view();
-            const auto converted_molar_values = d_micro_to_large_molar_rate.owned_write_view();
-            const auto growth_values = d_large_growth_rate.owned_write_view();
-            const auto dissolution_values = d_dissolution_rate.owned_write_view();
-            const auto error_values = d_inventory_error.owned_write_view();
-            const auto donor_values = d_donor_tracking_enabled
-                ? d_donor_hydrogen_deficit.owned_write_view()
-                : decltype(d_donor_hydrogen_deficit.owned_write_view()){};
-            for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            {
-                const auto properties =
-                    cell_properties(pressure_values(owned, 0), temperature_values(owned, 0),
-                        density_values(owned, 0), viscosity_values(owned, 0));
-                const CellKineticsState initial{inventory_values(owned, 0),
-                    micro_number_values(owned, 0), micro_moles_values(owned, 0),
-                    large_number_values(owned, 0), large_moles_values(owned, 0)};
-                const auto production_rate = d_options.gas_release_efficiency
-                    * d_options.hydrogen_yield_mol_per_j
-                    * std::max(power_values(owned, 0), scalar_type{});
-                production_values(owned, 0) = production_rate;
-                // alpha_g is reconstructed only after all cell kinetics;
-                // its liquid fraction is invariant over these subcycles.
-                const auto liquid_fraction = std::max(
-                    1.0 - alpha_values(owned, 0), scalar_type{1.0e-15});
-                const auto result = integrate_cell_kinetics(
-                    initial, static_cast<local_ordinal_type>(owned), transfer_evaluator,
-                    time_step,
-                    production_rate, liquid_fraction, properties, substeps);
-                d_last_statistics.maximum_subcycles = std::max(
-                    d_last_statistics.maximum_subcycles, result.subcycles);
-                converted_number_values(owned, 0) = result.converted_number_rate;
-                converted_molar_values(owned, 0) = result.converted_molar_rate;
-                growth_values(owned, 0) = result.large_growth_rate;
-                dissolution_values(owned, 0) = result.dissolution_rate;
-                error_values(owned, 0) = result.inventory_error;
-                const auto& state = result.state;
-                const auto micro_number = std::clamp(
-                    state.micro_number, scalar_type{}, d_options.max_population);
-                const auto large_number = std::clamp(
-                    state.large_number, scalar_type{}, d_options.max_population);
-                if (micro_number != state.micro_number || large_number != state.large_number)
-                    ++d_last_statistics.clipped_cells;
-                inventory_values(owned, 0) = std::max(state.dissolved_inventory, scalar_type{});
-                micro_number_values(owned, 0) = micro_number;
-                micro_moles_values(owned, 0) = std::max(state.micro_moles, scalar_type{});
-                large_number_values(owned, 0) = large_number;
-                large_moles_values(owned, 0) = std::max(state.large_moles, scalar_type{});
-                if (d_donor_tracking_enabled)
-                {
-                    const auto deficit = donor_values(owned, 0) + time_step * production_rate;
-                    if (!std::isfinite(deficit) || deficit < scalar_type{})
-                        throw std::runtime_error("Reacting donor deficit is invalid.");
-                    donor_values(owned, 0) = deficit;
-                }
-            }
-        });
-    d_dissolved_hydrogen_inventory.sync_ghosts();
-    d_micro_number.sync_ghosts();
-    d_micro_moles.sync_ghosts();
-    d_large_number.sync_ghosts();
-    d_large_moles.sync_ghosts();
-
-    reconstruct_derived_fields(
-        temperature,
-        material.density,
-        material.dynamic_viscosity);
-    {
-        const auto alpha_values = d_alpha_g.owned_read_view();
-        const auto previous_alpha_values = d_previous_alpha_g.owned_read_view();
-        const auto source_values = d_source_alpha_reaction.owned_write_view();
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            source_values(owned, 0) = (alpha_values(owned, 0) - previous_alpha_values(owned, 0)) / time_step;
-        }
-    }
-
-    d_last_statistics.hydrogen_produced =
-        global_integral(d_hydrogen_production_rate) * time_step;
-    if (d_donor_tracking_enabled)
-    {
-        d_donor_hydrogen_deficit.sync_ghosts();
-        d_last_statistics.donor_hydrogen_after = global_integral(d_donor_hydrogen_deficit);
-        d_last_statistics.donor_hydrogen_outflow = global_integral(d_donor_escape_rate) * time_step;
-        d_last_statistics.donor_inventory_error = d_last_statistics.donor_hydrogen_after -
-            d_last_statistics.donor_hydrogen_before - d_last_statistics.hydrogen_produced +
-            d_last_statistics.donor_hydrogen_outflow;
-        const auto scale = std::max(scalar_type{1}, std::abs(d_last_statistics.donor_hydrogen_before) +
-            std::abs(d_last_statistics.hydrogen_produced) + std::abs(d_last_statistics.donor_hydrogen_after));
-        if (std::abs(d_last_statistics.donor_inventory_error) >
-            (scalar_type{4096} * std::numeric_limits<scalar_type>::epsilon() + scalar_type{1.e-10}) * scale)
-            throw std::runtime_error("Reacting donor-H inventory closure failed.");
-    }
-    d_cumulative_hydrogen_produced +=
-        d_last_statistics.hydrogen_produced;
-    d_last_statistics.cumulative_hydrogen_produced =
-        d_cumulative_hydrogen_produced;
-    d_last_statistics.hydrogen_after =
-        total_hydrogen_inventory();
-    d_last_statistics.inventory_error =
-        d_last_statistics.hydrogen_after
-      + d_last_statistics.hydrogen_escaped
-      - d_last_statistics.hydrogen_before
-      - d_last_statistics.hydrogen_produced;
-    d_last_statistics.void_volume = global_integral(d_alpha_g);
-}
-
-/**
- * @brief Advance reconstructed absolute pressure with the inertial closure.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time_step Positive physical time step.
- * @param temperature Cell temperature field.
- * @param liquid_face_flux Oriented liquid volumetric flux.
- * @param material Material-property fields.
- * @throws std::invalid_argument if the selected property correlation is invalid.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::update_inertial_pressure(
-    scalar_type time_step,
-    const field_type& temperature,
-    const face_flux_field_type& liquid_face_flux,
-    const material_type& material)
-{
-    if (d_options.pressure_mode != ReactingPressureMode::Inertial)
-        return;
-
-    if (!d_history_initialized)
-    {
-        for (size_t owned = 0;
-             owned < d_mesh->num_owned_cells();
-             ++owned)
-        {
-            const auto cell_lid =
-                static_cast<local_ordinal_type>(owned);
-            d_previous_temperature.set_owned_value(
-                cell_lid, temperature.value(cell_lid));
-            d_previous_density.set_owned_value(
-                cell_lid, material.density.value(cell_lid));
-            d_previous_dynamic_viscosity.set_owned_value(
-                cell_lid, material.dynamic_viscosity.value(cell_lid));
-            d_previous_alpha_g.set_owned_value(
-                cell_lid, d_alpha_g.value(cell_lid));
-        }
-        d_history_initialized = true;
-        return;
-    }
-
-    std::vector<scalar_type> surface_tensions(d_mesh->num_owned_cells());
-    collective_detail::collective_local_validation(*d_mesh, "Reacting inertial surface tension", [&]
-    {
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-            surface_tensions[owned] = BubbleGasPhysics::surface_tension(
-                d_options, temperature.value(static_cast<local_ordinal_type>(owned)));
-    });
-
-    for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<local_ordinal_type>(owned);
-        const auto pressure = d_absolute_pressure.value(cell_lid);
-        const auto temperature_value = temperature.value(cell_lid);
-        const auto density = material.density.value(cell_lid);
-        const auto alpha = d_alpha_g.value(cell_lid);
-        const auto liquid_fraction =
-            std::max(1.0 - alpha, scalar_type{1.0e-15});
-        const auto radius =
-            d_characteristic_radius.value(cell_lid);
-        const auto surface_tension =
-            surface_tensions[owned];
-        const auto laplace_term =
-            radius > 0.0
-                ? 4.0 * surface_tension / (3.0 * radius)
-                : 0.0;
-        const auto bubble_pressure =
-            std::max(pressure + laplace_term,
-                     d_options.minimum_absolute_pressure);
-        const auto mixture_compressibility =
-            d_options.liquid_compressibility * liquid_fraction
-          + alpha / bubble_pressure;
-        const auto mixture_expansion =
-            d_options.liquid_thermal_expansion * liquid_fraction
-          + (alpha > 0.0
-                ? alpha / temperature_value
-                  * (pressure
-                     + (radius > 0.0
-                            ? 2.0 * surface_tension / radius
-                            : 0.0))
-                  / bubble_pressure
-                : 0.0);
-        const auto divergence =
-            FVM::cell_flux_balance<Pack>(
-                *d_mesh, liquid_face_flux, cell_lid)
-            / d_mesh->cell_volume(cell_lid);
-        const auto alpha_rate =
-            (alpha - d_previous_alpha_g.value(cell_lid))
-            / time_step;
-        const auto density_rate =
-            -density * divergence
-          + density * alpha_rate / liquid_fraction;
-        const auto temperature_rate =
-            (temperature_value
-             - d_previous_temperature.value(cell_lid))
-            / time_step;
-        const auto pressure_rate =
-            (density_rate / density
-             + mixture_expansion * temperature_rate)
-            / mixture_compressibility;
-        auto updated_pressure =
-            pressure + time_step * pressure_rate;
-        if (!std::isfinite(updated_pressure)
-            || updated_pressure
-                < d_options.minimum_absolute_pressure)
-        {
-            ++d_last_statistics.pressure_floor_cells;
-            updated_pressure = d_options.minimum_absolute_pressure;
-        }
-        d_absolute_pressure.set_owned_value(
-            cell_lid, updated_pressure);
-        d_previous_temperature.set_owned_value(
-            cell_lid, temperature_value);
-        d_previous_density.set_owned_value(cell_lid, density);
-        d_previous_dynamic_viscosity.set_owned_value(
-            cell_lid, material.dynamic_viscosity.value(cell_lid));
-        d_previous_alpha_g.set_owned_value(cell_lid, alpha);
-    }
-}
-
-/**
- * @brief Advance non-ideal reacting_gas using the model-owned void fraction.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time Current physical time.
- * @param time_step Positive physical time step.
- * @param temperature Cell temperature field.
- * @param gauge_pressure Cell gauge pressure in Pa.
- * @param velocity Liquid velocity field.
- * @param liquid_face_flux Oriented liquid volumetric flux.
- * @param material Material-property fields.
- * @param prescribed_heat_density Optional source field required when active.
- * @throws std::logic_error if called for ideal-gas source mode.
- * @throws std::invalid_argument if fields or physical inputs are invalid.
- * @throws std::runtime_error if a transport or property solve fails.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::advance(
-    scalar_type time,
-    scalar_type time_step,
-    const field_type& temperature,
-    const field_type& gauge_pressure,
-    const velocity_field_type& velocity,
-    const face_flux_field_type& liquid_face_flux,
-    const material_type& material,
-    const field_type* prescribed_heat_density,
-    const FVM::ALEControlVolumeState* ale,
-    Dimension slip_axis)
-{
-    if (mode() == ReactingGasMode::IdealGasSource)
-    {
-        throw std::logic_error(
-            "Ideal reacting_gas advance requires authoritative scalar void.");
-    }
-    advance(
-        time,
-        time_step,
-        temperature,
-        gauge_pressure,
-        velocity,
-        liquid_face_flux,
-        material,
-        prescribed_heat_density,
-        d_alpha_g,
-        d_options.alpha_max,
-        ale,
-        slip_axis);
-}
-
-/**
- * @brief Advance the active reacting_gas mode with authoritative void bounds.
- * @tparam Pack Tpetra type pack used by the model.
- * @param time Current physical time.
- * @param time_step Positive physical time step.
- * @param temperature Cell temperature field.
- * @param gauge_pressure Cell gauge pressure in Pa.
- * @param velocity Liquid velocity field.
- * @param liquid_face_flux Oriented liquid volumetric flux.
- * @param material Material-property fields.
- * @param prescribed_heat_density Optional source field required when active.
- * @param alpha_g Authoritative void fraction for ideal-gas source mode.
- * @param alpha_max Upper bound for authoritative void fraction.
- * @throws std::logic_error if model and authoritative state are incompatible.
- * @throws std::invalid_argument if fields or physical inputs are invalid.
- * @throws std::runtime_error if a transport or property solve fails.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::advance(
-    scalar_type time,
-    scalar_type time_step,
-    const field_type& temperature,
-    const field_type& gauge_pressure,
-    const velocity_field_type& velocity,
-    const face_flux_field_type& liquid_face_flux,
-    const material_type& material,
-    const field_type* prescribed_heat_density,
-    const field_type& alpha_g,
-    scalar_type alpha_max,
-    const FVM::ALEControlVolumeState* ale,
-    Dimension slip_axis)
-{
-    if (species_enabled())
-    {
-        if (!enabled())
-        {
-            d_source_alpha_reaction.put_scalar(0.0);
-            d_species_thermal_source.put_scalar(0.0);
-            return;
-        }
-        advance_species_fields(time, time_step, temperature, gauge_pressure, velocity, liquid_face_flux, material, ale,
-            slip_axis, d_active_bouss_wall_heat);
-        return;
-    }
-    d_last_statistics = {};
-    const auto update_started = std::chrono::steady_clock::now();
     if (!enabled())
     {
-        d_source_alpha_reaction.put_scalar(0.0);
+        d_source_alpha_reaction.put_scalar(0);
+        d_species_thermal_source.put_scalar(0);
         return;
     }
-    if (!std::isfinite(time_step) || time_step <= 0.0)
-    {
-        throw std::invalid_argument(
-            "Reacting gas timestep must be finite and positive.");
-    }
-    if (ale != nullptr)
-    {
-        ale->validate(*d_mesh, static_cast<real_t>(time_step));
-    }
-
-    if (mode() == ReactingGasMode::TwoPopulation
-        && !d_initial_state_initialized)
-    {
-        initialize_state(
-            time - time_step,
-            temperature,
-            gauge_pressure,
-            velocity,
-            material);
-    }
-    reconstruct_absolute_pressure(time, gauge_pressure);
-    if (mode() == ReactingGasMode::IdealGasSource)
-    {
-        synchronize_void_fraction(alpha_g, alpha_max);
-        update_ideal_gas_source(
-            time_step,
-            temperature,
-            prescribed_heat_density,
-            alpha_g,
-            alpha_max);
-        reduce_event_statistics();
-        return;
-    }
-
-    advance_two_population(
-        time_step,
-        temperature,
-        velocity,
-        liquid_face_flux,
-        material,
-        prescribed_heat_density,
-        ale,
-        slip_axis);
-    update_inertial_pressure(
-        time_step, temperature, liquid_face_flux, material);
-    reduce_event_statistics();
-
-    if (d_options.pressure_mode != ReactingPressureMode::Inertial)
-    {
-        const auto temperature_values = temperature.owned_read_view();
-        const auto density_values = material.density.owned_read_view();
-        const auto viscosity_values = material.dynamic_viscosity.owned_read_view();
-        const auto alpha_values = d_alpha_g.owned_read_view();
-        const auto previous_temperature_values = d_previous_temperature.owned_write_view();
-        const auto previous_density_values = d_previous_density.owned_write_view();
-        const auto previous_viscosity_values = d_previous_dynamic_viscosity.owned_write_view();
-        const auto previous_alpha_values = d_previous_alpha_g.owned_write_view();
-        for (size_t owned = 0; owned < d_mesh->num_owned_cells(); ++owned)
-        {
-            previous_temperature_values(owned, 0) = temperature_values(owned, 0);
-            previous_density_values(owned, 0) = density_values(owned, 0);
-            previous_viscosity_values(owned, 0) = viscosity_values(owned, 0);
-            previous_alpha_values(owned, 0) = alpha_values(owned, 0);
-        }
-        d_history_initialized = true;
-    }
-    sync_all_fields();
-    d_last_statistics.gas_update_seconds =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - update_started).count();
+    advance_species_fields(time, time_step, temperature, gauge_pressure, velocity, liquid_face_flux, material, ale,
+        slip_axis, d_active_bouss_wall_heat);
 }
 
-/**
- * @brief Mirror an externally authoritative scalar void-fraction field.
- * @tparam Pack Tpetra type pack used by the model.
- * @param alpha_g Authoritative gas void fraction.
- * @param alpha_max Maximum permitted gas void fraction.
- * @throws std::logic_error unless ideal-gas source mode is active.
- * @throws std::invalid_argument if the field, bound, or values are invalid.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::synchronize_void_fraction(
-    const field_type& alpha_g,
-    scalar_type alpha_max)
-{
-    if (mode() != ReactingGasMode::IdealGasSource)
-    {
-        throw std::logic_error(
-            "Only ideal reacting_gas can mirror authoritative scalar void.");
-    }
-    if (&alpha_g.mesh() != d_mesh.get())
-    {
-        throw std::invalid_argument(
-            "Reacting gas authoritative alpha_g is on the wrong mesh.");
-    }
-    if (!std::isfinite(alpha_max)
-        || alpha_max <= scalar_type{}
-        || alpha_max > scalar_type{1})
-    {
-        throw std::invalid_argument(
-            "Reacting gas authoritative alpha_max must be in (0, 1].");
-    }
-    for (size_t owned = 0;
-         owned < d_mesh->num_owned_cells();
-         ++owned)
-    {
-        const auto cell_lid = static_cast<local_ordinal_type>(owned);
-        const auto alpha = alpha_g.value(cell_lid);
-        if (!std::isfinite(alpha)
-            || alpha < scalar_type{}
-            || alpha > alpha_max)
-        {
-            throw std::invalid_argument(
-                "Reacting gas authoritative alpha_g is outside its bounds.");
-        }
-        d_alpha_g.set_owned_value(cell_lid, alpha);
-        d_alpha_l.set_owned_value(cell_lid, scalar_type{1} - alpha);
-    }
-    d_alpha_g.sync_ghosts();
-    d_alpha_l.sync_ghosts();
-}
-
-/**
- * @brief Synchronize overlap storage for every model-owned cell field.
- * @tparam Pack Tpetra type pack used by the model.
- */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::sync_all_fields()
+template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::sync_all_fields()
 {
     const auto fields = mutable_state_fields();
     if (d_state_sync_owned.is_null() || d_state_sync_owned->getNumVectors() != fields.size())
@@ -3309,44 +982,10 @@ template<TpetraTypePack Pack, class MeshType>
 std::vector<typename ReactingGasModel<Pack, MeshType>::field_type*>
 ReactingGasModel<Pack, MeshType>::mutable_state_fields()
 {
-    std::vector<field_type*> result{
-        &d_alpha_g,
-        &d_alpha_l,
-        &d_source_alpha_reaction,
-        &d_absolute_pressure,
-        &d_previous_temperature,
-        &d_previous_density,
-        &d_previous_dynamic_viscosity,
-        &d_previous_alpha_g,
-        &d_donor_hydrogen_deficit,
-        &d_donor_escape_rate,
-        &d_dissolved_hydrogen,
-        &d_dissolved_hydrogen_inventory,
-        &d_excluded_dissolved_inventory,
-        &d_micro_number,
-        &d_micro_moles,
-        &d_large_number,
-        &d_large_moles,
-        &d_nucleation_radius,
-        &d_micro_radius,
-        &d_large_radius,
-        &d_critical_concentration,
-        &d_equilibrium_concentration,
-        &d_mass_transfer_coefficient,
-        &d_alpha_g_micro,
-        &d_alpha_g_large,
-        &d_alpha_g_raw,
-        &d_transport_alpha_g_raw,
-        &d_alpha_g_excess,
-        &d_characteristic_radius,
-        &d_hydrogen_production_rate,
-        &d_micro_to_large_number_rate,
-        &d_micro_to_large_molar_rate,
-        &d_large_growth_rate,
-        &d_dissolution_rate,
-        &d_escape_molar_rate,
-        &d_escape_number_rate,
-        &d_inventory_error};
+    std::vector<field_type*> result{&d_alpha_g, &d_alpha_l, &d_source_alpha_reaction, &d_absolute_pressure,
+        &d_previous_temperature, &d_previous_alpha_g, &d_micro_number, &d_micro_moles, &d_large_number, &d_large_moles,
+        &d_micro_radius, &d_large_radius, &d_alpha_g_micro, &d_alpha_g_large, &d_alpha_g_raw, &d_transport_alpha_g_raw,
+        &d_alpha_g_excess, &d_escape_number_rate};
     append_species_fields(result);
     return result;
 }
@@ -3355,44 +994,10 @@ template<TpetraTypePack Pack, class MeshType>
 std::vector<const typename ReactingGasModel<Pack, MeshType>::field_type*>
 ReactingGasModel<Pack, MeshType>::state_fields() const
 {
-    std::vector<const field_type*> result{
-        &d_alpha_g,
-        &d_alpha_l,
-        &d_source_alpha_reaction,
-        &d_absolute_pressure,
-        &d_previous_temperature,
-        &d_previous_density,
-        &d_previous_dynamic_viscosity,
-        &d_previous_alpha_g,
-        &d_donor_hydrogen_deficit,
-        &d_donor_escape_rate,
-        &d_dissolved_hydrogen,
-        &d_dissolved_hydrogen_inventory,
-        &d_excluded_dissolved_inventory,
-        &d_micro_number,
-        &d_micro_moles,
-        &d_large_number,
-        &d_large_moles,
-        &d_nucleation_radius,
-        &d_micro_radius,
-        &d_large_radius,
-        &d_critical_concentration,
-        &d_equilibrium_concentration,
-        &d_mass_transfer_coefficient,
-        &d_alpha_g_micro,
-        &d_alpha_g_large,
-        &d_alpha_g_raw,
-        &d_transport_alpha_g_raw,
-        &d_alpha_g_excess,
-        &d_characteristic_radius,
-        &d_hydrogen_production_rate,
-        &d_micro_to_large_number_rate,
-        &d_micro_to_large_molar_rate,
-        &d_large_growth_rate,
-        &d_dissolution_rate,
-        &d_escape_molar_rate,
-        &d_escape_number_rate,
-        &d_inventory_error};
+    std::vector<const field_type*> result{&d_alpha_g, &d_alpha_l, &d_source_alpha_reaction, &d_absolute_pressure,
+        &d_previous_temperature, &d_previous_alpha_g, &d_micro_number, &d_micro_moles, &d_large_number, &d_large_moles,
+        &d_micro_radius, &d_large_radius, &d_alpha_g_micro, &d_alpha_g_large, &d_alpha_g_raw, &d_transport_alpha_g_raw,
+        &d_alpha_g_excess, &d_escape_number_rate};
     append_species_fields(result);
     return result;
 }
@@ -3413,6 +1018,7 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     result.d_species_history = d_species_history;
     result.d_bouss_receipts = d_bouss_receipts;
     result.d_species_event_receipt = d_species_event_receipt;
+    result.d_population_escape_receipt = d_population_escape_receipt;
     for (const auto* field : state_fields())
     {
         auto& values = result.d_fields.emplace_back();
@@ -3440,15 +1046,9 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     }
     result.d_liquid_transport_volume_receipt = d_liquid_transport_volume_receipt;
     result.d_statistics = d_last_statistics;
-    result.d_donor_tracking_enabled = d_donor_tracking_enabled;
     result.d_history_initialized = d_history_initialized;
     result.d_initial_state_initialized = d_initial_state_initialized;
     result.d_absolute_pressure_offset = d_absolute_pressure_offset;
-    result.d_cumulative_hydrogen_produced = d_cumulative_hydrogen_produced;
-    result.d_cumulative_dissolved_hydrogen_outflow = d_cumulative_dissolved_hydrogen_outflow;
-    result.d_cumulative_submerged_bubble_hydrogen_escaped = d_cumulative_submerged_bubble_hydrogen_escaped;
-    result.d_cumulative_hydrogen_escaped = d_cumulative_hydrogen_escaped;
-    result.d_cumulative_escaped_bubble_count = d_cumulative_escaped_bubble_count;
     return result;
 }
 
@@ -3465,14 +1065,21 @@ void ReactingGasModel<Pack, MeshType>::restore_for_ale_replay(const StateSnapsho
 }
 
 template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapshot, bool refresh_metrics)
+void ReactingGasModel<Pack, MeshType>::restore_for_initialization_rollback(const StateSnapshot& snapshot)
+{
+    restore_state(snapshot, true, true);
+}
+
+template<TpetraTypePack Pack, class MeshType>
+void ReactingGasModel<Pack, MeshType>::restore_state(
+    const StateSnapshot& snapshot, bool refresh_metrics, bool restore_initialization_authority)
 {
     const auto fields = mutable_state_fields();
-    // Typed snapshots bind the initialized schema generation. Legacy snapshots retain
-    // the same-owner/same-storage restore contract across cache-clearing configure().
+    // Public/ALE snapshots bind initialization authority. Only private failed-init/step rollback may restore it.
     int local_invalid = snapshot.d_owner != this ||
                         snapshot.d_source_configuration_generation != d_source_configuration_generation ||
-                        (species_enabled() && snapshot.d_species_generation != d_species_generation) ||
+                        (!restore_initialization_authority && snapshot.d_species_generation != d_species_generation) ||
+                        snapshot.d_species_generation > d_species_generation_allocator ||
                         snapshot.d_species_fingerprint !=
                             (species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0) ||
                         snapshot.d_fields.size() != fields.size() ||
@@ -3547,19 +1154,12 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
     d_species_history = snapshot.d_species_history;
     d_bouss_receipts = snapshot.d_bouss_receipts;
     d_species_event_receipt = snapshot.d_species_event_receipt;
-    d_donor_tracking_enabled = snapshot.d_donor_tracking_enabled;
-    if (d_donor_tracking_enabled)
-        d_output_fields.emplace("donorH2Deficit", &d_donor_hydrogen_deficit);
-    else
-        d_output_fields.erase("donorH2Deficit");
+    d_population_escape_receipt = snapshot.d_population_escape_receipt;
     d_history_initialized = snapshot.d_history_initialized;
     d_initial_state_initialized = snapshot.d_initial_state_initialized;
+    if (restore_initialization_authority)
+        d_species_generation = snapshot.d_species_generation; // The allocator deliberately never rewinds.
     d_absolute_pressure_offset = snapshot.d_absolute_pressure_offset;
-    d_cumulative_hydrogen_produced = snapshot.d_cumulative_hydrogen_produced;
-    d_cumulative_dissolved_hydrogen_outflow = snapshot.d_cumulative_dissolved_hydrogen_outflow;
-    d_cumulative_submerged_bubble_hydrogen_escaped = snapshot.d_cumulative_submerged_bubble_hydrogen_escaped;
-    d_cumulative_hydrogen_escaped = snapshot.d_cumulative_hydrogen_escaped;
-    d_cumulative_escaped_bubble_count = snapshot.d_cumulative_escaped_bubble_count;
     sync_all_fields();
     if constexpr (requires { d_transport_bubble_slip_volume_flux.sync_ghosts(); })
     {
@@ -3571,14 +1171,11 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
     else invalidate_transport_operator();
 }
 
-/** Refresh reconstruction geometry without a caller-supplied snapshot. */
-template<TpetraTypePack Pack, class MeshType>
-void ReactingGasModel<Pack, MeshType>::refresh_geometry()
+template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshType>::refresh_geometry()
 {
     refresh_geometry({});
 }
 
-/** Refresh transport state using an optional shared geometry snapshot. */
 template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::refresh_geometry(
     typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry)

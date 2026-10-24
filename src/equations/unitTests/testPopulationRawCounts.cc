@@ -111,4 +111,30 @@ TEST(PopulationRawCountsTest, NonfiniteOrNegativeOriginalEventsRejectBeforePubli
     }
     EXPECT_DOUBLE_EQ(f.counts.front().number, 1e20);
 }
+TEST(PopulationRawCountsTest, CompleteDissolutionNeedsItsExplicitCountDeath)
+{
+    PureFixture f(7, 1);
+    B::MultispeciesPopulationPacket packet;
+    packet.transfers = {{gas, P::Dispersed, P::Dissolved, "bin", {}, 1}};
+    EXPECT_THROW((void) f.apply(packet), std::runtime_error);
+    EXPECT_DOUBLE_EQ(f.counts.front().number, 7);
+    EXPECT_DOUBLE_EQ(f.state.amount(f.catalog, gas, P::Dispersed, "bin"), 1);
+    packet.numberEvents = {{"bin", 0, 7}};
+    const auto result = f.apply(packet);
+    EXPECT_DOUBLE_EQ(result.state.amount(f.catalog, gas, P::Dispersed, "bin"), 0);
+    EXPECT_DOUBLE_EQ(result.state.amount(f.catalog, gas, P::Dissolved), 1.0001);
+    EXPECT_DOUBLE_EQ(result.numbers.front().number, 0);
+    EXPECT_EQ(replay(7, result.localNumberChanges.front()), 0);
+}
+TEST(PopulationRawCountsTest, EarlierChemicalDisappearanceNeverManufacturesADeathEvent)
+{
+    PureFixture f(3, 0);
+    EXPECT_THROW((void) f.apply({}), std::runtime_error);
+    EXPECT_DOUBLE_EQ(f.counts.front().number, 3);
+    // A separately supplied count owner can explicitly close that prior
+    // material event. Absence alone never decides what happened to the count.
+    const auto result = f.apply({{}, {{"bin", 0, 3}}});
+    EXPECT_DOUBLE_EQ(result.numbers.front().number, 0);
+    EXPECT_EQ(replay(3, result.localNumberChanges.front()), 0);
+}
 } // namespace

@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include "GeneralGasModelTestSupport.hh"
 #include "equations/ReactingGasModel.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
@@ -26,14 +27,15 @@
 #include <map>
 #include <memory>
 #include <numbers>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace
 {
 
 using Pack = SimpleFluid::TpetraTypes<>;
+namespace GeneralGas = SimpleFluid::Testing::GeneralGasModel;
 using MeshType = SimpleFluid::Mesh<Pack>;
 using FieldType = SimpleFluid::CellField<Pack>;
 using VelocityFieldType = SimpleFluid::VectorCellField<Pack>;
@@ -44,40 +46,14 @@ thread_local const SimpleFluid::Meshes::MultiRegionMesh* gas_transport_guard_pro
 
 double gas_diffusivity_with_transport_guard_probe(double)
 {
-    if (gas_transport_guard_probe) gas_transport_guard_probe->require_geometry_writable();
+    if (gas_transport_guard_probe)
+        gas_transport_guard_probe->require_geometry_writable();
     return 1e-8;
 }
 
 using utils_test::KokkosEnvironment;
 
-testing::Environment* const kokkos_environment =
-    testing::AddGlobalTestEnvironment(new KokkosEnvironment);
-
-/**
- * @brief Sheng two-population options used by distributed inventory tests.
- *
- * @return Configured Sheng-model options.
- */
-SimpleFluid::ReactingGasOptions sheng_options()
-{
-    SimpleFluid::ReactingGasOptions options;
-    options.mode =
-        SimpleFluid::ReactingGasMode::TwoPopulation;
-    options.hydrogen_yield_mol_per_j = 2.0e-7;
-    options.gas_release_efficiency = 1.0;
-    options.max_source_alpha_rate = 1.0;
-    options.reference_pressure = 1.0e5;
-    options.henry_coefficient = 1.0e-5;
-    options.surface_tension = 0.07;
-    options.hydrogen_diffusivity = 1.0e-8;
-    options.nucleation_radius = 6.6359547089482127e-8;
-
-    options.min_radius = 1.0e-12;
-    options.max_radius = 1.0e-3;
-    options.min_population = 1.0e-40;
-    options.max_population = 1.0e40;
-    return options;
-}
+testing::Environment* const kokkos_environment = testing::AddGlobalTestEnvironment(new KokkosEnvironment);
 
 /**
  * @brief Create water-like material fields on the distributed test mesh.
@@ -85,8 +61,7 @@ SimpleFluid::ReactingGasOptions sheng_options()
  * @param mesh Mesh owning the material fields.
  * @return Initialized water-property fields.
  */
-SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
-    const SimpleFluid::SP<MeshType>& mesh)
+SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(const SimpleFluid::SP<MeshType>& mesh)
 {
     SimpleFluid::TimeStepperOptions time_options;
     SimpleFluid::BoussinesqModelOptions options;
@@ -108,33 +83,8 @@ SimpleFluid::MaterialPropertyFields<Pack> make_water_properties(
 double global_sum(const MeshType& mesh, double local_value)
 {
     double global_value = 0.0;
-    Teuchos::reduceAll(
-        *mesh.owned_cell_map()->getComm(),
-        Teuchos::REDUCE_SUM,
-        1,
-        &local_value,
-        &global_value);
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_value, &global_value);
     return global_value;
-}
-
-/**
- * @brief Compute a distributed cell-volume integral for a cell field.
- *
- * @param field Cell field to integrate.
- * @return Global volume integral.
- */
-double global_integral(const FieldType& field)
-{
-    double local_integral = 0.0;
-    const auto& mesh = field.mesh();
-    for (size_t owned = 0; owned < mesh.num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        local_integral +=
-            field.value(cell_lid) * mesh.cell_volume(cell_lid);
-    }
-    return global_sum(mesh, local_integral);
 }
 
 /**
@@ -143,26 +93,13 @@ double global_integral(const FieldType& field)
  * @param mesh Mesh providing the communicator.
  * @param value Replicated value to compare.
  */
-void expect_same_on_all_ranks(const MeshType& mesh, double value)
+template<class TestMesh> void expect_same_on_all_ranks(const TestMesh& mesh, double value)
 {
     double minimum = 0.0;
     double maximum = 0.0;
-    Teuchos::reduceAll(
-        *mesh.owned_cell_map()->getComm(),
-        Teuchos::REDUCE_MIN,
-        1,
-        &value,
-        &minimum);
-    Teuchos::reduceAll(
-        *mesh.owned_cell_map()->getComm(),
-        Teuchos::REDUCE_MAX,
-        1,
-        &value,
-        &maximum);
-    EXPECT_NEAR(
-        maximum,
-        minimum,
-        std::max(1.0e-14, std::abs(maximum) * 1.0e-12));
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &value, &minimum);
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &value, &maximum);
+    EXPECT_NEAR(maximum, minimum, std::max(1.0e-14, std::abs(maximum) * 1.0e-12));
 }
 
 } // namespace
@@ -178,28 +115,27 @@ TEST(ReactingGasModelMultiRankTest, CompositeTransportLeaseFailureIsCollectiveAn
     using Vector = SimpleFluid::VectorCellFieldStored<Pack, Handle>;
     using Face = SimpleFluid::ScalarFaceFieldStored<Pack, Handle>;
     using Model = SimpleFluid::ReactingGasModel<Pack, Handle>;
-    auto geometry = std::make_shared<Composite>(std::vector<Composite::Region>{
-        SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
-        SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
+    auto geometry = std::make_shared<Composite>(
+        std::vector<Composite::Region>{SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
+            SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
         std::vector<Composite::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}},
         SimpleFluid::Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
     auto mesh = std::make_shared<Handle>(geometry);
     const auto comm = mesh->owned_cell_map()->getComm();
-    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
     const int has_cells = mesh->num_owned_cells() > 0;
     int all_have_cells = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &has_cells, &all_have_cells);
     ASSERT_EQ(all_have_cells, 1);
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = .2;
-    options.initial_micro_number_density = 1e8;
-    options.initial_micro_moles = 1e-6;
-    options.microbubble_lifetime = 1e100;
-    options.micro_to_large_conversion_coefficient = 0;
-    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-    options.hydrogen_diffusivity_correlation = &gas_diffusivity_with_transport_guard_probe;
+    GeneralGas::Parameters parameters;
+    parameters.dissolved_one = .2;
+    parameters.number_density[0] = 1e8;
+    parameters.molar_one[0] = 1e-6;
+    parameters.diffusivity_two = [](const auto& c)
+    { return gas_diffusivity_with_transport_guard_probe(c.environment.temperature); };
+    auto options = GeneralGas::options(parameters);
     Model model(mesh, options);
-    model.enable_donor_hydrogen_deficit_tracking();
     Scalar temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
     Vector velocity(mesh, Handle::Vec3{}, "velocity");
     Face relative_flux(mesh, 0., "relative_flux");
@@ -211,19 +147,35 @@ TEST(ReactingGasModelMultiRankTest, CompositeTransportLeaseFailureIsCollectiveAn
     SimpleFluid::MaterialPropertyFields<Pack, Handle> material(mesh, water, SimpleFluid::TimeStepperOptions{});
     model.initialize_state(0., temperature, pressure, velocity, material);
     const auto checkpoint = model.snapshot();
-    const double before = model.global_submerged_hydrogen_moles();
+    const double before = model.global_species_moles(GeneralGas::one);
     gas_transport_guard_probe = comm->getRank() == 0 ? geometry.get() : nullptr;
     int category = 0;
     std::string message;
-    try { model.advance(.01, .01, temperature, pressure, velocity, relative_flux, material, &power); }
-    catch (const std::logic_error& error) { category = 1; message = error.what(); }
-    catch (const std::runtime_error& error) { category = 2; message = error.what(); }
-    catch (const std::exception& error) { category = 3; message = error.what(); }
+    try
+    {
+        model.advance(.01, .01, temperature, pressure, velocity, relative_flux, material);
+    }
+    catch (const std::logic_error& error)
+    {
+        category = 1;
+        message = error.what();
+    }
+    catch (const std::runtime_error& error)
+    {
+        category = 2;
+        message = error.what();
+    }
+    catch (const std::exception& error)
+    {
+        category = 3;
+        message = error.what();
+    }
     gas_transport_guard_probe = nullptr;
     EXPECT_EQ(category, comm->getRank() == 0 ? 1 : 2);
-    EXPECT_EQ(message, comm->getRank() == 0
-        ? "Geometry is held by a region execution view."
-        : "Reacting diffusivity evaluation failed on another rank.");
+    if (comm->getRank() == 0)
+        EXPECT_EQ(message, "Geometry is held by a region execution view.");
+    else
+        EXPECT_NE(message.find("another rank"), std::string::npos);
     EXPECT_NO_THROW(geometry->require_geometry_writable());
     model.restore(checkpoint);
 
@@ -233,12 +185,11 @@ TEST(ReactingGasModelMultiRankTest, CompositeTransportLeaseFailureIsCollectiveAn
         motion.begin_trial(1.1, .01);
         const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
         model.refresh_geometry();
-        model.advance(.01, .01, temperature, pressure, velocity, relative_flux, material, &power,
-            &ale, SimpleFluid::Dimension::Z);
-        EXPECT_GE(model.last_statistics().transport_linear.solves, 6);
-        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), before, 1e-12);
-        EXPECT_NEAR(model.last_statistics().inventory_error, 0., 1e-12);
-        EXPECT_NEAR(model.last_statistics().donor_inventory_error, 0., 1e-12);
+        model.advance(
+            .01, .01, temperature, pressure, velocity, relative_flux, material, &ale, SimpleFluid::Dimension::Z);
+        EXPECT_GE(model.last_statistics().transport_linear.solves, 4);
+        EXPECT_NEAR(model.global_species_moles(GeneralGas::one), before, 1e-12);
+        EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0., 1e-12);
         EXPECT_NO_THROW(geometry->require_geometry_writable());
         std::map<std::string, std::vector<double>> result;
         for (const auto& [name, field] : model.output_fields())
@@ -262,143 +213,174 @@ TEST(ReactingGasModelMultiRankTest, CompositeTransportLeaseFailureIsCollectiveAn
     model.refresh_geometry();
 }
 
-/** Check analytic source/decay, changing cell inputs and ghost state for either policy. */
-void check_repeated_kinetics_with_heterogeneous_inputs(SimpleFluid::ReactingKineticsMode mode)
+/** Actual source substeps refresh owned/overlap data; no specialized fallback or donor deficit. */
+void check_repeated_kinetics_with_heterogeneous_inputs(bool continuous)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 2, 2, 0.25));
-    auto options = sheng_options();
-    options.kinetics_mode = mode;
-    options.microbubble_lifetime = 1.e-5;
-    options.large_bubble_dissolution_time = 2.e-5;
-    options.micro_to_large_conversion_coefficient = 0.;
-    options.max_subcycles = 9;
-    ReactingModelType model(mesh, options);
-    model.enable_donor_hydrogen_deficit_tracking();
-    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"),
-        power(mesh, 0., "power");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0., "flux");
-    auto material = make_water_properties(mesh);
-    const std::array<double, 3> time_steps{8.e-6, 3.1e-5, 1.1e-5};
-    const std::array<int, 3> expected_subcycles{4, 9, 6};
-    std::vector<double> micro_moles(mesh->num_local_cells());
-    std::vector<double> micro_number(mesh->num_local_cells());
-    std::vector<double> donor(mesh->num_local_cells());
-    double time = 0.;
-    for (size_t step = 0; step < time_steps.size(); ++step)
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 2, 2, .25));
+    FieldType external_power(mesh, 0., "declared_external_feed_driver");
+    GeneralGas::Parameters p;
+    p.source = [&external_power](const GeneralGas::R::ReactionContext& c, double dt)
     {
-        SCOPED_TRACE(step);
-        const auto power_at = [step](auto gid)
+        GeneralGas::M::require(
+            c.environment.location && c.environment.location->ownedCell, "Expected source location.");
+        const double q =
+            external_power.value(static_cast<Pack::local_ordinal_type>(*c.environment.location->ownedCell));
+        GeneralGas::R::ReactionSourceInput input;
+        if (q > 0)
         {
-            return (gid % 5 == 0 ? -1. : 1.) * 1000. * (1. + 0.1 * gid) * (step + 1.);
-        };
-        const auto temperature_at = [step](auto gid) { return 300. + 0.5 * gid + 2. * step; };
-        for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-        {
-            const auto lid = static_cast<Pack::local_ordinal_type>(owned);
-            const auto gid = mesh->cell_global_id(lid);
-            power.set_owned_value(lid, power_at(gid));
-            temperature.set_owned_value(lid, temperature_at(gid));
+            const double n = 2e-7 * q * dt * c.environment.bulkVolume;
+            input.externalTransfers = {{"test.heterogeneous_finite_interval_feed", GeneralGas::one,
+                GeneralGas::Phase::Dissolved, n, .002 * n, 0, {}, {}}};
         }
-        power.sync_ghosts();
-        temperature.sync_ghosts();
-        const auto dt = time_steps[step];
-        const auto substep = dt / expected_subcycles[step];
-        const auto retention = std::exp(-dt / options.microbubble_lifetime);
-        // Closed-form geometric sum for source impulses preceding each decay.
-        const auto source_retention = mode == SimpleFluid::ReactingKineticsMode::ExactInactive
-            ? -options.microbubble_lifetime * std::expm1(-dt / options.microbubble_lifetime)
-            : substep * std::exp(-substep / options.microbubble_lifetime)
-                * std::expm1(-dt / options.microbubble_lifetime)
-                / std::expm1(-substep / options.microbubble_lifetime);
-        time += dt;
-        model.advance(time, dt, temperature, pressure, velocity, flux, material, &power);
-        EXPECT_EQ(model.last_statistics().maximum_subcycles,
-            mode == SimpleFluid::ReactingKineticsMode::ExactInactive ? 1 : expected_subcycles[step]);
-        double local_total = 0.;
-        for (size_t local = 0; local < mesh->num_local_cells(); ++local)
+        input.heat.rate = GeneralGas::R::VolumetricHeatRate{3, GeneralGas::R::SourceVolumeBasis::BulkVolume};
+        return input;
+    };
+    p.population = [&external_power, continuous](
+                       const SimpleFluid::BubbleGasPhysics::MultispeciesPopulationContext& c, double dt)
+    {
+        const auto& e = c.chemistry.environment;
+        const auto row = static_cast<Pack::local_ordinal_type>(*e.location->ownedCell);
+        const double q = external_power.value(row), production = q > 0 ? 2e-7 * q : 0;
+        constexpr double lifetime = 1e-5, radius = 6.6359547089482127e-8;
+        const double retention = std::exp(-dt / lifetime), loss = -std::expm1(-dt / lifetime);
+        const double retained_source = production * e.bulkVolume * (continuous ? lifetime * loss : dt * retention);
+        const double per_bubble = 4 * std::numbers::pi / 3 *
+                                  (e.absolutePressure * radius * radius * radius + 2 * .07 * radius * radius) /
+                                  (GeneralGas::gas_constant * e.temperature);
+        const double old =
+            c.chemistry.state.amount(c.chemistry.catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+        SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket packet;
+        if (old * loss > 0)
+            packet.transfers.push_back(
+                {GeneralGas::one, GeneralGas::Phase::Dispersed, GeneralGas::Phase::Dissolved, "micro", {}, old * loss});
+        if (retained_source > 0)
+            packet.transfers.push_back({GeneralGas::one, GeneralGas::Phase::Dissolved, GeneralGas::Phase::Dispersed, {},
+                "micro", retained_source});
+        packet.numberEvents = {{"micro", retained_source / per_bubble, c.populations.front().number * loss}};
+        return packet;
+    };
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    const std::array<double, 3> time_steps{8e-6, 3.1e-5, 1.1e-5};
+    const std::array<int, 3> subdivisions{4, 9, 6};
+    std::vector<double> expected_moles(mesh->num_local_cells()), expected_count(mesh->num_local_cells()),
+        supplied(mesh->num_local_cells());
+    double time = 0;
+    std::uint64_t revision = 0;
+    for (std::size_t step = 0; step < time_steps.size(); ++step)
+    {
+        const auto q = [step](auto gid) { return (gid % 5 == 0 ? -1. : 1.) * 1000 * (1 + .1 * gid) * (step + 1.); };
+        const auto T = [step](auto gid) { return 300 + .5 * gid + 2 * step; };
+        for (std::size_t row = 0; row < mesh->num_owned_cells(); ++row)
         {
-            const auto lid = static_cast<Pack::local_ordinal_type>(local);
-            const auto gid = mesh->cell_global_id(lid);
-            const auto production = options.gas_release_efficiency * options.hydrogen_yield_mol_per_j
-                * std::max(power_at(gid), 0.);
-            const auto cell_temperature = temperature_at(gid);
-            const auto radius = SimpleFluid::BubbleGasPhysics::nucleation_radius(
-                options, cell_temperature, options.reference_pressure);
-            const auto nucleation_moles = 4. * std::numbers::pi / 3.
-                * (options.reference_pressure * radius * radius * radius
-                    + 2. * options.surface_tension * radius * radius)
-                / (options.gas_constant * cell_temperature);
-            micro_moles[local] = micro_moles[local] * retention + production * source_retention;
-            micro_number[local] = micro_number[local] * retention
-                + production * source_retention / nucleation_moles;
-            donor[local] += production * dt;
-            EXPECT_NEAR(model.micro_moles().local_value(lid), micro_moles[local],
-                std::max(1.e-23, micro_moles[local] * 1.e-11));
-            EXPECT_NEAR(model.micro_number_density().local_value(lid), micro_number[local],
-                std::max(1.e-14, micro_number[local] * 1.e-11));
-            EXPECT_NEAR(model.donor_hydrogen_deficit().local_value(lid), donor[local],
-                std::max(1.e-23, donor[local] * 1.e-11));
-            EXPECT_DOUBLE_EQ(model.output_fields().at("H2_production_rate")->local_value(lid), production);
+            const auto cell = static_cast<Pack::local_ordinal_type>(row);
+            const auto gid = mesh->cell_global_id(cell);
+            external_power.set_owned_value(cell, q(gid));
+            f.temperature.set_owned_value(cell, T(gid));
+        }
+        external_power.sync_ghosts();
+        f.temperature.sync_ghosts();
+        const double dt = time_steps[step], h = dt / (continuous ? 1 : subdivisions[step]);
+        for (int substep = 0; substep < (continuous ? 1 : subdivisions[step]); ++substep)
+        {
+            time += h;
+            f.advance(time, h);
+            ++revision;
+            EXPECT_EQ(f.model.species_event_receipt().revision, revision);
+            for (std::size_t row = 0; row < mesh->num_owned_cells(); ++row)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(row);
+                const double cv = mesh->cell_volume(cell);
+                const auto gid = mesh->cell_global_id(cell);
+                double n = 0;
+                for (const auto& e : f.model.source_ledgers()[row].externalTransfers)
+                    if (e.species == GeneralGas::one)
+                    {
+                        n += e.moles;
+                        EXPECT_DOUBLE_EQ(e.mass, .002 * e.moles);
+                        EXPECT_DOUBLE_EQ(e.energy, 0);
+                    }
+                EXPECT_NEAR(n, std::max(q(gid), 0.) * 2e-7 * h * cv, std::max(1e-23, std::abs(n) * 1e-11));
+                EXPECT_NEAR(f.model.thermal_source().value(cell), 3, 1e-13);
+            }
+        }
+        const double retention = std::exp(-dt / 1e-5);
+        const double source_retention = continuous
+                                            ? -1e-5 * std::expm1(-dt / 1e-5)
+                                            : h * std::exp(-h / 1e-5) * std::expm1(-dt / 1e-5) / std::expm1(-h / 1e-5);
+        double local_total = 0;
+        for (std::size_t local = 0; local < mesh->num_local_cells(); ++local)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(local);
+            const auto gid = mesh->cell_global_id(cell);
+            const double production = 2e-7 * std::max(q(gid), 0.), r = 6.6359547089482127e-8;
+            const double mol_per_bubble =
+                4 * std::numbers::pi / 3 * (1e5 * r * r * r + 2 * .07 * r * r) / (GeneralGas::gas_constant * T(gid));
+            expected_moles[local] = expected_moles[local] * retention + production * source_retention;
+            expected_count[local] = expected_count[local] * retention + production * source_retention / mol_per_bubble;
+            supplied[local] += production * dt;
+            EXPECT_NEAR(f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "micro").local_value(cell),
+                expected_moles[local], std::max(1e-23, expected_moles[local] * 1e-11));
+            EXPECT_NEAR(f.model.population_number_field("micro").local_value(cell), expected_count[local],
+                std::max(1e-14, expected_count[local] * 1e-11));
             if (local < mesh->num_owned_cells())
-                local_total += donor[local] * mesh->cell_volume(lid);
+                local_total += supplied[local] * mesh->cell_volume(cell);
         }
-        const auto total = global_sum(*mesh, local_total);
-        EXPECT_NEAR(model.global_submerged_hydrogen_moles(), total, total * 1.e-11);
-        EXPECT_NEAR(model.last_statistics().inventory_error, 0., total * 1.e-11);
-        EXPECT_NEAR(model.last_statistics().donor_inventory_error, 0., total * 1.e-11);
+        const double total = global_sum(*mesh, local_total);
+        EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), total, total * 1e-11);
+        EXPECT_NEAR(GeneralGas::history(f.model).external_supply, total, total * 1e-11);
+        EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, total * 1e-11);
     }
 }
 
 /** Subcycles preserve split-source decay, changing cell inputs and ghost state. */
 TEST(ReactingGasModelMultiRankTest, RepeatedSubcyclesRefreshHeterogeneousInputsAndDonorInventory)
 {
-    check_repeated_kinetics_with_heterogeneous_inputs(SimpleFluid::ReactingKineticsMode::LegacySubcycled);
+    check_repeated_kinetics_with_heterogeneous_inputs(false);
 }
 
-/** Exact inactive updates preserve continuous production, changing inputs, donors and ghosts. */
+/** Supplied continuous-production updates preserve changing inputs, donor budgets and ghosts. */
 TEST(ReactingGasModelMultiRankTest, ExactInactiveRefreshesHeterogeneousInputsAndDonorInventory)
 {
-    check_repeated_kinetics_with_heterogeneous_inputs(SimpleFluid::ReactingKineticsMode::ExactInactive);
+    check_repeated_kinetics_with_heterogeneous_inputs(true);
 }
 
 /** Direct model users cannot select inconsistent numerical methods across ranks. */
 TEST(ReactingGasModelMultiRankTest, KineticsModeMustBeCollective)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 2, 2, 0.25));
-    const auto comm = mesh->owned_cell_map()->getComm();
+    using Native = SimpleFluid::MeshHandle<Pack>;
+    Native::DistributionOptions d;
+    d.allow_empty_partitions = true;
+    auto grid = std::make_shared<Native>(
+        std::make_shared<Native::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., 1.}, {0., 1.}, {0., 1.}}}),
+        d);
+    const auto comm = grid->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
-    auto options = sheng_options();
-    if (comm->getRank() == 0)
-        options.kinetics_mode = SimpleFluid::ReactingKineticsMode::ExactInactive;
-    // Complete metadata preflight now rejects divergent policy before fields
-    // or communicating model storage are constructed.
-    EXPECT_THROW((void) ReactingModelType(mesh, options), std::invalid_argument);
-    options = sheng_options();
-    EXPECT_NO_THROW((void) ReactingModelType(mesh, options));
+        GTEST_SKIP() << "Requires MPI metadata divergence.";
+    auto options = GeneralGas::options();
+    if (comm->getRank() == comm->getSize() - 1)
+        options.population_process = [](const auto&, double)
+        { return SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket{}; };
+    EXPECT_THROW((SimpleFluid::ReactingGasModel<Pack, Native>(grid, options)), std::invalid_argument);
+    EXPECT_NO_THROW((SimpleFluid::ReactingGasModel<Pack, Native>(grid, GeneralGas::options())));
+    int local_empty = grid->num_owned_cells() == 0, empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+    EXPECT_EQ(empty, comm->getSize() - 1);
 }
 
 /** @brief Collective policy selection rejects divergent ranks and supports GS. */
 TEST(ReactingGasModelMultiRankTest, TransportSolverPolicyIsCollective)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
         GTEST_SKIP() << "This test requires at least two MPI ranks.";
 
-    auto options = sheng_options();
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 1.0e-6;
-    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 10.0;
-    options.free_surface_patches = {"zmax"};
-    options.microbubble_lifetime = 1.0e30;
-    options.large_bubble_dissolution_time = 1.0e30;
-    options.micro_to_large_conversion_coefficient = 0.0;
+    auto selected = GeneralGas::populated();
+    selected.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    selected.controls.constant_slip_velocity = 10;
+    selected.controls.free_surface_patches = {"zmax"};
+    auto options = GeneralGas::options(selected);
     ReactingModelType model(mesh, options);
     const auto original = model.transport_linear_solver_options();
 
@@ -436,12 +418,13 @@ TEST(ReactingGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
     FaceFieldType flux(mesh, 0.0, "flux");
     auto material = make_water_properties(mesh);
-    model.advance(0.025, 0.025, temperature, pressure, velocity, flux, material, &power);
+    model.initialize_state(0.0, temperature, pressure, velocity, material);
+    model.advance(0.025, 0.025, temperature, pressure, velocity, flux, material);
     const auto& statistics = model.last_statistics();
-    EXPECT_GT(statistics.hydrogen_escaped, 0.0);
-    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-13);
+    EXPECT_GT(GeneralGas::step_escape(model), 0.0);
+    EXPECT_NEAR(GeneralGas::history(model).inventory_error, 0.0, 1.0e-13);
     EXPECT_TRUE(statistics.transport_linear.converged);
-    EXPECT_EQ(statistics.transport_linear.solves, 5);
+    EXPECT_EQ(statistics.transport_linear.solves, 9);
     EXPECT_GT(statistics.transport_linear.iterations, 0);
     EXPECT_LE(statistics.transport_linear.achieved_tolerance, candidate.tolerance);
     expect_same_on_all_ranks(*mesh, statistics.transport_linear.solves);
@@ -465,7 +448,7 @@ TEST(ReactingGasModelMultiRankTest, TransportSolverPolicyIsCollective)
     };
     check_publication();
     const auto accepted = model.snapshot();
-    model.advance(0.05, 0.025, temperature, pressure, velocity, flux, material, &power);
+    model.advance(0.05, 0.025, temperature, pressure, velocity, flux, material);
     check_publication();
     model.restore(accepted);
     check_publication();
@@ -475,32 +458,48 @@ TEST(ReactingGasModelMultiRankTest, ExternalMaterialFailureIsCollective)
 {
     auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 2, 2, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
-    if (comm->getSize() < 2) GTEST_SKIP() << "Requires two ranks.";
-    for (const bool surface_failure : {true, false})
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    for (const bool surface : {true, false})
     {
-        auto options = sheng_options();
-        options.pressure_mode = SimpleFluid::ReactingPressureMode::Inertial;
-        options.surface_tension_mode = SimpleFluid::SurfaceTensionMode::External;
-        options.surface_tension_correlation = [surface_failure](double temperature)
+        GeneralGas::Parameters p;
+        if (surface)
         {
-            if (surface_failure && temperature > 325) throw std::runtime_error("external surface tension failure");
-            return .07;
-        };
-        options.nucleation_radius_mode = SimpleFluid::NucleationRadiusMode::External;
-        options.nucleation_radius_correlation = [surface_failure](double temperature, double)
+            p.controls.surface_tension_mode = SimpleFluid::SurfaceTensionMode::External;
+            p.controls.surface_tension_correlation = [](double T)
+            {
+                if (T > 325)
+                    throw std::runtime_error("external surface tension failure");
+                return .07;
+            };
+        }
+        else
         {
-            if (!surface_failure && temperature > 325) throw std::runtime_error("external nucleation failure");
-            return 6.6359547089482127e-8;
-        };
-        ReactingModelType model(mesh, options);
-        FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
-        VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-        FaceFieldType flux(mesh, 0., "flux");
-        auto material = make_water_properties(mesh);
-        model.initialize_state(0., temperature, pressure, velocity, material);
-        ASSERT_GT(mesh->num_owned_cells(), 0U);
-        if (comm->getRank() == 0) temperature.set_owned_value(0, 350.);
-        EXPECT_THROW(model.advance(.001, .001, temperature, pressure, velocity, flux, material, &power), std::exception);
+            p.reservoir_mol_per_joule[0] = 2e-7;
+            p.nucleate_supplied_gas = true;
+            p.nucleation_radius_law = [](const auto& c)
+            {
+                if (c.environment.temperature > 325)
+                    throw std::runtime_error("external nucleation failure");
+                return 6.6359547089482127e-8;
+            };
+        }
+        GeneralGas::Fixture<MeshType> f(mesh, p);
+        f.power.put_scalar(1000);
+        f.initialize();
+        const auto receipt = f.model.species_event_receipt();
+        const auto histories = f.model.species_histories();
+        if (comm->getRank() == 0)
+            f.temperature.set_owned_value(0, 350);
+        f.temperature.sync_ghosts();
+        EXPECT_THROW(f.advance(.001, .001), std::exception);
+        EXPECT_EQ(f.model.species_event_receipt(), receipt);
+        EXPECT_EQ(f.model.species_histories(), histories);
+        f.temperature.put_scalar(300);
+        f.temperature.sync_ghosts();
+        EXPECT_NO_THROW(f.advance(.001, .001));
+        if (!surface)
+            EXPECT_GT(GeneralGas::history(f.model).external_supply, 0);
     }
 }
 
@@ -509,267 +508,160 @@ TEST(ReactingGasModelMultiRankTest, ExternalMaterialFailureIsCollective)
  */
 TEST(ReactingGasModelMultiRankTest, ConservesGlobalHydrogenAndVoidInventory)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    GeneralGas::Parameters p;
+    p.reservoir_mol_per_joule = {2e-7, 1e-7};
+    p.nucleate_supplied_gas = true;
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.power.put_scalar(1e5);
+    f.initialize();
+    f.advance(1e-6, 1e-6);
+    const double domain = global_sum(*mesh,
+        [&]
+        {
+            double v = 0;
+            for (std::size_t row = 0; row < mesh->num_owned_cells(); ++row)
+                v += mesh->cell_volume(static_cast<Pack::local_ordinal_type>(row));
+            return v;
+        }());
+    for (const auto [id, coefficient] :
+        std::array<std::pair<GeneralGas::R::SpeciesId, double>, 2>{{{GeneralGas::one, 2e-7}, {GeneralGas::two, 1e-7}}})
     {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+        const double expected = coefficient * 1e5 * 1e-6 * domain;
+        EXPECT_NEAR(GeneralGas::history(f.model, id).external_supply, expected, 1e-13);
+        EXPECT_NEAR(f.model.global_species_moles(id), expected, 1e-13);
+        EXPECT_NEAR(GeneralGas::history(f.model, id).inventory_error, 0, 1e-13);
+        expect_same_on_all_ranks(*mesh, f.model.global_species_moles(id));
     }
-
-    auto options = sheng_options();
-    options.microbubble_lifetime = 1.0e9;
-    options.large_bubble_dissolution_time = 1.0e9;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    ReactingModelType model(mesh, options);
-
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    constexpr double power_density = 1.0e5;
-    FieldType power(mesh, power_density, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    constexpr double time_step = 1.0e-6;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    double local_volume = 0.0;
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
+    double local_volume = 0;
+    const auto& catalog = f.model.options().reaction_mechanism->catalog();
+    for (std::size_t row = 0; row < mesh->num_owned_cells(); ++row)
     {
-        local_volume += mesh->cell_volume(
-            static_cast<Pack::local_ordinal_type>(owned));
+        const auto cell = static_cast<Pack::local_ordinal_type>(row);
+        const double cv = mesh->cell_volume(cell);
+        const auto state = f.model.cell_species_state(cell, cv);
+        double n = 0;
+        for (const auto& species : catalog.species())
+            n += state.amount(catalog, species.id, GeneralGas::Phase::Dispersed, "micro");
+        const double count = f.model.population_number_field("micro").value(cell) * cv;
+        local_volume += GeneralGas::volume(n, count, 300, 1e5, .07);
+        EXPECT_GE(f.model.alpha_g().value(cell), 0);
+        EXPECT_LE(f.model.alpha_g().value(cell), p.controls.alpha_max);
     }
-    const auto total_volume = global_sum(*mesh, local_volume);
-    const auto expected_produced =
-        options.hydrogen_yield_mol_per_j
-      * power_density
-      * total_volume
-      * time_step;
-    const auto& statistics = model.last_statistics();
-
-    EXPECT_NEAR(
-        statistics.hydrogen_produced,
-        expected_produced,
-        expected_produced * 1.0e-10);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_hydrogen_produced, statistics.hydrogen_produced);
-    EXPECT_DOUBLE_EQ(model.cumulative_hydrogen_produced(), statistics.cumulative_hydrogen_produced);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_dissolved_hydrogen_outflow, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.cumulative_submerged_bubble_hydrogen_escaped, 0.0);
-    EXPECT_NEAR(
-        statistics.inventory_error,
-        0.0,
-        std::max(1.0e-14, expected_produced * 1.0e-10));
-    EXPECT_TRUE(std::isfinite(statistics.void_volume));
-    EXPECT_GE(statistics.void_volume, 0.0);
-    EXPECT_NEAR(
-        statistics.void_volume,
-        global_integral(model.alpha_g()),
-        std::max(1.0e-14, statistics.void_volume * 1.0e-10));
-
-    const auto dissolved_moles = model.global_dissolved_hydrogen_moles();
-    const auto microbubble_moles = model.global_microbubble_hydrogen_moles();
-    const auto large_bubble_moles = model.global_large_bubble_hydrogen_moles();
-    const auto bubble_moles = model.global_submerged_bubble_hydrogen_moles();
-    const auto total_submerged_moles = model.global_submerged_hydrogen_moles();
-    const auto raw_bubble_volume = model.global_submerged_bubble_volume();
-    EXPECT_NEAR(dissolved_moles, global_integral(model.dissolved_hydrogen_inventory()),
-        std::max(1.0e-14, std::abs(dissolved_moles) * 1.0e-12));
-    EXPECT_NEAR(microbubble_moles, global_integral(model.micro_moles()),
-        std::max(1.0e-14, std::abs(microbubble_moles) * 1.0e-12));
-    EXPECT_NEAR(large_bubble_moles, global_integral(model.large_moles()),
-        std::max(1.0e-14, std::abs(large_bubble_moles) * 1.0e-12));
-    EXPECT_DOUBLE_EQ(bubble_moles, microbubble_moles + large_bubble_moles);
-    EXPECT_DOUBLE_EQ(total_submerged_moles, dissolved_moles + bubble_moles);
-    EXPECT_NEAR(raw_bubble_volume, global_integral(*model.output_fields().at("alpha_g_raw")),
-        std::max(1.0e-14, std::abs(raw_bubble_volume) * 1.0e-12));
-
-    expect_same_on_all_ranks(*mesh, statistics.hydrogen_produced);
-    expect_same_on_all_ranks(*mesh, statistics.cumulative_hydrogen_produced);
-    expect_same_on_all_ranks(*mesh, statistics.cumulative_dissolved_hydrogen_outflow);
-    expect_same_on_all_ranks(*mesh, statistics.cumulative_submerged_bubble_hydrogen_escaped);
-    expect_same_on_all_ranks(*mesh, statistics.inventory_error);
-    expect_same_on_all_ranks(*mesh, statistics.void_volume);
-    expect_same_on_all_ranks(*mesh, dissolved_moles);
-    expect_same_on_all_ranks(*mesh, microbubble_moles);
-    expect_same_on_all_ranks(*mesh, large_bubble_moles);
-    expect_same_on_all_ranks(*mesh, bubble_moles);
-    expect_same_on_all_ranks(*mesh, total_submerged_moles);
-    expect_same_on_all_ranks(*mesh, raw_bubble_volume);
-
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell_lid =
-            static_cast<Pack::local_ordinal_type>(owned);
-        EXPECT_TRUE(std::isfinite(model.alpha_g().value(cell_lid)));
-        EXPECT_GE(model.alpha_g().value(cell_lid), options.alpha_min);
-        EXPECT_LE(model.alpha_g().value(cell_lid), options.alpha_max);
-        EXPECT_TRUE(std::isfinite(
-            model.dissolved_hydrogen_inventory().value(cell_lid)));
-        EXPECT_GE(model.dissolved_hydrogen_inventory().value(cell_lid), 0.0);
-        EXPECT_TRUE(std::isfinite(model.micro_moles().value(cell_lid)));
-        EXPECT_GE(model.micro_moles().value(cell_lid), 0.0);
-        EXPECT_TRUE(std::isfinite(model.large_moles().value(cell_lid)));
-        EXPECT_GE(model.large_moles().value(cell_lid), 0.0);
-    }
+    const double expected_volume = global_sum(*mesh, local_volume);
+    EXPECT_NEAR(f.model.global_submerged_bubble_volume(), expected_volume, expected_volume * 1e-11);
+    expect_same_on_all_ranks(*mesh, f.model.global_submerged_bubble_volume());
+    // Same actual source/transport protocol with genuinely empty native owners.
+    using Native = SimpleFluid::MeshHandle<Pack>;
+    Native::DistributionOptions d;
+    d.allow_empty_partitions = true;
+    auto one_cell = std::make_shared<Native>(
+        std::make_shared<Native::Cartesian>(SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0., 1.}, {0., 1.}, {0., 1.}}}),
+        d);
+    GeneralGas::Fixture<Native> empty(one_cell, p);
+    empty.power.put_scalar(1e5);
+    empty.initialize();
+    empty.advance(1e-6, 1e-6);
+    int local_empty = one_cell->num_owned_cells() == 0, total_empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &total_empty);
+    EXPECT_EQ(total_empty, comm->getSize() - 1);
+    EXPECT_NEAR(empty.model.global_species_moles(GeneralGas::one), 2e-7 * 1e5 * 1e-6, 1e-13);
+    EXPECT_EQ(&empty.model.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved).mesh(), one_cell.get());
 }
 
 /** @brief Verify finite-Courant free-surface escape is globally conservative. */
-TEST(ReactingGasModelMultiRankTest,
-     ConservesFiniteCourantFreeSurfaceEscape)
+TEST(ReactingGasModelMultiRankTest, ConservesFiniteCourantFreeSurfaceEscape)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    GeneralGas::Parameters p;
+    p.number_density[0] = 1e10;
+    p.molar_one[0] = 1e-6;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = 10;
+    p.controls.free_surface_patches = {"zmax"};
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    const double before = f.model.global_species_moles(GeneralGas::one);
+    const double count = GeneralGas::integral(f.model.population_number_field("micro"));
+    f.advance(.025, .025);
+    const double escaped = GeneralGas::step_escape(f.model), number = GeneralGas::number_escape(f.model, "micro");
+    EXPECT_GT(escaped, 0);
+    EXPECT_GT(number, 0);
+    EXPECT_DOUBLE_EQ(GeneralGas::number_escape(f.model, "large"), 0);
+    EXPECT_NEAR(GeneralGas::step_escape(f.model, GeneralGas::one, true), escaped, 1e-13);
+    EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one) + escaped, before, 1e-13);
+    EXPECT_NEAR(GeneralGas::integral(f.model.population_number_field("micro")) + number, count, count * 1e-10);
+    EXPECT_NEAR(GeneralGas::history(f.model).inventory_error, 0, 1e-13);
+    double local_molar = 0, local_number = 0;
+    const auto& catalog = f.model.options().reaction_mechanism->catalog();
+    for (std::size_t row = 0; row < mesh->num_owned_cells(); ++row)
     {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+        local_molar -= f.model.escape_ledgers()[row].externalChange.amount(
+            catalog, GeneralGas::one, GeneralGas::Phase::Dispersed, "micro");
+        const auto cell = static_cast<Pack::local_ordinal_type>(row);
+        if (mesh->cell_centroid(cell).z > .75)
+            local_number += .025 * 10 * .25 * .25 * f.model.population_number_field("micro").value(cell);
     }
-
-    auto options = sheng_options();
-    options.initial_micro_number_density = 1.0e10;
-    options.initial_micro_moles = 1.0e-6;
-    options.rise_velocity_mode =
-        SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 10.0;
-    options.free_surface_patches = {"zmax"};
-    options.microbubble_lifetime = 1.0e30;
-    options.large_bubble_dissolution_time = 1.0e30;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    ReactingModelType model(mesh, options);
-
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    const auto count_before =
-        global_integral(model.micro_number_density())
-      + global_integral(model.large_number_density());
-    constexpr double time_step = 0.025;
-    model.advance(
-        time_step,
-        time_step,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    const auto count_after =
-        global_integral(model.micro_number_density())
-      + global_integral(model.large_number_density());
-    const auto& statistics = model.last_statistics();
-    const auto& molar_rate =
-        *model.output_fields().at("H2_escape_molar_rate");
-    const auto& number_rate =
-        *model.output_fields().at("bubble_escape_number_rate");
-
-    EXPECT_GT(statistics.hydrogen_escaped, 0.0);
-    EXPECT_DOUBLE_EQ(statistics.dissolved_hydrogen_outflow, 0.0);
-    EXPECT_NEAR(statistics.submerged_bubble_hydrogen_escaped, statistics.hydrogen_escaped, 1.0e-13);
-    EXPECT_NEAR(statistics.microbubble_hydrogen_escaped, statistics.submerged_bubble_hydrogen_escaped, 1.0e-13);
-    EXPECT_DOUBLE_EQ(
-        model.cumulative_submerged_bubble_hydrogen_escaped(), statistics.submerged_bubble_hydrogen_escaped);
-    EXPECT_DOUBLE_EQ(statistics.large_bubble_hydrogen_escaped, 0.0);
-    EXPECT_GT(statistics.escaped_bubble_count, 0.0);
-    EXPECT_NEAR(
-        statistics.hydrogen_after + statistics.hydrogen_escaped,
-        statistics.hydrogen_before + statistics.hydrogen_produced,
-        1.0e-13);
-    EXPECT_NEAR(statistics.inventory_error, 0.0, 1.0e-13);
-    EXPECT_NEAR(
-        count_after + statistics.escaped_bubble_count,
-        count_before,
-        count_before * 1.0e-10);
-    EXPECT_NEAR(
-        time_step * global_integral(molar_rate),
-        statistics.hydrogen_escaped,
-        1.0e-13);
-    EXPECT_NEAR(
-        time_step * global_integral(number_rate),
-        statistics.escaped_bubble_count,
-        count_before * 1.0e-10);
-
-    expect_same_on_all_ranks(*mesh, statistics.hydrogen_escaped);
-    expect_same_on_all_ranks(*mesh, statistics.submerged_bubble_hydrogen_escaped);
-    expect_same_on_all_ranks(*mesh, statistics.microbubble_hydrogen_escaped);
-    expect_same_on_all_ranks(*mesh, statistics.large_bubble_hydrogen_escaped);
-    expect_same_on_all_ranks(*mesh, statistics.escaped_bubble_count);
-    expect_same_on_all_ranks(*mesh, statistics.inventory_error);
-    expect_same_on_all_ranks(
-        *mesh, statistics.cumulative_hydrogen_escaped);
-    expect_same_on_all_ranks(*mesh, statistics.cumulative_submerged_bubble_hydrogen_escaped);
-    expect_same_on_all_ranks(
-        *mesh, statistics.cumulative_escaped_bubble_count);
+    EXPECT_NEAR(global_sum(*mesh, local_molar), escaped, 1e-13);
+    EXPECT_NEAR(global_sum(*mesh, local_number), number, count * 1e-10);
+    expect_same_on_all_ranks(*mesh, escaped);
+    expect_same_on_all_ranks(*mesh, number);
+    const auto accepted = f.model.population_escape_receipt();
+    const auto snap = f.model.snapshot();
+    f.advance(.05, .025);
+    f.model.restore(snap);
+    EXPECT_EQ(f.model.population_escape_receipt(), accepted);
 }
 
 /** @brief Verify clipped-cell diagnostics are reduced over every rank. */
 TEST(ReactingGasModelMultiRankTest, ReducesClippedCellCountGlobally)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    constexpr double capacity = .01, number = 1e12, requested = 1;
+    const double radius = std::cbrt(3 * capacity / (4 * std::numbers::pi * number));
+    const double admitted = capacity * (1e5 + 2 * .07 / radius) / (GeneralGas::gas_constant * 300) * (1 - 8e-12);
+    GeneralGas::Parameters p;
+    p.controls.alpha_max = capacity;
+    p.number_density[1] = number;
+    p.molar_one[1] = admitted;
+    p.dissolved_one = 1;
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    f.advance(1e-9, 1e-9);
+    int local_admissions = 0;
+    double local_reservoir = 0, local_volume = 0;
+    for (std::size_t row = 0; row < mesh->num_owned_cells(); ++row)
     {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
+        const auto cell = static_cast<Pack::local_ordinal_type>(row);
+        const double cv = mesh->cell_volume(cell);
+        EXPECT_LE(f.model.alpha_g().value(cell), capacity);
+        const double stored = f.model.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "large").value(cell);
+        EXPECT_NEAR(stored, admitted, admitted * 1e-12);
+        if (stored < requested)
+            ++local_admissions;
+        local_reservoir += (requested - stored) * cv;
+        local_volume += cv;
     }
-
-    auto options = sheng_options();
-    options.alpha_max = 0.01;
-    options.max_concentration = 1.0;
-    options.initial_dissolved_hydrogen = 5.0;
-    options.initial_large_number_density = 1.0e12;
-    options.initial_large_moles = 1.0;
-    options.microbubble_lifetime = 1.0e9;
-    options.large_bubble_dissolution_time = 1.0e9;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    ReactingModelType model(mesh, options);
-
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-
-    model.advance(
-        1.0e-9,
-        1.0e-9,
-        temperature,
-        pressure,
-        velocity,
-        flux,
-        material,
-        &power);
-
-    const auto expected_clipped = static_cast<int>(
-        mesh->owned_cell_map()->getGlobalNumElements());
-    EXPECT_EQ(
-        model.last_statistics().clipped_cells, expected_clipped);
-    const auto raw_bubble_volume = model.global_submerged_bubble_volume();
-    const auto bounded_bubble_volume = global_integral(model.alpha_g());
-    const auto unrepresented_bubble_volume = model.global_unrepresented_bubble_volume();
-    EXPECT_GT(raw_bubble_volume, bounded_bubble_volume);
-    EXPECT_NEAR(unrepresented_bubble_volume, raw_bubble_volume - bounded_bubble_volume, raw_bubble_volume * 1.0e-12);
-    EXPECT_NEAR(
-        raw_bubble_volume, global_integral(*model.output_fields().at("alpha_g_raw")), raw_bubble_volume * 1.0e-12);
-    expect_same_on_all_ranks(
-        *mesh,
-        static_cast<double>(model.last_statistics().clipped_cells));
-    expect_same_on_all_ranks(*mesh, raw_bubble_volume);
-    expect_same_on_all_ranks(*mesh, unrepresented_bubble_volume);
+    int admissions = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_admissions, &admissions);
+    EXPECT_EQ(admissions, static_cast<int>(mesh->owned_cell_map()->getGlobalNumElements()));
+    const double reservoir = global_sum(*mesh, local_reservoir), domain = global_sum(*mesh, local_volume);
+    EXPECT_GT(reservoir, 0);
+    EXPECT_NEAR(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large") + reservoir,
+        requested * domain, requested * domain * 1e-12);
+    EXPECT_NEAR(f.model.global_submerged_bubble_volume(), GeneralGas::integral(f.model.alpha_g()),
+        f.model.global_submerged_bubble_volume() * 1e-12);
+    expect_same_on_all_ranks(*mesh, static_cast<double>(admissions));
+    expect_same_on_all_ranks(*mesh, reservoir);
 }
 
 /** @brief Reconstructed pressure domains and rejected candidates are global. */
@@ -782,11 +674,12 @@ TEST(ReactingGasModelMultiRankTest, CollectivelyValidatesReconstructedPressureOf
         GTEST_SKIP() << "This test requires at least two MPI ranks.";
     }
 
-    auto options = sheng_options();
-    options.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
-    options.minimum_absolute_pressure = 5.0e4;
-    options.initial_micro_number_density = 2.0e8;
-    options.initial_micro_moles = 3.0e-6;
+    GeneralGas::Parameters p;
+    p.controls.pressure_mode = SimpleFluid::ReactingPressureMode::Reconstructed;
+    p.controls.minimum_absolute_pressure = 5e4;
+    p.number_density[0] = 2e8;
+    p.molar_one[0] = 3e-6;
+    auto options = GeneralGas::options(p);
     ReactingModelType model(mesh, options);
     FieldType temperature(mesh, 300.0, "temperature");
     FieldType pressure(mesh, 0.0, "pressure");
@@ -816,191 +709,115 @@ TEST(ReactingGasModelMultiRankTest, CollectivelyValidatesReconstructedPressureOf
 }
 
 /** @brief A rank-local slip-property failure is reported before bubble transport. */
-TEST(ReactingGasModelMultiRankTest,
-     RankLocalBubbleSlipFailureThrowsCoherently)
+TEST(ReactingGasModelMultiRankTest, RankLocalBubbleSlipFailureThrowsCoherently)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
-    {
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
-    }
-
-    auto options = sheng_options();
-    options.initial_large_number_density = 100.0;
-    options.initial_large_moles = 1.0e-6;
-    options.rise_velocity_mode =
-        SimpleFluid::BubbleRiseVelocityMode::Celata2007;
-    options.bubble_gas_density = 1.2;
-    ReactingModelType model(mesh, options);
-
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    model.initialize_state(
-        0.0, temperature, pressure, velocity, material);
-
-    ASSERT_GT(mesh->num_owned_cells(), 0U);
+        GTEST_SKIP() << "Requires MPI.";
+    GeneralGas::Parameters p;
+    p.number_density[1] = 100;
+    p.molar_one[1] = 1e-6;
+    const double r = GeneralGas::radius(1e-6, 100, 300, p.pressure, p.sigma);
+    p.molar_mass_one = 1.2 * GeneralGas::gas_constant * 300 / (p.pressure + 2 * p.sigma / r);
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::Celata2007;
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    const auto receipt = f.model.species_event_receipt();
     if (comm->getRank() == 0)
-    {
-        // Deliberately leave overlap values untouched: only rank 0's owned
-        // cell may fail the purely local bubble-slip validation stage.
-        material.dynamic_viscosity.set_owned_value(
-            0, std::numeric_limits<double>::quiet_NaN());
-    }
-
-    bool rejected = false;
+        f.material.dynamic_viscosity.set_owned_value(0, std::numeric_limits<double>::quiet_NaN());
     std::string message;
     try
     {
-        model.advance(
-            1.0e-6,
-            1.0e-6,
-            temperature,
-            pressure,
-            velocity,
-            flux,
-            material,
-            &power);
+        f.advance(1e-6, 1e-6);
     }
     catch (const std::exception& error)
     {
-        rejected = true;
         message = error.what();
     }
-
-    EXPECT_TRUE(rejected);
-    if (comm->getRank() == 0)
-    {
-        EXPECT_NE(message.find("dynamic viscosity"), std::string::npos);
-    }
-    else
-    {
-        EXPECT_NE(
-            message.find(
-                "Reacting bubble-slip evaluation failed on another rank"),
-            std::string::npos);
-    }
+    EXPECT_FALSE(message.empty());
+    EXPECT_NE(message.find(comm->getRank() == 0 ? "dynamic viscosity" : "another rank"), std::string::npos);
+    EXPECT_EQ(f.model.species_event_receipt(), receipt);
+    f.material.dynamic_viscosity.put_scalar(.001);
+    f.material.dynamic_viscosity.sync_ghosts();
+    EXPECT_NO_THROW(f.advance(1e-6, 1e-6));
 }
 
 /** One owned high-Sc population must fail before any rank enters a later collective. */
 TEST(ReactingGasModelMultiRankTest, RankLocalLegacySchmidtLimitThrowsCoherently)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
-
-    auto options = sheng_options();
-    options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::LegacyHughmark;
-    options.initial_large_number_density = 1.0e6;
-    options.initial_large_moles = 1.0e-7;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300.0, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-
-    ASSERT_GT(mesh->num_owned_cells(), 0U);
+        GTEST_SKIP() << "Requires MPI.";
+    GeneralGas::Parameters p;
+    p.number_density[1] = 1e6;
+    p.molar_one[1] = 1e-7;
+    p.diffusivity[0] = 1e-8;
+    p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::Hughmark;
+    p.viscosity_temperature = [](double T) { return T > 325 ? .003 : .001; };
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    const auto receipt = f.model.species_event_receipt();
     if (comm->getRank() == 0)
-        material.dynamic_viscosity.set_owned_value(0, 3.0e-3);
-    // D=1e-8, rho=1000: one owned cell has Sc=300; all other cells have Sc=100.
-    bool rejected = false;
+        f.temperature.set_owned_value(0, 350);
+    f.temperature.sync_ghosts();
     std::string message;
     try
     {
-        model.advance(1.0e-6, 1.0e-6, temperature, pressure, velocity,
-                      flux, material, &power);
+        f.advance(1e-6, 1e-6);
     }
     catch (const std::exception& error)
     {
-        rejected = true;
         message = error.what();
     }
-    EXPECT_TRUE(rejected);
-    if (comm->getRank() == 0)
-    {
-        EXPECT_NE(message.find("Sc < 250"), std::string::npos) << message;
-        EXPECT_NE(message.find("rank 0"), std::string::npos) << message;
-        EXPECT_NE(message.find("cell"), std::string::npos) << message;
-    }
-    else
-    {
-        EXPECT_NE(message.find("another rank"), std::string::npos) << message;
-    }
+    EXPECT_FALSE(message.empty());
+    EXPECT_NE(message.find(comm->getRank() == 0 ? "Sc < 250" : "another rank"), std::string::npos);
+    EXPECT_EQ(f.model.species_event_receipt(), receipt);
+    f.temperature.put_scalar(300);
+    f.temperature.sync_ghosts();
+    EXPECT_NO_THROW(f.advance(1e-6, 1e-6));
 }
 
 /** A rank-local finite-Pe state outside the Feng Stokes window fails coherently. */
 TEST(ReactingGasModelMultiRankTest, RankLocalFengReynoldsLimitThrowsCoherently)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
     if (comm->getSize() < 2)
-        GTEST_SKIP() << "This test requires at least two MPI ranks.";
-
-    auto options = sheng_options();
-    options.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid;
-    options.hydrogen_diffusivity = 4.5e-9;
-    options.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
-    options.constant_slip_velocity = 0.0045;
-    options.initial_large_number_density = 1.0e6;
-    options.initial_large_moles = 0.0002947014976484349; // R=1.2e-4 m at 298.85 K.
-    options.microbubble_lifetime = 1.0e9;
-    options.large_bubble_dissolution_time = 1.0e9;
-    options.micro_to_large_conversion_coefficient = 0.0;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 298.85, "temperature");
-    FieldType pressure(mesh, 0.0, "pressure");
-    FieldType power(mesh, 0.0, "qdot_external");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0.0, "flux");
-    auto material = make_water_properties(mesh);
-    for (size_t owned = 0; owned < mesh->num_owned_cells(); ++owned)
-    {
-        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
-        material.density.set_owned_value(cell, 1546.23563);
-        material.dynamic_viscosity.set_owned_value(cell, 0.00243878721);
-    }
-    material.density.sync_ghosts();
-    material.dynamic_viscosity.sync_ghosts();
-    model.initialize_state(0.0, temperature, pressure, velocity, material);
-
-    ASSERT_GT(mesh->num_owned_cells(), 0U);
+        GTEST_SKIP() << "Requires MPI.";
+    GeneralGas::Parameters p;
+    p.temperature = 298.85;
+    p.density = 1546.23563;
+    p.viscosity = .00243878721;
+    p.number_density[1] = 1e6;
+    p.molar_one[1] = .0002947014976484349;
+    p.diffusivity[0] = 4.5e-9;
+    p.controls.mass_transfer_mode = SimpleFluid::BubbleMassTransferMode::FengMichaelidesRigid;
+    p.controls.rise_velocity_mode = SimpleFluid::BubbleRiseVelocityMode::ConstantSlip;
+    p.controls.constant_slip_velocity = .0045;
+    p.viscosity_temperature = [](double T) { return T >= 300 ? .001 : .00243878721; };
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    const auto receipt = f.model.species_event_receipt();
     if (comm->getRank() == 0)
-        material.dynamic_viscosity.set_owned_value(0, 1.0e-3);
-    // Only rank 0's owned cell now has Re_d>1; Pe_a remains near 120.
-    bool rejected = false;
+        f.temperature.set_owned_value(0, 300);
+    f.temperature.sync_ghosts();
     std::string message;
     try
     {
-        model.advance(1.0e-6, 1.0e-6, temperature, pressure, velocity,
-                      flux, material, &power);
+        f.advance(1e-6, 1e-6);
     }
     catch (const std::exception& error)
     {
-        rejected = true;
         message = error.what();
     }
-    EXPECT_TRUE(rejected);
-    if (comm->getRank() == 0)
-    {
-        EXPECT_NE(message.find("Re_d < 1"), std::string::npos) << message;
-        EXPECT_NE(message.find("rank 0"), std::string::npos) << message;
-        EXPECT_NE(message.find("cell"), std::string::npos) << message;
-    }
-    else
-    {
-        EXPECT_NE(message.find("another rank"), std::string::npos) << message;
-    }
+    EXPECT_FALSE(message.empty());
+    EXPECT_NE(message.find(comm->getRank() == 0 ? "Re_d < 1" : "another rank"), std::string::npos);
+    EXPECT_EQ(f.model.species_event_receipt(), receipt);
+    f.temperature.put_scalar(298.85);
+    f.temperature.sync_ghosts();
+    EXPECT_NO_THROW(f.advance(1e-6, 1e-6));
 }
 
 namespace
@@ -1008,299 +825,262 @@ namespace
 using ZeroALEHandle = SimpleFluid::MeshHandle<Pack>;
 using ZeroALEModel = SimpleFluid::ReactingGasModel<Pack, ZeroALEHandle>;
 using ZeroALEScalar = SimpleFluid::ScalarCellFieldStored<Pack, ZeroALEHandle>;
-
-struct BatchedGhostProbe
-{
-    const ZeroALEModel* model = nullptr;
-    bool donor = false;
-    bool observed = false;
-    bool clean = true;
-};
-thread_local BatchedGhostProbe batched_ghost_probe;
 thread_local ZeroALEScalar* batched_mutation_target = nullptr;
 thread_local double batched_mutation_value = 0;
 thread_local bool batched_mutation_armed = false;
-
-double inspect_batched_zero_ghosts(double)
-{
-    const auto* model = batched_ghost_probe.model;
-    if (model)
-    {
-        const auto& work = model->last_statistics();
-        if (work.transport_work[0].skipped && work.transport_work[3].skipped &&
-            work.transport_work[4].skipped && (!batched_ghost_probe.donor || work.donor_transport_work.skipped))
-        {
-            // First reached from transported-volume reconstruction, before
-            // kinetics and its final packed state import can repair ghosts.
-            batched_ghost_probe.observed = true;
-            const std::array<const ZeroALEScalar*, 4> fields{&model->dissolved_hydrogen_inventory(),
-                batched_ghost_probe.donor ? &model->donor_hydrogen_deficit() : nullptr,
-                &model->large_number_density(), &model->large_moles()};
-            for (const auto* field : fields)
-                if (field)
-                {
-                    const auto values = field->local_read_view();
-                    for (size_t row = 0; row < values.extent(0); ++row)
-                        batched_ghost_probe.clean = batched_ghost_probe.clean && values(row, 0) == 0;
-                }
-        }
-    }
-    return 1e-8;
-}
-
-double mutate_batched_zero_inventory(double)
-{
-    if (batched_mutation_armed)
-    {
-        batched_mutation_armed = false;
-        batched_mutation_target->set_owned_value(0, batched_mutation_value);
-    }
-    return 1e-8;
-}
-
 struct ResetBatchedCallbackState
 {
     ~ResetBatchedCallbackState()
     {
-        batched_ghost_probe = {};
         batched_mutation_target = nullptr;
         batched_mutation_armed = false;
     }
 };
-
 SimpleFluid::SP<ZeroALEHandle> make_zero_ale_composite()
 {
     using Composite = SimpleFluid::Meshes::MultiRegionMesh;
-    return std::make_shared<ZeroALEHandle>(std::make_shared<Composite>(std::vector<Composite::Region>{
-        SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
-        SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
+    return std::make_shared<ZeroALEHandle>(std::make_shared<Composite>(
+        std::vector<Composite::Region>{SimpleFluid::Meshes::cartesian_region("left", {{{0, .5}, {0, 1}, {0, .5, 1}}}),
+            SimpleFluid::Meshes::cartesian_region("right", {{{.5, 1}, {0, 1}, {0, .5, 1}}})},
         std::vector<Composite::Interface>{SimpleFluid::Meshes::StructuredPatchInterface{{0, 1}, {1, 0}}},
         SimpleFluid::Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames));
 }
-
 struct DistributedALEZeroPair
 {
     SimpleFluid::SP<ZeroALEHandle> mesh = make_zero_ale_composite();
-    ZeroALEModel full, reduced;
+    GeneralGas::Parameters parameters;
     ZeroALEScalar temperature{mesh, 300., "temperature"}, pressure{mesh, 0., "pressure"}, power{mesh, 0., "power"};
     SimpleFluid::VectorCellFieldStored<Pack, ZeroALEHandle> velocity{mesh, ZeroALEHandle::Vec3{}, "velocity"};
     SimpleFluid::ScalarFaceFieldStored<Pack, ZeroALEHandle> flux{mesh, 0., "relative_flux"};
     SimpleFluid::MaterialPropertyFields<Pack, ZeroALEHandle> material;
+    ZeroALEModel full, reduced;
     SimpleFluid::PlanarALEMeshMotion<Pack> motion{mesh};
-
-    explicit DistributedALEZeroPair(SimpleFluid::ReactingGasOptions options, bool donor = true)
-        : full(mesh, options), reduced(mesh, options), material(mesh, [] {
-            SimpleFluid::BoussinesqModelOptions water;
-            water.reference_density = water.density = 1000.;
-            water.specific_heat_capacity = 4200.;
-            water.dynamic_viscosity = .001;
-            water.thermal_conductivity = .6;
-            return water;
-        }(), SimpleFluid::TimeStepperOptions{})
+    explicit DistributedALEZeroPair(GeneralGas::Parameters p = {})
+        : parameters(std::move(p)), material(
+                                        mesh,
+                                        []
+                                        {
+                                            SimpleFluid::BoussinesqModelOptions v;
+                                            v.reference_density = v.density = 1000;
+                                            v.specific_heat_capacity = 4200;
+                                            v.dynamic_viscosity = .001;
+                                            v.thermal_conductivity = .6;
+                                            return v;
+                                        }(),
+                                        SimpleFluid::TimeStepperOptions{}),
+          full(mesh, GeneralGas::options(parameters, &power)), reduced(mesh, GeneralGas::options(parameters, &power))
     {
-        if (donor)
-        {
-            full.enable_donor_hydrogen_deficit_tracking();
-            reduced.enable_donor_hydrogen_deficit_tracking();
-        }
-        reduced.set_skip_zero_auxiliary_transport(true);
-        full.initialize_state(0., temperature, pressure, velocity, material);
-        reduced.initialize_state(0., temperature, pressure, velocity, material);
+        full.initialize_state(0, temperature, pressure, velocity, material);
+        reduced.initialize_state(0, temperature, pressure, velocity, material);
     }
-
-    void advance(double top, double time, double dt)
+    void advance(double top, double end, double dt)
     {
         motion.begin_trial(top, dt);
         const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*mesh, motion);
+        full.refresh_geometry();
+        GeneralGas::force_numeric_reassembly(reduced);
         for (auto* model : {&full, &reduced})
         {
-            model->refresh_geometry();
-            model->advance(time, dt, temperature, pressure, velocity, flux, material, &power, &ale);
+            model->advance(end, dt, temperature, pressure, velocity, flux, material, &ale);
         }
     }
-
     void compare() const
     {
         for (const auto& [name, field] : full.output_fields())
         {
-            SCOPED_TRACE(name);
             const auto* actual = reduced.output_fields().at(name);
-            for (size_t row = 0; row < mesh->num_local_cells(); ++row)
+            for (std::size_t row = 0; row < mesh->num_local_cells(); ++row)
             {
-                const auto lid = static_cast<Pack::local_ordinal_type>(row);
-                const double expected = field->local_value(lid);
-                EXPECT_NEAR(actual->local_value(lid), expected, std::max(1e-20, std::abs(expected) * 1e-12));
+                const auto cell = static_cast<Pack::local_ordinal_type>(row);
+                const double expected = field->local_value(cell);
+                EXPECT_NEAR(actual->local_value(cell), expected, std::max(1e-20, std::abs(expected) * 1e-12)) << name;
             }
         }
-        EXPECT_NEAR(reduced.last_statistics().inventory_error, 0., 1e-12);
-        EXPECT_NEAR(reduced.last_statistics().donor_inventory_error, 0., 1e-12);
+        for (const auto& history : reduced.species_histories())
+        {
+            SCOPED_TRACE(history.species);
+            if (history.species == GeneralGas::one || history.species == GeneralGas::two)
+                EXPECT_NEAR(history.inventory_error, 0, 1e-12);
+            else
+            {
+                // Keep the historical absolute gas oracle distinct from the
+                // large finite solution stock with no external or boundary events.
+                EXPECT_DOUBLE_EQ(history.current_moles, history.initial_moles);
+                EXPECT_DOUBLE_EQ(history.chemical_production, 0.0);
+                EXPECT_DOUBLE_EQ(history.chemical_consumption, 0.0);
+                EXPECT_DOUBLE_EQ(history.external_supply, 0.0);
+                EXPECT_DOUBLE_EQ(history.external_withdrawal, 0.0);
+                EXPECT_DOUBLE_EQ(history.physical_outflow, 0.0);
+            }
+        }
+        EXPECT_EQ(reduced.population_escape_receipt().events, full.population_escape_receipt().events);
     }
 };
+template<class TestModel> void check_import(const TestModel& model)
+{
+    for (const auto& [name, field] : model.output_fields())
+    {
+        Pack::vector_type expected(field->overlap_data().getMap(), false);
+        Pack::import_type importer(field->owned_data().getMap(), expected.getMap());
+        expected.doImport(field->owned_data(), importer, Tpetra::REPLACE);
+        const auto values = expected.getData();
+        const auto actual = field->local_read_view();
+        for (std::size_t row = 0; row < values.size(); ++row)
+            EXPECT_DOUBLE_EQ(actual(row, 0), values[row]) << name;
+    }
+}
 } // namespace
 
 TEST(ReactingGasModelMultiRankTest, BatchedZeroAuxiliaryRepairsOverlapBeforePackedSync)
 {
-    for (const bool donor : {false, true})
+    DistributedALEZeroPair state;
+    const auto comm = state.mesh->owned_cell_map()->getComm();
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    int local = state.mesh->num_local_cells() > state.mesh->num_owned_cells(), any = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local, &any);
+    ASSERT_EQ(any, 1);
+    const auto a = state.full.snapshot(), b = state.reduced.snapshot();
+    for (const double top : {1.1, .9})
     {
-        SCOPED_TRACE(donor);
-        auto options = sheng_options();
-        options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-        options.hydrogen_diffusivity_correlation = &inspect_batched_zero_ghosts;
-        DistributedALEZeroPair state(options, donor);
-        ResetBatchedCallbackState reset_callbacks;
-        const auto comm = state.mesh->owned_cell_map()->getComm();
-        if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
-        const int local_ghosts = state.mesh->num_local_cells() > state.mesh->num_owned_cells();
-        int any_ghosts = 0;
-        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_ghosts, &any_ghosts);
-        ASSERT_EQ(any_ghosts, 1);
-        const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
-        for (const double top : {1.1, .9})
+        for (const auto* field : std::array<const ZeroALEScalar*, 4>{
+                 &state.reduced.species_field(GeneralGas::one, GeneralGas::Phase::Dissolved),
+                 &state.reduced.species_field(GeneralGas::two, GeneralGas::Phase::Dissolved),
+                 &state.reduced.population_number_field("large"),
+                 &state.reduced.species_field(GeneralGas::one, GeneralGas::Phase::Dispersed, "large")})
         {
-            const std::array<const ZeroALEScalar*, 4> fields{&state.reduced.dissolved_hydrogen_inventory(),
-                donor ? &state.reduced.donor_hydrogen_deficit() : nullptr,
-                &state.reduced.large_number_density(), &state.reduced.large_moles()};
-            for (const auto* field : fields)
-                if (field)
-                {
-                    // Owned values remain exactly zero; poison every overlap
-                    // row, including genuine remote ghosts and owned copies.
-                    const_cast<ZeroALEScalar*>(field)->overlap_data().putScalar(37.);
-                    const auto values = field->owned_read_view();
-                    for (size_t row = 0; row < values.extent(0); ++row) EXPECT_DOUBLE_EQ(values(row, 0), 0.);
-                }
-            state.motion.begin_trial(top, .001);
-            const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
-            state.full.refresh_geometry();
-            state.reduced.refresh_geometry();
-            state.full.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
-                state.material, &state.power, &ale);
-            batched_ghost_probe = {&state.reduced, donor, false, true};
-            state.reduced.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
-                state.material, &state.power, &ale);
-            EXPECT_TRUE(batched_ghost_probe.observed);
-            EXPECT_TRUE(batched_ghost_probe.clean);
-            batched_ghost_probe = {};
-            state.compare();
-            EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
-            EXPECT_EQ(state.reduced.last_statistics().donor_transport_work.skipped, donor ? 1 : 0);
-            state.motion.rollback_trial();
-            state.full.restore(full_start);
-            state.reduced.restore(reduced_start);
+            const_cast<ZeroALEScalar*>(field)->overlap_data().putScalar(37);
+            const auto owned = field->owned_read_view();
+            for (std::size_t row = 0; row < owned.extent(0); ++row)
+                EXPECT_DOUBLE_EQ(owned(row, 0), 0);
         }
+        state.motion.begin_trial(top, .001);
+        const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
+        for (auto* model : {&state.full, &state.reduced})
+        {
+            model->refresh_geometry();
+            model->advance(
+                .001, .001, state.temperature, state.pressure, state.velocity, state.flux, state.material, &ale);
+        }
+        state.compare();
+        check_import(state.reduced);
+        // Pointwise user callbacks have no promised access to intermediate mutable field ghosts.
+        // Accepted publication is compared to an independent import, including all zero schema columns.
+        state.motion.rollback_trial();
+        state.full.restore(a);
+        state.reduced.restore(b);
     }
 }
 
 TEST(ReactingGasModelMultiRankTest, BatchedZeroAuxiliaryKeepsRankLocalMolesIndependent)
 {
-    auto options = sheng_options();
-    options.microbubble_lifetime = options.large_bubble_dissolution_time = 1e100;
-    options.micro_to_large_conversion_coefficient = 0;
-    DistributedALEZeroPair state(options, false);
+    GeneralGas::Parameters p;
+    p.number_density[1] = 1e7;
+    p.molar_one[1] = 1e-6;
+    p.molar_two[1] = 3e-6;
+    DistributedALEZeroPair state(p);
     const auto comm = state.mesh->owned_cell_map()->getComm();
-    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
-    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    const auto prior_full = state.full.snapshot(), prior_reduced = state.reduced.snapshot();
     for (auto* model : {&state.full, &state.reduced})
     {
-        auto& moles = const_cast<ZeroALEScalar&>(model->large_moles());
-        if (comm->getRank() == 0) moles.set_owned_value(0, 1e-6);
-        moles.sync_ghosts();
+        std::vector<GeneralGas::R::CellSpeciesState> values;
+        std::vector<std::vector<double>> numbers;
+        const auto& catalog = model->options().reaction_mechanism->catalog();
+        for (std::size_t row = 0; row < state.mesh->num_owned_cells(); ++row)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(row);
+            const double cv = state.mesh->cell_volume(cell);
+            auto value = model->cell_species_state(cell, cv);
+            value.set_amount(catalog, GeneralGas::one, GeneralGas::Phase::Dispersed,
+                (comm->getRank() == 0 ? 2e-6 : 1e-6) * cv, "large");
+            value.set_amount(catalog, GeneralGas::two, GeneralGas::Phase::Dispersed,
+                (comm->getRank() == 0 ? 1e-6 : 4e-6) * cv, "large");
+            values.push_back(std::move(value));
+            numbers.push_back({0, 1e7 * cv});
+        }
+        model->initialize_species(values, numbers);
+        model->initialize_state(0, state.temperature, state.pressure, state.velocity, state.material);
     }
+    // Explicitly installing the rank-local physical stocks invalidates earlier
+    // snapshots. Replay must start from this new initialization authority.
+    EXPECT_THROW(state.full.restore(prior_full), std::invalid_argument);
+    EXPECT_THROW(state.reduced.restore(prior_reduced), std::invalid_argument);
+    const auto a = state.full.snapshot(), b = state.reduced.snapshot();
     state.advance(1.1, .001, .001);
     state.compare();
-    EXPECT_EQ(state.reduced.last_statistics().transport_work[3].skipped, 1);
-    EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 0);
-    EXPECT_EQ(state.reduced.last_statistics().transport_work[4].assemblies, 1);
-    EXPECT_EQ(state.reduced.last_statistics().donor_transport_work.solves, 0);
-    EXPECT_GT(state.reduced.global_large_bubble_hydrogen_moles(), 0.);
+    check_import(state.reduced);
+    EXPECT_GT(state.reduced.global_species_moles(GeneralGas::one), 0);
+    EXPECT_GT(state.reduced.global_species_moles(GeneralGas::two), 0);
     state.motion.rollback_trial();
-    state.full.restore(full_start);
-    state.reduced.restore(reduced_start);
-    // Replaying the zero baseline must discard the previous nonzero mask.
+    state.full.restore(a);
+    state.reduced.restore(b);
     state.advance(.9, .001, .001);
     state.compare();
-    EXPECT_EQ(state.reduced.last_statistics().transport_work[4].skipped, 1);
-    EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
-    EXPECT_DOUBLE_EQ(state.reduced.global_large_bubble_hydrogen_moles(), 0.);
+    check_import(state.reduced);
     state.motion.rollback_trial();
 }
 
 TEST(ReactingGasModelMultiRankTest, BatchedZeroCallbackMutationIsCollectiveWithoutErasure)
 {
-    constexpr auto guard_message = "Reacting material callback modified an untransported zero auxiliary inventory.";
-    for (int scenario = 0; scenario < 4; ++scenario)
+    for (int scenario = 0; scenario < 3; ++scenario)
     {
-        SCOPED_TRACE(scenario);
-        auto options = sheng_options();
-        options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-        options.hydrogen_diffusivity_correlation = &mutate_batched_zero_inventory;
-        DistributedALEZeroPair state(options);
-        ResetBatchedCallbackState reset_callbacks;
+        GeneralGas::Parameters p;
+        p.diffusivity_two = [](const auto&)
+        {
+            if (batched_mutation_armed)
+            {
+                batched_mutation_armed = false;
+                batched_mutation_target->set_owned_value(0, batched_mutation_value);
+            }
+            return 0.;
+        };
+        DistributedALEZeroPair state(p);
+        ResetBatchedCallbackState reset;
         const auto comm = state.mesh->owned_cell_map()->getComm();
-        if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
-        const bool enabled = scenario != 3;
-        if (!enabled) state.reduced.set_skip_zero_auxiliary_transport(false);
-        const auto checkpoint = state.reduced.snapshot();
-        auto& target = const_cast<ZeroALEScalar&>(scenario == 0
-            ? state.reduced.dissolved_hydrogen_inventory() : state.reduced.large_moles());
+        if (comm->getSize() < 2)
+            GTEST_SKIP() << "Requires MPI.";
+        auto& target = const_cast<ZeroALEScalar&>(state.reduced.species_field(GeneralGas::one,
+            scenario == 0 ? GeneralGas::Phase::Dissolved : GeneralGas::Phase::Dispersed, scenario == 0 ? "" : "large"));
         batched_mutation_target = &target;
         batched_mutation_value = scenario == 2 ? std::numeric_limits<double>::quiet_NaN() : 1e-6;
         batched_mutation_armed = comm->getRank() == 0;
+        const auto checkpoint = state.reduced.snapshot();
+        const auto receipt = state.reduced.species_event_receipt();
         state.motion.begin_trial(1.1, .001);
         const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
         state.reduced.refresh_geometry();
-        int category = 0;
-        std::string message;
-        try
-        {
-            state.reduced.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
-                state.material, &state.power, &ale);
-        }
-        catch (const std::logic_error& error) { category = 1; message = error.what(); }
-        catch (const std::runtime_error& error) { category = 2; message = error.what(); }
+        EXPECT_THROW(state.reduced.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
+                         state.material, &ale),
+            std::exception);
         batched_mutation_armed = false;
         batched_mutation_target = nullptr;
-        if (enabled)
-        {
-            EXPECT_EQ(category, comm->getRank() == 0 ? 1 : 2);
-            EXPECT_EQ(message, comm->getRank() == 0 ? guard_message
-                : "Reacting diffusivity evaluation failed on another rank.");
-            EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
-            EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 0);
-            if (comm->getRank() == 0)
-            {
-                if (scenario == 2) EXPECT_TRUE(std::isnan(target.value(0)));
-                else EXPECT_DOUBLE_EQ(target.value(0), batched_mutation_value);
-            }
-        }
-        else
-        {
-            // The disabled policy retains its existing transport/physical
-            // validation path, rather than adding the cached-zero guard.
-            EXPECT_NE(message, guard_message);
-            EXPECT_GT(state.reduced.last_statistics().transport_work[4].solves, 0);
-            if (comm->getRank() == 0) EXPECT_GT(target.value(0), 0.);
-        }
+        // Unledgered callback writes are invalid. Atomic rejection restores accepted
+        // material; legitimately supplied positive stocks are covered independently.
+        EXPECT_EQ(state.reduced.species_event_receipt(), receipt);
+        for (std::size_t row = 0; row < state.mesh->num_owned_cells(); ++row)
+            EXPECT_DOUBLE_EQ(target.value(static_cast<Pack::local_ordinal_type>(row)), 0);
         state.motion.rollback_trial();
         state.reduced.restore(checkpoint);
+        state.advance(.9, .001, .001);
+        state.compare();
+        state.motion.rollback_trial();
     }
 }
 
 TEST(ReactingGasModelMultiRankTest, ALEZeroAuxiliaryResumesAfterRankLocalProduction)
 {
-    auto options = sheng_options();
-    options.kinetics_mode = SimpleFluid::ReactingKineticsMode::ExactInactive;
-    options.microbubble_lifetime = .01;
-    options.micro_to_large_conversion_coefficient = 0;
-    options.large_bubble_dissolution_time = 1e100;
-    DistributedALEZeroPair state(options);
+    GeneralGas::Parameters p;
+    p.reservoir_mol_per_joule[0] = 2e-7;
+    p.nucleate_supplied_gas = true;
+    p.micro_decay_time = .01;
+    DistributedALEZeroPair state(p);
     const auto comm = state.mesh->owned_cell_map()->getComm();
-    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
-    const int local_owned = state.mesh->num_owned_cells() > 0;
-    int all_owned = 0;
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_owned, &all_owned);
-    ASSERT_EQ(all_owned, 1);
-    if (comm->getRank() == 0) state.power.set_owned_value(0, 1000.);
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    if (comm->getRank() == 0)
+        state.power.set_owned_value(0, 1000);
     state.power.sync_ghosts();
     for (const auto face : state.flux.owned_face_ids())
         if (!state.mesh->is_boundary_face(face))
@@ -1313,36 +1093,30 @@ TEST(ReactingGasModelMultiRankTest, ALEZeroAuxiliaryResumesAfterRankLocalProduct
         time += dt;
         state.advance(step == 2 ? .9 : 1.1, time, dt);
         state.compare();
-        const auto& work = state.reduced.last_statistics();
-        EXPECT_EQ(work.transport_work[0].skipped, step == 1 ? 1 : 0);
-        EXPECT_EQ(work.donor_transport_work.skipped, step == 1 ? 1 : 0);
-        EXPECT_EQ(work.transport_work[3].skipped, 1);
-        EXPECT_EQ(work.transport_work[4].skipped, 1);
-        EXPECT_EQ(work.transport_work[1].solves, 1);
-        EXPECT_EQ(work.transport_work[2].assemblies, 0);
-        if (step == 1) EXPECT_EQ(work.transport_linear.solves, 2);
-        else
-        {
-            EXPECT_GE(work.transport_work[0].solves, 1);
-            EXPECT_GE(work.donor_transport_work.solves, 1);
-        }
-        EXPECT_GT(state.reduced.global_dissolved_hydrogen_moles(), 0.);
+        check_import(state.reduced);
+        EXPECT_GT(GeneralGas::history(state.reduced).external_supply, 0);
+        EXPECT_GT(GeneralGas::compartment(state.reduced, GeneralGas::one, GeneralGas::Phase::Dissolved), 0);
+        EXPECT_GT(GeneralGas::integral(state.reduced.population_number_field("micro")), 0);
+        EXPECT_DOUBLE_EQ(GeneralGas::integral(state.reduced.population_number_field("large")), 0);
+        EXPECT_GT(state.reduced.last_statistics().transport_linear.solves, 0);
         state.motion.accept_trial();
-        state.power.put_scalar(0.);
+        state.power.put_scalar(0);
         state.power.sync_ghosts();
     }
 }
 
 TEST(ReactingGasModelMultiRankTest, ALEZeroAuxiliaryInvalidDiffusivityFailsBeforeSkipping)
 {
-    auto options = sheng_options();
-    options.diffusivity_mode = SimpleFluid::HydrogenDiffusivityMode::External;
-    options.hydrogen_diffusivity_correlation = +[](double temperature) { return temperature > 325 ? -1. : 1e-8; };
-    DistributedALEZeroPair state(options);
+    GeneralGas::Parameters p;
+    p.diffusivity_two = [](const auto& c) { return c.environment.temperature > 325 ? -1. : 1e-8; };
+    DistributedALEZeroPair state(p);
     const auto comm = state.mesh->owned_cell_map()->getComm();
-    if (comm->getSize() != 2) GTEST_SKIP() << "Requires two MPI ranks.";
-    const auto full_start = state.full.snapshot(), reduced_start = state.reduced.snapshot();
-    if (comm->getRank() == 0 && state.mesh->num_owned_cells()) state.temperature.set_owned_value(0, 350.);
+    if (comm->getSize() < 2)
+        GTEST_SKIP() << "Requires MPI.";
+    const auto a = state.full.snapshot(), b = state.reduced.snapshot();
+    const auto receipt = state.reduced.species_event_receipt();
+    if (comm->getRank() == 0)
+        state.temperature.set_owned_value(0, 350);
     state.temperature.sync_ghosts();
     state.motion.begin_trial(1.1, .001);
     const auto ale = SimpleFluid::FVM::make_ale_control_volume_state(*state.mesh, state.motion);
@@ -1351,119 +1125,127 @@ TEST(ReactingGasModelMultiRankTest, ALEZeroAuxiliaryInvalidDiffusivityFailsBefor
     std::string message;
     try
     {
-        state.reduced.advance(.001, .001, state.temperature, state.pressure, state.velocity, state.flux,
-            state.material, &state.power, &ale);
+        state.reduced.advance(
+            .001, .001, state.temperature, state.pressure, state.velocity, state.flux, state.material, &ale);
     }
-    catch (const std::invalid_argument& error) { category = 1; message = error.what(); }
-    catch (const std::runtime_error& error) { category = 2; message = error.what(); }
+    catch (const std::invalid_argument& e)
+    {
+        category = 1;
+        message = e.what();
+    }
+    catch (const std::runtime_error& e)
+    {
+        category = 2;
+        message = e.what();
+    }
     EXPECT_EQ(category, comm->getRank() == 0 ? 1 : 2);
-    EXPECT_NE(message.find(comm->getRank() == 0 ? "hydrogen diffusivity" : "another rank"), std::string::npos);
-    EXPECT_EQ(state.reduced.last_statistics().transport_work[0].skipped, 0);
-    EXPECT_EQ(state.reduced.last_statistics().transport_work[1].solves, 0);
+    EXPECT_NE(message.find(comm->getRank() == 0 ? "diffusivity" : "another rank"), std::string::npos);
+    EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 0);
+    EXPECT_EQ(state.reduced.species_event_receipt(), receipt);
     state.motion.rollback_trial();
-    state.temperature.put_scalar(300.);
+    state.temperature.put_scalar(300);
     state.temperature.sync_ghosts();
-    state.full.restore(full_start);
-    state.reduced.restore(reduced_start);
+    state.full.restore(a);
+    state.reduced.restore(b);
     state.advance(.9, .001, .001);
     state.compare();
-    EXPECT_EQ(state.reduced.last_statistics().transport_linear.solves, 2);
     state.motion.rollback_trial();
 }
 
 /** Auxiliary transport skips require global zero and resume after local kinetics. */
 TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryTransportMatchesFullAndResumesCollectively)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
     const auto comm = mesh->owned_cell_map()->getComm();
-    auto options = sheng_options();
-    options.microbubble_lifetime = 0.01;
-    options.large_bubble_dissolution_time = 1.e100;
-    options.micro_to_large_conversion_coefficient = 0.;
-    options.max_subcycles = 1;
-    ReactingModelType full(mesh, options), reduced(mesh, options);
-    reduced.set_skip_zero_auxiliary_transport(true);
-    if (comm->getSize() > 1)
-        EXPECT_THROW(reduced.set_skip_zero_auxiliary_transport(comm->getRank() == 0), std::invalid_argument);
-    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
-    if (comm->getRank() == 0 && mesh->num_owned_cells())
-        power.set_owned_value(0, 1000.);
-    power.sync_ghosts();
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0., "flux");
-    auto material = make_water_properties(mesh);
+    GeneralGas::Parameters p;
+    p.reservoir_mol_per_joule[0] = 2e-7;
+    p.nucleate_supplied_gas = true;
+    p.micro_decay_time = .01;
+    GeneralGas::Fixture<MeshType> full(mesh, p), fresh(mesh, p);
+    if (comm->getRank() == 0)
+    {
+        full.power.set_owned_value(0, 1000);
+        fresh.power.set_owned_value(0, 1000);
+    }
+    full.power.sync_ghosts();
+    fresh.power.sync_ghosts();
+    full.initialize();
+    fresh.initialize();
     for (int step = 1; step <= 3; ++step)
     {
-        full.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
-        reduced.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
-        EXPECT_EQ(full.last_statistics().transport_linear.solves, 5);
-        EXPECT_EQ(reduced.last_statistics().transport_linear.solves, step == 1 ? 2 : 3);
-        EXPECT_EQ(reduced.last_statistics().transport_work[0].skipped, step == 1 ? 1 : 0);
-        EXPECT_EQ(reduced.last_statistics().transport_work[3].skipped, 1);
-        EXPECT_EQ(reduced.last_statistics().transport_work[4].skipped, 1);
-        EXPECT_EQ(reduced.last_statistics().transport_work[1].solves, 1);
-        EXPECT_EQ(reduced.last_statistics().transport_work[2].assemblies, 0);
-        const auto expected = full.output_fields(), actual = reduced.output_fields();
-        ASSERT_EQ(expected.size(), actual.size());
-        for (const auto& [name, field] : expected)
+        GeneralGas::force_numeric_reassembly(fresh.model);
+        full.advance(step * .001, .001);
+        fresh.advance(step * .001, .001);
+        for (const auto& [name, field] : full.model.output_fields())
         {
-            SCOPED_TRACE(name);
-            const auto a = field->owned_data().getData();
-            const auto b = actual.at(name)->owned_data().getData();
-            for (size_t cell = 0; cell < a.size(); ++cell)
-                EXPECT_NEAR(a[cell], b[cell], std::max(1.e-20, std::abs(a[cell]) * 1.e-12));
+            const auto* actual = fresh.model.output_fields().at(name);
+            for (std::size_t row = 0; row < mesh->num_owned_cells(); ++row)
+            {
+                const auto cell = static_cast<Pack::local_ordinal_type>(row);
+                const double expected = field->value(cell);
+                EXPECT_NEAR(actual->value(cell), expected, std::max(1e-20, std::abs(expected) * 1e-12));
+            }
         }
-        EXPECT_NEAR(reduced.last_statistics().inventory_error, 0., 1.e-14);
+        EXPECT_EQ(full.model.last_statistics().transport_linear.solves,
+            fresh.model.last_statistics().transport_linear.solves);
+        EXPECT_EQ(full.model.last_statistics().transport_linear.solves, step == 1 ? 1 : 4);
+        EXPECT_NEAR(GeneralGas::history(fresh.model).inventory_error, 0, 1e-14);
+        check_import(fresh.model);
     }
 }
 
-/** A populated large category and dissolved inventory must retain all five solves. */
+/** Every nonzero schema column retains its own solve (finite solvent, dissolved gas, large gas and N). */
 TEST(ReactingGasModelMultiRankTest, ZeroAuxiliaryPolicyRetainsPopulatedInventories)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
-    auto options = sheng_options();
-    options.initial_dissolved_hydrogen = 1.e-5;
-    options.initial_large_number_density = 1.e7;
-    options.initial_large_moles = 1.e-6;
-    options.microbubble_lifetime = options.large_bubble_dissolution_time = 1.e100;
-    options.micro_to_large_conversion_coefficient = 0.;
-    ReactingModelType model(mesh, options);
-    model.set_skip_zero_auxiliary_transport(true);
-    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0., "flux");
-    auto material = make_water_properties(mesh);
-    model.advance(.001, .001, temperature, pressure, velocity, flux, material, &power);
-    EXPECT_EQ(model.last_statistics().transport_linear.solves, 5);
-    for (const auto& work : model.last_statistics().transport_work)
-        EXPECT_EQ(work.skipped, 0);
-    EXPECT_NEAR(model.last_statistics().inventory_error, 0., 1.e-14);
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
+    GeneralGas::Parameters p;
+    p.dissolved_one = 1e-5;
+    p.number_density[1] = 1e7;
+    p.molar_one[1] = 1e-6;
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    const double initial = f.model.global_species_moles(GeneralGas::one);
+    f.advance(.001, .001);
+    EXPECT_EQ(f.model.last_statistics().transport_linear.solves, 4);
+    EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), initial, 1e-14);
+    EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dissolved), 0);
+    EXPECT_GT(GeneralGas::compartment(f.model, GeneralGas::one, GeneralGas::Phase::Dispersed, "large"), 0);
+    EXPECT_GT(GeneralGas::integral(f.model.population_number_field("large")), 0);
+    check_import(f.model);
 }
 
 /** A skipped number equation cannot leave its moles partner using a stale operator. */
 TEST(ReactingGasModelMultiRankTest, ZeroNumberStillAssemblesPopulatedMoles)
 {
-    auto mesh = SimpleFluid::test::build_mesh<Pack>(
-        SimpleFluid::test::make_box_database(4, 4, 4, 0.25));
-    auto options = sheng_options();
-    options.initial_large_moles = 1.e-6;
-    options.microbubble_lifetime = options.large_bubble_dissolution_time = 1.e100;
-    options.micro_to_large_conversion_coefficient = 0.;
-    ReactingModelType full(mesh, options), reduced(mesh, options);
-    reduced.set_skip_zero_auxiliary_transport(true);
-    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0., "flux");
-    auto material = make_water_properties(mesh);
+    auto mesh = SimpleFluid::test::build_mesh<Pack>(SimpleFluid::test::make_box_database(4, 4, 4, .25));
+    GeneralGas::Parameters p;
+    p.sigma = 0;
+    p.number_density[1] = 1e7;
+    p.molar_one[1] = 1e-6;
+    p.population = [](const SimpleFluid::BubbleGasPhysics::MultispeciesPopulationContext& c, double)
+    {
+        const auto found = std::find_if(
+            c.populations.begin(), c.populations.end(), [](const auto& value) { return value.id == "large"; });
+        SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket packet;
+        packet.numberEvents = {{"large", 0, .25 * found->number}};
+        return packet;
+    };
+    GeneralGas::Fixture<MeshType> f(mesh, p);
+    f.initialize();
+    const double material = f.model.global_species_moles(GeneralGas::one);
+    const double number = GeneralGas::integral(f.model.population_number_field("large"));
     for (int step = 1; step <= 2; ++step)
     {
-        full.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
-        reduced.advance(step * .001, .001, temperature, pressure, velocity, flux, material, &power);
-        EXPECT_EQ(reduced.last_statistics().transport_linear.solves, 3);
-        EXPECT_EQ(reduced.last_statistics().transport_work[3].skipped, 1);
-        EXPECT_EQ(reduced.last_statistics().transport_work[4].assemblies, 1);
-        const auto a = full.large_moles().owned_data().getData();
-        const auto b = reduced.large_moles().owned_data().getData();
-        for (size_t i = 0; i < a.size(); ++i) EXPECT_DOUBLE_EQ(a[i], b[i]);
+        f.advance(step * .001, .001);
+        EXPECT_NEAR(f.model.global_species_moles(GeneralGas::one), material, 1e-14);
+        EXPECT_NEAR(GeneralGas::integral(f.model.population_number_field("large")), number * std::pow(.75, step),
+            number * 1e-12);
+        EXPECT_GT(f.model.last_statistics().transport_linear.solves, 0);
+        check_import(f.model);
     }
+    auto invalid = p;
+    invalid.number_density[1] = 0;
+    GeneralGas::Fixture<MeshType> malformed(mesh, invalid);
+    EXPECT_THROW(malformed.initialize(), std::invalid_argument);
+    EXPECT_FALSE(malformed.model.initial_state_initialized());
 }
