@@ -1146,12 +1146,26 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     std::vector<detail::CompensatedSum<long double>> changes(
                         state.amounts.size() + state.dispersedPopulations.size() * catalog.species().size());
                     auto materialEndpoints = changes;
+                    require(raw.postSourceAmounts.size() == materialEndpoints.size(),
+                        "Raw source endpoint has the wrong compartment schema.");
                     std::size_t initialSlot = 0;
+                    const auto seedMaterial = [&](double represented)
+                    {
+                        const auto& parts = raw.postSourceAmounts[initialSlot];
+                        require(std::isfinite(parts[0]) && std::isfinite(parts[1]),
+                            "Raw source endpoint contains a nonfinite part.");
+                        auto& stock = materialEndpoints[initialSlot++];
+                        stock += parts[0];
+                        stock += parts[1];
+                        const auto amount = stock.value();
+                        require(std::isfinite(amount) && amount >= 0 && narrow(amount) == represented,
+                            "Raw source endpoint does not project to the actual chemical state.");
+                    };
                     for (const auto value : state.amounts)
-                        materialEndpoints[initialSlot++] += value;
+                        seedMaterial(value);
                     for (const auto& population : state.dispersedPopulations)
                         for (const auto value : population.amounts)
-                            materialEndpoints[initialSlot++] += value;
+                            seedMaterial(value);
                     double elapsed = 0.0, next = dt;
                     std::size_t substeps = 0;
                     while (elapsed < dt)

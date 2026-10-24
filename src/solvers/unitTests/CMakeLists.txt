@@ -51,7 +51,7 @@ endforeach()
 
 # Raw accepted population events preserve tiny material/count endpoints and replay.
 foreach(_raw_population_ranks IN ITEMS 2 4)
-    foreach(_raw_population_case IN ITEMS PopulationRawCountReplay PopulationRawMaterialReplay)
+    foreach(_raw_population_case IN ITEMS PopulationRawCountReplay PopulationRawMaterialReplay PopulationChemicalDonors)
         simplefluid_add_mpi_test(NAME ${_raw_population_case}_${_raw_population_ranks}procs
             TARGET test${_raw_population_case} PROCS ${_raw_population_ranks}
             LABELS "mpi;species;population;conservation;transaction;empty_rank" TIMEOUT 180)

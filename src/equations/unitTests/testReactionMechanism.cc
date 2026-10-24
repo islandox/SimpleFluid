@@ -2,6 +2,7 @@
  * @brief Independent analytic and transactional checks for supplied multispecies chemistry.
  */
 #include "equations/ReactionMechanism.hh"
+#include "utils/CompensatedSum.hh"
 
 #include <gtest/gtest.h>
 
@@ -971,4 +972,73 @@ TEST(ReactionSourceLocationTest, RetriedSSPRK2KeepsOneImmutableSpatialFrameAndIn
     EXPECT_EQ(replay.ledger.retries, result.ledger.retries);
     EXPECT_EQ(*environment.location, location);
     EXPECT_DOUBLE_EQ(initial.amount(*schema, 5, P::Liquid), 1.);
+}
+
+TEST(ReactionMechanismTest, LocalPostSourceEndpointRetainsChemicalAndExternalSubUlpDonorDebits)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    constexpr R::SpeciesId left = 0, right = 17;
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {left, "synthetic left", 1e-20, {{"X", 1}}, {P::Liquid, P::Dissolved}},
+        {right, "synthetic right", 1e-20, {{"X", 1}}, {P::Liquid, P::Dissolved}}});
+    const R::ReactionMechanism mechanism(
+        schema, {{41, "finite isomerization", {{left, P::Liquid, -1}, {right, P::Liquid, 1}}, 0}});
+    R::CellSpeciesState initial(*schema);
+    initial.set_amount(*schema, left, P::Liquid, 1e20);
+    for (const bool external : {false, true})
+    {
+        R::ReactionSourceInput input;
+        if (external)
+            input.externalTransfers = {{"declared synthetic withdrawal", left, P::Liquid, -1, -1e-20, 0, {}, {}}};
+        else
+            input.integratedExtents = {{41, 1}};
+        const auto result = R::advance_reactions(mechanism, initial, {0, 300, 100000, 1, 1}, .01, input);
+        ASSERT_EQ(result.localReceipt.postSourceAmounts.size(), initial.amounts.size());
+        EXPECT_EQ(result.localReceipt.schemaFingerprint, schema->fingerprint());
+        EXPECT_DOUBLE_EQ(result.state.amount(*schema, left, P::Liquid), 1e20);
+        SimpleFluid::detail::CompensatedSum<long double> next_donor;
+        const auto& stock = result.localReceipt.postSourceAmounts[schema->index(left)];
+        next_donor += stock[0];
+        next_donor += stock[1];
+        next_donor += -1e20L;
+        EXPECT_EQ(next_donor.value(), -1); // The rounded public endpoint alone cannot prove this.
+        SimpleFluid::detail::CompensatedSum<long double> product;
+        const auto& funded = result.localReceipt.postSourceAmounts[schema->index(right)];
+        product += funded[0];
+        product += funded[1];
+        EXPECT_EQ(product.value(), external ? 0 : 1);
+    }
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, left, P::Liquid), 1e20);
+}
+
+TEST(ReactionMechanismTest, LocalPostSourceEndpointRetainsTinyCreditAfterCompleteChemicalReplacement)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    constexpr R::SpeciesId left = 0, right = 17;
+    constexpr double credit = 1e-280;
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {left, "synthetic left", 1e-20, {{"X", 1}}, {P::Liquid, P::Dissolved}},
+        {right, "synthetic right", 1e-20, {{"X", 1}}, {P::Liquid, P::Dissolved}}});
+    const R::ReactionMechanism mechanism(
+        schema, {{41, "finite isomerization", {{left, P::Liquid, -1}, {right, P::Liquid, 1}}, 0}});
+    R::CellSpeciesState initial(*schema);
+    initial.set_amount(*schema, left, P::Liquid, 1e20);
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{41, 1e20}};
+    input.externalTransfers = {
+        {"declared tiny synthetic feed", left, P::Liquid, credit, credit * 1e-20, 0, {}, {}}};
+    const auto result = R::advance_reactions(mechanism, initial, {0, 300, 100000, 1, 1}, .01, input);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, left, P::Liquid), credit);
+    ASSERT_EQ(result.localReceipt.postSourceAmounts.size(), initial.amounts.size());
+    SimpleFluid::detail::CompensatedSum<long double> next_donor;
+    const auto& stock = result.localReceipt.postSourceAmounts[schema->index(left)];
+    next_donor += stock[0];
+    next_donor += stock[1];
+    EXPECT_EQ(next_donor.value(), static_cast<long double>(credit));
+    next_donor += -static_cast<long double>(credit);
+    EXPECT_EQ(next_donor.value(), 0);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, right, P::Liquid), 1e20);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, left, P::Liquid), 1e20);
 }

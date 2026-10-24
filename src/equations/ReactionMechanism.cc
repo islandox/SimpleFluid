@@ -17,7 +17,27 @@ namespace SimpleFluid::Reacting
 {
 namespace
 {
-using Sum = detail::CompensatedSum<long double>;
+/** Same Neumaier update order as the shared local accumulator, with endpoint
+ * parts exposed privately for the next independently reserved material stage.
+ */
+class Sum
+{
+public:
+    void operator+=(long double value)
+    {
+        const auto next = d_sum + value;
+        if (std::abs(d_sum) >= std::abs(value))
+            d_correction += (d_sum - next) + value;
+        else
+            d_correction += (value - next) + d_sum;
+        d_sum = next;
+    }
+    [[nodiscard]] long double value() const { return d_sum + d_correction; }
+    [[nodiscard]] std::array<long double, 2> parts() const { return {d_sum, d_correction}; }
+
+private:
+    long double d_sum{}, d_correction{};
+};
 using Amounts = std::vector<long double>;
 
 void require(bool condition, const char* message)
@@ -647,6 +667,14 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     // Carry the actual accepted chemical sums into composition before the reporting state narrows them.
     auto& local = result.localReceipt;
     local.schemaFingerprint = mechanism.catalog().fingerprint();
+    local.postSourceAmounts.reserve(count);
+    for (const auto& stock : current)
+    {
+        const auto parts = stock.parts();
+        require(std::isfinite(parts[0]) && std::isfinite(parts[1]),
+            "Accepted raw source endpoint is nonfinite.");
+        local.postSourceAmounts.push_back(parts);
+    }
     local.chemicalChanges.reserve(count);
     const auto speciesCount = mechanism.catalog().species().size();
     std::size_t chemicalIndex = 0;

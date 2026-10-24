@@ -302,6 +302,12 @@ struct ReactionLocalReceipt
     std::vector<ReactionCompartmentChange> chemicalChanges;
     std::vector<long double> reactionHeatContributions;
     long double externalHeat = 0;
+    /** Actual post-source endpoint, including chemistry and external material.
+     * Dense state phase/catalog/named-population order; each pair is high and correction.
+     * Later material stages must retain both terms for finite donor reservation.
+     * This is local composition authority, not an MPI/reporting or persistent-state format.
+     */
+    std::vector<std::array<long double, 2>> postSourceAmounts;
 };
 
 struct ReactionAdvance
