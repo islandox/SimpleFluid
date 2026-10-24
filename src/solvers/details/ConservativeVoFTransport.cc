@@ -1,3 +1,4 @@
+#include "solvers/details/ConservativeVoFTransportSupport.hh"
 /** @file ConservativeVoFTransport.cc
  * @brief Native conservative implicit upwind assembly and per-inventory validation.
  */
@@ -26,16 +27,7 @@ namespace SimpleFluid::detail
 {
 namespace
 {
-using Pack = DefaultTpetraTypes;
-using LO = Pack::local_ordinal_type;
-using GO = Pack::global_ordinal_type;
-void require(const Pack::map_type& map, bool valid, const char* message)
-{
-    int local = valid, global = 0;
-    Teuchos::reduceAll(*map.getComm(), Teuchos::REDUCE_MIN, 1, &local, &global);
-    if (!global)
-        throw std::runtime_error(message);
-}
+using namespace transport_support;
 std::vector<double> import(
     const std::vector<double>& values, const Pack::import_type& plan, Pack::vector_type& from, Pack::vector_type& to)
 {
@@ -934,5 +926,4 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
     exact_preparation_.reset();
     return result;
 }
-#include "solvers/details/ConservativeVoFExactTransport.inc"
 } // namespace SimpleFluid::detail

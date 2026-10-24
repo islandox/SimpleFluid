@@ -1,22 +1,27 @@
 set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     GeneralVoFSolver.cc
-    details/GeneralVoFExactSolver.inc
+    details/GeneralVoFExactSolver.tcc
     VoFSolver.cc
     details/ConservativeVoFTransport.cc
-    details/ConservativeVoFExactTransport.inc
+    details/ConservativeVoFExactTransport.cc
     details/VoFProjectionWorkspace.cc
     details/GeneralVoFPhiClosure.cc
-    details/GeneralVoFBoundedPhiClosure.inc
-    details/GeneralVoFExactPhiClosure.inc
+    details/GeneralVoFExactPhiClosure.cc
+    details/GeneralVoFPhiClosureSupport.cc
     details/GeneralVoFProjectionArithmetic.cc
     details/GeneralVoFExactPressure.cc
     details/GeneralVoFFlowWorkspace.cc
-    details/GeneralVoFExactProjection.inc
+    details/GeneralVoFExactProjection.cc
     details/GeneralVoFCurvature.cc
     details/GeneralVoFExactStorage.cc
     details/ConservativeVoFExactArithmetic.cc
     details/GeneralVoFTransferBinding.cc
     AdaptiveVoFSolver.cc
+    details/AdaptiveVoFContext.cc
+    details/AdaptiveVoFLowMach.cc
+    details/AdaptiveVoFThermodynamics.cc
+    details/AdaptiveVoFLowMachTransport.cc
+    details/AdaptiveVoFRepresentation.cc
     VoFLowMach.cc
     ReactingVoFCoupler.cc
     BubbleRepresentation.cc
@@ -107,3 +112,26 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
             SKIP_PRECOMPILE_HEADERS TRUE)
     endif()
 endif()
+
+# Both arithmetic backends retain the owning implementation's numerical boundary.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(
+        details/ConservativeVoFExactTransport.cc
+        details/GeneralVoFExactProjection.cc
+        details/GeneralVoFExactPhiClosure.cc
+        details/GeneralVoFPhiClosureSupport.cc
+        PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
+endif()
+simplefluid_exclude_from_pgo_sources(details/ConservativeVoFExactTransport.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactProjection.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactPhiClosure.cc)
+simplefluid_exclude_from_pgo_sources(details/GeneralVoFPhiClosureSupport.cc)
+
+simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFContext.cc)
+simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFLowMach.cc)
+simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFRepresentation.cc)
+simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFThermodynamics.cc)
+simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFLowMachTransport.cc)

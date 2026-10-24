@@ -1,64 +1,41 @@
-// Private compiled members of AdaptiveVoFSolver::Impl::Context.
-// Every sparse parcel is owned once. Only its source and destination packets
-// are imported; neither a global solution nor a global parcel list is formed.
-struct RepresentationPacket
+/** @file AdaptiveVoFRepresentation.cc
+ * @brief Compiled adaptive VoF representation operations.
+ */
+#include "solvers/details/AdaptiveVoFContext.hh"
+namespace SimpleFluid::detail::adaptive_vof
 {
-    enum Quantity : std::size_t
-    {
-        Volume,
-        LiquidMass,
-        Hydrogen,
-        Inert,
-        Number,
-        Dissolved,
-        Donor,
-        Energy,
-        MomentumX,
-        MomentumY,
-        MomentumZ,
-        PressureVolume,
-        Width
-    };
-    using Data = std::vector<std::vector<double>>; // phase-major columns, native owned/sparse rows
-    static std::size_t column(std::size_t phase, std::size_t quantity) { return phase * Width + quantity; }
-};
-
-struct RepresentationExchange
+AdaptiveVoFContext::RepresentationPacket::Data AdaptiveVoFContext::RepresentationExchange::transfer(const RepresentationPacket::Data& input, bool reverse) const
 {
-    Teuchos::RCP<const Pack::map_type> source, target;
-    std::unique_ptr<Pack::import_type> importer;
-    RepresentationExchange(Teuchos::RCP<const Pack::map_type> owned_map, const std::set<GO>& ids)
-        : source(std::move(owned_map))
+    const auto from_map = reverse ? target : source, to_map = reverse ? source : target;
+    Pack::multi_vector_type from(from_map, input.size(), true), to(to_map, input.size(), true);
+    for (std::size_t q = 0; q < input.size(); ++q)
     {
-        std::vector<GO> list(ids.begin(), ids.end());
-        target = Teuchos::rcp(new Pack::map_type(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
-            Teuchos::arrayViewFromVector(list), GO{}, source->getComm()));
-        importer = std::make_unique<Pack::import_type>(source, target);
+        auto values = from.getDataNonConst(q);
+        std::copy(input[q].begin(), input[q].end(), values.begin());
     }
-    RepresentationPacket::Data transfer(const RepresentationPacket::Data& input, bool reverse) const
+    if (reverse)
+        to.doExport(from, *importer, Tpetra::ADD);
+    else
+        to.doImport(from, *importer, Tpetra::INSERT);
+    RepresentationPacket::Data result(input.size());
+    for (std::size_t q = 0; q < input.size(); ++q)
     {
-        const auto from_map = reverse ? target : source, to_map = reverse ? source : target;
-        Pack::multi_vector_type from(from_map, input.size(), true), to(to_map, input.size(), true);
-        for (std::size_t q = 0; q < input.size(); ++q)
-        {
-            auto values = from.getDataNonConst(q);
-            std::copy(input[q].begin(), input[q].end(), values.begin());
-        }
-        if (reverse)
-            to.doExport(from, *importer, Tpetra::ADD);
-        else
-            to.doImport(from, *importer, Tpetra::INSERT);
-        RepresentationPacket::Data result(input.size());
-        for (std::size_t q = 0; q < input.size(); ++q)
-        {
-            const auto values = to.getData(q);
-            result[q].assign(values.begin(), values.end());
-        }
-        return result;
+        const auto values = to.getData(q);
+        result[q].assign(values.begin(), values.end());
     }
-};
+    return result;
+}
 
-RepresentationPacket::Data representation_packets(const State& state) const
+AdaptiveVoFContext::RepresentationExchange::RepresentationExchange(Teuchos::RCP<const Pack::map_type> owned_map, const std::set<GO>& ids)
+    : source(std::move(owned_map))
+{
+    std::vector<GO> list(ids.begin(), ids.end());
+    target = Teuchos::rcp(new Pack::map_type(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(),
+        Teuchos::arrayViewFromVector(list), GO{}, source->getComm()));
+    importer = std::make_unique<Pack::import_type>(source, target);
+}
+
+AdaptiveVoFContext::RepresentationPacket::Data AdaptiveVoFContext::representation_packets(const State& state) const
 {
     using P = RepresentationPacket;
     const auto& q = *state.low;
@@ -135,7 +112,7 @@ RepresentationPacket::Data representation_packets(const State& state) const
     return result;
 }
 
-State change_representation(const State& old, const VoF::RepresentationChangeRequest& request,
+AdaptiveVoFContext::State AdaptiveVoFContext::change_representation(const State& old, const VoF::RepresentationChangeRequest& request,
     VoF::RepresentationDiagnostics& diagnostics) const
 {
     using P = RepresentationPacket;
@@ -653,3 +630,5 @@ State change_representation(const State& old, const VoF::RepresentationChangeReq
         material.surface_tension * (diagnostics.resolved_area_change + diagnostics.dispersed_area_change);
     return next;
 }
+
+} // namespace SimpleFluid::detail::adaptive_vof

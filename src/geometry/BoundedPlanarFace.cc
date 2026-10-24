@@ -1,29 +1,15 @@
-/** @file BoundedPlanarFace.inc
- * @brief Directed projected face intersection on authenticated source supports.
- * Included by the bounded kernel to share its environment, arithmetic and caps.
- */
+#include "geometry/details/BoundedConvexGeometryInternal.hh"
+
 namespace SimpleFluid::Meshes
 {
-namespace
+namespace bounded_geometry_detail
 {
-struct PlanarVertex
-{
-    std::array<Interval, 2> coordinates;
-    Point physical;
-    std::vector<BoundedPlaneAuthority> supports;
-    std::size_t token = 0;
-};
-using PlanarPolygon = std::vector<PlanarVertex>;
-struct PlanarLine
-{
-    PlanarVertex first, second;
-    std::vector<BoundedPlaneAuthority> supports;
-};
 Interval planar_turn(const PlanarVertex& a, const PlanarVertex& b, const PlanarVertex& c)
 {
     const auto x = b.coordinates[0] - a.coordinates[0], y = b.coordinates[1] - a.coordinates[1];
     return x * (c.coordinates[1] - a.coordinates[1]) - y * (c.coordinates[0] - a.coordinates[0]);
 }
+
 std::vector<BoundedPlaneAuthority> planar_common(
     const std::vector<BoundedPlaneAuthority>& first, const std::vector<BoundedPlaneAuthority>& second)
 {
@@ -33,6 +19,7 @@ std::vector<BoundedPlaneAuthority> planar_common(
             result.push_back(key);
     return result;
 }
+
 void planar_charge(const PlanarVertex& vertex)
 {
     active_work->charge(1, sizeof(PlanarVertex));
@@ -40,6 +27,7 @@ void planar_charge(const PlanarVertex& vertex)
     for (const auto& key : vertex.supports)
         active_work->charge(key.key.capacity(), sizeof(std::uint64_t));
 }
+
 PlanarLine planar_line(const PlanarVertex& first, const PlanarVertex& second, const BoundedPlaneAuthority& primary)
 {
     PlanarLine line{first, second, planar_common(first.supports, second.supports)};
@@ -49,6 +37,7 @@ PlanarLine planar_line(const PlanarVertex& first, const PlanarVertex& second, co
         reject("planar face edge has unresolved positive length.");
     return line;
 }
+
 Interval planar_distance(const PlanarVertex& vertex, const PlanarLine& edge)
 {
     for (const auto& key : edge.supports)
@@ -56,6 +45,7 @@ Interval planar_distance(const PlanarVertex& vertex, const PlanarLine& edge)
             return Interval{};
     return planar_turn(edge.first, edge.second, vertex);
 }
+
 Interval planar_area(const PlanarPolygon& polygon)
 {
     if (polygon.size() < 3)
@@ -75,6 +65,7 @@ Interval planar_area(const PlanarPolygon& polygon)
     area.estimate = (estimate + correction) / 2;
     return area;
 }
+
 void planar_convex(const PlanarPolygon& polygon, int winding, const BoundedPlaneAuthority& primary)
 {
     for (std::size_t e = 0; e < polygon.size(); ++e)
@@ -90,6 +81,7 @@ void planar_convex(const PlanarPolygon& polygon, int winding, const BoundedPlane
         }
     }
 }
+
 void planar_push(PlanarPolygon& polygon, PlanarVertex vertex)
 {
     if (!polygon.empty() && polygon.back().token == vertex.token)
@@ -99,6 +91,7 @@ void planar_push(PlanarPolygon& polygon, PlanarVertex vertex)
     planar_charge(vertex);
     polygon.push_back(std::move(vertex));
 }
+
 PlanarVertex planar_crossing(
     const PlanarVertex& a, const PlanarVertex& b, Interval da, Interval db, const PlanarLine& edge, std::size_t& token)
 {
@@ -121,6 +114,7 @@ PlanarVertex planar_crossing(
     result.token = ++token;
     return result;
 }
+
 bool planar_line_contact(const PlanarPolygon& polygon, const BoundedPlaneAuthority& primary)
 {
     if (polygon.size() < 3)
@@ -131,7 +125,10 @@ bool planar_line_contact(const PlanarPolygon& polygon, const BoundedPlaneAuthori
     std::erase(common, primary);
     return !common.empty();
 }
-} // namespace
+} // namespace bounded_geometry_detail
+} // namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes
+{
 BoundedPlanarFaceOverlap bounded_planar_face_overlap(std::span<const BoundedPoint> first,
     std::span<const BoundedPoint> second, const BoundedPlaneAuthority& support, BoundedGeometryLimits limits)
 {

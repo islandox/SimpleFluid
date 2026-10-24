@@ -1,13 +1,13 @@
 add_library(SimpleFluidFVM SHARED
     GeneralVoF.cc
-    details/GeneralVoFExactTransport.inc
-    details/GeneralVoFExactTransfer.inc
+    details/GeneralVoFState.cc
+    details/GeneralVoFFiniteTransport.cc
+    details/GeneralVoFExactTransport.cc
+    details/GeneralVoFExactTransfer.cc
     ExactPhaseTransfer.cc
     ExactFaceTransfer.cc
     PolyhedralReconstruction.cc
     FinitePolyhedralReconstruction.cc
-    details/BoundedPolyhedralReconstruction.inc
-    details/BoundedPhaseCertification.inc
     GeometricVoF.cc
     AdaptiveVoF.cc
     ConservativeAMRRemap.cc
@@ -17,6 +17,7 @@ add_library(SimpleFluidFVM SHARED
     details/ExactLiveStorage.cc
     details/ExactPhaseAccumulator.cc
     details/PhaseArithmetic.cc
+    details/BoundedPhaseArithmetic.cc
     details/ExperimentalPhaseBackend.cc
     # Non-orthogonal FVM solves and higher-level solvers share this instance.
     explicit_instantiation/DICPreconditioner.cc
@@ -39,13 +40,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # The independent VoF workstream is outside the existing Shiri PGO workload.
-simplefluid_exclude_from_pgo_sources(GeneralVoF.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc PolyhedralReconstruction.cc FinitePolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc details/ExperimentalPhaseBackend.cc)
+simplefluid_exclude_from_pgo_sources(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoFFiniteTransport.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc PolyhedralReconstruction.cc FinitePolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc details/BoundedPhaseArithmetic.cc details/ExperimentalPhaseBackend.cc)
 
 # Error-free transforms and directed residual bounds require strict arithmetic in
 # every caller translation unit; a strictly compiled geometry callee alone does
 # not constrain reassociation of its inline finite ledger helpers.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(GeneralVoF.cc PROPERTIES
+    set_source_files_properties(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoFFiniteTransport.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
+endif()
+
+# Compiled finite scalar transforms preserve the strict arithmetic of their callers.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(details/BoundedPhaseArithmetic.cc PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE
         SKIP_PRECOMPILE_HEADERS TRUE)

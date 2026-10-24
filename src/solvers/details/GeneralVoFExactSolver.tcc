@@ -1,4 +1,4 @@
-/** @file GeneralVoFExactSolver.inc
+/** @file GeneralVoFExactSolver.tcc
  * @brief Optional rational backend in the Exact namespace.
  * Included only by GeneralVoFSolver.cc inside SimpleFluid.
  */

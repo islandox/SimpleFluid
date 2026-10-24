@@ -1,3 +1,34 @@
+#include "geometry/details/BoundedConvexGeometryInternal.hh"
+
+namespace SimpleFluid::Meshes
+{
+BoundedPoint bounded_source_point(const ConvexCellGeometry& source, std::span<const char> identity)
+{
+    const std::array<const ConvexCellGeometry*, 1> sources{&source};
+    return source_point_fan(sources, identity);
+}
+
+BoundedPoint bounded_source_point(std::span<const ConvexGeometryPtr> sources, std::span<const char> identity)
+{
+    Operation scope({});
+    if (sources.size() > active_work->limits.maximum_faces)
+        reject("source point fan exceeds bootstrap source-count cap.");
+    active_work->charge(sources.size(), sizeof(const ConvexCellGeometry*));
+    std::vector<const ConvexCellGeometry*> pointers;
+    for (const auto& source : sources)
+        pointers.push_back(source.get());
+    return source_point_fan(pointers, identity);
+}
+
+BoundedPoint bounded_point_displaced(const BoundedPoint& source, const BoundedPoint& displacement)
+{
+    Operation scope({});
+    const auto delta = point(displacement);
+    if (std::all_of(delta.begin(), delta.end(), [](auto x) { return x.zero(); }))
+        return source;
+    return bounded(point(source) + delta);
+}
+
 BoundedPoint bounded_backtrace_constrained(const BoundedPoint& source, GeometryPoint velocity, double timestep,
     std::span<const BoundedFaceConstraint> walls, BoundedGeometryLimits limits)
 {
@@ -82,3 +113,4 @@ BoundedPoint bounded_backtrace_constrained(const BoundedPoint& source, GeometryP
     BoundedGeometryAccess::seal(result, std::move(retained));
     return result;
 }
+} // namespace SimpleFluid::Meshes

@@ -20,15 +20,18 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/MixedAMR.cc
     ConvexCellGeometry.cc
     BoundedConvexGeometry.cc
-    details/BoundedConvexArithmetic.inc
-    details/BoundedConvexPredicates.inc
-    details/BoundedConvexMeasures.inc
-    details/BoundedConvexConstruction.inc
-    details/BoundedConvexClipping.inc
-    details/BoundedConvexPartitions.inc
-    details/BoundedConvexTrajectories.inc
-    details/BoundedConvexPackets.inc
-    details/BoundedPlanarFace.inc
+    BoundedConvexConstruction.cc
+    BoundedConvexClipping.cc
+    BoundedConvexPartitions.cc
+    BoundedConvexTrajectories.cc
+    BoundedConvexPackets.cc
+    BoundedPlanarFace.cc
+    ExactExtrudedConstruction.cc
+    ExactPolyhedralComplex.cc
+    ExactExtrudedGeometry.cc
+    ExactPlanarFace.cc
+    ExactSweptGeometry.cc
+    ExactDepartureGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc
@@ -68,18 +71,6 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/MultiRegionMeshPartition.cc
 )
 
-# Private implementation fragments are included only by BoundedConvexGeometry.cc.
-set_source_files_properties(
-    details/BoundedConvexArithmetic.inc
-    details/BoundedConvexPredicates.inc
-    details/BoundedConvexMeasures.inc
-    details/BoundedConvexConstruction.inc
-    details/BoundedConvexClipping.inc
-    details/BoundedConvexPartitions.inc
-    details/BoundedConvexTrajectories.inc
-    details/BoundedConvexPackets.inc
-    PROPERTIES HEADER_FILE_ONLY TRUE)
-
 simplefluid_absolute_sources(SIMPLEFLUID_MESH_SOURCES)
 list(APPEND SIMPLEFLUID_MESH_SOURCES ${SIMPLEFLUID_IO_SOURCES} ${SIMPLEFLUID_PARALLEL_SOURCES})
 
@@ -98,7 +89,20 @@ set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
-    set_source_files_properties(ConvexCellGeometry.cc BoundedConvexGeometry.cc PROPERTIES
+    set_source_files_properties(ConvexCellGeometry.cc BoundedConvexGeometry.cc
+        BoundedConvexConstruction.cc
+        BoundedConvexClipping.cc
+        BoundedConvexPartitions.cc
+        BoundedConvexTrajectories.cc
+        BoundedConvexPackets.cc
+        BoundedPlanarFace.cc
+        ExactExtrudedConstruction.cc
+        ExactPolyhedralComplex.cc
+        ExactExtrudedGeometry.cc
+        ExactPlanarFace.cc
+        ExactSweptGeometry.cc
+        ExactDepartureGeometry.cc
+        PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
 endif()
@@ -129,6 +133,18 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/DecomposedOrthogonalTopology.cc
     mesh/DecomposedSemiStructuredTopology.cc
     details/SemiStructuredPartition.cc
+    BoundedConvexConstruction.cc
+    BoundedConvexClipping.cc
+    BoundedConvexPartitions.cc
+    BoundedConvexTrajectories.cc
+    BoundedConvexPackets.cc
+    BoundedPlanarFace.cc
+    ExactExtrudedConstruction.cc
+    ExactPolyhedralComplex.cc
+    ExactExtrudedGeometry.cc
+    ExactPlanarFace.cc
+    ExactSweptGeometry.cc
+    ExactDepartureGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc

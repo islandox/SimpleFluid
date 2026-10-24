@@ -830,11 +830,20 @@ definitions live directly in their owning `.cc` files and use unsuffixed
 entry points, including `plan_transport`, `plan_remap`, `solve` and `project`.
 Optional rational operations live in the owning component's `Exact` namespace:
 `SimpleFluid::VoF::Exact`, `SimpleFluid::detail::Exact` or
-`SimpleFluid::Exact`. Their definitions are isolated in `GeneralVoFExact*.inc` and
-`ConservativeVoFExactTransport.inc` detail fragments, included by those same
-translation units. Shared geometry, packet framing and collective admission
+`SimpleFluid::Exact`. Non-template definitions live in the owning compiled
+`.cc` translation units; the solver's exact template implementation lives in
+`details/GeneralVoFExactSolver.tcc`, included only by `GeneralVoFSolver.cc`.
+Shared geometry, packet framing and collective admission
 helpers remain common. This organization preserves the arithmetic compiler
-flags and policy dispatch; the exact fragments are not a finite-path fallback.
+flags and policy dispatch; exact operations are not a finite-path fallback.
+Shared scalar arithmetic lives in `utils/BoundedFloatingPoint.hh`,
+`utils/DirectedFloatingPoint.hh`, `utils/BoundedInterval.hh`, and
+`utils/ExactRational.hh`. Geometry, phase accounting, and solver state remain in
+their owning components. Private headers declare shared state and helper
+interfaces; separate compiled translation units implement geometry, finite and
+exact transport, projection, and adaptive solver subsystems. Each numerical
+implementation retains its owning target's arithmetic compiler settings.
+
 Explicit rational reconstruction uses `VoF::Exact::PolyhedralReconstruction`;
 the unsuffixed `VoF::PolyhedralReconstruction` accepts bounded geometry.
 
@@ -1134,7 +1143,7 @@ Active checkpoints and pending Phase 22 Stage 4 representation relaxation contin
 block topology change, as in [`AdaptiveVoFSolver::Impl::regrid`](../../src/solvers/AdaptiveVoFSolver.cc).
 [`LowMachState`](../../src/solvers/VoFLowMach.hh) carries liquid/resolved pressures
 and dispersed pressure/volume history; the
-[representation packets](../../src/solvers/AdaptiveVoFRepresentation.inc) retain
+[representation packets](../../src/solvers/details/AdaptiveVoFRepresentation.cc) retain
 phase `V`, `pV`, energy, and momentum. Ordinary remap/EOS reconstruction must not
 erase those histories or substitute pressure from new curvature. Physical
 relaxation remains a physical step, with no synthetic heat or source event.

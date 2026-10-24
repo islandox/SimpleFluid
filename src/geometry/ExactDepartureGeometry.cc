@@ -1,55 +1,23 @@
-/** @file DepartureFan.inc
- * @brief Private certified positive departure decomposition.
- * Included only inside ConvexCellGeometry.cc after target_sweep_shell.
- */
-// Its caller MUST first finish sweep_donors,
-// target_sweep_shell and every existing signed-simplex donor-coverage proof.
-// No public header/template exposure. All missing DERIVED certificates return
-// nullopt; original-chain corruption and resource failures throw.
-using DepartureTriangle = std::array<P, 3>;
-using DepartureTetraKey = std::array<P, 4>;
-using DepartureTriangleChain = std::map<DepartureTriangle, std::int64_t>;
-using DepartureEdgeChain = std::map<std::array<P, 2>, std::int64_t>;
+#include "geometry/details/ConvexCellGeometryInternal.hh"
 
+namespace SimpleFluid::Meshes
+{
+namespace exact_geometry_detail
+{
 void departure_charge_q(const Q& q, SweepBudget& budget)
 {
     std::size_t bytes = sizeof(Q);
     exact_scalar_storage(bytes, q);
     budget.add(bytes);
 }
+
 void departure_charge_point(const P& p, SweepBudget& budget)
 {
     budget.add(sizeof(P));
     for (const auto& q : p)
         departure_charge_q(q, budget);
 }
-template<class Key> void departure_charge_key(const Key& key, SweepBudget& budget)
-{
-    budget.add(sizeof(Key) + sizeof(std::int64_t) + 4 * sizeof(void*));
-    for (const auto& p : key)
-        departure_charge_point(p, budget);
-}
-template<class Key>
-void departure_coefficient(
-    std::map<Key, std::int64_t>& chain, const Key& key, std::int64_t coefficient, SweepBudget& budget)
-{
-    if (!coefficient)
-        return;
-    auto it = chain.find(key);
-    if (it == chain.end())
-    {
-        departure_charge_key(key, budget);
-        chain.emplace(key, coefficient);
-        return;
-    }
-    const auto old = it->second;
-    if ((coefficient > 0 && old > std::numeric_limits<std::int64_t>::max() - coefficient) ||
-        (coefficient < 0 && old < std::numeric_limits<std::int64_t>::min() - coefficient))
-        throw std::invalid_argument("Departure chain multiplicity overflow.");
-    it->second += coefficient;
-    if (!it->second)
-        chain.erase(it);
-}
+
 void departure_edge(DepartureEdgeChain& chain, const P& a, const P& b, int sign, SweepBudget& budget)
 {
     budget.test();
@@ -66,6 +34,7 @@ void departure_edge(DepartureEdgeChain& chain, const P& a, const P& b, int sign,
     }
     departure_coefficient(chain, key, sign, budget);
 }
+
 void departure_triangle(
     DepartureTriangleChain& chain, const P& a, const P& b, const P& c, int sign, SweepBudget& budget)
 {
@@ -84,30 +53,16 @@ void departure_triangle(
             }
     departure_coefficient(chain, key, sign, budget);
 }
+
 void departure_triangle(DepartureTriangleChain& chain, const DepartureTriangle& t, int sign, SweepBudget& budget)
 {
     departure_triangle(chain, t[0], t[1], t[2], sign, budget);
 }
+
 void departure_boundary_edges(DepartureEdgeChain& edges, const DepartureTriangle& t, SweepBudget& budget)
 {
     for (unsigned a = 0; a < 3; ++a)
         departure_edge(edges, t[a], t[(a + 1) % 3], 1, budget);
-}
-
-template<class T> void departure_push(std::vector<T>& values, T value, SweepBudget& budget)
-{
-    if (values.size() == values.capacity())
-    {
-        const auto capacity = values.capacity();
-        if (capacity > std::numeric_limits<std::size_t>::max() / 2)
-            throw std::invalid_argument("Departure vector capacity overflow.");
-        const auto next = capacity ? 2 * capacity : 1;
-        // Cumulative construction accounting includes both old and newly
-        // requested capacities; a failed optional attempt never refunds work.
-        budget.array(next, sizeof(T));
-        values.reserve(next);
-    }
-    values.push_back(std::move(value));
 }
 
 // Authenticate C(B) against the original immutable signed-sweep representation.
@@ -199,6 +154,7 @@ void departure_admit_boundary_storage(
     // 12n stored point copies plus6n temporary side-triangle point copies.
     budget.array(18 * current.size(), maximum);
 }
+
 // Unconditional entry proof, BEFORE any optional count/topology/kernel exit.
 void departure_authenticate_recipient_sweeps(const ExactSweepRecipient& target, SweepBudget& budget)
 {
@@ -243,12 +199,6 @@ void departure_authenticate_recipient_sweeps(const ExactSweepRecipient& target, 
         departure_authenticate_cones(face, current, center, boundary, budget);
     }
 }
-
-struct DepartureFanCandidate
-{
-    std::size_t recipient = 0;
-    std::vector<ExactConvexFragmentPtr> tetrahedra;
-};
 
 // No interpolation of absent coarse-edge nodes. Exact shared-side cancellation
 // is a prerequisite; a valid hanging-edge configuration lacking that OPTIONAL
@@ -599,3 +549,168 @@ std::optional<std::vector<ExactTransportAtom>> optional_departure_fan_partition(
             throw std::invalid_argument("Departure fan received occupancy differs from actual recipient volume.");
     return atoms;
 }
+} // namespace exact_geometry_detail
+} // namespace SimpleFluid::Meshes
+namespace SimpleFluid::Meshes
+{
+ExactTransportPartition ExactTransportPartition::local(
+    std::span<const ExactSweepDonor> donors, std::span<const ExactSweepRecipient> recipients, ExactSweepLimits limits)
+{
+    SweepBudget budget(limits);
+    budget.array(recipients.size(), sizeof(Q) + sizeof(int));
+    sweep_donors(donors, budget);
+    std::map<std::uint64_t, const ExactSweepDonor*> originals;
+    for (const auto& donor : donors)
+        originals.emplace(donor.id, &donor);
+    std::set<std::uint64_t> targets;
+    std::map<P, P> shared;
+    std::set<const ExactSweptFace*> proved;
+    for (const auto& target : recipients)
+    {
+        if (!targets.insert(target.id).second)
+            throw std::invalid_argument("Duplicate recipient identity.");
+        auto old = originals.find(target.id);
+        if (old == originals.end() || !target.geometry || !old->second->geometry->equivalent(*target.geometry))
+            throw std::invalid_argument("Transport recipient must bind its actual unchanged source cell.");
+        target_sweep_shell(target, budget, shared);
+        for (const auto& oriented : target.outward_faces)
+            if (proved.insert(oriented.face.get()).second)
+            {
+                if (oriented.face->simplices().size() > limits.maximum_simplices)
+                    throw std::invalid_argument("Recipient sweep exceeds simplex budget.");
+                for (std::size_t simplex = 0; simplex < oriented.face->simplices().size(); ++simplex)
+                {
+                    const auto& piece = oriented.face->simplices()[simplex];
+                    std::vector<ExactConvexFragmentPtr> coverage;
+                    for (const auto& donor : donors)
+                    {
+                        budget.test();
+                        if (auto p = ExactSweepAccess::intersect(ExactSweepAccess::certified(*piece.geometry),
+                                ExactSweepAccess::certified(*donor.geometry), budget))
+                        {
+                            budget.poly(p->get());
+                            coverage.push_back(ExactSweepAccess::fragment(std::move(*p)));
+                        }
+                    }
+                    for (std::size_t i = 0; i < coverage.size(); ++i)
+                        for (std::size_t j = 0; j < i; ++j)
+                            budget.test();
+                    try
+                    {
+                        certify_sweep_partition(ExactSweepAccess::certified(*piece.geometry), coverage, budget);
+                    }
+                    catch (const std::invalid_argument& error)
+                    {
+                        throw std::invalid_argument("Recipient local coverage target=" + std::to_string(target.id) +
+                                                    ": " + error.what() +
+                                                    sweep_cover_context(*oriented.face, piece, donors, simplex));
+                    }
+                }
+            }
+    }
+    ExactTransportPartition result;
+    if (auto positive = optional_departure_fan_partition(donors, recipients, budget))
+    {
+        result.atoms_ = std::move(*positive);
+        result.used_departure_fan_ = true;
+        return result;
+    }
+    std::vector<Q> volumes(recipients.size());
+    for (const auto& donor : donors)
+    {
+        budget.array(recipients.size(), sizeof(int));
+        budget.add(sizeof(SweepAtom));
+        std::vector<int> initial(recipients.size());
+        for (std::size_t r = 0; r < recipients.size(); ++r)
+            initial[r] = recipients[r].id == donor.id ? 1 : 0;
+        budget.poly(ExactSweepAccess::poly(*donor.geometry));
+        std::vector<SweepAtom> atoms{{ExactConvexFragment::from_geometry(*donor.geometry), std::move(initial)}};
+        for (std::size_t r = 0; r < recipients.size(); ++r)
+            for (const auto& oriented : recipients[r].outward_faces)
+                for (const auto& piece : oriented.face->simplices())
+                    atoms = overlay_sweep(std::move(atoms), piece, r, -oriented.outward_sign, budget);
+        for (auto& atom : atoms)
+        {
+            std::optional<std::size_t> owner;
+            for (std::size_t r = 0; r < recipients.size(); ++r)
+            {
+                const auto c = atom.coefficient[r];
+                if (c != 0 && c != 1)
+                    throw std::invalid_argument("Closed-cell pullback has negative or repeated signed multiplicity.");
+                if (c)
+                {
+                    if (owner)
+                        throw std::invalid_argument("Closed-cell pullbacks overlap between recipients.");
+                    owner = r;
+                }
+            }
+            if (owner)
+            {
+                budget.atom(result.atoms_.size());
+                budget.add(sizeof(ExactTransportAtom));
+                volumes[*owner] += sweep_volume(*atom.geometry);
+                result.atoms_.push_back({donor.id, recipients[*owner].id, std::move(atom.geometry)});
+            }
+        }
+    }
+    for (std::size_t r = 0; r < recipients.size(); ++r)
+        if (volumes[r] != sweep_volume(*recipients[r].geometry))
+            throw std::invalid_argument("Exact recipient occupancy differs from its native volume; projected flux "
+                                        "divergence needs a qualified canonical correction.");
+    return result;
+}
+
+void ExactTransportPartition::certify_donor_cover(
+    const ExactSweepDonor& donor, std::span<const ExactTransportAtom> atoms, ExactSweepLimits limits)
+{
+    SweepBudget budget(limits);
+    if (!donor.geometry)
+        throw std::invalid_argument("Missing donor coverage geometry.");
+    std::vector<ExactConvexFragmentPtr> pieces;
+    for (const auto& atom : atoms)
+    {
+        budget.atom(pieces.size());
+        if (atom.donor != donor.id || !atom.geometry)
+            throw std::invalid_argument("Foreign/null atom in donor coverage proof.");
+        budget.add(sizeof(ExactConvexFragmentPtr));
+        pieces.push_back(atom.geometry);
+    }
+    for (std::size_t i = 0; i < pieces.size(); ++i)
+        for (std::size_t j = 0; j < i; ++j)
+            budget.test();
+    certify_sweep_partition(ExactSweepAccess::certified(*donor.geometry), pieces, budget);
+}
+
+ExactTransportPartition ExactTransportPartition::make(
+    std::span<const ExactSweepDonor> donors, std::span<const ExactSweepRecipient> recipients, ExactSweepLimits limits)
+{
+    auto result = local(donors, recipients, limits);
+    for (const auto& donor : donors)
+    {
+        std::vector<ExactTransportAtom> atoms;
+        for (const auto& atom : result.atoms_)
+            if (atom.donor == donor.id)
+                atoms.push_back(atom);
+        certify_donor_cover(donor, atoms, limits);
+    }
+    return result;
+}
+
+ExactPhaseMeasures ExactTransportPartition::phases(
+    std::span<const ExactTransportAtom> atoms, const GeometryHalfspace& plane)
+{
+    std::vector<ExactConvexFragmentPtr> pieces;
+    for (const auto& atom : atoms)
+    {
+        if (!atom.geometry)
+            throw std::invalid_argument("Null transport atom.");
+        pieces.push_back(atom.geometry);
+    }
+    return sweep_phases(pieces, plane);
+}
+
+const void* exact_geometry_statistics_domain()
+{
+    return &exact_geometry_counts;
+}
+} // namespace SimpleFluid::Meshes

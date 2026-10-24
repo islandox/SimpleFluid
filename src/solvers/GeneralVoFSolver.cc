@@ -75,7 +75,7 @@ std::vector<Vector> finite_spans(const std::shared_ptr<const VoF::GeneralVoF>& p
     return result;
 }
 } // namespace
-#include "solvers/details/GeneralVoFExactSolver.inc"
+#include "solvers/details/GeneralVoFExactSolver.tcc"
 struct GeneralVoFSolver::Impl
 {
     struct State
