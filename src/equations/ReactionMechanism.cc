@@ -440,8 +440,13 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     require(std::isfinite(environment.time) && std::isfinite(environment.temperature) &&
                 environment.temperature > 0.0 && std::isfinite(environment.absolutePressure) &&
                 environment.absolutePressure > 0.0 && nonnegative(environment.liquidVolume) &&
-                nonnegative(environment.bulkVolume) && environment.liquidVolume <= environment.bulkVolume &&
-                nonnegative(duration) && std::isfinite(environment.time + duration) &&
+                nonnegative(environment.bulkVolume) &&
+                (environment.volumeClosure == ReactionVolumeClosure::Accepted ||
+                    environment.volumeClosure == ReactionVolumeClosure::ThermodynamicPredictor) &&
+                (environment.volumeClosure == ReactionVolumeClosure::ThermodynamicPredictor ||
+                    environment.liquidVolume <= environment.bulkVolume) &&
+                (environment.liquidVolume == 0 || environment.bulkVolume > 0) && nonnegative(duration) &&
+                std::isfinite(environment.time + duration) &&
                 (duration == 0.0 || environment.time + duration > environment.time),
         "Reaction context needs finite time, positive temperature/pressure and valid volumes/duration.");
     const auto initialValues = flatten(initial);
@@ -470,6 +475,14 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     }
     const auto count = flatten(initial).size();
     std::vector<Sum> chemical(count), external(count), extentSums(mechanism.reactions().size());
+    std::vector<Sum> forwardExtents(mechanism.reactions().size()), reverseExtents(mechanism.reactions().size());
+    const auto record_direction = [&](std::size_t reaction, long double extent)
+    {
+        if (extent >= 0.0L)
+            forwardExtents[reaction] += extent;
+        else
+            reverseExtents[reaction] += -extent;
+    };
     Sum externalHeat, transferEnergy, externalMass;
     std::array<Sum, 3> momentum;
     Amounts extents(mechanism.reactions().size(), 0.0L);
@@ -520,7 +533,10 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     }
     auto current = apply(flatten(initial), combined);
     for (std::size_t r = 0; r < extents.size(); ++r)
+    {
         extentSums[r] += extents[r];
+        record_direction(r, extents[r]);
+    }
     if (input.heat.rate)
     {
         require(std::isfinite(input.heat.rate->value), "External heat rate must be finite.");
@@ -588,7 +604,11 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
                 current = std::move(accepted);
                 chemical = std::move(acceptedChemical);
                 for (std::size_t r = 0; r < extents.size(); ++r)
+                {
                     extentSums[r] += acceptedExtents[r];
+                    record_direction(r, firstExtents[r] * 0.5L);
+                    record_direction(r, secondExtents[r] * 0.5L);
+                }
                 ++substeps;
                 elapsed = step == duration - elapsed ? duration : elapsed + step;
                 nextStep = std::min(options.maximumSubstep, step * 2.0);
@@ -622,6 +642,8 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     for (std::size_t r = 0; r < extentSums.size(); ++r)
     {
         ledger.reactionExtents.push_back(checked(extentSums[r].value()));
+        ledger.forwardReactionExtents.push_back(checked(forwardExtents[r].value()));
+        ledger.reverseReactionExtents.push_back(checked(reverseExtents[r].value()));
         reactionHeat += extentSums[r].value() * mechanism.reactions()[r].heatPerExtent;
     }
     ledger.externalTransfers = input.externalTransfers;

@@ -164,6 +164,7 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
     d_species_source_ledgers.clear();
     d_species_population_ledgers.clear();
     d_species_escape_ledgers.clear();
+    d_species_history = {};
     d_species_thermal_source.put_scalar(0.0);
     d_species_material_source.put_scalar(0.0);
     d_species_liquid_mass.put_scalar(0.0);
@@ -338,7 +339,11 @@ void ReactingGasModel<Pack, MeshType>::initialize_species(
     std::span<const Reacting::CellSpeciesState> states, std::span<const std::vector<double>> numbers)
 {
     using reacting_species_detail::require;
-    const auto prior = snapshot();
+    StateSnapshot prior;
+    collective_detail::collective_local_validation(*d_mesh, "Reacting species initialization snapshot", [&]
+    {
+        prior = snapshot();
+    });
     try
     {
         std::vector<double> volumes(d_mesh->num_owned_cells());
@@ -380,6 +385,7 @@ void ReactingGasModel<Pack, MeshType>::initialize_species(
         d_species_escape_ledgers.clear();
         d_initial_state_initialized = true;
         d_history_initialized = false;
+        publish_species_history(states, {}, true);
         sync_all_fields();
         ++d_species_generation;
     }
@@ -960,11 +966,16 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                         d_transport_bubble_carrier_volume_flux.owned_row(face), 0) = carrierSum;
                 }
             });
+        species_step_sums interphase_step;
         std::vector<Reacting::CellSpeciesState> candidates;
         std::vector<std::vector<BubbleGasPhysics::PopulationNumberState>> candidateNumbers;
         std::vector<double> transportedGas(volumes.size()), transportedMaterial(volumes.size());
         d_species_source_ledgers.resize(volumes.size());
         d_species_population_ledgers.resize(volumes.size());
+        collective_detail::collective_local_validation(*d_mesh, "Reacting history scratch", [&]
+        {
+            interphase_step.resize(catalog.species().size() * (4 + d_options.population_ids.size()));
+        });
         collective_detail::collective_local_validation(*d_mesh, "Reacting joint species and population preview",
             [&]
             {
@@ -1077,6 +1088,19 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                                 countChanges = std::move(acceptedCounts);
                                 state = std::move(acceptedState);
                                 numbers = std::move(acceptedNumbers);
+                                // Only accepted packets enter gross interphase histories. Rejected retries
+                                // cannot debit donors or increment diagnostic events.
+                                for (const auto& transfer : packet.transfers)
+                                {
+                                    const auto donor = species_compartment_index(
+                                        transfer.species, transfer.donor, transfer.donorPopulation);
+                                    const auto receiver = species_compartment_index(
+                                        transfer.species, transfer.receiver, transfer.receiverPopulation);
+                                    interphase_step[donor].amount[Reacting::history_detail::InterphaseOutflow] +=
+                                        transfer.moles;
+                                    interphase_step[receiver].amount[Reacting::history_detail::InterphaseInflow] +=
+                                        transfer.moles;
+                                }
                                 ++substeps;
                                 elapsed = step == dt - elapsed ? dt : elapsed + step;
                                 next = std::min(dt, 2 * step);
@@ -1122,22 +1146,29 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
         // Independent species closure includes internal stoichiometry and physical boundary withdrawals.
         for (const auto& species : catalog.species())
         {
-            std::array<detail::CompensatedSum<long double>, 3> sums;
-            for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+            std::array<double, 3> local{}, global{};
+            collective_detail::collective_local_validation(*d_mesh, "Reacting species closure input", [&]
             {
-                const auto after = candidates[owned];
-                for (std::size_t p = 0; p < 4; ++p)
+                std::array<detail::CompensatedSum<long double>, 3> sums;
+                for (std::size_t owned = 0; owned < volumes.size(); ++owned)
                 {
-                    const auto phase = static_cast<P>(p);
-                    sums[0] += before[owned].phase_amount(catalog, species.id, phase);
-                    sums[1] += after.phase_amount(catalog, species.id, phase);
-                    sums[2] += d_species_source_ledgers[owned].chemicalChange.phase_amount(catalog, species.id, phase);
-                    sums[2] += d_species_source_ledgers[owned].externalChange.phase_amount(catalog, species.id, phase);
-                    sums[2] += d_species_escape_ledgers[owned].externalChange.phase_amount(catalog, species.id, phase);
+                    const auto& after = candidates[owned];
+                    for (std::size_t p = 0; p < 4; ++p)
+                    {
+                        const auto phase = static_cast<P>(p);
+                        sums[0] += before[owned].phase_amount(catalog, species.id, phase);
+                        sums[1] += after.phase_amount(catalog, species.id, phase);
+                        sums[2] += d_species_source_ledgers[owned].chemicalChange.phase_amount(
+                            catalog, species.id, phase);
+                        sums[2] += d_species_source_ledgers[owned].externalChange.phase_amount(
+                            catalog, species.id, phase);
+                        sums[2] += d_species_escape_ledgers[owned].externalChange.phase_amount(
+                            catalog, species.id, phase);
+                    }
                 }
-            }
-            std::array<double, 3> local{narrow(sums[0].value()), narrow(sums[1].value()), narrow(sums[2].value())},
-                global{};
+                for (std::size_t i = 0; i < local.size(); ++i)
+                    local[i] = narrow(sums[i].value());
+            });
             Teuchos::reduceAll(
                 *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 3, local.data(), global.data());
             const double scale = std::max({std::abs(global[0]), std::abs(global[1]), std::abs(global[2])});
@@ -1145,6 +1176,7 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 std::abs((global[1] - global[0]) - global[2]) <= 4096 * std::numeric_limits<double>::epsilon() * scale,
                 "Accepted multispecies source/transport/escape ledger does not close.");
         }
+        publish_species_history(candidates, std::move(interphase_step), false);
         d_history_initialized = true;
         sync_all_fields();
         if constexpr (requires { d_transport_bubble_slip_volume_flux.sync_ghosts(); })
@@ -1163,6 +1195,7 @@ template<TpetraTypePack Pack, class MeshType>
 auto ReactingGasModel<Pack, MeshType>::evaluate_species_bubble_volume(
     scalar_type candidate_absolute_pressure_offset) const -> scalar_type
 {
+    validate_species_pressure_metadata(candidate_absolute_pressure_offset);
     scalar_type local = 0.0;
     collective_detail::collective_local_validation(*d_mesh, "Reacting candidate mixture bubble volume",
         [&]
@@ -1213,3 +1246,7 @@ ReactingGasOptions ReactingGasModel<Pack, MeshType>::require_options(
     return options;
 }
 } // namespace SimpleFluid
+
+#include "equations/ReactingSpeciesHistory.ipp"
+
+#include "equations/ReactingSpeciesPressure.ipp"

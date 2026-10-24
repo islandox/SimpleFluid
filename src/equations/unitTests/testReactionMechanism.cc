@@ -485,4 +485,92 @@ TEST(ReactionMechanismTest, RepeatedSubUlpConsumptionAccumulatesIntoRepresentabl
     EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, R::SpeciesPhase::Dissolved), 10000.0);
     EXPECT_DOUBLE_EQ(result.state.amount(*schema, G2, R::SpeciesPhase::Dissolved), 10000.0);
 }
+TEST(ReactionMechanismTest, PredictorEOSVolumeDefersOnlyOccupancyToTheFlowOwner)
+{
+    const auto schema = catalog();
+    const R::ReactionMechanism mechanism(schema, {split_reaction()});
+    const auto initial = state(*schema, .2);
+    auto context = environment();
+    context.liquidVolume = .6;
+    R::ReactionSourceInput input;
+    input.rates = constant_rate(*schema, 2.);
+    input.heat.rate = R::VolumetricHeatRate{2., R::SourceVolumeBasis::BulkVolume};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, .1, input), std::invalid_argument);
+    context.volumeClosure = R::ReactionVolumeClosure::ThermodynamicPredictor;
+    input.rates->validate = [](const R::ReactionContext& value)
+    {
+        EXPECT_DOUBLE_EQ(value.environment.liquidVolume, .6);
+        EXPECT_DOUBLE_EQ(value.environment.bulkVolume, .5);
+        EXPECT_EQ(value.environment.volumeClosure, R::ReactionVolumeClosure::ThermodynamicPredictor);
+    };
+    const auto result = R::advance_reactions(mechanism, initial, context, .1, input);
+    EXPECT_NEAR(result.ledger.reactionExtents[0], .12, 1e-16);
+    EXPECT_NEAR(result.state.amount(*schema, A, R::SpeciesPhase::Liquid), .08, 1e-16);
+    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, .1);
+    for (int invalid = 0; invalid < 4; ++invalid)
+    {
+        auto bad = context;
+        if (invalid == 0)
+            bad.volumeClosure = static_cast<R::ReactionVolumeClosure>(71);
+        if (invalid == 1)
+            bad.bulkVolume = 0;
+        if (invalid == 2)
+            bad.liquidVolume = -1;
+        if (invalid == 3)
+            bad.liquidVolume = std::numeric_limits<double>::infinity();
+        EXPECT_THROW((void) R::advance_reactions(mechanism, initial, bad, .1, input), std::invalid_argument);
+    }
+    R::ReactionSourceInput overdraw;
+    overdraw.integratedExtents = {{split, .3}};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, context, .1, overdraw), std::exception);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, A, R::SpeciesPhase::Liquid), .2);
+}
 } // namespace
+TEST(ReactionDirectionalHistoryTest, AcceptedStagesRetainGrossReversalWithoutChangingNetInventoryOrHeat)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {5, "left", 0.01, {{"X", 1}}, {P::Liquid}}, {17, "right", 0.01, {{"X", 1}}, {P::Liquid}}});
+    const R::ReactionMechanism mechanism(schema, {{61, "reversible", {{5, P::Liquid, -1}, {17, P::Liquid, 1}}, 10.0}});
+    R::CellSpeciesState initial(*schema);
+    initial.set_amount(*schema, 5, P::Liquid, 2.0);
+    initial.set_amount(*schema, 17, P::Liquid, 2.0);
+    R::ReactionSourceInput input;
+    R::ReactionRateProvider provider;
+    provider.identity = "linear sign change";
+    provider.schemaRevision = schema->revision();
+    provider.schemaFingerprint = schema->fingerprint();
+    provider.validityDescription = "manufactured finite time";
+    provider.parameterUnits = "mol/(m3 s)";
+    provider.validate = [](const R::ReactionContext&) {};
+    provider.evaluate = [](const R::ReactionContext& context)
+    {
+        return std::vector<R::ReactionRate>{
+            {61, 2.0 * context.environment.time - 1.0, R::SourceVolumeBasis::BulkVolume}};
+    };
+    input.rates = provider;
+    const R::ReactionEnvironment environment{0.0, 300.0, 100000.0, 1.0, 1.0};
+    for (const double maximumStep : {1.0, 0.25})
+    {
+        R::ReactionAdvanceOptions options;
+        options.maximumSubstep = maximumStep;
+        const auto result = R::advance_reactions(mechanism, initial, environment, 1.0, input, options);
+        EXPECT_DOUBLE_EQ(result.state.amount(*schema, 5, P::Liquid), 2.0);
+        EXPECT_DOUBLE_EQ(result.state.amount(*schema, 17, P::Liquid), 2.0);
+        ASSERT_EQ(result.ledger.forwardReactionExtents.size(), 1);
+        ASSERT_EQ(result.ledger.reverseReactionExtents.size(), 1);
+        EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], 0.0);
+        const double expectedDirection = maximumStep == 1.0 ? 0.5 : 0.25;
+        EXPECT_DOUBLE_EQ(result.ledger.forwardReactionExtents[0], expectedDirection);
+        EXPECT_DOUBLE_EQ(result.ledger.reverseReactionExtents[0], expectedDirection);
+        EXPECT_DOUBLE_EQ(result.ledger.reactionHeat, 0.0);
+    }
+    input.rates.reset();
+    input.integratedExtents = {{61, -0.125}};
+    const auto reverse = R::advance_reactions(mechanism, initial, environment, 1.0, input);
+    EXPECT_DOUBLE_EQ(reverse.ledger.forwardReactionExtents[0], 0.0);
+    EXPECT_DOUBLE_EQ(reverse.ledger.reverseReactionExtents[0], 0.125);
+    EXPECT_DOUBLE_EQ(reverse.ledger.reactionExtents[0], -0.125);
+    EXPECT_DOUBLE_EQ(reverse.ledger.reactionHeat, -1.25);
+}

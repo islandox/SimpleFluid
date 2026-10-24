@@ -16,6 +16,7 @@
 #include "equations/BoussinesqModel.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/ReactingGasProperties.hh"
+#include "equations/SpeciesInventoryHistory.hh"
 #include "fields/FaceField.hh"
 #include "fields/MeshFieldTraits.hh"
 #include "solvers/BelosLinearSolver.hh"
@@ -150,6 +151,25 @@ public:
     {
         return d_species_escape_ledgers;
     }
+    /** Globally reduced catalog-ordered accepted histories; no query advances a counter. */
+    const std::vector<Reacting::SpeciesInventoryHistory>& species_histories() const noexcept
+    {
+        return d_species_history.inventory;
+    }
+    /** Exact accepted step events in fixed compartment-major/catalog order, not differences of cumulative doubles. */
+    const std::vector<Reacting::SpeciesCompartmentEvents>& species_step_events() const noexcept
+    {
+        return d_species_history.step;
+    }
+    /** Actual transport escape only. Supplied enthalpy/momentum traces do not debit an owned phase-energy ledger. */
+    const std::vector<Reacting::SpeciesPhysicalEscapeEvent>& physical_escape_events() const noexcept
+    {
+        return d_species_history.escape;
+    }
+    /** Pure collective current Liquid+Dissolved volume at retained T and candidate offset.
+     * No source evaluation, field publication or accepted history/pressure changes.
+     */
+    scalar_type evaluate_liquid_volume(scalar_type candidate_absolute_pressure_offset) const;
     /** Accepted independent external/reaction/transfer thermal allocation in W/m3 bulk, consumed once by controller. */
     const field_type& thermal_source() const noexcept { return d_species_thermal_source; }
     const field_type& material_volume_source() const noexcept { return d_species_material_source; }
@@ -165,6 +185,7 @@ public:
         const ReactingGasModel* d_owner = nullptr;
         std::uint64_t d_species_generation = 0, d_species_fingerprint = 0, d_geometry_epoch = 0;
         std::vector<Reacting::SpeciesSourceLedger> d_species_sources, d_species_populations, d_species_escapes;
+        Reacting::history_detail::State d_species_history;
         std::vector<std::vector<scalar_type>> d_fields;
         std::vector<local_ordinal_type> d_transport_slip_face_ids;
         std::vector<scalar_type> d_transport_slip_face_values;
@@ -493,7 +514,9 @@ public:
      *
      * Only constant and reconstructed pressure modes support an externally
      * coupled offset.  Reconstructed mode retains every accepted gauge-pressure
-     * variation exactly.  For initialized two-population state, every
+     * variation exactly. For initialized species state, every occupied liquid/gas EOS,
+     * amount/count pair and gas capacity is validated before publication. Failure
+     * preserves pressure, fields and histories. For other two-population state, every
      * pressure-dependent bubble diagnostic is reconstructed at the accepted
      * offset without modifying conserved inventories or escape ledgers.  This
      * is a collective operation.
@@ -714,6 +737,14 @@ private:
         std::vector<std::unique_ptr<field_type>> populations;
         std::unique_ptr<field_type> escape;
     };
+    using species_step_sums = std::vector<Reacting::history_detail::CompartmentSums>;
+    SIMPLEFLUID_EQUATIONS_LOCAL std::size_t species_compartment_index(
+        Reacting::SpeciesId species, Reacting::SpeciesPhase phase, std::string_view population) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL void publish_species_history(
+        std::span<const Reacting::CellSpeciesState> states, species_step_sums step, bool initialize);
+    SIMPLEFLUID_EQUATIONS_LOCAL void validate_species_pressure_metadata(scalar_type pressure_offset) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL void validate_species_candidate_pressure(scalar_type pressure_offset) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL void set_species_absolute_pressure_offset(scalar_type pressure_offset);
     SIMPLEFLUID_EQUATIONS_LOCAL void configure_species_fields();
     SIMPLEFLUID_EQUATIONS_LOCAL scalar_type evaluate_species_bubble_volume(scalar_type candidate_absolute_pressure_offset) const;
     SIMPLEFLUID_EQUATIONS_LOCAL field_type& mutable_species_field(
@@ -773,6 +804,7 @@ private:
     std::vector<std::unique_ptr<field_type>> d_population_volume_fractions, d_population_slip_fields;
     std::vector<Reacting::SpeciesSourceLedger> d_species_source_ledgers, d_species_population_ledgers,
         d_species_escape_ledgers;
+    Reacting::history_detail::State d_species_history;
     std::uint64_t d_species_generation = 0;
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;

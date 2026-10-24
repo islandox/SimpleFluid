@@ -147,13 +147,24 @@ struct IntegratedReactionExtent
     double moles = 0.0; ///< Signed mol reaction per cell over the entire interval; no further dt/volume scaling.
 };
 
+/** Accepted occupancy is the default. A thermodynamic predictor carries the
+ * actual provisional EOS liquid volume during a flow corrector; its owner must
+ * close and validate material occupancy before accepting the physical state.
+ */
+enum class ReactionVolumeClosure
+{
+    Accepted,
+    ThermodynamicPredictor
+};
+
 struct ReactionEnvironment
 {
     double time = 0.0;
     double temperature = 0.0;      ///< K.
     double absolutePressure = 0.0; ///< Pa.
     double liquidVolume = 0.0;     ///< m3, shared by Liquid and Dissolved.
-    double bulkVolume = 0.0;       ///< m3.
+    double bulkVolume = 0.0;       ///< Actual geometric m3, including during a predictor.
+    ReactionVolumeClosure volumeClosure = ReactionVolumeClosure::Accepted;
 };
 
 struct ReactionContext
@@ -229,7 +240,11 @@ struct SpeciesSourceLedger
 {
     CellSpeciesState chemicalChange;
     CellSpeciesState externalChange;
-    std::vector<double> reactionExtents; ///< Mechanism order.
+    std::vector<double> reactionExtents; ///< Signed net extents, mechanism order.
+    /** Nonnegative accepted directional extents; retain gross chemistry when a
+     * reversible rate changes sign within an accepted SSPRK2 interval.
+     */
+    std::vector<double> forwardReactionExtents, reverseReactionExtents;
     std::vector<ExternalSpeciesTransfer> externalTransfers;
     double externalHeat = 0.0;
     double reactionHeat = 0.0;

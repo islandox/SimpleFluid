@@ -7,6 +7,7 @@
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
+#include "solvers/details/LowMachSourceStage.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -185,7 +186,7 @@ struct LowMachMixtureSolver::Implementation
     State accepted;
     Diagnostics diagnostics;
     bool initialized = false, controller_active = false;
-    std::uint64_t trial_nonce = 0, controller_id = 0;
+    std::uint64_t trial_nonce = 0, controller_id = 0, source_invocation = 0;
     std::uint64_t epoch = 0;
     ScalarField rho, old_rho, mu, mechanical_pressure, old_scalar, scalar, unit, zero, published_rho;
     VectorField u, old_u, pressure_gradient, published_u;
@@ -217,6 +218,9 @@ struct LowMachMixtureSolver::Implementation
                           std::isfinite(options.conservation_relative_tolerance) &&
                           std::isfinite(options.continuity_tolerance) && options.continuity_tolerance > 0,
                     "Low-Mach physical tolerances and pressure bounds must be finite and positive.");
+                check(std::isfinite(options.source_relative_tolerance) && options.source_relative_tolerance > 0 &&
+                          std::isfinite(options.thermal_relative_tolerance) && options.thermal_relative_tolerance > 0,
+                    "Source/thermal corrector tolerances must be finite and positive.");
                 check(!eos.empty() && options.minimum_pressure > 0 &&
                           options.maximum_pressure > options.minimum_pressure && options.maximum_correctors > 0 &&
                           options.maximum_pressure_iterations > 0 && options.volume_relative_tolerance > 0 &&
@@ -256,6 +260,8 @@ struct LowMachMixtureSolver::Implementation
         collective_detail::require_uniform_value(*mesh, options.continuity_tolerance, "Low-Mach continuity gate");
         collective_detail::require_uniform_value(
             *mesh, options.conservation_relative_tolerance, "Low-Mach conservation gate");
+        collective_detail::require_uniform_value(*mesh, options.source_relative_tolerance, "Low-Mach source gate");
+        collective_detail::require_uniform_value(*mesh, options.thermal_relative_tolerance, "Low-Mach thermal gate");
         collective_detail::require_uniform_value(*mesh, eos.size(), "Low-Mach phase count");
         collective_detail::require_uniform_value(
             *mesh, eos.front()->catalog().revision(), "Low-Mach species schema revision");
@@ -550,12 +556,28 @@ void LowMachMixtureSolver::restore(const Checkpoint& saved, const ControllerLeas
 LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
     double dt, const std::vector<CellSources>& sources, const ControllerLease* controller)
 {
+    return preview_impl(dt, sources, nullptr, controller);
+}
+
+LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_with_sources(
+    double dt, std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller)
+{
+    collective_detail::collective_local_validation(*d->mesh, "Source provider ownership",
+        [&] { check(bool(provider), "preview_with_sources requires an immutable shared provider."); });
+    return preview_impl(dt, {}, std::move(provider), controller);
+}
+
+LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const std::vector<CellSources>& fixed_sources,
+    std::shared_ptr<const SourceStageProvider> provider, const ControllerLease* controller)
+{
+    std::vector<CellSources> sources;
     const auto& mesh = *d->mesh;
     require_controller(controller);
     collective_detail::require_uniform_value(mesh, dt, "Low-Mach mixture timestep");
     collective_detail::collective_local_validation(mesh, "Low-Mach mixture step inputs",
         [&]
         {
+            sources = fixed_sources;
             check(d->initialized && d->epoch == mesh_geometry_epoch(mesh) && std::isfinite(dt) && dt > 0,
                 "Low-Mach step requires initialized current fixed geometry and a positive timestep.");
             check(d->accepted.revision != std::numeric_limits<std::uint64_t>::max() &&
@@ -581,8 +603,61 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
                         std::isfinite(source.momentum.component(component)), "Nonfinite integrated physical momentum.");
             }
         });
+    collective_detail::require_uniform_value(mesh, int(bool(provider)), "Collective source-stage selection");
+    SourceStageMetadata stage;
+    auto source_options = d->options;
+    int maximum_source_evaluations = d->options.maximum_correctors;
+    if (provider)
+    {
+        collective_detail::collective_local_validation(mesh, "Immutable source-stage metadata",
+            [&]
+            {
+                check(!provider->identity.empty() &&
+                          provider->identity.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
+                          provider->revision > 0 &&
+                          provider->schema_fingerprint == d->eos.front()->catalog().fingerprint() &&
+                          bool(provider->evaluate) && d->options.maximum_correctors >= 2 &&
+                          std::isfinite(provider->relative_tolerance) && provider->relative_tolerance >= 0 &&
+                          (provider->maximum_evaluations == 0 || provider->maximum_evaluations >= 2),
+                    "Source-stage identity/revision/schema/callback or corrector budget is invalid.");
+                check(d->source_invocation != std::numeric_limits<std::uint64_t>::max(),
+                    "Source invocation identity exhausted.");
+            });
+        collective_detail::require_uniform_value(mesh, provider->identity.size(), "Source identity length");
+        collective_detail::require_uniform_value(mesh, provider->revision, "Source provider revision");
+        collective_detail::require_uniform_value(mesh, provider->schema_fingerprint, "Source provider schema");
+        collective_detail::require_uniform_value(mesh, provider->relative_tolerance, "Source provider relative gate");
+        collective_detail::require_uniform_value(
+            mesh, provider->maximum_evaluations, "Source provider evaluation limit");
+        if (provider->relative_tolerance > 0)
+            source_options.source_relative_tolerance = provider->relative_tolerance;
+        if (provider->maximum_evaluations > 0)
+            maximum_source_evaluations = std::min(maximum_source_evaluations, provider->maximum_evaluations);
+        collective_detail::require_uniform_value(mesh, d->source_invocation, "Source invocation generation");
+        std::string identity;
+        collective_detail::collective_local_validation(
+            mesh, "Source identity preparation", [&] { identity = provider->identity; });
+        Teuchos::broadcast(*mesh.owned_cell_map()->getComm(), 0, static_cast<int>(identity.size()), identity.data());
+        collective_detail::collective_local_validation(mesh, "Source identity text",
+            [&] { check(identity == provider->identity, "Source provider identity differs across ranks."); });
+        collective_detail::collective_local_validation(mesh, "Source receipt metadata",
+            [&]
+            {
+                stage.provider_identity = provider->identity;
+                stage.provider_revision = provider->revision;
+            });
+        // Receipt identity allocation is private. It NEVER changes the accepted
+        // trial nonce, so previous same-generation Trials remain committable.
+        stage.invocation = ++d->source_invocation;
+    }
     const auto accepted = d->accepted;
     const size_t nc = accepted.cells.size(), np = d->eos.size(), ns = d->eos.front()->catalog().species().size();
+    TransportSnapshot last_transport;
+    std::vector<PhaseFaceTransport> last_phase_transport;
+    std::optional<TransportSnapshot> previous_transport;
+    std::vector<CellSources> previous_sources;
+    std::vector<std::vector<double>> gross_events, previous_events;
+    std::optional<bool> event_channel;
     d->publish_fields(accepted);
     d->old_rho.owned_data().update(1.0, d->rho.owned_data(), 0.0);
     d->old_rho.sync_ghosts();
@@ -771,6 +846,119 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
             }
             caloric_transport_magnitude = d->sum(local_caloric_transport);
             energy_transport_operand_magnitude = d->sum(local_energy_transport);
+            stage.corrector = static_cast<size_t>(iteration);
+            collective_detail::collective_local_validation(mesh, "Immutable transport snapshot",
+                [&]
+                {
+                    last_transport = {};
+                    last_transport.cells.resize(nc);
+                    last_transport.old_control_volumes.resize(nc);
+                    last_transport.new_control_volumes.resize(nc);
+                    last_transport.accepted_revision = accepted.revision;
+                    last_transport.accepted_generation = d->trial_nonce;
+                    last_transport.old_geometry_epoch = d->epoch;
+                    last_transport.new_geometry_epoch = d->epoch;
+                    last_transport.schema_fingerprint = d->eos.front()->catalog().fingerprint();
+                    last_transport.accepted_time = accepted.time;
+                    last_transport.time_step = dt;
+                    last_transport.stage = stage;
+                    last_phase_transport.assign(mesh.num_owned_faces(), {});
+                    for (size_t f = 0; f < last_phase_transport.size(); ++f)
+                    {
+                        const LO face = static_cast<LO>(f);
+                        auto& packet = last_phase_transport[f];
+                        packet.carrier_volume_flux = d->trial_flux.local_value(face);
+                        packet.phase_volume_flux.resize(np);
+                        packet.material_fraction.resize(np);
+                        check(std::isfinite(packet.carrier_volume_flux), "Nonfinite stage carrier flux receipt.");
+                        for (size_t a = 0; a < np; ++a)
+                        {
+                            packet.phase_volume_flux[a] = phase_flux[a]->local_value(face);
+                            packet.material_fraction[a] = material_face_fraction[a]->local_value(face);
+                            check(std::isfinite(packet.phase_volume_flux[a]) &&
+                                      std::isfinite(packet.material_fraction[a]) && packet.material_fraction[a] >= 0,
+                                "Invalid exact phase-face transport receipt.");
+                        }
+                    }
+                    for (size_t c = 0; c < nc; ++c)
+                    {
+                        last_transport.old_control_volumes[c] = mesh.cell_volume(static_cast<LO>(c));
+                        last_transport.new_control_volumes[c] = last_transport.old_control_volumes[c];
+                        last_transport.cells[c].phases.resize(np);
+                        for (size_t a = 0; a < np; ++a)
+                        {
+                            auto& inventory = last_transport.cells[c].phases[a];
+                            inventory.moles = trial.cells[c].phases[a].moles;
+                            inventory.internal_energy = trial.cells[c].phases[a].internal_energy;
+                            inventory.advected_material_volume = adv_volumes[c][a];
+                            // population_number stays disengaged until actual number transport exists.
+                        }
+                    }
+                });
+            if (provider)
+            {
+                SourceStageResult evaluated;
+                std::exception_ptr callback_error;
+                try
+                {
+                    evaluated = provider->evaluate(SourceStageContext{last_transport, thermodynamic_guess, mesh});
+                }
+                catch (...)
+                {
+                    callback_error = std::current_exception();
+                }
+                collective_detail::collective_local_validation(mesh, "Source-stage returned packets",
+                    [&]
+                    {
+                        if (callback_error)
+                            std::rethrow_exception(callback_error);
+                        source_stage_detail::validate_packets(evaluated.sources, nc, np, ns);
+                        source_stage_detail::validate_events(evaluated.gross_events, nc);
+                    });
+                int local_events = !evaluated.gross_events.empty(), global_events = 0;
+                Teuchos::reduceAll(
+                    *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_events, &global_events);
+                collective_detail::collective_local_validation(mesh, "Source-stage event schema",
+                    [&]
+                    {
+                        check(!global_events || evaluated.gross_events.size() == nc,
+                            "Enabled gross-event channel requires one event vector per owned cell.");
+                        check(!event_channel || *event_channel == bool(global_events),
+                            "Source stage changed its gross-event channel between correctors.");
+                        if (previous_transport)
+                            source_stage_detail::validate_event_shape(evaluated.gross_events, previous_events);
+                    });
+                event_channel = bool(global_events);
+                sources = std::move(evaluated.sources);
+                gross_events = std::move(evaluated.gross_events);
+                double event_residual = global_events ? std::numeric_limits<double>::infinity() : 0;
+                double source_residual = std::numeric_limits<double>::infinity();
+                double transport_residual = std::numeric_limits<double>::infinity();
+                if (previous_transport)
+                {
+                    collective_detail::collective_local_validation(mesh, "Source/transport convergence",
+                        [&]
+                        {
+                            event_residual = source_stage_detail::event_error(
+                                gross_events, previous_events, source_options.source_relative_tolerance);
+                            source_residual = source_stage_detail::source_error(sources, previous_sources,
+                                last_transport, thermodynamic_guess, accepted, source_options);
+                            transport_residual = source_stage_detail::transport_error(
+                                last_transport, *previous_transport, thermodynamic_guess, accepted, d->options);
+                        });
+                }
+                result.source_evaluations = iteration + 1;
+                result.maximum_event_residual = d->maximum(event_residual);
+                result.maximum_source_residual = d->maximum(source_residual);
+                result.maximum_transport_residual = d->maximum(transport_residual);
+                collective_detail::collective_local_validation(mesh, "Retained source corrector receipt",
+                    [&]
+                    {
+                        previous_transport = last_transport;
+                        previous_sources = sources;
+                        previous_events = gross_events;
+                    });
+            }
             collective_detail::collective_local_validation(mesh, "Low-Mach integrated local sources",
                 [&]
                 {
@@ -814,7 +1002,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
             Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local_upper, &upper);
             check(std::isfinite(lower) && std::isfinite(upper) && lower <= upper,
                 "Low-Mach phases have no common supplied pressure interval.");
-            double p0 = std::clamp(accepted.thermodynamic_pressure, lower, upper);
+            double p0 = std::clamp(thermodynamic_guess.thermodynamic_pressure, lower, upper);
             double last_feasible_pressure = p0;
             bool have_feasible_pressure = false;
             const double domain_volume = d->sum(local_domain_volume);
@@ -878,43 +1066,56 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
                 p0 = next;
             }
             trial.thermodynamic_pressure = p0;
-            std::vector<double> target(nc);
+            std::vector<double> target(nc), volume_susceptibility(nc);
             FaceField slip_volume(d->mesh, 0.0, "phase_slip_material_volume");
+            FaceField carrier_fraction(d->mesh, 0.0, "phase_upwind_carrier_fraction");
             std::array<std::unique_ptr<FaceField>, 3> drift_momentum;
             for (auto& field : drift_momentum)
                 field = std::make_unique<FaceField>(d->mesh, 0.0, "phase_slip_momentum_flux");
-            for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
-            {
-                const LO face = static_cast<LO>(f);
-                if (mesh.is_boundary_face(face))
+            collective_detail::collective_local_validation(mesh, "Phase mass/material momentum packets",
+                [&]
                 {
-                    d->mass_flux.set_owned_value(face, 0);
-                    continue;
-                }
-                const LO owner = mesh.owner_cell(face), neighbor = mesh.opposite_or_periodic_neighbor_cell(face, owner);
-                double mass_flux = 0, volume_slip = 0;
-                Vector drift_flux{};
-                for (size_t a = 0; a < np; ++a)
-                {
-                    const double phi = phase_flux[a]->local_value(face);
-                    const LO donor = phi >= 0 ? owner : neighbor;
-                    double density = 0;
-                    for (size_t s = 0; s < ns; ++s)
-                        density += transported_species[a * ns + s]->local_value(donor) *
-                                   d->eos[a]->catalog().species()[s].molarMass;
-                    const double mf = phi * density;
-                    mass_flux += mf;
-                    drift_flux = drift_flux + drift[a]->local_value(donor) * mf;
-                    const double slip = phi - d->trial_flux.local_value(face);
-                    volume_slip += slip * material_face_fraction[a]->local_value(face);
-                }
-                d->mass_flux.set_owned_value(face, mass_flux);
-                slip_volume.set_owned_value(face, volume_slip);
-                for (size_t component = 0; component < 3; ++component)
-                    drift_momentum[component]->set_owned_value(face, drift_flux.component(component));
-            }
+                    for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                    {
+                        const LO face = static_cast<LO>(f);
+                        if (mesh.is_boundary_face(face))
+                        {
+                            d->mass_flux.set_owned_value(face, 0);
+                            continue;
+                        }
+                        const LO owner = mesh.owner_cell(face),
+                                 neighbor = mesh.opposite_or_periodic_neighbor_cell(face, owner);
+                        double mass_flux = 0, volume_slip = 0, theta = 0;
+                        Vector drift_flux{};
+                        for (size_t a = 0; a < np; ++a)
+                        {
+                            const double phi = phase_flux[a]->local_value(face);
+                            const LO donor = phi >= 0 ? owner : neighbor;
+                            double density = 0;
+                            for (size_t s = 0; s < ns; ++s)
+                                density += transported_species[a * ns + s]->local_value(donor) *
+                                           d->eos[a]->catalog().species()[s].molarMass;
+                            const double mf = phi * density;
+                            mass_flux += mf;
+                            drift_flux = drift_flux + drift[a]->local_value(donor) * mf;
+                            const double slip = phi - d->trial_flux.local_value(face);
+                            const double phase_fraction = material_face_fraction[a]->local_value(face);
+                            theta += phase_fraction;
+                            volume_slip += slip * phase_fraction;
+                        }
+                        check(std::isfinite(mass_flux) && std::isfinite(volume_slip) && std::isfinite(theta) &&
+                                  theta >= 0,
+                            "Phase mass/material flux packet overflow.");
+                        d->mass_flux.set_owned_value(face, mass_flux);
+                        slip_volume.set_owned_value(face, volume_slip);
+                        carrier_fraction.set_owned_value(face, theta);
+                        for (size_t component = 0; component < 3; ++component)
+                            drift_momentum[component]->set_owned_value(face, drift_flux.component(component));
+                    }
+                });
             d->mass_flux.sync_ghosts();
             slip_volume.sync_ghosts();
+            carrier_fraction.sync_ghosts();
             for (auto& field : drift_momentum)
                 field->sync_ghosts();
             double occupancy = 0, local_work = 0, local_roundoff = 0, local_work_magnitude = 0,
@@ -929,8 +1130,10 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
                         trial.cells[c] = thermal[c].cell;
                         const double advected_volume =
                             std::accumulate(adv_volumes[c].begin(), adv_volumes[c].end(), 0.0);
-                        target[c] = (thermal[c].volume - advected_volume) / dt -
-                                    FVM::cell_flux_balance(mesh, slip_volume, cell);
+                        volume_susceptibility[c] = -thermal[c].derivative;
+                        check(std::isfinite(volume_susceptibility[c]) && volume_susceptibility[c] >= 0,
+                            "Low-Mach local EOS volume susceptibility is not stable and nonnegative.");
+                        target[c] = (thermal[c].volume - advected_volume) / dt;
                         occupancy = std::max(occupancy, std::abs(thermal[c].volume - volume) / volume);
                         local_work += thermal[c].work;
                         local_work_magnitude += thermal[c].work_magnitude;
@@ -974,6 +1177,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
             result.empty_phase_energy_roundoff = d->sum(local_roundoff);
             FVM::cell_gradient(d->mechanical_pressure, BoundaryConditionMap{}, d->pressure_gradient, d->gradient_cache,
                 FVM::CellGradientScheme::LeastSquares);
+            d->pressure_gradient.sync_ghosts();
             result.momentum_linear = d->momentum.advance(
                 d->old_u, d->old_rho, d->rho, d->mass_flux, d->mu, dt, d->u,
                 [&](LO cell)
@@ -1023,8 +1227,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
                 pressure_impulse = pressure_impulse - d->pressure_gradient.local_value(static_cast<LO>(c)) *
                                                           (dt * mesh.cell_volume(static_cast<LO>(c)));
             }
-            const auto projected = d->pressure.project(d->rho, dt, target, predictor, d->trial_flux,
-                d->mechanical_pressure, d->u, d->options.linear, d->options.continuity_tolerance);
+            const auto projected = d->pressure.project_material_with_eos(d->rho, dt, target, volume_susceptibility,
+                carrier_fraction, slip_volume, predictor, d->trial_flux, d->mechanical_pressure, d->u,
+                d->options.linear, d->options.continuity_tolerance);
+            trial.thermodynamic_pressure += projected.thermodynamic_pressure_increment;
+            check(std::isfinite(trial.thermodynamic_pressure), "Uniform pressure gauge increment overflow.");
             result.maximum_continuity_residual = projected.maximum_continuity_residual;
             result.maximum_occupancy_error = d->maximum(occupancy);
             double flux_change = 0, smallest_volume = std::numeric_limits<double>::infinity();
@@ -1044,10 +1251,33 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
             Teuchos::reduceAll(
                 *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &smallest_volume, &global_smallest_volume);
             flux_change = d->maximum(flux_change) * dt / global_smallest_volume;
+            double thermal_residual = 0;
+            collective_detail::collective_local_validation(mesh, "Pressure/thermal corrector convergence",
+                [&] { thermal_residual = source_stage_detail::thermal_error(trial, thermodynamic_guess, d->options); });
+            result.maximum_thermal_residual = d->maximum(thermal_residual);
             thermodynamic_guess = trial;
             if (result.maximum_occupancy_error <= d->options.volume_relative_tolerance &&
-                flux_change <= d->options.volume_relative_tolerance)
+                flux_change <= d->options.volume_relative_tolerance &&
+                result.maximum_continuity_residual <=
+                    d->options.continuity_tolerance * std::max(1.0, projected.continuity_scale) &&
+                result.maximum_thermal_residual <= 1 &&
+                (!provider ||
+                    (iteration >= 1 && result.maximum_source_residual <= 1 && result.maximum_transport_residual <= 1 &&
+                        result.maximum_thermal_residual <= 1 && result.maximum_event_residual <= 1)))
+            {
+                collective_detail::collective_local_validation(mesh, "Accepted low-Mach uniform pressure",
+                    [&]
+                    {
+                        check(trial.thermodynamic_pressure >= d->options.minimum_pressure &&
+                                  trial.thermodynamic_pressure <= d->options.maximum_pressure,
+                            "Accepted uniform pressure after mechanical gauge transfer is outside its declared "
+                            "bracket.");
+                    });
                 break;
+            }
+            if (provider && iteration + 1 >= maximum_source_evaluations)
+                throw std::runtime_error(
+                    "Low-Mach source/event/transport/thermal correctors exhausted the provider evaluation limit.");
             if (iteration + 1 >= d->options.maximum_correctors)
             {
                 std::ostringstream message;
@@ -1179,6 +1409,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
                          new_p = d->sum(new_momentum.component(component));
             const double external_p = d->sum(external_momentum.component(component));
             const double pressure_p = d->sum(pressure_impulse.component(component));
+            result.pressure_impulse.component(component) = pressure_p;
+            result.external_impulse.component(component) = external_p;
             result.momentum_error.component(component) = new_p - old_p - external_p - pressure_p;
             check(std::abs(result.momentum_error.component(component)) <=
                       d->options.conservation_relative_tolerance *
@@ -1191,10 +1423,15 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview(
         Trial staged;
         staged.candidate = std::move(trial);
         staged.statistics = result;
+        staged.transport = std::move(last_transport);
+        staged.sources = std::move(sources);
+        staged.gross_events = std::move(gross_events);
+        staged.provider = std::move(provider);
         staged.owner = this;
         staged.nonce = d->trial_nonce;
         staged.base_revision = accepted.revision;
         staged.geometry_epoch = d->epoch;
+        staged.phase_transport = std::move(last_phase_transport);
         staged.face_flux.resize(mesh.num_owned_faces());
         for (size_t f = 0; f < staged.face_flux.size(); ++f)
             staged.face_flux[f] = d->trial_flux.local_value(static_cast<LO>(f));

@@ -1050,6 +1050,12 @@ void ReactingGasModel<Pack, MeshType>::set_absolute_pressure_offset(
                                     "variation.");
     }
 
+    if (species_enabled() && d_initial_state_initialized)
+    {
+        set_species_absolute_pressure_offset(pressure_offset);
+        return;
+    }
+
     if (mode() == ReactingGasMode::TwoPopulation && d_initial_state_initialized)
     {
         // Validate every EOS radius collectively before mutating accepted
@@ -3394,6 +3400,7 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     result.d_species_sources = d_species_source_ledgers;
     result.d_species_populations = d_species_population_ledgers;
     result.d_species_escapes = d_species_escape_ledgers;
+    result.d_species_history = d_species_history;
     for (const auto* field : state_fields())
     {
         auto& values = result.d_fields.emplace_back();
@@ -3509,6 +3516,7 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
     d_species_source_ledgers = snapshot.d_species_sources;
     d_species_population_ledgers = snapshot.d_species_populations;
     d_species_escape_ledgers = snapshot.d_species_escapes;
+    d_species_history = snapshot.d_species_history;
     d_donor_tracking_enabled = snapshot.d_donor_tracking_enabled;
     if (d_donor_tracking_enabled)
         d_output_fields.emplace("donorH2Deficit", &d_donor_hydrogen_deficit);

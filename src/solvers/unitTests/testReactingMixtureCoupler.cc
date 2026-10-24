@@ -1,6 +1,7 @@
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "utils/testing_environment.hh"
+#include <array>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <memory>
@@ -107,7 +108,8 @@ struct Fixture
             R::ReactionSourceInput input;
             const auto& reaction = context.reaction;
             const double amount = reaction.state.amount(reaction.catalog, donor, R::SpeciesPhase::Liquid);
-            // An explicit integrated extent, always recomputed from accepted inventory, never a fresh volumetric rate.
+            // An explicit integrated extent, always recomputed from transported inventory, never a fresh volumetric
+            // rate.
             input.integratedExtents = {{42, 1e-4 * amount * dt}};
             return input;
         };
@@ -134,12 +136,20 @@ void expect_state_equal(const Solver::State& a, const Solver::State& b)
     for (size_t c = 0; c < a.cells.size(); ++c)
     {
         EXPECT_DOUBLE_EQ(a.cells[c].mechanical_pressure, b.cells[c].mechanical_pressure);
+        for (size_t axis = 0; axis < 3; ++axis)
+            EXPECT_DOUBLE_EQ(a.cells[c].velocity.component(axis), b.cells[c].velocity.component(axis));
+        ASSERT_EQ(a.cells[c].drift_velocity.size(), b.cells[c].drift_velocity.size());
+        for (size_t p = 0; p < a.cells[c].drift_velocity.size(); ++p)
+            for (size_t axis = 0; axis < 3; ++axis)
+                EXPECT_DOUBLE_EQ(
+                    a.cells[c].drift_velocity[p].component(axis), b.cells[c].drift_velocity[p].component(axis));
         ASSERT_EQ(a.cells[c].phases.size(), b.cells[c].phases.size());
         for (size_t p = 0; p < a.cells[c].phases.size(); ++p)
         {
             EXPECT_EQ(a.cells[c].phases[p].moles, b.cells[c].phases[p].moles);
             EXPECT_DOUBLE_EQ(a.cells[c].phases[p].internal_energy, b.cells[c].phases[p].internal_energy);
             EXPECT_DOUBLE_EQ(a.cells[c].phases[p].temperature, b.cells[c].phases[p].temperature);
+            EXPECT_DOUBLE_EQ(a.cells[c].phases[p].absolute_pressure, b.cells[c].phases[p].absolute_pressure);
         }
     }
 }
@@ -517,5 +527,227 @@ TEST(ReactingMixtureCouplerTest, ChemicalHeatSurvivesCancellationAcrossIndepende
     expect_state_equal(packets.flow->state(), chemical.flow->state());
     EXPECT_NEAR(total_energy(packets.flow->state()) - old_energy - packet_controller.diagnostics().flow.pressure_work,
         global_budget, 1e-3);
+}
+
+TEST(ReactingMixtureCouplerTest, FullConversionUsesActualTransportedDonorsAndCommitsTheExactReceiptOnce)
+{
+    const auto grid = mesh();
+    constexpr R::SpeciesId a = 103, b = 709;
+    const auto species = std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{a, "finite_A", .02, {{"X", 1}}, {R::SpeciesPhase::Liquid}},
+            {b, "finite_B", .02, {{"X", 1}}, {R::SpeciesPhase::Liquid}}});
+    const auto liquid =
+        R::make_linear_compressible_mixture_liquid(species, {250, 600, 10000, 2000000}, [](std::span<const double>)
+            { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4000, 1e-3, 5e-9, 1e6, 0, 0}; });
+    const auto mechanism = std::make_shared<const R::ReactionMechanism>(species,
+        std::vector<R::ReactionDefinition>{
+            {64, "isomerization", {{a, R::SpeciesPhase::Liquid, -1, {}}, {b, R::SpeciesPhase::Liquid, 1, {}}}, 0}},
+        R::EnergyConvention::IncludesFormationEnergy);
+    Solver::Options flow_options;
+    flow_options.minimum_pressure = 20000;
+    flow_options.maximum_pressure = 1000000;
+    flow_options.linear.preconditioner = LinearPreconditioner::None;
+    flow_options.linear.tolerance = 1e-12;
+    auto flow = std::make_shared<Solver>(grid, std::vector{liquid}, flow_options);
+    Solver::State initial;
+    initial.thermodynamic_pressure = 100000;
+    initial.cells.resize(grid->num_owned_cells());
+    for (size_t c = 0; c < initial.cells.size(); ++c)
+    {
+        const double mass = grid->cell_volume(static_cast<LO>(c)) * 1000;
+        initial.cells[c].phases = {{liquid, {.8 * mass / .02, .2 * mass / .02}, 100000, mass * 1e6, 300}};
+    }
+    flow->initialize(initial);
+    initial = flow->state();
+    R::ReactingMixtureOptions options;
+    options.mechanism = mechanism;
+    options.phases = {{R::SpeciesPhase::Liquid, {}, {}}};
+    options.source_identity = "complete-isomerization-after-transport";
+    options.source_revision = 3;
+    auto calls = std::make_shared<int>(0);
+    options.source = [grid, calls](const R::CoupledReactionContext& context, double)
+    {
+        ++*calls; // Instrumentation only; the source is independent of invocation count.
+        const auto& transported = context.transported.phases.at(0);
+        const double donor_amount = context.reaction.state.amount(context.reaction.catalog, a, R::SpeciesPhase::Liquid);
+        EXPECT_DOUBLE_EQ(donor_amount, transported.moles.at(0));
+        EXPECT_EQ(context.thermodynamic_trial.phases[0].moles, transported.moles);
+        R::ReactionSourceInput input;
+        input.integratedExtents = {{64, donor_amount}};
+        input.heat.integratedEnergy = grid->cell_centroid(static_cast<LO>(context.owned_cell)).z < .5 ? 1000. : 0.;
+        return input;
+    };
+    Coupler controller(flow, std::move(options));
+    const auto checkpoint = controller.checkpoint();
+    const auto trial = controller.preview(.01);
+    expect_state_equal(flow->state(), initial);
+    const auto& snapshot = trial.transport_snapshot();
+    EXPECT_EQ(snapshot.accepted_revision, initial.revision);
+    EXPECT_EQ(snapshot.stage.provider_revision, 3);
+    EXPECT_EQ(snapshot.stage.provider_identity, "ReactingMixtureCoupler:complete-isomerization-after-transport");
+    EXPECT_EQ(snapshot.stage.corrector + 1, size_t(trial.diagnostics().correctors));
+    EXPECT_GE(trial.diagnostics().correctors, 2);
+    double local_transport_change = 0, global_transport_change = 0;
+    for (size_t c = 0; c < initial.cells.size(); ++c)
+    {
+        const double donor_amount = snapshot.cells[c].phases[0].moles[0];
+        local_transport_change =
+            std::max(local_transport_change, std::abs(donor_amount - initial.cells[c].phases[0].moles[0]));
+        EXPECT_DOUBLE_EQ(trial.state().cells[c].phases[0].moles[0], 0.);
+        EXPECT_DOUBLE_EQ(trial.local_sources()[c].reactionExtents[0], donor_amount);
+        EXPECT_DOUBLE_EQ(trial.local_sources()[c].forwardReactionExtents[0], donor_amount);
+        EXPECT_DOUBLE_EQ(trial.local_sources()[c].reverseReactionExtents[0], 0.);
+        EXPECT_NEAR(
+            trial.state().cells[c].phases[0].moles[1], snapshot.cells[c].phases[0].moles[1] + donor_amount, 1e-10);
+    }
+    Teuchos::reduceAll(
+        *grid->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_transport_change, &global_transport_change);
+    EXPECT_GT(global_transport_change, 1e-8);
+    const int count = *calls;
+    controller.commit(trial);
+    EXPECT_EQ(*calls, count);
+    EXPECT_EQ(controller.diagnostics().forward_reaction_extents, controller.diagnostics().reaction_extents);
+    EXPECT_EQ(controller.diagnostics().reverse_reaction_extents, std::vector<double>{0.});
+    controller.restore(checkpoint);
+    EXPECT_EQ(*calls, count);
+    expect_state_equal(flow->state(), initial);
+    const auto replay = controller.preview(.01);
+    EXPECT_EQ(replay.diagnostics().reaction_extents, trial.diagnostics().reaction_extents);
+    expect_state_equal(replay.state(), trial.state());
+    int local_empty = grid->num_owned_cells() == 0 ? 1 : 0, empty = 0;
+    Teuchos::reduceAll(*grid->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+    if (grid->owned_cell_map()->getComm()->getSize() == 4)
+        EXPECT_EQ(empty, 2);
+}
+
+TEST(ReactingMixtureCouplerTest, ForwardAndReverseAcceptedStagesRetainGrossTurnoverWithZeroNetReaction)
+{
+    Fixture f;
+    auto options = f.options();
+    // The forward SSPRK2 stage supplies the finite donors used by the reverse stage.
+    options.source_identity = "forward-reverse-stage-turnover";
+    options.source = [schema = f.species](const auto&, double)
+    {
+        R::ReactionRateProvider rate;
+        rate.identity = "manufactured-time-reversal";
+        rate.schemaRevision = schema->revision();
+        rate.schemaFingerprint = schema->fingerprint();
+        rate.validityDescription = "finite donor regression";
+        rate.parameterUnits = "mol/(m3 s)";
+        rate.validate = [](const auto&) {};
+        rate.evaluate = [](const R::ReactionContext& context)
+        {
+            return std::vector<R::ReactionRate>{
+                {42, context.environment.time == 0 ? .1 : -.1, R::SourceVolumeBasis::BulkVolume}};
+        };
+        R::ReactionSourceInput result;
+        result.rates = std::move(rate);
+        return result;
+    };
+    Coupler controller(f.flow, std::move(options));
+    const auto accepted = f.flow->state();
+    const auto trial = controller.preview(.01);
+    EXPECT_NEAR(trial.diagnostics().reaction_extents[0], 0., 1e-16);
+    EXPECT_NEAR(trial.diagnostics().forward_reaction_extents[0], .0005, 1e-14);
+    EXPECT_NEAR(trial.diagnostics().reverse_reaction_extents[0], .0005, 1e-14);
+    EXPECT_DOUBLE_EQ(trial.diagnostics().chemical_heat, 0.);
+    for (const auto& ledger : trial.local_sources())
+    {
+        EXPECT_DOUBLE_EQ(ledger.forwardReactionExtents[0], ledger.reverseReactionExtents[0]);
+        EXPECT_GT(ledger.forwardReactionExtents[0], 0.);
+    }
+    expect_state_equal(f.flow->state(), accepted);
+    controller.commit(trial);
+}
+
+TEST(ReactingMixtureCouplerTest, ArrivingIndependentPhaseUsesTransportedEnergyForItsMissingThermalGuess)
+{
+    Fixture f(true);
+    auto state = f.flow->state();
+    for (size_t c = 0; c < state.cells.size(); ++c)
+    {
+        auto& cell = state.cells[c];
+        cell.drift_velocity[1] = Solver::Vector{0, 0, .1};
+        if (f.grid->cell_centroid(static_cast<LO>(c)).z > .5)
+        {
+            const double mass = f.grid->cell_volume(static_cast<LO>(c)) * 1000;
+            cell.phases[0].moles = {mass / .1, 0, 0, 0};
+            cell.phases[0].internal_energy = mass * (1e6 + 4000 * 50);
+            cell.phases[1].moles.assign(4, 0.);
+            cell.phases[1].internal_energy = 0;
+            cell.phases[1].temperature = 0;
+        }
+    }
+    f.flow->initialize(state);
+    state = f.flow->state();
+    auto options = f.options();
+    options.mechanism = std::make_shared<const R::ReactionMechanism>(
+        f.species, std::vector<R::ReactionDefinition>{}, R::EnergyConvention::IncludesFormationEnergy);
+    options.source_identity = "arriving-gas-independent-caloric-state";
+    auto checked = std::make_shared<std::vector<bool>>(state.cells.size(), false);
+    options.source = [state, checked](const R::CoupledReactionContext& context, double)
+    {
+        const auto c = context.owned_cell;
+        const auto& packet = context.transported.phases[1];
+        const double amount = std::accumulate(packet.moles.begin(), packet.moles.end(), 0.);
+        if (!(*checked)[c] && state.cells[c].phases[1].temperature == 0 && amount > 0)
+        {
+            auto arriving = context.thermodynamic_trial.phases[1];
+            arriving.internal_energy = packet.internal_energy;
+            const double expected = R::recover_phase_temperatures(
+                std::vector{arriving}, packet.internal_energy, R::PhaseThermalMode::SeparatePhaseTemperatures)
+                                        .phases[0]
+                                        .temperature;
+            EXPECT_NEAR(context.thermodynamic_trial.phases[1].temperature, expected, 1e-10);
+            EXPECT_NEAR(expected, 300., 1e-9);
+            EXPECT_GT(std::abs(context.thermodynamic_trial.phases[0].temperature - expected), 40.);
+            (*checked)[c] = true;
+        }
+        return R::ReactionSourceInput{};
+    };
+    Coupler controller(f.flow, std::move(options));
+    constexpr double dt = .001;
+    const auto trial = controller.preview(dt);
+    int local_checked = std::count(checked->begin(), checked->end(), true), global_checked = 0;
+    Teuchos::reduceAll(*f.grid->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_checked, &global_checked);
+    EXPECT_EQ(global_checked, 1);
+    expect_state_equal(f.flow->state(), state);
+    EXPECT_NEAR(trial.diagnostics().flow.mass_error, 0., 1e-10);
+    controller.commit(trial);
+    // Independent Rhie--Chow identity on this two-cell closed-Neumann line.
+    // The LS z normal coefficient is h^2+(h/2)^2, so grad(p)=.8*Delta p/h.
+    // This checks synchronized cell gradients, the old-pressure interpolation,
+    // and the bare pressure correction rather than reusing assembly helpers.
+    std::array<double, 8> local{}, global{};
+    for (size_t c = 0; c < f.flow->state().cells.size(); ++c)
+    {
+        const auto cell = static_cast<LO>(c);
+        const size_t side = f.grid->cell_centroid(cell).z < .5 ? 0 : 1;
+        const auto& accepted_cell = f.flow->state().cells[c];
+        double mass = 0;
+        for (const auto& phase : accepted_cell.phases)
+            for (size_t species = 0; species < phase.moles.size(); ++species)
+                mass += phase.moles[species] * f.species->species()[species].molarMass;
+        local[side] = mass / f.grid->cell_volume(cell);
+        local[2 + side] = accepted_cell.velocity.z;
+        local[4 + side] = accepted_cell.mechanical_pressure;
+        local[6 + side] = 1;
+    }
+    Teuchos::reduceAll(
+        *f.grid->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, int(local.size()), local.data(), global.data());
+    ASSERT_DOUBLE_EQ(global[6], 1.);
+    ASSERT_DOUBLE_EQ(global[7], 1.);
+    constexpr double center_distance = .5;
+    const double pressure_jump = global[5] - global[4];
+    const double gradient = .8 * pressure_jump / center_distance;
+    const double expected_carrier = .5 * (global[2] + global[3]) +
+                                    .5 * dt * gradient * (1. / global[0] + 1. / global[1]) -
+                                    dt * 2. / (global[0] + global[1]) * pressure_jump / center_distance;
+    for (const auto face : f.flow->volume_flux().owned_face_ids())
+        if (!f.grid->is_geometry_exterior_face(face))
+        {
+            const double sign = f.grid->cell_centroid(f.grid->owner_cell(face)).z < .5 ? 1. : -1.;
+            EXPECT_NEAR(f.flow->volume_flux().local_value(face), sign * expected_carrier, 1e-11);
+        }
 }
 } // namespace

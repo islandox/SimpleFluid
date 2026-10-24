@@ -27,8 +27,9 @@ struct MixturePhaseBinding
 struct CoupledReactionContext
 {
     ReactionContext reaction;
-    const LowMachMixtureSolver::CellState& thermodynamic_trial;
+    const LowMachMixtureSolver::CellState& thermodynamic_trial; ///< Trial T/p, with actual transported composition.
     std::size_t owned_cell = 0;
+    const LowMachMixtureSolver::TransportCellInventory& transported; ///< Pre-source moles/U/work-volume packet.
 };
 
 struct ReactingMixtureOptions
@@ -36,6 +37,7 @@ struct ReactingMixtureOptions
     std::shared_ptr<const ReactionMechanism> mechanism;
     std::vector<MixturePhaseBinding> phases;
     std::string source_identity;
+    std::uint64_t source_revision = 1; ///< Immutable source law revision, identical on every rank.
     std::function<ReactionSourceInput(const CoupledReactionContext&, double)> source;
     /** Optional distribution of external plus chemical heat over physical phases [J].
      * The ledger permits explicit zero-sum allocation for cross-phase reactions.
@@ -47,7 +49,7 @@ struct ReactingMixtureOptions
         partition_heat;
     std::size_t liquid_phase = 0;
     std::size_t heat_phase = 0;
-    int maximum_correctors = 20;
+    int maximum_correctors = 20; ///< Maximum evaluations in the shared transport/source fixed point.
     double source_relative_tolerance = 1e-8;
     ReactionAdvanceOptions integration;
 };
@@ -58,7 +60,8 @@ public:
     struct Diagnostics
     {
         int correctors = 0;
-        std::vector<double> reaction_extents; ///< MPI totals, mol/reaction for this accepted interval.
+        std::vector<double> reaction_extents; ///< MPI signed totals, mol/reaction for this accepted interval.
+        std::vector<double> forward_reaction_extents, reverse_reaction_extents; ///< Nonnegative gross accepted extents.
         double chemical_heat = 0, external_heat = 0, transfer_energy = 0, external_mass = 0;
         double net_thermal_energy = 0; ///< MPI total of compensated per-cell heat plus transfer energy, J.
         LowMachMixtureSolver::Diagnostics flow;
@@ -69,6 +72,7 @@ public:
         [[nodiscard]] const LowMachMixtureSolver::State& state() const;
         [[nodiscard]] const Diagnostics& diagnostics() const;
         [[nodiscard]] const std::vector<SpeciesSourceLedger>& local_sources() const;
+        [[nodiscard]] const LowMachMixtureSolver::TransportSnapshot& transport_snapshot() const;
 
     private:
         friend class ReactingMixtureCoupler;
@@ -84,7 +88,9 @@ public:
     };
 
     /** Retains shared ownership and exclusively leases advancement of an initialized solver.
-     * Source callbacks are deterministic and have no external mutable history.
+     * Source callbacks are deterministic, MPI-free and have no external mutable history.
+     * Each source evaluation consumes the current conservative transport snapshot.
+     * Commit and restore never evaluate a source; ledgers belong to its exact final receipt.
      * All methods except const queries are collective on the solver mesh communicator.
      */
     ReactingMixtureCoupler(std::shared_ptr<LowMachMixtureSolver> solver, ReactingMixtureOptions options);

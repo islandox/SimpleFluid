@@ -221,7 +221,11 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesMassClosureTolerance[(]"
     "^SimpleFluid::Reacting::(LowMachMixtureSolver|LowMachPressureEquation|ReactingMixtureCoupler)::Implementation::"
     "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::Data::"
-    "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller)[(]"
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller|preview_impl)[(]"
+    "^SimpleFluid::Reacting::LowMachPressureEquation::project_impl[(]"
+    "^SimpleFluid::Reacting::source_stage_detail::"
+    "^SimpleFluid::Reacting::history_detail::"
+    "^SimpleFluid::ReactingGasModel<.*>[ ]*::(species_compartment_index|publish_species_history|validate_species_pressure_metadata|validate_species_candidate_pressure|set_species_absolute_pressure_offset)[(]"
     "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::ControllerLease[(]SimpleFluid::Reacting::LowMachMixtureSolver[*], (unsigned long|unsigned long long)[)]$"
     "SimpleFluid::VoFSolver::Impl::"
     "SimpleFluid::AdaptiveVoFSolver::Impl::"
@@ -633,6 +637,29 @@ foreach(simplefluid_stage3_mesh_kind IN ITEMS native legacy)
         "^${simplefluid_stage3_momentum_class}::refresh_geometry[(][)]$" 1)
     simplefluid_require_variable_density_api(
         "^${simplefluid_stage3_momentum_class}::advance[(]${simplefluid_stage3_momentum_vector} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_face} const&, ${simplefluid_stage3_momentum_scalar} const&, double, ${simplefluid_stage3_momentum_vector}&, ${simplefluid_stage3_force}, ${simplefluid_stage3_boundary}, ${simplefluid_stage3_boundary_value}, SimpleFluid::LinearSolverOptions const&, SimpleFluid::FVM::NonOrthogonalTreatment, SimpleFluid::FVM::ALEControlVolumeState const[*][)]$" 1)
+endforeach()
+
+# Transport-first source evaluation and accepted species-history reporting add
+# exactly twelve definitions: four concrete trial/provider/pressure methods and
+# four queries for each native/legacy field model. No Stage 3 signatures were removed.
+set(simplefluid_source_history_public_symbol_budget 12)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::preview_with_sources[(]double, ${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::LowMachMixtureSolver::SourceStageProvider const>, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::transport_snapshot[(][)] const$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachPressureEquation::project_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachPressureEquation::project_material_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
+foreach(simplefluid_stage4_mesh_kind IN ITEMS native legacy)
+    set(simplefluid_stage4_model
+        "SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_stage4_mesh_kind}_mesh}[ ]*>")
+    foreach(simplefluid_stage4_query IN ITEMS species_histories species_step_events physical_escape_events)
+        simplefluid_require_exact_api(
+            "^${simplefluid_stage4_model}::${simplefluid_stage4_query}[(][)] const$" 1)
+    endforeach()
+    simplefluid_require_exact_api(
+        "^${simplefluid_stage4_model}::evaluate_liquid_volume[(]double[)] const$" 1)
 endforeach()
 
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
@@ -1101,15 +1128,17 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # headroom: expected GCC Debug 1478 disabled / 1620 experimental-enabled.
 # The native mixture flow/controller stage adds only its 51 separately anchored
 # definitions: GCC Debug 1478 -> 1529 with VoF disabled, no removals. Keep the
-# substrate ceiling, 142-symbol disabled-family subtraction and three existing
-# headroom entries unchanged (disabled ceiling 1532; opt-in ceiling 1674).
+# substrate ceiling and 142-symbol disabled-family subtraction unchanged.
+# Source/history and EOS/material pressure linearization add twelve reviewed
+# definitions (1541 disabled); the three-entry headroom remains unchanged
+# (disabled ceiling 1544; opt-in ceiling 1686).
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR
