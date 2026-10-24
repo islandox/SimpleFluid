@@ -1,4 +1,6 @@
 set(SIMPLEFLUID_SOLVER_SOURCES
+    LowMachMixtureSolver.cc
+    ReactingMixtureCoupler.cc
     explicit_instantiation/LiquidMassInventory.cc
     explicit_instantiation/VolumeContinuityModel.cc
     explicit_instantiation/PlanarALEBoundary.cc

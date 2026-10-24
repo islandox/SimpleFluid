@@ -280,7 +280,9 @@ struct BasicWeightedScalarTransportRequest
     const BoundaryCacheType* boundary_diffusivity = nullptr;
     const GeometryCacheType* geometry_cache = nullptr;
     FaceCoefficientInterpolation coefficient_interpolation = FaceCoefficientInterpolation::Harmonic;
-    /** Mapped accepted-old storage coefficient; null means unchanged from storage_weight. */
+    /** Accepted-old storage coefficient for Backward Euler on either field backend.
+     * Null means unchanged from storage_weight; BDF2 retains its current-weight contract.
+     */
     const ScalarField* old_storage_weight = nullptr;
     /** Mapped active ALE trial; null preserves the fixed-grid assembly exactly. */
     const ALEControlVolumeState* ale = nullptr;

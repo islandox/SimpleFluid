@@ -64,7 +64,7 @@ simplefluid_add_mpi_test(
     NAME ScalarTransportDiscretizationValidation_2procs
     TARGET testScalarTransportDiscretization
     PROCS 2
-    ARGS "--gtest_filter=ScalarTransportDiscretizationTest.AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively"
+    ARGS "--gtest_filter=ScalarTransportDiscretizationTest.AdvancedAssemblersRejectRankDivergentPreflightInputsCollectively:ScalarTransportDiscretizationTest.LegacyAcceptedOldStorageAvoidsEndpointCancellation:ScalarTransportDiscretizationTest.LegacyAcceptedStorageRejectsUnsupportedAndDivergentInputsCollectively"
     LABELS "mpi;scalar_transport"
     TIMEOUT 120)
 

@@ -31,6 +31,16 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
 endforeach()
 
+# Conservative native mixture flow and its external reaction controller.
+foreach(_mixture_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME LowMachMixture_${_mixture_ranks}procs
+        TARGET testLowMachMixtureSolver PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;conservation;transaction;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME ReactingMixtureCoupler_${_mixture_ranks}procs
+        TARGET testReactingMixtureCoupler PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;conservation;transaction;empty_rank" TIMEOUT 120)
+endforeach()
+
 # Schema-indexed reacting fields and the liquid inventory follower.
 simplefluid_add_mpi_test(NAME ReactingSpeciesModel_2procs TARGET testReactingSpeciesModel PROCS 2
     ARGS "--gtest_filter=-*LegacyMesh*"

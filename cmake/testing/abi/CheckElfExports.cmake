@@ -219,6 +219,10 @@ string(REPLACE "\n" ";"
 set(simplefluid_forbidden_api_patterns
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::require_finite[(]"
     "SimpleFluid::LiquidMassInventory<.*>[ ]*::speciesMassClosureTolerance[(]"
+    "^SimpleFluid::Reacting::(LowMachMixtureSolver|LowMachPressureEquation|ReactingMixtureCoupler)::Implementation::"
+    "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::Data::"
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::(require_controller|release_controller)[(]"
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::ControllerLease[(]SimpleFluid::Reacting::LowMachMixtureSolver[*], (unsigned long|unsigned long long)[)]$"
     "SimpleFluid::VoFSolver::Impl::"
     "SimpleFluid::AdaptiveVoFSolver::Impl::"
     "SimpleFluid::ReactingVoFCoupler::Impl::"
@@ -510,6 +514,126 @@ simplefluid_require_exact_api(
     "^SimpleFluid::LiquidMassInventory<.*>[ ]*::previewSpeciesMass[(].* const&, .* const&, double, double, SimpleFluid::FVM::ALEControlVolumeState const[*][)]$" 2)
 simplefluid_require_exact_api(
     "^SimpleFluid::BubbleGasPhysics::advance_multispecies_population_exchange[(]SimpleFluid::Reacting::SpeciesCatalog const&, SimpleFluid::Reacting::CellSpeciesState const&, std::(__[0-9]+::)?vector<SimpleFluid::BubbleGasPhysics::PopulationNumberState, .* const&, SimpleFluid::Reacting::ReactionEnvironment const&, SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket const&[)]$" 1)
+
+# Stage 3 adds exactly 51 public definitions, without changing any existing
+# signature: LowMachMixtureSolver (19) plus its move-only ControllerLease (5),
+# LowMachPressureEquation (5), ReactingMixtureCoupler including Trial queries
+# (14), and VariableDensityMomentumEquation (4 per native/legacy mesh).
+# Complete/base constructors and nonvirtual destructors each have two entries.
+# Inline trial/checkpoint storage and private implementation helpers are not API.
+set(simplefluid_low_mach_public_symbol_budget 51)
+set(simplefluid_stage3_std "std::(__[0-9]+::)?")
+set(simplefluid_stage3_size "(unsigned long|unsigned long long)")
+set(simplefluid_stage3_native_mesh
+    "SimpleFluid::MeshHandle<SimpleFluid::TpetraTypes<.*>[ ]*>")
+set(simplefluid_stage3_legacy_mesh
+    "SimpleFluid::Mesh<SimpleFluid::TpetraTypes<.*>[ ]*>")
+set(simplefluid_stage3_eos_pointer
+    "${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::MixtureThermodynamics const>")
+set(simplefluid_stage3_eos_vector
+    "${simplefluid_stage3_std}vector<${simplefluid_stage3_eos_pointer}, ${simplefluid_stage3_std}allocator<${simplefluid_stage3_eos_pointer}[ ]*>[ ]*>")
+set(simplefluid_stage3_sources_vector
+    "${simplefluid_stage3_std}vector<SimpleFluid::Reacting::LowMachMixtureSolver::CellSources, ${simplefluid_stage3_std}allocator<SimpleFluid::Reacting::LowMachMixtureSolver::CellSources>[ ]*>")
+set(simplefluid_stage3_controller_pointer
+    "SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease const[*]")
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::LowMachMixtureSolver[(]${simplefluid_stage3_std}shared_ptr<${simplefluid_stage3_native_mesh} const>, ${simplefluid_stage3_eos_vector}, SimpleFluid::Reacting::LowMachMixtureSolver::Options[)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::~LowMachMixtureSolver[(][)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::ControllerLease[(]SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease&&[)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::operator=[(]SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease&&[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::~ControllerLease[(][)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::acquire_controller[(][)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::initialize[(]SimpleFluid::Reacting::LowMachMixtureSolver::State, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::preview[(]double, ${simplefluid_stage3_sources_vector} const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::commit[(]SimpleFluid::Reacting::LowMachMixtureSolver::Trial const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::advance[(]double, ${simplefluid_stage3_sources_vector} const&[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachMixtureSolver::restore[(]SimpleFluid::Reacting::LowMachMixtureSolver::Checkpoint const&, ${simplefluid_stage3_controller_pointer}[)]$" 1)
+foreach(simplefluid_stage3_solver_query IN ITEMS
+        initialized mesh options state diagnostics checkpoint volume_flux density velocity)
+    simplefluid_require_reacting_api(
+        "^SimpleFluid::Reacting::LowMachMixtureSolver::${simplefluid_stage3_solver_query}[(][)] const$" 1)
+endforeach()
+
+# Pressure correction uses native scalar-cell, scalar-face and vector-cell fields;
+# retain the complete field order rather than accepting arbitrary project overloads.
+set(simplefluid_stage3_scalar_cell
+    "SimpleFluid::FieldStored<SimpleFluid::Field<double, SimpleFluid::CellLocation>, SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_native_mesh}[ ]*>")
+set(simplefluid_stage3_scalar_face
+    "SimpleFluid::FieldStored<SimpleFluid::Field<double, SimpleFluid::FaceLocation>, SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_native_mesh}[ ]*>")
+set(simplefluid_stage3_vector_cell
+    "SimpleFluid::FieldStored<SimpleFluid::Field<SimpleFluid::vec3<double>, SimpleFluid::CellLocation>, SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_native_mesh}[ ]*>")
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachPressureEquation::LowMachPressureEquation[(]${simplefluid_stage3_std}shared_ptr<${simplefluid_stage3_native_mesh} const>[)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachPressureEquation::~LowMachPressureEquation[(][)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::LowMachPressureEquation::project[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
+
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::ReactingMixtureCoupler::ReactingMixtureCoupler[(]${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::LowMachMixtureSolver>, SimpleFluid::Reacting::ReactingMixtureOptions[)]$" 2)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::ReactingMixtureCoupler::~ReactingMixtureCoupler[(][)]$" 2)
+foreach(simplefluid_stage3_coupler_operation IN ITEMS preview advance)
+    simplefluid_require_reacting_api(
+        "^SimpleFluid::Reacting::ReactingMixtureCoupler::${simplefluid_stage3_coupler_operation}[(]double[)]$" 1)
+endforeach()
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::ReactingMixtureCoupler::commit[(]SimpleFluid::Reacting::ReactingMixtureCoupler::Trial const&[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::ReactingMixtureCoupler::restore[(]SimpleFluid::Reacting::ReactingMixtureCoupler::Checkpoint const&[)]$" 1)
+foreach(simplefluid_stage3_coupler_query IN ITEMS checkpoint diagnostics solver)
+    simplefluid_require_reacting_api(
+        "^SimpleFluid::Reacting::ReactingMixtureCoupler::${simplefluid_stage3_coupler_query}[(][)] const$" 1)
+endforeach()
+foreach(simplefluid_stage3_trial_query IN ITEMS state diagnostics local_sources)
+    simplefluid_require_reacting_api(
+        "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::${simplefluid_stage3_trial_query}[(][)] const$" 1)
+endforeach()
+
+# Review this template family independently of the reacting namespace: only the
+# constructor, geometry refresh and conservative advance are public definitions.
+set(simplefluid_reviewed_variable_density_api_patterns)
+macro(simplefluid_require_variable_density_api simplefluid_pattern simplefluid_count)
+    list(APPEND simplefluid_reviewed_variable_density_api_patterns "${simplefluid_pattern}")
+    simplefluid_require_exact_api("${simplefluid_pattern}" "${simplefluid_count}")
+endmacro()
+set(simplefluid_stage3_force
+    "${simplefluid_stage3_std}function<SimpleFluid::vec3<double> [(]int[)]>")
+set(simplefluid_stage3_boundary
+    "${simplefluid_stage3_std}function<SimpleFluid::BoundaryCondition [(]int, ${simplefluid_stage3_size}, ${simplefluid_stage3_size}[)]>")
+set(simplefluid_stage3_boundary_value
+    "${simplefluid_stage3_std}function<double [(]int, ${simplefluid_stage3_size}, ${simplefluid_stage3_size}[)]>")
+foreach(simplefluid_stage3_mesh_kind IN ITEMS native legacy)
+    if(simplefluid_stage3_mesh_kind STREQUAL "native")
+        set(simplefluid_stage3_momentum_mesh "${simplefluid_stage3_native_mesh}")
+        set(simplefluid_stage3_momentum_scalar "${simplefluid_stage3_scalar_cell}")
+        set(simplefluid_stage3_momentum_vector "${simplefluid_stage3_vector_cell}")
+        set(simplefluid_stage3_momentum_face "${simplefluid_stage3_scalar_face}")
+    else()
+        set(simplefluid_stage3_momentum_mesh "${simplefluid_stage3_legacy_mesh}")
+        set(simplefluid_stage3_momentum_scalar "SimpleFluid::CellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
+        set(simplefluid_stage3_momentum_vector "SimpleFluid::VectorCellField<SimpleFluid::TpetraTypes<.*>[ ]*>")
+        set(simplefluid_stage3_momentum_face "SimpleFluid::FaceField<SimpleFluid::TpetraTypes<.*>[ ]*>")
+    endif()
+    set(simplefluid_stage3_momentum_class
+        "SimpleFluid::VariableDensityMomentumEquation<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_momentum_mesh}[ ]*>")
+    simplefluid_require_variable_density_api(
+        "^${simplefluid_stage3_momentum_class}::VariableDensityMomentumEquation[(]${simplefluid_stage3_std}shared_ptr<${simplefluid_stage3_momentum_mesh} const>[)]$" 2)
+    simplefluid_require_variable_density_api(
+        "^${simplefluid_stage3_momentum_class}::refresh_geometry[(][)]$" 1)
+    simplefluid_require_variable_density_api(
+        "^${simplefluid_stage3_momentum_class}::advance[(]${simplefluid_stage3_momentum_vector} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_scalar} const&, ${simplefluid_stage3_momentum_face} const&, ${simplefluid_stage3_momentum_scalar} const&, double, ${simplefluid_stage3_momentum_vector}&, ${simplefluid_stage3_force}, ${simplefluid_stage3_boundary}, ${simplefluid_stage3_boundary_value}, SimpleFluid::LinearSolverOptions const&, SimpleFluid::FVM::NonOrthogonalTreatment, SimpleFluid::FVM::ALEControlVolumeState const[*][)]$" 1)
+endforeach()
 
 # Isothermal NOX adds one public context constructor (two Itanium entries) and
 # two virtual hooks. Even private overrides must remain exported: downstream
@@ -917,6 +1041,21 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
                 "Unreviewed reacting dynamic definition: ${simplefluid_demangled_symbol}")
         endif()
     endif()
+
+    if(simplefluid_demangled_symbol MATCHES "^SimpleFluid::VariableDensityMomentumEquation<")
+        set(simplefluid_reviewed_variable_density_api FALSE)
+        foreach(simplefluid_variable_density_api_pattern
+                IN LISTS simplefluid_reviewed_variable_density_api_patterns)
+            if(simplefluid_demangled_symbol MATCHES "${simplefluid_variable_density_api_pattern}")
+                set(simplefluid_reviewed_variable_density_api TRUE)
+                break()
+            endif()
+        endforeach()
+        if(NOT simplefluid_reviewed_variable_density_api)
+            message(FATAL_ERROR
+                "Unreviewed variable-density momentum dynamic definition: ${simplefluid_demangled_symbol}")
+        endif()
+    endif()
 endforeach()
 
 # The isothermal/adaptive, solid-conduction, and fixed-grid planar free-surface
@@ -960,13 +1099,17 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # absent in that configuration (142 total). The disabled-family guard above
 # independently enforces this boundary. Preserve the same three-entry substrate
 # headroom: expected GCC Debug 1478 disabled / 1620 experimental-enabled.
+# The native mixture flow/controller stage adds only its 51 separately anchored
+# definitions: GCC Debug 1478 -> 1529 with VoF disabled, no removals. Keep the
+# substrate ceiling, 142-symbol disabled-family subtraction and three existing
+# headroom entries unchanged (disabled ceiling 1532; opt-in ceiling 1674).
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

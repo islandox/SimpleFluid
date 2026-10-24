@@ -923,12 +923,14 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
     const auto coefficient_interpolation = request.coefficient_interpolation;
 
     const auto& mesh = old_values.mesh();
-    const auto mapped_extension_state = detail::reduce_transport_validation_state(
-        mesh, std::array<int, 2>{request.old_storage_weight == nullptr ? 0 : 1, request.ale == nullptr ? 0 : 1});
-    if (mapped_extension_state[0] != 0 || mapped_extension_state[1] != 0)
+    const auto old_storage_present = request.old_storage_weight == nullptr ? 0 : 1;
+    const auto extension_state = detail::reduce_transport_validation_state(
+        mesh, std::array<int, 4>{old_storage_present, -old_storage_present, request.ale == nullptr ? 0 : 1,
+                  old_storage_present && discretization.time != ScalarTimeScheme::BackwardEuler ? 1 : 0});
+    if (extension_state[0] != -extension_state[1] || extension_state[2] != 0 || extension_state[3] != 0)
     {
-        throw std::invalid_argument(
-            "legacy weighted_scalar_transport_system does not support mapped accepted-old storage or ALE state.");
+        throw std::invalid_argument("Legacy weighted transport requires uniform accepted-old storage selection, "
+                                    "Backward Euler for historical storage, and no ALE state.");
     }
     const auto older_field_state =
         older_values == nullptr
@@ -946,10 +948,9 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
         mesh, treatment, correction_field, "weighted_scalar_transport_system");
 
     const int incompatible_fields =
-        &face_fluxes.mesh() != &mesh
-             || &storage_weight.mesh() != &mesh
-             || &advection_weight.mesh() != &mesh
-             || &diffusivity.mesh() != &mesh
+        &face_fluxes.mesh() != &mesh || &storage_weight.mesh() != &mesh || &advection_weight.mesh() != &mesh ||
+                &diffusivity.mesh() != &mesh ||
+                (request.old_storage_weight != nullptr && &request.old_storage_weight->mesh() != &mesh)
             ? 1
             : 0;
     int invalid_boundary_cache = 0;
@@ -986,15 +987,14 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
                 const auto cell_lid =
                     static_cast<local_ordinal_type>(owned);
                 const auto storage = storage_weight.local_value(cell_lid);
+                const auto old_storage =
+                    request.old_storage_weight == nullptr ? storage : request.old_storage_weight->local_value(cell_lid);
                 const auto advection = advection_weight.local_value(cell_lid);
                 const auto diffusion = diffusivity.local_value(cell_lid);
-                invalid_coefficients = invalid_coefficients
-                    || !std::isfinite(storage)
-                    || !std::isfinite(advection)
-                    || !std::isfinite(diffusion)
-                    || storage <= scalar_type{}
-                    || advection < scalar_type{}
-                    || diffusion < scalar_type{};
+                invalid_coefficients = invalid_coefficients || !std::isfinite(storage) || !std::isfinite(old_storage) ||
+                                       old_storage <= scalar_type{} || !std::isfinite(advection) ||
+                                       !std::isfinite(diffusion) || storage <= scalar_type{} ||
+                                       advection < scalar_type{} || diffusion < scalar_type{};
             }
         }
         catch (...)
@@ -1390,6 +1390,8 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
     }
     const auto face_flux_data = face_fluxes.owned_read_view();
     const auto storage_data = storage_weight.local_read_view();
+    const auto old_storage_data =
+        request.old_storage_weight == nullptr ? storage_data : request.old_storage_weight->local_read_view();
     const auto advection_data = advection_weight.local_read_view();
     const auto diffusivity_data = diffusivity.local_read_view();
     using partition_gradient_view_type = decltype(partition_gradients->local_read_view());
@@ -1406,6 +1408,7 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
         const auto cell_storage = storage_data(cell_lid, 0);
         const auto cell_advection = advection_data(cell_lid, 0);
         const auto transient = cell_storage * volume / time_step;
+        const auto old_transient = old_storage_data(cell_lid, 0) * volume / time_step;
         const auto sink = sink_values[owned];
 
         row_values.clear();
@@ -1415,15 +1418,10 @@ TransportSystem<Pack> weighted_scalar_transport_system(WeightedScalarTransportRe
             transient_coefficients.diagonal * transient
                 + volume * sink);
         rhs->replaceLocalValue(
-            cell_lid,
-            transient
-                    * (transient_coefficients.previous
-                           * old_value_data(cell_lid, 0)
-                       + transient_coefficients.older
-                           * (older_value_data
-                                  ? (*older_value_data)(cell_lid, 0)
-                                  : scalar_type{}))
-                + volume * source_values[owned]);
+            cell_lid, old_transient * (transient_coefficients.previous * old_value_data(cell_lid, 0) +
+                                          transient_coefficients.older *
+                                              (older_value_data ? (*older_value_data)(cell_lid, 0) : scalar_type{})) +
+                          volume * source_values[owned]);
 
         auto add_non_orthogonal_stencil = [&](local_ordinal_type gradient_cell_lid, scalar_type gradient_weight,
                                               scalar_type face_diffusivity,

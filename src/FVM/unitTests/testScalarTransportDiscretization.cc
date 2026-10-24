@@ -782,4 +782,83 @@ TEST(ScalarTransportDiscretizationTest, Bdf2BoundedLinearUpwindMatchesLegacyMapp
     EXPECT_GT(correction_norm, 1.0e-12);
 }
 
+TEST(ScalarTransportDiscretizationTest, LegacyAcceptedOldStorageAvoidsEndpointCancellation)
+{
+    using namespace SimpleFluid::FVM;
+    const auto mesh = make_legacy_line();
+    LegacyScalar old(mesh, 3., "old"), accepted(mesh, 1., "accepted_storage"), trial(mesh, 1e20, "trial_storage"),
+        unit(mesh, 1., "unit"), zero(mesh, 0., "zero");
+    LegacyFlux flux(mesh, 0., "flux");
+    const auto system = weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{.old_values = old,
+        .face_fluxes = flux,
+        .time_step = .5,
+        .storage_weight = trial,
+        .advection_weight = unit,
+        .diffusivity = zero,
+        .boundary_condition = [](int, size_t)
+        { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.}; },
+        .boundary_value = zero_boundary_value(),
+        .source = [](auto) { return 0.; },
+        .treatment = NonOrthogonalTreatment::Implicit,
+        .old_storage_weight = &accepted});
+    for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+    {
+        const auto local = static_cast<Pack::local_ordinal_type>(row);
+        const auto column =
+            system.matrix->getColMap()->getLocalElement(system.matrix->getRowMap()->getGlobalElement(local));
+        const auto volume = mesh->cell_volume(local);
+        EXPECT_NEAR(matrix_entry(*system.matrix, local, column) / (2e20 * volume), 1., 1e-14);
+        EXPECT_NEAR(system.rhs->getData()[row] / (6. * volume), 1., 1e-14);
+    }
+}
+
+TEST(ScalarTransportDiscretizationTest, LegacyAcceptedStorageRejectsUnsupportedAndDivergentInputsCollectively)
+{
+    using namespace SimpleFluid::FVM;
+    const auto mesh = make_legacy_line();
+    LegacyScalar old(mesh, 3., "old"), accepted(mesh, 1., "accepted_storage"), trial(mesh, 2., "trial_storage"),
+        unit(mesh, 1., "unit"), zero(mesh, 0., "zero");
+    LegacyFlux flux(mesh, 0., "flux");
+    const auto assemble = [&](const LegacyScalar* previous, ScalarTimeScheme scheme = ScalarTimeScheme::BackwardEuler)
+    {
+        return weighted_scalar_transport_system<Pack>(WeightedScalarTransportRequest<Pack>{.old_values = old,
+            .face_fluxes = flux,
+            .time_step = .5,
+            .storage_weight = trial,
+            .advection_weight = unit,
+            .diffusivity = zero,
+            .boundary_condition = [](int, size_t)
+            { return SimpleFluid::BoundaryCondition{SimpleFluid::BoundaryConditionType::Neumann, 0.}; },
+            .boundary_value = zero_boundary_value(),
+            .source = [](auto) { return 0.; },
+            .treatment = NonOrthogonalTreatment::Implicit,
+            .discretization = {.time = scheme},
+            .older_values = scheme == ScalarTimeScheme::BDF2 ? &old : nullptr,
+            .old_storage_weight = previous});
+    };
+    EXPECT_THROW((void) assemble(&accepted, ScalarTimeScheme::BDF2), std::invalid_argument);
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() > 1)
+        EXPECT_THROW((void) assemble(comm->getRank() == 0 ? nullptr : &accepted), std::invalid_argument);
+    for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+    {
+        const auto local = static_cast<Pack::local_ordinal_type>(row);
+        if (mesh->owned_cell_map()->getGlobalElement(local) == 0)
+            accepted.set_owned_value(local, std::numeric_limits<double>::quiet_NaN());
+    }
+    // set_owned_value updates only owned storage; coefficient assembly reads the
+    // synchronized overlap view even in serial.
+    accepted.sync_ghosts();
+    int local_invalid = 0;
+    for (size_t row = 0; row < mesh->num_owned_cells(); ++row)
+        local_invalid += !std::isfinite(accepted.local_value(static_cast<Pack::local_ordinal_type>(row)));
+    int global_invalid = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_invalid, &global_invalid);
+    EXPECT_EQ(global_invalid, 1);
+    EXPECT_THROW((void) assemble(&accepted), std::invalid_argument);
+    accepted.owned_data().putScalar(1.);
+    accepted.sync_ghosts();
+    EXPECT_NO_THROW((void) assemble(&accepted));
+}
+
 } // namespace
