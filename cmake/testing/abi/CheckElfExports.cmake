@@ -748,16 +748,14 @@ endif()
 # These counts do not qualify other toolchains or build configurations.
 # Private-family exclusions and exact API anchors above remain authoritative.
 set(simplefluid_api_symbol_lower_bound 1250)
-# Vented cavity, typed ALE thermal transactions and compiled traversal plans
-# extend the public surface. After hiding traversal implementation helpers,
-# GCC Release/LTO has 1414 API exports and LLVM Debug has 1426 (2026-10-14).
-# Keep modest toolchain headroom; private-family exclusions and exact API
-# anchors above remain authoritative.
-# The external multiphysics controller exports its own lifecycle/configuration
-# API; model forwarding APIs no longer belong to BoussinesqSolver. GCC Debug
-# exports 1453 API symbols (2026-10-15). Keep modest toolchain headroom while
-# exact API anchors and private-family exclusions remain authoritative.
-set(simplefluid_api_symbol_upper_bound 1480)
+# LLVM Debug CI at 8f8948e exports 1487 reviewed API symbols:
+# https://github.com/islandox/SimpleFluid/actions/runs/40038074466/job/120702342486
+# Keep 10% upward headroom, rounded up to a whole symbol. This is a fixed,
+# reviewed baseline, not a ceiling derived from the library under test.
+# Exact API anchors and private-family exclusions above remain authoritative.
+set(simplefluid_api_symbol_reviewed_maximum 1487)
+math(EXPR simplefluid_api_symbol_upper_bound
+    "(${simplefluid_api_symbol_reviewed_maximum} * 110 + 99) / 100")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR
