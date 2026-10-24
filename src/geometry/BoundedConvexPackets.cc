@@ -1,153 +1,7 @@
-namespace
+#include "geometry/details/BoundedConvexGeometryInternal.hh"
+
+namespace SimpleFluid::Meshes
 {
-struct NumericalWriter
-{
-    std::vector<char> bytes;
-    std::size_t limit;
-    explicit NumericalWriter(std::size_t budget) : limit(budget) {}
-    void word(std::uint64_t x)
-    {
-        if (bytes.size() > limit || limit - bytes.size() < 8)
-            reject("numerical packet exceeds storage cap.");
-        for (unsigned byte = 0; byte < 8; ++byte)
-            bytes.push_back(static_cast<char>((x >> (8 * byte)) & 255));
-    }
-    void real(long double x)
-    {
-        finite(x);
-        word(std::signbit(x) && x != 0 ? 1 : 0);
-        int exponent = 0;
-        auto fraction = std::frexp(std::abs(x), &exponent);
-        word(static_cast<std::uint64_t>(static_cast<std::int64_t>(exponent)));
-        constexpr unsigned chunks = (std::numeric_limits<long double>::digits + 31) / 32;
-        for (unsigned i = 0; i < chunks; ++i)
-        {
-            fraction = std::scalbn(fraction, 32);
-            const auto chunk = static_cast<std::uint64_t>(fraction);
-            word(chunk);
-            fraction -= static_cast<long double>(chunk);
-        }
-        if (fraction != 0)
-            reject("wider-FP significand cannot be serialized losslessly.");
-    }
-    void interval(Interval x)
-    {
-        real(x.lo);
-        real(x.hi);
-    }
-    void coordinates(const Point& p)
-    {
-        for (const auto x : p)
-            interval(x);
-    }
-    void frame(const Frame& f)
-    {
-        for (const auto x : f.origin)
-            real(x);
-        word(static_cast<std::uint64_t>(static_cast<std::int64_t>(f.exponent)));
-    }
-    void authorities(const std::vector<BoundedPlaneAuthority>& keys)
-    {
-        word(keys.size());
-        for (const auto& key : keys)
-        {
-            word(key.key.size());
-            for (const auto x : key.key)
-                word(x);
-        }
-    }
-};
-struct NumericalReader
-{
-    std::span<const char> bytes;
-    std::size_t cursor = 0;
-    explicit NumericalReader(std::span<const char> input) : bytes(input) {}
-    std::uint64_t word()
-    {
-        if (cursor > bytes.size() || bytes.size() - cursor < 8)
-            reject("truncated numerical geometry packet.");
-        std::uint64_t x = 0;
-        for (unsigned byte = 0; byte < 8; ++byte)
-            x |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[cursor++])) << (8 * byte);
-        return x;
-    }
-    std::size_t count(std::size_t maximum, std::size_t element)
-    {
-        const auto n = word();
-        if (n > maximum || (element && n > (bytes.size() - cursor) / element))
-            reject("numerical packet count exceeds remaining bytes/resource cap.");
-        active_work->charge(static_cast<std::size_t>(n), element);
-        return static_cast<std::size_t>(n);
-    }
-    long double real()
-    {
-        const auto negative = word();
-        const auto exponent_word = word();
-        const auto exponent = std::bit_cast<std::int64_t>(exponent_word);
-        if (negative > 1 || exponent < std::numeric_limits<long double>::min_exponent - 1 ||
-            exponent > std::numeric_limits<long double>::max_exponent)
-            reject("invalid numerical packet scalar exponent/sign.");
-        constexpr unsigned chunks = (std::numeric_limits<long double>::digits + 31) / 32;
-        long double significand = 0;
-        for (unsigned i = 0; i < chunks; ++i)
-        {
-            const auto chunk = word();
-            if (chunk > std::numeric_limits<std::uint32_t>::max())
-                reject("invalid numerical packet significand.");
-            significand = std::scalbn(significand, 32) + static_cast<long double>(chunk);
-        }
-        const auto value = std::scalbn(significand, static_cast<int>(exponent) - 32 * chunks);
-        finite(value);
-        if (significand != 0 && value == 0)
-            reject("numerical packet loses nonzero coordinates.");
-        return negative ? -value : value;
-    }
-    Interval interval()
-    {
-        const auto lo = real(), hi = real();
-        return {lo, hi};
-    }
-    Point coordinates() { return {interval(), interval(), interval()}; }
-    Frame frame()
-    {
-        Frame f;
-        for (auto& x : f.origin)
-        {
-            const auto original = real();
-            x = static_cast<double>(original);
-            if (!std::isfinite(x) || static_cast<long double>(x) != original)
-                reject("source frame anchor is not its original binary64 value.");
-        }
-        const auto exponent = std::bit_cast<std::int64_t>(word());
-        if (exponent < -32768 || exponent > 32768)
-            reject("invalid local scaling exponent.");
-        f.exponent = static_cast<int>(exponent);
-        return f;
-    }
-    std::vector<BoundedPlaneAuthority> authorities(
-        const std::set<BoundedPlaneAuthority>& registry, BoundedGeometryLimits limits)
-    {
-        std::vector<BoundedPlaneAuthority> result;
-        const auto n = count(limits.maximum_faces, sizeof(std::uint64_t));
-        for (std::size_t i = 0; i < n; ++i)
-        {
-            BoundedPlaneAuthority key;
-            const auto words = count(limits.byte_budget / sizeof(std::uint64_t), sizeof(std::uint64_t));
-            if (!words)
-                reject("empty numerical support authority.");
-            for (std::size_t j = 0; j < words; ++j)
-                key.key.push_back(word());
-            if (!registry.contains(key))
-                reject("foreign or absent original source support authority.");
-            result.push_back(std::move(key));
-        }
-        std::sort(result.begin(), result.end());
-        if (std::adjacent_find(result.begin(), result.end()) != result.end())
-            reject("duplicate support authority in numerical packet.");
-        return result;
-    }
-};
-} // namespace
 std::vector<char> BoundedConvexGeometry::encode(
     const BoundedGeometryPacketContext& context, std::size_t byte_budget) const
 {
@@ -213,6 +67,7 @@ std::vector<char> BoundedConvexGeometry::encode(
     active_work->charge(writer.bytes.size(), sizeof(char));
     return std::move(writer.bytes);
 }
+
 BoundedConvexGeometryPtr BoundedConvexGeometry::decode(std::span<const char> packet,
     const BoundedGeometryPacketContext& expected, std::span<const BoundedConvexGeometryPtr> authenticated_sources,
     BoundedGeometryLimits limits)
@@ -409,3 +264,161 @@ BoundedConvexGeometryPtr BoundedConvexGeometry::decode(std::span<const char> pac
     finish(*result);
     return BoundedConvexGeometryPtr(new BoundedConvexGeometry(std::move(result)));
 }
+
+const void* bounded_geometry_statistics_domain()
+{
+    return &statistics;
+}
+} // namespace SimpleFluid::Meshes
+
+namespace SimpleFluid::Meshes
+{
+namespace bounded_geometry_detail
+{
+void NumericalWriter::word(std::uint64_t x)
+{
+    if (bytes.size() > limit || limit - bytes.size() < 8)
+        reject("numerical packet exceeds storage cap.");
+    for (unsigned byte = 0; byte < 8; ++byte)
+        bytes.push_back(static_cast<char>((x >> (8 * byte)) & 255));
+}
+
+void NumericalWriter::real(long double x)
+{
+    finite(x);
+    word(std::signbit(x) && x != 0 ? 1 : 0);
+    int exponent = 0;
+    auto fraction = std::frexp(std::abs(x), &exponent);
+    word(static_cast<std::uint64_t>(static_cast<std::int64_t>(exponent)));
+    constexpr unsigned chunks = (std::numeric_limits<long double>::digits + 31) / 32;
+    for (unsigned i = 0; i < chunks; ++i)
+    {
+        fraction = std::scalbn(fraction, 32);
+        const auto chunk = static_cast<std::uint64_t>(fraction);
+        word(chunk);
+        fraction -= static_cast<long double>(chunk);
+    }
+    if (fraction != 0)
+        reject("wider-FP significand cannot be serialized losslessly.");
+}
+
+void NumericalWriter::interval(Interval x)
+{
+    real(x.lo);
+    real(x.hi);
+}
+
+void NumericalWriter::coordinates(const Point& p)
+{
+    for (const auto x : p)
+        interval(x);
+}
+
+void NumericalWriter::frame(const Frame& f)
+{
+    for (const auto x : f.origin)
+        real(x);
+    word(static_cast<std::uint64_t>(static_cast<std::int64_t>(f.exponent)));
+}
+
+void NumericalWriter::authorities(const std::vector<BoundedPlaneAuthority>& keys)
+{
+    word(keys.size());
+    for (const auto& key : keys)
+    {
+        word(key.key.size());
+        for (const auto x : key.key)
+            word(x);
+    }
+}
+
+std::uint64_t NumericalReader::word()
+{
+    if (cursor > bytes.size() || bytes.size() - cursor < 8)
+        reject("truncated numerical geometry packet.");
+    std::uint64_t x = 0;
+    for (unsigned byte = 0; byte < 8; ++byte)
+        x |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[cursor++])) << (8 * byte);
+    return x;
+}
+
+std::size_t NumericalReader::count(std::size_t maximum, std::size_t element)
+{
+    const auto n = word();
+    if (n > maximum || (element && n > (bytes.size() - cursor) / element))
+        reject("numerical packet count exceeds remaining bytes/resource cap.");
+    active_work->charge(static_cast<std::size_t>(n), element);
+    return static_cast<std::size_t>(n);
+}
+
+long double NumericalReader::real()
+{
+    const auto negative = word();
+    const auto exponent_word = word();
+    const auto exponent = std::bit_cast<std::int64_t>(exponent_word);
+    if (negative > 1 || exponent < std::numeric_limits<long double>::min_exponent - 1 ||
+        exponent > std::numeric_limits<long double>::max_exponent)
+        reject("invalid numerical packet scalar exponent/sign.");
+    constexpr unsigned chunks = (std::numeric_limits<long double>::digits + 31) / 32;
+    long double significand = 0;
+    for (unsigned i = 0; i < chunks; ++i)
+    {
+        const auto chunk = word();
+        if (chunk > std::numeric_limits<std::uint32_t>::max())
+            reject("invalid numerical packet significand.");
+        significand = std::scalbn(significand, 32) + static_cast<long double>(chunk);
+    }
+    const auto value = std::scalbn(significand, static_cast<int>(exponent) - 32 * chunks);
+    finite(value);
+    if (significand != 0 && value == 0)
+        reject("numerical packet loses nonzero coordinates.");
+    return negative ? -value : value;
+}
+
+Interval NumericalReader::interval()
+{
+    const auto lo = real(), hi = real();
+    return {lo, hi};
+}
+
+Frame NumericalReader::frame()
+{
+    Frame f;
+    for (auto& x : f.origin)
+    {
+        const auto original = real();
+        x = static_cast<double>(original);
+        if (!std::isfinite(x) || static_cast<long double>(x) != original)
+            reject("source frame anchor is not its original binary64 value.");
+    }
+    const auto exponent = std::bit_cast<std::int64_t>(word());
+    if (exponent < -32768 || exponent > 32768)
+        reject("invalid local scaling exponent.");
+    f.exponent = static_cast<int>(exponent);
+    return f;
+}
+
+std::vector<BoundedPlaneAuthority> NumericalReader::authorities(
+    const std::set<BoundedPlaneAuthority>& registry, BoundedGeometryLimits limits)
+{
+    std::vector<BoundedPlaneAuthority> result;
+    const auto n = count(limits.maximum_faces, sizeof(std::uint64_t));
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        BoundedPlaneAuthority key;
+        const auto words = count(limits.byte_budget / sizeof(std::uint64_t), sizeof(std::uint64_t));
+        if (!words)
+            reject("empty numerical support authority.");
+        for (std::size_t j = 0; j < words; ++j)
+            key.key.push_back(word());
+        if (!registry.contains(key))
+            reject("foreign or absent original source support authority.");
+        result.push_back(std::move(key));
+    }
+    std::sort(result.begin(), result.end());
+    if (std::adjacent_find(result.begin(), result.end()) != result.end())
+        reject("duplicate support authority in numerical packet.");
+    return result;
+}
+} // namespace bounded_geometry_detail
+} // namespace SimpleFluid::Meshes

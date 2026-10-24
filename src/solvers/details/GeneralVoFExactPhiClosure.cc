@@ -1,7 +1,23 @@
-/** @file GeneralVoFExactPhiClosure.inc
- * @brief Optional rational backend in the Exact namespace.
- * Included only by GeneralVoFPhiClosure.cc inside SimpleFluid::detail.
+/** @file Exact::GeneralVoFPhiClosure.cc
+ * @brief Sparse persistent-identity forest closure with bounded floating-point arithmetic.
  */
+#include "solvers/details/GeneralVoFPhiClosure.hh"
+#include "parallel/SparseOwnerExchange.hh"
+#include "solvers/details/ConservativeVoFExactArithmetic.hh"
+#include "solvers/details/GeneralVoFExactStorage.hh"
+#include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <exception>
+#include <limits>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include "solvers/details/GeneralVoFPhiClosureSupport.hh"
+namespace SimpleFluid::detail
+{
+using namespace phi_support;
 namespace Exact
 {
 namespace
@@ -754,3 +770,4 @@ bool general_vof_projection_arithmetic_admitted(
     return certify_general_vof_projection_rate(mesh, values, budget).arithmetic_admitted;
 }
 } // namespace Exact
+} // namespace SimpleFluid::detail

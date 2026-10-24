@@ -1,3 +1,4 @@
+#include "solvers/details/GeneralVoFFlowSupport.hh"
 /** @file GeneralVoFFlowWorkspace.cc
  * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
@@ -23,15 +24,7 @@ namespace SimpleFluid::detail
 {
 namespace
 {
-using Vector = VoF::Vector;
-double dot(const Vector& a, const Vector& b)
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-Vector convert(const MeshUtils::Vec3& a)
-{
-    return {a.x, a.y, a.z};
-}
+using namespace flow_support;
 SP<const MeshHandle<>> validated_native_flow_mesh(SP<const MeshHandle<>> mesh)
 {
     bool accepted = true;
@@ -880,5 +873,4 @@ double GeneralVoFFlowWorkspace::stable_timestep(
     const double inverse = maximum(local_inverse);
     return inverse > 0 ? 1 / inverse : std::numeric_limits<double>::infinity();
 }
-#include "solvers/details/GeneralVoFExactProjection.inc"
 } // namespace SimpleFluid::detail

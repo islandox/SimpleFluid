@@ -38,21 +38,21 @@ endif()
 
   if(TEST_NAME STREQUAL "testConservativeVoFTransport" OR TEST_NAME STREQUAL "testExactConservativeVoFTransport")
     # Compile the private numerical boundary directly; it is not a DSO export.
-    target_sources(${TEST_NAME} PRIVATE ../details/ConservativeVoFTransport.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc ../details/GeneralVoFTransferBinding.cc)
+    target_sources(${TEST_NAME} PRIVATE ../details/ConservativeVoFTransport.cc ../details/ConservativeVoFExactTransport.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc ../details/GeneralVoFTransferBinding.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFCurvature" OR TEST_NAME STREQUAL "testExactGeneralVoFCurvature")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFCurvature.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFFlowWorkspace" OR TEST_NAME STREQUAL "testExactGeneralVoFFlowWorkspace")
-    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/VoFProjectionWorkspace.cc
-      ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactPressure.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/GeneralVoFExactProjection.cc ../details/VoFProjectionWorkspace.cc
+      ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFExactPhiClosure.cc ../details/GeneralVoFPhiClosureSupport.cc ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactPressure.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFExactPressure")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFExactPressure.cc
       ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFPhiClosure" OR TEST_NAME STREQUAL "testExactGeneralVoFPhiClosure")
-    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFPhiClosure.cc
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFExactPhiClosure.cc ../details/GeneralVoFPhiClosureSupport.cc
       ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
@@ -733,8 +733,12 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
           testExactGeneralVoFFlowWorkspace.cc
           ../GeneralVoFSolver.cc
           ../details/ConservativeVoFTransport.cc
+          ../details/ConservativeVoFExactTransport.cc
           ../details/GeneralVoFFlowWorkspace.cc
+          ../details/GeneralVoFExactProjection.cc
           ../details/GeneralVoFPhiClosure.cc
+          ../details/GeneralVoFExactPhiClosure.cc
+          ../details/GeneralVoFPhiClosureSupport.cc
           ../details/GeneralVoFCurvature.cc
           PROPERTIES
           COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"

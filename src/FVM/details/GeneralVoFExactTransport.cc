@@ -1,7 +1,9 @@
-/** @file GeneralVoFExactTransport.inc
- * @brief Optional rational backend in the Exact namespace.
- * Included only by GeneralVoF.cc inside SimpleFluid::VoF.
+/** @file GeneralVoFExactTransport.cc
+ * @brief Optional exact phase transport planning.
  */
+#include "FVM/details/GeneralVoFInternal.hh"
+namespace SimpleFluid::VoF
+{
 namespace Exact
 {
 namespace
@@ -1199,3 +1201,5 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
     return trial;
 }
 } // namespace Exact
+
+}

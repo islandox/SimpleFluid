@@ -1,7 +1,28 @@
-/** @file GeneralVoFExactProjection.inc
- * @brief Optional rational projection backend.
- * Included by GeneralVoFFlowWorkspace.cc inside SimpleFluid::detail.
+/** @file GeneralVoFFlowWorkspace.cc
+ * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
+#include "solvers/details/GeneralVoFFlowWorkspace.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/ConvexCellGeometry.hh"
+#include "geometry/BoundedConvexGeometry.hh"
+#include "solvers/details/ConservativeVoFExactArithmetic.hh"
+#include "solvers/details/GeneralVoFExactPressure.hh"
+#include "solvers/details/GeneralVoFExactStorage.hh"
+#include "solvers/details/GeneralVoFPhiClosure.hh"
+#include "utils/CompensatedSum.hh"
+#include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cfenv>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include "solvers/details/GeneralVoFFlowSupport.hh"
+namespace SimpleFluid::detail
+{
+using namespace flow_support;
 namespace Exact
 {
 void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std::vector<double>& face_velocity,
@@ -920,3 +941,4 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
     }
 }
 } // namespace Exact
+} // namespace SimpleFluid::detail

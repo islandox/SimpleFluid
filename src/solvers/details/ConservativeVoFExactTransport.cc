@@ -1,7 +1,31 @@
-/** @file ConservativeVoFExactTransport.inc
- * @brief Optional rational backend in the Exact namespace.
- * Included only by ConservativeVoFTransport.cc inside SimpleFluid::detail.
+/** @file ConservativeVoFTransport.cc
+ * @brief Native conservative implicit upwind assembly and per-inventory validation.
  */
+#include "solvers/details/ConservativeVoFTransport.hh"
+#include "geometry/ExactSweptGeometry.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "parallel/SparseOwnerExchange.hh"
+#include <bit>
+#include <tuple>
+#include "solvers/details/ConservativeVoFExactArithmetic.hh"
+#include "solvers/details/GeneralVoFExactStorage.hh"
+#include "solvers/details/GeneralVoFTransferBinding.hh"
+#include "utils/CompensatedSum.hh"
+
+#include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+
+#include "solvers/details/ConservativeVoFTransportSupport.hh"
+namespace SimpleFluid::detail
+{
+using namespace transport_support;
 namespace Exact
 {
 struct TransportPreparation
@@ -552,3 +576,4 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
     return result;
 }
 } // namespace Exact
+} // namespace SimpleFluid::detail

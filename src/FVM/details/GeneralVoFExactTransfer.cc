@@ -1,7 +1,21 @@
-/** @file GeneralVoFExactTransfer.inc
- * @brief Optional rational backend in the Exact namespace.
- * Included only by GeneralVoF.cc inside SimpleFluid::VoF.
+/** @file GeneralVoFExactTransfer.cc
+ * @brief Explicit exact capsule validation, export and adoption.
  */
+#include "FVM/details/GeneralVoFInternal.hh"
+namespace SimpleFluid::VoF
+{
+void GeneralVoF::validate_transfer_target(const ExactPhaseTransferResult& result) const
+{
+    Exact::GeneralVoF::validate_transfer_target(*this, result);
+}
+ExactPhaseTransferSource GeneralVoF::export_transfer_source(bool prepare_geometry) const
+{
+    return Exact::GeneralVoF::export_transfer_source(*this, prepare_geometry);
+}
+std::shared_ptr<const GeneralVoF> GeneralVoF::adopt_transfer(const ExactPhaseTransferResult& result) const
+{
+    return Exact::GeneralVoF::adopt_transfer(*this, result);
+}
 namespace Exact
 {
 void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTransferResult& result)
@@ -237,3 +251,4 @@ std::shared_ptr<const VoF::GeneralVoF> GeneralVoF::adopt_transfer(
         std::move(gas), std::move(carrier), self.data_->options, std::move(declarations), &result));
 }
 } // namespace Exact
+}
