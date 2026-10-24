@@ -1,7 +1,7 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "utils/BoundedInterval.hh"
-/** @file BoundedConvexGeometry.cc
+/** @file BoundedConvexGeometryInternal.hh
  * @brief Bounded wider-FP construction and structural convex partitions.
  */
 #include "geometry/BoundedConvexGeometry.hh"
@@ -36,11 +36,14 @@ struct SIMPLEFLUID_LOCAL BoundedPointProvenance
 {
     std::array<long double, 3> value, absolute_error;
     std::vector<BoundedPlaneAuthority> supports;
+    ArithmeticMode arithmetic_mode;
 };
 
 class SIMPLEFLUID_LOCAL BoundedGeometryAccess
 {
 public:
+    static std::shared_ptr<const BoundedPointProvenance> identity(const BoundedPoint& p);
+    static std::size_t identity_bytes(const std::shared_ptr<const BoundedPointProvenance>& p);
     static std::size_t storage_bytes(const BoundedPoint& p);
     static bool same_source(const BoundedPoint& a, const BoundedPoint& b);
     static void seal(BoundedPoint& point, std::vector<BoundedPlaneAuthority> supports);
@@ -59,11 +62,12 @@ struct Work
     BoundedGeometryLimits limits;
     std::size_t operations = 0, bytes = 0, pairs = 0, operation_limit = 0;
     explicit Work(BoundedGeometryLimits requested);
-    void operation();
     void charge(std::size_t count, std::size_t size);
     void pair();
 };
 extern thread_local Work* active_work;
+BoundedGeometryLimits mode_limits(ArithmeticMode mode);
+void require_mode(ArithmeticMode a, ArithmeticMode b);
 
 struct Operation
 {
@@ -73,48 +77,41 @@ struct Operation
     ~Operation() { active_work = previous; }
 };
 void operation();
-void interval_operation();
-void finite(long double value);
 
 using ::SimpleFluid::detail::directed_fp::infinity;
-struct ScalarPolicy
+// Persisted intervals carry coordinates only. Arithmetic must first bind a
+// fixed policy; deleted hooks turn accidental storage arithmetic into an error.
+struct StoragePolicy
 {
-    static bool ordinary() { return false; }
-    static void interval_operation() { bounded_geometry_detail::interval_operation(); }
-    static void operation() { bounded_geometry_detail::operation(); }
-    static void finite(long double value) { bounded_geometry_detail::finite(value); }
+    static bool ordinary() = delete;
+    static void interval_operation() = delete;
+    static void operation() = delete;
+    static void finite(long double value)
+    {
+        if (!std::isfinite(value))
+            bounded_geometry_detail::reject("arithmetic range unresolved (overflow or subnormal wider-FP result).");
+    }
     [[noreturn]] static void reject(const char* reason) { bounded_geometry_detail::reject(reason); }
 };
-long double directed_add(long double a, long double b, bool up);
-long double directed_multiply(long double a, long double b, bool up);
-long double directed_divide(long double a, long double b, bool up);
 
-using Interval = ::SimpleFluid::detail::directed_fp::Interval<ScalarPolicy>;
-using ::SimpleFluid::detail::directed_fp::scaled;
-
-Interval enclosure(BoundedGeometryValue a);
-BoundedGeometryValue bounded(Interval a);
+using Interval = ::SimpleFluid::detail::directed_fp::Interval<StoragePolicy>;
 
 using Point = std::array<Interval, 3>;
-Point point(const BoundedPoint& a);
-Point point(GeometryPoint a);
-BoundedPoint bounded(const Point& a);
-Point operator+(const Point& a, const Point& b);
-Point operator-(const Point& a, const Point& b);
-Point operator*(const Point& a, Interval b);
-Point scaled(const Point& a, int e);
-Interval dot(const Point& a, const Point& b);
-Point cross(const Point& a, const Point& b);
-bool same(const Point& a, const Point& b);
-bool nonzero(const Point& a);
-int sign(Interval a);
 
 struct Frame
 {
     GeometryPoint origin{};
     int exponent = 0;
 };
-Point transform(const Point& p, const Frame& from, const Frame& to);
+
+// Spatial coordinate ranges are not uncertainty scalars: keep their full extent
+// even when ordinary arithmetic uses only each point's nominal coordinates.
+struct CoordinateRange
+{
+    long double lo = 0, hi = 0;
+};
+
+using CoordinateBox = std::array<CoordinateRange, 3>;
 
 struct Plane
 {
@@ -123,6 +120,7 @@ struct Plane
     Interval offset;
     std::optional<GeometryHalfspace> input;
     std::vector<BoundedPlaneAuthority> authorities;
+    std::vector<std::weak_ptr<const BoundedPointProvenance>> source_vertices;
 };
 
 using PlanePtr = std::shared_ptr<const Plane>;
@@ -132,6 +130,7 @@ struct Vertex
     Point coordinates;
     std::vector<PlanePtr> incident;
     std::vector<BoundedPlaneAuthority> authorities;
+    std::shared_ptr<const BoundedPointProvenance> source_identity;
 };
 
 using Face = std::vector<std::size_t>;
@@ -143,6 +142,7 @@ struct Ancestry
     std::shared_ptr<const Ancestry> parent;
     std::shared_ptr<const Split> split;
     bool outside = false;
+    std::size_t depth = 0;
 };
 
 struct Split
@@ -150,22 +150,16 @@ struct Split
     std::shared_ptr<const Ancestry> parent;
 };
 
+struct PartitionCertificate
+{
+    std::shared_ptr<const Ancestry> parent;
+    std::vector<std::weak_ptr<const Ancestry>> members;
+};
+
 struct Surface
 {
     PlanePtr plane;
     int orientation = 1;
-};
-
-int matching_input(const GeometryHalfspace&, const GeometryHalfspace&);
-Interval distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane);
-Interval square_root(Interval x);
-
-struct Accumulator
-{
-    Interval enclosure;
-    long double sum = 0, correction = 0;
-    void add(Interval term);
-    Interval result() const;
 };
 
 struct Integrals
@@ -187,27 +181,19 @@ namespace SimpleFluid::Meshes
 struct SIMPLEFLUID_LOCAL BoundedConvexGeometry::Impl
 {
     Frame frame;
+    GeometryPoint reference_origin{};
     std::vector<Vertex> vertices;
     std::vector<Face> faces;
     std::vector<Surface> surfaces;
     std::vector<BoundedPoint> displayed;
     BoundedGeometryLimits limits;
+    CoordinateBox bounds;
     Interval volume;
+    bool partition_proof_only = false;
     std::shared_ptr<const Ancestry> ancestry = std::make_shared<Ancestry>();
+    std::shared_ptr<const PartitionCertificate> partition_certificate;
     std::shared_ptr<MomentCache> moment_cache = std::make_shared<MomentCache>();
 };
-} // namespace SimpleFluid::Meshes
-namespace SimpleFluid::Meshes
-{
-
-namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
-{
-Integrals integrate(const BoundedConvexGeometry::Impl& poly, bool moments);
-void finish(BoundedConvexGeometry::Impl& poly);
-void validate_connected_boundary(std::size_t vertex_count, const std::vector<Face>& faces);
-std::shared_ptr<BoundedConvexGeometry::Impl> import(GeometryPoint origin, std::span<const BoundedPoint> vertices,
-    const std::vector<Face>& faces, BoundedGeometryLimits limits, bool authenticated_planarity);
-} // namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes
 namespace SimpleFluid::Meshes
 {
@@ -226,59 +212,13 @@ BoundedGeometryValue bounded_orientation(const std::array<BoundedPoint, 4>& vert
 namespace SimpleFluid::Meshes
 {
 
-namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
-{
-int matching_input(const GeometryHalfspace& a, const GeometryHalfspace& b);
-bool incident(const Vertex& v, const PlanePtr& plane);
-BoundedGeometrySection section(
-    const BoundedConvexGeometry::Impl& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
-bool structural_cover(
-    const std::shared_ptr<const Ancestry>& root, const std::vector<std::shared_ptr<const Ancestry>>& leaves);
-BoundedPoint source_point_fan(std::span<const ConvexCellGeometry* const> sources, std::span<const char> identity);
-} // namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
-} // namespace SimpleFluid::Meshes
-namespace SimpleFluid::Meshes
-{
-
-BoundedPoint bounded_source_point(const ConvexCellGeometry& source, std::span<const char> identity);
-BoundedPoint bounded_source_point(std::span<const ConvexGeometryPtr> sources, std::span<const char> identity);
+BoundedPoint bounded_source_point(
+    const ConvexCellGeometry& source, std::span<const char> identity, ArithmeticMode mode);
+BoundedPoint bounded_source_point(
+    std::span<const ConvexGeometryPtr> sources, std::span<const char> identity, ArithmeticMode mode);
 BoundedPoint bounded_point_displaced(const BoundedPoint& source, const BoundedPoint& displacement);
 BoundedPoint bounded_backtrace_constrained(const BoundedPoint& source, GeometryPoint velocity, double timestep,
     std::span<const BoundedFaceConstraint> walls, BoundedGeometryLimits limits);
-} // namespace SimpleFluid::Meshes
-namespace SimpleFluid::Meshes
-{
-
-namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
-{
-struct NumericalWriter
-{
-    std::vector<char> bytes;
-    std::size_t limit;
-    explicit NumericalWriter(std::size_t budget) : limit(budget) {}
-    void word(std::uint64_t x);
-    void real(long double x);
-    void interval(Interval x);
-    void coordinates(const Point& p);
-    void frame(const Frame& f);
-    void authorities(const std::vector<BoundedPlaneAuthority>& keys);
-};
-
-struct NumericalReader
-{
-    std::span<const char> bytes;
-    std::size_t cursor = 0;
-    explicit NumericalReader(std::span<const char> input) : bytes(input) {}
-    std::uint64_t word();
-    std::size_t count(std::size_t maximum, std::size_t element);
-    long double real();
-    Interval interval();
-    Point coordinates() { return {interval(), interval(), interval()}; }
-    Frame frame();
-    std::vector<BoundedPlaneAuthority> authorities(
-        const std::set<BoundedPlaneAuthority>& registry, BoundedGeometryLimits limits);
-};
-} // namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes
 namespace SimpleFluid::Meshes
 {
@@ -305,18 +245,6 @@ struct PlanarLine
     PlanarVertex first, second;
     std::vector<BoundedPlaneAuthority> supports;
 };
-Interval planar_turn(const PlanarVertex& a, const PlanarVertex& b, const PlanarVertex& c);
-std::vector<BoundedPlaneAuthority> planar_common(
-    const std::vector<BoundedPlaneAuthority>& first, const std::vector<BoundedPlaneAuthority>& second);
-void planar_charge(const PlanarVertex& vertex);
-PlanarLine planar_line(const PlanarVertex& first, const PlanarVertex& second, const BoundedPlaneAuthority& primary);
-Interval planar_distance(const PlanarVertex& vertex, const PlanarLine& edge);
-Interval planar_area(const PlanarPolygon& polygon);
-void planar_convex(const PlanarPolygon& polygon, int winding, const BoundedPlaneAuthority& primary);
-void planar_push(PlanarPolygon& polygon, PlanarVertex vertex);
-PlanarVertex planar_crossing(
-    const PlanarVertex& a, const PlanarVertex& b, Interval da, Interval db, const PlanarLine& edge, std::size_t& token);
-bool planar_line_contact(const PlanarPolygon& polygon, const BoundedPlaneAuthority& primary);
 } // namespace bounded_geometry_detail SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes
 namespace SimpleFluid::Meshes

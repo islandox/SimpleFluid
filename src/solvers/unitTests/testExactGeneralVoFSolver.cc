@@ -48,7 +48,8 @@ std::shared_ptr<const VoF::GeneralVoF> inventory_fixture(
         carrier.push_back(1 - g);
     }
     VoF::GeneralVoFOptions options;
-    options.inventory_policy = policy;
+    options.arithmetic_mode =
+        policy == VoF::PhaseInventoryPolicy::ExperimentalExact ? ArithmeticMode::Exact : ArithmeticMode::Ordinary;
     auto source = std::make_shared<const VoF::GeneralVoF>(hierarchy, order, gas, carrier, options);
     int local_empty = source->mesh()->num_owned_cells() == 0, empty = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
@@ -225,7 +226,7 @@ TEST(ExactGeneralVoFSolverTest, GeometryInstrumentationObservesActualFiniteAndEx
                   after_finite_solver.bounded.floating_operations - before_finite_solver.bounded.floating_operations),
         0);
     auto exact_options = finite_source->options();
-    exact_options.inventory_policy = VoF::PhaseInventoryPolicy::ExperimentalExact;
+    exact_options.arithmetic_mode = ArithmeticMode::Exact;
     const auto before_exact_fvm = VoF::GeneralVoF::geometry_statistics();
     const auto exact_source = std::make_shared<const VoF::GeneralVoF>(finite_source->hierarchy(),
         finite_source->owned_order(), finite_source->gas_volumes(), finite_source->carrier_volumes(), exact_options);

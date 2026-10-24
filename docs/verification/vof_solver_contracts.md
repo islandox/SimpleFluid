@@ -1,6 +1,7 @@
 # VoF verification contracts
 
-This index owns reproducible numerical assertions and focused test entry
+Floating-point arithmetic is the primary VoF path. This index owns its
+reproducible numerical assertions and focused test entry
 points. The modeling guides and [general AMR design](../architecture/general_amr.md#qualification-status)
 own support and qualification status. Raw commands, source/runtime manifests,
 XML, logs and timing samples belong in local build artifacts. Historical passes
@@ -102,12 +103,12 @@ that a campaign ran during documentation maintenance.
 
 | Scope | Targets and independent gates |
 | --- | --- |
-| Hierarchy and construction | `testCartesianAMR`, `testExactExtrudedConstruction`, `testExtrudedAMR`, `testLocalProductAMR`, `testPolyhedralAMR`, `testMixedAMR`: ancestry, exact source observations, complete inverse families, closure and transactional rejection |
-| Geometry and remap | `testConvexCellGeometry`, `testExactPolyhedralComplex`, `testExactExplicitProvider`, `testConservativeAMRRemap`, `testProductAMRRemap`, `testPolyhedralAMRRemap`, `testMixedAMRRemap`: actual native certificates, positive tiny pieces, coverage, moments, independent phases and paired quantities |
+| Hierarchy and construction | `testCartesianAMR`, `testExtrudedAMR`, `testLocalProductAMR`, `testPolyhedralAMR`, `testMixedAMR`: ancestry, exact source observations, complete inverse families, closure and transactional rejection |
+| Native authority boundary | Source/geometry checks are indexed in [ExactGeometry](../architecture/exact_geometry.md#focused-verification); they qualify source import separately from FP numerical geometry and remap |
 | Distributed migration | `testDistributedAdaptiveKey`, `testDistributedAdaptivePackets`, `testDistributedAdaptiveAuthority`, `testDistributedAdaptiveClosure`, `testDistributedAdaptiveBalance`, `testDistributedAdaptiveState`, `testDistributedCartesianKernel`, `testDistributedProductKernel`, `testDistributedMixedKernel`, `testFrozenNative`, `testSparseNativeMesh`, `testSparseNativePeriodic`, `testDistributedNativeOperators`, `testSparseOwnerExchange`: owner-local state, ghost completeness, exact contact authorities, final packet cost and observed empty owners |
-| General geometry/transport | `testExactSweptGeometry`, `testDepartureFan`, `testPolyhedralReconstruction`, `testExactPolyhedralReconstruction`, `testExactPhaseTransfer`, `testGeneralVoF`, `testExactGeneralVoF`: exact contacts versus positive overlaps, signed PLIC support, donor fans, finite provenance and optional exact-policy separation |
-| General flow | `testGeneralVoFFlowWorkspace`, `testConservativeVoFTransport`, `testGeneralVoFPhiClosure`, `testGeneralVoFExactPressure`, `testGeneralVoFCurvature`, `testGeneralVoFSolver`: physical residuals, conditioned sampled directions, independent phase mass, original physical horizons, rollback/regrid and cache invalidation |
-| Explicit exact test targets | `testExactGeneralVoF`, `testExactPolyhedralReconstruction`, `testExactConservativeVoFTransport`, `testExactGeneralVoFFlowWorkspace`, `testExactGeneralVoFPhiClosure`, `testExactGeneralVoFCurvature`, `testExactGeneralVoFSolver`: extracted exact-backend and cross-policy cases, registered with the `exact` label |
+| Primary FP geometry/transport | `testBoundedConvexGeometry`, `testBoundedPlanarFace`, `testBoundedPhaseArithmetic`, `testPolyhedralReconstruction`, `testGeneralVoF`, `testGeneralVoFFinite`, `testFiniteVoFRemap`: bounded constructions, signed PLIC support, refinement requests, canonical transfers, independent phases and history |
+| General flow | `testGeneralVoFFlowWorkspace`, `testConservativeVoFTransport`, `testGeneralVoFPhiClosure`, `testGeneralVoFCurvature`, `testGeneralVoFSolver`: physical residuals, independent phase mass, original physical horizons, rollback/regrid and cache invalidation |
+| Optional exact backend | `testExactGeneralVoF`, `testExactPolyhedralReconstruction`, `testExactConservativeVoFTransport`, `testExactGeneralVoFFlowWorkspace`, `testExactGeneralVoFPhiClosure`, `testExactGeneralVoFCurvature`, `testExactGeneralVoFSolver`: rational operations, exact storage/history and explicit cross-policy boundaries; registered with the `exact` label |
 
 For example, a reconstruction-only change can use:
 
@@ -130,51 +131,66 @@ physical assertions. Use distinct per-rank XML paths and count logical methods
 separately from rank executions. Explicit exclusions and known failures must
 remain visible; consult the design's qualification table before reporting a pass.
 
-## Proposed FP geometry acceptance gates
+<a id="proposed-fp-geometry-acceptance-gates"></a>
 
-**Status: planned verification for the
-[FP geometry proposal](../architecture/general_amr.md#proposed-floating-point-geometry-for-finite-vof),
-not implemented behavior or a newly executed campaign.** The integrated
-integer/FP predicate and lazy-distance optimizations still construct exact
-geometry and run exact coverage/measure checks. Their recorded results do not
-qualify approximate constructions, FP moments or a replacement coverage contract.
+## Floating-point acceptance gates
 
+**Status: [ordinary FP is the default and bounded certification is opt-in](../architecture/general_amr.md#floating-point-geometry-and-arithmetic).
+The finite modes have focused geometry, reconstruction, arithmetic, projection and remap coverage;
+full coupled-flow and performance qualification remain open.** Earlier
+rational-route results are documented in [ExactVoF](../architecture/exact_vof.md)
+and do not qualify the FP implementation. `testBoundedConvexGeometry`,
+`testBoundedPlanarFace`, `testPolyhedralReconstruction`,
+`testBoundedPhaseArithmetic`, `testGeneralVoFFinite`, `testFiniteVoFRemap` and
+the finite Flow/Phi tests provide separate component gates. Consult actual
+run manifests for source/configuration, ranks and method results; declarations
+or a component pass are not evidence that the full horizon completed.
+
+Mode regressions distinguish ordinary scalar admission from explicit bounded
+certification, while checking the same physical invariants and rejecting mixed
+mode state/packets. Ordinary checks do not establish an interval certificate.
 Keep exact-utility and conservative-accounting oracles distinct from physical
 resolution requirements. The mandatory arbitrary subcell-phase reconstruction
 success cases have been retired; ordinary-volume fits retain complementary,
 reversed-normal and pure-endpoint coverage. Historical tiny-fit results are not
 future production gates. Add separate resolution/refinement cases for the
-proposed numerical path and compare admitted reconstructions against independent
+finite numerical path and compare admitted reconstructions against independent
 geometric or analytic references. A changed policy must be named in its evidence.
 
-| Gate | Required evidence before integration |
+| Gate | Required qualification evidence |
 | --- | --- |
-| Arithmetic routing and exact-work limits | Assert that the proposed finite backend performs no rational construction, volume/moment or ledger operations, including cache preparation, MPI serialization and retries. Exercise bounded FP retry, the sign-only exact exception and cap exhaustion; no hidden whole-geometry retry or policy switch. Reference/oracle work is explicit and measured separately |
+| Arithmetic routing and exact-work limits | Assert that ordinary and certified finite geometry/ledger evaluation performs no rational construction, volume/moment or ledger operations. Count native-authority imports and reference/oracle work separately. Verify the ordinary default, explicit certification, cap exhaustion and rejection of mixed modes; no failure may switch modes |
 | Volume and moment bounds | Analytic boxes/tetrahedra, oblique rational cuts, translated/scaled cells and extreme ranges; the independent reference lies inside every claimed enclosure, and the propagated error fits the unchanged physical budget. No moment is required solely to replay a qualified structural coverage proof |
-| Construction and topology | Shared edge/face identity, complementary cuts, coplanarity, tangencies, collinear prefixes, positive slivers and real holes/overlaps; bounded FP retries or sign-only exact predicates must resolve decisions from original provenance. Unresolved geometry rejects; an exact classification of rounded coordinates cannot certify the source construction |
-| PLIC fitting | `IndependentPhaseVolumesAreUnchangedDuringFitting` and `RationalCellFitsComplementaryPlanesAndPureEndpoints` cover ordinary phase amounts, nonbinary cell support, complementary labels, reversed normals and pure endpoints; no arbitrarily thin phase-fit success is required |
-| Physical resolution and refinement | Planned cases must distinguish adequately resolved features, genuinely underresolved thickness/curvature/stencils, and small cut fractions from resolved grazing interfaces. Verify unit/scale invariance, refinement request and recheck, exhausted/unavailable refinement, actionable diagnostics and atomic rejection without phase-mass deletion |
+| Construction and topology | Shared edge/face identity, complementary cuts, tangencies, collinear prefixes, positive slivers and real holes/overlaps remain checked in both modes. Ordinary geometry uses scalar predicates; bounded certification additionally requires original-provenance enclosure decisions. Ordinary results must not claim a certified enclosure |
+| PLIC fitting | `PolyhedralReconstruction.RationalSupportFitsComplementaryOrdinaryVolumes`, `FarMinoritySupportRetainsOffsetPrecisionForBothLabelsAndNormals` and the pure-endpoint case cover bounded FP fitting, nonbinary support, complementary labels and reversed normals; arbitrary thin-phase fit success is not required |
+| Physical resolution and refinement | Finite reconstruction tests distinguish supported neighborhoods, insufficient phase/stencil support and small grazing cuts; test scaling, actionable refinement requests and unchanged inventory on rejection. This necessary support/model screen is not a full thickness/curvature or application-convergence test. Automatic refinement/reinitialization, exhausted-refinement handling and independent convergence remain open |
 | Inventory and zero-phase accounting | Independent gas/carrier storage, dominant-phase cancellation, small carrier products, pure phases and zero-reference residuals remain accounting checks. They do not require physical reconstruction of an underresolved phase; refinement or rejection must preserve accepted inventory rather than erase mass |
 | Small intermediate contributions | Exercise individually unrepresentable contributions accumulated with scaling/compensation and propagated bounds, including many pieces whose total is significant. No contribution vanishes from the accounting/error budget; an uncertain sign is not clamped. Accept only established nonnegative, conservative budgets; otherwise reject atomically without rational volume fallback |
 | Canonical conservation | One shared phase transfer per face across MPI, opposite incidences, compatible coarse/fine sums, source-free constant/pure states, donor availability and recipient occupancy; check local and global extensive budgets independently |
+| Ordinary face construction | `OrdinaryVoFSweep` checks signed represented-volume defects against independent cell-derived allowances, unchanged canonical controls and rejection under smaller or invalid budgets. Integrated coverage must verify owner-supplied canonical subface counts, identical shared-face diagnostics across ranks and combined cell closure within the original volume allowance |
 | Boundedness and repairs | Nonnegative phase amounts and supported CFL/capacity bounds; any permitted roundoff correction is shared-face conservative and bounded by derived uncertainty; no independent cell clipping or residual renormalization |
 | Structural coverage certificates | Independently demonstrate containment, non-overlap and completeness for each admitted construction class before skipping repeated moment/pair checks; balanced gap/overlap examples must still reject. Cover signed overlays separately from positive partitions |
 | Coupled physical acceptance | Compatible phase/mass/momentum ledgers, original pressure/divergence and physical-residual targets, and the named hydrostatic, capillary, viscous and coarse/fine horizons above |
 | Provenance and transactions | Topology/geometry/partition and policy invalidation, rejected cache preparation, collective failure with asserted empty owners, stale/foreign owner evidence, and unchanged accepted state/time/history after rejection |
-| Accumulated error and policy isolation | Track error across repeated steps, conservative remap and repartition without resetting it; preserve `ExperimentalExact` authority and reject cross-policy adoption or silent resource-triggered switching |
-| Bounded retries and compiler coverage | Directly exercise decisive, ambiguous, range-limited and unsupported FP cases. Compare retries/predicates with original inputs and independent references; exhaust their work/storage budget and verify collective rejection. Unsupported environments must select a qualified bounded FP route or reject, never silently enable full rational geometry. Keep actual compiler/environment coverage explicit |
+| Accumulated error and policy isolation | Track error across repeated steps, conservative remap and repartition without resetting it; reject cross-policy adoption or silent resource-triggered switching; optional-policy contracts are owned by [ExactVoF](../architecture/exact_vof.md) |
+| Bounded retries and compiler coverage | In explicit certification mode, exercise decisive, ambiguous, range-limited and unsupported-environment cases, and exhaust work/storage budgets. In ordinary mode, verify scalar finite/domain checks and the unchanged physical acceptance criteria. Keep reference/oracle runs separate and compiler/environment coverage explicit; never enable exact geometry as a fallback |
 
 The general-native targets listed above provide the starting regression map.
 Inspect their current CMake registrations, run affected Debug serial cases first,
 then relevant MPI modes with observed empty owners. A new FP acceptance path
 needs its own independent resolution, error and convergence tests. Test separately
 that spatial underresolution requests refinement, while a resolved construction
-with unresolved arithmetic rejects with an arithmetic diagnostic. Neither an
-exact predicate nor a successful reference reconstruction can bypass the
-resolution gate or rescue a failed finite acceptance budget. Existing exact-API
-and `ExperimentalExact` tests keep their own authority; do not weaken them to
-match FP values. No resolution controller, refinement request or FP backend is
-implemented by these design changes or the earlier test retirement.
+with unresolved arithmetic rejects with an arithmetic diagnostic. A reference
+calculation cannot bypass the resolution gate or rescue a failed FP acceptance
+budget. Optional exact-API verification is owned by
+[ExactVoF](../architecture/exact_vof.md#verification-and-historical-qualification),
+[ExactTransport](../architecture/exact_transport.md#focused-verification) and
+[ExactGeometry](../architecture/exact_geometry.md#focused-verification).
+The finite backend and refinement-request API are implemented;
+an automatic adaptation controller and full physical resolution qualification
+remain open. Tangent remap cases whose newly tiny phase cannot meet its own
+arithmetic accuracy budget reject atomically; this is an arithmetic limitation,
+not a phase cutoff or proof of spatial underresolution.
 Full flow qualification includes both
 long capillary/viscous methods; any exclusion remains an open named boundary.
 
@@ -183,11 +199,27 @@ over complete physical horizons in serial and at two/four ranks. Preserve the
 50-cell coarse/fine case's ten `0.002`-second steps through `0.02`, and add
 longer runs to expose accumulated drift. Record initialization and step costs,
 repetitions, per-rank wall/CPU time, fragment/pair counts, bounded FP retries and
-rejections, and exact work split into predicate/construction/measure/ledger
-counts. Report operand-size distributions for any exact predicates, their cap
-usage, certificate/measure-cache reuse and process peak RSS. Verify zero rational
-construction/measure/ledger work in the proposed finite backend; do not infer it
-from a low sampling percentage. Report reference-oracle and instrumentation
-cost separately; uninstrumented timing runs must not overlap other builds or
+rejections, certificate/measure-cache reuse and process peak RSS. Report native
+import and selected reference costs independently. Verify zero rational
+construction/measure/ledger work in finite numerical steps; count native-source
+authority import separately and do not infer zero work from a low sampling
+percentage. Report instrumentation settings and overhead; timing runs must
+not overlap other builds or
 numerical jobs. No operation-count, memory or universal scaling claim may be
 inferred from an inclusive CPU profile alone.
+
+## Benchmark setup and reference data
+
+A benchmark may use verified reference data or independent analytic phase
+initialization. Regenerating rational reference volumes in every run is not a
+requirement for the primary FP path. Keep reference-oracle checks in explicitly
+selected correctness work. Preserve the same physical initial data and error
+criteria when changing a fixture.
+
+Measure fixture construction/adaptation, native authority import, solver
+construction, explicit initialization and physical steps separately, alongside
+complete-case wall time. A timer spanning all setup stages cannot be reported
+as `initialize()` alone. The solver constructor currently initializes a default
+state, so a following explicit initialization repeats part of the preparation.
+Exact-API instrumentation is optional; bounded geometry/ledger counters are
+built in. Describe timing instrumentation and concurrent workloads accurately.

@@ -4,6 +4,28 @@
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
+PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode)
+{
+    return mode == ArithmeticMode::Exact ? PhaseInventoryPolicy::ExperimentalExact : PhaseInventoryPolicy::Finite;
+}
+Meshes::BoundedGeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes)
+{
+    Meshes::BoundedGeometryLimits limits;
+    limits.arithmetic_mode = mode;
+    limits.byte_budget = bytes;
+    return limits;
+}
+long double phase_allowance(Meshes::BoundedGeometryValue source, double relative)
+{
+    const auto evaluate = [&]<ArithmeticMode Mode>()
+    {
+        using Math = fp::Arithmetic<Mode>;
+        return Math::lower(Math::multiply(Math::make_value(Math::lower(source)), Math::make_value(relative)));
+    };
+    if (source.arithmetic_mode == ArithmeticMode::Ordinary)
+        return evaluate.template operator()<ArithmeticMode::Ordinary>();
+    return evaluate.template operator()<ArithmeticMode::BoundedCertification>();
+}
 Meshes::ExactPhaseMeasures phase_measures(const Cell& cell)
 {
     if (cell.experimental_exact)
@@ -16,18 +38,44 @@ Measure finite_bound(double value)
 {
     return Measure::from_value(value);
 }
+namespace
+{
+template<ArithmeticMode Mode> Meshes::BoundedGeometryValue finite_cell_defect(const Cell& cell,
+    Meshes::BoundedGeometryValue actual)
+{
+    using Math = fp::Arithmetic<Mode>;
+    fp::SumFor<Mode> defect_sum(actual.arithmetic_mode);
+    defect_sum.add(Math::make_value(cell.phase.gas_volume));
+    defect_sum.add(Math::make_value(cell.phase.carrier_volume));
+    defect_sum.add(Math::negate(actual));
+    return defect_sum.value();
+}
+Meshes::BoundedGeometryValue finite_cell_defect(const Cell& cell, Meshes::BoundedGeometryValue actual)
+{
+    if (actual.arithmetic_mode == ArithmeticMode::Ordinary)
+        return finite_cell_defect<ArithmeticMode::Ordinary>(cell, actual);
+    return finite_cell_defect<ArithmeticMode::BoundedCertification>(cell, actual);
+}
+Meshes::BoundedGeometryValue finite_native_conversion(const Cell& cell, Meshes::BoundedGeometryValue actual)
+{
+    const auto evaluate = [&]<ArithmeticMode Mode>()
+    {
+        using Math = fp::Arithmetic<Mode>;
+        return Math::subtract(Math::make_value(cell.native_volume), actual);
+    };
+    if (actual.arithmetic_mode == ArithmeticMode::Ordinary)
+        return evaluate.template operator()<ArithmeticMode::Ordinary>();
+    return evaluate.template operator()<ArithmeticMode::BoundedCertification>();
+}
+} // namespace
 void occupancy(Cell& cell)
 {
     if (cell.finite_geometry)
     {
         using namespace finite_detail;
         const auto actual = cell.finite_geometry->volume();
-        const auto conversion = subtract(Value{cell.native_volume, 0}, actual);
-        Sum defect_sum;
-        defect_sum.add({cell.phase.gas_volume, 0});
-        defect_sum.add({cell.phase.carrier_volume, 0});
-        defect_sum.add(negate(actual));
-        const auto defect = defect_sum.value();
+        const auto conversion = finite_native_conversion(cell, actual);
+        const auto defect = finite_cell_defect(cell, actual);
         const auto input = static_cast<long double>(cell.native_volume) * 8 * std::numeric_limits<double>::epsilon();
         if (!(cell.native_volume > 0) || !std::isfinite(cell.native_volume) ||
             std::abs(conversion.value) > input + conversion.absolute_error ||
@@ -61,7 +109,7 @@ void occupancy(Cell& cell)
 }
 void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
 {
-    const bool experimental = options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact;
+    const bool experimental = options.arithmetic_mode == ArithmeticMode::Exact;
     if (experimental != bool(cell.experimental_exact))
         throw std::invalid_argument("General VoF inventory policy/payload differs.");
     if (experimental)
@@ -75,21 +123,18 @@ void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
     if (!experimental)
     {
         using namespace finite_detail;
-        if (!cell.finite_geometry)
+        if (!cell.finite_geometry || cell.finite_geometry->arithmetic_mode() != options.arithmetic_mode)
             throw std::invalid_argument("Finite General VoF is missing bounded geometry authority.");
         const auto actual = cell.finite_geometry->volume();
-        Sum defect_sum;
-        defect_sum.add({cell.phase.gas_volume, 0});
-        defect_sum.add({cell.phase.carrier_volume, 0});
-        defect_sum.add(negate(actual));
-        const auto defect = defect_sum.value();
+        const auto defect = finite_cell_defect(cell, actual);
         const auto& e = cell.occupancy;
         bool valid = std::isfinite(cell.phase.gas_volume) && cell.phase.gas_volume >= 0 &&
             std::isfinite(cell.phase.carrier_volume) && cell.phase.carrier_volume >= 0 &&
             std::isfinite(e.difference) && std::isfinite(e.native_conversion) &&
             std::abs(defect.value) <= e.admitted_bound + defect.absolute_error;
-        for (double bound : {e.admitted_bound, e.phase_input_bound, e.fit_bound, e.transferred_bound,
-                 e.fit_allocation_bound, cell.roundoff.gas, cell.roundoff.carrier, cell.finite_history.gas, cell.finite_history.carrier})
+        for (double bound :
+            {e.admitted_bound, e.phase_input_bound, e.fit_bound, e.transferred_bound, e.fit_allocation_bound,
+                cell.roundoff.gas, cell.roundoff.carrier, cell.finite_history.gas, cell.finite_history.carrier})
             valid = valid && std::isfinite(bound) && bound >= 0;
         if (!valid || std::uint64_t(cell.declaration) > 2)
             throw std::invalid_argument("General VoF finite occupancy provenance is invalid.");
@@ -184,14 +229,21 @@ long double finite_real(wire::Reader& r)
 }
 void finite_value(wire::Writer& w, Meshes::BoundedGeometryValue v)
 {
+    finite_detail::validate(v);
+    w.word(std::uint64_t(v.arithmetic_mode));
     finite_real(w, v.value);
     finite_real(w, v.absolute_error);
 }
-Meshes::BoundedGeometryValue finite_value(wire::Reader& r)
+Meshes::BoundedGeometryValue finite_value(wire::Reader& r, std::optional<ArithmeticMode> expected)
 {
-    Meshes::BoundedGeometryValue v{finite_real(r), finite_real(r)};
-    if (v.absolute_error < 0)
-        throw std::invalid_argument("Finite VoF wire bound is negative.");
+    const auto mode = r.word();
+    if (mode > std::uint64_t(ArithmeticMode::BoundedCertification))
+        throw std::invalid_argument("Finite VoF wire arithmetic mode is invalid.");
+    Meshes::BoundedGeometryValue v{finite_real(r), finite_real(r), ArithmeticMode(mode)};
+    finite_detail::validate(v);
+    if ((v.arithmetic_mode == ArithmeticMode::Ordinary && v.absolute_error != 0) ||
+        (expected && v.arithmetic_mode != *expected))
+        throw std::invalid_argument("Finite VoF wire scalar arithmetic mode differs from its state.");
     return v;
 }
 void plane(wire::Writer& w, const PolyhedralInterface& p)
@@ -212,7 +264,7 @@ void plane(wire::Writer& w, const PolyhedralInterface& p)
     if (p.finite_geometry)
         finite_value(w, p.finite_target_volume_difference);
 }
-PolyhedralInterface plane(wire::Reader& r)
+PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode)
 {
     PolyhedralInterface p;
     for (auto& v : p.gas.normal)
@@ -229,7 +281,7 @@ PolyhedralInterface plane(wire::Reader& r)
     p.fit_converged = r.word();
     p.finite_geometry = r.word();
     if (p.finite_geometry)
-        p.finite_target_volume_difference = finite_value(r);
+        p.finite_target_volume_difference = finite_value(r, mode);
     return p;
 }
 Meshes::ExactPhaseMeasures phases(const Meshes::ExactConvexFragment& fragment, const PolyhedralInterface& p)
@@ -269,7 +321,7 @@ PolyhedralPhaseSample geometric_sample(const Cell& cell)
 }
 void refresh_experimental_catalog(GeneralVoF::Data& data)
 {
-    if (data.options.inventory_policy == PhaseInventoryPolicy::Finite)
+    if (data.options.arithmetic_mode != ArithmeticMode::Exact)
     {
         data.experimental_catalog.reset();
         return;
@@ -302,7 +354,8 @@ void retained_budget(const GeneralVoF::Data& data)
     std::set<const void*> geometry;
     budget.add(sizeof(data) + sizeof(GeneralVoF::Data::Topology) + data.topology->order.capacity() * sizeof(Key) +
                (data.gas.capacity() + data.carrier.capacity()) * sizeof(double) +
-               data.phases.capacity() * sizeof(PhaseVolumes) + (data.roundoff.capacity() + data.phase_history.capacity()) * sizeof(PhaseRoundoff) +
+               data.phases.capacity() * sizeof(PhaseVolumes) +
+               (data.roundoff.capacity() + data.phase_history.capacity()) * sizeof(PhaseRoundoff) +
                data.occupancy.capacity() * sizeof(PhaseError));
     std::set<const void*> exact_payloads;
     const auto charge_exact = [&](const Meshes::ExactGeometryMeasure& value)
@@ -569,12 +622,13 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
         [&]
         {
             wire::Budget budget{options.byte_budget};
-            if (std::uint64_t(options.inventory_policy) > 1)
-                throw std::invalid_argument("Unknown General VoF inventory policy.");
-            budget.packet(17 * 8);
+            if (std::uint64_t(options.arithmetic_mode) > std::uint64_t(ArithmeticMode::Exact))
+                throw std::invalid_argument("Unknown General VoF arithmetic mode.");
+            budget.packet(18 * 8);
             wire::Writer w;
+            w.word(2); // Full arithmetic-mode protocol, distinct from legacy inventory policy.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
-                     std::uint64_t(options.support_rings), std::uint64_t(options.inventory_policy),
+                     std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
                      std::uint64_t(options.reconstruction.maximum_offset_iterations),
                      std::uint64_t(options.reconstruction.maximum_fit_iterations),
                      std::uint64_t(options.reconstruction.maximum_stencil_cells),
@@ -640,11 +694,13 @@ void import_phases(GeneralVoF::Data& data)
                 const auto& cell = data.cells.at(key);
                 if (cell.owner != comm->getRank() || cell.revision != revision)
                     throw std::invalid_argument("General VoF stale phase request.");
-                budget.packet(bytes.size() + 152);
                 wire::Writer w;
                 w.bytes(bytes);
                 w.word(revision);
-                w.word(std::uint64_t(data.options.inventory_policy));
+                w.word(3);
+                w.word(std::uint64_t(data.options.arithmetic_mode));
+                w.word(cell.canonical_face_count);
+                finite_real(w, cell.ordinary_quota_scale);
                 real(w, cell.phase.gas_volume);
                 real(w, cell.phase.carrier_volume);
                 w.word(std::uint64_t(cell.declaration));
@@ -658,7 +714,7 @@ void import_phases(GeneralVoF::Data& data)
                         &cell.occupancy.phase_input_bound, &cell.occupancy.fit_residual, &cell.occupancy.fit_bound,
                         &cell.occupancy.transferred_bound, &cell.occupancy.fit_allocation_bound})
                     real(w, *value);
-                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                if (data.options.arithmetic_mode == ArithmeticMode::Exact)
                 {
                     if (!cell.experimental_exact)
                         throw std::invalid_argument("Missing exact owner phase state.");
@@ -666,6 +722,7 @@ void import_phases(GeneralVoF::Data& data)
                     budget.add(8 + encoded.size());
                     w.bytes(encoded);
                 }
+                budget.packet(w.data.size());
                 replies.push_back({packet.peer, std::move(w.data)});
             }
         });
@@ -683,8 +740,15 @@ void import_phases(GeneralVoF::Data& data)
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated phase reply.");
-                if (r.word() != std::uint64_t(data.options.inventory_policy))
+                if (r.word() != 3 || r.word() != std::uint64_t(data.options.arithmetic_mode))
                     throw std::invalid_argument("General VoF ghost inventory policy differs.");
+                const auto count = r.word();
+                const auto quota = finite_real(r);
+                if (!count || count > limit / sizeof(std::size_t) || !std::isfinite(quota) || quota < 0 ||
+                    (data.options.arithmetic_mode == ArithmeticMode::Ordinary && !(quota > 0)))
+                    throw std::invalid_argument("General VoF owner face quota is malformed.");
+                cell.canonical_face_count = static_cast<std::size_t>(count);
+                cell.ordinary_quota_scale = quota;
                 cell.phase.gas_volume = real(r);
                 cell.phase.carrier_volume = real(r);
                 cell.declaration = GeneralVoFPhaseGeometry(r.word());
@@ -698,7 +762,7 @@ void import_phases(GeneralVoF::Data& data)
                         &cell.occupancy.phase_input_bound, &cell.occupancy.fit_residual, &cell.occupancy.fit_bound,
                         &cell.occupancy.transferred_bound, &cell.occupancy.fit_allocation_bound})
                     *value = real(r);
-                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                if (data.options.arithmetic_mode == ArithmeticMode::Exact)
                     cell.experimental_exact = detail::decode_experimental(r.bytes(), limit);
                 else
                     cell.experimental_exact.reset();
@@ -763,7 +827,8 @@ PolyhedralInterface reconstruct_finite_cell(const GeneralVoF::Data& data, const 
         result.pure_carrier = !result.pure_gas;
         const auto minority = result.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
         result.target_volume_residual = minority;
-        result.finite_target_volume_difference = {-static_cast<long double>(minority), 0};
+        result.finite_target_volume_difference = fp::make_value(data.options.arithmetic_mode,
+            -static_cast<long double>(minority));
         return result;
     }
     if (cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
@@ -831,14 +896,14 @@ std::map<Key, PolyhedralInterface> reconstruct_exact_local(const GeneralVoF::Dat
             }
             front = std::move(next);
         }
-        result.emplace(
-            key, Exact::PolyhedralReconstruction::reconstruct(geometric_sample(target), stencil, data.options.reconstruction));
+        result.emplace(key, Exact::PolyhedralReconstruction::reconstruct(
+                                geometric_sample(target), stencil, data.options.reconstruction));
     }
     return result;
 }
 std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data)
 {
-    return data.options.inventory_policy == PhaseInventoryPolicy::Finite ?
+    return data.options.arithmetic_mode != ArithmeticMode::Exact ?
         reconstruct_finite_local(data) : reconstruct_exact_local(data);
 }
 std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
@@ -906,8 +971,9 @@ std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated plane reply.");
-                auto fitted = plane(r);
-                if (data.options.inventory_policy == PhaseInventoryPolicy::Finite)
+                auto fitted = plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ?
+                    std::optional<ArithmeticMode>{} : data.options.arithmetic_mode);
+                if (data.options.arithmetic_mode != ArithmeticMode::Exact)
                 {
                     if (!fitted.finite_geometry)
                         throw std::invalid_argument("Finite VoF imported an exact interface authority.");
@@ -918,7 +984,8 @@ std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
                         fitted.finite_target_volume_difference = finite_detail::subtract(
                             gas ? amounts.gas : amounts.carrier,
                             {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
-                        fitted.target_volume_residual = static_cast<double>(fitted.finite_target_volume_difference.value);
+                        fitted.target_volume_residual =
+                            static_cast<double>(fitted.finite_target_volume_difference.value);
                     }
                 }
                 else if (!fitted.pure_gas && !fitted.pure_carrier)

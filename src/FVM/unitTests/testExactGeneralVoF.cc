@@ -23,7 +23,7 @@ std::map<std::uint64_t, ExactPhaseMeasures> delivered_phases(const GeneralVoF::T
 GeneralVoFOptions exact_reference_options()
 {
     GeneralVoFOptions options;
-    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    options.arithmetic_mode = ArithmeticMode::Exact;
     return options;
 }
 TEST(ExactGeneralVoF, ComplementaryDonorLabelCorrectionIsLinearBoundedAndRejectsUnprovedDefect)
@@ -662,7 +662,7 @@ TEST(ExactGeneralVoF, ExperimentalInventoryPolicyIsExplicitCollectiveAndIsolated
         EXPECT_FALSE(capsule.experimental_exact);
     }
     GeneralVoFOptions options;
-    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    options.arithmetic_mode = ArithmeticMode::Exact;
     GeneralVoF exact(f.hierarchy, f.order, f.gas, f.carrier, options);
     EXPECT_EQ(exact.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
     EXPECT_EQ(exact.experimental_phases().size(), exact.owned_order().size());
@@ -675,11 +675,11 @@ TEST(ExactGeneralVoF, ExperimentalInventoryPolicyIsExplicitCollectiveAndIsolated
     {
         auto mixed = options;
         if (comm->getRank() != 0)
-            mixed.inventory_policy = PhaseInventoryPolicy::Finite;
+            mixed.arithmetic_mode = ArithmeticMode::Ordinary;
         EXPECT_THROW((GeneralVoF(f.hierarchy, f.order, f.gas, f.carrier, mixed)), std::invalid_argument);
     }
     auto invalid = options;
-    invalid.inventory_policy = static_cast<PhaseInventoryPolicy>(2);
+    invalid.arithmetic_mode = static_cast<ArithmeticMode>(99);
     EXPECT_THROW((GeneralVoF(f.hierarchy, f.order, f.gas, f.carrier, invalid)), std::invalid_argument);
     std::vector<GeneralVoFFaceVolume> zero;
     for (const auto& face : exact.tiles())
@@ -697,7 +697,7 @@ TEST(ExactGeneralVoF, ExperimentalNonDyadicHistorySurvivesOnlyAfterExplicitOptIn
     using M = ExactGeometryMeasure;
     auto f = setup();
     GeneralVoFOptions options;
-    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    options.arithmetic_mode = ArithmeticMode::Exact;
     GeneralVoF exact(f.hierarchy, f.order, f.gas, f.carrier, options);
     auto controls = cycle(exact);
     const auto q = M::from_value(1).divided_by(M::from_value(79));

@@ -11,6 +11,7 @@
 #include "geometry/BoundedConvexGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
+#include "utils/ArithmeticMode.hh"
 #include <array>
 #include <memory>
 #include <string>
@@ -37,7 +38,7 @@ struct GeneralVoFOptions
     unsigned support_rings = 2;
     PolyhedralReconstructionOptions reconstruction;
     Meshes::ExactSweepLimits sweep;
-    PhaseInventoryPolicy inventory_policy = PhaseInventoryPolicy::Finite;
+    ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
 };
 enum class GeneralVoFFiniteRemapCarrier
 {
@@ -63,6 +64,9 @@ struct GeneralVoFFiniteRemapRoute
     std::uint64_t source_gid = 0, target_gid = 0;
     int source_owner = -1, target_owner = -1;
     Meshes::BoundedPhaseMeasures amount;
+    /** Signed redistribution derived from source fit deviations and raw
+     * phase/bulk shares; historical allowance remains a separate bound. */
+    Meshes::BoundedGeometryValue fit_allocation, inherited_fit_allocation;
 };
 struct GeneralVoFFiniteCommonCell
 {
@@ -167,6 +171,25 @@ struct GeneralVoFFiniteNodeTrajectory
     std::uint64_t node = 0;
     Meshes::BoundedPoint point, departure;
 };
+/** Actual nominal face-chain quantities. The allowance is allocated from the
+ * frozen incident cells, never inferred from the observed construction defect. */
+struct GeneralVoFFaceChainDiagnostic
+{
+    std::uint64_t face = 0;
+    Meshes::BoundedGeometryValue control, constructed, signed_difference;
+    long double allowed_difference = 0;
+};
+/** Owned-cell closure using the original cell allowance, including the signed
+ * geometry/control differences of every incident canonical subface. */
+struct GeneralVoFCellClosureDiagnostic
+{
+    Meshes::AMR::AdaptiveCellKey key;
+    std::uint64_t cell = 0;
+    std::size_t canonical_face_count = 0;
+    long double quota_scale = 0;
+    Meshes::BoundedGeometryValue canonical_residual, signed_geometry_difference, combined_residual;
+    long double absolute_geometry_difference = 0, allowed_closure = 0;
+};
 struct GeneralVoFSupportCell
 {
     std::uint64_t cell = 0, revision = 0;
@@ -205,7 +228,9 @@ public:
     /** Input phases follow input_keys; each local owner must name every owned
      * leaf exactly once. Full ghosts are owner-authenticated sparse imports.
      * With omitted declarations, a fresh exactly absent phase proves pure
-     * geometry, retained under the existing fixed consistency bound. Nonzero
+     * geometry. Transport retains that hint only while no positive minority
+     * geometry arrives; independent trace inventory carried by same-phase pure
+     * geometry does not itself assert a new interface. Nonzero fresh-input
      * minorities remain Infer regardless of magnitude; explicit declarations
      * (including Infer) and adopted capsule geometry remain authoritative. */
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key> input_keys, std::vector<double> gas,
@@ -219,8 +244,11 @@ public:
      * views only. The policy is explicit and never inferred from phase values. */
     [[nodiscard]] const std::vector<PhaseVolumes>& phase_volumes() const noexcept;
     [[nodiscard]] PhaseInventoryPolicy inventory_policy() const noexcept;
-    /** Current authority: fresh finite lifts by default, retained exact values
-     * only after explicit ExperimentalExact opt-in. No cross-mode cache. */
+    [[nodiscard]] ArithmeticMode arithmetic_mode() const noexcept;
+    /** Accepted geometry declarations in owned_order, without fitting or export. */
+    [[nodiscard]] std::vector<GeneralVoFPhaseGeometry> phase_geometry_declarations() const;
+    /** Exact-mode authority only. Finite modes use phase_volumes(); requesting
+     * this view never performs an implicit rational lift of finite storage. */
     [[nodiscard]] std::vector<Meshes::ExactPhaseMeasures> inventory_measures() const;
     /** Explicit experimental authority; rejects Finite mode. Unqualified for
      * finite-duration physical flow, performance and storage scalability. */
@@ -230,9 +258,8 @@ public:
     /** Independent accumulated finite arithmetic uncertainty across accepted
      * steps, distinct from this publication's conversion error. */
     [[nodiscard]] const std::vector<PhaseRoundoff>& accumulated_phase_errors() const noexcept;
-    /** Complementary geometric fitting labels in owned_order. The physical
-     * minority is lifted from finite storage and the other label is actualV−minority;
-     * physical inventories and signed occupancy provenance remain unchanged. */
+    /** Exact-mode complementary geometric fitting labels in owned_order.
+     * Finite callers use geometric_gas_fractions() for a diagnostic view. */
     [[nodiscard]] std::vector<Meshes::ExactPhaseMeasures> geometric_phases() const;
     /** Geometry-only gas/V enclosure view after an exact [0,1] check. Rounding
      * to0/1 is permitted while an extensive minority remains positive. This is
@@ -319,6 +346,11 @@ public:
         [[nodiscard]] const std::vector<GeneralVoFFiniteTransfer>& finite_transfers() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFFiniteDonorBudget>& finite_donor_budgets() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFFiniteNodeTrajectory>& finite_node_trajectories() const noexcept;
+        /** All locally retained canonical tiles; MPI shared-face replicas repeat.
+         * Deduplicate by canonical face ID before forming a global diagnostic sum. */
+        [[nodiscard]] const std::vector<GeneralVoFFaceChainDiagnostic>& finite_face_chain_diagnostics() const noexcept;
+        [[nodiscard]] const std::vector<GeneralVoFCellClosureDiagnostic>&
+        finite_cell_closure_diagnostics() const noexcept;
         [[nodiscard]] std::shared_ptr<const GeneralVoF> candidate() const;
 
     private:
@@ -335,17 +367,29 @@ public:
         std::vector<GeneralVoFFiniteTransfer> finite_transfers_;
         std::vector<GeneralVoFFiniteDonorBudget> finite_budgets_;
         std::vector<GeneralVoFFiniteNodeTrajectory> finite_trajectories_;
+        std::vector<GeneralVoFFaceChainDiagnostic> finite_face_chain_;
+        std::vector<GeneralVoFCellClosureDiagnostic> finite_cell_closure_;
     };
     /** All locally retained canonical nodes/faces must be supplied exactly once.
      * Shared authority verifies identical represented velocity/Phi controls.
      * A closed impermeable boundary projects trajectories onto the complete
-     * authenticated incident wall catalog. Finite uses sealed source supports,
-     * bounded FP trajectories/face chains and independently bounded phase
-     * ledgers; ExperimentalExact retains the exact construction route. Shared
+     * authenticated incident wall catalog. Ordinary uses nominal FP geometry
+     * and ledgers. BoundedCertification adds explicit enclosures; Exact alone
+     * selects the rational construction route. Modes never fall back. Shared
      * controls authenticate the complete catalog and departure before transport.
-     * Source-free occupancy requires canonical face closure within the derived
-     * arithmetic bound and unchanged physical target (exact zero in the exact
-     * route). No cell/source correction is invented. Mixed finite interfaces
+     * Source-free occupancy requires canonical face closure within its original
+     * physical tolerance (exact zero in Exact). Ordinary conservation uses the
+     * configured source/recipient phase scale and independent rounding allowance.
+     * Ordinary face geometry errors have owner-issued shares of the existing
+     * cell allowance; canonical residual plus signed geometry defects must still
+     * satisfy that original cell allowance without a second budget claim.
+     * Before binary64 publication, each certified finite recipient phase must
+     * independently admit its current-step geometry/arithmetic enclosure against
+     * reconstruction.volume_tolerance times that phase's positive lower amount.
+     * Donor/bulk amounts and historical error cannot supply this allowance;
+     * final narrowing and accumulated temporal history remain separate evidence.
+     * Exhaustion is an arithmetic rejection, not a spatial-resolution diagnosis.
+     * No cell/source correction is invented. Mixed finite interfaces
      * require neighborhood resolution admission before expensive fitting;
      * unavailable refinement rejects with a request and preserves accepted state.
      * Unsupported periodic images reject until image-qualified sweeps exist. */
@@ -355,6 +399,11 @@ public:
 
 private:
     friend struct Exact::GeneralVoF;
+    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL Trial plan_transport_finite(
+        std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
+    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL FiniteRemapTrial plan_remap_finite(const Hierarchy::Plan&,
+        std::shared_ptr<const Hierarchy>, std::span<const GeneralVoFFiniteOwnedChannels>,
+        GeneralVoFFiniteRemapOptions) const;
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key>, std::vector<double>, std::vector<double>,
         GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*);
     explicit GeneralVoF(std::shared_ptr<const Data> data) : data_(std::move(data)) {}

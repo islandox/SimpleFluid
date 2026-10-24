@@ -2,6 +2,7 @@
  * @brief Arithmetic provenance, nonzero circulation, and bounded closure rollback.
  */
 #include "FVM/AdaptiveVoF.hh"
+#include "geometry/mesh/MultiRegionMesh.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "solvers/details/GeneralVoFProjectionArithmetic.hh"

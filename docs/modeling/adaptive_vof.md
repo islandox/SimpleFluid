@@ -1,5 +1,11 @@
 # Adaptive Cartesian volume of fluid
 
+Floating-point arithmetic is the primary VoF choice. The shared
+[transport contract](../architecture/vof_transport.md) defines conservative
+accounting and acceptance; the [general-native FP policy](../architecture/general_amr.md#floating-point-geometry-and-arithmetic)
+owns its separate mesh support and qualification limits. Optional rational
+APIs are documented under [ExactVoF](../architecture/exact_vof.md).
+
 `AdaptiveVoFSolver` extends the source-free, isothermal two-phase model in the
 [uniform VoF guide](vof.md) to distributed dyadic Cartesian blocks. It uses the
 native `MultiRegionMesh`, `MeshHandle`, and `FieldStored` path. The adaptive

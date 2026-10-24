@@ -1,7 +1,14 @@
-# Conservative VoF transport and state ownership
+# Floating-point VoF transport and state ownership
+
+Floating-point arithmetic is the primary choice for VoF. The general-native
+backend uses `ArithmeticMode::Ordinary` by default; Cartesian VoF retains
+its specialized FP reconstruction and directional sweeps. Conservation,
+positivity, physical tolerances and atomic acceptance apply throughout.
+Optional rational-path contracts live in [ExactVoF](exact_vof.md),
+[ExactTransport](exact_transport.md) and [ExactGeometry](exact_geometry.md).
 
 The geometric fraction operator and the momentum operator have distinct time
-integration. The fraction operator uses directional PLIC sweeps with a frozen
+integration. The Cartesian fraction operator uses directional PLIC sweeps with a frozen
 Weymouth–Yue indicator. Momentum uses a conservative implicit upwind equation
 on the integrated mass ledger produced by those sweeps. Reusing the swept
 volumes with explicit accepted-old donor velocities is incompatible: material
@@ -27,33 +34,71 @@ volumes or first moments as a general rule. Basic PLIC VoF does not evolve first
 moments; methods using centroids or higher-order remapping need accurate moments,
 but not necessarily rational ones.
 
-The implemented general-native path currently imposes stronger exact geometry
-and partition certificates even with finite physical inventories. The
-[proposed FP geometry contract](general_amr.md#proposed-floating-point-geometry-for-finite-vof)
-separates those implementation choices from the required physical invariants.
-It is not implemented and does not change existing geometry, phase-budget,
-inventory-policy or residual-acceptance contracts. In particular, the directional
-Cartesian roundoff rule below is not a blanket allowance for a new general-mesh
-geometry backend.
+The general-native default uses ordinary FP geometry and compensated numerical
+ledgers. `GeneralVoFOptions::arithmetic_mode` selects `Ordinary` (default),
+`BoundedCertification`, or `Exact`; the latter two are explicit opt-ins under the [FP geometry contract](general_amr.md#floating-point-geometry-and-arithmetic).
+The replacement is implemented with focused component coverage; full coupled
+flow qualification remains open. The directional Cartesian roundoff rule below
+is not a blanket allowance for the general-mesh backend.
+
+Configuration remains a runtime choice. Operation entry points dispatch into
+compiled `Ordinary` or `BoundedCertification` template kernels; scalar arithmetic,
+compensated sums, reconstruction, transport/remap, projection and momentum use
+fixed-mode helpers and `if constexpr` inside those kernels. `Exact` continues
+through its separate rational backend. External value tags, packet provenance,
+resource limits and collective mode agreement remain runtime checks, including
+on empty owners. No mode silently falls back to another arithmetic policy.
+
+The private `Arithmetic<Mode>` and `SumFor<Mode>` helpers are implementation
+interfaces, not template parameters on the public VoF API. Inferred external
+values retain their checked runtime adapters. Persistent geometry storage is
+shared by the two finite specializations; mode-specific kernel views do not
+replace retained geometry objects or change their storage accounting. Heavy
+template definitions remain in compiled `.tcc` providers with explicit
+instantiations for the supported modes.
 
 Physical interface resolution is a separate admission decision. The mandatory
-arbitrary subcell-phase fitting case has been withdrawn. The proposed general
-backend requests refinement or rejects an underresolved feature according to
+arbitrary subcell-phase fitting case has been withdrawn. The general
+backend reports insufficient interface support according to
 [mesh/stencil resolution](general_amr.md#resolution-before-additional-precision),
 without silently deleting its accepted phase amount. Small numerical inventories
 still require conservative accounting; they do not prove a resolved interface.
-The refinement-request behavior remains planned.
+The implemented support/model screen emits actionable refinement requests; it
+is a necessary admission check, not a complete thickness/curvature convergence
+test. A caller must refine or reinitialize and retry; no adaptation controller
+runs inside a physical trial.
 
-Under the [finite arithmetic policy](general_amr.md#finite-arithmetic-policy-and-permitted-exact-work),
-the proposed backend uses bounded FP intersections, volumes, required moments,
-PLIC fits and phase/mass ledgers. Arithmetic uncertainty permits bounded FP
-retries, then rejection. Exact arithmetic is limited to bounded topology
-predicates returning discrete decisions, explicit reference verification and
-the separate exact APIs/policy; it must not trigger a whole-geometry or timestep
-retry with rationals. Small intermediate contributions still enter conservative
+Under the [finite arithmetic policy](general_amr.md#primary-floating-point-policy),
+ordinary arithmetic accepts represented scalar results against the configured
+physical tolerances, without interval-width admission. Finite values, actual
+phase nonnegativity, conservation, topology, solver residuals and resource caps
+remain checked. `BoundedCertification` additionally propagates enclosures and
+rejects unresolved certification. Source-authority import remains an explicit
+bootstrap boundary described in
+[ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary).
+Small intermediate contributions still enter conservative
 aggregate accounting and error bounds. Removing exact per-fragment values does
 not authorize a phase cutoff, mass deletion, looser physical tolerances or larger
 resource caps.
+
+For ordinary general-native transport, each canonical face receives a fixed
+construction allowance from its incident cells: `B_f = tau * min(V_L/N_L,
+V_R/N_R)`, using the single incident cell at a physical boundary. Here `tau`
+is the configured volume tolerance, `N` counts all incident canonical subfaces,
+and `V` is the smaller of the native and represented geometry volumes. Cell
+owners supply these quantities; both sides agree on the same face allowance.
+The actual signed sum of stored swept-piece volumes is compared with the
+unchanged canonical control. This avoids imposing a relative accuracy target
+on a face flux that can approach zero.
+
+The trial records each locally retained face's signed construction difference
+and the owned-cell signed and absolute totals. Shared face records repeat across
+ranks and must be deduplicated by canonical face identity for global summaries.
+The canonical cell residual plus its incident
+signed construction differences must satisfy the original cell-volume
+allowance; the two residuals do not receive separate additive budgets. These
+nominal diagnostics are not uncertainty bounds. Donor availability, recipient
+occupancy, independent phase conservation and momentum checks still apply.
 
 ## Implicit momentum contract
 

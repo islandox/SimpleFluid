@@ -6,6 +6,7 @@
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "solvers/details/GeneralVoFProjectionArithmetic.hh"
 #include "solvers/details/VoFProjectionWorkspace.hh"
+#include "utils/ArithmeticMode.hh"
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -14,7 +15,10 @@
 
 namespace SimpleFluid::detail
 {
-namespace Exact { struct GeneralVoFFlowWorkspace; }
+namespace Exact
+{
+struct GeneralVoFFlowWorkspace;
+}
 /** Immutable native geometry with physical-coordinate conditioned stencils.
  * Every operation is collective. It owns numerical workspaces, not accepted state.
  */
@@ -28,6 +32,7 @@ struct GeneralVoFProjectionProvenance
  * describe arithmetic only and never replace physical pressure thresholds. */
 struct GeneralVoFFiniteProjectionProvenance
 {
+    std::optional<ArithmeticMode> arithmetic_mode;
     std::size_t byte_budget = 64 * 1024 * 1024;
     std::vector<long double> face_rate, face_radius, cell_radius;
     std::vector<std::array<long double, 3>> velocity_error;
@@ -37,8 +42,9 @@ class SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFlowWorkspace
 {
 public:
     using Vector = VoF::Vector;
-    explicit GeneralVoFFlowWorkspace(
-        SP<const MeshHandle<>> mesh, bool finite_arithmetic = false, std::vector<Vector> finite_spans = {});
+    explicit GeneralVoFFlowWorkspace(SP<const MeshHandle<>> mesh,
+        ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary, std::vector<Vector> finite_spans = {});
+    [[nodiscard]] ArithmeticMode arithmetic_mode() const noexcept { return arithmetic_mode_; }
     [[nodiscard]] std::vector<double> cells(const std::vector<double>& owned) const;
     [[nodiscard]] std::vector<Vector> vectors(const std::vector<Vector>& owned) const;
     [[nodiscard]] std::vector<double> faces(const std::vector<double>& overlap) const;
@@ -51,12 +57,16 @@ public:
     [[nodiscard]] std::vector<double> interpolate(const std::vector<Vector>& owned_velocity) const;
     [[nodiscard]] std::vector<Vector> viscous_force(
         const std::vector<Vector>& velocity, const std::vector<double>& viscosity) const;
-    /** Default bounded FP route; finite physical masses retain products below
-     * binary64 range. No rational construction, measure or ledger fallback. */
-    void project(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
-        std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
-        const std::vector<double>& curvature, double dt, double surface_tension, const VoFSolverOptions& options,
-        VoFStepDiagnostics& diagnostics, GeneralVoFFiniteProjectionProvenance* arithmetic = nullptr,
+    /** Ordinary and explicitly bounded FP routes retain physical mass products
+     * below binary64 range. Represented geometry and prepared gradients are
+     * input leaves. Only BoundedCertification propagates operation-derived
+     * bounds through coefficient narrowing and requests certified Phi repair.
+     * Discretization/Krylov errors keep the independent original physical gates.
+     * No rational construction, measure or ledger fallback. */
+    void project(std::vector<double>& face_velocity, std::vector<Vector>& velocity, std::vector<double>& pressure,
+        const std::vector<double>& density, const std::vector<double>& fraction, const std::vector<double>& curvature,
+        double dt, double surface_tension, const VoFSolverOptions& options, VoFStepDiagnostics& diagnostics,
+        GeneralVoFFiniteProjectionProvenance* arithmetic = nullptr,
         std::optional<std::span<const long double>> physical_mass = std::nullopt,
         const GeneralVoFFiniteProjectionClosureTopology* closure_topology = nullptr,
         std::optional<std::span<const long double>> physical_mass_error = std::nullopt);
@@ -72,6 +82,14 @@ public:
     }
 
 private:
+    template<ArithmeticMode Mode>
+    void project_finite(std::vector<double>& face_velocity, std::vector<Vector>& velocity,
+        std::vector<double>& pressure, const std::vector<double>& density, const std::vector<double>& fraction,
+        const std::vector<double>& kappa, double dt, double sigma, const VoFSolverOptions& options,
+        VoFStepDiagnostics& diagnostics, GeneralVoFFiniteProjectionProvenance* provenance,
+        std::optional<std::span<const long double>> physical_mass,
+        const GeneralVoFFiniteProjectionClosureTopology* closure_topology,
+        std::optional<std::span<const long double>> physical_mass_error);
     friend struct Exact::GeneralVoFFlowWorkspace;
     using Pack = DefaultTpetraTypes;
     using LO = Pack::local_ordinal_type;
@@ -84,7 +102,7 @@ private:
     };
     SP<const MeshHandle<>> mesh_;
     std::vector<Face> geometry_;
-    bool finite_arithmetic_ = false;
+    ArithmeticMode arithmetic_mode_ = ArithmeticMode::Ordinary;
     std::vector<double> volumes_;
     std::vector<Meshes::ExactGeometryMeasure> exact_volumes_;
     std::vector<Vector> spans_;

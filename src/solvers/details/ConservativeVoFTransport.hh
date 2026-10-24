@@ -7,11 +7,17 @@
 #include "geometry/ExactSweptGeometry.hh"
 #include "geometry/MeshHandle.hh"
 #include "solvers/BelosLinearSolver.hh"
+#include "utils/ArithmeticMode.hh"
 #include <memory>
+#include <optional>
 
 namespace SimpleFluid::detail
 {
-namespace Exact { struct ConservativeVoFTransport; struct TransportPreparation; }
+namespace Exact
+{
+struct ConservativeVoFTransport;
+struct TransportPreparation;
+} // namespace Exact
 /** Private native-grid transport boundary shared by VoF momentum and species.
  *
  * Solves M_new*c_new + div(F*c_new_upwind) = Q_old + S. F is an
@@ -113,14 +119,16 @@ public:
     };
     /** Default fixed-storage FP ledger. Row normalization is a numerical
      * solve aid; acceptance checks the original canonical raw-face equation
-     * with propagated arithmetic bounds and the unchanged physical tolerance. */
-    [[nodiscard]] Result solve(const std::vector<long double>& old,
-        const std::vector<long double>& source, const std::vector<long double>& capacity,
-        const std::vector<long double>& outgoing, const std::vector<FiniteTransfer>& incoming,
-        const std::vector<FiniteFaceContribution>& contributions, bool nonnegative,
-        int maximum_iterations, double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024,
+     * with the unchanged physical tolerance. Ordinary uses represented values;
+     * explicit BoundedCertification also propagates arithmetic bounds. A cached
+     * workspace cannot change its selected FP mode. */
+    [[nodiscard]] Result solve(const std::vector<long double>& old, const std::vector<long double>& source,
+        const std::vector<long double>& capacity, const std::vector<long double>& outgoing,
+        const std::vector<FiniteTransfer>& incoming, const std::vector<FiniteFaceContribution>& contributions,
+        bool nonnegative, int maximum_iterations, double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024,
         std::span<const long double> old_error = {}, std::span<const long double> source_error = {},
-        std::span<const long double> capacity_error = {}, std::span<const long double> outgoing_error = {});
+        std::span<const long double> capacity_error = {}, std::span<const long double> outgoing_error = {},
+        ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary);
 
     struct ExactTransfer
     {
@@ -135,10 +143,19 @@ public:
     };
 
 private:
+    template<ArithmeticMode Mode>
+    Result solve_finite(const std::vector<long double>& old, const std::vector<long double>& source,
+        const std::vector<long double>& capacity, const std::vector<long double>& outgoing,
+        const std::vector<FiniteTransfer>& incoming, const std::vector<FiniteFaceContribution>& contributions,
+        bool nonnegative, int maximum_iterations, double tolerance, std::size_t byte_budget,
+        std::span<const long double> old_error, std::span<const long double> source_error,
+        std::span<const long double> capacity_error, std::span<const long double> outgoing_error,
+        ArithmeticMode arithmetic_mode);
     friend struct Exact::ConservativeVoFTransport;
     using Pack = DefaultTpetraTypes;
     struct SparseAssembly;
     std::shared_ptr<Exact::TransportPreparation> exact_preparation_;
+    std::optional<ArithmeticMode> finite_arithmetic_mode_;
     PreparationStatistics preparation_statistics_;
     [[nodiscard]] Result solve_impl(const std::vector<double>& old, const std::vector<double>& source,
         const std::vector<double>& capacity, const std::vector<double>& forward, const std::vector<double>& reverse,

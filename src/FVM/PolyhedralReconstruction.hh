@@ -100,6 +100,16 @@ public:
         const FinitePolyhedralPhaseSample&, Meshes::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
     [[nodiscard]] static PolyhedralInterface reconstruct(const FinitePolyhedralPhaseSample&,
         std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
+private:
+    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL static void validate_finite(
+        const FinitePolyhedralPhaseSample&, PolyhedralReconstructionOptions);
+    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL static PolyhedralResolutionAssessment assess_resolution_finite(
+        const FinitePolyhedralPhaseSample&, std::span<const FinitePolyhedralPhaseSample>, PolyhedralReconstructionOptions);
+    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL static PolyhedralInterface solve_offset_finite(
+        const FinitePolyhedralPhaseSample&, Meshes::GeometryPoint, PolyhedralReconstructionOptions);
+    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL static PolyhedralInterface reconstruct_finite(
+        const FinitePolyhedralPhaseSample&, std::span<const FinitePolyhedralPhaseSample>, PolyhedralReconstructionOptions);
+
 };
 namespace Exact
 {

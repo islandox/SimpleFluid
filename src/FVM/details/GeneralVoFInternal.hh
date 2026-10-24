@@ -47,6 +47,7 @@ namespace AMR = Meshes::AMR;
 namespace wire = AMR::adaptive_detail;
 using Key = AMR::AdaptiveCellKey;
 using Measure = Meshes::ExactGeometryMeasure;
+namespace fp = finite_detail;
 struct Cell
 {
     Key key;
@@ -54,6 +55,8 @@ struct Cell
     int owner = -1;
     Meshes::GeometryPoint centroid{};
     double native_volume = 0;
+    std::size_t canonical_face_count = 0;
+    long double ordinary_quota_scale = 0;
     PolyhedralPhaseSample phase;
     Meshes::BoundedConvexGeometryPtr finite_geometry;
     PhaseError occupancy;
@@ -107,6 +110,9 @@ struct GeneralVoF::Data
 };
 namespace general_vof_detail
 {
+SIMPLEFLUID_FVM_LOCAL PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode);
+SIMPLEFLUID_FVM_LOCAL Meshes::BoundedGeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes = 64 * 1024 * 1024);
+SIMPLEFLUID_FVM_LOCAL long double phase_allowance(Meshes::BoundedGeometryValue source, double relative);
 SIMPLEFLUID_FVM_LOCAL Meshes::ExactPhaseMeasures phase_measures(const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL Measure finite_bound(double value);
 SIMPLEFLUID_FVM_LOCAL void occupancy(Cell& cell);
@@ -116,9 +122,9 @@ SIMPLEFLUID_FVM_LOCAL double real(wire::Reader& r);
 SIMPLEFLUID_FVM_LOCAL void finite_real(wire::Writer& w, long double value);
 SIMPLEFLUID_FVM_LOCAL long double finite_real(wire::Reader& r);
 SIMPLEFLUID_FVM_LOCAL void finite_value(wire::Writer& w, Meshes::BoundedGeometryValue v);
-SIMPLEFLUID_FVM_LOCAL Meshes::BoundedGeometryValue finite_value(wire::Reader& r);
+SIMPLEFLUID_FVM_LOCAL Meshes::BoundedGeometryValue finite_value(wire::Reader& r, std::optional<ArithmeticMode> expected = {});
 SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PolyhedralInterface& p);
-SIMPLEFLUID_FVM_LOCAL PolyhedralInterface plane(wire::Reader& r);
+SIMPLEFLUID_FVM_LOCAL PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
 SIMPLEFLUID_FVM_LOCAL Meshes::ExactPhaseMeasures phases(const Meshes::ExactConvexFragment& fragment, const PolyhedralInterface& p);
 SIMPLEFLUID_FVM_LOCAL GeneralVoFPhaseEnclosure diagnostic(const Meshes::ExactPhaseMeasures& measures);
 SIMPLEFLUID_FVM_LOCAL double output(const Measure& measure);

@@ -26,6 +26,7 @@
 namespace SimpleFluid::detail
 {
 using namespace transport_support;
+/** Optional rational backend in the Exact namespace. */
 namespace Exact
 {
 struct TransportPreparation

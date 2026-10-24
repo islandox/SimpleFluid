@@ -6,6 +6,7 @@
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "geometry/unitTests/polyhedral_amr_helpers.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
+#include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -67,7 +68,6 @@ SP<const MeshHandle<>> boundary_polyhedron(bool pair)
     return AMR::assemble_adaptive_native(hierarchy, schema).mesh;
 }
 } // namespace
-
 namespace
 {
 // Independent uncached least-squares assembly for the fully sampled fixture.

@@ -6,6 +6,7 @@
 #include "geometry/ExactSweptGeometry.hh"
 #include "geometry/MeshHandle.hh"
 #include "solvers/details/GeneralVoFProjectionArithmetic.hh"
+#include "utils/ArithmeticMode.hh"
 #include <optional>
 #include <stdexcept>
 namespace SimpleFluid::detail
@@ -36,13 +37,20 @@ struct GeneralVoFFiniteRateClosure
     std::size_t forest_rounds = 0, admitted_storage_bytes = 0;
 };
 /** Collectively close source-free canonical owned rates within independently
- * supplied face/cell arithmetic capacities. The authenticated sparse forest is
- * admitted against byte_budget before exchange; oversized local work rejects.
- * Empty owners participate, and infeasibility never changes input rates. */
+ * supplied face/cell arithmetic capacities. Persistent roots select widest
+ * available paths before depth/identity ties, without gathering the graph.
+ * Compensated node/subtree sums retain cancellation. Returned corrections and
+ * incident spending are actual represented changes; application/assembly error
+ * evidence is separate from the original capacities. The authenticated sparse
+ * forest is admitted against byte_budget before exchange; oversized local work
+ * rejects. Empty owners participate; infeasibility never changes input rates.
+ * This certificate API requires explicit BoundedCertification. Ordinary
+ * projection accepts its original physical residual without this repair. */
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFiniteRateClosure close_general_vof_finite_rate(
     const SP<const MeshHandle<>>&, std::span<const long double> owned_rate,
     std::span<const long double> owned_face_radius, std::span<const long double> owned_cell_radius,
-    std::size_t byte_budget, const GeneralVoFFiniteProjectionClosureTopology* topology = nullptr);
+    std::size_t byte_budget, ArithmeticMode arithmetic_mode,
+    const GeneralVoFFiniteProjectionClosureTopology* topology = nullptr);
 /** Bounded correction is infeasible; metadata/range/resource errors are distinct. */
 class GeneralVoFPhiInfeasible : public std::runtime_error
 {
