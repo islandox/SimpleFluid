@@ -44,12 +44,12 @@ enum class ReactingPressureMode
 };
 
 /**
- * @brief Solution (Liquid plus Dissolved) transport selection.
+ * @brief Dissolved advection selection; finite Liquid always follows the liquid flux.
  */
 enum class ReactingTransportMode
 {
-    NoAdvection, ///< Keep solution inventory cell-local.
-    Advective    ///< Transport solution inventory with liquid flux.
+    NoAdvection, ///< Keep Dissolved inventory cell-local.
+    Advective    ///< Transport Dissolved inventory with liquid flux.
 };
 
 /**
@@ -127,9 +127,6 @@ struct ReactingSpeciesProperties
     std::function<double(const Reacting::ReactionContext&, Reacting::SpeciesPhase, std::string_view)>
         carried_molar_enthalpy; ///< Required when this species crosses an open boundary, J/mol.
 };
-/**
- * @brief Runtime configuration for schema-owned reacting gas.
- */
 /** Source ordering for an explicitly prescribed carrier reference.
  * Normal finite chemistry supplies thermal input before temperature transport.
  * The post-temperature path owns gas amounts/counts only and must apply exactly
@@ -141,6 +138,9 @@ enum class ReactingSourceSchedule
     PrescribedCarrierAfterTemperature
 };
 
+/**
+ * @brief Runtime configuration for schema-owned reacting gas.
+ */
 struct ReactingGasOptions
 {
     /** Typed general chemistry. Its catalog defines every authoritative chemical field.
@@ -172,6 +172,7 @@ struct ReactingGasOptions
     double micro_conversion_frequency = 0.0;  ///< 1/s, micro->large transfer, preserving each species.
     ReactingGasMode mode = ReactingGasMode::Disabled;
     ReactingPressureMode pressure_mode = ReactingPressureMode::Constant;
+    /// Selects Dissolved advection; finite Liquid always follows the liquid flux.
     ReactingTransportMode solution_transport = ReactingTransportMode::NoAdvection;
     BubbleTransportMode bubble_transport = BubbleTransportMode::General;
     BubbleRiseVelocityMode rise_velocity_mode = BubbleRiseVelocityMode::ZeroSlip;

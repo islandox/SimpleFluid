@@ -8,53 +8,59 @@ application supplies the reaction mechanism, material properties, and closure
 validity ranges. No particular energy-deposition mechanism, gas species,
 solution composition, or vessel application defines the model.
 
-The current neutral API is a transitional substrate. `ReactingGasModel`
-still implements the existing H2 energy-yield
-specialization, micro/large bubble populations, transport, and transaction
-machinery. Hydrogen inventories and the reduced donor ledger remain explicit.
-Neutral names do not establish arbitrary species, reaction-network transport,
-nonideal mixture thermodynamics, or general variable-density coupling.
+`Reacting::SpeciesCatalog`, `ReactionMechanism` and `CellSpeciesState` define
+supplied chemistry and finite inventories. Every enabled `ReactingGasModel`
+requires an explicit mechanism, material providers and compatible population
+state. There is no library-default gas species, energy yield or implicit donor.
+`PrescribedHeatSource` remains an independent external thermal source. A named
+application adapter may explicitly correlate material injection with prescribed
+heat, provided it supplies the external mass, species and energy budgets.
 
-`PrescribedHeatSource` supplies independent external thermal deposition as
-`qdot_external`. Its profiles use `PrescribedHeatProfile` and
-`PrescribedHeatSourceOptions`, with `prescribed_heat_*` database keys.
-The current H2 gas implementation can still use that energy field as a
-specialized reaction driver; general mechanisms must supply their own species
-and energy budgets under the contract below.
+There are two distinct flow integrations:
 
-This migration is a deliberate source and configuration break, with no legacy
-aliases. Downstream applications must update includes, types, method calls,
-database keys, output-field consumers, and executable paths, then rebuild.
+- The field adapter and `MultiphysicsSolverCoupler` retain the documented weak
+  Boussinesq, prescribed-carrier and sensible-temperature approximations. They
+  transport species and named population counts and publish accepted species
+  receipts. Their EOS material volume need not equal a fixed reference cell's
+  geometric volume.
+- `LowMachMixtureSolver` and its external `ReactingMixtureCoupler` own conservative
+  species, internal energy and momentum with an EOS material-volume closure.
+  Pressure, phase transport, source iteration and prescribed closed planar motion
+  follow the [native low-Mach contract](../architecture/low_mach_reacting_flow.md).
 
-| Retired interface | Neutral interface |
+A resolved-gas inventory compartment does not imply interface reconstruction.
+VoF and reacting-VoF integration are disabled; bounded floating-point and
+exact-rational VoF/general-AMR paths are deferred from this refactor. Shared
+lower-level geometry and finite-volume utilities remain available.
+
+This migration deliberately breaks old source/configuration interfaces. Update
+includes, types, setup code, field readers and executable paths, then rebuild.
+There are no compatibility aliases or enabled single-species fallbacks.
+
+| Retired interface or assumption | Replacement |
 | --- | --- |
-| `PrescribedHeatSource` / `PrescribedHeatSourceOptions` / `PrescribedHeatProfile` | `PrescribedHeatSource` / `PrescribedHeatSourceOptions` / `PrescribedHeatProfile` |
-| `ReactingGasModel` / `ReactingGasOptions` | `ReactingGasModel` / `ReactingGasOptions` |
-| `ReactingGasProperties.hh` / `BubbleGasPhysics` | `ReactingGasProperties.hh` / `BubbleGasPhysics` |
-| `BubblePopulationKinetics` | `BubblePopulationKinetics` |
-| `configure_prescribed_heat_source` / `configure_reacting_gas` | `configure_prescribed_heat_source` / `configure_reacting_gas` |
-| `prescribed_heat_power_mode` / `prescribed_heat_power_density` | `prescribed_heat_mode` / `prescribed_heat_density` |
-| `prescribed_heat_total_power` / `prescribed_heat_center` / `prescribed_heat_standard_deviation` | `prescribed_heat_total_power` / `prescribed_heat_center` / `prescribed_heat_standard_deviation` |
-| `enable_reaction_source` / `reacting_*` / `max_reacting_subcycles` | `enable_reacting_gas` / `reacting_*` / `max_reacting_subcycles` |
-| `sheng2024TwoPopulation` | `twoPopulation` (same two-population arithmetic) |
-| Heat and gas-source outputs | `qdot_external` / `source_alpha_reaction()` / `S_alpha_reaction` |
-| `absorbed_radiation_energy` | `reaction_driver_energy` (J/cell, still the transitional energy-yield driver) |
+| `PrescribedHeatSource`, its options/profile, and `prescribed_heat_*` setup | Independent `PrescribedHeatSource`, `PrescribedHeatSourceOptions`, `PrescribedHeatProfile` and `prescribed_heat_*` setup |
+| `ReactingGasModel`, `ReactingGasOptions`, `reacting_*` setup | `ReactingGasModel` and explicit typed `ReactingGasOptions` |
+| Specialized `idealGasSource` / `twoPopulation` selectors and energy-yield source | `ReactingGasMode::Species`, a supplied schema/mechanism and declared material/source laws |
+| H2 aggregate fields, reduced donor deficit and cumulative-counter escape inference | `species_field(id, phase, population)`, finite reactants, typed histories and accepted event receipts |
+| `reaction_driver_energy` as general chemistry input | Supplied reaction extents/rates or named external material packets, with independent heat ownership |
+| Resolved/dispersed interface coupling | Deferred; no supported implementation is included in this snapshot |
 | `reacting_solution_tank_demo` / `heated_solution_tank_sst` | `reacting_solution_tank_demo` / `heated_solution_tank_sst` |
-| `verification/openfoam/heatedSolutionTank` | `verification/openfoam/heatedSolutionTank` |
 
-Explicit retired source/gas keys and `scalar_group_*` controls reject before a
-parser can silently select disabled defaults. The delayed-external-source model,
-its coupler configuration, and its output/checkpoint hooks have been removed.
-`ScalarSourceDecayTransport` preserves reusable analytic source/decay and
-conservative scalar advection/diffusion as a standalone utility. Its supplied
-scalar sources have no external-source or heat-yield coupling; it is not a species
-reaction mechanism.
+Explicit retired keys reject even when the model is disabled. A flat database
+cannot manufacture a species catalog or infer material physics; enabled setup
+requires the typed C++ provider seam. The delayed-external-source model and its coupler,
+output and checkpoint hooks are removed. `ScalarSourceDecayTransport` retains
+standalone analytic source/decay and conservative scalar transport, with no
+external-source or heat-yield coupling.
 
-The [roadmap](../../TODO.md) tracks implementation and qualification separately.
-The [gas transport guide](../reacting-gas-models.md) and
-[bubble/boiling guide](reacting_bubble_boiling.md) document the retained
-numerical foundation and the limits of the current specialization.
-Resolved/dispersed interface coupling is excluded from this source snapshot.
+Hydrogen and IF97 data remain explicit application choices in the matched
+reference cases. Their provenance and H2 result labels describe those chosen
+materials, not mandatory library species or slots. Numerical verification,
+external comparison and physical validation remain separate claims. See the
+[species contract](../architecture/reacting_species_contract.md),
+[transport guide](../reacting-gas-models.md),
+[bubble/boiling guide](reacting_bubble_boiling.md) and [roadmap](../../TODO.md).
 
 ## Source ownership and inputs
 
@@ -64,12 +70,16 @@ transport. The controller retains shared ownership of the solver and prepares
 sources without calling a second full transport advance. This preserves the
 [existing coupling ownership contract](../architecture/multiphysics_solver_coupler.md).
 
-The proposed provider takes a declared species schema, accepted inventories,
-trial temperature and absolute pressure, liquid composition, cell geometry,
-and a time interval. It returns either rates with an explicit integration rule
-or integrated reaction extents for that interval. These are alternative input
-forms; supplying both for the same reaction must reject. Inputs identify their
-owned-cell map, geometry epoch, schema revision, and time interval.
+The provider takes a declared species schema, actual transported or ordered-stage
+predecessor inventories, trial temperature and absolute pressure, liquid
+composition, cell geometry, and a time interval. It returns either rates with an
+explicit integration rule or integrated reaction extents for that interval. These are alternative input
+forms; supplying both for the same reaction must reject. Mesh source contexts carry `ReactionLocation`: canonical geometry cell ID,
+actual centroid and geometry epoch, plus an ephemeral owned row. These describe
+the actual donor stage, including trial-new ALE geometry. Algebraic map GIDs
+are not physical source identities. Pure local kernels may omit location; a
+spatial law must explicitly require it. Source receipts separately bind schema,
+provider/revision, accepted generation, time interval and transport state.
 
 | Quantity | Units and convention |
 | --- | --- |
@@ -85,7 +95,10 @@ owned-cell map, geometry epoch, schema revision, and time interval.
 
 Rates may depend on local temperature, pressure, and composition or be supplied
 by an external chemistry calculation. A rate law supplies its name, parameter
-units, valid domain, and deterministic evaluation or checkpoint/restore policy.
+units and valid domain through an immutable, deterministic, MPI-free and reentrant
+callback. A stateful external chemistry engine requires a separately owned
+transaction protocol; this callback seam does not checkpoint or restore external
+mutable provider state.
 An energy-dependent yield can be an application adapter, but an energy field
 is not a required input to the general gas-source model. A prescribed gas
 injection must identify an external material reservoir; it is not an internal
@@ -150,10 +163,11 @@ Here `H_i` uses mol/(m3 liquid Pa), `k_L,i` is in m/s, area `A` is in m2,
 and positive transfer leaves the liquid. Other Henry-law conventions require
 explicit conversion at the provider boundary. The same signed amount is
 removed and added across the interface, so transfer cancels in the total
-species budget. Gas dissolution reverses that exchange. A multicomponent gas
-uses partial pressures and a supplied mixture EOS; total pressure cannot
-stand in for each species' partial pressure. Film thickness, nucleation,
-coalescence, breakup, and slip laws require declared applicability ranges.
+species budget. Gas dissolution reverses that exchange. For an ideal mixture,
+each species uses its own partial pressure rather than total pressure. Nonideal exchange uses the supplied mixture fugacity or explicit
+equilibrium law; ideal partial pressure cannot silently replace that law.
+Film thickness, nucleation, coalescence, breakup, and slip laws require declared
+applicability ranges.
 
 An optional dilute, prescribed-pressure approximation can convert the net
 molar rate entering the gas phase to a bulk volume-fraction source:
@@ -193,8 +207,9 @@ produce gas. The provider declares one energy convention:
   conservative composition change account for it; do not add the same heat
   of reaction again.
 
-The thermal equation and EOS must use the same caloric reference, storage
-potential, pressure-work convention, and source units. A caller-supplied net
+For native phase-U storage and recovery, the thermal equation and EOS must use
+the same caloric reference, storage potential, pressure-work convention, and
+source units. A caller-supplied net
 thermal budget already includes its declared reaction-energy allocation.
 Driving energy used to evaluate a rate or yield is not automatically another
 heat source. Report external heating, reaction allocation, latent exchange,
@@ -212,46 +227,52 @@ own qualification; existing boiling coverage does not establish that support.
 ## Transport and accepted-state transactions
 
 Each conservative inventory uses its declared phase/carrier flux exactly once.
-Dissolved species follow liquid transport plus a consistent diffusion model;
-dispersed populations use carrier-plus-slip flux; resolved gas uses its phase
-flux. Species diffusion must retain the model's declared mixture-mass and
-energy convention. Interface capture and representation conversion move
-inventories without creating another chemical source or recording false escape.
+In the field adapter, Liquid follows the carrier and solution_transport selects
+whether Dissolved follows it too; named dispersed populations use their common
+species/count carrier-plus-slip flux. The field Resolved bucket is stationary:
+zero carrier with conservative ALE storage, without resolved-interface advection.
+Native low-Mach phases instead use their explicitly owned physical-phase fluxes.
+Species diffusion requires the backend's declared mixture-mass and energy owner;
+field bulk diffusion remains rejected. Geometric interface capture and
+VoF/dispersed representation conversion remain deferred. Explicit local
+species-compartment transfers do not reconstruct an interface. Any future
+representation conversion must avoid duplicate chemical sources or false
+physical escape.
 Only physical boundary discharge or an explicitly budgeted external withdrawal
 (including a vent reservoir) removes material from the domain.
 
 Every corrector starts from the same accepted state and recomputes sources for
 the current trial. The controller validates schema and maps collectively,
-previews reactions and transfer, assembles conservative transport and material
-volume/thermal effects, and accepts only after all physical gates pass.
-Commit publishes geometry, fields, time, source budgets, external-provider
-state, and histories once. Rejection restores them together; retained stale
+assembles actual transport, then previews reactions and ordered transfer from that transported
+predecessor and closes material-volume/thermal effects. Acceptance requires all
+physical gates. Commit publishes geometry, fields, time, source budgets and
+histories once; it does not invoke provider laws or publish external mutable
+provider state. Rejection restores them together; retained stale
 trials cannot be committed after reinitialization or a schema change.
 
 For ALE, use accepted-old/trial-new volumes and mesh-relative transport fluxes.
 Reevaluate liquid-based rates on the trial liquid volume, or preserve already
 integrated extensive source budgets through mapping. Do not rescale an
 integrated amount as a fresh volumetric rate on every corrector. Geometry
-changes invalidate geometry-dependent closure and transport caches. Regridding
-remaps species, mass, momentum, energy, and population moments conservatively
-at accepted boundaries, before obtaining the next source context.
+changes invalidate geometry-dependent closure and transport caches. Any future reacting-flow regridding integration must
+remap species, mass, momentum, energy and population moments conservatively
+at accepted boundaries before obtaining the next source context. The current
+fixed-topology ALE path does not qualify adaptive reacting remap.
 
 MPI ownership, canonical face orientation, empty-rank participation, shared
 interface transfers, and collective failure order follow the existing solver
 contracts. These requirements do not extend the current ALE or general-mesh
 support matrix; each backend must qualify the new source interface separately.
 
-## Implementation and acceptance gates
+## Numerical and physical acceptance gates
 
-1. Define the species/reaction schema, rate and integrated-extent interfaces,
-   source units, donor accounting, and independent energy contract. Start with
-   a declared single-gas mechanism and retain explicit limits until each new
-   species/phase capability is qualified.
-2. Adapt the existing transport and population machinery behind that contract.
-   The neutral source/configuration migration above is a deliberate break;
-   retired keys reject and no aliases remain. Retain numerical behavior until
-   the general species path is qualified. Retire application-specific defaults
-   from general examples.
+1. Verify the immutable species/reaction schema, alternative rate/integrated
+   input forms, volume basis, donor accounting and independent energy contract
+   with multiple ordinary species and nontrivial catalog IDs.
+2. Verify the field, population and controller adapters against that contract.
+   Missing required schemas, retired keys and unsupported combinations reject
+   collectively. General examples supply their own finite manufactured material
+   laws; matched reference applications retain their explicit chosen physics.
 3. Verify a closed-cell analytic reaction such as `A_l -> B_l + G_d` with
    `W_A = W_B + W_G`. For a first-order law check
    `n_A(t)=n_A(0) exp(-k t)`, product stoichiometry, and total mass/element balance.
@@ -271,7 +292,7 @@ support matrix; each backend must qualify the new source interface separately.
    tests, including spatial/time convergence and the intended pressure,
    temperature, concentration, bubble-size, and turbulence ranges.
 
-No completed legacy test or roadmap checkmark substitutes for these general
-source-interface gates. The documentation describes the planned contract;
-implementation, external comparison, and physical validation remain separate
-claims.
+No historical test log or roadmap checkmark substitutes for these gates.
+Architecture documents define each implemented support/rejection matrix.
+Numerical tests use supplied manufactured closures; experimental calibration,
+external comparison and physical validation remain separate requirements.

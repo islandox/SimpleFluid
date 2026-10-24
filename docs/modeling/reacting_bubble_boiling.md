@@ -1,208 +1,187 @@
-# Reacting gas, boiling, and material feedback
+# Reacting gas, finite vapor and thermal ownership
 
-The [general reacting-gas design](reacting_gas_sources.md) treats gas
-production in a solution as application-supplied reactions with explicit
-species, stoichiometry, finite reactants, and heat accounting. Chemical gas
-production and liquid-to-vapor phase change have separate inventory and
-energy ledgers, even when both contribute to the same occupied volume.
+Chemical gas production and solvent/vapor phase change have distinct material
+and energy events. Neither heat deposition nor a scalar void increment defines
+a reaction. The generic species API requires an explicit catalog, conservative
+mechanism and supplied material laws; see
+[the reacting model guide](../reacting-gas-models.md) and
+[the source contract](reacting_gas_sources.md).
 
-The neutral `Reacting*`, `PrescribedHeat*`, and `BubblePopulationKinetics`
-interfaces replace the retired application-specific names without aliases.
-The runtime two-population selector is `twoPopulation`. Existing H2 fields
-and the energy-yield source closure remain transitional; this migration does
-not establish arbitrary-species transport or a general chemistry interface.
-See the [migration table](reacting_gas_sources.md) for exact API and key changes.
+## Select one thermal owner
 
-## General coupling design
+| Configuration | Thermal and material owner |
+| --- | --- |
+| Standalone scalar void/boiling | Low-order bounded scalar void and admitted latent sink; no general chemical inventory |
+| `ReactingGasOptions.bouss_reference` plus `bouss_sources` | Finite schema species/vapor with fixed reference-volume and scalar `rho_ref*cp*T` storage |
+| Native `LowMachMixtureSolver` plus configured interphase stages | Actual phase internal energy, supplied mixture caloric EOS and solver-owned pressure work |
 
-A reaction provider supplies integrated species changes and net reaction heat
-under a declared volume and energy convention. It must distinguish gas
-released from finite dissolved/reactant stocks from external species
-injection. A boiling provider separately transfers solvent mass to vapor and
-accounts for latent heat. Neither provider can reserve the same reactant,
-sensible energy, or void capacity twice. Gas composition and thermodynamic
-properties determine occupied volume; void fraction is a consequence of those
-inventories on a conservative path.
+Do not attach an independent `BoilingSourceModel` to a schema-owned reacting
+inventory. The coordinated finite Boussinesq adapter supplies the positive
+gas-plus-boiling path without that second material/latent owner. Its
+approximation is separate from native phase-energy recovery; neither one
+qualifies the other.
 
-All providers participate in the coupler's accepted-state transaction.
-Preview combined reaction, phase-change, thermal, and volume effects from the
-same accepted state. Accept only with consistent species, mass, energy, and
-volume budgets; reject or recompute a smaller physical step on exhausted
-reactants. A scalar void bound alone does not establish chemical conservation.
-Supporting mixed reaction gas and vapor in a population therefore requires
-composition-aware inventories and transfer laws before enabling the currently
-rejected combinations.
+## Finite Boussinesq reference binding
 
-Material feedback uses the accepted temperature, composition, gas occupancy,
-and pressure with supplied validity-bounded properties. The design requires
-no particular source of reaction energy or external application model. General
-source/feedback adapters remain planned.
+`BoussReferenceVolume` explicitly declares identity, revision, catalog
+fingerprint, liquid reference density, thermal reference density, constant heat
+capacity and catalog-ordered gas molar volumes. These additive gas volumes are
+fixed reference inputs, not an EOS or an inferred solvent. The field model
+owns actual Liquid/Dissolved and named gas inventories even though its thermal
+equation remains a scalar approximation.
 
-## Current single-gas implementation: model choices
+`BoussCoordinatedSources` contains separately selected gas requests, solvent/
+vapor binding, volume-only population processes and explicit population-number
+events. `configure_bouss_sources(...)` replaces these sublaws without resetting
+evolved inventories or void. Initialization and later configuration must keep
+the same material ownership and immutable schema.
 
-- `idealGasSource`: computes `S_alpha_reaction` from the legacy power-density
-  input, temperature, pressure, gas yield, and release efficiency.
-- `twoPopulation`: reconstructs void fraction from dissolved
-  hydrogen plus microbubble and large-bubble inventories.
-- Low-order scalar `alpha_g`: aggregates `S_alpha_reaction`, `S_alpha_boil`, and
-  optional collapse into `S_alpha_total`, then applies an explicit bounded
-  update.
-- Boiling source: adds explicit bulk and wall boiling alpha sources and a
-  positive latent heat sink `latentHeatSink` in W/m3. Bulk boiling is capped
-  by the sensible superheat available over one timestep. Bulk and wall
-  sources are then limited together by remaining scalar void capacity, with
-  the same factor applied to `latentHeatSink`.
+The material sequence is:
 
-The boiling-model update accepts the canonical scalar-void model and any
-already-reserved legacy gas source in one call. This keeps `alpha_g`, both
-bounds, and collapse behavior in one authoritative object. It publishes only
-the admitted boiling source and its matching latent sink; the former unbounded
-two-argument update is no longer a supported coupling path.
+1. Transport actual species and paired population counts.
+2. Execute the actual reaction/external-source input. An infeasible actual
+   source rejects; it is not rescaled to fit void capacity.
+3. Reserve the explicitly requested forward gas-producing reaction extents
+   against remaining finite original donors and admit them in declared order.
+4. Admit bulk/wall solvent-vapor proposals using the remaining donor, thermal
+   and scalar gas-volume capacity. Incoming credit cannot finance competing
+   requests in the same reservation.
+5. Apply explicit number events consistent with the accepted material endpoint.
+   No automatic birth, death or disappearance is inferred.
 
-Collapse is limited to the gas removable without crossing `alpha_min` during
-the current timestep:
+`BoussVaporBinding` names one real species present as liquid solvent and vapor,
+its vapor compartment/population, saturation temperature, latent heat and time
+scale. It may also declare a signed scalar-storage sensible correction.
+Evaporation transfers the same material amount from Liquid to vapor and
+condensation reverses it. Available superheat/subcooling and finite stocks
+bound the admitted event. A scalar cap cannot delete material or supply a
+missing donor.
 
-```text
-S_alpha_collapse = min(alpha_g / tau_c,
-                       (alpha_g - alpha_min) / dt).
-```
+The net evaporation cooling is
+`dm*(latentHeat-sensibleCorrection)` and must be positive. The accepted latent
+and sensible channels enter `rho_ref*cp*T` once; condensation reverses their
+sign. The complete material/energy receipt, not the requested amount, drives
+publication. Do not add mixture latent enthalpy, carried sensible traces or
+pressure work again.
 
-Boiling can reuse that realizable capacity, but cannot claim collapse that the
-bounded scalar update would otherwise discard.
+## Wall heat admission
 
-## Current single-gas implementation: configuration keys
+Each `BoussWallHeatBinding` names a physical patch, nonnegative inward heat
+flux and evaporation fraction. The coupling owner captures actual canonical
+owned-face heat, area, interval and geometry epoch before admission. The
+declared flux must match the temperature equation's immutable boundary input.
 
-`reacting_transport_solver_tolerance` optionally sets the relative linear
-solve tolerance for the existing gas finite-volume inventory transport (default
-`1e-10`). The typed option is `ReactingGasOptions::transport_solver_tolerance`.
-Graded meshes with nearly zero early escape may require tighter algebraic
-accuracy to satisfy the unchanged roundoff-level inventory checks; the
-bottom-heated boundary-layer fixture uses `1e-14`. This is separate from
-`local_ode_tolerance`, which controls local kinetics/radius calculations.
+The full boundary heat is already supplied through the temperature boundary
+condition. It is never added again as a volumetric source. Only the admitted
+latent/sensible conversion changes the scalar thermal budget. Bulk and wall
+proposals share finite solvent and the declared proportional-request admission
+policy; rejected wall demand leaves unspent heat in the same scalar owner.
+Raw receipts retain patch and geometry-face provenance.
 
-Boiling keys:
+The initial wall path requires closed zero-carrier-flux walls and known
+prescribed heat or compatible Neumann input with valid conductivity. Unknown
+Dirichlet, Robin or convective heat cannot be guessed before the solve.
+Boundary data/conductivity, source configuration or geometry changes invalidate
+the retained heat snapshot. Local failures are fenced before halo exchange or
+global reductions, including on empty owners.
 
-```text
-enable_bulk_boiling
-enable_wall_boiling
-saturation_temperature
-boiling_activation_delta_t
-boiling_time_scale
-latent_heat
-gas_density
-wall_evaporation_fraction
-wall_heat_flux
-wall_boiling_patches
-```
+## Boussinesq support and rejection limits
 
-Scalar void keys:
+The coordinated adapter requires fixed-grid physical sensible-temperature
+storage with its declared constant `cp` and thermal density. It uses zero
+surface tension, zero/prescribed slip and closed material boundaries. Its
+reference-volume population callback deliberately contains no EOS/fugacity
+point.
 
-```text
-alpha_min
-alpha_max
-initial_alpha_g
-alpha_collapse_time
-alpha_diffusivity
-```
+It rejects supplied phase EOS alongside this binding, EOS film laws, the
+general EOS population callback, variable-`cp`/external material-updater storage,
+independent boiling, `coupledNonlinear`, free surface/ALE and a native phase-U
+thermal participant. Use the distinct supported path rather than disabling
+one owner silently. Scalar mirror bounds must match; an unrelated scalar
+collapse cannot remove schema-owned gas.
 
-The low-order scalar void model does not yet have an advective transport
-path. Direct `ScalarVoidFractionOptions` therefore reject a nonzero reserved
-`constant_slip_velocity`, while the scalar model's flat database parser does
-not consume that key. In a shared flat database, `constant_slip_velocity`
-belongs to the bubble-population model's operational rise-velocity
-configuration.
+The separate `PrescribedCarrierAfterTemperature` reference schedule rejects
+both finite Boussinesq bindings. That schedule is gas-only with individually
+zero applied chemical/external/transfer heat; it is not an alternative route
+for latent cooling.
 
-Material feedback keys:
+Material feedback can use accepted temperature and gas void under its selected
+Boussinesq or mixture approximation. It supplies neither an independent gas
+momentum equation nor drag, lift, virtual mass or turbulent dispersion.
+Gas escape enthalpy/momentum in the weak field adapter remain carried traces,
+with no implied conservative phase-energy/momentum debit.
 
-```text
-density_feedback_model = constant | boussinesqTemperatureOnly | boussinesqVoid | mixture
-viscosity_feedback_model = constant
-min_density
-min_viscosity
-gas_density
-```
+## Native phase-energy interphase transfer
 
-## Current single-gas implementation: numerical ordering
+The native low-Mach controller consumes actual transported inventory, chemistry
+and ordered face stages before freezing configured interphase event amounts.
+Each material stage reserves gross outgoing species from its actual predecessor;
+later stages may use earlier admitted credit, but simultaneous incoming credit
+does not fund a donor. Number events run after final material changes.
 
-For each Boussinesq step:
+Supplied true partial-molar enthalpies and their temperature/pressure
+derivatives determine paired material energy at each pressure-conditioned
+anchor. Signed local heat slots provide separate paired heat exchange.
+Common-temperature mode records internal caloric redistribution; separate
+temperatures retain each occupied phase's own energy. An absent phase has no
+invented temperature or heat capacity.
 
-1. Refresh material properties and temperature sources from the previous
-   accepted state.
-2. Advance velocity and pressure.
-3. For the ideal gas-source specialization, compute `S_alpha_reaction` from the
-   authoritative scalar `alpha_g` and its bound.
-4. Compute boiling, limit it against timestep energy and remaining void
-   capacity, then update the scalar void field.
-5. Advance temperature with all heat sources minus the accepted
-   `latentHeatSink`.
-6. When selected, advance the two-population model and mirror its reconstructed
-   void into the scalar publication field. The mirror derives `S_alpha_total`
-   from its actual old/new published state.
-7. Refresh feedback material fields for output and the next step.
+The solver alone applies `-p*(Vfinal-Vadv)`, using the actual transported
+physical phase-volume packet. Kinetics, chemistry and count events are not
+reintegrated during pressure roots. Frozen plans, active constitutive values
+and final thermal evaluations have separate receipts, and commit/restore
+invoke none of those laws. See
+[the native thermal contract](../architecture/reacting_interphase_thermal.md).
 
-Other independently enabled legacy physics stages are outside this gas and
-boiling contract; this ordering is not a generic reaction-network API.
+This backend uses closed orthogonal meshes, common phase pressure and zero
+surface tension. Prescribed native planar ALE retains accepted-old/new storage,
+relative phase flux and explicit live motion authority. It is not the
+Boussinesq free-surface/vapor adapter. Upstream complete depletion without owned
+scalar source-decay work, pressure-conditioned transfer across faces, evolving slip
+momentum, capillary energy and general interface dynamics remain outside its
+support boundary.
 
-## Current single-gas implementation: output fields
+## Standalone scalar controls
 
-Use `SolutionOutputOptions`:
+`ScalarVoidFractionModel` and `BoilingSourceModel` remain available for their
+documented low-order approximation without a general reacting inventory.
+They share admitted void capacity and latent sink; requested boiling and
+discarded scalar increments are not accepted material production.
+Bulk boiling uses available sensible superheat. Wall boiling uses prescribed
+heat flux, not RPI heat-flux partitioning. The scalar model has no advective
+population balance and rejects nonzero reserved scalar slip.
 
-- `include_sources`: writes temperature sources plus `S_alpha_reaction`,
-  `S_alpha_boil`, `S_alpha_total`, and `latentHeatSink`.
-- `include_reacting_gas_fields`: writes `alpha_g`, `alpha_l`, and
-  diagnostics from the existing H2 specialization.
-- `include_material_properties`: writes material fields plus `rhoFeedback`
-  and `muFeedback` when feedback is configured.
+The established boiling controls include `enable_bulk_boiling`,
+`enable_wall_boiling`, `saturation_temperature`, `boiling_activation_delta_t`,
+`boiling_time_scale`, `latent_heat`, `gas_density`, `wall_evaporation_fraction`,
+`wall_heat_flux` and `wall_boiling_patches`. Scalar controls include `alpha_min`,
+`alpha_max`, `initial_alpha_g`, `alpha_collapse_time` and `alpha_diffusivity`.
+They do not create a catalog or configure the finite adapter automatically.
 
-## Current single-gas implementation: feedback mapping
+Generic reacting setup is C++ provider-based. A flat database cannot construct
+a mechanism, mixture EOS or finite Boussinesq binding; enabled generic parsing
+therefore rejects without explicit setup. The retired fixed-H2/yield/model
+keys and modes have no compatibility aliases.
 
-`FeedbackMap::volume_weighted_average` maps owned CFD cells into named
-feedback cells. Multiplying a mapped average by its mapped volume preserves
-the original scalar volume integral for coarsened cells.
-`FeedbackFieldRegistry` exports deterministic snapshots with stable field and
-coarse-cell ordering. Registry contents, mesh identity, options, and exchanged
-sizes are validated collectively for distributed runs.
+## Output, replay and evidence
 
-The existing `FeedbackMap::import_power_density` and
-`PlaceholderOuterCouplingDriver` remain a specialized in-memory power/feedback
-scaffold; the imported field retains the name `qdot_external`. They are not a
-general species-source adapter and do not establish reaction/heat convergence
-or an external communication protocol.
+Schema species fields and keyed chemical/external/interphase/physical-escape
+ledgers carry material provenance. `BoussAcceptedReceipt` retains requested and
+admitted gas extents, vapor/number events and original thermal channels.
+Additional `bouss_evaporation_moles_rate`, `bouss_condensation_moles_rate`,
+`bouss_latent_power`, `bouss_sensible_power` and `bouss_vapor_volume_source`
+fields report the reference adapter. They do not replace accepted receipts or
+define native phase energy.
 
-## Current single-gas implementation: OpenFOAM transport verification
+Coupled snapshots and rejected steps retain flow, temperature, fields,
+inventories, source/heat receipts, time and histories atomically. A failed
+admission does not permit a partial latent debit or silent reinitialization.
+Use fresh focused serial/MPI output, actual owner counts and skips to establish
+execution evidence. Numerical source/energy/replay fixtures are not physical
+validation of boiling, nucleation or interfacial constitutive laws.
 
-The paired [`dispersedBubbleFlow` verification cases](../../verification/openfoam/dispersedBubbleFlow/README.md)
-compare production microbubble transport with an independent OpenFOAM
-finite-volume reference. The steady case balances uniform bubble production
-with top escape; the transient case tracks clearance of an initial bubble
-inventory. Both use a prescribed constant rise speed and suppress population
-conversion and dissolution to isolate the shared transport equations.
-The checks cover matched cell profiles, inventories, and source/escape
-conservation. They do not validate gas momentum, interphase forces, turbulence,
-or the full legacy kinetics model.
-Both cases require the optional IF97 library and use liquid-water reference
-properties and surface tension at 300 K and 101325 Pa absolute. OpenFOAM
-uses the same material snapshot. The fixture gas remains hydrogen; water
-vapor density is not substituted for its ideal-gas/capillary bubble model.
-
-## Current single-gas implementation: limitations
-
-- No separate gas momentum equation is solved.
-- The scalar `alpha_g` path has no population balance.
-- The Sheng 2024 model uses two representative bubble populations, not a full
-  size distribution.
-- Boiling with the Sheng 2024 model is rejected until vapor mass can be added
-  conservatively to its bubble inventories.
-- Finite scalar collapse with the Sheng 2024 model is likewise rejected until
-  removal is coupled to bubble inventories and escape accounting.
-- Boiling is explicit and does not subcycle; its accepted source is limited by
-  timestep sensible energy, scalar alpha capacity, gas-source reservation, and
-  configured collapse.
-- Wall boiling uses a prescribed heat flux and does not implement RPI heat
-  flux partitioning.
-- Viscosity feedback currently supports a constant model with a safety floor.
-- General reactions, multiple generated gas species, composition feedback,
-  and conservative reaction-gas/vapor coupling require implementation and
-  separate qualification.
-- The existing outer loop is an in-memory callback scaffold and does not
-  establish an application-specific physical validation claim.
+Explicit H2/IF97/OpenFOAM references may retain those physical names and supplied
+correlations. Their documented external-carrier approximation does not imply
+finite-water inlet conservation or general latent ownership. VoF remains
+excluded, with no experimental-enable path provided in this source snapshot;
+bounded-FP and exact-rational geometry paths remain deferred.

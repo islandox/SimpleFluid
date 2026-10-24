@@ -8,8 +8,11 @@ model-configuration forwarding APIs.
 
 The [general reacting-gas source design](../modeling/reacting_gas_sources.md)
 retains this ownership and transaction boundary while separating reaction
-extents from heat deposition. The first example below uses the neutral single-gas
-source APIs; it does not expose the planned general reaction interface.
+extents from heat deposition. In the example below, `gas_options` supplies an
+explicit species catalog/mechanism, compatible EOS laws, finite initial states,
+counts and source laws. A surface additionally needs a supplied catalog-bound
+headspace. The separate finite-reference vapor adapter has its own supported
+fixed-grid thermal boundary.
 
 ```cpp
 auto solver = std::make_shared<BoussinesqSolver<Pack>>(
@@ -19,7 +22,7 @@ coupling.add_prescribed_heat_source().initialize_constant(power_density);
 coupling.configure_reacting_gas(gas_options);
 coupling.configure_material_feedback(feedback_options);
 coupling.initialize_heated_box(initial_temperature, initial_temperature);
-coupling.configure_free_surface(surface_options); // Configure after dependencies.
+coupling.configure_free_surface(surface_options, std::move(headspace_model)); // After dependencies.
 coupling.step();
 const auto& temperature = solver->temperature();
 ```
@@ -68,12 +71,23 @@ order. The accepted ALE Courant diagnostic is
 `coupling.maximum_courant_number()`; the standalone solver diagnoses its own
 absolute projected flux.
 
+`ReactingGasModel` initialization restores its previous fields, histories,
+receipts and initialized/uninitialized state if validation fails. Implicit
+initialization during a coupled step participates in whole-step rollback.
+Snapshots of a rejected tentative initialized state remain invalid on a later
+retry; successful explicit reinitialization still invalidates older snapshots.
+
 ## Advancement and transactions
 
-Fixed-grid advancement preserves collective validation, interval-source
-refresh, material/source refresh, flow, turbulence, lagged ideal-gas source and
-boiling/void updates, temperature, legacy two-population gas kinetics and its void mirror,
-material feedback, free-surface accounting, and accepted publication.
+Fixed-grid advancement validates configuration collectively, refreshes interval
+sources/materials, advances flow/turbulence and executes the selected source and
+temperature schedule. General species and coordinated finite vapor sources run
+before temperature under one thermal owner. The explicitly selected prescribed-
+carrier reference schedule runs after temperature and rejects finite solution,
+film, applied source heat, vapor, surface and ALE participants. Generic gas
+inventories publish the authoritative void mirror; material feedback, supported
+surface accounting and histories follow accepted-state checks. Standalone
+boiling retains its separate owner and cannot duplicate coordinated vapor heat.
 SST-SAS and nonlinear-flow rollback retain their existing scopes. The existing
 planar ALE geometry-trial Picard loop, relative transport, GCL/quality gates,
 energy/mass/gas/continuity acceptance checks, and rejection rollback belong to
@@ -120,35 +134,13 @@ the solver, coupler, and their dependencies. Public headers do not include
 `.tcc` implementations. This is a Boussinesq backend; arbitrary solver adapters
 and additional physics combinations are outside this change.
 
-External-controller migration validation in GCC Debug on 2026-10-15 passed
-287 serial/ELF checks, with 19
-MPI-only cases skipped in serial, plus 15 two-rank groups, the four-rank
-composite ALE regression, and nine bounded example checks. Both public headers
-and owning implementation units compiled without PCH. The two optional IF97
-example sources passed syntax checks; IF97 and NOX runtime configurations were
-not qualified. MPI used host networking. This is focused validation, not a full
-suite or performance qualification.
-
-The subsequent ALE phase split passed 82 focused serial/ELF checks, with five
-MPI-only serial skips, the two-rank ALE replay suite, and the four-rank composite
-ALE check. Its headers and owning implementation units compiled without PCH.
-All four verification-driver cases retained byte-identical printed physical
-diagnostics compared with the implementation before the split. Private phase
-helpers add no exported symbols.
-
-Shared-solver ownership validation passed 289 focused serial/ELF checks, with
-19 MPI-only serial skips, six MPI groups including the four-rank composite ALE
-check, and nine bounded example checks. The lifetime regression releases the
-caller's solver handle, advances and replays a checkpoint through the retained
-owner, then verifies solver destruction when the coupler releases the last
-owner. Null ownership and duplicate-controller rejection are also covered.
-
-
-The neutral source migration removes scalar source-decay ownership and
-configuration from this controller. Standalone `ScalarSourceDecayTransport`
-retains generic source/decay and scalar transport for callers that explicitly
-own it. Source APIs and configuration keys have no legacy aliases; see the
-[migration table](../modeling/reacting_gas_sources.md).
+Focused component and registered serial/MPI tests cover ownership, lifetime,
+accepted interval replay, source/heat schedules and supported geometry. Historical
+controller-only runs do not qualify later material or source combinations. Use
+the current support matrices and actual selected test results; no full-suite,
+hosted-CI or physical-validation claim follows from this architecture contract.
+The [migration table](../modeling/reacting_gas_sources.md) lists the deliberate
+source/configuration break and required downstream rebuild.
 
 The typed species surface adapter uses accepted event receipts, supplied catalog-bound
 headspace EOS and exact transported liquid-volume packets. Its ownership and

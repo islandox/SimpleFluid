@@ -1,15 +1,33 @@
 # Liquid-side bubble mass transfer
 
-The `twoPopulation` kinetics uses a selected liquid-side coefficient
-for the exchange between dissolved H2 and **active large bubbles**. The
-selector `bubble_mass_transfer_model` defaults to `legacyHughmark` and also
-accepts `sphericalDiffusion`, `fengMichaelidesClean`, and
-`fengMichaelidesRigid`. These are separate from the molecular
-diffusivity provider (`hydrogen_diffusivity_model` or the C++ callback).
+`ReactingGasMode::Species` uses finite catalogued species and explicitly named
+dispersed populations. The field adapter's built-in film stage evaluates each
+eligible species in each occupied population; there is no preferred H2 slot or
+large-bubble-only transfer inventory. An application may instead supply the
+whole `population_process` packet and own its constitutive law and event order.
+Enabled setup requires an explicit mechanism/catalog, initial material and counts,
+mixture thermodynamics and per-species properties; it has no heat-yield fallback.
+
+`ReactingGasOptions::mass_transfer_mode` selects `Hughmark`,
+`SphericalDiffusion`, `FengMichaelidesClean` or `FengMichaelidesRigid`. The neutral
+database spellings are `hughmark`, `sphericalDiffusion`, `fengMichaelidesClean`
+and `fengMichaelidesRigid`. The enum default remains the guarded Hughmark
+implementation; it is not a universal recommendation. A database selector cannot
+supply the missing catalog, EOS or finite inventories required to enable Species.
+Retired yield/kinetics/property selectors are rejected rather than mapped to an
+unnamed gas.
+
+Each `ReactingSpeciesProperties` entry identifies a stable species ID and supplies
+its own molecular diffusivity or MPI-free `diffusivity_provider`. Zero diffusivity
+disables that species' film process. Henry coefficients use
+mol/(m3 actual liquid Pa); equilibrium uses the supplied gas-mixture fugacity,
+`C_i,eq = H_i*f_i`, or `equilibrium_concentration`. For an ideal mixture this reduces to
+`f_i = y_i*p_g`. A nonideal provider cannot silently substitute total or partial
+ideal-gas pressure for its equilibrium law.
 
 All dimensional inputs and outputs are SI. The shared evaluator reports
-dimensionless diameter-based numbers using the bubble-liquid relative speed
-supplied by the existing rise law:
+dimensionless diameter-based numbers using the explicitly supplied bubble-liquid
+relative speed:
 
 ```text
 d  = 2 R
@@ -19,31 +37,52 @@ Pe = Re Sc = |u_rel| d / D_m
 Sh = k_L d / D_m
 ```
 
-`D_m` is the **molecular** dissolved-H2 diffusivity. The bulk finite-volume
-operator separately uses `alpha_l D_m`; turbulent or numerical diffusion is
-never inserted into the interfacial `Sc`. The selector changes only `k_L`.
-It does not change bubble slip, drag, liquid velocity, Henry/Laplace
-equilibrium, conversion, lifetime terms, or the conservative inventories.
-Comparisons between selectors use the same prescribed or computed slip.
-The runtime mode is resolved once before each cell-field sweep (preflight,
-kinetics, or derived `K_L`). Each cell still receives its own physical-input
-and applicability checks; the Feng low/high Pe branch remains state-dependent.
+`D_m` is the molecular diffusivity of the selected species in the actual liquid.
+It is a film property: it does not implicitly enable a bulk finite-volume
+`alpha_l D_m` operator. The field adapter's conservative bulk-mixture-diffusion
+selection remains rejected until it has a complete transport/enthalpy owner.
+The native low-Mach controller has a separate supplied finite face-source contract;
+see [its ownership and support limits](architecture/low_mach_reacting_flow.md).
+Turbulent or numerical diffusion is never inserted into interfacial `Sc`.
+
+The shared evaluator accepts an explicit bubble-liquid relative speed. The current
+default Species film stage supplies `constant_slip_velocity` for `ConstantSlip`
+and zero otherwise. In particular, selecting Celata for population transport does
+not automatically feed that computed velocity into the film evaluator. A supplied
+population law must own any additional consistent slip/transfer coupling. Comparing
+selectors requires the same declared relative speed and physical properties.
+The selector changes `k_L` only; it does not independently change drag, velocity,
+mixture equilibrium, finite stocks, counts or the supplied event schedule.
+
+For the built-in stage, the integrated request is
+
+```text
+dn_i = dt * k_L,i * (4*pi*R^2*N) * (n_i,dissolved/V_liquid - C_i,eq).
+```
+
+Positive `dn_i` moves that amount from Dissolved to the named Dispersed bin;
+negative `dn_i` reverses the transfer. All original outgoing species/count events
+share finite donor limits before incoming credit. No material or count is clipped
+to repair overdraw. Count births/deaths are explicit. Only a declared built-in
+complete-dissolution stage may issue its own remaining-count death; arbitrary
+chemical disappearance or a user packet cannot trigger a generic count reset.
+The law and its low/high-Pe branch are evaluated on each actual local state.
 
 ## Implemented laws and domains
 
 | Selector | Diameter-based equation | Runtime domain and meaning |
 | --- | --- | --- |
-| `legacyHughmark` | `Sh = 2 + 0.6 Re^(1/2) Sc^(1/3)` for `Re < 776.06`; `Sh = 2 + 0.27 Re^0.63 Sc^(1/3)` otherwise | Existing behavior, including the strict `0 <= Sc < 250` guard. This is the historical rigid-sphere-like branch; it has no mobile-interface model. Its low-Re, high-Sc use is not qualified. |
+| `hughmark` | `Sh = 2 + 0.6 Re^(1/2) Sc^(1/3)` for `Re < 776.06`; `Sh = 2 + 0.27 Re^0.63 Sc^(1/3)` otherwise | Existing behavior, including the strict `0 <= Sc < 250` guard. This is the historical rigid-sphere-like branch; it has no mobile-interface model. Its low-Re, high-Sc use is not qualified. |
 | `sphericalDiffusion` | `Sh = 2`, hence `k_L = D_m/R` | Exact steady radial diffusion for a sphere with fixed surface concentration in quiescent, unbounded liquid. Runtime requires `Pe = 0`. In a CFD flow, it is an explicit local diffusion-only approximation, not a finite-Pe high-Sc closure. |
 | `fengMichaelidesClean` | Low Pe: `Sh = 2 + Pe/2 + (Pe² ln Pe)/12`; high Pe: `Sh = 1.49 (Pe/2)^0.435` | Inviscid clean/mobile endpoint. Requires `Re < 1`; low branch `0 <= Pe < 1`, high branch `100 <= Pe/2 <= 5000`; rejects the gap. |
 | `fengMichaelidesRigid` | Low Pe: `Sh = 2 + Pe/2 + (Pe² ln Pe)/8`; high Pe: `Sh = 1.49 (Pe/2)^0.322` | Rigid/immobilized endpoint, with the same disjoint gates. |
 
-The legacy expression and `Sc` guard reproduce the existing
+The retained expression and `Sc` guard reproduce the existing
 `BubbleGasPhysics::hughmark_sherwood` implementation. Its historical
 reference is G. A. Hughmark, “Mass and heat transfer from rigid spheres,”
 *AIChE Journal* **13** (1967), 1219–1221,
-<https://doi.org/10.1002/aic.690130638>. The publisher preview identifies
-the article but does not provide its equations for an independent comparison;
+<https://doi.org/10.1002/aic.690130638>. The original correlation review identified the article through its publisher
+preview but could not independently compare its equations there;
 the equations above are documented as the retained implementation, not as a
 new qualification of Hughmark's original data.
 
@@ -63,19 +102,30 @@ timestep is not a bubble age and no transient term is used here.
 The shared evaluator rejects nonfinite/nonphysical dimensional inputs with
 `invalid_argument`, and finite states outside a selected model's domain with
 `domain_error`. It reports `R`, `d`, `u_rel`, `rho_l`, `mu_l`, `D_m`, `Re`, `Sc`,
-`Pe`, `Sh`, `k_L`, the model, and an applicability label. The originating
-rank's model exception identifies the population, cell, and rank; peers
-receive a collective failure before the next communication.
+`Pe`, `Sh`, `k_L`, the model, and an applicability label. The distributed owner
+fences local failures before the next communication;
+peers receive collective failure. Callback laws themselves perform no MPI work.
 
-The optional field `K_L` evaluates the selected law at the reconstructed
-**characteristic radius** for visualization. The source term uses the actual
-large-population radius, so `K_L` is not the exact coefficient of every
-population source term. Accepted-step statistics record the independently
-minimized and maximized dimensional inputs and outputs from active
-large-population kinetic evaluations; trial/reconstruction calls do not enter
-that envelope. A cell with neither population has no transfer evaluation;
-when only microbubbles are present, the characteristic-radius diagnostic
-can still be evaluated, while no large-population kinetic transfer occurs.
+The pure evaluator's `BubbleMassTransferResult` reports the dimensional inputs,
+`Re`, `Sc`, `Pe`, `Sh`, `coefficient`, model and applicability label. Those are
+constitutive evaluation results, not proof that a kinetic request was accepted.
+The field adapter's `population_ledgers()`, `species_step_events()` and accepted
+`species_event_receipt()` identify actual per-species/population material events.
+An independent test can recover the accepted coefficient from those events, actual
+area and the declared equilibrium driving force. Retired characteristic-radius
+`K_L` output and five-slot H2 diagnostics are not authoritative general observers.
+No aggregate min/max envelope is a substitute for those keyed receipts.
+
+This Boussinesq field adapter does not own extensive phase internal energy.
+Selective escape requires a supplied partial-molar-enthalpy trace, but the trace
+is not another phase-U debit. The [weak surface adapter](architecture/reacting_species_surface.md)
+uses the same accepted events for its vent/headspace, with actual count escape
+reported separately. The fixed-grid finite-solvent/vapor `cp*T` adapter owns an
+explicit reference-volume/latent approximation and cannot be combined with that
+weak supplied-EOS surface/ALE path. Native
+[pressure-conditioned interphase transfer](architecture/reacting_interphase_thermal.md)
+has a separate phase-energy and pressure-work owner. A film coefficient by itself
+qualifies none of these thermal combinations.
 
 ## Feng–Michaelides finite-Pe endpoints
 
@@ -130,9 +180,9 @@ zero slip, the limit `Pe_d² ln(Pe_d) -> 0` is applied without evaluating
 no numerical error bound near `Pe_d=1`. The same endpoint selectors use it
 only for `0 <= Pe_d < 1`, and use Eq. (19) only in the operational high-Pe
 window. They reject `1 <= Pe_d < 200` rather than blending, falling back to
-Hughmark, or substituting `Sh=2` at finite Pe. Accepted-step diagnostics
-count the low-Pe and fit evaluations separately, including a mixed-regime
-label if both occurred in one step. The Reynolds-dependent expression often
+Hughmark, or substituting `Sh=2` at finite Pe. Result labels distinguish low-Pe
+from fit evaluations; accepted material must still be checked from keyed events.
+The Reynolds-dependent expression often
 quoted under the authors' names belongs to a distinct **2001** paper and is
 not used here.
 
@@ -141,12 +191,24 @@ Transfer from Spherical Bubbles: The Effect of Interface Contamination at Low
 Reynolds Numbers,” *International Journal of Chemical Reactor Engineering*
 (2006), <https://doi.org/10.2202/1542-6580.1304>, compares creeping-flow
 clean and fully contaminated bubbles. Its author-posted text includes
-Clift-attributed finite-Pe endpoint equations, but the PDF equations could
-not be checked visually in this update. Its moderate-Re comparisons do not
+Clift-attributed finite-Pe endpoint equations, but the original correlation review
+could not check those PDF equations visually. This documentation cleanup has not
+reverified the primary-paper images. Its moderate-Re comparisons do not
 establish a high-Sc moderate-Re closure, so no `Dani` selector, regime switch,
 or extrapolation is implemented. The Feng fit also does not cover moderate Re
 or the unsourced intermediate-Pe gap.
 
-The population model also includes a large-bubble lifetime dissolution term
-when interfacial transfer is negative. That term can overlap with the
-`k_L`-driven loss; it is retained as a separate physical-model question.
+The optional explicitly configured micro/large first-order dissolution and
+conversion frequencies are separate declared events. Their loss may overlap a
+film-driven request; the combined finite donor budget must still pass. They are
+not an inferred bubble age, a replacement for the supplied film domain, or a
+license to discard another species' residual gas/count inventory.
+
+These correlations use spherical representative bins and supplied constitutive
+properties. Native and legacy field backends preserve the caller's mesh identity;
+serial/MPI execution, including XY/Z decompositions and empty owners, has separate
+map/halo/epoch/failure contracts. Geometry/operator coverage alone does not qualify
+every physics combination. This guide records model equations and source
+provenance, not experimental validation. VoF and the bounded floating-point and
+exact-rational VoF/general-AMR geometry paths remain deferred outside this refactor;
+ordinary finite-donor, conservation and roundoff checks remain required.

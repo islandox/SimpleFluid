@@ -133,8 +133,10 @@ flux because inlet composition and post-boiling local clipping have no
 conservative contract. Always derive liquid volume from this inventory and
 pure `rhoLiquid`, never void-reduced mixture density. Its physical mass-closure
 gate must remain independent of the Krylov tolerance; a loose linear solve must
-fail conservation rather than relax it. Separate solvent, solute, and reactive-species
-inventories remain future work.
+fail conservation rather than relax it. The species-bound follower instead derives physical liquid mass and volume
+from finite Liquid+Dissolved inventories and accepted transport/source receipts.
+It must not transport or consume those inventories a second time; see
+[species-bound surface coupling](docs/architecture/reacting_species_surface.md).
 
 When free-surface coupling has enabled boiling phase-inventory tracking,
 `remove_free_surface_model()` must reject removal while submerged steam remains.

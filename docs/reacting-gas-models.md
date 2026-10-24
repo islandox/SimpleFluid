@@ -1,429 +1,235 @@
-# Reacting gas in solution: source and transport reference
+# Reacting gas in solution: API and transport contract
 
-The general model design is [Reacting gas sources in solution](modeling/reacting_gas_sources.md).
-It separates application-supplied reactions, species, finite reactants, and
-heat release from conservative dissolved, dispersed, and resolved gas
-transport. A particular energy source or solution composition is not a
-required part of that design.
+The active reacting API uses an explicit species catalog, conservative reactions,
+supplied properties and real material inventories. No species name, gas constant,
+reaction yield or source of heat selects chemistry implicitly. See the
+[source contract](modeling/reacting_gas_sources.md), the
+[native flow architecture](architecture/low_mach_reacting_flow.md), and the
+[boiling/thermal ownership guide](modeling/reacting_bubble_boiling.md).
 
-The neutral `Reacting*`, `PrescribedHeat*`, and `BubblePopulationKinetics`
-interfaces replace the retired application-specific names without aliases.
-The runtime two-population selector is `twoPopulation`. Existing H2 fields
-and the energy-yield source closure remain transitional; this migration does
-not establish arbitrary-species transport or a general chemistry interface.
-See the [migration table](modeling/reacting_gas_sources.md) for exact API and key changes.
+## Choose the physical owner
 
-## General source boundary
+| Path | Owner and scope |
+| --- | --- |
+| `ReactingGasModel` with supplied liquid/gas EOS | Schema-indexed fields and named bubble populations coupled to the weak Boussinesq carrier; no independent phase-energy or gas-momentum equation |
+| `ReactingGasModel` with `bouss_reference` and `bouss_sources` | Explicit fixed-density, scalar-temperature approximation with finite chemical and solvent/vapor inventories, coordinated bulk/wall admission |
+| `LowMachMixtureSolver` with `ReactingMixtureCoupler` | Native conservative species, phase internal energy, common pressure, carrier momentum and explicit phase-number ownership |
+| Standalone `ScalarVoidFractionModel` and `BoilingSourceModel` | Low-order scalar void/boiling controls; these are not a general chemical inventory |
+| Explicit H2/IF97 verification applications | Declared physical reference laws and reservoirs, with the approximation documented by each application |
 
-The planned provider supplies reaction extents or species rates with explicit
-units and volume basis, stoichiometric reactant/product changes, and already
-net thermal energy under a declared formation-energy convention. Per-liquid
-rates are converted to extensive amounts using true liquid volume exactly
-once. Finite reactants must be debited before a candidate can be accepted;
-external injection has a separate mass, species, momentum, and enthalpy ledger.
-Dissolution, bubble formation, capture, and representation changes transfer
-existing species and do not create additional reaction production.
+These paths have different energy and volume contracts. Enabling one does not
+authorize combining every other model. VoF remains unavailable in this refactor;
+no experimental-enable path supplies those absent sources. Bounded
+floating-point and exact-rational VoF/general-AMR geometry paths remain deferred.
 
-Gas EOS, solubility, diffusivity, surface tension, nucleation, and transfer
-laws remain supplied closures with declared composition and validity ranges.
-Their integration must preserve the transport, pressure, inventory, and
-rollback contracts documented below. Generic chemistry is not implemented by
-renaming the legacy options or interpreting an arbitrary reaction rate as
-power.
+## Catalog, reactions and units
 
-## Current single-gas implementation: available modes and ownership
+`Reacting::SpeciesCatalog` is immutable. Each entry supplies a unique stable ID
+and name, positive molar mass, elemental composition and allowed compartments.
+A fingerprint binds the ordered schema; matching size or revision alone is not
+enough. Zero is an ordinary species ID, not a solvent or inert-gas sentinel.
 
-The existing runtime-selectable source subsystem has three modes:
-
-- `disabled`
-- `idealGasSource`
-- `twoPopulation`
-
-This transitional subsystem is owned by an external `MultiphysicsSolverCoupler` after
-`configure_reacting_gas(...)` is called. Construct the coupler with a
-`SP<BoussinesqSolver<Pack>>` and use `coupling.step()` or `coupling.run()` for
-advancement. The standalone Boussinesq solver owns no reacting model. See
-[the controller ownership and migration guide](architecture/multiphysics_solver_coupler.md).
-
-## Current single-gas implementation: public units
-
-All public options and fields use SI:
+`CellSpeciesState` stores extensive mol per cell. `Liquid` and `Dissolved` are
+chemical compartments in one physical liquid phase and share its volume and
+temperature. Every named `Dispersed` population has its own composition;
+`Resolved` is distinct. Reactions select exact donor compartments, including the
+population name. Aggregates are derived views and cannot supply an unnamed donor.
 
 | Quantity | Unit |
 | --- | --- |
-| Temperature | K |
-| Absolute pressure | Pa |
-| Dissolved concentration | mol/m3 liquid |
-| Bulk molar inventory | mol/m3 bulk |
-| Legacy energy-to-H2 yield | mol/J |
-| Radius | m |
-| Time | s |
-| Dynamic viscosity | Pa s |
-| Density | kg/m3 |
-| Henry coefficient, `C = H p` | mol/(m3 Pa) |
-
-## Current single-gas implementation: external material properties
-
-Application-specific property correlations belong to the supplied material
-model. Density, heat capacity, viscosity and thermal conductivity can be
-supplied through the external `MaterialProvider` API. The existing gas
-specialization takes its additional properties through `ReactingGasOptions`:
-
-| Property | Constant input | External callback | Callback inputs / output |
-| --- | --- | --- | --- |
-| Surface tension | `surface_tension` | `surface_tension_correlation` | K / N/m |
-| Hydrogen diffusivity | `hydrogen_diffusivity` | `hydrogen_diffusivity_correlation` | K / m2/s |
-| Nucleation radius | `nucleation_radius` | `nucleation_radius_correlation` | K, Pa / m |
-
-Select `SurfaceTensionMode::External`, `HydrogenDiffusivityMode::External` or
-`NucleationRadiusMode::External` when supplying the corresponding callback.
-Surface-tension and nucleation callbacks may capture material composition and
-model parameters by value. All callbacks must be reentrant, physically
-identical on each MPI rank, and return finite positive values. Runtime callback
-failures propagate collectively before MPI-dependent assembly or field exchange.
-The generic Henry equilibrium, ideal-gas, bubble drag and transfer equations
-operate on supplied material values.
-
-Temperature-dependent diffusivity is evaluated per cell for both dissolved
-transport and bubble mass transfer. Dissolved transport uses `alpha_l*D(T)`.
-The selected liquid-side transfer law, its strict domain, and the distinction
-between kinetic and characteristic-radius coefficients are documented in
-[Liquid-side bubble mass transfer](bubble-mass-transfer.md).
-
-The old `sheng2024` surface-tension and diffusivity selectors are removed.
-Database configurations supply constant properties, including an explicit
-positive `nucleation_radius`; external callbacks are configured through C++.
-Removed application-specific property and alternate-yield keys remain
-rejected. The legacy source yield `hydrogen_yield_mol_per_j` remains a solver
-input; it is not a general reaction-rate interface.
-
-## Current single-gas implementation: low-order ideal-gas source
-
-The current energy-yield specialization computes
-
-```text
-S_alpha_reaction =
-    (1 - alpha_g) eta G qdot_external R T / p_abs.
-```
-
-Here `qdot_external` is the existing power-density input name; this formula
-documents that specialization rather than defining the general source
-provider. The source is zero at zero supplied power and when
-`alpha_g >= alpha_max`. It is limited by both `max_source_alpha_rate` and
-`(alpha_max - alpha_g) / dt`. In the Boussinesq solver, the Phase 14 scalar
-model owns the authoritative `alpha_g` field and bound; ideal reacting_gas reads
-that state and mirrors it only for its model-local diagnostics.
-
-When no scalar-void model was explicitly configured, ideal-reacting_gas bounds
-seed the solver's implicit scalar model before the first step. Explicit
-`ScalarVoidFractionOptions` take precedence. Reconfiguring reacting_gas after
-time advancement never resets the evolved scalar state or its bounds.
-Standalone ideal-mode calls likewise must use the `advance` overload that
-supplies authoritative `alpha_g` and `alpha_max`; the shorter overload is
-reserved for disabled and two-population modes.
-
-## Current single-gas implementation: two-population state
-
-The advanced model stores dissolved hydrogen conservatively as
-
-```text
-I_H2 = alpha_l C_H2.
-```
-
-It transports and reacts the following bulk quantities:
-
-- `I_H2`
-- `N_micro`, `M_micro`
-- `N_large`, `M_large`
-
-`C_H2` is reconstructed from `I_H2 / alpha_l`. Empty bubble populations have
-zero radius and zero void diagnostics; population floors are never used as
-divisors.
-
-In this two-population mode, the reacting_gas inventories own the reconstructed
-void state and the scalar model is only a common publication mirror. Their
-configured alpha bounds must match so mirroring cannot clip conserved bubble
-state.
-
-The `twoPopulation` selector retains its specific production,
-conversion, dissolution, and experimental inertial-pressure closures. These
-are compatibility behavior, not universal reaction or nucleation laws. The
-reusable thermodynamic pieces include Henry equilibrium, the Laplace
-pressure jump, and the gas equation of state.
-
-Bubble radii are positive roots of
-
-```text
-4 pi r^3 / 3 (p_l + 2 sigma / r) = zeta R T.
-```
-
-The solver uses bracketed bisection over the configured radius interval and
-reports failed brackets or iterations.
-
-## Current single-gas implementation: numerical ordering
-
-For each configured two-population solver step:
-
-1. Refresh material properties and the prescribed source power.
-2. Solve velocity and pressure correction.
-3. Advance temperature.
-4. Reconstruct or prescribe absolute thermodynamic pressure.
-5. Transport dissolved and bubble inventories.
-6. Integrate local production, conversion, growth, and dissolution.
-7. Reconstruct radii, concentrations, and void fraction.
-8. Evaluate experimental inertial pressure for the following timestep.
-
-Population transport holds a mesh execution read lease across its inventory,
-flux, assembly, balance and escape calculations. Composite geometry queries
-share the guarded static-region validation. Per-assembly ALE validation remains:
-borrowed views execute the full GCL check, while the planar solver's validated
-immutable snapshot reuses that result after collective live-state checks.
-Acquisition failures are
-propagated collectively before transport communication. The lease ends on
-return or exception, before subsequent mesh-motion acceptance or rollback.
-
-`set_skip_zero_auxiliary_transport(true)` opts into skipping a dissolved,
-large-number, large-moles, or enabled donor transport equation only when every
-owned value is exactly zero across all MPI ranks. The default is false. This
-works on fixed and validated ALE meshes: the transport stage has zero source,
-homogeneous Neumann data and no incoming boundary flux, so different old/new
-volumes still map zero inventory to zero. Microbubble number and moles always
-run, and later kinetics can populate an empty field; its next transport then
-resumes normally. Independent flags for all four auxiliary fields are combined
-in one reduction per transport stage; a disabled donor is excluded. Proven-zero
-owned and overlap storage is filled locally without a halo import. Skipping a
-field leaves other populations' accumulated escape unchanged.
-
-The flags live only within that transport call and are consumed after each
-field, so kinetics, rollback and later replays always obtain fresh decisions.
-Property callbacks must not modify a still-untransported inventory proven
-zero by that batch. Pending zeros are checked after external-provider phases
-inside their existing collective error handling; a callback write raises an
-error before it can be erased by a local zero fill. These checks add no
-collectives. The final post-kinetics field synchronization is unchanged.
-
-ALE zero-field paths retain active-trial, timestep and GCL validation. Empty
-dissolved transport also evaluates the selected diffusivity provider and
-validates the same clamped liquid storage and liquid-weighted diffusion as
-assembly, including ALE validation after the provider callback. Borrowed views
-repeat the full GCL check; immutable planar snapshots retain their validated
-data and still check the live trial and epochs. The existing
-fixed-mesh shortcut keeps its previous behavior. No nonzero population is
-discarded or treated as zero by a tolerance, and no old numeric operator is
-reused when a skipped number equation has a populated moles partner.
-
-Transport/local-kinetics splitting is first order. Local linear decays are
-analytic and the remaining rates use bounded subcycles. `maximum_subcycles`,
-clipping, pressure-floor events, and radius failures are exposed through
-`ReactingGasStepStatistics` and reduced globally across MPI ranks.
-
-`ReactingKineticsMode::LegacySubcycled` remains the default. Opting into
-`ExactInactive` (`reacting_kinetics_mode = exactInactive` in a database)
-replaces local subcycles by one exact continuous-source update only when both
-large-population inventories are exactly zero and the conservative bound
-`I_H2 + M_micro + production_rate * dt < alpha_l * C_critical` proves that
-conversion cannot activate anywhere in the interval. The bound is rounded
-outward; borderline cases retain the legacy path. It may reject an otherwise
-inactive interval because it deliberately includes all available microbubble
-moles. Existing large populations and possible threshold crossings retain
-the original subcycles, conversion and transfer calculations.
-
-For this inactive subsystem, with frozen source `S` and lifetime `tau`,
-`M_new = exp(-dt/tau)*M_old + S*tau*(1-exp(-dt/tau))`. Number density follows
-the same equation with source `S/nucleation_moles`; dissolved inventory gains
-the complementary hydrogen. Small lifetime ratios use cancellation-safe
-expressions, while large ratios retain the finite `S*tau` population.
-`maximum_subcycles` reports actual local updates, so an entirely inactive
-exact step reports one. Donor production, dissolution diagnostics and total
-hydrogen accounting retain their physical definitions.
-
-This opt-in changes the numerical method: the legacy source-before-decay
-split has a steady microbubble population about 9.67 percent below `S*tau`
-at `substep/tau = 0.2`. Agreement should therefore be assessed against
-analytic and refined solutions, not byte-identical legacy output. Transport
-and kinetics remain split at first order, and this option does not adapt the
-CFD timestep or active-population local error. `local_ode_tolerance` controls
-radius-root solves; it is not a local time-integration error tolerance.
-
-In ideal mode, `S_alpha_reaction` is the source applied to the low-order scalar
-model. In two-population mode it is the model-owned net bounded-void rate,
-`(alpha_g_new - alpha_g_previous) / dt`; it includes reconstruction, transport,
-and escape and can therefore be negative. The common scalar mirror derives
-`S_alpha_total` independently from its own published old/new state rather than
-copying this internal history.
-
-The no-advection dissolved mode is the legacy compatibility default.
-Optional CFD advection uses the projected liquid face flux. Bubble number and
-moles use the same category face flux. `general` bubble transport retains the
-full CFD liquid flux. `axial` reconstructs only the liquid z-velocity at each
-face for one-dimensional compatibility. Rise velocity is added
-in the positive z direction in both modes. Configured free-surface patches
-are outflow-only for hydrogen and bubble-count escape.
-
-## Current single-gas implementation: bubble rise velocity
-
-`celata2007` retains the following implemented drag/rise relation:
-
-```text
-v_b = sqrt(8 r_b g / (3 C_D))
-C_D = max(
-    24 (1 + 0.15 Re^0.687) / Re,
-    8 Eo / (3 (Eo + 4)))
-Eo = 4 g r_b^2 (rho_l - rho_g) / sigma
-Re = 2 rho_l v_b r_b / mu_l
-```
-
-The coupled positive root is found by bracketed bisection. In this legacy
-relation gas density enters `Eo`; it is not inserted into the numerator of
-the velocity equation. Celata et al. (2007) Table 2 reports an experimental envelope of
-diameter 0.5-4 mm, `Re` 200-1500, and `Eo` 0.1-3.5. The pure property result
-reports whether a point lies inside that envelope, but the runtime model
-allows explicit extrapolation for much smaller populations. Such extrapolation
-requires application qualification and is not a general default for reacting gas.
-
-## Current single-gas implementation: pressure
-
-Pressure modes are:
-
-- `constant`: uniform `reference_pressure`
-- `prescribedHistory`: piecewise-linear absolute-pressure history
-- `reconstructed`:
-  `p_ref + p_gauge - volume_mean(p_gauge)`, where the solver gauge pressure is
-  stored in Pa
-- `inertial`: retained absolute-pressure field updated weakly after kinetics
-
-The incompressible pressure-correction field is never interpreted directly as
-absolute pressure. The inertial option does not change the projection
-equation. Pressure-floor events are reported in step statistics.
-
-## Current single-gas implementation: conservation
-
-The per-step hydrogen balance is
-
-```text
-inventory_error =
-    H2_after + H2_escaped - H2_before - H2_produced.
-```
-
-The inventory is the domain integral of
-`I_H2 + M_micro + M_large`. Microbubble dissolution and category conversion
-transfer moles between these fields without deleting them.
-
-Free-surface escape is evaluated from the accepted unknown of the implicit
-upwind transport solve. `H2_escape_molar_rate` and
-`bubble_escape_number_rate` are cell-volumetric rates localized to the
-free-surface owner cells, and their global integrals times `dt` reproduce the
-per-step escaped inventories.
-
-When the raw reconstructed void exceeds `alpha_max`, population inventories
-remain unchanged. `alpha_g_raw`, `alpha_g_excess`, and bounded `alpha_g`
-publish the distinction. A concentration publication ceiling similarly does
-not modify `I_H2`; excluded dissolved inventory is reported separately.
-
-## Current single-gas implementation: configuration
-
-Options are parsed from flat snake-case `Database` keys. The principal keys
-are:
-
-```text
-enable_reacting_gas
-reacting_bubble_model
-reacting_pressure_mode
-dissolved_hydrogen_transport_mode
-bubble_transport_mode
-reacting_heaviside_mode
-reacting_kinetics_mode
-bubble_rise_velocity_model
-surface_tension_model
-hydrogen_diffusivity_model
-bubble_mass_transfer_model
-hydrogen_yield_mol_per_j
-gas_release_efficiency
-reference_pressure
-gas_constant
-alpha_min
-alpha_max
-max_source_alpha_rate
-henry_coefficient
-surface_tension
-hydrogen_diffusivity
-nucleation_radius
-microbubble_lifetime
-large_bubble_dissolution_time
-micro_to_large_conversion_coefficient
-smooth_heaviside_width
-constant_slip_velocity
-bubble_gas_density
-bubble_gravity
-rise_velocity_tolerance
-max_rise_velocity_iterations
-initial_dissolved_hydrogen
-initial_micro_number_density
-initial_micro_moles
-initial_large_number_density
-initial_large_moles
-min_radius
-max_radius
-min_population
-max_population
-max_concentration
-local_ode_tolerance
-max_reacting_subcycles
-max_radius_iterations
-pressure_history_times
-pressure_history_values
-reacting_free_surface_patches
-```
-
-Enabled modes require an explicit positive molar yield and an explicit finite
-source-rate limit. Advanced mode also requires Henry, property, nucleation,
-radius, population, and concentration inputs.
-
-Advanced mode reconstructs void from conserved bubble inventories. It is
-therefore rejected with active boiling or finite scalar collapse until those
-mechanisms can add or remove the corresponding inventories conservatively.
-
-## Current single-gas implementation: output
-
-`SolutionOutputOptions::include_sources` writes `S_alpha_reaction`.
-
-`SolutionOutputOptions::include_reacting_gas_fields` writes `alpha_g`,
-`alpha_l`, absolute pressure, all advanced state fields, reconstructed
-properties, and diagnostic rates.
-
-## Current single-gas implementation: limitations
-
-- Chemistry is H2-only; arbitrary species, reaction networks, and generic
-  finite-reactant inventories remain planned.
-- The two populations are representative radii, not a size distribution.
-- The retained conversion coefficient `F = 1e-4 Pa^-1 s^-1` is an
-  application-calibrated implementation default, not a universal coefficient.
-- The inertial pressure update is experimental and weakly coupled.
-- Source calibration and coupled physical validation are application
-  responsibilities; transport tests do not qualify a reaction law.
-- Celata validity diagnostics use the experimental envelope in the primary
-  paper; microbubble use outside it is an explicit extrapolation.
-
-## Legacy closure reference
-
-- G. P. Celata et al., Experimental Thermal and Fluid Science (2007),
-  <https://doi.org/10.1016/j.expthermflusci.2006.06.006>.
-
-<a id="numerical-and-performance-qualification"></a>
-
-## Current single-gas implementation: numerical and performance qualification
-
-The strict auxiliary-transport policy has recorded serial/MPI coverage for exact
-global-zero skipping, rank-local activation, paired transport preparation and
-rank-divergent selection rejection. Matched fixed-grid reduced-fixture exports
-were unchanged by skipping inactive equations. That fixture aligns active gas
-equations with its external comparison; it does not equate matrix formats,
-iteration work, carriers or all model bookkeeping between solvers.
-
-Kinetics reuses the unchanged subcycle schedule and exponential coefficients per
-advance and frozen production/pressure/liquid-fraction factors per cell. Evolving
-concentration, supersaturation, conversion, radius, slip and transfer are still
-recomputed within each subcycle. Scoped field views end before synchronization
-or solves. Recorded gas/ALE replay fixtures preserve owned fields, histories and
-physical budgets. Their short CPU timings do not qualify a full coupled application,
-IF97/device path, large-rank scaling or long-duration physical behavior.
+| Cell species amount / integrated reaction extent | mol/cell / mol reaction per cell |
+| Model species field | mol/m3 of geometric control volume |
+| Liquid-basis concentration | mol/m3 of actual physical liquid |
+| Rate | mol reaction/(m3 of declared basis s) |
+| Absolute pressure / temperature | Pa / K |
+| Integrated energy / external momentum | J/cell / kg m/s per cell |
+| Population number / number field | count/cell / count per m3 control volume |
+| Diffusivity / partial-molar enthalpy | m2/s / J/mol |
+| Surface tension / bubble radius | N/m / m |
+
+`ReactionMechanism` checks molar-mass and declared-element conservation.
+`ReactionSourceInput` accepts signed rates with `LiquidVolume` or `BulkVolume`
+basis, or integrated extents. Rate volume and time are applied once; integrated
+extents receive no additional scaling. All finite internal donors are reserved
+jointly. The bounded SSPRK2 source kernel retries smaller explicit local steps
+when needed; supplied integrated extents provide an alternative for externally
+integrated chemistry. It does not clip inventory or relax a physical gate.
+
+A named `ExternalSpeciesTransfer` declares external species, amount, mass,
+energy and momentum explicitly. Supply and withdrawal are distinct from an
+internal reaction, phase relocation or physical transport escape. Arbitrary
+positive source terms cannot silently manufacture mass.
+
+Independent external heat excludes chemical heat. With `SensibleEnergy`,
+`heatPerExtent` supplies chemical energy absent from sensible storage; reverse
+extent reverses its sign. With `IncludesFormationEnergy`, species caloric
+storage already owns that energy and per-reaction heat must be zero. Do not add
+latent or pressure work a second time.
+
+## Field model setup and advancement
+
+The C++ modes are `ReactingGasMode::Disabled` and `Species`. An enabled model
+requires an explicit mechanism plus matching supplied liquid/gas EOS, or the
+separate finite Boussinesq reference binding. Set actual initial species and
+population numbers through the initialization callbacks or collective
+`initialize_species(...)`. Batch initialization includes empty owners; it is
+not a sequence of rank-local collective setters.
+
+Use `species_field(id, phase, population)`, `population_number_field(name)` and
+`cell_species_state(...)` for authoritative state. There is no reserved H2 slot
+or single-species inventory facade. Liquid follows the carrier;
+`solution_transport` selects whether Dissolved follows it too. Complete solution
+advection is required by the species-bound ALE path. Gas and number transport
+use the same named population carrier-plus-slip flux. The field adapter's
+Resolved compartment is stationary; it does not advect resolved interfaces.
+Actual physical escape comes from accepted upwind transport, not an endpoint
+loss estimate.
+Before the first population solve, each transport interval freezes paired
+extensive species amounts and counts. ALE forms both from accepted-old control
+volumes and publishes transported concentrations on trial-new volumes. Every
+bin's slip and radius evaluation uses that frozen pair; a later bin cannot mix
+old material with a prior bin's already transported count.
+
+The field source environment uses `ReferenceControlVolume`: actual EOS liquid
+volume sets liquid-basis rates, while geometric CV sets bulk-basis rates and
+heat. EOS liquid volume may differ from CV under this weak Boussinesq
+approximation. It is not clipped, and this path does not claim local total
+phase occupancy. The strict pure-kernel `Accepted` context and native flow's
+`ThermodynamicPredictor` retain their separate occupancy owners.
+
+`MultiphysicsSolverCoupler` retains shared ownership of the solver and owns
+optional models and advancement. Construct it around the solver, configure
+models, then use its `step()`/`run()` interface. Normal typed sources advance
+before scalar temperature; their accepted thermal input enters that equation
+once, followed by a nonadvancing thermodynamic refresh. The Boussinesq scalar
+temperature owner requires sensible-energy accounting.
+
+The explicitly selected `PrescribedCarrierAfterTemperature` schedule exists
+for gas-only reference applications. It preserves a documented flow-temperature-
+gas split and independently heated external carrier. It rejects finite
+Liquid/Dissolved stock, film/implicit interphase processes, boiling, both finite
+Boussinesq bindings, free-surface/ALE and independent phase-energy ownership.
+Every individual applied chemical, external and transfer heat channel must be
+zero, including canceling channels. Physical escape enthalpy/momentum remain
+carried traces, not scalar-temperature heat inputs.
+
+## Properties and population closures
+
+Supply composition-aware liquid and gas thermodynamics with matching catalogs,
+energy conventions, validity bounds and derivatives. Gas radius and volume use
+actual bin composition and number; exact empty bins have zero number, amount
+and volume. Finite gas capacity or invalid radius brackets reject rather than
+discarding material.
+
+`ReactingSpeciesProperties` binds per-species diffusivity/equilibrium and
+carried partial-molar enthalpy laws. Film exchange uses supplied mixture
+fugacities and finite phase donors. A zero species diffusivity explicitly
+disables that film exchange. No implicit H2 solubility or ideal-mixture
+partial enthalpy is substituted. Field bulk diffusion is rejected until that
+backend has a matching counterflux/face-energy owner; film diffusivity does
+not enable a hidden independent Fick solve.
+
+Supplied population packets describe finite same-species transfers and explicit
+number births/deaths. Optional first-order micro/large dissolution and conversion
+frequencies retain neutral moment mathematics when explicitly selected.
+Representative populations are not a resolved size distribution. Birth, death
+and material amounts must remain paired; no automatic count floor or collapse
+is inferred.
+
+Zero/prescribed slip and selected correlation helpers are closures, not gas
+momentum equations. `Hughmark`, `HughmarkSchmidtDomain`, spherical diffusion and
+the named Feng-Michaelides laws retain their documented applicability checks;
+see [liquid-side mass transfer](bubble-mass-transfer.md). The Celata helper
+retains its published-envelope diagnostics; using it outside that envelope
+needs application qualification. None of these reference correlations selects
+a chemical species.
+
+Field pressure modes are constant, prescribed absolute-pressure history and
+reconstructed reference-plus-zero-mean mechanical pressure. The old weak
+inertial pressure mode is retired. Invalid pressure/EOS states reject.
+`evaluate_liquid_volume(candidate_offset)` and
+`evaluate_submerged_bubble_volume(candidate_offset)` are pure collective
+queries; pressure publication validates liquid and gas together before writes.
+
+## Native conservative flow
+
+`LowMachMixtureSolver` owns phase species, internal energy, carrier momentum and
+common thermodynamic pressure. `ReactingMixtureCoupler` maps chemical
+compartments to physical phases and composes actual transported state,
+chemistry, ordered same-carrier face stages, configured local interphase
+stages and explicit population-number events. Each stage uses its actual
+predecessor; independently reserving all stages against the same accepted stock
+is forbidden.
+
+Explicit face diffusion names its counter-species, contact/conductance and true
+partial-molar enthalpy law. Joint outgoing face donors are reserved before
+credits; the same opposite-signed heat packet reaches the two incident cells.
+The declared same-carrier zero-net-mass convention contributes exactly zero
+diffusive momentum. Fourier contact likewise needs supplied conductance; a gas
+bin does not imply contact with another bin.
+
+Configured local interphase amounts are frozen before caloric pressure recovery.
+Supplied partial-molar enthalpies and their derivatives are reevaluated at each
+pressure-conditioned anchor; kinetics are not reintegrated inside pressure
+roots. The phase-energy owner applies `-p*(Vfinal-Vadv)` once. See
+[pressure-conditioned thermal transfer](architecture/reacting_interphase_thermal.md).
+
+This native backend is closed and orthogonal, with common phase pressure and
+zero surface tension. It supports common or separate phase temperatures and
+explicit dispersed roles with extensive counts. Prescribed planar ALE uses live
+motion authority, accepted-old/new CV storage and relative phase transport.
+Preview restores accepted geometry; commit and restore do not call source or
+EOS laws. The moving path retains its inviscid/slip-wall, topology and
+nonperiodic restrictions. Upstream complete depletion with missing pre-transfer state
+work, nonlocal pressure-conditioned transfer, evolving slip momentum, capillary
+energy and general moving interfaces are outside this support boundary.
+
+## Configuration, output and accepted receipts
+
+Flat database parsing cannot construct a catalog, EOS or pure source provider.
+The parser therefore rejects `reacting_species_model=species` or
+`enable_reacting_gas=true`; construct enabled options explicitly in C++.
+Disabled flat configuration remains available.
+Old `idealGasSource`, `twoPopulation`, fixed-H2/yield/property/scalar source-decay keys and
+aliases are retired. `solution_transport_mode` replaces the specialized
+dissolved-transport key. Application reference property files may still contain
+explicitly named physical yield/correlation inputs; those are application laws,
+not solver defaults.
+
+`include_reacting_gas_fields` exports dynamic
+`species_<id>_phase_<phase-index>` and
+`species_<id>_population_<name>` inventories with aggregate pressure/void/source
+diagnostics. `include_sources` and `include_material_properties` retain their
+thermal/material roles. Aggregate micro/large summaries, when present, are
+derived total-population views, not a chemical identity or an independent stock.
+
+`species_histories()` reports separate chemical production/consumption,
+external supply/withdrawal, interphase relocation and physical outflow.
+`species_step_events()` and `physical_escape_events()` retain exact accepted
+interval provenance. `population_escape_receipt()` carries actual per-bin
+outward number events with the same accepted `SpeciesEventReceipt`; it is not
+inferred from moles or count endpoint differences. Snapshots include inventories,
+raw histories, receipts, geometry-related state and accepted ledgers. Public
+MPI totals are rounded reports and never seed private compensated accumulation.
+
+Public source metadata, schemas, options and failures are checked collectively,
+including actual empty owners. User property/source laws are deterministic,
+MPI-free and reentrant with immutable captures. Optional `ReactionLocation`
+names the canonical geometry cell, trial centroid/epoch and ephemeral owned row;
+algebraic GIDs and retained mesh views are not spatial identities.
+
+## Verification and reference provenance
+
+The source tree contains independent finite-donor, multiple-gas, energy,
+transport, pressure, replay and empty-owner regression fixtures. Their existence
+does not mean every combination or rank count has run. Use current focused
+serial/MPI logs, required ranks, skips and ABI results for execution evidence;
+manufactured tests do not physically validate supplied laws.
+
+The dispersed and bottom-heated OpenFOAM references explicitly select H2 and
+IF97 water. Their prescribed external carrier, named gas/count reservoirs,
+temperature schedule and correlation inputs remain documented approximations.
+They do not claim finite-water inlet or separate gas-energy/momentum closure.
+The planar ALE verification uses finite two-gas inventories. The opt-in
+coupling benchmark's `fixture_schema=2` is a different finite mixture workload;
+old fallback timings are not a matched comparison.

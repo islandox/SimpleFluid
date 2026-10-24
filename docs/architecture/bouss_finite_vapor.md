@@ -5,10 +5,9 @@ approximation. Its source is implemented in BoussFiniteVapor, with the field
 model and MultiphysicsSolverCoupler owning transport, temperature and atomic
 acceptance. No qualification is inferred from this contract or source tests.
 
-The existing TwoPopulation selector is the pre-cleanup API name for the typed
-field path; the catalog and explicit population_ids define actual species and
-bins. It does not reserve hydrogen, donor, inert or vapor slots. Later API
-cleanup replaces that misleading selector independently.
+The typed field path selects ReactingGasMode::Species; its catalog and explicit
+population_ids define actual species and bins. No hydrogen, donor, inert or vapor
+slot is reserved, and no enabled null-mechanism or yield fallback is supplied.
 
 ## Material and energy ownership
 
@@ -33,8 +32,11 @@ same-stage gross donor. Condensation reserves the actual pre-admission vapor.
 
 Every dispersed birth/death is an explicit supplied event, after accepted
 material admission. The Bouss helper requires paired count/material endpoints
-and does not infer a count death from arbitrary gas disappearance. This does
-not qualify the separate legacy/generic field fallback that awaits API cleanup.
+and does not infer a count death from arbitrary gas disappearance. The generic
+field default dissolution/conversion operator likewise requires its own paired
+occupied predecessor and declared events; its own complete dissolution may
+supply the remaining-count death. Earlier chemistry or a user material packet
+cannot trigger an automatic count reset.
 
 ## Exact wall heat owner
 

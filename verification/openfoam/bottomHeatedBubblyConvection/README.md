@@ -214,11 +214,18 @@ operator_slot_4 plus gas_update. These are not species identities. Reader checks
 require complete finite nonnegative work rows and actual active number/species solves;
 they do not claim that every typed component performs one solve on an empty first
 interval. Maximum-rank timers are not an exclusive phase profile.
-The optional NOX build supports this fixed-mesh physical Boussinesq case with
+The optional NOX build admits this fixed-mesh physical Boussinesq configuration with
 temperature, material properties, SST coefficients, and gas state frozen during
 each nonlinear velocity-pressure solve. Their ordinary updates run once after
 the accepted flow solve. It is not a monolithic nonlinear solve of all transported
 fields. See the [nonlinear solver contract](../../../docs/architecture/coupled_nonlinear_solver.md).
+
+The active 1120-cell scale-1 reference is unqualified for a two-step NOX startup.
+With prescribed sources and forcing controls unchanged, GMRES corrections reject
+the first step and BiCGStab corrections reject the second at the strict explicit
+residual-forcing gate. Smaller registered NOX/SAS/rollback tests do not establish
+convergence for this application. The invocation below selects the supported
+interface; it is not a passing qualification recipe.
 
 ```sh
 bottom_heated_bubbly_convection --coupling nox \

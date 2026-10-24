@@ -62,14 +62,17 @@ The Boussinesq controller consumes the accepted species thermal source once and
 refreshes derived thermodynamic properties after temperature advancement without
 re-evaluating chemistry. This backend retains the sensible-temperature and
 Boussinesq approximations. Formation-energy storage requires the conservative
-low-Mach backend. Typed reacting free-surface integration and conservative
-bulk-mixture diffusion are gated until their complete adapters are available;
-selecting an unsupported path must fail explicitly.
+low-Mach backend. Typed reacting free-surface integration consumes the exact accepted event and
+liquid transport receipts; see [the surface contract](reacting_species_surface.md).
+The field adapter's general bulk-mixture diffusion remains gated. Native ordered
+face transport and local interphase thermal stages have their own conservative
+owners and support limits; component kernels do not enable every combination.
 
-VoF solvers and reacting-VoF coupling are disabled by default and excluded from
-this refactor's supported execution scope. Their retained experimental sources
-have not completed qualification. Shared geometric and finite-volume utilities
-remain available independently of those solvers.
+VoF solvers and reacting-VoF coupling are disabled and excluded from this
+refactor's supported execution scope. No experimental-enable path supplies
+those absent sources in this snapshot. Bounded
+floating-point and exact-rational VoF/general-AMR paths are deferred. Shared
+geometric and finite-volume utilities remain available independently.
 
 ## Distributed and numerical acceptance
 
