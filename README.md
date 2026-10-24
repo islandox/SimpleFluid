@@ -200,7 +200,8 @@ on collocated grids. Compatible with all four pressure–velocity coupling modes
     other volume topologies are rejected during assembly
 - Cartesian/cylindrical [multidimensional decomposition](docs/architecture/orthogonal_decomposition.md)
   balances cell counts first, uses geometric widths for rank-grid/cut selection,
-  and creates contiguous owned cell/face Tpetra maps
+  and creates contiguous owned cell/face Tpetra maps with compact halo topology
+  and arithmetic owned-cell/face geometry lookup
 - Owned + ghost cell decomposition for distributed-memory assembly
 - CRS-style neighbor connectivity for FVM stencil construction
 - Kokkos-based geometry storage — portable across CPU and GPU backends

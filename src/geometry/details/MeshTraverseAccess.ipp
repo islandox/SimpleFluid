@@ -63,7 +63,7 @@ inline size_t TraverseAccess<PublicMesh, GeometryMesh>::geometry_cell(size_t cel
             return cell;
         if (d_mesh.d_serial_identity)
             return cell;
-        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_decomposition)
+        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_topology)
             return static_cast<size_t>(d_mesh.geometry_cell_lid(local(cell)));
         return static_cast<size_t>(d_mesh.d_map_indexing ? d_mesh.d_overlap_cell_map->getGlobalElement(local(cell))
                                                          : d_mesh.d_indexer.cell_global_id(local(cell)));
@@ -87,7 +87,7 @@ inline size_t TraverseAccess<PublicMesh, GeometryMesh>::geometry_face(size_t fac
             return face;
         if (d_mesh.d_serial_identity)
             return face;
-        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_decomposition)
+        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_topology)
             return static_cast<size_t>(d_mesh.geometry_face_lid(local(face)));
         return static_cast<size_t>(d_mesh.d_map_indexing ? d_mesh.d_overlap_face_map->getGlobalElement(local(face))
                                                          : d_mesh.d_indexer.face_global_id(local(face)));
@@ -120,7 +120,7 @@ TraverseAccess<PublicMesh, GeometryMesh>::field_cell(Cell cell) const
         if (d_mesh.d_serial_identity)
             return ordinal < num_cells() ? local(ordinal) : invalid_local_id();
         using global_ordinal_type = typename PublicMesh::global_ordinal_type;
-        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_decomposition)
+        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_topology)
             return d_mesh.geometry_to_local_cell(ordinal);
         return d_mesh.d_map_indexing
                    ? d_mesh.d_overlap_cell_map->getLocalElement(static_cast<global_ordinal_type>(ordinal))
@@ -155,7 +155,7 @@ TraverseAccess<PublicMesh, GeometryMesh>::field_face(Face face) const
         if (d_mesh.d_serial_identity)
             return ordinal < num_faces() ? local(ordinal) : invalid_local_id();
         using global_ordinal_type = typename PublicMesh::global_ordinal_type;
-        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_decomposition)
+        if (d_mesh.d_semi_structured_topology || d_mesh.d_orthogonal_topology)
             return d_mesh.geometry_to_local_face(ordinal);
         return d_mesh.d_map_indexing
                    ? d_mesh.d_overlap_face_map->getLocalElement(static_cast<global_ordinal_type>(ordinal))

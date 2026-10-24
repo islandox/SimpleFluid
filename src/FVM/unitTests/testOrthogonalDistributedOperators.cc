@@ -66,6 +66,15 @@ template<class Native> void verify(const std::shared_ptr<Native>& native)
     Handle::DistributionOptions options;
     options.allow_empty_partitions = true;
     auto mesh = std::make_shared<Handle>(native, options);
+    EXPECT_FALSE(mesh->has_materialized_indexer());
+    EXPECT_FALSE(mesh->has_materialized_connectivity());
+    const auto compact = mesh->decomposed_orthogonal_topology();
+    if (Tpetra::getDefaultComm()->getSize() > 1)
+    {
+        ASSERT_TRUE(compact);
+        EXPECT_EQ(&compact->source_topology(), &native->topology());
+        EXPECT_EQ(compact->lookup_storage_estimate(), 0U);
+    }
     Scalar scalar(mesh, -91., "source_cell_ids");
     Vector vector(mesh, Vec{-91., -91., -91.}, "source_vectors");
     Flux flux(mesh, -91., "source_face_ids");
@@ -207,6 +216,8 @@ template<class Native> void verify(const std::shared_ptr<Native>& native)
     FVM::cell_gradient(scalar, boundary, boundary_value, gradient, cache);
     for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
         expect_vector(gradient.value(LO(c)), Vec{0., 0., .4}, 2e-10);
+    EXPECT_EQ(mesh->decomposed_orthogonal_topology().get(), compact.get());
+    EXPECT_FALSE(mesh->has_materialized_indexer());
     EXPECT_FALSE(mesh->legacy_mesh());
     EXPECT_FALSE(mesh->has_materialized_connectivity());
 }

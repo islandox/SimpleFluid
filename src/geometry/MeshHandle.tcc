@@ -437,88 +437,13 @@ void MeshHandle<Pack>::initialize_orthogonal(SP<const MeshType> mesh, Distributi
     error = {};
     try
     {
-        const auto begin = d_orthogonal_decomposition->owned_begin(rank);
-        const auto end = d_orthogonal_decomposition->owned_end(rank);
-        const auto& source_indexer = mesh->indexer();
-        std::vector<size_t> owned, ghost;
-        std::map<size_t, size_t> distance;
-        std::vector<size_t> frontier;
-        for (size_t k = begin[2]; k < end[2]; ++k)
-            for (size_t j = begin[1]; j < end[1]; ++j)
-                for (size_t i = begin[0]; i < end[0]; ++i)
-                {
-                    const auto id = source_indexer.cell_ordinal({static_cast<unsigned>(i),
-                        static_cast<unsigned>(j), static_cast<unsigned>(k)});
-                    owned.push_back(id);
-                    frontier.push_back(id);
-                    distance.emplace(id, 0);
-                }
-        for (size_t depth = 0; depth < options.ghost_layers && !frontier.empty(); ++depth)
-        {
-            std::vector<size_t> next;
-            for (const auto id : frontier)
-            {
-                const auto adjacent = mesh->topology().neighbor_cells(source_indexer.cell_id(id));
-                for (size_t entry = 0; entry < adjacent.num; ++entry)
-                {
-                    const auto neighbor = source_indexer.cell_ordinal(adjacent.neighbors[entry]);
-                    if (distance.emplace(neighbor, depth + 1).second)
-                        next.push_back(neighbor);
-                }
-            }
-            frontier = std::move(next);
-        }
-        for (const auto& [id, depth] : distance)
-            if (depth != 0)
-                ghost.push_back(id);
-        initialize_cells(owned, ghost);
-        d_orthogonal_cell_geometry_lids.assign(owned.begin(), owned.end());
-        d_orthogonal_cell_geometry_lids.insert(d_orthogonal_cell_geometry_lids.end(), ghost.begin(), ghost.end());
-        for (size_t local = 0; local < d_orthogonal_cell_geometry_lids.size(); ++local)
-            d_orthogonal_cell_local_lids.emplace(d_orthogonal_cell_geometry_lids[local], checked_local(local));
-
-        std::unordered_set<size_t> seen_faces, seen_nodes;
-        std::vector<size_t> owned_faces, overlap_faces, nodes;
-        constexpr std::array<std::array<unsigned, 3>, 8> corners{{
-            {{0, 0, 0}}, {{1, 0, 0}}, {{1, 1, 0}}, {{0, 1, 0}},
-            {{0, 0, 1}}, {{1, 0, 1}}, {{1, 1, 1}}, {{0, 1, 1}}}};
-        for (const auto geometry : d_orthogonal_cell_geometry_lids)
-        {
-            const auto cell = source_indexer.cell_id(static_cast<size_t>(geometry));
-            for (const auto face : mesh->cell_faces(cell))
-            {
-                const auto id = source_indexer.face_ordinal(face);
-                if (seen_faces.insert(id).second)
-                    (d_orthogonal_decomposition->owner(mesh->topology().owner_cell(face)) == rank ?
-                        owned_faces : overlap_faces).push_back(id);
-            }
-            for (const auto& corner : corners)
-            {
-                const typename MeshType::NodeID node{
-                    static_cast<unsigned>((cell.i + corner[0]) % source_indexer.num_nodes_per_dim[0]),
-                    static_cast<unsigned>((cell.j + corner[1]) % source_indexer.num_nodes_per_dim[1]),
-                    static_cast<unsigned>((cell.k + corner[2]) % source_indexer.num_nodes_per_dim[2])};
-                const auto id = source_indexer.node_ordinal(node);
-                if (seen_nodes.insert(id).second)
-                    nodes.push_back(id);
-            }
-        }
-        const auto face_order = [&](size_t a, size_t b)
-        {
-            const auto left = source_indexer.face_id(a), right = source_indexer.face_id(b);
-            return std::tuple{left.orientation, left.k, left.j, left.i} <
-                std::tuple{right.orientation, right.k, right.j, right.i};
-        };
-        std::sort(owned_faces.begin(), owned_faces.end(), face_order);
-        std::sort(overlap_faces.begin(), overlap_faces.end(), face_order);
-        initialize_faces(owned_faces, overlap_faces);
-        d_orthogonal_face_geometry_lids.assign(owned_faces.begin(), owned_faces.end());
-        d_orthogonal_face_geometry_lids.insert(d_orthogonal_face_geometry_lids.end(),
-            overlap_faces.begin(), overlap_faces.end());
-        for (size_t local = 0; local < d_orthogonal_face_geometry_lids.size(); ++local)
-            d_orthogonal_face_local_lids.emplace(d_orthogonal_face_geometry_lids[local], checked_local(local));
-        d_node_global_ids = checked_global_ids(std::move(nodes));
-        d_indexer.set_nodes(d_node_global_ids);
+        auto source = std::shared_ptr<const Meshes::OrthoMeshTopo>(mesh, &mesh->topology());
+        d_orthogonal_topology = std::make_shared<Meshes::DecomposedOrthogonalTopology>(std::move(source),
+            d_orthogonal_decomposition->owned_begin(rank), d_orthogonal_decomposition->owned_end(rank),
+            options.ghost_layers);
+        checked_local(d_orthogonal_topology->num_local_cells());
+        checked_local(d_orthogonal_topology->num_local_faces());
+        checked_local(d_orthogonal_topology->num_local_nodes());
         initialize_boundary_batches(*mesh);
     }
     catch (...)
@@ -529,7 +454,29 @@ void MeshHandle<Pack>::initialize_orthogonal(SP<const MeshType> mesh, Distributi
     // Serial virtual partitions are compatibility views, not communicating
     // partitions: retain canonical source IDs in their maps.
     if (communicator_size == 1)
+    {
+        // Only compatibility virtual views materialize transient source IDs.
+        // The retained topology supplies all subsequent geometry/node lookups.
+        error = {};
+        try
+        {
+            std::vector<size_t> owned, ghost, faces, overlap;
+            for (size_t cell = 0; cell < num_local_cells(); ++cell)
+                (cell < num_owned_cells() ? owned : ghost)
+                    .push_back(static_cast<size_t>(geometry_cell_lid(checked_local(cell))));
+            for (size_t face = 0; face < num_faces(); ++face)
+                (face < num_owned_faces() ? faces : overlap)
+                    .push_back(static_cast<size_t>(geometry_face_lid(checked_local(face))));
+            initialize_cells(std::move(owned), std::move(ghost));
+            initialize_faces(std::move(faces), std::move(overlap));
+        }
+        catch (...)
+        {
+            error = std::current_exception();
+        }
+        collective_error(error, "Orthogonal virtual source-map setup failed.");
         create_maps(comm);
+    }
     else
         initialize_contiguous_native_maps(comm);
 }
@@ -1247,9 +1194,11 @@ template<class MeshType>
 void MeshHandle<Pack>::initialize_boundary_batches(
     const MeshType& mesh)
 {
-    if constexpr (std::same_as<MeshType, MultiRegion> || std::same_as<MeshType, SemiStructured>)
+    if constexpr (std::same_as<MeshType, MultiRegion> || std::same_as<MeshType, SemiStructured> ||
+                  std::same_as<MeshType, Cartesian> || std::same_as<MeshType, Cylindrical>)
     {
-        if constexpr (std::same_as<MeshType, SemiStructured>)
+        if constexpr (std::same_as<MeshType, SemiStructured> || std::same_as<MeshType, Cartesian> ||
+                      std::same_as<MeshType, Cylindrical>)
         {
             // Boundary configuration is global even when this rank has no
             // incident boundary faces (or owns no cells at all).

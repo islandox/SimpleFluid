@@ -141,7 +141,7 @@ verification items below mean the foundation as a whole is not yet complete.
         focused regressions
   - [x] Add count-balanced, width-aware Cartesian/cylindrical tensor partitioning
         and contiguous owned cell/face algebraic maps
-  - [ ] Replace orthogonal local source-ID tables with compact halo-aware topology
+  - [x] Replace orthogonal local source-ID tables with compact halo-aware topology
         and arithmetic lookups
   - [x] Cover native unstructured execution directly in serial and through
         `MeshPartitioner`/`PartitionedMesh` in MPI

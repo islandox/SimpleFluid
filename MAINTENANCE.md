@@ -37,7 +37,8 @@ consumers.
 
 Within the native path, Cartesian and cylindrical meshes construct
 [count-balanced, width-aware tensor decompositions](docs/architecture/orthogonal_decomposition.md)
-with initially contiguous owned cell/face algebraic maps. An `UnstructuredMesh` must first be
+with initially contiguous owned cell/face algebraic maps and compact halo topology
+for local geometry lookup. An `UnstructuredMesh` must first be
 partitioned with `MeshPartitioner` and adapted through `PartitionedMesh` on a
 multi-rank communicator. `SemiStructuredXY_Z` constructs native owned/overlap
 maps from Zoltan2/ParMETIS XY graph partitions crossed with balanced Z slabs.
@@ -95,7 +96,8 @@ This limits moving-mesh support to the implemented conservative transformation.
 Normal `MeshHandle::faces()` queries return independent sized/indexable ranges.
 Do not reintroduce implicit cell-face CSR while building fields, graphs, or
 solvers. `materialize_cell_faces()` is an explicit compatibility operation.
-Serial IDs are arithmetic and distributed lookup reuses required Tpetra maps;
+Serial IDs are arithmetic. Decomposed orthogonal and XY/Z geometry lookup uses
+compact local topology; algebraic lookup reuses required Tpetra maps.
 `indexer()` remains an opt-in compatibility allocation. Arbitrary native
 reordering is explicit and retains its permutation; composite reordering is
 currently rejected. See [region contracts and storage categories](docs/region_meshes.md).
