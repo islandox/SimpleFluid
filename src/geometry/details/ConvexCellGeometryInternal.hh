@@ -1,7 +1,7 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "utils/ExactRational.hh"
-/** @file ConvexCellGeometry.cc
+/** @file ConvexCellGeometryInternal.hh
  * @brief Exact represented-input convex clipping and moment certificates.
  */
 #include "geometry/ConvexCellGeometry.hh"

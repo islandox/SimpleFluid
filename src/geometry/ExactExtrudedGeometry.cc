@@ -4,6 +4,22 @@ namespace SimpleFluid::Meshes
 {
 namespace exact_geometry_detail
 {
+void write_point_recipes(WireWriter& w, const ExactExtrudedBaseData& base)
+{
+    w.word(base.recipes.size());
+    for (const auto& p : base.recipes)
+    {
+        for (auto x : p.root)
+            w.real(x);
+        w.word(p.parents.size());
+        for (auto id : p.parents)
+            w.word(id);
+    }
+    w.word(base.active.size());
+    for (auto id : base.active)
+        w.word(id);
+}
+
 void read_point_recipes(WireReader& r, std::vector<ExactPointRecipe>& points, std::vector<std::size_t>& active)
 {
     auto n = r.count();

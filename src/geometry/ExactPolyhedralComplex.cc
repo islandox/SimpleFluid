@@ -4,6 +4,16 @@ namespace SimpleFluid::Meshes
 {
 namespace exact_geometry_detail
 {
+P polygon_vector(const Polygon& polygon)
+{
+    P area{};
+    if (polygon.size() < 3)
+        return area;
+    for (std::size_t i = 1; i + 1 < polygon.size(); ++i)
+        area = add(area, cross(sub(polygon[i], polygon[0]), sub(polygon[i + 1], polygon[0])));
+    return mul(area, Q(1, 2));
+}
+
 Polygon minimal_polygon(Polygon polygon)
 {
     bool changed = true;
@@ -1069,25 +1079,4 @@ std::shared_ptr<const ExtrudedTopology> ExtrudedTopology::decode_base(std::span<
     r.finish();
     return std::make_shared<const ExtrudedTopology>(nodes, loops, layers, boundaries);
 }
-} // namespace SimpleFluid::Meshes
-namespace SimpleFluid::Meshes
-{
-namespace exact_geometry_detail
-{
-void write_point_recipes(WireWriter& w, const ExactExtrudedBaseData& base)
-{
-    w.word(base.recipes.size());
-    for (const auto& p : base.recipes)
-    {
-        for (auto x : p.root)
-            w.real(x);
-        w.word(p.parents.size());
-        for (auto id : p.parents)
-            w.word(id);
-    }
-    w.word(base.active.size());
-    for (auto id : base.active)
-        w.word(id);
-}
-} // namespace exact_geometry_detail
 } // namespace SimpleFluid::Meshes
