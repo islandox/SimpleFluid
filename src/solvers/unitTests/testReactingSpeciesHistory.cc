@@ -73,11 +73,11 @@ S::ReactingGasOptions options()
     return result;
 }
 
-std::shared_ptr<Mesh> mesh(std::size_t cells = 4)
+std::shared_ptr<Mesh> mesh(std::size_t cells = 4, double length = 1.)
 {
     std::vector<double> edges(cells + 1);
     for (std::size_t i = 0; i <= cells; ++i)
-        edges[i] = static_cast<double>(i) / cells;
+        edges[i] = length * static_cast<double>(i) / cells;
     auto geometry = std::make_shared<Mesh::Cartesian>(S::Vec3D<S::ArrReal>{{{0., 1.}, {0., 1.}, edges}});
     Mesh::DistributionOptions distribution;
     distribution.allow_empty_partitions = true;
@@ -103,8 +103,8 @@ struct Fixture
     Velocity velocity;
     Flux flux;
     S::MaterialPropertyFields<Pack, Mesh> material;
-    explicit Fixture(S::ReactingGasOptions selected = options(), std::size_t cells = 4)
-        : grid(mesh(cells)), settings(std::move(selected)), model(grid, settings), temperature(grid, 300., "T"),
+    explicit Fixture(S::ReactingGasOptions selected = options(), std::size_t cells = 4, double length = 1.)
+        : grid(mesh(cells, length)), settings(std::move(selected)), model(grid, settings), temperature(grid, 300., "T"),
           pressure(grid, 0., "p"), velocity(grid, S::vec3<double>{}, "U"), flux(grid, 0., "phi"),
           material(grid, material_options(), S::TimeStepperOptions{})
     {
@@ -539,4 +539,119 @@ TEST(ReactingSpeciesHistoryTest, NetEventReportSurvivesRoundedOpposingGrossReser
     fixture.advance();
     EXPECT_EQ(history(fixture.model, donor), second);
 }
+TEST(ReactingSpeciesHistoryTest, FieldThermalSourceUsesAcceptedHeatDespiteEqualRoundedReactionExtents)
+{
+    using P = R::SpeciesPhase;
+    auto selected = options();
+    const auto catalog = schema();
+    const double large = std::ldexp(1., 60), quantum = std::ldexp(1., -60);
+    selected.reaction_mechanism = std::make_shared<const R::ReactionMechanism>(catalog,
+        std::vector<R::ReactionDefinition>{
+            {41, "forward finite isomerization",
+                {{donor, P::Liquid, -.4 * quantum}, {liquidProduct, P::Liquid, quantum}}, 1.},
+            {83, "opposing finite isomerization",
+                {{liquidProduct, P::Liquid, -quantum}, {donor, P::Liquid, .4 * quantum}}, -1.}});
+    selected.reaction_advance.maximumSubstep = .5;
+    selected.species_source = [large](const R::ReactionContext& context, double)
+    {
+        R::ReactionRateProvider provider;
+        provider.identity = "finite normalized field cancellation";
+        provider.schemaRevision = context.catalog.revision();
+        provider.schemaFingerprint = context.catalog.fingerprint();
+        provider.validityDescription = "manufactured t in [0,1], finite opposing donors";
+        provider.parameterUnits = "mol/(m3 bulk s)";
+        provider.validate = [](const auto&) {};
+        provider.evaluate = [large](const R::ReactionContext& stage)
+        {
+            const double time = stage.environment.time, volume = stage.environment.bulkVolume;
+            return std::vector<R::ReactionRate>{
+                {41, (time == 0 ? 4 * large : (time == 1 ? 4. : 0.)) / volume,
+                    R::SourceVolumeBasis::BulkVolume},
+                {83, (time == 0 ? 4 * large : 0.) / volume, R::SourceVolumeBasis::BulkVolume}};
+        };
+        R::ReactionSourceInput source;
+        source.rates = std::move(provider);
+        return source;
+    };
+    Fixture fixture(selected, 2);
+    auto initial = fixture.initial(0., 0., false, .99);
+    for (auto& cell : initial)
+        cell.set_amount(*catalog, liquidProduct, P::Liquid, 2.);
+    fixture.initialize(initial);
+    expect_liquid_headroom(fixture);
+    const auto saved = fixture.model.snapshot();
+    const auto check_source = [&]
+    {
+        double energy = 0.;
+        for (std::size_t c = 0; c < initial.size(); ++c)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(c);
+            const double volume = fixture.grid->cell_volume(cell);
+            const auto& ledger = fixture.model.source_ledgers()[c];
+            EXPECT_EQ(ledger.reactionExtents.size(), 2U);
+            if (ledger.reactionExtents.size() == 2)
+            {
+                EXPECT_DOUBLE_EQ(ledger.reactionExtents[0], large);
+                EXPECT_DOUBLE_EQ(ledger.reactionExtents[1], large);
+            }
+            EXPECT_DOUBLE_EQ(ledger.reactionHeat, 1.);
+            EXPECT_DOUBLE_EQ(fixture.model.thermal_source().value(cell), 1. / volume); // dt=1, exactly one J/cell.
+            energy += fixture.model.thermal_source().value(cell) * volume;
+        }
+        EXPECT_DOUBLE_EQ(fixture.sum(energy), 2.);
+    };
+    fixture.advance(1.);
+    check_source();
+    fixture.model.restore(saved);
+    fixture.advance(1.);
+    check_source();
+    const auto ranks = fixture.grid->owned_cell_map()->getComm()->getSize();
+    EXPECT_EQ(fixture.sum(fixture.grid->num_owned_cells() == 0 ? 1. : 0.),
+        static_cast<double>(std::max(0, ranks - 2)));
+}
+
+TEST(ReactingSpeciesHistoryTest, RawVolumetricHeatAndCarriedEnergyCancelBeforeFieldSourceNarrowingAndReplay)
+{
+    const double factor = std::ldexp(1., 30), large = std::ldexp(1., 60);
+    auto selected = options();
+    selected.species_source = [factor, large](const R::ReactionContext&, double)
+    {
+        R::ReactionSourceInput source;
+        source.heat.rate = R::VolumetricHeatRate{factor + 1., R::SourceVolumeBasis::BulkVolume};
+        // A real finite species withdrawal carries this declared external energy packet.
+        source.externalTransfers = {{"manufactured carried-energy withdrawal", donor, R::SpeciesPhase::Liquid,
+            -1., -.010, -large, {}, {}}};
+        return source;
+    };
+    Fixture fixture(selected, 1, factor - 1.);
+    fixture.initialize(fixture.initial(0., 0., false, .99));
+    expect_liquid_headroom(fixture);
+    const auto saved = fixture.model.snapshot();
+    const auto check_source = [&]
+    {
+        double energy = 0.;
+        for (std::size_t c = 0; c < fixture.grid->num_owned_cells(); ++c)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(c);
+            const double volume = fixture.grid->cell_volume(cell);
+            EXPECT_DOUBLE_EQ(volume, factor - 1.);
+            const auto& ledger = fixture.model.source_ledgers()[c];
+            EXPECT_DOUBLE_EQ(ledger.externalHeat, large); // Reports round the actual 2^60-1 J.
+            EXPECT_DOUBLE_EQ(ledger.transferEnergy, -large);
+            EXPECT_DOUBLE_EQ(ledger.thermal_energy(), 0.); // This reporting route loses the finite cooling packet.
+            EXPECT_DOUBLE_EQ(fixture.model.thermal_source().value(cell), -1. / volume);
+            energy += fixture.model.thermal_source().value(cell) * volume;
+        }
+        EXPECT_NEAR(fixture.sum(energy), -1., 3e-16);
+    };
+    fixture.advance(1.);
+    check_source();
+    fixture.model.restore(saved);
+    fixture.advance(1.);
+    check_source();
+    const auto ranks = fixture.grid->owned_cell_map()->getComm()->getSize();
+    EXPECT_EQ(fixture.sum(fixture.grid->num_owned_cells() == 0 ? 1. : 0.),
+        static_cast<double>(ranks - 1));
+}
+
 } // namespace

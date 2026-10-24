@@ -70,8 +70,8 @@ transport has changed the available material.
 `TransportSnapshot` owns the pre-source species moles, internal energy and
 advected material-volume packet for each physical phase, together with old/new
 control volumes, accepted time/revision/generation, geometry epochs, schema
-fingerprint and source-stage metadata. This snapshot precedes local sources and
-pressure work; its API also reserves this ordering for future Fourier heat.
+fingerprint and source-stage metadata. This snapshot precedes chemistry, ordered face diffusion/Fourier sources and
+pressure work.
 The `advected_material_volume` is a continuity/work packet, not a physical donor
 volume or a concentration denominator. Rates use actual transported composition
 and the current thermodynamic T/p guess. The liquid-volume basis is recomputed
@@ -132,6 +132,78 @@ together with compensation before narrowing each phase packet. Its
 opposite reservoir channels cancel; adding the individually rounded channel
 totals is not an equivalent energy budget.
 
+## Supplied mixture diffusion and Fourier contacts
+
+`ReactingMixtureOptions::face_transport` is an ordered list of explicit physical
+phase contacts. Each entry supplies immutable identity, revision and catalog
+fingerprint, and enables a diffusion law, a Fourier law, or both. Conductivity in
+an EOS alone does not enable heat transport. The initial face adapter supports
+closed, nonperiodic native meshes; compact native periodic metadata rejects
+before user laws or imports. Physical boundary face packets are zero.
+
+A diffusion law supplies catalog-ordered molar conductances `K_i` in m3/s,
+selected primary species and an explicitly selected finite counter-species in
+the same physical carrier. Species ID zero is an ordinary valid selection;
+omission is an error. The canonical owner-to-neighbor primary packet is
+`dt*K_i*(C_owner-C_neighbor)`. Concentrations use actual post-chemistry moles and
+EOS phase volume `m/rho(T,p,x)`. Neither the geometric control volume nor the
+advected pressure-work volume substitutes for that concentration denominator.
+Contact area and distance belong in the supplied conductance; the adapter does
+not multiply by area, volume or phase fraction again.
+
+One counterflux cancels the sum of primary species mass fluxes. Every incident
+face reserves its outgoing primary and counter donors before any incoming credit
+is applied. Insufficient donors reject the trial without clipping, capping or
+borrowing incoming material. Canonical owned faces are evaluated once and their
+identical integer-indexed packets imported to incident ranks. Each owned cell
+applies its own signed side. Optional stages consume the actual finite endpoint
+of their predecessor, never independently reserve one shared original state.
+
+The donor partial-molar enthalpy of every signed primary and counter transfer is
+explicitly supplied at actual donor T/p/composition. No ideal-gas or bulk-mixture
+enthalpy surrogate is inferred. Identical raw molar/enthalpy terms enter the two
+incident cells with opposite signs. The flow adapter uses a declared barycentric
+zero-net-mass diffusion convention with zero mixture momentum contribution;
+relative diffusion inertia and stress are outside this adapter. The equation
+layer packet utility separately retains its explicitly supplied donor-velocity
+convention. These are distinct declared uses of the same finite-donor kernel.
+
+A Fourier law supplies contact conductance `G` in W/K. Its one paired packet is
+`Q = dt*G*(T_owner-T_neighbor)`. Contact between dispersed bins, cross-phase
+transport, boundary reservoirs and latent heat are not inferred. Phase pressure
+work remains owned by the flow solver and is never added by a face law. Positive
+post-chemistry inventory needs a valid candidate T/p; no absent phase temperature
+or EOS state is fabricated.
+
+The source sequence is conservative transport, local chemistry, ordered face
+stages, one final source packet, and flow caloric/pressure acceptance. Chemistry
+provides its local unrounded accepted source receipt before double reporting;
+rounded extent reports cannot reconstruct small net chemical heat. Raw chemical,
+external material, allocated heat, donor enthalpy and Fourier terms stay in one
+compensated accumulator until final narrowing. A separate declared thermal sum
+survives the entire sequence. Final phase packets must reproduce it on an
+endpoint-relative representation scale; large gross turnover cannot hide a lost
+joule after cancellation. A custom double heat allocation that loses such a term
+rejects rather than weakening the energy gate.
+
+The final signed molar packets must also replay the actual sequential donor
+endpoint from transported stocks, with exact empty/nonempty consistency and an
+endpoint-relative representation bound. A large depletion followed by a finite
+credit can leave a valid donor endpoint whose net double source is not
+representable; that publication rejects instead of erasing the remaining stock.
+Pure diffusion keeps initial stocks and individual events in one accumulator.
+Rounded per-face energy and net material ledgers are reporting views and must
+not seed subsequent accumulation.
+
+Receipts retain their producing adapter, physical phase, invocation and geometry
+identity. The controller validates each receipt against its immutable ordered
+adapter and the exact source/transport/gross-event packets retained by the flow
+trial. Local chemistry, face laws, packing and final composition have failure
+fences before their next collective, including on empty owners. Commit and
+restore invoke no law. The net thermal diagnostic sums final applied phase
+packets locally with compensation and then uses the supported scalar MPI sum;
+it does not claim exact arithmetic for arbitrary cancellation across ranks.
+
 ## Acceptance and replay
 
 A source preview retains the final transport snapshot, integrated species,
@@ -176,6 +248,13 @@ subtracting separately rounded gross reports can erase a small real transfer.
 MPI reporting uses ordinary scalar reductions, so this does not claim exact
 arithmetic across arbitrarily cancelling rank totals.
 
+The field adapter's physical thermal source uses `ReactionAdvance::localReceipt`
+and individual external-transfer energy packets before one division by `dt*V`.
+It does not reconstruct the applied source from rounded heat reports. For example,
+a volumetric heat channel and carried-energy withdrawal can leave a finite cooling
+packet even when their separately rounded reports cancel to zero. The receipt is
+transient local data and has no long-double MPI serialization contract.
+
 Its collective `evaluate_liquid_volume(candidate_offset)` query uses current
 Liquid+Dissolved inventories exactly once, retained temperature and the supplied
 mixture EOS. `evaluate_submerged_bubble_volume(candidate_offset)` likewise uses
@@ -216,11 +295,10 @@ old/new-volume fields in a source snapshot. Population-number ownership and
 transport are not implemented by this backend; `population_number` remains
 disengaged rather than inferred from molar inventory.
 
-Bulk species diffusion, Fourier heat transport and interphase thermal exchange
-are not wired into this backend. Supplying conductivity in a caloric provider
-or using a separate equation-layer diffusion helper does not enable their
-conservative flow adapters. Those paths require complete transport, donor,
-energy and acceptance contracts before their support gates open. VoF solvers
+Supplied same-carrier species diffusion and Fourier contact laws use the explicit
+ordered face adapter described above. Interphase thermal exchange and latent
+material-transfer energy are not yet wired into this backend. Their complete
+conservative ownership and acceptance contracts remain required before use. VoF solvers
 remain disabled by default and excluded from the supported reacting-flow scope
 while their qualification remains incomplete.
 

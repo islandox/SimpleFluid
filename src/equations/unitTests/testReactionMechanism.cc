@@ -220,6 +220,23 @@ TEST(ReactionMechanismTest, SeparateDispersedPopulationsCarryTwoGasDonors)
     R::ReactionSourceInput input;
     input.integratedExtents = {{1, 0.2}, {2, 0.4}};
     const auto result = R::advance_reactions(mechanism, initial, environment(), 1.0, input);
+    const auto& raw = result.localReceipt.chemicalChanges;
+    ASSERT_EQ(raw.size(), 4U);
+    EXPECT_EQ(raw[0].species, G1);
+    EXPECT_EQ(raw[0].phase, P::Dissolved);
+    EXPECT_TRUE(raw[0].population.empty());
+    EXPECT_EQ(raw[0].moles, static_cast<long double>(.2));
+    EXPECT_EQ(raw[1].species, G2);
+    EXPECT_EQ(raw[1].phase, P::Dissolved);
+    EXPECT_EQ(raw[1].moles, static_cast<long double>(.4));
+    EXPECT_EQ(raw[2].species, G1);
+    EXPECT_EQ(raw[2].phase, P::Dispersed);
+    EXPECT_EQ(raw[2].population, "micro");
+    EXPECT_EQ(raw[2].moles, -static_cast<long double>(.2));
+    EXPECT_EQ(raw[3].species, G2);
+    EXPECT_EQ(raw[3].phase, P::Dispersed);
+    EXPECT_EQ(raw[3].population, "large:7");
+    EXPECT_EQ(raw[3].moles, -static_cast<long double>(.4));
     EXPECT_NEAR(result.state.amount(*schema, G1, P::Dispersed, "micro"), 0.1, 1e-16);
     EXPECT_DOUBLE_EQ(result.state.amount(*schema, G1, P::Dispersed, "large:7"), 0.2);
     EXPECT_NEAR(result.state.phase_amount(*schema, G2, P::Dispersed), 0.2, 1e-16);
@@ -573,4 +590,84 @@ TEST(ReactionDirectionalHistoryTest, AcceptedStagesRetainGrossReversalWithoutCha
     EXPECT_DOUBLE_EQ(reverse.ledger.reverseReactionExtents[0], 0.125);
     EXPECT_DOUBLE_EQ(reverse.ledger.reactionExtents[0], -0.125);
     EXPECT_DOUBLE_EQ(reverse.ledger.reactionHeat, -1.25);
+}
+
+TEST(ReactionMechanismTest, LocalAcceptedReceiptPreservesHeatAndMaterialLostByRoundedExtentReports)
+{
+    namespace R = SimpleFluid::Reacting;
+    using P = R::SpeciesPhase;
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {11, "left", .1, {{"X", 1}}, {P::Liquid}},
+        {29, "right", .1, {{"X", 1}}, {P::Liquid}}});
+    const double large = std::ldexp(1., 60), quantum = std::ldexp(1., -60);
+    const R::ReactionMechanism mechanism(schema,
+        {{41, "forward", {{11, P::Liquid, -quantum}, {29, P::Liquid, quantum}}, 1.},
+            {83, "opposing", {{29, P::Liquid, -quantum}, {11, P::Liquid, quantum}}, -1.}});
+    R::CellSpeciesState initial(*schema);
+    initial.set_amount(*schema, 11, P::Liquid, 2.);
+    initial.set_amount(*schema, 29, P::Liquid, 2.);
+    R::ReactionRateProvider provider;
+    provider.identity = "two accepted intervals with one small surviving event";
+    provider.schemaRevision = schema->revision();
+    provider.schemaFingerprint = schema->fingerprint();
+    provider.validityDescription = "manufactured t in [0,1], finite donors";
+    provider.parameterUnits = "mol/(m3 s)";
+    provider.validate = [](const R::ReactionContext&) {};
+    provider.evaluate = [large](const R::ReactionContext& context)
+    {
+        const double time = context.environment.time;
+        // The first .5-s SSPRK2 interval accepts 2^60 for each reaction.
+        // The second accepts exactly one additional forward extent, without a large donor stock.
+        return std::vector<R::ReactionRate>{
+            {41, time == 0 ? 4 * large : (time == 1 ? 4. : 0.), R::SourceVolumeBasis::BulkVolume},
+            {83, time == 0 ? 4 * large : 0., R::SourceVolumeBasis::BulkVolume}};
+    };
+    R::ReactionSourceInput input;
+    input.rates = provider;
+    const R::ReactionEnvironment environment{0., 300., 100000., 1., 1.};
+    const auto result = R::advance_reactions(mechanism, initial, environment, 1., input, {.5, 4});
+    ASSERT_EQ(result.ledger.substeps, 2U);
+    ASSERT_EQ(result.ledger.reactionExtents.size(), 2U);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0], large);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[1], large);
+    // Reconstructing from those reporting views invents zero heat and zero chemical change.
+    EXPECT_DOUBLE_EQ(result.ledger.reactionExtents[0] - result.ledger.reactionExtents[1], 0.);
+    EXPECT_DOUBLE_EQ(quantum * (result.ledger.reactionExtents[0] - result.ledger.reactionExtents[1]), 0.);
+    EXPECT_DOUBLE_EQ(result.ledger.reactionHeat, 1.);
+    const auto& receipt = result.localReceipt;
+    EXPECT_EQ(receipt.schemaFingerprint, schema->fingerprint());
+    ASSERT_EQ(receipt.reactionHeatContributions.size(), 2U);
+    const long double actual_heat = receipt.reactionHeatContributions[0] + receipt.reactionHeatContributions[1];
+    EXPECT_EQ(actual_heat, 1.L);
+    EXPECT_EQ(receipt.externalHeat, 0.L);
+    ASSERT_EQ(receipt.chemicalChanges.size(), 2U);
+    EXPECT_EQ(receipt.chemicalChanges[0].species, 11U);
+    EXPECT_EQ(receipt.chemicalChanges[0].phase, P::Liquid);
+    EXPECT_TRUE(receipt.chemicalChanges[0].population.empty());
+    EXPECT_EQ(receipt.chemicalChanges[0].moles, -static_cast<long double>(quantum));
+    EXPECT_EQ(receipt.chemicalChanges[1].species, 29U);
+    EXPECT_EQ(receipt.chemicalChanges[1].moles, static_cast<long double>(quantum));
+    EXPECT_DOUBLE_EQ(result.ledger.chemicalChange.amount(*schema, 11, P::Liquid), -quantum);
+    EXPECT_DOUBLE_EQ(result.ledger.chemicalChange.amount(*schema, 29, P::Liquid), quantum);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, 11, P::Liquid), 2.);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, 29, P::Liquid), 2.);
+}
+
+TEST(ReactionMechanismTest, LocalReceiptRetainsVolumetricHeatBeforeItsDoubleReportingView)
+{
+    namespace R = SimpleFluid::Reacting;
+    const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
+        {7, "ordinary carrier", .1, {{"X", 1}}, {R::SpeciesPhase::Liquid}}});
+    const R::ReactionMechanism mechanism(schema, {}, R::EnergyConvention::IncludesFormationEnergy);
+    R::CellSpeciesState initial(*schema);
+    const double factor = std::ldexp(1., 30);
+    R::ReactionSourceInput input;
+    input.heat.rate = R::VolumetricHeatRate{factor + 1., R::SourceVolumeBasis::BulkVolume};
+    const R::ReactionEnvironment environment{0., 300., 100000., 0., factor - 1.};
+    const auto result = R::advance_reactions(mechanism, initial, environment, 1., input);
+    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, std::ldexp(1., 60));
+    EXPECT_EQ(result.localReceipt.externalHeat, std::ldexp(1.L, 60) - 1.L);
+    EXPECT_TRUE(result.localReceipt.chemicalChanges.empty());
+    EXPECT_TRUE(result.localReceipt.reactionHeatContributions.empty());
+    EXPECT_DOUBLE_EQ(result.ledger.reactionHeat, 0.);
 }

@@ -5,6 +5,7 @@
 #include "SimpleFluidExport.hh"
 #include "equations/ReactionMechanism.hh"
 #include "solvers/LowMachMixtureSolver.hh"
+#include "solvers/MixtureFaceTransport.hh"
 #include <functional>
 #include <memory>
 #include <string>
@@ -52,6 +53,10 @@ struct ReactingMixtureOptions
     int maximum_correctors = 20; ///< Maximum evaluations in the shared transport/source fixed point.
     double source_relative_tolerance = 1e-8;
     ReactionAdvanceOptions integration;
+    /** Explicit ordered same-carrier face stages after pure chemistry.
+     * Every stage consumes its actual predecessor state; user laws are MPI-free.
+     */
+    std::vector<MixtureFaceTransportOptions> face_transport;
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler
@@ -63,7 +68,7 @@ public:
         std::vector<double> reaction_extents; ///< MPI signed totals, mol/reaction for this accepted interval.
         std::vector<double> forward_reaction_extents, reverse_reaction_extents; ///< Nonnegative gross accepted extents.
         double chemical_heat = 0, external_heat = 0, transfer_energy = 0, external_mass = 0;
-        double net_thermal_energy = 0; ///< MPI total of compensated per-cell heat plus transfer energy, J.
+        double net_thermal_energy = 0; ///< MPI sum of final applied phase packets with local compensation, J.
         LowMachMixtureSolver::Diagnostics flow;
     };
     class Trial
@@ -71,6 +76,7 @@ public:
     public:
         [[nodiscard]] const LowMachMixtureSolver::State& state() const;
         [[nodiscard]] const Diagnostics& diagnostics() const;
+        /** Chemistry and declared reservoir ledgers; internal face packets remain distinct private receipts. */
         [[nodiscard]] const std::vector<SpeciesSourceLedger>& local_sources() const;
         [[nodiscard]] const LowMachMixtureSolver::TransportSnapshot& transport_snapshot() const;
 

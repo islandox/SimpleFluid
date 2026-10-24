@@ -1,5 +1,6 @@
 set(SIMPLEFLUID_EQUATION_SOURCES
     ReactionMechanism.cc
+    SpeciesDiffusion.cc
     ReactingThermodynamics.cc
     LowMachPressureEquation.cc
     explicit_instantiation/VariableDensityMomentumEquation.cc

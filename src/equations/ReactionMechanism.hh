@@ -256,10 +256,38 @@ struct SpeciesSourceLedger
     [[nodiscard]] SIMPLEFLUID_EQUATIONS_EXPORT double thermal_energy() const;
 };
 
+/** One accepted net chemical change before narrowing into the reporting ledger.
+ * Identity is chemical species + exact phase/population, never a preferred vector slot.
+ */
+struct ReactionCompartmentChange
+{
+    SpeciesId species = 0;
+    SpeciesPhase phase = SpeciesPhase::Liquid;
+    std::string population;
+    long double moles = 0;
+};
+
+/** Local composition receipt from the kernel's actual accepted sums.
+ * These channels precede double reporting: do not reconstruct them from reactionExtents.
+ * chemicalChanges contains only nonzero entries in state phase/catalog/population order.
+ * reactionHeatContributions is in mechanism order and contains accepted unrounded extent * heatPerExtent.
+ * External material/energy/momentum packets retain their individual ledger.externalTransfers records.
+ * This is O(compartments + reactions), with no per-substep diary or MPI serialization contract.
+ * It is transient local composition data, not an alternative authoritative stored species state.
+ */
+struct ReactionLocalReceipt
+{
+    std::uint64_t schemaFingerprint = 0;
+    std::vector<ReactionCompartmentChange> chemicalChanges;
+    std::vector<long double> reactionHeatContributions;
+    long double externalHeat = 0;
+};
+
 struct ReactionAdvance
 {
     CellSpeciesState state;
-    SpeciesSourceLedger ledger;
+    SpeciesSourceLedger ledger; ///< Double reporting views of the accepted events.
+    ReactionLocalReceipt localReceipt; ///< Use raw local channels when composing later physical source stages.
 };
 
 /** Atomic pure preview. External transfers and supplied integrated extents are one

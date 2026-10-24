@@ -15,6 +15,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
   target_link_libraries(${TEST_NAME} SimpleFluid::Solvers GTest::gtest_main)
+  if(TEST_NAME STREQUAL "testLowMachFaceTransportAdapter")
+    # Exercise the private adapter directly without exporting it from the DSO.
+    target_sources(${TEST_NAME} PRIVATE ../details/LowMachFaceTransportAdapter.cc)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
   if(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
@@ -42,6 +46,12 @@ foreach(_mixture_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME LowMachSourceContracts_${_mixture_ranks}procs
         TARGET testLowMachSourceContracts PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;reacting;conservation;transaction;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME LowMachFaceTransport_${_mixture_ranks}procs
+        TARGET testLowMachFaceTransportAdapter PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;diffusion;thermal;transaction;empty_rank" TIMEOUT 120)
+    simplefluid_add_mpi_test(NAME ReactingMixtureFaces_${_mixture_ranks}procs
+        TARGET testReactingMixtureFaceCoupling PROCS ${_mixture_ranks}
+        LABELS "mpi;low_mach;reacting;diffusion;thermal;transaction;empty_rank" TIMEOUT 120)
     simplefluid_add_mpi_test(NAME LowMachCaloricFeasibility_${_mixture_ranks}procs
         TARGET testLowMachCaloricFeasibility PROCS ${_mixture_ranks}
         LABELS "mpi;low_mach;reacting;thermodynamics;transaction;empty_rank" TIMEOUT 120)

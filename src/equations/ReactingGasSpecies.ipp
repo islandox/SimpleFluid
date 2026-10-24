@@ -994,8 +994,26 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                         *d_options.reaction_mechanism, state, environment, dt, source, d_options.reaction_advance);
                     state = chemistry.state;
                     d_species_source_ledgers[owned] = chemistry.ledger;
-                    d_species_thermal_source.owned_write_view()(owned, 0) =
-                        chemistry.ledger.thermal_energy() / (dt * volumes[owned]);
+                    // Reporting ledgers may round away a channel before a later physical cancellation.
+                    // Accumulate the accepted local receipt and each original reservoir packet before one division.
+                    const auto& raw = chemistry.localReceipt;
+                    require(raw.schemaFingerprint == catalog.fingerprint() &&
+                                raw.reactionHeatContributions.size() ==
+                                    d_options.reaction_mechanism->reactions().size(),
+                        "Field thermal receipt does not match its mechanism/schema.");
+                    detail::CompensatedSum<long double> thermalEnergy;
+                    thermalEnergy += raw.externalHeat;
+                    for (const auto heat : raw.reactionHeatContributions)
+                        thermalEnergy += heat;
+                    for (const auto& transfer : chemistry.ledger.externalTransfers)
+                        thermalEnergy += transfer.energy;
+                    const auto measure = static_cast<long double>(dt) * volumes[owned];
+                    require(std::isfinite(measure) && measure > 0,
+                        "Field thermal source needs a finite positive time-volume measure.");
+                    const auto powerDensity = thermalEnergy.value() / measure;
+                    require(thermalEnergy.value() == 0 || powerDensity != 0,
+                        "Field thermal source underflows its physical rate.");
+                    d_species_thermal_source.owned_write_view()(owned, 0) = narrow(powerDensity);
                     auto populationLedger = Reacting::SpeciesSourceLedger{};
                     populationLedger.chemicalChange = reacting_species_detail::zero_like(state);
                     populationLedger.externalChange = reacting_species_detail::zero_like(state);

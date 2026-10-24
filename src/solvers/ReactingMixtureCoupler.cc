@@ -3,12 +3,15 @@
  */
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "equations/CollectiveValidation.hh"
+#include "solvers/details/LowMachFaceSourceComposition.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <iomanip>
 #include <limits>
+#include <new>
 #include <set>
 #include <sstream>
 #include <tuple>
@@ -19,6 +22,7 @@ namespace
 {
 using Sum = detail::CompensatedSum<long double>;
 using Solver = LowMachMixtureSolver;
+namespace Faces = low_mach_faces;
 void require(bool valid, const char* message)
 {
     if (!valid)
@@ -34,7 +38,14 @@ void uniform_text(const Solver::Mesh& mesh, const std::string& text)
         { require(text.size() <= size_t(std::numeric_limits<int>::max()), "Reacting configuration is too large."); });
     const int size = static_cast<int>(text.size());
     collective_detail::require_uniform_value(mesh, size, "Reacting mixture configuration length");
-    std::vector<int> values(text.begin(), text.end()), lower(size), upper(size);
+    std::vector<int> values, lower, upper;
+    collective_detail::collective_local_validation(mesh, "Controller metadata buffers",
+        [&]
+        {
+            values.assign(text.begin(), text.end());
+            lower.resize(size);
+            upper.resize(size);
+        });
     if (size)
     {
         const auto comm = mesh.owned_cell_map()->getComm();
@@ -57,14 +68,31 @@ bool identical_sources(std::span<const Solver::CellSources> a, std::span<const S
     }
     return true;
 }
+// Preallocate both object storage and its shared control block inside a local fence.
+// Moved constructor inputs then enter the adapter's own communicating constructor without a rank-local allocation.
+struct FaceStageStorage
+{
+    using Adapter = Faces::LowMachFaceTransportAdapter;
+    alignas(Adapter) std::byte memory[sizeof(Adapter)];
+    Adapter* value = nullptr;
+    ~FaceStageStorage()
+    {
+        if (value)
+            value->~Adapter();
+    }
+};
+
 struct SourceEngine
 {
     std::shared_ptr<Solver> flow;
     ReactingMixtureOptions options;
+    std::vector<std::shared_ptr<const Faces::LowMachFaceTransportAdapter>> face_stages;
     struct Prepared
     {
         Solver::SourceStageResult result;
         std::vector<SpeciesSourceLedger> ledgers;
+        std::vector<std::shared_ptr<const Faces::Receipt>> face_receipts;
+        std::vector<CellSpeciesState> post_faces;
     };
     CellSpeciesState species(const Solver::CellState& cell) const
     {
@@ -94,7 +122,7 @@ struct SourceEngine
                 return p;
         throw std::invalid_argument("External transfer references an unbound physical compartment.");
     }
-    Prepared prepare(const Solver::SourceStageContext& context) const
+    void prepare_chemistry(const Solver::SourceStageContext& context, Faces::LocalChemistryStage& stage) const
     {
         const auto& catalog = options.mechanism->catalog();
         const auto& transport = context.transport;
@@ -104,13 +132,11 @@ struct SourceEngine
         require(
             transport.cells.size() == trial.cells.size() && transport.cells.size() == flow->mesh()->num_owned_cells(),
             "Transport/source cell counts do not agree.");
-        Prepared prepared;
-        auto& sources = prepared.result.sources;
-        auto& events = prepared.result.gross_events;
-        sources.resize(transport.cells.size());
-        events.resize(transport.cells.size());
-        std::vector<SpeciesSourceLedger> ledgers;
-        ledgers.reserve(transport.cells.size());
+        stage.sums.reset(transport.cells.size(), np, ns);
+        stage.gross_events.resize(transport.cells.size());
+        stage.ledgers.reserve(transport.cells.size());
+        stage.post_chemistry.reserve(transport.cells.size());
+        stage.caloric_guesses.reserve(transport.cells.size());
         for (size_t c = 0; c < transport.cells.size(); ++c)
         {
             auto cell = trial.cells.at(c);
@@ -195,73 +221,138 @@ struct SourceEngine
                 options.source ? options.source({reaction, cell, c, transport.cells[c]}, dt) : ReactionSourceInput{};
             auto chemistry =
                 advance_reactions(*options.mechanism, initial, environment, dt, input, options.integration);
-            auto& output = sources[c];
-            output.species_moles.assign(np, std::vector<double>(ns));
-            output.internal_energy.assign(np, 0);
+            // Retain actual pure-kernel state for the first face stage, not an endpoint reconstruction.
+            stage.post_chemistry.push_back(chemistry.state);
+            auto caloric = cell;
             for (size_t p = 0; p < np; ++p)
-                for (size_t i = 0; i < ns; ++i)
+            {
+                // Preserve an available current guess for a newly created phase whose transported stock was empty.
+                // Arriving transported phases already recovered their own T from transported U above.
+                if (!(caloric.phases[p].temperature > 0))
                 {
-                    const auto phase = compartment(options.phases[p], i);
-                    const auto id = catalog.species()[i].id;
-                    Sum delta;
-                    delta += chemistry.ledger.chemicalChange.amount(catalog, id, phase, options.phases[p].population);
-                    delta += chemistry.ledger.externalChange.amount(catalog, id, phase, options.phases[p].population);
-                    output.species_moles[p][i] = static_cast<double>(delta.value());
+                    const double guess = trial.cells[c].phases[p].temperature;
+                    if (guess > 0)
+                        caloric.phases[p].temperature = guess;
+                    else if (flow->options().thermal_mode == PhaseThermalMode::Equilibrium)
+                        caloric.phases[p].temperature = temperature;
                 }
-            Sum declared_energy;
-            declared_energy += chemistry.ledger.externalHeat;
-            declared_energy += chemistry.ledger.reactionHeat;
-            std::vector<Sum> phase_energy(np);
+            }
+            stage.caloric_guesses.push_back(std::move(caloric));
+            const auto& raw = chemistry.localReceipt;
+            require(raw.schemaFingerprint == catalog.fingerprint() &&
+                        raw.reactionHeatContributions.size() == options.mechanism->reactions().size(),
+                "Local reaction receipt does not match the immutable mechanism/schema.");
+            for (const auto& change : raw.chemicalChanges)
+            {
+                // The receipt is sparse; an unbound zero compartment never reaches phase_for.
+                if (change.moles != 0)
+                    stage.sums.add_material(c, phase_for(change.species, change.phase, change.population),
+                        catalog.index(change.species), change.moles);
+            }
+            Sum declared_heat;
+            declared_heat += raw.externalHeat;
+            for (const auto heat : raw.reactionHeatContributions)
+                declared_heat += heat;
+
             if (options.partition_heat)
             {
-                const auto heat = static_cast<double>(declared_energy.value());
-                require(std::isfinite(heat), "Heat allocation input is not representable.");
-                const auto heat_parts = options.partition_heat(heat, chemistry.ledger, cell);
-                require(heat_parts.size() == np, "Heat allocation must match physical phases.");
-                Sum heat_sum, heat_scale;
-                for (size_t phase = 0; phase < np; ++phase)
+                // Declare original channels before custom double allocation. Later cancellation must not hide loss.
+                stage.sums.declare_energy(c, raw.externalHeat);
+                for (const auto heat : raw.reactionHeatContributions)
+                    stage.sums.declare_energy(c, heat);
+                const double heat = static_cast<double>(declared_heat.value());
+                require(std::isfinite(heat) && (declared_heat.value() == 0 || heat != 0),
+                    "Heat allocation input is not representable.");
+                const auto parts = options.partition_heat(heat, chemistry.ledger, cell);
+                require(parts.size() == np, "Heat allocation must match physical phases.");
+                Sum allocated, scale;
+                for (size_t p = 0; p < np; ++p)
                 {
-                    const auto part = heat_parts[phase];
-                    require(std::isfinite(part), "Phase heat allocation is nonfinite.");
-                    phase_energy[phase] += part;
-                    heat_sum += part;
-                    heat_scale += std::abs(static_cast<long double>(part));
+                    require(std::isfinite(parts[p]), "Phase heat allocation is nonfinite.");
+                    stage.sums.add_allocated_energy(c, p, parts[p]);
+                    allocated += parts[p];
+                    scale += std::abs(static_cast<long double>(parts[p]));
                 }
-                require(std::abs(heat_sum.value() - declared_energy.value()) <=
-                            64 * std::numeric_limits<double>::epsilon() *
-                                (heat_scale.value() + std::abs(declared_energy.value())),
-                    "Phase heat allocation does not conserve the supplied budget.");
+                require(
+                    std::abs(allocated.value() - declared_heat.value()) <=
+                        64 * std::numeric_limits<double>::epsilon() * (scale.value() + std::abs(declared_heat.value())),
+                    "Phase heat allocation does not conserve its original budget.");
             }
             else
             {
-                // Keep independent source channels separate until material-transfer
-                // energy has also been accumulated; their large terms may cancel.
-                phase_energy[options.heat_phase] += chemistry.ledger.externalHeat;
-                phase_energy[options.heat_phase] += chemistry.ledger.reactionHeat;
+                stage.sums.add_energy(c, options.heat_phase, raw.externalHeat);
+                for (const auto heat : raw.reactionHeatContributions)
+                    stage.sums.add_energy(c, options.heat_phase, heat);
             }
             for (const auto& transfer : chemistry.ledger.externalTransfers)
             {
-                phase_energy[phase_for(transfer.species, transfer.phase, transfer.population)] += transfer.energy;
-                declared_energy += transfer.energy;
+                const auto p = phase_for(transfer.species, transfer.phase, transfer.population);
+                stage.sums.add_material(c, p, catalog.index(transfer.species), transfer.moles);
+                stage.sums.add_energy(c, p, transfer.energy);
+                for (size_t axis = 0; axis < 3; ++axis)
+                    stage.sums.add_momentum(c, axis, transfer.momentum[axis]);
             }
-            Sum applied_energy, applied_scale;
-            for (size_t phase = 0; phase < np; ++phase)
-            {
-                output.internal_energy[phase] = static_cast<double>(phase_energy[phase].value());
-                require(std::isfinite(output.internal_energy[phase]), "Physical phase source energy overflow.");
-                applied_energy += output.internal_energy[phase];
-                applied_scale += std::abs(static_cast<long double>(output.internal_energy[phase]));
-            }
-            require(std::abs(applied_energy.value() - declared_energy.value()) <=
-                        64 * std::numeric_limits<double>::epsilon() *
-                            (applied_scale.value() + std::abs(declared_energy.value())),
-                "Physical phase source packets lost declared thermal energy.");
-            output.momentum = Solver::Vector{chemistry.ledger.externalMomentum};
-            events[c] = gross_events(chemistry.ledger);
-            ledgers.push_back(std::move(chemistry.ledger));
+            stage.gross_events[c] = gross_events(chemistry.ledger);
+            stage.ledgers.push_back(std::move(chemistry.ledger));
         }
-        prepared.ledgers = std::move(ledgers);
-        return prepared;
+    }
+
+    Prepared prepare(const Solver::SourceStageContext& context) const
+    {
+        std::vector<const Faces::LowMachFaceTransportAdapter*> ordered;
+        std::function<void(const Solver::SourceStageContext&, Faces::LocalChemistryStage&)> local_prepare;
+        collective_detail::collective_local_validation(context.mesh, "Ordered face-stage views",
+            [&]
+            {
+                local_prepare = [this](const Solver::SourceStageContext& current, Faces::LocalChemistryStage& local)
+                { prepare_chemistry(current, local); };
+                ordered.reserve(face_stages.size());
+                for (const auto& stage : face_stages)
+                {
+                    require(bool(stage), "Null immutable face-stage adapter.");
+                    ordered.push_back(stage.get());
+                }
+            });
+        auto composed =
+            Faces::compose_post_chemistry_faces(context, options.mechanism->catalog(), ordered, local_prepare);
+        Prepared result;
+        collective_detail::collective_local_validation(context.mesh, "Immutable composed source receipt",
+            [&]
+            {
+                result.result = std::move(composed.result);
+                result.ledgers = std::move(composed.chemistry_ledgers);
+                result.face_receipts = std::move(composed.faces);
+                result.post_faces = std::move(composed.post_faces);
+                // A single signed double packet must replay the actual sequential chemistry/face endpoint.
+                // In particular, a large depletion cannot erase a later finite incoming face credit.
+                const auto& catalog = options.mechanism->catalog();
+                require(result.post_faces.size() == context.transport.cells.size() &&
+                            result.result.sources.size() == result.post_faces.size(),
+                    "Final source endpoint row mismatch.");
+                for (size_t c = 0; c < result.post_faces.size(); ++c)
+                    for (size_t p = 0; p < options.phases.size(); ++p)
+                        for (size_t s = 0; s < catalog.species().size(); ++s)
+                        {
+                            const auto actual = result.post_faces[c].amount(catalog, catalog.species()[s].id,
+                                compartment(options.phases[p], s), options.phases[p].population);
+                            Faces::validate_source_endpoint(context.transport.cells[c].phases[p].moles.at(s),
+                                result.result.sources[c].species_moles.at(p).at(s), actual);
+                        }
+            });
+        return result;
+    }
+
+    void validate_face_receipts(const Prepared& prepared, const Solver::SourceStageContext& context) const
+    {
+        collective_detail::collective_local_validation(context.mesh, "Ordered face receipt count",
+            [&]
+            {
+                require(prepared.face_receipts.size() == face_stages.size(), "Face receipt stage count changed.");
+                for (const auto& face : prepared.face_receipts)
+                    require(bool(face), "Missing immutable face receipt.");
+            });
+        for (size_t stage = 0; stage < face_stages.size(); ++stage)
+            face_stages[stage]->validate_receipt(*prepared.face_receipts[stage], context);
     }
 
     std::vector<double> gross_events(const SpeciesSourceLedger& ledger) const
@@ -312,6 +403,7 @@ struct ReactingMixtureCoupler::Trial::Data
     Solver::Trial flow;
     Diagnostics diagnostics;
     std::vector<SpeciesSourceLedger> ledgers;
+    std::vector<std::shared_ptr<const Faces::Receipt>> face_receipts;
 };
 
 struct ReactingMixtureCoupler::Implementation
@@ -324,10 +416,11 @@ struct ReactingMixtureCoupler::Implementation
     std::uint64_t generation = 0;
 
     Implementation(std::shared_ptr<Solver> solver, ReactingMixtureOptions controls)
-        : flow(std::move(solver)), options(std::move(controls)), lease(flow->acquire_controller()),
-          source_engine(std::make_shared<const SourceEngine>(SourceEngine{flow, options}))
+        : flow(std::move(solver)), options(std::move(controls)), lease(flow->acquire_controller())
     {
         const auto& mesh = *flow->mesh();
+        collective_detail::require_uniform_value(mesh, static_cast<unsigned long long>(options.face_transport.size()),
+            "Ordered controller face-stage count");
         collective_detail::collective_local_validation(mesh, "Reacting mixture controller setup",
             [&]
             {
@@ -338,6 +431,8 @@ struct ReactingMixtureCoupler::Implementation
                 require((!options.source || !options.source_identity.empty()) && options.source_revision > 0,
                     "A reaction source needs an explicit identity and a positive immutable revision.");
                 require(flow->initialized(), "Initialize low-Mach flow before constructing its reaction controller.");
+                // Callback copies/immutable engine allocation are local and may fail even on an empty owner.
+                source_engine = std::make_shared<const SourceEngine>(SourceEngine{flow, options, {}});
                 const auto& catalog = options.mechanism->catalog();
                 const auto ns = catalog.species().size();
                 std::set<std::tuple<SpeciesId, SpeciesPhase, std::string>> mapped;
@@ -380,6 +475,39 @@ struct ReactingMixtureCoupler::Implementation
                         require(physical_phases.size() <= 1,
                             "Separate-temperature cross-phase chemistry needs explicit phase-energy allocation.");
                     }
+                for (const auto& face : options.face_transport)
+                {
+                    require(!face.identity.empty() && face.revision > 0 &&
+                                face.schema_fingerprint == catalog.fingerprint() &&
+                                face.physical_phase < options.phases.size() && (face.diffusion || face.fourier),
+                        "Invalid immutable face-stage identity/schema/physical role.");
+                    if (face.diffusion)
+                    {
+                        const auto& law = *face.diffusion;
+                        const auto& b = law.binding;
+                        require(!b.identity.empty() && b.revision > 0 && b.schemaFingerprint == catalog.fingerprint() &&
+                                    b.counterSpecies.has_value() && law.molar_conductance &&
+                                    law.partial_molar_enthalpy && !law.primary_species.empty() &&
+                                    b.energyConvention == options.mechanism->energy_convention(),
+                            "Diffusion requires explicit finite counter, laws and common energy/schema metadata.");
+                        require(source_engine->phase_for(*b.counterSpecies, b.counter.phase, b.counter.population) ==
+                                        face.physical_phase &&
+                                    catalog.allows(*b.counterSpecies, b.counter.phase),
+                            "Diffusion counter must belong to its declared physical carrier.");
+                        std::set<SpeciesId> primary;
+                        for (const auto id : law.primary_species)
+                            require(primary.insert(id).second && catalog.allows(id, b.transported.phase) &&
+                                        source_engine->phase_for(id, b.transported.phase, b.transported.population) ==
+                                            face.physical_phase &&
+                                        id != *b.counterSpecies,
+                                "Diffusion primary/counter roles must be distinct and share one physical carrier.");
+                    }
+                    if (face.fourier)
+                        require(!face.fourier->identity.empty() && face.fourier->revision > 0 &&
+                                    face.fourier->schema_fingerprint == catalog.fingerprint() &&
+                                    face.fourier->conductance,
+                            "Fourier contact requires explicit immutable conductance metadata.");
+                }
                 for (const auto& cell : flow->state().cells)
                 {
                     require(cell.phases.size() == options.phases.size(), "Physical phase schema does not match flow.");
@@ -399,77 +527,158 @@ struct ReactingMixtureCoupler::Implementation
                     (void) source_engine->species(cell);
                 }
             });
-        std::ostringstream signature;
-        signature << std::hexfloat << options.mechanism->catalog().fingerprint() << ':' << bool(options.source) << ':'
-                  << options.source_identity.size() << ':' << options.source_identity << ':' << options.source_revision
-                  << ':' << options.maximum_correctors << ':' << options.source_relative_tolerance << ':'
-                  << options.liquid_phase << ':' << options.heat_phase << ':' << bool(options.partition_heat) << ':'
-                  << options.integration.maximumSubstep << ':' << options.integration.maximumSubsteps << ':'
-                  << options.integration.maximumRetries << ':' << int(options.mechanism->energy_convention());
-        signature << ':' << options.phases.size() << ':' << options.mechanism->reactions().size();
-        for (const auto& phase : options.phases)
+        std::string schema_signature;
+        collective_detail::collective_local_validation(mesh, "Controller immutable metadata encoding",
+            [&]
+            {
+                std::ostringstream signature;
+                signature << std::hexfloat << options.mechanism->catalog().fingerprint() << ':' << bool(options.source)
+                          << ':' << options.source_identity.size() << ':' << options.source_identity << ':'
+                          << options.source_revision << ':' << options.maximum_correctors << ':'
+                          << options.source_relative_tolerance << ':' << options.liquid_phase << ':'
+                          << options.heat_phase << ':' << bool(options.partition_heat) << ':'
+                          << options.integration.maximumSubstep << ':' << options.integration.maximumSubsteps << ':'
+                          << options.integration.maximumRetries << ':' << int(options.mechanism->energy_convention());
+                signature << ':' << options.phases.size() << ':' << options.mechanism->reactions().size();
+                for (const auto& phase : options.phases)
+                {
+                    signature << ':' << int(phase.phase) << ':' << phase.population.size() << ':' << phase.population
+                              << ':' << phase.species_phases.size();
+                    for (const auto kind : phase.species_phases)
+                        signature << ':' << int(kind);
+                }
+                for (const auto& reaction : options.mechanism->reactions())
+                {
+                    signature << ':' << reaction.id << ':' << reaction.heatPerExtent << ':' << reaction.changes.size();
+                    for (const auto& term : reaction.changes)
+                        signature << ':' << term.species << ':' << int(term.phase) << ':' << term.population.size()
+                                  << ':' << term.population << ':' << term.coefficient;
+                }
+                signature << ':' << options.face_transport.size();
+                for (const auto& face : options.face_transport)
+                {
+                    signature << ':' << face.identity.size() << ':' << face.identity << ':' << face.revision << ':'
+                              << face.schema_fingerprint << ':' << face.physical_phase << ':' << bool(face.diffusion)
+                              << ':' << bool(face.fourier);
+                    if (face.diffusion)
+                    {
+                        const auto& law = *face.diffusion;
+                        const auto& b = law.binding;
+                        signature << ':' << b.identity.size() << ':' << b.identity << ':' << b.revision << ':'
+                                  << b.schemaFingerprint << ':' << *b.counterSpecies << ':' << int(b.energyConvention)
+                                  << ':' << int(b.transported.phase) << ':' << b.transported.population.size() << ':'
+                                  << b.transported.population << ':' << int(b.counter.phase) << ':'
+                                  << b.counter.population.size() << ':' << b.counter.population << ':'
+                                  << law.primary_species.size();
+                        for (const auto id : law.primary_species)
+                            signature << ':' << id;
+                    }
+                    if (face.fourier)
+                        signature << ':' << face.fourier->identity.size() << ':' << face.fourier->identity << ':'
+                                  << face.fourier->revision << ':' << face.fourier->schema_fingerprint;
+                }
+                schema_signature = signature.str();
+            });
+        uniform_text(mesh, schema_signature);
+        if (!options.face_transport.empty())
         {
-            signature << ':' << int(phase.phase) << ':' << phase.population.size() << ':' << phase.population << ':'
-                      << phase.species_phases.size();
-            for (const auto kind : phase.species_phases)
-                signature << ':' << int(kind);
+            std::shared_ptr<SourceEngine> engine;
+            std::shared_ptr<const SpeciesCatalog> catalog_alias;
+            Faces::PhaseBindings bindings;
+            collective_detail::collective_local_validation(mesh, "Immutable face-stage construction inputs",
+                [&]
+                {
+                    engine = std::make_shared<SourceEngine>(SourceEngine{flow, options, {}});
+                    engine->face_stages.reserve(options.face_transport.size());
+                    // Aliasing ownership retains the mechanism/catalog lifetime without copying its immutable schema.
+                    catalog_alias =
+                        std::shared_ptr<const SpeciesCatalog>(options.mechanism, &options.mechanism->catalog());
+                    bindings.resize(options.phases.size());
+                    for (size_t p = 0; p < options.phases.size(); ++p)
+                        for (size_t s = 0; s < options.mechanism->catalog().species().size(); ++s)
+                            bindings[p].push_back({compartment(options.phases[p], s), options.phases[p].population});
+                });
+            // Collective constructors run only after all phase/source/ordered-stage metadata agrees.
+            for (const auto& face : options.face_transport)
+            {
+                std::shared_ptr<FaceStageStorage> storage;
+                Faces::Options prepared_options;
+                Faces::PhaseBindings prepared_bindings;
+                collective_detail::collective_local_validation(mesh, "Allocate one ordered face stage",
+                    [&]
+                    {
+                        storage = std::make_shared<FaceStageStorage>();
+                        prepared_options = face;
+                        prepared_bindings = bindings;
+                    });
+                storage->value = ::new (static_cast<void*>(storage->memory)) Faces::LowMachFaceTransportAdapter(
+                    flow->mesh(), catalog_alias, std::move(prepared_options), std::move(prepared_bindings));
+                // Aliasing does not allocate; the reserved vector preserves this exact immutable stage association.
+                engine->face_stages.emplace_back(storage, storage->value);
+            }
+            source_engine = std::move(engine);
         }
-        for (const auto& reaction : options.mechanism->reactions())
-        {
-            signature << ':' << reaction.id << ':' << reaction.heatPerExtent << ':' << reaction.changes.size();
-            for (const auto& term : reaction.changes)
-                signature << ':' << term.species << ':' << int(term.phase) << ':' << term.population.size() << ':'
-                          << term.population << ':' << term.coefficient;
-        }
-        uniform_text(mesh, signature.str());
     }
 
-    Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, int correctors,
-        const Solver::Diagnostics& flow_statistics) const
+    Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, std::span<const Solver::CellSources> applied,
+        int correctors, const Solver::Diagnostics& flow_statistics) const
     {
         const auto nr = options.mechanism->reactions().size();
-        std::vector<Sum> sums(3 * nr + 5);
-        for (const auto& ledger : ledgers)
-        {
-            for (size_t r = 0; r < nr; ++r)
-            {
-                sums[r] += ledger.reactionExtents.at(r);
-                sums[nr + r] += ledger.forwardReactionExtents.at(r);
-                sums[2 * nr + r] += ledger.reverseReactionExtents.at(r);
-            }
-            sums[3 * nr] += ledger.reactionHeat;
-            sums[3 * nr + 1] += ledger.externalHeat;
-            sums[3 * nr + 2] += ledger.transferEnergy;
-            sums[3 * nr + 3] += ledger.externalMass;
-            sums[3 * nr + 4] += ledger.thermal_energy();
-        }
-        std::vector<double> local(3 * nr + 5), global(3 * nr + 5);
+        std::vector<double> local, global;
         collective_detail::collective_local_validation(*flow->mesh(), "Reacting source reduction input",
             [&]
             {
+                require(ledgers.size() == applied.size(), "Reaction diagnostics must match applied owned packets.");
                 require(
-                    local.size() <= size_t(std::numeric_limits<int>::max()), "Too many reaction diagnostic entries.");
+                    nr <= (size_t(std::numeric_limits<int>::max()) - 5) / 3, "Too many reaction diagnostic entries.");
+                std::vector<Sum> sums(3 * nr + 5);
+                for (const auto& ledger : ledgers)
+                {
+                    for (size_t r = 0; r < nr; ++r)
+                    {
+                        sums[r] += ledger.reactionExtents.at(r);
+                        sums[nr + r] += ledger.forwardReactionExtents.at(r);
+                        sums[2 * nr + r] += ledger.reverseReactionExtents.at(r);
+                    }
+                    sums[3 * nr] += ledger.reactionHeat;
+                    sums[3 * nr + 1] += ledger.externalHeat;
+                    sums[3 * nr + 2] += ledger.transferEnergy;
+                    sums[3 * nr + 3] += ledger.externalMass;
+                }
+                // These are the final applied physical packets, after every raw face/source cancellation.
+                // Keep one rank-local sum across all cells and phases rather than first rounding cell totals.
+                for (const auto& source : applied)
+                    for (const auto value : source.internal_energy)
+                        sums[3 * nr + 4] += value;
+                local.resize(sums.size());
+                global.resize(sums.size());
                 for (size_t i = 0; i < local.size(); ++i)
                 {
-                    local[i] = static_cast<double>(sums[i].value());
-                    require(std::isfinite(local[i]), "Reaction diagnostic overflow.");
+                    const auto value = sums[i].value();
+                    local[i] = static_cast<double>(value);
+                    require(std::isfinite(value) && std::isfinite(local[i]) && (value == 0 || local[i] != 0),
+                        "Reaction diagnostic overflow or underflow.");
                 }
             });
         Teuchos::reduceAll(*flow->mesh()->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
             static_cast<int>(local.size()), local.data(), global.data());
-        for (const auto value : global)
-            require(std::isfinite(value), "Global reaction diagnostic overflow.");
         Diagnostics result;
-        result.correctors = correctors;
-        result.reaction_extents.assign(global.begin(), global.begin() + nr);
-        result.forward_reaction_extents.assign(global.begin() + nr, global.begin() + 2 * nr);
-        result.reverse_reaction_extents.assign(global.begin() + 2 * nr, global.begin() + 3 * nr);
-        result.chemical_heat = global[3 * nr];
-        result.external_heat = global[3 * nr + 1];
-        result.transfer_energy = global[3 * nr + 2];
-        result.external_mass = global[3 * nr + 3];
-        result.net_thermal_energy = global[3 * nr + 4];
-        result.flow = flow_statistics;
+        collective_detail::collective_local_validation(*flow->mesh(), "Reacting source reduction report",
+            [&]
+            {
+                for (const auto value : global)
+                    require(std::isfinite(value), "Global reaction diagnostic overflow.");
+                result.correctors = correctors;
+                result.reaction_extents.assign(global.begin(), global.begin() + nr);
+                result.forward_reaction_extents.assign(global.begin() + nr, global.begin() + 2 * nr);
+                result.reverse_reaction_extents.assign(global.begin() + 2 * nr, global.begin() + 3 * nr);
+                result.chemical_heat = global[3 * nr];
+                result.external_heat = global[3 * nr + 1];
+                result.transfer_energy = global[3 * nr + 2];
+                result.external_mass = global[3 * nr + 3];
+                result.net_thermal_energy = global[3 * nr + 4];
+                result.flow = flow_statistics;
+            });
         return result;
     }
 };
@@ -517,22 +726,32 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
     collective_detail::collective_local_validation(mesh, "Reacting mixture timestep",
         [&] { require(std::isfinite(dt) && dt > 0, "Reacting mixture timestep must be positive and finite."); });
     collective_detail::require_uniform_value(mesh, dt, "Reacting mixture timestep");
-    auto receipt = std::make_shared<SourceReceipt>();
-    auto provider = std::make_shared<const Solver::SourceStageProvider>(
-        Solver::SourceStageProvider{"ReactingMixtureCoupler:" + d->options.source_identity, d->options.source_revision,
-            d->options.mechanism->catalog().fingerprint(),
-            [engine = d->source_engine, receipt](const Solver::SourceStageContext& context)
-            {
-                SourceEngine::Prepared prepared;
-                // User laws and pure chemical kernels are local. Fence their errors
-                // before any later mesh exchange or global reduction in this stage.
-                collective_detail::collective_local_validation(
-                    context.mesh, "Transported reaction source preview", [&] { prepared = engine->prepare(context); });
-                receipt->transport = context.transport;
-                receipt->prepared = std::move(prepared);
-                return receipt->prepared.result;
-            },
-            d->options.source_relative_tolerance, d->options.maximum_correctors});
+    std::shared_ptr<SourceReceipt> receipt;
+    std::shared_ptr<const Solver::SourceStageProvider> provider;
+    collective_detail::collective_local_validation(mesh, "Allocate immutable source provider",
+        [&]
+        {
+            receipt = std::make_shared<SourceReceipt>();
+            provider = std::make_shared<const Solver::SourceStageProvider>(
+                Solver::SourceStageProvider{"ReactingMixtureCoupler:" + d->options.source_identity,
+                    d->options.source_revision, d->options.mechanism->catalog().fingerprint(),
+                    [engine = d->source_engine, receipt](const Solver::SourceStageContext& context)
+                    {
+                        // This is a communicating stage. Its local chemistry and each face stage own their fences.
+                        auto prepared = engine->prepare(context);
+                        engine->validate_face_receipts(prepared, context);
+                        Solver::SourceStageResult result;
+                        collective_detail::collective_local_validation(context.mesh, "Retain composed source receipt",
+                            [&]
+                            {
+                                receipt->transport = context.transport;
+                                receipt->prepared = std::move(prepared);
+                                result = receipt->prepared.result;
+                            });
+                        return result;
+                    },
+                    d->options.source_relative_tolerance, d->options.maximum_correctors});
+        });
     auto flow_trial = d->flow->preview_with_sources(dt, std::move(provider), &d->lease);
     collective_detail::collective_local_validation(mesh, "Reacting mixture immutable source receipt",
         [&]
@@ -546,13 +765,22 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                         std::equal(events.begin(), events.end(), receipt->prepared.result.gross_events.begin()),
                 "Reaction receipt does not match the exact accepted gross events.");
         });
-    auto data = std::make_shared<Trial::Data>();
-    data->owner = this;
-    data->revision = d->generation;
-    data->diagnostics =
-        d->totals(receipt->prepared.ledgers, flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
-    data->flow = std::move(flow_trial);
-    data->ledgers = std::move(receipt->prepared.ledgers);
+    const Solver::SourceStageContext final_context{flow_trial.transport_snapshot(), flow_trial.state(), mesh};
+    d->source_engine->validate_face_receipts(receipt->prepared, final_context);
+    auto statistics = d->totals(receipt->prepared.ledgers, flow_trial.integrated_sources(),
+        flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
+    std::shared_ptr<Trial::Data> data;
+    collective_detail::collective_local_validation(mesh, "Retain immutable reacting trial",
+        [&]
+        {
+            data = std::make_shared<Trial::Data>();
+            data->owner = this;
+            data->revision = d->generation;
+            data->diagnostics = std::move(statistics);
+            data->flow = std::move(flow_trial);
+            data->ledgers = std::move(receipt->prepared.ledgers);
+            data->face_receipts = std::move(receipt->prepared.face_receipts);
+        });
     // The flow trial retains the immutable provider lifetime. Release this
     // temporary duplicate only after exact receipt verification and publication.
     *receipt = {};

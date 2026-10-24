@@ -636,6 +636,31 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
         chemicalValues[i] = chemical[i].value();
         externalValues[i] = external[i].value();
     }
+    // Carry the actual accepted chemical sums into composition before the reporting state narrows them.
+    auto& local = result.localReceipt;
+    local.schemaFingerprint = mechanism.catalog().fingerprint();
+    local.chemicalChanges.reserve(count);
+    const auto speciesCount = mechanism.catalog().species().size();
+    std::size_t chemicalIndex = 0;
+    for (std::size_t phase = 0; phase < static_cast<std::size_t>(SpeciesPhase::Count); ++phase)
+        for (std::size_t s = 0; s < speciesCount; ++s)
+        {
+            const auto value = chemicalValues[chemicalIndex++];
+            if (value != 0)
+                local.chemicalChanges.push_back({mechanism.catalog().species()[s].id,
+                    static_cast<SpeciesPhase>(phase), {}, value});
+        }
+    for (const auto& population : initial.dispersedPopulations)
+        for (std::size_t s = 0; s < speciesCount; ++s)
+        {
+            const auto value = chemicalValues[chemicalIndex++];
+            if (value != 0)
+                local.chemicalChanges.push_back(
+                    {mechanism.catalog().species()[s].id, SpeciesPhase::Dispersed, population.id, value});
+        }
+    local.externalHeat = externalHeat.value();
+    local.reactionHeatContributions.reserve(extentSums.size());
+
     ledger.chemicalChange = store(zeros(initial), chemicalValues);
     ledger.externalChange = store(zeros(initial), externalValues);
     Sum reactionHeat;
@@ -644,7 +669,9 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
         ledger.reactionExtents.push_back(checked(extentSums[r].value()));
         ledger.forwardReactionExtents.push_back(checked(forwardExtents[r].value()));
         ledger.reverseReactionExtents.push_back(checked(reverseExtents[r].value()));
-        reactionHeat += extentSums[r].value() * mechanism.reactions()[r].heatPerExtent;
+        const auto contribution = extentSums[r].value() * mechanism.reactions()[r].heatPerExtent;
+        local.reactionHeatContributions.push_back(contribution);
+        reactionHeat += contribution;
     }
     ledger.externalTransfers = input.externalTransfers;
     ledger.externalHeat = checked(externalHeat.value());
