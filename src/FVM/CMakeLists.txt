@@ -6,6 +6,8 @@ add_library(SimpleFluidFVM SHARED
     ExactFaceTransfer.cc
     PolyhedralReconstruction.cc
     FinitePolyhedralReconstruction.cc
+    details/BoundedPolyhedralReconstruction.inc
+    details/BoundedPhaseCertification.inc
     GeometricVoF.cc
     AdaptiveVoF.cc
     ConservativeAMRRemap.cc
