@@ -24,6 +24,8 @@
 #include <limits>
 #include <memory>
 #include <numbers>
+#include <optional>
+#include <set>
 #include <vector>
 
 namespace
@@ -43,7 +45,7 @@ using LO = Pack::local_ordinal_type;
 testing::Environment* const kokkos_environment =
     testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-SimpleFluid::SP<Handle> make_cartesian(bool reversed = false,
+SimpleFluid::SP<Handle> make_cartesian(bool split_y = false,
                                       bool coarse = false)
 {
     const auto comm = Tpetra::getDefaultComm();
@@ -52,12 +54,33 @@ SimpleFluid::SP<Handle> make_cartesian(bool reversed = false,
         : SimpleFluid::ArrReal{0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0};
     auto geometry = std::make_shared<Handle::Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{
-            std::move(x), {0.0, 1.0}, {0.0, 1.0}}});
+            std::move(x), {0.0, 0.25, 0.5, 0.75, 1.0}, {0.0, 1.0}}});
     Handle::DistributionOptions distribution;
-    distribution.partition = static_cast<size_t>(
-        reversed ? comm->getSize() - 1 - comm->getRank() : comm->getRank());
-    distribution.partitions = static_cast<size_t>(comm->getSize());
+    // Keep rank IDs communicator-aligned while changing physical ownership.
+    // Both grids cover the same domain; the Y subdivision preserves its volume.
+    const auto ranks = static_cast<size_t>(comm->getSize());
+    distribution.orthogonal_partitions = split_y
+        ? std::array<size_t, 3>{1, ranks, 1}
+        : std::array<size_t, 3>{ranks, 1, 1};
     return std::make_shared<Handle>(std::move(geometry), distribution);
+}
+
+// For identical geometry, canonical IDs identify physical donors. Algebraic
+// IDs are rank-contiguous and cannot be compared across different decompositions.
+void expect_remote_geometric_owners(const Handle& source, const Handle& target)
+{
+    std::set<Pack::global_ordinal_type> owned_geometry;
+    for (size_t row = 0; row < source.num_owned_cells(); ++row)
+        owned_geometry.insert(source.cell_geometry_global_id(static_cast<LO>(row)));
+    int local_remote = 0;
+    for (size_t row = 0; row < target.num_owned_cells(); ++row)
+        local_remote += !owned_geometry.contains(
+            target.cell_geometry_global_id(static_cast<LO>(row)));
+    int global_remote = 0;
+    Teuchos::reduceAll(*target.owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+                       1, &local_remote, &global_remote);
+    EXPECT_GT(local_remote, 0);
+    EXPECT_GT(global_remote, 0);
 }
 
 double global_integral(const ScalarField& field)
@@ -75,17 +98,23 @@ double global_integral(const ScalarField& field)
 }
 
 SimpleFluid::SP<Handle> make_cylindrical(
-    SimpleFluid::Vec3D<SimpleFluid::ArrReal> edges, bool reversed = false,
-    bool allow_empty_partitions = false)
+    SimpleFluid::Vec3D<SimpleFluid::ArrReal> edges, bool reordered = false,
+    bool allow_empty_partitions = false,
+    std::optional<std::array<size_t, 3>> factors = {})
 {
-    const auto comm = Tpetra::getDefaultComm();
     auto geometry = std::make_shared<Handle::Cylindrical>(std::move(edges));
     Handle::DistributionOptions distribution;
-    distribution.partition = static_cast<size_t>(
-        reversed ? comm->getSize() - 1 - comm->getRank() : comm->getRank());
-    distribution.partitions = static_cast<size_t>(comm->getSize());
     distribution.allow_empty_partitions = allow_empty_partitions;
-    return std::make_shared<Handle>(std::move(geometry), distribution);
+    distribution.orthogonal_partitions = factors;
+    auto mesh = std::make_shared<Handle>(std::move(geometry), distribution);
+    if (!reordered)
+        return mesh;
+    // Exercise a distinct local layout without changing communicator ownership.
+    const auto layout = SimpleFluid::MeshReorderingFactory<Pack>::selected_cells_first(
+        std::move(mesh), [](Pack::global_ordinal_type gid, const Handle::Vec3&)
+        { return gid % 2 != 0; });
+    // The consumed handle was mutable and no fields or caches exist yet.
+    return std::const_pointer_cast<Handle>(layout.mesh);
 }
 
 auto cylindrical_id(const Handle& mesh, LO local)
@@ -157,19 +186,7 @@ TEST(MeshToMeshTransferMultiRankTest, ImportsRemoteOwnersAndRefreshesScalarAndVe
     VectorField source_vector(source_mesh, "source_vector");
     VectorField target_vector(target_mesh, "target_vector");
     ASSERT_GT(target_mesh->num_local_cells(), target_mesh->num_owned_cells());
-    int local_remote = 0;
-    for (size_t row = 0; row < target_mesh->num_owned_cells(); ++row)
-    {
-        const auto gid = target_mesh->cell_global_id(static_cast<LO>(row));
-        if (!source_mesh->owned_cell_map()->isNodeGlobalElement(gid))
-        {
-            ++local_remote;
-        }
-    }
-    int global_remote = 0;
-    Teuchos::reduceAll(*target.map()->getComm(), Teuchos::REDUCE_SUM,
-                       1, &local_remote, &global_remote);
-    ASSERT_GT(global_remote, 0);
+    expect_remote_geometric_owners(*source_mesh, *target_mesh);
 
     Transfer transfer(source_mesh, target_mesh);
     for (const double offset : {0.0, 100.0})
@@ -196,6 +213,62 @@ TEST(MeshToMeshTransferMultiRankTest, ImportsRemoteOwnersAndRefreshesScalarAndVe
             EXPECT_DOUBLE_EQ(vector.z, 3.0 * x);
         }
     }
+}
+
+TEST(MeshToMeshTransferMultiRankTest, ConservativeProjectionImportsRemoteCylindricalOwners)
+{
+    SKIP_SINGLE_RANK(MeshToMeshTransferMultiRankTest);
+    const auto ranks = static_cast<size_t>(Tpetra::getDefaultComm()->getSize());
+    SimpleFluid::ArrReal theta(ranks + 1), z(ranks + 1);
+    for (size_t edge = 0; edge <= ranks; ++edge)
+    {
+        theta[edge] = 2.0 * std::numbers::pi * edge / ranks;
+        z[edge] = static_cast<double>(edge) / ranks;
+    }
+    const SimpleFluid::Vec3D<SimpleFluid::ArrReal> edges{{{1.0, 2.0}, theta, z}};
+    auto source_mesh = make_cylindrical(edges, true, false,
+        std::array<size_t, 3>{1, ranks, 1});
+    auto target_mesh = make_cylindrical(edges, false, false,
+        std::array<size_t, 3>{1, 1, ranks});
+    expect_remote_geometric_owners(*source_mesh, *target_mesh);
+    ASSERT_GT(target_mesh->num_local_cells(), target_mesh->num_owned_cells());
+    ScalarField source(source_mesh, "remote_annular_source");
+    ScalarField target(target_mesh, "remote_annular_target");
+    Options options;
+    options.method = Method::ConservativeCellAverage;
+    Transfer transfer(source_mesh, target_mesh, options);
+    for (const double offset : {0.0, 100.0})
+    {
+        for (size_t row = 0; row < source.num_owned_cells(); ++row)
+        {
+            const auto lid = static_cast<LO>(row);
+            source.set_owned_value(lid, 1.0 + source_mesh->cell_geometry_global_id(lid) + offset);
+        }
+        target.put_scalar(-999.0);
+        transfer.apply(source, target);
+        for (size_t row = 0; row < target.num_local_cells(); ++row)
+        {
+            const auto lid = static_cast<LO>(row);
+            EXPECT_NEAR(target.local_value(lid),
+                1.0 + target_mesh->cell_geometry_global_id(lid) + offset, 1.0e-12);
+        }
+        EXPECT_NEAR(global_integral(target), global_integral(source), 1.0e-11);
+    }
+}
+
+TEST(MeshToMeshTransferMultiRankTest, MismatchedNativePartitionIdsRemainInvalid)
+{
+    SKIP_SINGLE_RANK(MeshToMeshTransferMultiRankTest);
+    const auto comm = Tpetra::getDefaultComm();
+    Handle::DistributionOptions options;
+    options.partition = static_cast<size_t>((comm->getRank() + 1) % comm->getSize());
+    options.partitions = static_cast<size_t>(comm->getSize());
+    SimpleFluid::ArrReal x(static_cast<size_t>(comm->getSize()) + 1);
+    for (size_t edge = 0; edge < x.size(); ++edge)
+        x[edge] = static_cast<double>(edge);
+    auto geometry = std::make_shared<Handle::Cartesian>(
+        SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{std::move(x), {0.0, 1.0}, {0.0, 1.0}}});
+    EXPECT_THROW((Handle(geometry, options)), std::invalid_argument);
 }
 
 TEST(MeshToMeshTransferMultiRankTest, ConservativeProjectionPreservesGlobalIntegral)
@@ -367,13 +440,13 @@ TEST(MeshToMeshTransferMultiRankTest, AnnularProjectionMatchesAnalyticSerialValu
     const std::array<double, 3> radial{0.0, 5.0, 10.0};
     const std::array<double, 4> angular{1.0, 3.0, 5.0, 3.0};
     const std::array<double, 3> axial{0.0, 2.0, 3.0};
-    for (const bool reversed_source : {false, true})
+    for (const bool reordered_source : {false, true})
     {
-        SCOPED_TRACE(reversed_source);
+        SCOPED_TRACE(reordered_source);
         auto source_mesh = make_cylindrical({{
             {1.0, std::sqrt(5.0), 3.0},
             {0.0, pi / 2.0, pi, 3.0 * pi / 2.0, 2.0 * pi},
-            {0.0, 1.0, 3.0}}}, reversed_source);
+            {0.0, 1.0, 3.0}}}, reordered_source);
         auto target_mesh = make_cylindrical({{
             {1.0, std::sqrt(3.0), std::sqrt(7.0), 3.0},
             {pi / 4.0, 3.0 * pi / 4.0, 5.0 * pi / 4.0,
@@ -618,8 +691,14 @@ TEST(MeshToMeshTransferMultiRankTest, NativeSectorProjectionHandlesEmptyOwnersIn
         auto target_mesh = make_cylindrical(
             {{target_r, {0.0, pi / 2.0}, {0.0, 2.0}}}, true, true);
         EXPECT_EQ(source_mesh->num_owned_cells(), rank == 0 ? 1U : 0U);
-        const bool target_active = rank >= comm->getSize() - (refined_target ? 2 : 1);
+        const bool target_active = rank < (refined_target ? 2 : 1);
         EXPECT_EQ(target_mesh->num_owned_cells(), target_active ? 1U : 0U);
+        // Refinement gives rank 1 a target cell whose only donor is on rank 0.
+        if (refined_target && rank == 1)
+        {
+            EXPECT_EQ(source_mesh->num_owned_cells(), 0U);
+            EXPECT_EQ(target_mesh->num_owned_cells(), 1U);
+        }
         Transfer forward(source_mesh, target_mesh, options);
         Transfer reverse(target_mesh, source_mesh, options);
         const auto& coverage = forward.coverage();
@@ -804,10 +883,10 @@ Options polygon_partial_options()
     return options;
 }
 
-SimpleFluid::SP<Handle> make_polygon_enclosing_annulus(bool reversed = false)
+SimpleFluid::SP<Handle> make_polygon_enclosing_annulus(bool reordered = false)
 {
     return make_cylindrical({{{0.1, 3.0},
-        {0.0, std::numbers::pi / 4.0, std::numbers::pi / 2.0}, {0.0, 1.0}}}, reversed);
+        {0.0, std::numbers::pi / 4.0, std::numbers::pi / 2.0}, {0.0, 1.0}}}, reordered);
 }
 } // namespace
 
@@ -1105,8 +1184,13 @@ TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapHandlesEmptyOwnersInBothDire
         auto target = make_cylindrical(
             {{target_r, {0.0, pi / 2.0}, {0.0, 2.0}}}, true, true);
         EXPECT_EQ(source->num_owned_cells(), comm->getRank() == 0 ? 1U : 0U);
-        const bool target_active = comm->getRank() >= comm->getSize() - (refined ? 2 : 1);
+        const bool target_active = comm->getRank() < (refined ? 2 : 1);
         EXPECT_EQ(target->num_owned_cells(), target_active ? 1U : 0U);
+        if (refined && comm->getRank() == 1)
+        {
+            EXPECT_EQ(source->num_owned_cells(), 0U);
+            EXPECT_EQ(target->num_owned_cells(), 1U);
+        }
         expect_reverse_overlap_parity(source, target, options);
         expect_reverse_overlap_parity(target, source, options);
     }
@@ -1130,21 +1214,22 @@ TEST(MeshToMeshTransferMultiRankTest, ReverseOverlapPreservesRankAndLocalDonorOr
         1.24, 2.0, 2.7, 4.0}, {0.0, pi, 2 * pi}, {0.0, 0.000001, 0.37, 1.29, 2.7}}}, true);
     auto coarse = make_cylindrical({{{1.0, 1.07, 1.49, 2.2, 4.0},
         {0.0, pi, 2 * pi}, {0.0, 0.23, 1.73, 2.7}}});
-    // Rank order is reversed on the fine mesh; local IDs are then permuted
-    // into nonmonotone, noncontiguous runs on both endpoint maps. Sorting by
-    // global ID instead of rank/local donor ordinal changes coverage sums.
+    // Local IDs are permuted into nonmonotone, noncontiguous runs on both
+    // endpoint maps without changing rank ownership. Sorting by global ID
+    // instead of rank/local donor ordinal changes coverage sums.
     ASSERT_GT(coarse->num_owned_cells(), 1U);
     const auto coarse_first_gid = coarse->cell_global_id(0);
     const auto coarse_last_gid = coarse->cell_global_id(
         static_cast<LO>(coarse->num_owned_cells() - 1));
+    const auto coarse_last_geometry = coarse->cell_geometry_global_id(
+        static_cast<LO>(coarse->num_owned_cells() - 1));
     const auto fine_layout = Factory::selected_cells_first(std::move(fine),
         [](Pack::global_ordinal_type gid, const Handle::Vec3&) { return gid % 3 == 1; });
-    // With four ranks, each coarse radial slab owns GIDs rank + 4*k;
-    // a parity predicate would select all or none and leave the map unchanged.
-    // Move the actual last owned cell first, independently of that stride.
+    // Select by geometry ID, which need not equal the rank-contiguous
+    // algebraic GID retained by the reordered map.
     const auto coarse_layout = Factory::selected_cells_first(std::move(coarse),
-        [coarse_last_gid](Pack::global_ordinal_type gid, const Handle::Vec3&)
-        { return gid == coarse_last_gid; });
+        [coarse_last_geometry](Pack::global_ordinal_type gid, const Handle::Vec3&)
+        { return gid == coarse_last_geometry; });
     EXPECT_TRUE(fine_layout.mesh->has_reordered_cells());
     EXPECT_TRUE(coarse_layout.mesh->has_reordered_cells());
     EXPECT_EQ(coarse_layout.mesh->cell_global_id(0), coarse_last_gid);

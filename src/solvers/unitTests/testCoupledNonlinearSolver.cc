@@ -4,7 +4,9 @@
 #include "FVM/FaceFlux.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
+#include "geometry/mesh/PartitionedMeshBase.hh"
 #include "geometry/unitTests/region_mesh_helpers.hh"
+#include "parallel/MeshPartitioner.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/CoupledNonlinearProblem.hh"
 #include "solvers/FluidSolver.hh"
@@ -33,18 +35,78 @@ using LO = Pack::local_ordinal_type;
 using NonlinearProblem = CoupledNonlinearProblem;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-SP<const NativeMesh> cavity_mesh(bool reverse_partitions = false)
+const Vec3D<ArrReal> cavity_edges{{{0., .25, .5, .75, 1.}, {0., .3, .65, 1.}, {0., .5, 1.}}};
+
+SP<const NativeMesh> cavity_mesh()
 {
-    NativeMesh::DistributionOptions distribution;
-    if (reverse_partitions)
+    return std::make_shared<NativeMesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(cavity_edges));
+}
+
+SP<const NativeMesh> noncontiguous_gauge_mesh()
+{
+    using Composite = Meshes::MultiRegionMesh;
+    using Partition = Meshes::PartitionedMesh<Meshes::UnstructuredMesh, Pack>;
+    using Indexer = NativeMesh::unstructured_indexer_type;
+    using CellID = Indexer::cell_id_t;
+    // Retain the complete connected cavity and its boundary names. Arbitrary
+    // global ownership belongs to the explicit partitioned-mesh path, not to
+    // native orthogonal rank/count overrides.
+    const Composite source(
+        {Meshes::cartesian_region("cavity", cavity_edges)}, {},
+        Meshes::InterfaceTolerance{}, Composite::BoundaryNamePolicy::MergeMatchingNames);
+    auto geometry = test::explicit_reference(source);
+    const auto count = geometry->num_cells();
+    const auto comm = Tpetra::getDefaultComm();
+    auto partition = MeshPartitioner<Pack>::partition(*geometry, comm);
+
+    std::vector<int> local_owners(count, -1), owners(count);
+    for (const auto gid : partition.indexer.owned_cell_global_ids())
+        local_owners[gid] = comm->getRank();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, static_cast<int>(count),
+                       local_owners.data(), owners.data());
+    std::vector<std::vector<CellID>> cells_by_rank(comm->getSize());
+    for (size_t gid = 0; gid < count; ++gid)
+        cells_by_rank.at(owners[gid]).push_back(static_cast<CellID>(gid));
+
+    // Interleave owners in reverse rank order, preserving the dense 0..N-1
+    // global ID universe while placing the pressure gauge on the last rank.
+    std::vector<CellID> permutation(count);
+    CellID next = 0;
+    for (size_t row = 0; row < count; ++row)
+        for (int rank = comm->getSize() - 1; rank >= 0; --rank)
+            if (row < cells_by_rank[rank].size())
+                permutation[cells_by_rank[rank][row]] = next++;
+    const auto remap = [&](const auto& ids)
     {
-        const auto comm = Tpetra::getDefaultComm();
-        distribution.partition = static_cast<size_t>(comm->getSize() - comm->getRank() - 1);
-        distribution.partitions = static_cast<size_t>(comm->getSize());
-    }
-    return std::make_shared<NativeMesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
-                                            Vec3D<ArrReal>{{{0., .25, .5, .75, 1.}, {0., .3, .65, 1.}, {0., .5, 1.}}}),
-        distribution);
+        std::vector<CellID> result;
+        for (const auto gid : ids)
+            result.push_back(permutation[gid]);
+        return result;
+    };
+    auto owned = remap(partition.indexer.owned_cell_global_ids());
+    auto ghosts = remap(partition.indexer.ghost_cell_global_ids());
+    partition.indexer.set_cells(std::move(owned), std::move(ghosts));
+    return std::make_shared<NativeMesh>(
+        std::make_shared<Partition>(geometry, std::move(partition.indexer), comm));
+}
+
+void expect_noncontiguous_gauge_ownership(const NativeMesh& mesh)
+{
+    const auto owned = mesh.owned_cell_map();
+    const auto comm = owned->getComm();
+    EXPECT_EQ(owned->getGlobalNumElements(), 24U);
+    EXPECT_EQ(owned->getMinAllGlobalIndex(), 0);
+    EXPECT_EQ(owned->getMaxAllGlobalIndex(), 23);
+    EXPECT_TRUE(owned->isOneToOne());
+    EXPECT_EQ(owned->isNodeGlobalElement(0), comm->getRank() == comm->getSize() - 1);
+    if (comm->getSize() == 1)
+        return;
+    EXPECT_GT(mesh.num_local_cells(), mesh.num_owned_cells());
+    bool has_gap = false;
+    for (size_t cell = 1; cell < mesh.num_owned_cells(); ++cell)
+        has_gap = has_gap || owned->getGlobalElement(static_cast<LO>(cell)) !=
+                                 owned->getGlobalElement(static_cast<LO>(cell - 1)) + 1;
+    EXPECT_TRUE(has_gap);
 }
 
 SP<const NativeMesh> planar_cavity_mesh()
@@ -451,7 +513,8 @@ TEST(CoupledNonlinearProblemTest, ContinuityTargetChangesIntegratedRowsAndGaugeM
 
 TEST(CoupledNonlinearProblemTest, PressureUsesReferenceDensityAndCellInterleavedGlobalIds)
 {
-    State state(cavity_mesh(true));
+    State state(noncontiguous_gauge_mesh());
+    expect_noncontiguous_gauge_ownership(*state.mesh);
     const auto accepted_u = values(state.velocity.owned_data());
     const auto accepted_p = values(state.pressure.owned_data());
     const auto cells = state.mesh->owned_cell_map();
@@ -480,7 +543,8 @@ TEST(CoupledNonlinearProblemTest, PressureUsesReferenceDensityAndCellInterleaved
 
 TEST(CoupledNonlinearProblemTest, InitialPressureGaugeRemovesLargeOffsetsWithinInputRoundoff)
 {
-    State state(cavity_mesh(true));
+    State state(noncontiguous_gauge_mesh());
+    expect_noncontiguous_gauge_ownership(*state.mesh);
     const double density = 7.;
     const double offset = 7.e6;
     auto reference = state.problem(density);
@@ -1239,15 +1303,9 @@ TEST(CoupledNonlinearSolverTest, NoncontiguousOwnershipKeepsPressureGaugeOnItsOw
     const auto comm = Tpetra::getDefaultComm();
     if (comm->getSize() != 2)
         GTEST_SKIP() << "Requires exactly two MPI ranks.";
-    State state(cavity_mesh(true));
+    State state(noncontiguous_gauge_mesh());
+    expect_noncontiguous_gauge_ownership(*state.mesh);
     state.time.coupled_operator_backend = CoupledOperatorBackend::BlockComposite;
-    const auto owned = state.mesh->owned_cell_map();
-    bool has_gap = false;
-    for (size_t cell = 1; cell < state.mesh->num_owned_cells(); ++cell)
-        has_gap = has_gap || owned->getGlobalElement(static_cast<LO>(cell)) !=
-                                 owned->getGlobalElement(static_cast<LO>(cell - 1)) + 1;
-    EXPECT_TRUE(has_gap);
-    EXPECT_EQ(owned->isNodeGlobalElement(0), comm->getRank() == 1);
     auto problem = state.problem(7.);
     auto x = problem->pack_initial();
     const auto result = solve_nox(problem->callbacks(), *x, state.nonlinear, state.linear);
