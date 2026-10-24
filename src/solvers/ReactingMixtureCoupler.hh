@@ -3,11 +3,13 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
+#include "equations/BubblePopulationKinetics.hh"
 #include "equations/ReactionMechanism.hh"
 #include "solvers/LowMachMixtureSolver.hh"
 #include "solvers/MixtureFaceTransport.hh"
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,39 @@ struct CoupledReactionContext
     const LowMachMixtureSolver::CellState& thermodynamic_trial; ///< Trial T/p, with actual transported composition.
     std::size_t owned_cell = 0;
     const LowMachMixtureSolver::TransportCellInventory& transported; ///< Pre-source moles/U/work-volume packet.
+};
+
+/** Pure local number-law input. post_material is the ACTUAL predecessor stage state.
+ * Candidate T/p is only a guess; no absent phase temperature is invented for this law.
+ * transported carries actual Nadv; thermodynamic_guess.phase_numbers is reconstructed from it.
+ */
+struct MixturePopulationEventContext
+{
+    const SpeciesCatalog& catalog;
+    const CellSpeciesState& post_material;
+    const LowMachMixtureSolver::TransportCellInventory& transported;
+    const LowMachMixtureSolver::CellState& thermodynamic_guess;
+    const LowMachMixtureSolver::SourceStageMetadata& stage;
+    std::size_t owned_cell = 0;
+    double time_step = 0;
+};
+/** Immutable metadata and MPI-free supplied event law. No material/energy transfer is inferred. */
+struct MixturePopulationEventProvider
+{
+    const std::string identity;
+    const std::uint64_t revision = 1, schema_fingerprint = 0;
+    const std::function<std::vector<BubbleGasPhysics::PopulationNumberEvent>(const MixturePopulationEventContext&)>
+        evaluate;
+};
+/** Exact local supplied events and their raw endpoint replay proof; aligned with physical phases. */
+struct MixturePopulationEventReceipt
+{
+    std::string provider_identity;
+    std::uint64_t provider_revision = 0, schema_fingerprint = 0;
+    std::vector<BubbleGasPhysics::PopulationNumberEvent> events;
+    LowMachMixtureSolver::SourceStageMetadata source_stage;
+    std::vector<std::optional<double>> transported_numbers, final_numbers;
+    std::vector<double> births, deaths, changes;
 };
 
 struct ReactingMixtureOptions
@@ -57,6 +92,8 @@ struct ReactingMixtureOptions
      * Every stage consumes its actual predecessor state; user laws are MPI-free.
      */
     std::vector<MixtureFaceTransportOptions> face_transport;
+    std::shared_ptr<const MixturePopulationEventProvider>
+        population_events; ///< Optional explicit post-face number law.
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler
@@ -69,6 +106,8 @@ public:
         std::vector<double> forward_reaction_extents, reverse_reaction_extents; ///< Nonnegative gross accepted extents.
         double chemical_heat = 0, external_heat = 0, transfer_energy = 0, external_mass = 0;
         double net_thermal_energy = 0; ///< MPI sum of final applied phase packets with local compensation, J.
+        std::vector<double> population_births, population_deaths,
+            population_number_changes; ///< Global per-phase counts.
         LowMachMixtureSolver::Diagnostics flow;
     };
     class Trial
@@ -78,6 +117,7 @@ public:
         [[nodiscard]] const Diagnostics& diagnostics() const;
         /** Chemistry and declared reservoir ledgers; internal face packets remain distinct private receipts. */
         [[nodiscard]] const std::vector<SpeciesSourceLedger>& local_sources() const;
+        [[nodiscard]] const std::vector<MixturePopulationEventReceipt>& local_population_events() const;
         [[nodiscard]] const LowMachMixtureSolver::TransportSnapshot& transport_snapshot() const;
 
     private:

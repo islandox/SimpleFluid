@@ -204,6 +204,47 @@ restore invoke no law. The net thermal diagnostic sums final applied phase
 packets locally with compensation and then uses the supported scalar MPI sum;
 it does not claim exact arithmetic for arbitrary cancellation across ranks.
 
+## Explicit population numbers
+
+`LowMachMixtureSolver::Options::phase_roles` distinguishes bulk liquid, bulk gas
+and named dispersed gas. A chemical compartment name or gas EOS alone does not
+enable number ownership. Each declared dispersed role has a unique identity and
+an explicit finite nonnegative extensive `CellState::phase_numbers` entry. Bulk
+entries are disengaged. Zero number and exactly empty gas inventory must coincide;
+there is no minimum count, automatic birth or automatic disappearance. Number is
+a continuum moment and may be fractional.
+
+Every transport corrector restarts from accepted counts. It transports `N/CV`
+using the same phase carrier-plus-slip flux and upwind operator as that bin's
+moles, with no extra phase fraction. `TransportSnapshot` retains the actual
+pre-source count. An independent local canonical-face balance checks transport,
+and the final per-bin budget compares counts with integrated number sources.
+Signed cell residuals are accumulated before MPI reduction; subtracting separately
+rounded large global totals would misreport an exactly balanced small cell.
+Number source and transport residuals have no absolute count floor.
+
+The controller's optional immutable `population_events` provider receives actual
+post-material species, transported counts and the current thermodynamic guess.
+It returns explicit named nonnegative births and deaths. The role identity must
+match its dispersed chemical binding. Provider identity, revision, schema and
+presence agree across ranks before callbacks, including on empty owners. The law
+is MPI-free; no separate-phase temperature is invented just to evaluate it.
+
+Gross deaths reserve the original transported stock before any birth credit.
+Raw events feed separate signed-change, final-stock and donor-margin accumulators;
+rounded positive totals are reporting views. Final count packets must replay the
+actual endpoint without erasing a finite residual number. Complete gas removal
+needs an explicit death, and new gas needs an explicit birth. Fixed-material
+coalescence or breakup may change count while leaving gas occupied; count events
+infer no material, heat, momentum, radius or surface-energy change.
+
+`Trial::local_population_events()` retains original events, provider/stage metadata,
+transported/final counts and phase-aligned birth/death/change packets. Gross birth
+and death convergence is checked independently of net count. Diagnostics expose
+phase-aligned accepted interval totals. Exact source matching includes the number
+packets; commit and restore never invoke the provider. Retained valid trials and
+all counts survive later rejected previews and checkpoint replay.
+
 ## Acceptance and replay
 
 A source preview retains the final transport snapshot, integrated species,
@@ -290,10 +331,11 @@ floors. All public pressure operations validate linear solver options
 collectively, including empty owners. Final thermodynamic pressure must remain
 inside its declared bracket after the mechanical gauge is separated.
 
-Prescribed phase drift is an explicit closure. ALE is not enabled by the
-old/new-volume fields in a source snapshot. Population-number ownership and
-transport are not implemented by this backend; `population_number` remains
-disengaged rather than inferred from molar inventory.
+Prescribed phase drift is an explicit closure. Dispersed number ownership is
+opt-in through explicit roles and events; bulk phases retain disengaged counts.
+The present model uses common phase pressure and zero surface tension. Number
+transport does not qualify a capillary, radius or slip correlation. ALE is not
+enabled by the old/new-volume fields in a source snapshot.
 
 Supplied same-carrier species diffusion and Fourier contact laws use the explicit
 ordered face adapter described above. Interphase thermal exchange and latent

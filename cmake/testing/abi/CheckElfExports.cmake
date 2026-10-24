@@ -226,6 +226,7 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::Reacting::source_stage_detail::"
     "^SimpleFluid::Reacting::history_detail::"
     "^SimpleFluid::Reacting::low_mach_faces::"
+    "^SimpleFluid::Reacting::population_source_detail::"
     "^SimpleFluid::ReactingGasModel<.*>[ ]*::(species_compartment_index|publish_species_history|validate_species_pressure_metadata|validate_species_candidate_pressure|set_species_absolute_pressure_offset)[(]"
     "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::ControllerLease[(]SimpleFluid::Reacting::LowMachMixtureSolver[*], (unsigned long|unsigned long long)[)]$"
     "SimpleFluid::VoFSolver::Impl::"
@@ -666,6 +667,11 @@ endforeach()
 # Transport-first source evaluation and accepted species-history reporting add
 # exactly twelve definitions: four concrete trial/provider/pressure methods and
 # four queries for each native/legacy field model. No Stage 3 signatures were removed.
+# Explicit dispersed-count ownership adds only its accepted event receipt query.
+set(simplefluid_population_events_public_symbol_budget 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::local_population_events[(][)] const$" 1)
+
 set(simplefluid_source_history_public_symbol_budget 12)
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachMixtureSolver::preview_with_sources[(]double, ${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::LowMachMixtureSolver::SourceStageProvider const>, ${simplefluid_stage3_controller_pointer}[)]$" 1)
@@ -1166,13 +1172,15 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # GCC Debug 1549, disabled ceiling 1552, with the same three-entry headroom.
 # The pure species-diffusion kernel adds one definition: measured GCC Debug
 # 1550, disabled ceiling 1553. Internal distributed face helpers stay hidden.
+# Explicit number events add one exactly anchored receipt query: measured GCC
+# Debug 1551, disabled ceiling 1554. Population helpers remain private.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

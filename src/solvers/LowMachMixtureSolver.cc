@@ -15,6 +15,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -243,6 +244,25 @@ struct LowMachMixtureSolver::Implementation
                     check(provider && &provider->catalog() == &eos.front()->catalog() &&
                               provider->energy_convention() == eos.front()->energy_convention(),
                         "Every low-Mach phase must share catalog and caloric formation convention.");
+                if (options.phase_roles.empty())
+                    for (const auto& provider : eos)
+                        options.phase_roles.push_back(
+                            {provider->kind() == EOSKind::Liquid ? PhaseRole::BulkLiquid : PhaseRole::BulkGas, {}});
+                check(options.phase_roles.size() == eos.size(), "Physical phase-role schema must match EOS phases.");
+                std::set<std::string> identities;
+                for (size_t a = 0; a < eos.size(); ++a)
+                {
+                    const auto& role = options.phase_roles[a];
+                    check(role.role == PhaseRole::BulkLiquid || role.role == PhaseRole::BulkGas ||
+                              role.role == PhaseRole::DispersedGas,
+                        "Unknown physical phase role.");
+                    check((role.role == PhaseRole::BulkLiquid) == (eos[a]->kind() == EOSKind::Liquid),
+                        "Physical phase role/EOS kind mismatch.");
+                    check(role.identity.size() <= static_cast<size_t>(std::numeric_limits<int>::max()) &&
+                              (role.role != PhaseRole::DispersedGas || !role.identity.empty()) &&
+                              (role.identity.empty() || identities.insert(role.identity).second),
+                        "Physical phase identities must be unique and dispersed identities explicit.");
+                }
                 for (size_t f = 0; f < mesh->num_faces(); ++f)
                 {
                     const auto face = static_cast<LO>(f);
@@ -289,6 +309,18 @@ struct LowMachMixtureSolver::Implementation
                 { check(identity == provider.identity, "Caloric domain provider identity differs across ranks."); });
         }
         collective_detail::require_uniform_value(*mesh, eos.size(), "Low-Mach phase count");
+        for (const auto& role : options.phase_roles)
+        {
+            collective_detail::require_uniform_value(*mesh, int(role.role), "Physical phase role");
+            collective_detail::require_uniform_value(*mesh, role.identity.size(), "Physical phase identity length");
+            std::string identity;
+            collective_detail::collective_local_validation(
+                *mesh, "Physical phase identity preparation", [&] { identity = role.identity; });
+            Teuchos::broadcast(
+                *mesh->owned_cell_map()->getComm(), 0, static_cast<int>(identity.size()), identity.data());
+            collective_detail::collective_local_validation(*mesh, "Physical phase identity",
+                [&] { check(identity == role.identity, "Physical phase identity differs across ranks."); });
+        }
         collective_detail::require_uniform_value(
             *mesh, eos.front()->catalog().revision(), "Low-Mach species schema revision");
         collective_detail::require_uniform_value(
@@ -452,6 +484,14 @@ void LowMachMixtureSolver::initialize(State candidate, const ControllerLease* co
                                   std::isfinite(cell.drift_velocity[a].component(component)),
                             "Nonfinite initial phase velocity.");
                 }
+                if (cell.phase_numbers.empty())
+                {
+                    check(std::none_of(d->options.phase_roles.begin(), d->options.phase_roles.end(),
+                              [](const auto& role) { return role.role == PhaseRole::DispersedGas; }),
+                        "Declared dispersed phases require explicit initialized numbers.");
+                    cell.phase_numbers.resize(d->eos.size());
+                }
+                source_stage_detail::validate_phase_numbers(cell, d->options.phase_roles);
                 PhaseThermalRecovery recovered;
                 recovered.phases = cell.phases;
                 recovered.volumes.resize(cell.phases.size());
@@ -612,6 +652,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                       std::isfinite(d->accepted.time + dt) && d->accepted.time + dt > d->accepted.time,
                 "Low-Mach next clock/revision cannot be represented without overflow or lost advancement.");
             check(sources.empty() || sources.size() == mesh.num_owned_cells(), "Low-Mach source map differs.");
+            source_stage_detail::validate_number_packets(sources, mesh.num_owned_cells(), d->options.phase_roles);
             for (const auto& source : sources)
             {
                 check((source.species_moles.empty() || source.species_moles.size() == d->eos.size()) &&
@@ -752,6 +793,76 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         face, d->trial_flux.local_value(face) + slip.dot(mesh.face_area_vector(face)));
                 }
                 phase_flux[a]->sync_ghosts();
+                if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
+                {
+                    collective_detail::collective_local_validation(mesh, "Population transport input",
+                        [&]
+                        {
+                            for (size_t c = 0; c < nc; ++c)
+                            {
+                                before[c] = *accepted.cells[c].phase_numbers[a];
+                                check(std::isfinite(before[c] / mesh.cell_volume(static_cast<LO>(c))),
+                                    "Population number concentration is not representable.");
+                            }
+                        });
+                    d->transport(before, *phase_flux[a], dt, after, result);
+
+                    ScalarField number_concentration(d->mesh, 0.0, "transported_population_number");
+                    FaceField number_flux(d->mesh, 0.0, "conservative_population_number_flux");
+                    collective_detail::collective_local_validation(mesh, "Transported population numbers",
+                        [&]
+                        {
+                            for (size_t c = 0; c < nc; ++c)
+                            {
+                                check(std::isfinite(after[c]) && after[c] >= 0,
+                                    "Population transport produced a negative/nonfinite number.");
+                                trial.cells[c].phase_numbers[a] = after[c];
+                                const double concentration = after[c] / mesh.cell_volume(static_cast<LO>(c));
+                                check(std::isfinite(concentration),
+                                    "Transported population concentration is not representable.");
+                                number_concentration.set_owned_value(static_cast<LO>(c), concentration);
+                            }
+                        });
+                    number_concentration.sync_ghosts();
+                    collective_detail::collective_local_validation(mesh, "Canonical population number flux",
+                        [&]
+                        {
+                            for (size_t f = 0; f < mesh.num_owned_faces(); ++f)
+                            {
+                                const LO face = static_cast<LO>(f);
+                                if (mesh.is_geometry_exterior_face(face))
+                                    continue;
+                                const double phi = phase_flux[a]->local_value(face);
+                                const LO owner = mesh.owner_cell(face),
+                                         donor =
+                                             phi >= 0 ? owner : mesh.opposite_or_periodic_neighbor_cell(face, owner);
+                                const double flux = phi * number_concentration.local_value(donor);
+                                check(std::isfinite(flux), "Population number face flux overflow.");
+                                number_flux.set_owned_value(face, flux);
+                            }
+                        });
+                    number_flux.sync_ghosts();
+                    double local_number_error = 0;
+                    collective_detail::collective_local_validation(mesh, "Physical local population balance",
+                        [&]
+                        {
+                            for (size_t c = 0; c < nc; ++c)
+                            {
+                                const long double flux = static_cast<long double>(dt) *
+                                                         FVM::cell_flux_balance(mesh, number_flux, static_cast<LO>(c));
+                                const long double residual = static_cast<long double>(after[c]) - before[c] + flux;
+                                local_number_error = std::max(local_number_error,
+                                    source_stage_detail::normalized(residual,
+                                        std::abs(static_cast<long double>(after[c])) +
+                                            std::abs(static_cast<long double>(before[c])) + std::abs(flux),
+                                        d->options.conservation_relative_tolerance));
+                            }
+                        });
+                    const double count_error = d->maximum(local_number_error);
+                    result.maximum_population_transport_residual =
+                        std::max(result.maximum_population_transport_residual, count_error);
+                    check(count_error <= 1, "Population transport fails its physical local count-balance gate.");
+                }
                 for (size_t s = 0; s < ns; ++s)
                 {
                     for (size_t c = 0; c < nc; ++c)
@@ -878,6 +989,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             collective_detail::collective_local_validation(mesh, "Immutable transport snapshot",
                 [&]
                 {
+                    for (const auto& cell : trial.cells)
+                        source_stage_detail::validate_phase_numbers(cell, d->options.phase_roles);
                     last_transport = {};
                     last_transport.cells.resize(nc);
                     last_transport.old_control_volumes.resize(nc);
@@ -919,7 +1032,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             inventory.moles = trial.cells[c].phases[a].moles;
                             inventory.internal_energy = trial.cells[c].phases[a].internal_energy;
                             inventory.advected_material_volume = adv_volumes[c][a];
-                            // population_number stays disengaged until actual number transport exists.
+                            inventory.population_number = trial.cells[c].phase_numbers[a];
                         }
                     }
                 });
@@ -942,6 +1055,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             std::rethrow_exception(callback_error);
                         source_stage_detail::validate_packets(evaluated.sources, nc, np, ns);
                         source_stage_detail::validate_events(evaluated.gross_events, nc);
+                        source_stage_detail::validate_number_packets(evaluated.sources, nc, d->options.phase_roles);
                     });
                 int local_events = !evaluated.gross_events.empty(), global_events = 0;
                 Teuchos::reduceAll(
@@ -1001,9 +1115,18 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 check(std::isfinite(phase.moles[s]) && phase.moles[s] >= 0,
                                     "Low-Mach source/transport overdraws phase species.");
                             }
+                            if (!sources.empty() && !sources[c].population_number_changes.empty() &&
+                                trial.cells[c].phase_numbers[a])
+                                *trial.cells[c].phase_numbers[a] += sources[c].population_number_changes[a];
                             if (!sources.empty() && !sources[c].internal_energy.empty())
                                 phase.internal_energy += sources[c].internal_energy[a];
                         }
+                });
+            collective_detail::collective_local_validation(mesh, "Joint phase mole/number source admissibility",
+                [&]
+                {
+                    for (const auto& cell : trial.cells)
+                        source_stage_detail::validate_phase_numbers(cell, d->options.phase_roles);
                 });
             std::vector<CaloricCell> thermal(nc);
             double local_domain_volume = 0;
@@ -1572,6 +1695,45 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             "Low-Mach energy reference is too poorly conditioned for the requested caloric accuracy.");
         check(std::abs(result.internal_energy_error) <= physical_budget + result.internal_energy_roundoff_bound,
             "Low-Mach physical internal-energy/work budget failed.");
+
+        result.population_number_errors.assign(np, 0);
+        for (size_t a = 0; a < np; ++a)
+            if (d->options.phase_roles[a].role == PhaseRole::DispersedGas)
+            {
+                detail::CompensatedSum<long double> old_count, new_count, count_source, signed_residual;
+                collective_detail::collective_local_validation(mesh, "Population number budget operands",
+                    [&]
+                    {
+                        for (size_t c = 0; c < nc; ++c)
+                        {
+                            const double old_number = *accepted.cells[c].phase_numbers[a];
+                            const double new_number = *trial.cells[c].phase_numbers[a];
+                            const double change = source_stage_detail::number_packet(sources, c, a);
+                            old_count += old_number;
+                            new_count += new_number;
+                            count_source += change;
+                            // Retain small-cell cancellations before any positive total is narrowed or reduced.
+                            detail::CompensatedSum<long double> cell_residual;
+                            cell_residual += new_number;
+                            cell_residual += -static_cast<long double>(old_number);
+                            cell_residual += -static_cast<long double>(change);
+                            signed_residual += cell_residual.value();
+                        }
+                        check(std::isfinite(old_count.value()) && std::isfinite(new_count.value()) &&
+                                  std::isfinite(count_source.value()) && std::isfinite(signed_residual.value()),
+                            "Population number budget overflow.");
+                    });
+                const double before = d->sum(static_cast<double>(old_count.value())),
+                             after = d->sum(static_cast<double>(new_count.value())),
+                             change = d->sum(static_cast<double>(count_source.value()));
+                const double error = d->sum(static_cast<double>(signed_residual.value()));
+                check(std::isfinite(before) && std::isfinite(after) && std::isfinite(change) && std::isfinite(error),
+                    "Global population number budget overflow.");
+                result.population_number_errors[a] = error;
+                check(std::abs(error) <=
+                          d->options.conservation_relative_tolerance * std::max({before, after, std::abs(change)}),
+                    "Low-Mach physical population number budget failed.");
+            }
         result.species_errors.resize(ns);
         for (size_t s = 0; s < ns; ++s)
         {

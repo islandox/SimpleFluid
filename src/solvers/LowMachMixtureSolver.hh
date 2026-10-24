@@ -23,6 +23,18 @@ public:
     using Mesh = MeshHandle<Pack>;
     using Traits = MeshFieldTraits<Pack, Mesh>;
     using Vector = Traits::vector_cell_type::vec_type;
+    enum class PhaseRole
+    {
+        BulkLiquid,
+        BulkGas,
+        DispersedGas
+    };
+    struct PhaseRoleDescriptor
+    {
+        PhaseRole role = PhaseRole::BulkGas;
+        std::string identity; ///< Required unique identity for an explicitly owned dispersed population.
+        bool operator==(const PhaseRoleDescriptor&) const = default;
+    };
     struct Options
     {
         PhaseThermalMode thermal_mode = PhaseThermalMode::Equilibrium;
@@ -35,6 +47,7 @@ public:
         std::shared_ptr<const CaloricPressureDomainProvider> caloric_domain_provider;
         LinearSolverOptions linear;
         std::function<double(std::span<const PhaseThermalState>, std::span<const double>)> mixture_dynamic_viscosity;
+        std::vector<PhaseRoleDescriptor> phase_roles; ///< Constructor-copied immutable schema, aligned with EOS phases.
     };
     struct CellState
     {
@@ -42,6 +55,8 @@ public:
         std::vector<Vector> drift_velocity; ///< Prescribed phase velocity relative to the shared continuous velocity.
         Vector velocity{};
         double mechanical_pressure = 0;
+        std::vector<std::optional<double>>
+            phase_numbers; ///< Engaged extensive finite N only for explicit dispersed roles.
     };
     struct State
     {
@@ -54,6 +69,8 @@ public:
         std::vector<std::vector<double>> species_moles; ///< Integrated signed mol per phase/species; empty means zero.
         std::vector<double> internal_energy;            ///< Integrated J per phase, excludes solver-owned p*dV work.
         Vector momentum{};                              ///< Integrated external physical kg m/s.
+        std::vector<double>
+            population_number_changes; ///< Integrated signed number per physical phase; empty means zero.
     };
     /** A transport inventory is before local sources, Fourier heat and pressure work.
      * advected_material_volume is the exact work/continuity packet. It is NOT
@@ -63,7 +80,7 @@ public:
     {
         std::vector<double> moles;
         double internal_energy = 0, advected_material_volume = 0;
-        std::optional<double> population_number; ///< Absent until an explicit dispersed-number role is implemented.
+        std::optional<double> population_number; ///< Actual pre-source transported N for explicit dispersed roles.
         bool operator==(const TransportPhaseInventory&) const = default;
     };
     struct TransportCellInventory
@@ -148,6 +165,9 @@ public:
         Vector pressure_impulse{},
             external_impulse{}; ///< Global integrated mechanical-pressure/external momentum, kg m/s.
         std::vector<double> species_errors;
+        std::vector<double> population_number_errors; ///< Per-phase global deltaN-sourceN, zero for bulk roles.
+        double maximum_population_transport_residual =
+            0; ///< Local count balance normalized by its physical relative gate.
         LinearSolveSummary transport_linear, momentum_linear;
     };
     class Checkpoint

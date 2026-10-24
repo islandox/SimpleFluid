@@ -156,46 +156,58 @@ public:
 
 struct Event
 {
-    Amounts change;
-    Amounts donors;
+    struct Term
+    {
+        std::size_t slot;
+        long double moles;
+    };
+    std::vector<Term> terms; ///< Sparse raw integrated stoichiometric/external molar events.
 };
+using Stocks = std::vector<Sum>;
+
+Amounts inventory_values(const Stocks& stocks)
+{
+    Amounts result(stocks.size());
+    for (std::size_t i = 0; i < stocks.size(); ++i)
+    {
+        result[i] = stocks[i].value();
+        checked(result[i]);
+    }
+    return result;
+}
 
 Event reaction_event(const ReactionMechanism& mechanism, const CellSpeciesState& topology, const Amounts& extents)
 {
-    const auto count = flatten(topology).size();
-    std::vector<Sum> changes(count), donors(count);
+    Event result;
     for (std::size_t r = 0; r < mechanism.reactions().size(); ++r)
         for (const auto& term : mechanism.reactions()[r].changes)
         {
             const auto i = slot(mechanism.catalog(), topology, term.species, term.phase, term.population);
             const long double delta = static_cast<long double>(term.coefficient) * extents[r];
             checked(delta);
-            changes[i] += delta;
-            if (delta < 0.0L)
-                donors[i] += -delta;
+            if (delta != 0.0L)
+                result.terms.push_back({i, delta});
         }
-    Event result{Amounts(count), Amounts(count)};
-    for (std::size_t i = 0; i < count; ++i)
-    {
-        result.change[i] = changes[i].value();
-        result.donors[i] = donors[i].value();
-    }
     return result;
 }
 
-Amounts apply(const Amounts& initial, const Event& event)
+Stocks apply_event(const Stocks& initial, const Event& event)
 {
-    Amounts result(initial.size());
+    auto result = initial;
+    auto margins = initial;
+    for (const auto& term : event.terms)
+    {
+        result[term.slot] += term.moles;
+        if (term.moles < 0.0L)
+            margins[term.slot] += term.moles; // Never fund simultaneous outgoing demands with incoming credits.
+    }
     for (std::size_t i = 0; i < initial.size(); ++i)
     {
-        if (event.donors[i] > initial[i])
+        // The comparison is on the residual, not an already-rounded positive gross sum.
+        if (margins[i].value() < 0.0L)
             throw DonorExhaustion();
-        Sum sum;
-        sum += initial[i];
-        sum += event.change[i];
-        result[i] = sum.value();
-        checked(result[i]);
-        if (result[i] < 0.0L)
+        checked(result[i].value());
+        if (result[i].value() < 0.0L)
             throw DonorExhaustion();
     }
     return result;
@@ -494,9 +506,8 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
         extents[mechanism.index(extent.reaction)] = extent.moles;
     }
     auto combined = reaction_event(mechanism, initial, extents);
-    for (std::size_t i = 0; i < count; ++i)
-        chemical[i] += combined.change[i];
-    std::vector<Sum> extraDonors(count);
+    for (const auto& term : combined.terms)
+        chemical[term.slot] += term.moles;
     for (const auto& transfer : input.externalTransfers)
     {
         require(!transfer.reservoir.empty() && std::isfinite(transfer.moles) && std::isfinite(transfer.mass) &&
@@ -511,8 +522,8 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
             std::abs(expected) + std::abs(static_cast<long double>(transfer.mass)),
             "External mass must match its signed species amount.");
         external[i] += transfer.moles;
-        if (transfer.moles < 0.0)
-            extraDonors[i] += -static_cast<long double>(transfer.moles);
+        if (transfer.moles != 0.0)
+            combined.terms.push_back({i, static_cast<long double>(transfer.moles)});
         transferEnergy += transfer.energy;
         externalMass += transfer.mass;
         for (std::size_t axis = 0; axis < 3; ++axis)
@@ -521,17 +532,10 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
             momentum[axis] += transfer.momentum[axis];
         }
     }
+    Stocks initialStocks(count);
     for (std::size_t i = 0; i < count; ++i)
-    {
-        Sum change, donors;
-        change += combined.change[i];
-        change += external[i].value();
-        donors += combined.donors[i];
-        donors += extraDonors[i].value();
-        combined.change[i] = change.value();
-        combined.donors[i] = donors.value();
-    }
-    auto current = apply(flatten(initial), combined);
+        initialStocks[i] += initialValues[i];
+    auto current = apply_event(initialStocks, combined);
     for (std::size_t r = 0; r < extents.size(); ++r)
     {
         extentSums[r] += extents[r];
@@ -566,46 +570,44 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
                 const double stageEndTime = environment.time + (elapsed + step);
                 require(stageEndTime > stageEnvironment.time,
                     "Reaction substep cannot advance representable absolute callback time.");
-                const auto firstRates = rates(mechanism, store(initial, current), stageEnvironment, *input.rates);
+                const auto firstRates =
+                    rates(mechanism, store(initial, inventory_values(current)), stageEnvironment, *input.rates);
                 const auto firstExtents = multiply(firstRates, step);
                 const auto firstEvent = reaction_event(mechanism, initial, firstExtents);
-                const auto stage = apply(current, firstEvent);
+                const auto stage = apply_event(current, firstEvent);
                 stageEnvironment.time = stageEndTime;
-                const auto secondRates = rates(mechanism, store(initial, stage), stageEnvironment, *input.rates);
+                const auto secondRates =
+                    rates(mechanism, store(initial, inventory_values(stage)), stageEnvironment, *input.rates);
                 const auto secondExtents = multiply(secondRates, step);
                 const auto secondEvent = reaction_event(mechanism, initial, secondExtents);
-                static_cast<void>(apply(stage, secondEvent));
-                Amounts acceptedExtents(extents.size());
-                for (std::size_t r = 0; r < extents.size(); ++r)
-                {
-                    Sum sum;
-                    sum += firstExtents[r] * 0.5L;
-                    sum += secondExtents[r] * 0.5L;
-                    acceptedExtents[r] = sum.value();
-                }
-                const auto acceptedEvent = reaction_event(mechanism, initial, acceptedExtents);
-                // SSPRK2 is the convex combination of its two feasible Euler stages.
-                // Reconstruct from persistent compensated event sums: a repeated transfer
-                // smaller than the current inventory ULP must accumulate until representable.
+                static_cast<void>(apply_event(stage, secondEvent));
+                // Each Euler stage above reserves donors against its actual stage stocks.
+                // SSPRK2 then combines the two feasible stages; do not reserve these
+                // averaged events against the original stock (stage one may create a stage-two donor).
                 auto acceptedChemical = chemical;
-                Amounts accepted(current.size());
-                for (std::size_t i = 0; i < count; ++i)
+                auto accepted = current;
+                for (const auto* event : {&firstEvent, &secondEvent})
+                    for (const auto& term : event->terms)
+                    {
+                        const long double delta = term.moles * 0.5L;
+                        require(std::isfinite(delta) && (term.moles == 0.0L || delta != 0.0L),
+                            "Weighted reaction event is not representable in local accumulation.");
+                        acceptedChemical[term.slot] += delta;
+                        accepted[term.slot] += delta;
+                    }
+                for (const auto& stock : accepted)
                 {
-                    acceptedChemical[i] += acceptedEvent.change[i];
-                    Sum sum;
-                    sum += initialValues[i];
-                    sum += acceptedChemical[i].value();
-                    sum += external[i].value();
-                    accepted[i] = sum.value();
-                    checked(accepted[i]);
-                    if (accepted[i] < 0.0L)
+                    checked(stock.value());
+                    if (stock.value() < 0.0L)
                         throw DonorExhaustion();
                 }
                 current = std::move(accepted);
                 chemical = std::move(acceptedChemical);
                 for (std::size_t r = 0; r < extents.size(); ++r)
                 {
-                    extentSums[r] += acceptedExtents[r];
+                    // Preserve the independent stage operands until final reporting.
+                    extentSums[r] += firstExtents[r] * 0.5L;
+                    extentSums[r] += secondExtents[r] * 0.5L;
                     record_direction(r, firstExtents[r] * 0.5L);
                     record_direction(r, secondExtents[r] * 0.5L);
                 }
@@ -625,9 +627,9 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     }
     ReactionAdvance result;
     require(environment.bulkVolume > 0.0 ||
-                std::none_of(current.begin(), current.end(), [](long double value) { return value > 0.0L; }),
+                std::none_of(current.begin(), current.end(), [](const Sum& value) { return value.value() > 0.0L; }),
         "Produced species inventories require positive physical bulk volume.");
-    result.state = store(initial, current);
+    result.state = store(initial, inventory_values(current));
     result.state.validate(mechanism.catalog());
     auto& ledger = result.ledger;
     Amounts chemicalValues(count), externalValues(count);

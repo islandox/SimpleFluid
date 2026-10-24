@@ -88,6 +88,57 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double event_error(
         }
     return maximum;
 }
+
+SIMPLEFLUID_SOLVERS_LOCAL inline double number_packet(std::span<const Flow::CellSources> cells, size_t c, size_t a)
+{
+    return cells.empty() || cells[c].population_number_changes.empty() ? 0 : cells[c].population_number_changes[a];
+}
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_number_packets(
+    std::span<const Flow::CellSources> sources, size_t cells, std::span<const Flow::PhaseRoleDescriptor> roles)
+{
+    require(sources.empty() || sources.size() == cells, "Population source owned-cell layout differs.");
+    for (const auto& source : sources)
+    {
+        require(source.population_number_changes.empty() || source.population_number_changes.size() == roles.size(),
+            "Population source physical-phase layout differs.");
+        for (size_t a = 0; a < source.population_number_changes.size(); ++a)
+        {
+            const double change = source.population_number_changes[a];
+            require(std::isfinite(change) && (roles[a].role == Flow::PhaseRole::DispersedGas || change == 0),
+                "Population number sources must be finite and bulk sources exactly zero.");
+        }
+    }
+}
+SIMPLEFLUID_SOLVERS_LOCAL inline void validate_phase_numbers(
+    const Flow::CellState& cell, std::span<const Flow::PhaseRoleDescriptor> roles)
+{
+    require(cell.phases.size() == roles.size() && cell.phase_numbers.size() == roles.size(),
+        "Population state physical-phase layout differs.");
+    for (size_t a = 0; a < roles.size(); ++a)
+    {
+        const auto& number = cell.phase_numbers[a];
+        if (roles[a].role != Flow::PhaseRole::DispersedGas)
+        {
+            require(!number, "Bulk phases do not own a population number.");
+            continue;
+        }
+        require(number && std::isfinite(*number) && *number >= 0,
+            "Dispersed phase requires an explicit finite nonnegative number.");
+        const auto& phase = cell.phases[a];
+        require(phase.thermodynamics && phase.moles.size() == phase.thermodynamics->catalog().species().size() &&
+                    std::all_of(
+                        phase.moles.begin(), phase.moles.end(), [](double n) { return std::isfinite(n) && n >= 0; }),
+            "Dispersed number inventory has invalid species layout or amounts.");
+        const bool occupied = std::any_of(phase.moles.begin(), phase.moles.end(), [](double n) { return n > 0; });
+        require(occupied == (*number > 0), "Empty dispersed gas and zero population number must coincide exactly.");
+        if (occupied)
+        {
+            const double phase_mass = static_cast<double>(mass(phase.moles, phase.thermodynamics->catalog()));
+            require(std::isfinite(phase_mass) && phase_mass > 0,
+                "Occupied dispersed mass is not representable; no numerical phase floor is supplied.");
+        }
+    }
+}
 struct SIMPLEFLUID_SOLVERS_LOCAL CaloricReference
 {
     long double energy = 0, capacity = 0;
@@ -132,6 +183,10 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double source_error(std::span<const Flow::CellS
         for (size_t a = 0; a < transported.cells[c].phases.size(); ++a)
         {
             const auto& catalog = guess.cells[c].phases[a].thermodynamics->catalog();
+            const long double number_now = number_packet(current, c, a), number_old = number_packet(previous, c, a);
+            maximum = std::max(
+                maximum, normalized(number_now - number_old, std::max(std::abs(number_now), std::abs(number_old)),
+                             options.source_relative_tolerance));
             long double mass_current = 0, mass_previous = 0;
             bool active = false;
             for (size_t s = 0; s < catalog.species().size(); ++s)
@@ -213,8 +268,13 @@ SIMPLEFLUID_SOLVERS_LOCAL inline double transport_error(const Flow::TransportSna
                 normalized(static_cast<long double>(now.advected_material_volume) - old.advected_material_volume,
                     std::max(std::abs(now.advected_material_volume), std::abs(old.advected_material_volume)),
                     options.volume_relative_tolerance));
-            require(!now.population_number && !old.population_number,
-                "Number transport is not implemented by the source-only solver.");
+            require(now.population_number.has_value() == old.population_number.has_value(),
+                "Population ownership changed within an immutable transport preview.");
+            if (now.population_number)
+                maximum = std::max(
+                    maximum, normalized(static_cast<long double>(*now.population_number) - *old.population_number,
+                                 std::max(std::abs(*now.population_number), std::abs(*old.population_number)),
+                                 options.source_relative_tolerance));
         }
     }
     return maximum;

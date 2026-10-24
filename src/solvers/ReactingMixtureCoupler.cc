@@ -4,6 +4,7 @@
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "equations/CollectiveValidation.hh"
 #include "solvers/details/LowMachFaceSourceComposition.hh"
+#include "solvers/details/LowMachPopulationSource.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -60,7 +61,8 @@ bool identical_sources(std::span<const Solver::CellSources> a, std::span<const S
         return false;
     for (size_t c = 0; c < a.size(); ++c)
     {
-        if (a[c].species_moles != b[c].species_moles || a[c].internal_energy != b[c].internal_energy)
+        if (a[c].species_moles != b[c].species_moles || a[c].internal_energy != b[c].internal_energy ||
+            a[c].population_number_changes != b[c].population_number_changes)
             return false;
         for (size_t axis = 0; axis < 3; ++axis)
             if (a[c].momentum.component(axis) != b[c].momentum.component(axis))
@@ -93,6 +95,7 @@ struct SourceEngine
         std::vector<SpeciesSourceLedger> ledgers;
         std::vector<std::shared_ptr<const Faces::Receipt>> face_receipts;
         std::vector<CellSpeciesState> post_faces;
+        std::vector<MixturePopulationEventReceipt> population_events;
     };
     CellSpeciesState species(const Solver::CellState& cell) const
     {
@@ -142,8 +145,10 @@ struct SourceEngine
             auto cell = trial.cells.at(c);
             require(transport.cells[c].phases.size() == np && cell.phases.size() == np,
                 "Transport/source physical phase counts do not agree.");
+            cell.phase_numbers.resize(np);
             for (size_t p = 0; p < np; ++p)
             {
+                cell.phase_numbers[p] = transport.cells[c].phases[p].population_number;
                 auto& phase = cell.phases[p];
                 phase.moles = transport.cells[c].phases[p].moles;
                 Sum moles, phase_mass;
@@ -323,6 +328,52 @@ struct SourceEngine
                 result.ledgers = std::move(composed.chemistry_ledgers);
                 result.face_receipts = std::move(composed.faces);
                 result.post_faces = std::move(composed.post_faces);
+                result.population_events.reserve(result.post_faces.size());
+                const auto& roles = flow->options().phase_roles;
+                const auto& population_catalog = options.mechanism->catalog();
+                for (size_t c = 0; c < result.post_faces.size(); ++c)
+                {
+                    auto guess = context.thermodynamic_trial.cells.at(c);
+                    guess.phase_numbers.resize(roles.size());
+                    std::vector<int> occupied(roles.size(), 0);
+                    for (size_t p = 0; p < roles.size(); ++p)
+                    {
+                        guess.phase_numbers[p] = context.transport.cells[c].phases[p].population_number;
+                        auto& moles = guess.phases.at(p).moles;
+                        for (size_t i = 0; i < population_catalog.species().size(); ++i)
+                        {
+                            moles.at(i) =
+                                result.post_faces[c].amount(population_catalog, population_catalog.species()[i].id,
+                                    compartment(options.phases[p], i), options.phases[p].population);
+                            occupied[p] |= moles[i] > 0;
+                        }
+                    }
+                    // Post-face moles and Nadv are actual inventories. T/p remains the existing candidate guess;
+                    // never manufacture a separate-phase temperature just to call an optional number law.
+                    std::vector<BubbleGasPhysics::PopulationNumberEvent> events;
+                    if (options.population_events)
+                        events = options.population_events->evaluate(
+                            {population_catalog, result.post_faces[c], context.transport.cells[c], guess,
+                                context.transport.stage, c, context.transport.time_step});
+                    auto number =
+                        population_source_detail::apply(roles, guess.phase_numbers, occupied, std::move(events));
+                    number.source_stage = context.transport.stage;
+                    number.schema_fingerprint = population_catalog.fingerprint();
+                    if (options.population_events)
+                    {
+                        number.provider_identity = options.population_events->identity;
+                        number.provider_revision = options.population_events->revision;
+                    }
+                    // Number events change no material, thermal packet or momentum. This is the sole narrowing
+                    // of their independent raw dimension; material/energy were narrowed once by the face composer.
+                    result.result.sources.at(c).population_number_changes = number.changes;
+                    for (size_t p = 0; p < roles.size(); ++p)
+                    {
+                        result.result.gross_events.at(c).push_back(number.births[p]);
+                        result.result.gross_events.at(c).push_back(number.deaths[p]);
+                    }
+                    result.population_events.push_back(std::move(number));
+                }
                 // A single signed double packet must replay the actual sequential chemistry/face endpoint.
                 // In particular, a large depletion cannot erase a later finite incoming face credit.
                 const auto& catalog = options.mechanism->catalog();
@@ -404,6 +455,7 @@ struct ReactingMixtureCoupler::Trial::Data
     Diagnostics diagnostics;
     std::vector<SpeciesSourceLedger> ledgers;
     std::vector<std::shared_ptr<const Faces::Receipt>> face_receipts;
+    std::vector<MixturePopulationEventReceipt> population_events;
 };
 
 struct ReactingMixtureCoupler::Implementation
@@ -435,6 +487,20 @@ struct ReactingMixtureCoupler::Implementation
                 source_engine = std::make_shared<const SourceEngine>(SourceEngine{flow, options, {}});
                 const auto& catalog = options.mechanism->catalog();
                 const auto ns = catalog.species().size();
+                require(options.phases.size() == flow->options().phase_roles.size(),
+                    "Controller physical bindings must match immutable flow roles, including empty owners.");
+                for (size_t p = 0; p < options.phases.size(); ++p)
+                    if (flow->options().phase_roles[p].role == Solver::PhaseRole::DispersedGas)
+                        require(options.phases[p].phase == SpeciesPhase::Dispersed &&
+                                    options.phases[p].population == flow->options().phase_roles[p].identity,
+                            "Explicit dispersed role identity must match its named physical/chemical binding.");
+                if (options.population_events)
+                {
+                    const auto& law = *options.population_events;
+                    require(!law.identity.empty() && law.revision > 0 &&
+                                law.schema_fingerprint == catalog.fingerprint() && law.evaluate,
+                        "Population provider needs explicit immutable identity/revision/schema and a pure local law.");
+                }
                 std::set<std::tuple<SpeciesId, SpeciesPhase, std::string>> mapped;
                 for (const auto& phase : options.phases)
                 {
@@ -577,6 +643,13 @@ struct ReactingMixtureCoupler::Implementation
                         signature << ':' << face.fourier->identity.size() << ':' << face.fourier->identity << ':'
                                   << face.fourier->revision << ':' << face.fourier->schema_fingerprint;
                 }
+                signature << ":population:" << bool(options.population_events);
+                if (options.population_events)
+                {
+                    const auto& law = *options.population_events;
+                    signature << ':' << law.identity.size() << ':' << law.identity << ':' << law.revision << ':'
+                              << law.schema_fingerprint;
+                }
                 schema_signature = signature.str();
             });
         uniform_text(mesh, schema_signature);
@@ -621,7 +694,8 @@ struct ReactingMixtureCoupler::Implementation
     }
 
     Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, std::span<const Solver::CellSources> applied,
-        int correctors, const Solver::Diagnostics& flow_statistics) const
+        std::span<const MixturePopulationEventReceipt> populations, int correctors,
+        const Solver::Diagnostics& flow_statistics) const
     {
         const auto nr = options.mechanism->reactions().size();
         std::vector<double> local, global;
@@ -679,6 +753,42 @@ struct ReactingMixtureCoupler::Implementation
                 result.net_thermal_energy = global[3 * nr + 4];
                 result.flow = flow_statistics;
             });
+        // All ranks, including empty owners, reduce the same immutable physical-role layout.
+        std::vector<double> local_numbers, global_numbers;
+        const size_t np = options.phases.size();
+        collective_detail::collective_local_validation(*flow->mesh(), "Population event diagnostics",
+            [&]
+            {
+                require(populations.size() == applied.size() && np <= size_t(std::numeric_limits<int>::max()) / 3,
+                    "Population diagnostics row/phase layout differs.");
+                std::vector<Sum> totals(3 * np);
+                for (const auto& receipt : populations)
+                {
+                    require(receipt.births.size() == np && receipt.deaths.size() == np && receipt.changes.size() == np,
+                        "Population receipt diagnostic shape differs.");
+                    for (size_t p = 0; p < np; ++p)
+                    {
+                        totals[p] += receipt.births[p];
+                        totals[np + p] += receipt.deaths[p];
+                        totals[2 * np + p] += receipt.changes[p];
+                    }
+                }
+                local_numbers.resize(totals.size());
+                global_numbers.resize(totals.size());
+                for (size_t i = 0; i < totals.size(); ++i)
+                    local_numbers[i] = population_source_detail::narrow(totals[i].value());
+            });
+        Teuchos::reduceAll(*flow->mesh()->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM,
+            static_cast<int>(local_numbers.size()), local_numbers.data(), global_numbers.data());
+        collective_detail::collective_local_validation(*flow->mesh(), "Population event global diagnostic report",
+            [&]
+            {
+                for (double n : global_numbers)
+                    require(std::isfinite(n), "Population global diagnostics overflow.");
+                result.population_births.assign(global_numbers.begin(), global_numbers.begin() + np);
+                result.population_deaths.assign(global_numbers.begin() + np, global_numbers.begin() + 2 * np);
+                result.population_number_changes.assign(global_numbers.begin() + 2 * np, global_numbers.end());
+            });
         return result;
     }
 };
@@ -714,6 +824,12 @@ const std::vector<SpeciesSourceLedger>& ReactingMixtureCoupler::Trial::local_sou
     return d->ledgers;
 }
 
+const std::vector<MixturePopulationEventReceipt>& ReactingMixtureCoupler::Trial::local_population_events() const
+{
+    require(bool(d), "Empty reacting mixture trial.");
+    return d->population_events;
+}
+
 const Solver::TransportSnapshot& ReactingMixtureCoupler::Trial::transport_snapshot() const
 {
     require(bool(d), "Empty reacting mixture trial.");
@@ -732,25 +848,30 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
         [&]
         {
             receipt = std::make_shared<SourceReceipt>();
-            provider = std::make_shared<const Solver::SourceStageProvider>(
-                Solver::SourceStageProvider{"ReactingMixtureCoupler:" + d->options.source_identity,
-                    d->options.source_revision, d->options.mechanism->catalog().fingerprint(),
-                    [engine = d->source_engine, receipt](const Solver::SourceStageContext& context)
-                    {
-                        // This is a communicating stage. Its local chemistry and each face stage own their fences.
-                        auto prepared = engine->prepare(context);
-                        engine->validate_face_receipts(prepared, context);
-                        Solver::SourceStageResult result;
-                        collective_detail::collective_local_validation(context.mesh, "Retain composed source receipt",
-                            [&]
-                            {
-                                receipt->transport = context.transport;
-                                receipt->prepared = std::move(prepared);
-                                result = receipt->prepared.result;
-                            });
-                        return result;
-                    },
-                    d->options.source_relative_tolerance, d->options.maximum_correctors});
+            provider = std::make_shared<const Solver::SourceStageProvider>(Solver::SourceStageProvider{
+                "ReactingMixtureCoupler:" + d->options.source_identity +
+                    (d->options.population_events
+                            ? (":population:" + std::to_string(d->options.population_events->identity.size()) + ":" +
+                                  d->options.population_events->identity + ":" +
+                                  std::to_string(d->options.population_events->revision))
+                            : std::string{}),
+                d->options.source_revision, d->options.mechanism->catalog().fingerprint(),
+                [engine = d->source_engine, receipt](const Solver::SourceStageContext& context)
+                {
+                    // This is a communicating stage. Its local chemistry and each face stage own their fences.
+                    auto prepared = engine->prepare(context);
+                    engine->validate_face_receipts(prepared, context);
+                    Solver::SourceStageResult result;
+                    collective_detail::collective_local_validation(context.mesh, "Retain composed source receipt",
+                        [&]
+                        {
+                            receipt->transport = context.transport;
+                            receipt->prepared = std::move(prepared);
+                            result = receipt->prepared.result;
+                        });
+                    return result;
+                },
+                d->options.source_relative_tolerance, d->options.maximum_correctors});
         });
     auto flow_trial = d->flow->preview_with_sources(dt, std::move(provider), &d->lease);
     collective_detail::collective_local_validation(mesh, "Reacting mixture immutable source receipt",
@@ -768,7 +889,7 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
     const Solver::SourceStageContext final_context{flow_trial.transport_snapshot(), flow_trial.state(), mesh};
     d->source_engine->validate_face_receipts(receipt->prepared, final_context);
     auto statistics = d->totals(receipt->prepared.ledgers, flow_trial.integrated_sources(),
-        flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
+        receipt->prepared.population_events, flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
     std::shared_ptr<Trial::Data> data;
     collective_detail::collective_local_validation(mesh, "Retain immutable reacting trial",
         [&]
@@ -780,6 +901,7 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
             data->flow = std::move(flow_trial);
             data->ledgers = std::move(receipt->prepared.ledgers);
             data->face_receipts = std::move(receipt->prepared.face_receipts);
+            data->population_events = std::move(receipt->prepared.population_events);
         });
     // The flow trial retains the immutable provider lifetime. Release this
     // temporary duplicate only after exact receipt verification and publication.

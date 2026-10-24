@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 
@@ -397,4 +398,80 @@ TEST(SpeciesDiffusionTest, CompleteLargeDepletionThenFiniteCreditRetainsPositive
     EXPECT_DOUBLE_EQ(initial[0].amount(*catalog, one, P::Dissolved), 1e20);
     // The stock is authoritative; its net double report cannot encode +1 beside -1e20.
     EXPECT_DOUBLE_EQ(result.cells[0].change.amount(*catalog, one, P::Dissolved), -1e20);
+}
+
+TEST(SpeciesDiffusionTest, GrossPrimaryDemandRetainsOneMoleAboveHugeStockDespiteSimultaneousCredit)
+{
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{17, "explicit finite counter", 1., {{"X", 1}}, {P::Liquid}},
+            {41, "finite primary donor", 1., {{"X", 1}}, {P::Dissolved}}});
+    const auto stock = [&](double solvent, double primary)
+    {
+        R::CellSpeciesState result(*catalog);
+        result.set_amount(*catalog, 17, P::Liquid, solvent);
+        result.set_amount(*catalog, 41, P::Dissolved, primary);
+        return result;
+    };
+    const std::vector initial{stock(1e20, 1e20), stock(1e20, 0), stock(1, 0), stock(0, 1e20)};
+    R::SpeciesDiffusionBinding selected;
+    selected.counterSpecies = 17;
+    selected.identity = "raw primary donor margin";
+    selected.schemaFingerprint = catalog->fingerprint();
+    for (const auto ids :
+        {std::array<unsigned, 3>{1, 2, 3}, std::array<unsigned, 3>{3, 2, 1}, std::array<unsigned, 3>{2, 3, 1}})
+    {
+        std::vector<R::CanonicalDiffusionFace> packets(3);
+        for (std::size_t f = 0; f < packets.size(); ++f)
+        {
+            packets[f].identity = ids[f];
+            packets[f].moles = {0, f == 1 ? 1. : 1e20};
+            packets[f].ownerMolarEnthalpy = packets[f].neighborMolarEnthalpy = {0, 0};
+        }
+        packets[0].owner = 0;
+        packets[0].neighbor = 1;
+        packets[1].owner = 0;
+        packets[1].neighbor = 2;
+        packets[2].owner = 3;
+        packets[2].neighbor = 0;
+        // Cell zero has a nonnegative endpoint, but 1e20+1 outgoing is not funded by its 1e20 stock.
+        EXPECT_THROW((void) R::preview_species_diffusion(*catalog, initial, selected, packets), std::runtime_error);
+        EXPECT_DOUBLE_EQ(initial[0].amount(*catalog, 41, P::Dissolved), 1e20);
+        EXPECT_DOUBLE_EQ(initial[0].amount(*catalog, 17, P::Liquid), 1e20);
+    }
+}
+
+TEST(SpeciesDiffusionTest, GrossCounterDemandRetainsOneMoleAboveHugeStockDespiteSimultaneousCredit)
+{
+    const auto catalog = std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{17, "explicit finite counter", 1., {{"X", 1}}, {P::Liquid}},
+            {41, "finite primary donor", 1., {{"X", 1}}, {P::Dissolved}}});
+    const auto stock = [&](double solvent, double primary)
+    {
+        R::CellSpeciesState result(*catalog);
+        result.set_amount(*catalog, 17, P::Liquid, solvent);
+        result.set_amount(*catalog, 41, P::Dissolved, primary);
+        return result;
+    };
+    const std::vector initial{stock(1e20, 1e20), stock(0, 1e20), stock(0, 1), stock(1e20, 0)};
+    R::SpeciesDiffusionBinding selected;
+    selected.counterSpecies = 17;
+    selected.identity = "raw counter donor margin";
+    selected.schemaFingerprint = catalog->fingerprint();
+    std::vector<R::CanonicalDiffusionFace> packets(3);
+    for (std::size_t f = 0; f < packets.size(); ++f)
+    {
+        packets[f].identity = f + 1;
+        packets[f].moles = {0, f == 1 ? 1. : 1e20};
+        packets[f].ownerMolarEnthalpy = packets[f].neighborMolarEnthalpy = {0, 0};
+    }
+    packets[0].owner = 1;
+    packets[0].neighbor = 0;
+    packets[1].owner = 2;
+    packets[1].neighbor = 0;
+    packets[2].owner = 0;
+    packets[2].neighbor = 3;
+    // Equal molar masses make each counter demand exactly the corresponding primary amount.
+    EXPECT_THROW((void) R::preview_species_diffusion(*catalog, initial, selected, packets), std::runtime_error);
+    EXPECT_DOUBLE_EQ(initial[0].amount(*catalog, 17, P::Liquid), 1e20);
+    EXPECT_DOUBLE_EQ(initial[0].amount(*catalog, 41, P::Dissolved), 1e20);
 }

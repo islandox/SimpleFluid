@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -670,4 +671,193 @@ TEST(ReactionMechanismTest, LocalReceiptRetainsVolumetricHeatBeforeItsDoubleRepo
     EXPECT_TRUE(result.localReceipt.chemicalChanges.empty());
     EXPECT_TRUE(result.localReceipt.reactionHeatContributions.empty());
     EXPECT_DOUBLE_EQ(result.ledger.reactionHeat, 0.);
+}
+
+namespace
+{
+constexpr R::SpeciesId margin_donor = 101, margin_sink = 103, margin_feed = 107;
+std::shared_ptr<const R::SpeciesCatalog> margin_schema()
+{
+    using P = R::SpeciesPhase;
+    return std::make_shared<const R::SpeciesCatalog>(
+        std::vector<R::SpeciesDefinition>{{margin_donor, "finite donor", 1., {{"X", 1}}, {P::Liquid}},
+            {margin_sink, "finite product", 1., {{"X", 1}}, {P::Liquid}},
+            {margin_feed, "explicit incoming feed", 1., {{"X", 1}}, {P::Liquid}}});
+}
+std::vector<R::ReactionDefinition> margin_reactions()
+{
+    using P = R::SpeciesPhase;
+    return {{211, "large donor demand", {{margin_donor, P::Liquid, -1}, {margin_sink, P::Liquid, 1}}, 0},
+        {223, "independent one-mole donor demand", {{margin_donor, P::Liquid, -1}, {margin_sink, P::Liquid, 1}}, 0},
+        {227, "simultaneous donor credit", {{margin_feed, P::Liquid, -1}, {margin_donor, P::Liquid, 1}}, 0}};
+}
+R::CellSpeciesState margin_state(const R::SpeciesCatalog& schema, double donor = 1e20, double feed = 1e20)
+{
+    R::CellSpeciesState result(schema);
+    result.set_amount(schema, margin_donor, R::SpeciesPhase::Liquid, donor);
+    result.set_amount(schema, margin_feed, R::SpeciesPhase::Liquid, feed);
+    return result;
+}
+R::ReactionRateProvider margin_provider(const R::SpeciesCatalog& schema)
+{
+    auto provider = constant_rate(schema, 0, R::SourceVolumeBasis::BulkVolume);
+    provider.identity = "raw stage donor margin";
+    return provider;
+}
+R::ExternalSpeciesTransfer margin_transfer(const char* reservoir, double moles)
+{
+    return {reservoir, margin_donor, R::SpeciesPhase::Liquid, moles, moles, 0., {}, {}};
+}
+const R::ReactionEnvironment margin_environment{0., 300., 100000., 1., 1.};
+} // namespace
+
+TEST(ReactionMechanismTest, GrossChemicalDemandCannotBorrowHugeSimultaneousCreditOrLoseOneMole)
+{
+    const auto schema = margin_schema();
+    const R::ReactionMechanism mechanism(schema, margin_reactions());
+    const auto initial = margin_state(*schema);
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{211, 1e20}, {223, 1}, {227, 1e20}};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, margin_environment, 1., input), std::runtime_error);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1e20);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, margin_feed, R::SpeciesPhase::Liquid), 1e20);
+}
+
+TEST(ReactionMechanismTest, GrossExternalDemandCannotBorrowHugeSimultaneousCreditOrLoseOneMole)
+{
+    const auto schema = margin_schema();
+    const R::ReactionMechanism mechanism(schema, {});
+    const auto initial = margin_state(*schema);
+    R::ReactionSourceInput input;
+    input.externalTransfers = {margin_transfer("large withdrawal", -1e20),
+        margin_transfer("independent withdrawal", -1), margin_transfer("explicit supply", 1e20)};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, margin_environment, 1., input), std::runtime_error);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1e20);
+    std::reverse(input.externalTransfers.begin(), input.externalTransfers.end());
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, margin_environment, 1., input), std::runtime_error);
+}
+
+TEST(ReactionMechanismTest, ChemicalAndExternalRawDemandsShareOneFiniteMargin)
+{
+    const auto schema = margin_schema();
+    const R::ReactionMechanism mechanism(schema, margin_reactions());
+    const auto initial = margin_state(*schema);
+    R::ReactionSourceInput input;
+    input.integratedExtents = {{211, 1e20}};
+    input.externalTransfers = {margin_transfer("one extra withdrawal", -1), margin_transfer("incoming credit", 1e20)};
+    EXPECT_THROW((void) R::advance_reactions(mechanism, initial, margin_environment, 1., input), std::runtime_error);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1e20);
+}
+
+TEST(ReactionMechanismTest, EachSSPRK2EulerStageChecksRawGrossDemandAgainstItsOwnStock)
+{
+    const auto schema = margin_schema();
+    const R::ReactionMechanism mechanism(schema, margin_reactions());
+    const auto initial = margin_state(*schema);
+    for (bool second_only : {false, true})
+    {
+        auto provider = margin_provider(*schema);
+        provider.evaluate = [second_only](const R::ReactionContext& context)
+        {
+            const bool active = !second_only || context.environment.time > 0.;
+            return std::vector<R::ReactionRate>{{211, active ? 1e20 : 0., R::SourceVolumeBasis::BulkVolume},
+                {223, active ? 1. : 0., R::SourceVolumeBasis::BulkVolume},
+                {227, active ? 1e20 : 0., R::SourceVolumeBasis::BulkVolume}};
+        };
+        R::ReactionSourceInput input;
+        input.rates = std::move(provider);
+        EXPECT_THROW((void) R::advance_reactions(mechanism, initial, margin_environment, 1., input, {1., 4, 0}),
+            std::runtime_error); // No retry may replace the deliberately overdrawn Euler stage.
+        EXPECT_DOUBLE_EQ(initial.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1e20);
+    }
+}
+
+TEST(ReactionMechanismTest, FullDepletionRetainsSeparateFiniteExternalAndChemicalCredits)
+{
+    const auto schema = margin_schema();
+    const auto initial = margin_state(*schema, 1e20, 1);
+    const R::ReactionMechanism external_only(schema, {});
+    R::ReactionSourceInput external;
+    external.externalTransfers = {margin_transfer("complete withdrawal", -1e20), margin_transfer("finite credit", 1)};
+    const auto supplied = R::advance_reactions(external_only, initial, margin_environment, 1., external);
+    EXPECT_DOUBLE_EQ(supplied.state.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1.);
+    ASSERT_EQ(supplied.ledger.externalTransfers.size(), 2U);
+    EXPECT_DOUBLE_EQ(supplied.ledger.externalTransfers[1].moles, 1.);
+    const R::ReactionMechanism chemical(schema, margin_reactions());
+    R::ReactionSourceInput reactions;
+    reactions.integratedExtents = {{211, 1e20}, {227, 1}};
+    const auto created = R::advance_reactions(chemical, initial, margin_environment, 1., reactions);
+    EXPECT_DOUBLE_EQ(created.state.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1.);
+    EXPECT_DOUBLE_EQ(created.state.amount(*schema, margin_feed, R::SpeciesPhase::Liquid), 0.);
+    EXPECT_DOUBLE_EQ(created.ledger.reactionExtents[2], 1.);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1e20);
+}
+
+TEST(ReactionMechanismTest, SSPRK2SecondStageMayUseItsActualFirstStageProduct)
+{
+    using P = R::SpeciesPhase;
+    const auto schema = margin_schema();
+    const R::ReactionMechanism mechanism(
+        schema, {{241, "first Euler stage", {{margin_donor, P::Liquid, -1}, {margin_sink, P::Liquid, 1}}, 0},
+                    {251, "second Euler stage", {{margin_sink, P::Liquid, -1}, {margin_feed, P::Liquid, 1}}, 0}});
+    auto provider = margin_provider(*schema);
+    provider.evaluate = [](const R::ReactionContext& context)
+    {
+        const bool first = context.environment.time == 0.;
+        return std::vector<R::ReactionRate>{{241, first ? 1. : 0., R::SourceVolumeBasis::BulkVolume},
+            {251, first ? 0. : 1., R::SourceVolumeBasis::BulkVolume}};
+    };
+    R::ReactionSourceInput input;
+    input.rates = std::move(provider);
+    const auto result =
+        R::advance_reactions(mechanism, margin_state(*schema, 1., 0.), margin_environment, 1., input, {1., 4, 0});
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, margin_donor, P::Liquid), .5);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, margin_sink, P::Liquid), 0.);
+    EXPECT_DOUBLE_EQ(result.state.amount(*schema, margin_feed, P::Liquid), .5);
+}
+
+TEST(ReactionMechanismTest, AcceptedSmallDepletionRemainsInTheNextEulerDonorMargin)
+{
+    const auto schema = margin_schema();
+    const R::ReactionMechanism mechanism(schema, margin_reactions());
+    const auto initial = margin_state(*schema, 1e20, 0.);
+    auto provider = margin_provider(*schema);
+    provider.evaluate = [](const R::ReactionContext& context)
+    {
+        const double t = context.environment.time;
+        return std::vector<R::ReactionRate>{
+            {211, t == 0. ? 4. : (t == 1. ? 2e20 : 0.), R::SourceVolumeBasis::BulkVolume}};
+    };
+    R::ReactionSourceInput input;
+    input.rates = std::move(provider);
+    // First accepted half-step consumes one mole. The next Euler stage may not spend the rounded 1e20 view.
+    EXPECT_THROW(
+        (void) R::advance_reactions(mechanism, initial, margin_environment, 1., input, {.5, 4, 0}), std::runtime_error);
+    EXPECT_DOUBLE_EQ(initial.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), 1e20);
+}
+
+TEST(ReactionMechanismTest, SSPRK2PrivateHalfEventsDoNotPrematurelyNarrowARepresentableFinalTransfer)
+{
+    const auto schema = margin_schema();
+    const R::ReactionMechanism mechanism(schema, margin_reactions());
+    const double quantum = std::numeric_limits<double>::denorm_min();
+    auto provider = margin_provider(*schema);
+    provider.evaluate = [quantum](const R::ReactionContext&)
+    { return std::vector<R::ReactionRate>{{211, quantum, R::SourceVolumeBasis::BulkVolume}}; };
+    R::ReactionSourceInput input;
+    input.rates = std::move(provider);
+    const auto initial = margin_state(*schema, 2 * quantum, 0.);
+    if constexpr (std::numeric_limits<long double>::min_exponent < std::numeric_limits<double>::min_exponent)
+    {
+        const auto result = R::advance_reactions(mechanism, initial, margin_environment, 1., input, {1., 4, 0});
+        EXPECT_EQ(result.state.amount(*schema, margin_donor, R::SpeciesPhase::Liquid), quantum);
+        EXPECT_EQ(result.state.amount(*schema, margin_sink, R::SpeciesPhase::Liquid), quantum);
+        EXPECT_EQ(result.ledger.reactionExtents[0], quantum);
+    }
+    else
+    {
+        // Without exponent headroom the half-event cannot be retained: reject rather than silently erase it.
+        EXPECT_THROW((void) R::advance_reactions(mechanism, initial, margin_environment, 1., input, {1., 4, 0}),
+            std::invalid_argument);
+    }
 }

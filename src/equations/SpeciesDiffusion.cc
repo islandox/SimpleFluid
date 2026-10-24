@@ -81,7 +81,7 @@ SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
     const bool sameCompartment = binding.transported.phase == binding.counter.phase &&
                                  binding.transported.population == binding.counter.population;
     std::vector<std::vector<long double>> initial;
-    std::vector<std::vector<Sum>> changes, donors, stocks;
+    std::vector<std::vector<Sum>> changes, donor_margins, stocks;
     std::vector<Sum> energy(owned.size());
     std::vector<std::array<Sum, 3>> momentum(owned.size());
     for (const auto& state : owned)
@@ -91,10 +91,13 @@ SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
         static_cast<void>(slot(catalog, state, 0, binding.transported));
         initial.push_back(flatten(state));
         changes.emplace_back(initial.back().size());
-        donors.emplace_back(initial.back().size());
+        donor_margins.emplace_back(initial.back().size());
         stocks.emplace_back(initial.back().size());
         for (std::size_t i = 0; i < initial.back().size(); ++i)
+        {
             stocks.back()[i] += initial.back()[i];
+            donor_margins.back()[i] += initial.back()[i];
+        }
     }
     SpeciesDiffusionPreview result;
     result.identity = binding.identity;
@@ -172,7 +175,7 @@ SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
                 for (std::size_t a = 0; a < 3; ++a)
                     momentum[*row][a] += delta * catalog.species()[species].molarMass * velocity[a];
                 if (delta < 0.0L)
-                    donors[*row][index] += -delta;
+                    donor_margins[*row][index] += delta;
             };
             apply(face.owner, -1.0);
             apply(face.neighbor, 1.0);
@@ -199,7 +202,10 @@ SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
         std::vector<long double> accepted(initial[c].size()), deltas(initial[c].size());
         for (std::size_t i = 0; i < initial[c].size(); ++i)
         {
-            if (donors[c][i].value() > initial[c][i])
+            // Subtract each raw demand from the stock before collapsing the sum:
+            // a rounded positive total 1e20+1 could otherwise compare equal to 1e20.
+            // Incoming credits never enter this independently reserved margin.
+            if (donor_margins[c][i].value() < 0.0L)
                 throw std::runtime_error("Canonical diffusion jointly exhausts a finite species/counter donor; "
                                          "recompute a smaller physical step.");
             deltas[i] = changes[c][i].value();
