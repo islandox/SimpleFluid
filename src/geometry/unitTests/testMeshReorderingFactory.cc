@@ -154,8 +154,13 @@ void expect_cells_preserved(const std::map<GlobalOrdinal, CellIdentity>& before,
             {
                 visited_faces.push_back(reordered.face_global_id(face));
                 EXPECT_DOUBLE_EQ(native.face_area(native_face), reordered.face_area(face));
-                const auto displacement = native.cell_centroid(native_cell) - expected.centroid;
-                EXPECT_DOUBLE_EQ(displacement.norm(), 0.0);
+                // Use the same component-wise ULP bound as the handle checks above.
+                // Fusing a cylindrical centroid's multiplication with subtraction
+                // can leave a rounding residual even when its coordinates agree.
+                const auto native_center = native.cell_centroid(native_cell);
+                EXPECT_DOUBLE_EQ(native_center.x, expected.centroid.x);
+                EXPECT_DOUBLE_EQ(native_center.y, expected.centroid.y);
+                EXPECT_DOUBLE_EQ(native_center.z, expected.centroid.z);
             });
         EXPECT_EQ(visited_faces, faces);
         std::ranges::sort(faces);
