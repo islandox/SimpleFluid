@@ -99,6 +99,46 @@ TEST(BoundedPlanarFaceTest, CoplanarDisjointEdgeAndPointContactsHaveProvenZeroAr
         EXPECT_EQ(result.overlap_over_second.value, 0);
     }
 }
+TEST(BoundedPlanarFaceTest, OrdinaryScalarOverlapPreservesSignedAreasContactsAndWorkCaps)
+{
+    BoundedGeometryLimits limits;
+    limits.arithmetic_mode = SimpleFluid::ArithmeticMode::Ordinary;
+    // Native support import is confined to fixture construction; overlap uses
+    // only the Ordinary scalar provider and the retained support identities.
+    const auto first =
+        BoundedConvexGeometry::from_geometry(*ConvexCellGeometry::box({0, 0, 0}, {2, 2, 1}), limits);
+    const auto second =
+        BoundedConvexGeometry::from_geometry(*ConvexCellGeometry::box({1, .5, 0}, {3, 1.5, 1}), limits);
+    const auto contact =
+        BoundedConvexGeometry::from_geometry(*ConvexCellGeometry::box({2, 0, 0}, {3, 2, 1}), limits);
+    const auto a = bottom(*first);
+    auto b = bottom(*second);
+    const auto support = bounded_common_supports(a).front();
+    reset_bounded_geometry_statistics();
+    const auto result = bounded_planar_face_overlap(a, b, support, limits);
+    EXPECT_EQ(result.orientation, 1);
+    EXPECT_EQ(result.first_projected_area.value, 4);
+    EXPECT_EQ(result.second_projected_area.value, 2);
+    EXPECT_EQ(result.overlap_projected_area.value, 1);
+    EXPECT_EQ(result.overlap_over_first.value, .25L);
+    EXPECT_EQ(result.overlap_over_second.value, .5L);
+    EXPECT_EQ(result.overlap_projected_area.arithmetic_mode, SimpleFluid::ArithmeticMode::Ordinary);
+    EXPECT_THROW((void) result.overlap_projected_area.lower(), std::invalid_argument);
+    std::reverse(b.begin(), b.end());
+    const auto reversed = bounded_planar_face_overlap(a, b, support, limits);
+    EXPECT_EQ(reversed.orientation, -1);
+    EXPECT_EQ(reversed.overlap_projected_area.value, 1);
+    EXPECT_EQ(reversed.overlap_over_first.value, -.25L);
+    EXPECT_EQ(reversed.overlap_over_second.value, -.5L);
+    const auto touching = bounded_planar_face_overlap(a, bottom(*contact), support, limits);
+    EXPECT_EQ(touching.overlap_projected_area.value, 0);
+    EXPECT_EQ(bounded_geometry_statistics().interval_operations, 0u);
+    auto tampered = a;
+    tampered.front().value[0] += .01L;
+    EXPECT_THROW((void) bounded_planar_face_overlap(a, tampered, support, limits), std::invalid_argument);
+    limits.maximum_operations = 1;
+    EXPECT_THROW((void) bounded_planar_face_overlap(a, a, support, limits), std::invalid_argument);
+}
 TEST(BoundedPlanarFaceTest, ObliqueRationalSourceCutsUseOriginalSupportAndIndependentAreaOracle)
 {
     const std::array<GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};

@@ -1,10 +1,10 @@
-/** Compiled finite geometry kernels. Included only by the owning implementation unit.
- * Namespace operators bind shared storage to the fixed arithmetic policy; Mode
- * templates retain the compiled implementation boundary across geometry units.
+/** Compiled certification geometry kernels. Included only by the owning implementation unit.
+ * Directed interval arithmetic and retained certificates remain confined to this
+ * provider; Mode templates retain the compiled implementation boundary.
  */
 namespace SimpleFluid::Meshes::bounded_geometry_detail
 {
-namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+namespace certification_kernel SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode> int matching_input(const GeometryHalfspace& a, const GeometryHalfspace& b)
 {
@@ -56,8 +56,8 @@ Interval refine_triangle_distance(const Point& coordinates, const Frame& frame, 
     for (std::size_t k = 0; k < 3; ++k)
     {
         const auto n = normal[k], original = plane->normal[k];
-        const auto strength = n.lo > 0 ? n.lo : n.hi < 0 ? -n.hi : 0;
-        if (strength > largest && (original.lo > 0 || original.hi < 0))
+        const auto strength = n.lo() > 0 ? n.lo() : n.hi() < 0 ? -n.hi() : 0;
+        if (strength > largest && (original.lo() > 0 || original.hi() < 0))
         {
             axis = k;
             largest = strength;
@@ -69,7 +69,7 @@ Interval refine_triangle_distance(const Point& coordinates, const Frame& frame, 
     auto determinant = forms.front();
     for (const auto& form : forms)
     {
-        const auto lo = std::max(determinant.lo, form.lo), hi = std::min(determinant.hi, form.hi);
+        const auto lo = std::max(determinant.lo(), form.lo()), hi = std::min(determinant.hi(), form.hi());
         if (lo > hi)
             reject("equivalent source-face determinants are disjoint.");
         determinant = Interval(lo, hi);
@@ -79,7 +79,7 @@ Interval refine_triangle_distance(const Point& coordinates, const Frame& frame, 
     const auto refined = scaled<Mode>(determinant * (plane->normal[axis] / normal[axis]),
                              triangle_frame.exponent - plane->frame.exponent) *
                          Interval(orientation);
-    const auto lo = std::max(result.lo, refined.lo), hi = std::min(result.hi, refined.hi);
+    const auto lo = std::max(result.lo(), refined.lo()), hi = std::min(result.hi(), refined.hi());
     if (lo > hi)
         reject("source-face support refinement has inconsistent distance enclosures.");
     return Interval(lo, hi);
@@ -87,7 +87,7 @@ Interval refine_triangle_distance(const Point& coordinates, const Frame& frame, 
 
 template<ArithmeticMode Mode>
 BoundedGeometrySection section(
-    const BoundedConvexGeometry::Impl& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop)
+    const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop)
 {
     static_assert(Mode == kernel_mode);
     BoundedGeometrySection result;
@@ -184,10 +184,11 @@ BoundedClipResult GeometryKernel<Mode>::clip_by_face(
 }
 
 template<ArithmeticMode Mode>
-BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Impl>& source, std::size_t plane_id,
-    bool measure_section, bool construct_outside, bool partition_proof) const
+BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const BoundedConvexGeometry::Impl>& source_base,
+    std::size_t plane_id, bool measure_section, bool construct_outside, bool partition_proof) const
 {
     static_assert(Mode == kernel_mode);
+    const auto source = checked_geometry_storage<Mode>(source_base);
     require_mode(impl_->limits.arithmetic_mode, source->limits.arithmetic_mode);
     if ((impl_->partition_proof_only && !partition_proof) ||
         (partition_proof && (measure_section || !construct_outside)))
@@ -202,7 +203,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
             result =
                 refine_triangle_distance<Mode>(coordinates, frame, source->vertices[face[0]], source->vertices[face[i]],
                     source->vertices[face[i + 1]], source->frame, plane, support.orientation, result);
-            if (result.lo > 0 || result.hi < 0 || result.zero())
+            if (result.lo() > 0 || result.hi() < 0 || result.zero())
                 break;
         }
         return result;
@@ -222,7 +223,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
     const auto retained_endpoint_distance = [&](const Vertex& endpoint, const PlanePtr& original)
     {
         auto result = distance<Mode>(endpoint, source->frame, original);
-        if (result.lo > 0 || result.hi < 0 || result.zero())
+        if (result.lo() > 0 || result.hi() < 0 || result.zero())
             return result;
         active_work->charge(original->source_vertices.size(), sizeof(Vertex));
         std::vector<Vertex> defining;
@@ -237,7 +238,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
         {
             result = refine_triangle_distance<Mode>(endpoint.coordinates, source->frame, defining[0], defining[i],
                 defining[i + 1], source->frame, original, 1, result);
-            if (result.lo > 0 || result.hi < 0 || result.zero())
+            if (result.lo() > 0 || result.hi() < 0 || result.zero())
                 break;
         }
         return result; // Deliberately no affine or clipping recursion.
@@ -245,7 +246,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
     const auto endpoint_distance = [&](const Vertex& endpoint)
     {
         auto result = distance<Mode>(endpoint, source->frame, plane) * Interval(support.orientation);
-        if (result.lo <= 0 && result.hi >= 0 && !result.zero())
+        if (result.lo() <= 0 && result.hi() >= 0 && !result.zero())
             result = refine_face_distance(endpoint.coordinates, source->frame, result);
         return result;
     };
@@ -255,7 +256,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
     for (const auto& vertex : impl_->vertices)
     {
         auto d = distance<Mode>(vertex, impl_->frame, plane) * Interval(support.orientation);
-        if (!ordinary() && d.lo <= 0 && d.hi >= 0 && !d.zero() && plane_id < source->faces.size())
+        if (d.lo() <= 0 && d.hi() >= 0 && !d.zero() && plane_id < source->faces.size())
         {
             // Three noncollinear shared points determine the same affine
             // plane, even when separate swept pieces use opposite windings.
@@ -283,7 +284,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                     break;
             }
         }
-        if (!ordinary() && d.lo <= 0 && d.hi >= 0 && !d.zero() && plane_id < source->faces.size())
+        if (d.lo() <= 0 && d.hi() >= 0 && !d.zero() && plane_id < source->faces.size())
         {
             // A reconstructed crossing can be an original source vertex even
             // when its independent coordinate enclosure straddles this plane.
@@ -310,21 +311,21 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                             active_work->pair();
                             const auto determinant =
                                 dot<Mode>(common[a]->normal, cross<Mode>(common[b]->normal, common[c]->normal));
-                            identical = determinant.lo > 0 || determinant.hi < 0;
+                            identical = determinant.lo() > 0 || determinant.hi() < 0;
                         }
                 if (identical)
                 {
                     const auto coordinates = transform<Mode>(candidate.coordinates, source->frame, impl_->frame);
                     for (std::size_t axis = 0; axis < 3; ++axis)
-                        if (coordinates[axis].hi < vertex.coordinates[axis].lo ||
-                            vertex.coordinates[axis].hi < coordinates[axis].lo)
+                        if (coordinates[axis].hi() < vertex.coordinates[axis].lo() ||
+                            vertex.coordinates[axis].hi() < coordinates[axis].lo())
                             reject("shared-support point identity has inconsistent coordinate enclosures.");
                     d = Interval{};
                     break; // Existing zero-sign propagation retains this incidence.
                 }
             }
         }
-        if (!ordinary() && d.lo <= 0 && d.hi >= 0 && !d.zero() && plane_id < source->faces.size())
+        if (d.lo() <= 0 && d.hi() >= 0 && !d.zero() && plane_id < source->faces.size())
         {
             // Two independent target supports define a line. Two distinct
             // source-face points on both supports prove that the query plane
@@ -354,9 +355,9 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                     }
             }
         }
-        if (!ordinary() && d.lo <= 0 && d.hi >= 0 && !d.zero() && plane_id < source->faces.size())
+        if (d.lo() <= 0 && d.hi() >= 0 && !d.zero() && plane_id < source->faces.size())
             d = refine_face_distance(vertex.coordinates, impl_->frame, d);
-        if (!ordinary() && d.lo <= 0 && d.hi >= 0 && !d.zero() && plane_id < source->faces.size())
+        if (d.lo() <= 0 && d.hi() >= 0 && !d.zero() && plane_id < source->faces.size())
         {
             // P and Q share an edge (a,b). On P, x-a = s*(b-a)+t*(p-a),
             // so Q(x)=t*Q(p). Retain this affine dependency instead of
@@ -390,7 +391,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                         for (std::size_t k = 0; k < 3; ++k)
                         {
                             const auto n = normal[k];
-                            const auto strength = n.lo > 0 ? n.lo : n.hi < 0 ? -n.hi : 0;
+                            const auto strength = n.lo() > 0 ? n.lo() : n.hi() < 0 ? -n.hi() : 0;
                             if (strength > largest)
                             {
                                 axis = k;
@@ -402,7 +403,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                         auto t = cross<Mode>(edge, x - a.coordinates)[axis] / normal[axis];
                         const auto residual = endpoint_distance(p);
                         auto refined = t * residual;
-                        if (refined.lo <= 0 && refined.hi >= 0 && !refined.zero())
+                        if (refined.lo() <= 0 && refined.hi() >= 0 && !refined.zero())
                         {
                             // On this retained plane, x=a+s*(b-a)+t*(p-a).
                             // Other authenticated supports give two linear
@@ -432,37 +433,37 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                                     const auto& u = rows[first];
                                     const auto& v = rows[second];
                                     const auto determinant = u.along_edge * v.transverse - u.transverse * v.along_edge;
-                                    if (!(determinant.lo > 0 || determinant.hi < 0))
+                                    if (!(determinant.lo() > 0 || determinant.hi() < 0))
                                         continue;
                                     const auto solved =
                                         (u.at_anchor * v.along_edge - u.along_edge * v.at_anchor) / determinant;
-                                    const auto lo = std::max(t.lo, solved.lo), hi = std::min(t.hi, solved.hi);
+                                    const auto lo = std::max(t.lo(), solved.lo()), hi = std::min(t.hi(), solved.hi());
                                     if (lo > hi)
                                         reject("retained-plane affine coordinates have inconsistent enclosures.");
                                     t = Interval(lo, hi);
                                     refined = t * residual;
-                                    if (refined.lo > 0 || refined.hi < 0 || refined.zero())
+                                    if (refined.lo() > 0 || refined.hi() < 0 || refined.zero())
                                         break;
                                 }
-                                if (refined.lo > 0 || refined.hi < 0 || refined.zero())
+                                if (refined.lo() > 0 || refined.hi() < 0 || refined.zero())
                                     break;
                             }
                         }
-                        const auto lo = std::max(d.lo, refined.lo), hi = std::min(d.hi, refined.hi);
+                        const auto lo = std::max(d.lo(), refined.lo()), hi = std::min(d.hi(), refined.hi());
                         if (lo > hi)
                             reject("shared-edge affine support has inconsistent distance enclosures.");
                         d = Interval(lo, hi);
-                        if (d.lo > 0 || d.hi < 0 || d.zero())
+                        if (d.lo() > 0 || d.hi() < 0 || d.zero())
                             break;
                     }
-                    if (d.lo > 0 || d.hi < 0 || d.zero())
+                    if (d.lo() > 0 || d.hi() < 0 || d.zero())
                         break;
                 }
-                if (d.lo > 0 || d.hi < 0 || d.zero())
+                if (d.lo() > 0 || d.hi() < 0 || d.zero())
                     break;
             }
         }
-        if (!ordinary() && d.lo <= 0 && d.hi >= 0 && !d.zero() && plane_id < source->faces.size())
+        if (d.lo() <= 0 && d.hi() >= 0 && !d.zero() && plane_id < source->faces.size())
         {
             // Two independent retained supports define a line through their
             // original points a,b. Evaluate Q along that line, including its
@@ -503,7 +504,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                             for (std::size_t k = 0; k < 3; ++k)
                             {
                                 const auto e = edge[k];
-                                const auto strength = e.lo > 0 ? e.lo : e.hi < 0 ? -e.hi : 0;
+                                const auto strength = e.lo() > 0 ? e.lo() : e.hi() < 0 ? -e.hi() : 0;
                                 if (strength > largest)
                                 {
                                     axis = k;
@@ -516,20 +517,20 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
                             const auto second_weight = (x[axis] - a.coordinates[axis]) / edge[axis];
                             const auto refined =
                                 first_weight * endpoint_distance(a) + second_weight * endpoint_distance(b);
-                            const auto lo = std::max(d.lo, refined.lo), hi = std::min(d.hi, refined.hi);
+                            const auto lo = std::max(d.lo(), refined.lo()), hi = std::min(d.hi(), refined.hi());
                             if (lo > hi)
                                 reject("retained-line support has inconsistent distance enclosures.");
                             d = Interval(lo, hi);
-                            if (d.lo > 0 || d.hi < 0 || d.zero())
+                            if (d.lo() > 0 || d.hi() < 0 || d.zero())
                                 break;
                         }
-                        if (d.lo > 0 || d.hi < 0 || d.zero())
+                        if (d.lo() > 0 || d.hi() < 0 || d.zero())
                             break;
                     }
-                    if (d.lo > 0 || d.hi < 0 || d.zero())
+                    if (d.lo() > 0 || d.hi() < 0 || d.zero())
                         break;
                 }
-                if (d.lo > 0 || d.hi < 0 || d.zero())
+                if (d.lo() > 0 || d.hi() < 0 || d.zero())
                     break;
             }
         }
@@ -630,7 +631,7 @@ BoundedClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Im
         // Strict opposite endpoint distances prove a unique intersection in
         // the open edge. An independently enclosed da/(da-db) loses the shared
         // denominator dependency near an endpoint and need not exclude 0/1.
-        if (!((distances[a].lo > 0 && distances[b].hi < 0) || (distances[b].lo > 0 && distances[a].hi < 0)))
+        if (!((distances[a].lo() > 0 && distances[b].hi() < 0) || (distances[b].lo() > 0 && distances[a].hi() < 0)))
             reject("edge intersection lacks certified opposite endpoint signs.");
         Vertex vertex;
         const auto denominator = distances[a] - distances[b];
@@ -908,7 +909,7 @@ BoundedConvexGeometryPtr GeometryKernel<Mode>::intersect(const BoundedConvexGeom
     // unrelated faces first can create poorly conditioned intermediates even
     // though a later shared support already separates the original pieces.
     for (const auto& a : impl_->surfaces)
-        for (const auto& b : other.impl_->surfaces)
+        for (const auto& b : checked_geometry_storage<Mode>(other.impl_)->surfaces)
         {
             active_work->pair();
             int normal_orientation = 0;
@@ -928,8 +929,8 @@ BoundedConvexGeometryPtr GeometryKernel<Mode>::intersect(const BoundedConvexGeom
                     for (std::size_t axis = 0; axis < 3; ++axis)
                     {
                         const auto na = a.plane->normal[axis], nb = b.plane->normal[axis];
-                        const int sa = na.lo > 0 ? 1 : na.hi < 0 ? -1 : 0;
-                        const int sb = nb.lo > 0 ? 1 : nb.hi < 0 ? -1 : 0;
+                        const int sa = na.lo() > 0 ? 1 : na.hi() < 0 ? -1 : 0;
+                        const int sb = nb.lo() > 0 ? 1 : nb.hi() < 0 ? -1 : 0;
                         if (sa && sb)
                         {
                             // The key proves collinearity of the true normals.
@@ -1001,13 +1002,14 @@ template Interval refine_triangle_distance<kernel_mode>(const Point& coordinates
     const Vertex& b, const Vertex& c, const Frame& triangle_frame, const PlanePtr& plane, int orientation,
     Interval result);
 template BoundedGeometrySection section<kernel_mode>(
-    const BoundedConvexGeometry::Impl& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
+    const StoredGeometry& poly, const std::vector<Vertex>& vertices, const std::vector<std::size_t>& loop);
 template BoundedClipResult GeometryKernel<kernel_mode>::clip(
     const GeometryHalfspace& input, bool measure_section) const;
 template BoundedClipResult GeometryKernel<kernel_mode>::clip_by_face(
     const BoundedConvexGeometry& source, std::size_t face, bool measure_section) const;
-template BoundedClipResult GeometryKernel<kernel_mode>::clip_impl(const std::shared_ptr<const Impl>& source,
-    std::size_t plane_id, bool measure_section, bool construct_outside, bool partition_proof) const;
+template BoundedClipResult GeometryKernel<kernel_mode>::clip_impl(
+    const std::shared_ptr<const BoundedConvexGeometry::Impl>& source, std::size_t plane_id, bool measure_section,
+    bool construct_outside, bool partition_proof) const;
 template BoundedPhaseMeasures GeometryKernel<kernel_mode>::phases(const GeometryHalfspace& gas) const;
 template bool construction_contains<kernel_mode>(
     const std::shared_ptr<const Ancestry>& parent, std::shared_ptr<const Ancestry> child);
@@ -1016,5 +1018,5 @@ template bool separated_bounds<kernel_mode>(const BoundedConvexGeometry::Impl& a
 template bool GeometryKernel<kernel_mode>::bounds_prove_disjoint_interiors(const BoundedConvexGeometry& other) const;
 template BoundedConvexGeometryPtr GeometryKernel<kernel_mode>::intersect(const BoundedConvexGeometry& other) const;
 template BoundedConvexGeometryPtr GeometryKernel<kernel_mode>::translated(GeometryPoint displacement) const;
-} // namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+} // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail

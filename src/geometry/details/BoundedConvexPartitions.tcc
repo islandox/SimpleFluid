@@ -1,10 +1,10 @@
-/** Compiled finite geometry kernels. Included only by the owning implementation unit.
- * Namespace operators bind shared storage to the fixed arithmetic policy; Mode
- * templates retain the compiled implementation boundary across geometry units.
+/** Compiled certification geometry kernels. Included only by the owning implementation unit.
+ * Directed interval arithmetic and retained certificates remain confined to this
+ * provider; Mode templates retain the compiled implementation boundary.
  */
 namespace SimpleFluid::Meshes::bounded_geometry_detail
 {
-namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+namespace certification_kernel SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode>
 bool structural_cover(
@@ -128,7 +128,7 @@ void GeometryKernel<Mode>::certify_partition(
             if (construction_contains<Mode>(impl_->ancestry, piece->impl_->ancestry))
                 continue;
             for (const auto& surface : impl_->surfaces)
-                for (const auto& vertex : piece->impl_->vertices)
+                for (const auto& vertex : checked_geometry_storage<Mode>(piece->impl_)->vertices)
                 {
                     active_work->pair();
                     const auto d =
@@ -149,10 +149,10 @@ void GeometryKernel<Mode>::certify_partition(
     }
     Interval total;
     for (const auto& piece : pieces)
-        total = total + piece->impl_->volume;
+        total = total + checked_geometry_storage<Mode>(piece->impl_)->volume;
     const auto residual = total - impl_->volume;
-    const auto allowance = Interval(relative_budget) * Interval(impl_->volume.lo);
-    if (std::max(std::abs(residual.lo), std::abs(residual.hi)) > allowance.lo)
+    const auto allowance = Interval(relative_budget) * Interval(impl_->volume.lo());
+    if (std::max(std::abs(residual.lo()), std::abs(residual.hi())) > allowance.lo())
     {
         // Independent measure intervals forget the common parent expression.
         // After containment and disjointness, prove completeness by removing
@@ -242,7 +242,8 @@ std::vector<BoundedPartitionPiece> PartitionKernel<Mode>::partition(
     Operation scope(limits);
     if (!maximum_pieces || parent.impl_->partition_proof_only)
         reject("invalid measured partition parent or fragment cap.");
-    if (parent.impl_->vertices.size() > limits.maximum_vertices || parent.impl_->faces.size() > limits.maximum_faces)
+    if (checked_geometry_storage<Mode>(parent.impl_)->vertices.size() > limits.maximum_vertices ||
+        parent.impl_->faces.size() > limits.maximum_faces)
         reject("partition parent exceeds its vertex/face cap.");
     std::vector<BoundedPartitionPiece> result;
     std::vector<BoundedConvexGeometryPtr> remainder;
@@ -331,7 +332,7 @@ std::vector<BoundedPartitionPiece> PartitionKernel<Mode>::partition(
     for (auto& piece : result)
     {
         active_work->charge(piece.geometry->storage_bytes() + sizeof(BoundedConvexGeometry), 1);
-        auto certified = std::make_shared<BoundedConvexGeometry::Impl>(*piece.geometry->impl_);
+        auto certified = std::make_shared<StoredGeometry>(*checked_geometry_storage<Mode>(piece.geometry->impl_));
         certified->partition_certificate = certificate;
         piece.geometry = BoundedConvexGeometryPtr(new BoundedConvexGeometry(std::move(certified)));
     }
@@ -347,5 +348,5 @@ template std::vector<BoundedConvexGeometryPtr> GeometryKernel<kernel_mode>::vali
     std::span<const BoundedConvexGeometryPtr>, BoundedGeometryLimits);
 template std::vector<BoundedPartitionPiece> PartitionKernel<kernel_mode>::partition(
     const BoundedConvexGeometry& parent, std::size_t maximum_pieces) const;
-} // namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+} // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail

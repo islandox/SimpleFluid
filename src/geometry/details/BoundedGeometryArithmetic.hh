@@ -12,12 +12,18 @@ template<ArithmeticMode Mode> struct ArithmeticPolicy
     static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
     static constexpr bool ordinary() { return Mode == ArithmeticMode::Ordinary; }
     static void operation() { bounded_geometry_detail::operation(); }
+    static void scalar_operation()
+    {
+        static_assert(Mode == ArithmeticMode::Ordinary);
+        if (active_work && ++active_work->operations > active_work->operation_limit)
+            bounded_geometry_detail::reject("scalar operation cap exhausted.");
+    }
     static void interval_operation()
     {
+        static_assert(Mode == ArithmeticMode::BoundedCertification);
         if (active_work)
         {
-            if constexpr (Mode == ArithmeticMode::BoundedCertification)
-                ++statistics.interval_operations;
+            ++statistics.interval_operations;
             if (++active_work->operations > active_work->operation_limit)
                 bounded_geometry_detail::reject("interval scalar operation cap exhausted.");
         }

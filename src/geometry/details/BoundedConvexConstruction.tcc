@@ -1,79 +1,14 @@
-/** Compiled finite geometry kernels. Included only by the owning implementation unit.
- * Namespace operators bind shared storage to the fixed arithmetic policy; Mode
- * templates retain the compiled implementation boundary across geometry units.
+/** Compiled certification geometry kernels. Included only by the owning implementation unit.
+ * Directed interval arithmetic and retained certificates remain confined to this
+ * provider; Mode templates retain the compiled implementation boundary.
  */
 namespace SimpleFluid::Meshes::bounded_geometry_detail
 {
-namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+namespace certification_kernel SIMPLEFLUID_LOCAL
 {
-template<ArithmeticMode Mode> /** Ordinary scalar cone integration. No enclosure intersections or certificate retries.
-                               */
-Integrals integrate_ordinary(const BoundedConvexGeometry::Impl& poly, bool moments)
+template<ArithmeticMode Mode> Integrals integrate(const StoredGeometry& poly, bool moments)
 {
     static_assert(Mode == kernel_mode);
-    if (poly.vertices.size() == 4 && poly.faces.size() == 4 &&
-        std::all_of(poly.faces.begin(), poly.faces.end(), [](const auto& face) { return face.size() == 3; }))
-    {
-        Integrals result;
-        if (!moments)
-        {
-            const auto& anchor = poly.vertices.front().coordinates;
-            for (const auto& face : poly.faces)
-                if (std::find(face.begin(), face.end(), 0) == face.end())
-                {
-                    result.volume = scaled<Mode>(dot<Mode>(poly.vertices[face[0]].coordinates - anchor,
-                                                     cross<Mode>(poly.vertices[face[1]].coordinates - anchor,
-                                                         poly.vertices[face[2]].coordinates - anchor)) /
-                                                     Interval(6),
-                        3 * poly.frame.exponent);
-                    break;
-                }
-        }
-        else
-        {
-            Point center;
-            for (const auto& vertex : poly.vertices)
-                center = center + vertex.coordinates;
-            result.volume = poly.volume;
-            result.first = scaled<Mode>(center * Interval(.25L), poly.frame.exponent) * poly.volume;
-        }
-        return result;
-    }
-    Point pivot;
-    for (const auto& vertex : poly.vertices)
-        pivot = pivot + vertex.coordinates;
-    pivot = pivot * (Interval(1) / Interval(static_cast<long double>(poly.vertices.size())));
-    Accumulator<Mode> volume;
-    std::array<Accumulator<Mode>, 3> first;
-    for (const auto& face : poly.faces)
-        for (std::size_t i = 1; i + 1 < face.size(); ++i)
-        {
-            const auto& a = poly.vertices[face[0]].coordinates;
-            const auto& b = poly.vertices[face[i]].coordinates;
-            const auto& c = poly.vertices[face[i + 1]].coordinates;
-            const auto determinant = dot<Mode>(a - pivot, cross<Mode>(b - pivot, c - pivot));
-            volume.add(determinant);
-            if (moments)
-            {
-                const auto weighted = (pivot + a + b + c) * determinant;
-                for (std::size_t axis = 0; axis < 3; ++axis)
-                    first[axis].add(weighted[axis]);
-            }
-        }
-    Integrals result;
-    result.volume =
-        moments ? Interval(poly.volume) : scaled<Mode>(volume.result() / Interval(6), 3 * poly.frame.exponent);
-    if (moments)
-        for (std::size_t axis = 0; axis < 3; ++axis)
-            result.first[axis] = scaled<Mode>(first[axis].result() / Interval(24), 4 * poly.frame.exponent);
-    return result;
-}
-
-template<ArithmeticMode Mode> Integrals integrate(const BoundedConvexGeometry::Impl& poly, bool moments)
-{
-    static_assert(Mode == kernel_mode);
-    if constexpr (ordinary())
-        return integrate_ordinary<Mode>(poly, moments);
     if (poly.vertices.size() == 4 && poly.faces.size() == 4 &&
         std::all_of(poly.faces.begin(), poly.faces.end(), [](const auto& face) { return face.size() == 3; }))
     {
@@ -98,8 +33,8 @@ template<ArithmeticMode Mode> Integrals integrate(const BoundedConvexGeometry::I
                     const auto candidate = dot<Mode>(a, cross<Mode>(b, c));
                     if (determinant)
                     {
-                        const auto lo = std::max(determinant->lo, candidate.lo);
-                        const auto hi = std::min(determinant->hi, candidate.hi);
+                        const auto lo = std::max(determinant->lo(), candidate.lo());
+                        const auto hi = std::min(determinant->hi(), candidate.hi());
                         if (lo > hi)
                             reject("equivalent tetrahedron volume enclosures are disjoint.");
                         determinant = Interval(lo, hi);
@@ -150,18 +85,18 @@ template<ArithmeticMode Mode> Integrals integrate(const BoundedConvexGeometry::I
     if (moments)
         for (std::size_t axis = 0; axis < 3; ++axis)
             sum.first[axis] = scaled<Mode>(first_sum[axis].result() / Interval(24), 4 * poly.frame.exponent);
-    if (!(sum.volume.lo > 0))
+    if (!(sum.volume.lo() > 0))
     {
         const auto common = [](Interval a, Interval b)
         {
-            const auto lo = std::max(a.lo, b.lo), hi = std::min(a.hi, b.hi);
+            const auto lo = std::max(a.lo(), b.lo()), hi = std::min(a.hi(), b.hi());
             if (lo > hi)
                 reject("equivalent polyhedral integral enclosures are disjoint.");
             return Interval(lo, hi);
         };
         // Thin clipped shells can lose the dependency of the shared mean
         // pivot. Retry with each actual vertex, bounded by the admitted vertex
-        // count and the same scalar-work cap. Ordinary positive enclosures do
+        // count and the same scalar-work cap. Already-positive enclosures do
         // not pay for these routes. Every route integrates the same shell.
         for (std::size_t anchor = 0; anchor < poly.vertices.size(); ++anchor)
         {
@@ -210,8 +145,8 @@ template<ArithmeticMode Mode> Integrals integrate(const BoundedConvexGeometry::I
         const auto box_moment = scaled<Mode>(interval_box<Mode>(poly.bounds), poly.frame.exponent) * poly.volume;
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
-            const auto lo = std::max(sum.first[axis].lo, box_moment[axis].lo);
-            const auto hi = std::min(sum.first[axis].hi, box_moment[axis].hi);
+            const auto lo = std::max(sum.first[axis].lo(), box_moment[axis].lo());
+            const auto hi = std::min(sum.first[axis].hi(), box_moment[axis].hi());
             if (lo > hi)
                 reject("convex moment bound contradicts its integral enclosure.");
             sum.first[axis] = Interval(lo, hi);
@@ -220,8 +155,7 @@ template<ArithmeticMode Mode> Integrals integrate(const BoundedConvexGeometry::I
     return sum;
 }
 
-template<ArithmeticMode Mode>
-void finish(BoundedConvexGeometry::Impl& poly, bool partition_proof, bool positive_construction)
+template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_proof, bool positive_construction)
 {
     static_assert(Mode == kernel_mode);
     if (poly.vertices.size() > std::min(poly.limits.maximum_vertices, active_work->limits.maximum_vertices) ||
@@ -261,12 +195,12 @@ void finish(BoundedConvexGeometry::Impl& poly, bool partition_proof, bool positi
     // in one local frame later, avoiding cancellation at large global origins.
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
-        auto lo = poly.vertices.front().coordinates[axis].lo;
-        auto hi = poly.vertices.front().coordinates[axis].hi;
+        auto lo = poly.vertices.front().coordinates[axis].lo();
+        auto hi = poly.vertices.front().coordinates[axis].hi();
         for (const auto& vertex : poly.vertices)
         {
-            lo = std::min(lo, vertex.coordinates[axis].lo);
-            hi = std::max(hi, vertex.coordinates[axis].hi);
+            lo = std::min(lo, vertex.coordinates[axis].lo());
+            hi = std::max(hi, vertex.coordinates[axis].hi());
         }
         poly.bounds[axis] = {lo, hi};
     }
@@ -275,17 +209,17 @@ void finish(BoundedConvexGeometry::Impl& poly, bool partition_proof, bool positi
     {
         ++statistics.volume_evaluations;
         poly.volume = integrate<Mode>(poly, false).volume;
-        if (!(poly.volume.lo > 0))
+        if (!(poly.volume.lo() > 0))
         {
-            if (ordinary() || !positive_construction)
+            if (!positive_construction)
                 reject("strictly positive volume cannot be established.");
-            if (!(poly.volume.hi > 0))
+            if (!(poly.volume.hi() > 0))
                 reject("positive construction contradicts its volume enclosure.");
             // Strict opposite signs on a full-dimensional parent prove
             // positive child interior. They do not supply a positive numeric
             // lower bound. Intersect only with the proved nonnegative domain;
             // retain the full upper uncertainty for every quantitative gate.
-            poly.volume = Interval(0, poly.volume.hi);
+            poly.volume = Interval(0, poly.volume.hi());
         }
     }
     ++statistics.constructions;
@@ -328,7 +262,7 @@ template<ArithmeticMode Mode> void validate_connected_boundary(std::size_t verte
 }
 
 template<ArithmeticMode Mode>
-std::shared_ptr<BoundedConvexGeometry::Impl> import(GeometryPoint origin, std::span<const BoundedPoint> vertices,
+std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const BoundedPoint> vertices,
     const std::vector<Face>& faces, BoundedGeometryLimits limits, bool authenticated_planarity,
     std::span<const std::shared_ptr<const BoundedPointProvenance>> identities)
 {
@@ -340,7 +274,7 @@ std::shared_ptr<BoundedConvexGeometry::Impl> import(GeometryPoint origin, std::s
         reject("invalid or excessive convex shell size.");
     for (const auto& face : faces)
         active_work->charge(face.size(), 4 * sizeof(std::size_t) + 4 * sizeof(void*));
-    auto result = std::make_shared<BoundedConvexGeometry::Impl>();
+    auto result = std::make_shared<StoredGeometry>();
     result->frame.origin = origin;
     result->reference_origin = origin;
     result->limits = limits;
@@ -350,7 +284,7 @@ std::shared_ptr<BoundedConvexGeometry::Impl> import(GeometryPoint origin, std::s
     {
         input.push_back(point<Mode>(vertex));
         for (const auto x : input.back())
-            extent = std::max({extent, std::abs(x.lo), std::abs(x.hi)});
+            extent = std::max({extent, std::abs(x.lo()), std::abs(x.hi())});
     }
     if (!(extent > 0))
         reject("degenerate shell extent.");
@@ -394,7 +328,7 @@ std::shared_ptr<BoundedConvexGeometry::Impl> import(GeometryPoint origin, std::s
         for (const auto index : face)
         {
             const auto& coordinate = result->vertices[index].coordinates;
-            if (!ordinary() && !authenticated_planarity && index != face[0] && index != face[second] &&
+            if (!authenticated_planarity && index != face[0] && index != face[second] &&
                 index != face[third] && !dot<Mode>(plane->normal, coordinate - plane->anchor).zero())
                 reject("face coplanarity unresolved; an enclosure containing zero is not coplanarity.");
             result->vertices[index].incident.push_back(plane);
@@ -418,10 +352,6 @@ std::shared_ptr<BoundedConvexGeometry::Impl> import(GeometryPoint origin, std::s
     {
         const auto& face = result->faces[f];
         const auto& plane = result->surfaces[f].plane;
-        // The native source already owns its convex face topology. Ordinary
-        // import does not re-prove its rounded coplanarity or winding.
-        if (ordinary() && authenticated_planarity)
-            continue;
         for (const auto& vertex : result->vertices)
             if (sign<Mode>(distance<Mode>(vertex, result->frame, plane)) > 0)
                 reject("shell is not convex/outward.");
@@ -436,13 +366,13 @@ std::shared_ptr<BoundedConvexGeometry::Impl> import(GeometryPoint origin, std::s
                     continue;
                 const auto orientation =
                     dot<Mode>(cross<Mode>(b - a, result->vertices[index].coordinates - a), plane->normal);
-                if (orientation.hi < 0)
+                if (orientation.hi() < 0)
                     reject("nonconvex face loop.");
-                if (orientation.lo < 0 && !orientation.zero())
+                if (orientation.lo() < 0 && !orientation.zero())
                 {
                     // Source authentication establishes planar convex loops;
                     // arbitrary bounded public shells need a decisive turn.
-                    if (!ordinary() && !authenticated_planarity)
+                    if (!authenticated_planarity)
                         reject("face convexity unresolved.");
                 }
             }
@@ -492,7 +422,7 @@ template<ArithmeticMode Mode> long double ValueKernel<Mode>::lower() const
     if (arithmetic_mode != ArithmeticMode::BoundedCertification)
         reject("ordinary values do not carry certified bounds.");
     Operation scope(mode_limits(arithmetic_mode));
-    return enclosure<Mode>(*this).lo;
+    return enclosure<Mode>(*this).lo();
 }
 
 template<ArithmeticMode Mode> long double ValueKernel<Mode>::upper() const
@@ -501,24 +431,16 @@ template<ArithmeticMode Mode> long double ValueKernel<Mode>::upper() const
     if (arithmetic_mode != ArithmeticMode::BoundedCertification)
         reject("ordinary values do not carry certified bounds.");
     Operation scope(mode_limits(arithmetic_mode));
-    return enclosure<Mode>(*this).hi;
+    return enclosure<Mode>(*this).hi();
 }
 
 template<ArithmeticMode Mode> double ValueKernel<Mode>::as_double() const
 {
     static_assert(Mode == kernel_mode);
     Operation scope(mode_limits(arithmetic_mode));
-    if constexpr (ordinary())
-    {
-        finite(value);
-        const auto result = static_cast<double>(value);
-        if (!std::isfinite(result) || (result == 0 && value != 0))
-            reject("ordinary value outside publication range.");
-        return result;
-    }
     const auto interval = enclosure<Mode>(*this);
     const auto result = static_cast<double>(value);
-    if (!std::isfinite(result) || (result == 0 && (interval.lo != 0 || interval.hi != 0)))
+    if (!std::isfinite(result) || (result == 0 && (interval.lo() != 0 || interval.hi() != 0)))
         reject("publication would lose a nonzero/uncertain amount.");
     return result;
 }
@@ -535,7 +457,7 @@ template<ArithmeticMode Mode> bool ValueKernel<Mode>::relative_error_at_most(lon
     if (target == 0)
         return error.zero();
     const auto allowance = Interval(std::abs(target)) * Interval(tolerance);
-    return std::max(std::abs(error.lo), std::abs(error.hi)) <= allowance.lo;
+    return std::max(std::abs(error.lo()), std::abs(error.hi())) <= allowance.lo();
 }
 
 template<ArithmeticMode Mode> bool bounded_points_identical(const BoundedPoint& a, const BoundedPoint& b)
@@ -569,13 +491,14 @@ template<ArithmeticMode Mode> BoundedGeometryValue bounded_orientation(const std
     // nonzero-width coordinate enclosures from unrelated constructions.
     for (std::size_t i = 0; i < 4; ++i)
         for (std::size_t j = 0; j < i; ++j)
-            if (same<Mode>(p[i], p[j]) && std::all_of(p[i].begin(), p[i].end(), [](auto x) { return x.lo == x.hi; }))
+            if (same<Mode>(p[i], p[j]) &&
+                std::all_of(p[i].begin(), p[i].end(), [](auto x) { return x.lo() == x.hi(); }))
                 return bounded<Mode>(Interval{});
     Point a = p[1] - p[0], b = p[2] - p[0], c = p[3] - p[0];
     long double extent = 0;
     for (const auto* vector : {&a, &b, &c})
         for (const auto x : *vector)
-            extent = std::max({extent, std::abs(x.lo), std::abs(x.hi)});
+            extent = std::max({extent, std::abs(x.lo()), std::abs(x.hi())});
     if (extent == 0)
         return bounded<Mode>(Interval{});
     int exponent;
@@ -823,8 +746,8 @@ template<ArithmeticMode Mode> std::array<BoundedGeometryValue, 3> GeometryKernel
         for (const auto& vertex : impl_->vertices)
         {
             const auto x = vertex.coordinates[axis];
-            minimum = {std::min(minimum.lo, x.lo), std::min(minimum.hi, x.hi)};
-            maximum = {std::max(maximum.lo, x.lo), std::max(maximum.hi, x.hi)};
+            minimum = {std::min(minimum.lo(), x.lo()), std::min(minimum.hi(), x.hi())};
+            maximum = {std::max(maximum.lo(), x.lo()), std::max(maximum.hi(), x.hi())};
         }
         result[axis] = bounded<Mode>(scaled<Mode>(maximum - minimum, impl_->frame.exponent));
     }
@@ -844,21 +767,18 @@ BoundedSupport GeometryKernel<Mode>::support(GeometryPoint normal, GeometryPoint
     {
         const auto projection =
             dot<Mode>(point<Mode>(normal), scaled<Mode>(vertex.coordinates, impl_->frame.exponent) + offset);
-        minimum =
-            minimum ? Interval(std::min(minimum->lo, projection.lo), std::min(minimum->hi, projection.hi)) : projection;
-        maximum =
-            maximum ? Interval(std::max(maximum->lo, projection.lo), std::max(maximum->hi, projection.hi)) : projection;
+        minimum = minimum ? Interval(std::min(minimum->lo(), projection.lo()), std::min(minimum->hi(), projection.hi()))
+                          : projection;
+        maximum = maximum ? Interval(std::max(maximum->lo(), projection.lo()), std::max(maximum->hi(), projection.hi()))
+                          : projection;
     }
     return {bounded<Mode>(*minimum), bounded<Mode>(*maximum)};
 }
 
-template /** Ordinary scalar cone integration. No enclosure intersections or certificate retries. */
-    Integrals
-    integrate_ordinary<kernel_mode>(const BoundedConvexGeometry::Impl& poly, bool moments);
-template Integrals integrate<kernel_mode>(const BoundedConvexGeometry::Impl& poly, bool moments);
-template void finish<kernel_mode>(BoundedConvexGeometry::Impl& poly, bool partition_proof, bool positive_construction);
+template Integrals integrate<kernel_mode>(const StoredGeometry& poly, bool moments);
+template void finish<kernel_mode>(StoredGeometry& poly, bool partition_proof, bool positive_construction);
 template void validate_connected_boundary<kernel_mode>(std::size_t vertex_count, const std::vector<Face>& faces);
-template std::shared_ptr<BoundedConvexGeometry::Impl> import<kernel_mode>(GeometryPoint origin,
+template std::shared_ptr<StoredGeometry> import<kernel_mode>(GeometryPoint origin,
     std::span<const BoundedPoint> vertices, const std::vector<Face>& faces, BoundedGeometryLimits limits,
     bool authenticated_planarity, std::span<const std::shared_ptr<const BoundedPointProvenance>> identities);
 template BoundedPoint bounded_point_average<kernel_mode>(std::span<const BoundedPoint> vertices);
@@ -889,5 +809,5 @@ template GeometryPoint GeometryKernel<kernel_mode>::centroid() const;
 template std::vector<BoundedPoint> GeometryKernel<kernel_mode>::local_points() const;
 template std::array<BoundedGeometryValue, 3> GeometryKernel<kernel_mode>::axis_spans() const;
 template BoundedSupport GeometryKernel<kernel_mode>::support(GeometryPoint normal, GeometryPoint anchor) const;
-} // namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+} // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail

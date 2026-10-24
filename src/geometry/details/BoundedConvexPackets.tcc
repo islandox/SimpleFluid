@@ -1,10 +1,10 @@
-/** Compiled finite geometry kernels. Included only by the owning implementation unit.
- * Namespace operators bind shared storage to the fixed arithmetic policy; Mode
- * templates retain the compiled implementation boundary across geometry units.
+/** Compiled certification geometry kernels. Included only by the owning implementation unit.
+ * Directed interval arithmetic and retained certificates remain confined to this
+ * provider; Mode templates retain the compiled implementation boundary.
  */
 namespace SimpleFluid::Meshes::bounded_geometry_detail
 {
-namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+namespace certification_kernel SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode>
 std::vector<char> GeometryKernel<Mode>::encode(
@@ -14,7 +14,7 @@ std::vector<char> GeometryKernel<Mode>::encode(
     Operation scope(impl_->limits);
     if (impl_->partition_proof_only)
         reject("private partition witness cannot be serialized.");
-    if (!(impl_->volume.lo > 0))
+    if (!(impl_->volume.lo() > 0))
         reject("numerical packet requires a quantitative positive-volume certificate.");
     NumericalWriter<Mode> writer(std::min(byte_budget, impl_->limits.byte_budget));
     writer.word(0x5346424f554e4431ULL);
@@ -96,7 +96,7 @@ BoundedConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
         if (!source)
             reject("null authenticated source registry entry.");
         require_mode(limits.arithmetic_mode, source->arithmetic_mode());
-        for (const auto& vertex : source->impl_->vertices)
+        for (const auto& vertex : checked_geometry_storage<Mode>(source->impl_)->vertices)
             for (const auto& plane : vertex.incident)
                 for (const auto& key : plane->authorities)
                 {
@@ -164,7 +164,7 @@ BoundedConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
                 scaled<Mode>(point<Mode>(h.anchor) - point<Mode>(plane->frame.origin), -plane->frame.exponent);
             const auto expected_offset = scaled<Mode>(Interval(h.offset), -plane->frame.exponent);
             if (!same<Mode>(plane->normal, expected_normal) || !same<Mode>(plane->anchor, expected_anchor) ||
-                plane->offset.lo != expected_offset.lo || plane->offset.hi != expected_offset.hi)
+                plane->offset.lo() != expected_offset.lo() || plane->offset.hi() != expected_offset.hi())
                 reject("plane expression disagrees with its original input provenance.");
             plane->input = h;
         }
@@ -176,11 +176,11 @@ BoundedConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
             const auto& original = registry_planes.at(key);
             const auto reference_anchor = transform<Mode>(original->anchor, original->frame, plane->frame);
             const auto offset_residual = dot<Mode>(plane->normal, reference_anchor - plane->anchor) - plane->offset;
-            if (offset_residual.lo > 0 || offset_residual.hi < 0)
+            if (offset_residual.lo() > 0 || offset_residual.hi() < 0)
                 reject("numerical source support expression differs from its registry.");
             const auto parallel = cross<Mode>(plane->normal, original->normal);
             for (const auto component : parallel)
-                if (component.lo > 0 || component.hi < 0)
+                if (component.lo() > 0 || component.hi() < 0)
                     reject("numerical source normal differs from its registry.");
         }
         planes.push_back(std::move(plane));
@@ -205,14 +205,14 @@ BoundedConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
         for (const auto& plane : vertex.incident)
         {
             const auto raw = raw_distance<Mode>(vertex, result->frame, plane);
-            if (!ordinary() && (raw.lo > 0 || raw.hi < 0))
+            if (raw.lo() > 0 || raw.hi() < 0)
                 reject("numerical vertex misses its claimed original construction support.");
         }
         for (const auto& key : vertex.authorities)
         {
             const auto& original = registry_planes.at(key);
             const auto raw = raw_distance<Mode>(vertex, result->frame, original);
-            if (!ordinary() && (raw.lo > 0 || raw.hi < 0))
+            if (raw.lo() > 0 || raw.hi() < 0)
                 reject("numerical point claims a foreign source support incidence.");
         }
         result->vertices.push_back(std::move(vertex));
@@ -260,23 +260,21 @@ BoundedConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     {
         const auto& surface = result->surfaces[f];
         for (const auto& vertex : result->vertices)
-            if (!ordinary() &&
-                sign<Mode>(distance<Mode>(vertex, result->frame, surface.plane) * Interval(surface.orientation)) > 0)
+            if (sign<Mode>(distance<Mode>(vertex, result->frame, surface.plane) * Interval(surface.orientation)) > 0)
                 reject("numerical packet violates convex containment.");
         const auto& face = result->faces[f];
         Point normal;
         for (std::size_t j = 1; j + 1 < face.size(); ++j)
             normal = normal + cross<Mode>(result->vertices[face[j]].coordinates - result->vertices[face[0]].coordinates,
                                   result->vertices[face[j + 1]].coordinates - result->vertices[face[0]].coordinates);
-        if (!ordinary() && sign<Mode>(dot<Mode>(normal, surface.plane->normal) * Interval(surface.orientation)) <= 0)
+        if (sign<Mode>(dot<Mode>(normal, surface.plane->normal) * Interval(surface.orientation)) <= 0)
             reject("numerical packet face winding is not outward.");
         for (std::size_t j = 0; j < face.size(); ++j)
         {
             const auto& a = result->vertices[face[j]].coordinates;
             const auto& b = result->vertices[face[(j + 1) % face.size()]].coordinates;
             for (const auto index : face)
-                if (!ordinary() &&
-                    dot<Mode>(cross<Mode>(b - a, result->vertices[index].coordinates - a), normal).hi < 0)
+                if (dot<Mode>(cross<Mode>(b - a, result->vertices[index].coordinates - a), normal).hi() < 0)
                     reject("numerical packet contains a nonconvex face loop.");
         }
     }
@@ -316,8 +314,8 @@ template<ArithmeticMode Mode> void NumericalWriter<Mode>::real(long double x)
 template<ArithmeticMode Mode> void NumericalWriter<Mode>::interval(Interval x)
 {
     static_assert(Mode == kernel_mode);
-    real(x.lo);
-    real(x.hi);
+    real(x.lo());
+    real(x.hi());
 }
 
 template<ArithmeticMode Mode> void NumericalWriter<Mode>::coordinates(const Point& p)
@@ -374,8 +372,7 @@ template<ArithmeticMode Mode> long double NumericalReader<Mode>::real()
     const auto negative = word();
     const auto exponent_word = word();
     const auto exponent = std::bit_cast<std::int64_t>(exponent_word);
-    const auto minimum_exponent =
-        std::numeric_limits<long double>::min_exponent - (ordinary() ? std::numeric_limits<long double>::digits : 1);
+    const auto minimum_exponent = std::numeric_limits<long double>::min_exponent - 1;
     if (negative > 1 || exponent < minimum_exponent || exponent > std::numeric_limits<long double>::max_exponent)
         reject("invalid numerical packet scalar exponent/sign.");
     constexpr unsigned chunks = (std::numeric_limits<long double>::digits + 31) / 32;
@@ -398,8 +395,6 @@ template<ArithmeticMode Mode> Interval NumericalReader<Mode>::interval()
 {
     static_assert(Mode == kernel_mode);
     const auto lo = real(), hi = real();
-    if (ordinary() && lo != hi)
-        reject("ordinary packet contains an interval certificate.");
     return {lo, hi};
 }
 
@@ -464,5 +459,5 @@ template Interval NumericalReader<kernel_mode>::interval();
 template Frame NumericalReader<kernel_mode>::frame();
 template std::vector<BoundedPlaneAuthority> NumericalReader<kernel_mode>::authorities(
     const std::set<BoundedPlaneAuthority>& registry, BoundedGeometryLimits limits);
-} // namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+} // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail

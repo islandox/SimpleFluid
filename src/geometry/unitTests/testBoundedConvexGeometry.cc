@@ -12,6 +12,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <type_traits>
 
 namespace
 {
@@ -39,42 +40,54 @@ template<ArithmeticMode Mode> void fixed_policy_scalar_contract()
 {
     namespace arithmetic = SimpleFluid::Meshes::bounded_geometry_detail;
     using Policy = arithmetic::ArithmeticPolicy<Mode>;
-    using FixedInterval = SimpleFluid::detail::directed_fp::Interval<Policy>;
-    static_assert(Policy::ordinary() == (Mode == ArithmeticMode::Ordinary));
+    using Number = std::conditional_t<Mode == ArithmeticMode::Ordinary,
+        SimpleFluid::detail::ordinary_fp::Scalar<Policy>, SimpleFluid::detail::directed_fp::Interval<Policy>>;
+    using Storage = arithmetic::StoredValue<Mode>;
     auto limits = geometry_limits(Mode);
     limits.maximum_operations = 1;
     arithmetic::Operation scope(limits);
-
-    // Rebinding immutable shared storage copies all three fields verbatim;
-    // constructing a kernel view must not reconstruct or widen its intervals.
-    arithmetic::Interval stored;
-    stored.lo = 2;
-    stored.hi = 4;
-    stored.estimate = 2.75L;
-    const FixedInterval rebound(stored);
-    EXPECT_EQ(rebound.lo, stored.lo);
-    EXPECT_EQ(rebound.hi, stored.hi);
-    EXPECT_EQ(rebound.estimate, stored.estimate);
-    const arithmetic::Interval roundtrip(rebound);
-    EXPECT_EQ(roundtrip.lo, stored.lo);
-    EXPECT_EQ(roundtrip.hi, stored.hi);
-    EXPECT_EQ(roundtrip.estimate, stored.estimate);
+    Storage stored(2.75L);
+    if constexpr (Mode == ArithmeticMode::BoundedCertification)
+    {
+        stored = Storage(2, 4);
+        stored.estimate = 2.75L;
+    }
+    const Number rebound(stored);
+    const Storage roundtrip(rebound);
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        EXPECT_EQ(rebound.value, stored.value);
+        EXPECT_EQ(roundtrip.value, stored.value);
+    }
+    else
+    {
+        EXPECT_EQ(rebound.lo(), stored.lo());
+        EXPECT_EQ(rebound.hi(), stored.hi());
+        EXPECT_EQ(rebound.estimate, stored.estimate);
+        EXPECT_EQ(roundtrip.lo(), stored.lo());
+        EXPECT_EQ(roundtrip.hi(), stored.hi());
+        EXPECT_EQ(roundtrip.estimate, stored.estimate);
+    }
     EXPECT_EQ(scope.work.operations, 0u);
-
-    const auto sum = FixedInterval(1) + FixedInterval(2);
-    EXPECT_EQ(sum.lo, 3);
-    EXPECT_EQ(sum.hi, 3);
-    EXPECT_EQ(sum.estimate, 3);
+    const auto sum = Number(1) + Number(2);
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        EXPECT_EQ(sum.value, 3);
+    else
+    {
+        EXPECT_EQ(sum.lo(), 3);
+        EXPECT_EQ(sum.hi(), 3);
+        EXPECT_EQ(sum.estimate, 3);
+    }
     EXPECT_EQ(scope.work.operations, 1u);
     EXPECT_EQ(
         bounded_geometry_statistics().interval_operations, Mode == ArithmeticMode::BoundedCertification ? 1u : 0u);
     EXPECT_EQ(
         bounded_geometry_statistics().floating_operations, Mode == ArithmeticMode::BoundedCertification ? 2u : 1u);
-    EXPECT_THROW((void) (sum + FixedInterval(1)), std::invalid_argument);
+    EXPECT_THROW((void) (sum + Number(1)), std::invalid_argument);
     EXPECT_EQ(scope.work.operations, 2u);
 }
 
-TEST(BoundedConvexGeometryTest, FixedArithmeticPoliciesPreserveSharedStorageAndScalarCaps)
+TEST(BoundedConvexGeometryTest, FixedArithmeticPoliciesPreserveTypedStorageAndScalarCaps)
 {
     if (!bounded_geometry_environment())
         GTEST_SKIP() << "Bounded wider floating-point environment unavailable.";
@@ -90,6 +103,55 @@ TEST(BoundedConvexGeometryTest, FixedArithmeticPoliciesPreserveSharedStorageAndS
     ASSERT_GT(subnormal, 0);
     EXPECT_NO_THROW(Ordinary::finite(subnormal));
     EXPECT_THROW(Certified::finite(subnormal), std::invalid_argument);
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryStorageRetainsOneScalarAcrossGeometryAndPlanarRecords)
+{
+    namespace arithmetic = SimpleFluid::Meshes::bounded_geometry_detail;
+    constexpr auto ordinary_mode = ArithmeticMode::Ordinary;
+    constexpr auto certified_mode = ArithmeticMode::BoundedCertification;
+    using Ordinary = arithmetic::StoredValue<ordinary_mode>;
+    using Certified = arithmetic::StoredValue<certified_mode>;
+    static_assert(sizeof(Ordinary) == sizeof(long double));
+    static_assert(sizeof(Certified) == 3 * sizeof(long double));
+    static_assert(!std::is_constructible_v<Ordinary, Certified>);
+    static_assert(!std::is_constructible_v<Certified, Ordinary>);
+    static_assert(sizeof(arithmetic::StoredPoint<ordinary_mode>) == 3 * sizeof(long double));
+    static_assert(sizeof(arithmetic::StoredPoint<certified_mode>) == 9 * sizeof(long double));
+    static_assert(sizeof(arithmetic::StoredVertex<ordinary_mode>) < sizeof(arithmetic::StoredVertex<certified_mode>));
+    static_assert(sizeof(arithmetic::StoredPlane<ordinary_mode>) < sizeof(arithmetic::StoredPlane<certified_mode>));
+    static_assert(
+        sizeof(arithmetic::StoredIntegrals<ordinary_mode>) < sizeof(arithmetic::StoredIntegrals<certified_mode>));
+    static_assert(
+        sizeof(arithmetic::StoredPlanarVertex<ordinary_mode>) < sizeof(arithmetic::StoredPlanarVertex<certified_mode>));
+    static_assert(
+        sizeof(arithmetic::GeometryStorage<ordinary_mode>) < sizeof(arithmetic::GeometryStorage<certified_mode>));
+    static_assert(!std::is_constructible_v<Ordinary, long double, long double>);
+    const auto ordinary_storage = std::make_shared<arithmetic::GeometryStorage<ordinary_mode>>();
+    const auto certified_storage = std::make_shared<arithmetic::GeometryStorage<certified_mode>>();
+    const std::shared_ptr<const BoundedConvexGeometry::Impl> ordinary_base = ordinary_storage;
+    const std::shared_ptr<const BoundedConvexGeometry::Impl> certified_base = certified_storage;
+    EXPECT_EQ(arithmetic::checked_geometry_storage<ordinary_mode>(ordinary_base).get(), ordinary_storage.get());
+    EXPECT_EQ(arithmetic::checked_geometry_storage<certified_mode>(certified_base).get(), certified_storage.get());
+    EXPECT_THROW((void) arithmetic::checked_geometry_storage<certified_mode>(ordinary_base), std::invalid_argument);
+    EXPECT_THROW((void) arithmetic::checked_geometry_storage<ordinary_mode>(certified_base), std::invalid_argument);
+
+    if (!bounded_geometry_environment())
+        GTEST_SKIP() << "Bounded wider floating-point environment unavailable.";
+    const auto ordinary = BoundedConvexGeometry::box({0, 0, 0}, {1, 1, 1}, geometry_limits(ordinary_mode));
+    const auto certified = cube();
+    EXPECT_LT(ordinary->storage_bytes(), certified->storage_bytes());
+    EXPECT_EQ(ordinary->volume().value, 1);
+    encloses(certified->volume(), 1);
+    const BoundedGeometryPacketContext context{{127, 131, 137, 139}};
+    const std::array registry{ordinary};
+    const auto restored =
+        BoundedConvexGeometry::decode(ordinary->encode(context), context, registry, geometry_limits(ordinary_mode));
+    EXPECT_EQ(restored->volume().value, ordinary->volume().value);
+    EXPECT_EQ(restored->arithmetic_mode(), ordinary_mode);
+    const auto moments = restored->moments();
+    for (const auto& component : moments.first_moment)
+        EXPECT_EQ(component.value, .5L);
 }
 
 TEST(BoundedConvexGeometryTest, FixedModeValueQueriesMatchRuntimeResultsAndCounters)

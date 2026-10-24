@@ -1,10 +1,10 @@
-/** Compiled finite geometry kernels. Included only by the owning implementation unit.
- * Namespace operators bind shared storage to the fixed arithmetic policy; Mode
- * templates retain the compiled implementation boundary across geometry units.
+/** Compiled certification geometry kernels. Included only by the owning implementation unit.
+ * Directed interval arithmetic and retained certificates remain confined to this
+ * provider; Mode templates retain the compiled implementation boundary.
  */
 namespace SimpleFluid::Meshes::bounded_geometry_detail
 {
-namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+namespace certification_kernel SIMPLEFLUID_LOCAL
 {
 template<ArithmeticMode Mode> long double directed_add(long double a, long double b, bool up)
 {
@@ -27,8 +27,6 @@ template<ArithmeticMode Mode> long double directed_divide(long double a, long do
 template<ArithmeticMode Mode> Interval enclosure(BoundedGeometryValue a)
 {
     static_assert(Mode == kernel_mode);
-    if constexpr (ordinary())
-        return Interval(a.value);
     if (!(a.absolute_error >= 0))
         reject("invalid input error.");
     return Interval(a.value) + Interval(-a.absolute_error, a.absolute_error);
@@ -37,11 +35,10 @@ template<ArithmeticMode Mode> Interval enclosure(BoundedGeometryValue a)
 template<ArithmeticMode Mode> BoundedGeometryValue bounded(Interval a)
 {
     static_assert(Mode == kernel_mode);
-    if constexpr (ordinary())
-        return {a.estimate, 0, ArithmeticMode::Ordinary};
-    const auto middle =
-        std::isfinite(a.estimate) && a.estimate >= a.lo && a.estimate <= a.hi ? a.estimate : std::midpoint(a.lo, a.hi);
-    const auto error = std::max(directed_add<Mode>(middle, -a.lo, true), directed_add<Mode>(a.hi, -middle, true));
+    const auto middle = std::isfinite(a.estimate) && a.estimate >= a.lo() && a.estimate <= a.hi()
+                            ? a.estimate
+                            : std::midpoint(a.lo(), a.hi());
+    const auto error = std::max(directed_add<Mode>(middle, -a.lo(), true), directed_add<Mode>(a.hi(), -middle, true));
     return {middle, error};
 }
 
@@ -112,7 +109,7 @@ template<ArithmeticMode Mode> bool same(const Point& a, const Point& b)
 {
     static_assert(Mode == kernel_mode);
     for (std::size_t axis = 0; axis < 3; ++axis)
-        if (a[axis].lo != b[axis].lo || a[axis].hi != b[axis].hi)
+        if (a[axis].lo() != b[axis].lo() || a[axis].hi() != b[axis].hi())
             return false;
     return true;
 }
@@ -120,15 +117,15 @@ template<ArithmeticMode Mode> bool same(const Point& a, const Point& b)
 template<ArithmeticMode Mode> bool nonzero(const Point& a)
 {
     static_assert(Mode == kernel_mode);
-    return std::any_of(a.begin(), a.end(), [](auto x) { return x.lo > 0 || x.hi < 0; });
+    return std::any_of(a.begin(), a.end(), [](auto x) { return x.lo() > 0 || x.hi() < 0; });
 }
 
 template<ArithmeticMode Mode> int sign(Interval a)
 {
     static_assert(Mode == kernel_mode);
-    if (a.lo > 0)
+    if (a.lo() > 0)
         return 1;
-    if (a.hi < 0)
+    if (a.hi() < 0)
         return -1;
     if (a.zero())
         return 0;
@@ -150,20 +147,10 @@ template<ArithmeticMode Mode> CoordinateBox transform(const CoordinateBox& box, 
     CoordinateBox result;
     for (std::size_t axis = 0; axis < 3; ++axis)
     {
-        if constexpr (ordinary())
-        {
-            const auto shift = Interval(from.origin[axis]) - Interval(to.origin[axis]);
-            const auto lo = scaled<Mode>(scaled<Mode>(Interval(box[axis].lo), from.exponent) + shift, -to.exponent);
-            const auto hi = scaled<Mode>(scaled<Mode>(Interval(box[axis].hi), from.exponent) + shift, -to.exponent);
-            result[axis] = {lo.estimate, hi.estimate};
-        }
-        else
-        {
-            Point point_box;
-            point_box[axis] = Interval(box[axis].lo, box[axis].hi);
-            const auto converted = transform<Mode>(point_box, from, to)[axis];
-            result[axis] = {converted.lo, converted.hi};
-        }
+        Point point_box;
+        point_box[axis] = Interval(box[axis].lo, box[axis].hi);
+        const auto converted = transform<Mode>(point_box, from, to)[axis];
+        result[axis] = {converted.lo(), converted.hi()};
     }
     return result;
 }
@@ -179,11 +166,10 @@ template<ArithmeticMode Mode> BoundedPoint converted_point(const BoundedPoint& i
     static_assert(Mode == kernel_mode);
     if (input.arithmetic_mode == ArithmeticMode::Exact || mode == ArithmeticMode::Exact)
         reject("Exact arithmetic is not a finite geometry mode.");
-    if (input.arithmetic_mode == mode)
-        return input;
-    if (mode != ArithmeticMode::Ordinary)
+    require_mode(mode, Mode);
+    if (input.arithmetic_mode != mode)
         reject("ordinary point cannot be upgraded to a bounded certificate.");
-    return BoundedPoint(input.value, {}, mode); // Explicit conversion drops provenance and radii.
+    return input;
 }
 
 template<ArithmeticMode Mode> Interval raw_distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane)
@@ -212,9 +198,7 @@ template<ArithmeticMode Mode> Interval distance(const Vertex& vertex, const Fram
             if (original->input && matching_input<Mode>(*original->input, *plane->input))
                 return Interval{}; // The identical original expression, not a rounded plane fit.
     auto result = raw_distance<Mode>(vertex, frame, plane);
-    if constexpr (ordinary())
-        return result;
-    if (result.lo > 0 || result.hi < 0 || result.zero())
+    if (result.lo() > 0 || result.hi() < 0 || result.zero())
         return result;
     const auto anchor = transform<Mode>(plane->anchor, plane->frame, frame);
     const auto offset = scaled<Mode>(plane->offset, plane->frame.exponent - frame.exponent);
@@ -225,7 +209,7 @@ template<ArithmeticMode Mode> Interval distance(const Vertex& vertex, const Fram
         for (std::size_t candidate = 0; candidate < 3; ++candidate)
         {
             const auto n = original->normal[candidate];
-            const auto magnitude = n.lo > 0 ? n.lo : n.hi < 0 ? -n.hi : 0;
+            const auto magnitude = n.lo() > 0 ? n.lo() : n.hi() < 0 ? -n.hi() : 0;
             if (magnitude > largest)
             {
                 axis = candidate;
@@ -248,11 +232,11 @@ template<ArithmeticMode Mode> Interval distance(const Vertex& vertex, const Fram
                 reduced = reduced + (plane->normal[other] - ratio * original->normal[other]) *
                                         (vertex.coordinates[other] - anchor[other]);
         reduced = scaled<Mode>(reduced, frame.exponent - plane->frame.exponent);
-        const auto lo = std::max(result.lo, reduced.lo), hi = std::min(result.hi, reduced.hi);
+        const auto lo = std::max(result.lo(), reduced.lo()), hi = std::min(result.hi(), reduced.hi());
         if (lo > hi)
             reject("retained incident equation gives an inconsistent support residual.");
         result = Interval(lo, hi);
-        if (result.lo > 0 || result.hi < 0 || result.zero())
+        if (result.lo() > 0 || result.hi() < 0 || result.zero())
             return result;
     }
     return result;
@@ -261,8 +245,6 @@ template<ArithmeticMode Mode> Interval distance(const Vertex& vertex, const Fram
 template<ArithmeticMode Mode> void tighten_incident_coordinates(Vertex& vertex, const Frame& frame)
 {
     static_assert(Mode == kernel_mode);
-    if constexpr (ordinary())
-        return;
     // Each retained incidence is an equation of the original construction.
     // Intersect its interval solution with the existing coordinate enclosure;
     // this propagates shared constraints without snapping a rounded point or
@@ -278,14 +260,14 @@ template<ArithmeticMode Mode> void tighten_incident_coordinates(Vertex& vertex, 
             for (std::size_t candidate = 0; candidate < 3; ++candidate)
             {
                 const auto n = plane->normal[candidate];
-                const auto magnitude = n.lo > 0 ? n.lo : n.hi < 0 ? -n.hi : 0;
+                const auto magnitude = n.lo() > 0 ? n.lo() : n.hi() < 0 ? -n.hi() : 0;
                 if (magnitude > largest)
                 {
                     axis = candidate;
                     largest = magnitude;
                 }
             }
-            if (axis == 3 || vertex.coordinates[axis].lo == vertex.coordinates[axis].hi)
+            if (axis == 3 || vertex.coordinates[axis].lo() == vertex.coordinates[axis].hi())
                 continue;
             const auto anchor = transform<Mode>(plane->anchor, plane->frame, frame);
             auto rhs = scaled<Mode>(plane->offset, plane->frame.exponent - frame.exponent);
@@ -294,10 +276,10 @@ template<ArithmeticMode Mode> void tighten_incident_coordinates(Vertex& vertex, 
                     rhs = rhs - plane->normal[other] * (vertex.coordinates[other] - anchor[other]);
             const auto solved = anchor[axis] + rhs / plane->normal[axis];
             auto& coordinate = vertex.coordinates[axis];
-            const auto lo = std::max(coordinate.lo, solved.lo), hi = std::min(coordinate.hi, solved.hi);
+            const auto lo = std::max(coordinate.lo(), solved.lo()), hi = std::min(coordinate.hi(), solved.hi());
             if (lo > hi)
                 reject("retained incident equations have inconsistent coordinate enclosures.");
-            if (lo != coordinate.lo || hi != coordinate.hi)
+            if (lo != coordinate.lo() || hi != coordinate.hi())
             {
                 coordinate = Interval(lo, hi);
                 changed = true;
@@ -311,19 +293,12 @@ template<ArithmeticMode Mode> void tighten_incident_coordinates(Vertex& vertex, 
 template<ArithmeticMode Mode> Interval square_root(Interval x)
 {
     static_assert(Mode == kernel_mode);
-    if constexpr (ordinary())
-    {
-        if (x.estimate < 0)
-            reject("negative square root in ordinary geometry.");
-        operation();
-        return Interval(std::sqrt(x.estimate));
-    }
-    if (x.lo < 0)
+    if (x.lo() < 0)
         reject("area square root is unresolved.");
-    const auto lo = std::sqrt(x.lo), hi = std::sqrt(x.hi);
+    const auto lo = std::sqrt(x.lo()), hi = std::sqrt(x.hi());
     finite(lo);
     finite(hi);
-    if (x.hi == 0)
+    if (x.hi() == 0)
         return Interval{};
     if (lo == 0)
         reject("positive area below wider-FP range.");
@@ -347,8 +322,6 @@ template<ArithmeticMode Mode> Interval Accumulator<Mode>::result() const
     static_assert(Mode == kernel_mode);
     auto result = enclosure;
     result.estimate = sum + correction;
-    if constexpr (ordinary())
-        return Interval(result.estimate);
     return result;
 }
 
@@ -376,5 +349,5 @@ template void tighten_incident_coordinates<kernel_mode>(Vertex& vertex, const Fr
 template Interval square_root<kernel_mode>(Interval x);
 template void Accumulator<kernel_mode>::add(Interval term);
 template Interval Accumulator<kernel_mode>::result() const;
-} // namespace SIMPLEFLUID_GEOMETRY_KERNEL SIMPLEFLUID_LOCAL
+} // namespace certification_kernel SIMPLEFLUID_LOCAL
 } // namespace SimpleFluid::Meshes::bounded_geometry_detail
