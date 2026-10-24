@@ -463,7 +463,7 @@ TEST(PlanarALEMeshMotionMultiRankTest, PartitionFaceFluxIsConsistentAndTargetsAr
     for (size_t local = 0; local < mesh->num_faces(); ++local)
     {
         const auto face_lid = static_cast<local_ordinal_type>(local);
-        if (static_cast<size_t>(mesh->face_global_id(face_lid)) == shared_geometry_face)
+        if (static_cast<size_t>(mesh->face_geometry_global_id(face_lid)) == shared_geometry_face)
         {
             local_found = 1;
             local_flux = motion.face_mesh_fluxes()[local];
@@ -501,8 +501,8 @@ TEST(PlanarALEMeshMotionMultiRankTest, RejectsTransverseGeometryAndInvalidAxisMi
     const auto transverse_extent = comm->getRank() == 0 ? 1.0 : 2.0;
     auto divergent_geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, transverse_extent}, {0.0, 1.0}, {0.0, 1.0, 2.0, 3.0, 4.0}}});
-    auto divergent_mesh = std::make_shared<Handle>(divergent_geometry);
-    EXPECT_THROW({ Motion inconsistent_geometry(divergent_mesh); }, std::invalid_argument);
+    // Distribution now rejects inconsistent geometry before motion is constructed.
+    EXPECT_THROW((void) std::make_shared<Handle>(divergent_geometry), std::invalid_argument);
 
     auto common_geometry = std::make_shared<Cartesian>(
         SimpleFluid::Vec3D<SimpleFluid::ArrReal>{{{0.0, 1.0}, {0.0, 1.0}, {0.0, 1.0, 2.0, 3.0, 4.0}}});

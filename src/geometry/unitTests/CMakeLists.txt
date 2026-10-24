@@ -149,3 +149,23 @@ simplefluid_add_mpi_test(NAME SemiStructuredReordering_4procs
     TARGET testMeshReorderingFactory PROCS 4
     ARGS "--gtest_filter=MeshReorderingFactoryMultiRankTest.*SemiStructured*"
     LABELS "mpi;geometry;semi_structured;mesh_reordering;empty_rank" TIMEOUT 120)
+
+foreach(_ortho_ranks IN ITEMS 2 4 8)
+    # Run each fixed-rank width oracle where its required layout is available.
+    if(_ortho_ranks EQUAL 2)
+        set(_ortho_filter "-OrthogonalDistributedTest.AutomaticGridBalancesCountsBeforePhysicalAspect")
+    else()
+        set(_ortho_filter "-OrthogonalDistributedTest.PhysicalWidthsBreakBalancedCutLocationTies")
+    endif()
+    simplefluid_add_mpi_test(NAME OrthogonalDistributed_${_ortho_ranks}procs
+        TARGET testOrthogonalDistributed PROCS ${_ortho_ranks}
+        ARGS "--gtest_filter=${_ortho_filter}"
+        LABELS "mpi;geometry;orthogonal;partition;empty_rank" TIMEOUT 120)
+endforeach()
+
+foreach(_ortho_reorder_ranks IN ITEMS 4 8)
+    simplefluid_add_mpi_test(NAME OrthogonalReordering_${_ortho_reorder_ranks}procs
+        TARGET testMeshReorderingFactory PROCS ${_ortho_reorder_ranks}
+        ARGS "--gtest_filter=MeshReorderingFactoryMultiRankTest.*Orthogonal*"
+        LABELS "mpi;geometry;orthogonal;mesh_reordering;empty_rank" TIMEOUT 120)
+endforeach()

@@ -730,3 +730,127 @@ TEST(MeshReorderingFactoryMultiRankTest, SemiStructuredSelectedFirstPreservesGeo
         expect_cells_preserved(original, *first.mesh);
     }
 }
+
+TEST(MeshReorderingFactoryMultiRankTest, OrthogonalSelectedFirstPreservesGeometryAlgebraicIDsAndGhostImports)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto ranks = std::size_t(comm->getSize());
+    if (ranks != 2 && ranks != 4 && ranks != 8)
+        GTEST_SKIP() << "Requires two, four or eight MPI ranks.";
+    for (const bool cylindrical : {false, true})
+        for (const bool sparse_slab : {false, true})
+        {
+            SCOPED_TRACE(::testing::Message() << "cylindrical=" << cylindrical << " sparse_slab=" << sparse_slab);
+            const SimpleFluid::Vec3D<SimpleFluid::ArrReal> edges{{{1., 1.2, 1.7, 2.1, 3.}, {0., .2, .6, 1.1, 1.5},
+                sparse_slab ? SimpleFluid::ArrReal{0., 1.7} : SimpleFluid::ArrReal{0., .2, .7, 1.1, 1.7}}};
+            Handle::DistributionOptions options;
+            options.allow_empty_partitions = true;
+            options.orthogonal_partitions =
+                sparse_slab ? std::array<std::size_t, 3>{1, 1, ranks}
+                            : std::array<std::size_t, 3>{2, ranks >= 4 ? 2U : 1U, ranks == 8 ? 2U : 1U};
+            auto parent = cylindrical ? std::make_shared<Handle>(std::make_shared<Cylindrical>(edges), options)
+                                      : std::make_shared<Handle>(std::make_shared<Cartesian>(edges), options);
+            EXPECT_TRUE(parent->owned_cell_map()->isContiguous());
+            EXPECT_TRUE(parent->owned_face_map()->isContiguous());
+            EXPECT_TRUE(parent->owned_cell_map()->isOneToOne());
+            EXPECT_TRUE(parent->owned_face_map()->isOneToOne());
+            if (sparse_slab)
+            {
+                EXPECT_EQ(parent->num_owned_cells(), comm->getRank() == 0 ? 16U : 0U);
+                if (comm->getRank() != 0)
+                {
+                    EXPECT_EQ(parent->num_local_cells(), 0U);
+                    EXPECT_EQ(parent->num_faces(), 0U);
+                }
+            }
+            const auto before = capture_cells(*parent);
+            std::vector<GlobalOrdinal> owned_order;
+            double local_distinct = 0., distinct = 0.;
+            for (std::size_t c = 0; c < parent->num_owned_cells(); ++c)
+            {
+                const auto lid = local(c);
+                owned_order.push_back(parent->cell_global_id(lid));
+                local_distinct += parent->cell_global_id(lid) != parent->cell_geometry_global_id(lid);
+            }
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_distinct, &distinct);
+            if (!sparse_slab)
+                EXPECT_GT(distinct, 0.);
+            std::vector<std::array<GlobalOrdinal, 3>> faces;
+            for (std::size_t f = 0; f < parent->num_faces(); ++f)
+                faces.push_back({parent->face_geometry_global_id(local(f)), parent->face_global_id(local(f)),
+                    parent->is_owned_face(local(f)) ? 1 : 0});
+            std::vector<GlobalOrdinal> nodes;
+            for (std::size_t n = 0; n < parent->indexer().num_local_nodes(); ++n)
+                nodes.push_back(parent->indexer().node_global_id(local(n)));
+            if (sparse_slab)
+                parent->materialize_cell_faces();
+            const auto selected = [](GlobalOrdinal source, const Vec3&) { return source % 2 != 0; };
+            const auto* original_address = parent.get();
+            const auto first = Factory::selected_cells_first(std::move(parent), selected);
+            EXPECT_EQ(first.mesh.get(), original_address);
+            EXPECT_FALSE(parent);
+            EXPECT_FALSE(first.mesh->legacy_mesh());
+            expect_cells_preserved(before, *first.mesh);
+            double local_changed = 0., changed = 0.;
+            for (std::size_t c = 0; c < first.mesh->num_owned_cells(); ++c)
+                local_changed += first.mesh->cell_global_id(local(c)) != owned_order[c];
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_changed, &changed);
+            EXPECT_GT(changed, 0.);
+            const auto verify_layout = [&](const auto& layout)
+            {
+                const auto& mesh = *layout.mesh;
+                expect_cells_preserved(before, mesh);
+                EXPECT_TRUE(mesh.owned_cell_map()->isOneToOne());
+                EXPECT_TRUE(mesh.owned_face_map()->isOneToOne());
+                for (std::size_t c = 0; c < mesh.num_local_cells(); ++c)
+                {
+                    const auto lid = local(c);
+                    const auto source = mesh.cell_geometry_global_id(lid);
+                    EXPECT_EQ(selected(source, {}),
+                        layout.selected_owned_range().contains(c) || layout.selected_ghost_range().contains(c));
+                    EXPECT_EQ(mesh.indexer().cell_global_id(lid), source);
+                    EXPECT_EQ(mesh.overlap_cell_map()->getGlobalElement(lid), before.at(source).gid);
+                }
+                ASSERT_EQ(mesh.num_faces(), faces.size());
+                for (std::size_t f = 0; f < faces.size(); ++f)
+                {
+                    EXPECT_EQ(mesh.face_geometry_global_id(local(f)), faces[f][0]);
+                    EXPECT_EQ(mesh.face_global_id(local(f)), faces[f][1]);
+                    EXPECT_EQ(mesh.is_owned_face(local(f)), faces[f][2] != 0);
+                    EXPECT_EQ(mesh.indexer().face_global_id(local(f)), faces[f][0]);
+                }
+                ASSERT_EQ(mesh.indexer().num_local_nodes(), nodes.size());
+                for (std::size_t n = 0; n < nodes.size(); ++n)
+                    EXPECT_EQ(mesh.indexer().node_global_id(local(n)), nodes[n]);
+                const auto verify_import = [&](bool cells)
+                {
+                    const auto owned_map = cells ? mesh.owned_cell_map() : mesh.owned_face_map();
+                    const auto overlap_map = cells ? mesh.overlap_cell_map() : mesh.overlap_face_map();
+                    const auto owned_count = cells ? mesh.num_owned_cells() : mesh.num_owned_faces();
+                    const auto local_count = cells ? mesh.num_local_cells() : mesh.num_faces();
+                    Pack::vector_type owned(owned_map, true), overlap(overlap_map, true);
+                    const auto probe = [&](LocalOrdinal lid)
+                    {
+                        const auto source =
+                            cells ? mesh.cell_geometry_global_id(lid) : mesh.face_geometry_global_id(lid);
+                        const auto algebraic = cells ? before.at(source).gid : faces[std::size_t(lid)][1];
+                        return 3. * double(source) + .5 * double(algebraic) + .125;
+                    };
+                    for (std::size_t i = 0; i < owned_count; ++i)
+                        owned.replaceLocalValue(local(i), probe(local(i)));
+                    Pack::import_type importer(owned_map, overlap_map);
+                    overlap.doImport(owned, importer, Tpetra::REPLACE);
+                    const auto values = overlap.getLocalViewHost(Tpetra::Access::ReadOnly);
+                    for (std::size_t i = 0; i < local_count; ++i)
+                        EXPECT_DOUBLE_EQ(values(local(i), 0), probe(local(i)));
+                };
+                verify_import(true);
+                verify_import(false);
+            };
+            verify_layout(first);
+            auto copy = std::make_shared<Handle>(*first.mesh);
+            const auto second = Factory::selected_cells_first(std::move(copy), selected);
+            verify_layout(second);
+            verify_layout(first);
+        }
+}

@@ -20,7 +20,7 @@ auto laplacian_face_area(const MeshType& mesh, typename MeshType::local_ordinal_
     {
         if (const auto* cylindrical = std::get_if<typename MeshType::CylindricalPtr>(&mesh.variant()))
         {
-            const auto id = (*cylindrical)->face_id(mesh.face_global_id(face));
+            const auto id = (*cylindrical)->face_id(mesh.face_geometry_global_id(face));
             if (id.orientation == MeshType::Cylindrical::R_FACE)
             {
                 const auto& theta = (*cylindrical)->cell_edges()[MeshType::Cylindrical::THETA];

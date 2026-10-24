@@ -225,6 +225,44 @@ auto MeshReorderingFactory<Pack>::selected_cells_first(SP<mesh_type>&& parent, c
     append_group(owned_count, selected.size(), true);
     append_group(owned_count, selected.size(), false);
 
+    if (parent->d_orthogonal_decomposition && parent->d_orthogonal_decomposition->num_partitions() > 1)
+    {
+        // Orthogonal geometry lookup follows the current field rows.
+        // Preserve algebraic IDs while composing an explicit selected-cell order.
+        std::vector<global_ordinal_type> geometry, owned_gids, overlap_gids;
+        std::map<global_ordinal_type, local_ordinal_type> reverse_geometry;
+        geometry.reserve(reordered_to_parent.size());
+        owned_gids.reserve(owned_count);
+        overlap_gids.reserve(reordered_to_parent.size());
+        for (size_t local = 0; local < reordered_to_parent.size(); ++local)
+        {
+            const auto previous = reordered_to_parent[local];
+            const auto source = parent->geometry_cell_lid(previous);
+            geometry.push_back(source);
+            reverse_geometry.emplace(source, mesh_type::checked_local(local));
+            const auto algebraic = parent->overlap_cell_map()->getGlobalElement(previous);
+            overlap_gids.push_back(algebraic);
+            if (local < owned_count)
+                owned_gids.push_back(algebraic);
+        }
+        auto owned_map = parent->make_map(comm, owned_gids);
+        auto overlap_map = parent->make_map(comm, overlap_gids);
+        parent->d_orthogonal_cell_geometry_lids = std::move(geometry);
+        parent->d_orthogonal_cell_local_lids = std::move(reverse_geometry);
+        parent->d_owned_cell_map = std::move(owned_map);
+        parent->d_overlap_cell_map = std::move(overlap_map);
+        parent->d_map_indexing = true;
+        if (!local_identity)
+        {
+            parent->d_cells_reordered = true;
+            parent->d_indexer = typename mesh_type::indexer_type{};
+            parent->d_legacy_indexer_materialized = false;
+            if (!parent->d_cell_face_offsets.empty())
+                parent->initialize_cell_faces();
+        }
+        return {std::move(parent), selected_owned, selected_ghost};
+    }
+
     if (parent->d_semi_structured_topology)
     {
         // The compact decomposition describes the original local XY/Z order.
