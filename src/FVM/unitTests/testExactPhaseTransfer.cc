@@ -343,7 +343,7 @@ TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAn
     EXPECT_EQ(finite.inventory_policy(), PhaseInventoryPolicy::Finite);
     EXPECT_THROW((void) finite.experimental_phases(), std::invalid_argument);
     GeneralVoFOptions options;
-    options.inventory_policy = PhaseInventoryPolicy::ExperimentalExact;
+    options.arithmetic_mode = ArithmeticMode::Exact;
     GeneralVoF exact(h, keys, gas, carrier, options, pure);
     std::vector<GeneralVoFNodeVelocity> nodes;
     for (const auto& n : exact.nodes())

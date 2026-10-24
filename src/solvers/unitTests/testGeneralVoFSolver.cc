@@ -362,7 +362,16 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     auto material = inviscid();
     material.gas_density = .1;
     material.liquid_density = 1;
-    GeneralVoFSolver solver(skew_coarse_fine_plane(), material);
+    const auto fixture_started = Clock::now();
+    const auto initial_phases = skew_coarse_fine_plane();
+    const auto fixture_finished = Clock::now();
+    GeneralVoFSolver solver(initial_phases, material);
+    const auto constructor_finished = Clock::now();
+    record("fixture_seconds", std::chrono::duration<double>(fixture_finished - fixture_started).count());
+    record("solver_constructor_seconds",
+        std::chrono::duration<double>(constructor_finished - fixture_finished).count());
+    record("phase_initialization", "ordinary_fp");
+    record("arithmetic_mode", "Ordinary");
     record_exact("after_construction");
     double local_structure[2] = {double(solver.mesh()->num_owned_cells()), 0}, structure[2]{};
     for (std::size_t f = 0; f < solver.mesh()->num_owned_faces(); ++f)
@@ -394,9 +403,13 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         velocity[c] = {vx + .2 * vy, vy, 0};
     }
     record_exact("before_initialize");
+    const auto explicit_initialize_started = Clock::now();
     solver.initialize(velocity);
     record_exact("after_initialize");
     const auto initialized = Clock::now();
+    record("explicit_initialize_seconds",
+        std::chrono::duration<double>(initialized - explicit_initialize_started).count());
+    // Historical property includes fixture, constructor and explicit initialize.
     record("initialization_seconds", std::chrono::duration<double>(initialized - started).count());
     const auto region_gas = [&]
     {

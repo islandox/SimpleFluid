@@ -1,61 +1,29 @@
-#include "geometry/details/BoundedConvexGeometryInternal.hh"
+#include "geometry/details/BoundedGeometryKernels.hh"
 
 namespace SimpleFluid::Meshes
 {
-void BoundedConvexGeometry::certify_partition(
-    std::span<const BoundedConvexGeometryPtr> pieces, double relative_budget) const
+std::size_t BoundedConvexPartition::storage_bytes() const noexcept
 {
-    Operation scope(impl_->limits);
-    ++statistics.partition_checks;
-    if (!std::isfinite(relative_budget) || relative_budget < 0)
-        reject("invalid partition physical budget.");
-    std::vector<std::shared_ptr<const Ancestry>> leaves;
-    Interval total;
-    for (const auto& piece : pieces)
-    {
-        if (!piece)
-            reject("null partition piece.");
-        leaves.push_back(piece->impl_->ancestry);
-        total = total + piece->impl_->volume;
-    }
-    const bool structural = structural_cover(impl_->ancestry, leaves);
-    if (structural)
-        ++statistics.structural_partition_reuses;
-    else
-    {
-        for (const auto& piece : pieces)
-            for (const auto& surface : impl_->surfaces)
-                for (const auto& vertex : piece->impl_->vertices)
-                {
-                    active_work->pair();
-                    const auto d = distance(vertex, piece->impl_->frame, surface.plane) * Interval(surface.orientation);
-                    if (sign(d) > 0)
-                        reject("partition piece escapes its parent.");
-                }
-        for (std::size_t i = 0; i < pieces.size(); ++i)
-            for (std::size_t j = 0; j < i; ++j)
-            {
-                active_work->pair();
-                if (pieces[i]->intersect(*pieces[j]))
-                    reject("partition pieces have overlapping interiors.");
-            }
-    }
-    const auto residual = total - impl_->volume;
-    const auto allowance = Interval(relative_budget) * Interval(impl_->volume.lo);
-    if (std::max(std::abs(residual.lo), std::abs(residual.hi)) > allowance.lo)
-        reject("partition closure exceeds its physical budget.");
+    return sizeof(*this) + donors_.capacity() * sizeof(BoundedConvexGeometryPtr);
 }
+} // namespace SimpleFluid::Meshes
 
+namespace SimpleFluid::Meshes
+{
 std::size_t BoundedConvexGeometry::storage_bytes() const
 {
     std::size_t bytes = sizeof(Impl) + sizeof(MomentCache) + impl_->vertices.capacity() * sizeof(Vertex) +
                         impl_->faces.capacity() * sizeof(Face) + impl_->surfaces.capacity() * sizeof(Surface) +
                         impl_->displayed.capacity() * sizeof(BoundedPoint);
+    if (impl_->partition_certificate)
+        bytes += sizeof(PartitionCertificate) +
+                 impl_->partition_certificate->members.capacity() * sizeof(std::weak_ptr<const Ancestry>);
     std::set<PlanePtr> planes;
     for (const auto& vertex : impl_->vertices)
     {
         bytes += vertex.incident.capacity() * sizeof(PlanePtr) +
                  vertex.authorities.capacity() * sizeof(BoundedPlaneAuthority);
+        bytes += BoundedGeometryAccess::identity_bytes(vertex.source_identity);
         for (const auto& key : vertex.authorities)
             bytes += key.key.capacity() * sizeof(std::uint64_t);
         planes.insert(vertex.incident.begin(), vertex.incident.end());
@@ -67,6 +35,7 @@ std::size_t BoundedConvexGeometry::storage_bytes() const
     for (const auto& plane : planes)
     {
         bytes += sizeof(Plane) + plane->authorities.capacity() * sizeof(BoundedPlaneAuthority);
+        bytes += plane->source_vertices.capacity() * sizeof(std::weak_ptr<const BoundedPointProvenance>);
         for (const auto& key : plane->authorities)
             bytes += key.key.capacity() * sizeof(std::uint64_t);
     }
@@ -80,50 +49,42 @@ std::size_t BoundedConvexGeometry::storage_bytes() const
     return bytes;
 }
 } // namespace SimpleFluid::Meshes
+
+#define SIMPLEFLUID_GEOMETRY_KERNEL ordinary_kernel
+#include "geometry/details/BoundedConvexPartitions.tcc"
+#undef SIMPLEFLUID_GEOMETRY_KERNEL
+#define SIMPLEFLUID_GEOMETRY_KERNEL certification_kernel
+#include "geometry/details/BoundedConvexPartitions.tcc"
+#undef SIMPLEFLUID_GEOMETRY_KERNEL
+
 namespace SimpleFluid::Meshes
 {
-namespace bounded_geometry_detail
+void BoundedConvexGeometry::certify_partition(
+    std::span<const BoundedConvexGeometryPtr> pieces, double relative_budget) const
 {
-BoundedPoint source_point_fan(std::span<const ConvexCellGeometry* const> sources, std::span<const char> identity)
-{
-    Operation scope({});
-    ++statistics.source_imports;
-    if (sources.empty() || identity.size() > active_work->limits.byte_budget)
-        reject("source point export requires a capped authenticated source fan.");
-    std::size_t faces = 0;
-    for (const auto* source : sources)
-    {
-        if (!source || source->storage_bytes() > active_work->limits.byte_budget ||
-            source->num_faces() > active_work->limits.maximum_faces - faces)
-            reject("source point authority exceeds bootstrap storage/fan cap.");
-        faces += source->num_faces();
-    }
-    const auto coordinates = numerical_point(identity);
-    BoundedPoint result;
-    for (std::size_t axis = 0; axis < 3; ++axis)
-    {
-        result.value[axis] = coordinates[axis].value;
-        result.absolute_error[axis] = coordinates[axis].absolute_error;
-    }
-    std::vector<BoundedPlaneAuthority> supports;
-    for (const auto* source : sources)
-        for (std::size_t f = 0; f < source->num_faces(); ++f)
-        {
-            const auto face = source->face_geometry(f);
-            if (!face->contains_exact_point(identity))
-                continue;
-            const auto bytes = exact_planar_support(*face);
-            BoundedPlaneAuthority authority;
-            authority.key.push_back(bytes.size());
-            authority.key.resize(1 + (bytes.size() + 7) / 8, 0);
-            for (std::size_t i = 0; i < bytes.size(); ++i)
-                authority.key[1 + i / 8] |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[i]))
-                                            << (8 * (i % 8));
-            active_work->charge(authority.key.size(), sizeof(std::uint64_t));
-            supports.push_back(std::move(authority));
-        }
-    BoundedGeometryAccess::seal(result, std::move(supports));
-    return result;
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).certify_partition(pieces, relative_budget);
+    else
+        certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).certify_partition(
+            pieces, relative_budget);
 }
-} // namespace bounded_geometry_detail
+
+BoundedConvexPartition::BoundedConvexPartition(
+    std::span<const BoundedConvexGeometryPtr> donors, BoundedGeometryLimits limits)
+    : limits_(limits)
+{
+    donors_ = limits.arithmetic_mode == ArithmeticMode::Ordinary
+                  ? ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::validate_donors(donors, limits)
+                  : certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::validate_donors(
+                        donors, limits);
+}
+
+std::vector<BoundedPartitionPiece> BoundedConvexPartition::partition(
+    const BoundedConvexGeometry& parent, std::size_t maximum_pieces) const
+{
+    if (limits_.arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::PartitionKernel<ArithmeticMode::Ordinary>(*this).partition(parent, maximum_pieces);
+    return certification_kernel::PartitionKernel<ArithmeticMode::BoundedCertification>(*this).partition(
+        parent, maximum_pieces);
+}
 } // namespace SimpleFluid::Meshes

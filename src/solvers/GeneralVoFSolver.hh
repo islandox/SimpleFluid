@@ -34,14 +34,15 @@ struct GeneralVoFMomentumDiagnostics
 };
 /** Independent general-mesh backend; Cartesian specialized solvers are retained.
  *
- * The supplied immutable phase authority owns exact geometry and independent
- * default finite gas/carrier volumes. Its construction policy may explicitly
- * select ExperimentalExact; that optional path retains exact phase history and
- * remains unqualified, with known memory/performance gaps. The solver never
- * reinterprets or switches the source policy. Current-step arithmetic in finite
- * mode uses a separate bounded floating-point geometry/phase/mass/momentum
- * route. Independent accumulated arithmetic history follows phase transfers;
- * no rational numerical construction, measure or ledger fallback is selected.
+ * The supplied immutable phase authority owns native source geometry and
+ * independent gas/carrier volumes. Its arithmetic mode selects Ordinary
+ * (default), BoundedCertification, or the experimental Exact path. Exact retains
+ * exact phase history and remains unqualified, with known memory/performance
+ * gaps. The solver pins the source mode for geometry, phase, mass and momentum.
+ * Ordinary uses represented-value physical acceptance; only the opt-in bounded
+ * mode requires interval certificates. Independent accumulated arithmetic
+ * history follows phase transfers in bounded mode. Neither FP mode selects a
+ * rational numerical construction, measure or ledger fallback.
  * All construction, initialization, timestep and
  * advance operations are collective, including empty-owner ranks. Pressure,
  * viscosity and curvature use actual physical geometry. Source-free compatible

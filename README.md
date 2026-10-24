@@ -813,6 +813,20 @@ deferred, not alternate reacting-flow configurations. The
 [general AMR design](docs/architecture/general_amr.md) remains a separate
 geometry/distribution/flow qualification program.
 
+**Within the retained, disabled VoF sources, floating-point arithmetic is the primary design.** Its
+[FP geometry contract](docs/architecture/general_amr.md#floating-point-geometry-and-arithmetic)
+uses `ArithmeticMode::Ordinary` by default. `BoundedCertification` retains
+explicit interval certification, and `Exact` selects the separate exact backend;
+there is no automatic fallback. Both finite modes retain independent phase
+inventories and the physical conservation, boundedness, residual and resource
+gates. The interface-support screen reports refinement requests or rejects
+atomically. Full-flow and performance qualification remains open. Native mesh
+authority is imported explicitly, with separate optional [ExactVoF](docs/architecture/exact_vof.md),
+[ExactTransport](docs/architecture/exact_transport.md) and
+[ExactGeometry](docs/architecture/exact_geometry.md) contracts.
+Automatic refinement and application-level resolution/convergence
+qualification remain future work.
+
 ## Dependencies
 
 | Dependency | Role | Version | Requirement |

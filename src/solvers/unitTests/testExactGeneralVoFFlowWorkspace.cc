@@ -7,7 +7,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, SingleExtrudedLayerRetainsConstantAndInPl
 {
     const auto mesh = skew_native(1);
     EXPECT_EQ(mesh->num_owned_cells() == 0, Tpetra::getDefaultComm()->getRank() != 0);
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     std::vector<double> field(mesh->num_owned_cells(), 7);
     for (const auto& g : flow.gradient(field))
         for (double component : g)
@@ -29,7 +29,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, IsolatedBoundaryTetrahedronConstantIsExac
 {
     const auto mesh = boundary_polyhedron(false);
     EXPECT_EQ(mesh->num_owned_cells() == 0, Tpetra::getDefaultComm()->getRank() != 0);
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     std::vector<double> scalar(mesh->num_owned_cells(), 3);
     for (const auto& g : flow.gradient(scalar))
         for (double component : g)
@@ -44,7 +44,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, IsolatedBoundaryTetrahedronConstantIsExac
 TEST(ExactGeneralVoFFlowWorkspaceTest, UnresolvedNonconstantBoundaryPolyhedralStencilRemainsRejected)
 {
     const auto mesh = boundary_polyhedron(true);
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     std::vector<double> scalar(mesh->num_owned_cells());
     for (std::size_t c = 0; c < scalar.size(); ++c)
         scalar[c] = mesh->cell_centroid(LO(c)).x;
@@ -54,7 +54,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, UnresolvedNonconstantBoundaryPolyhedralSt
 TEST(ExactGeneralVoFFlowWorkspaceTest, AffinePhysicalGradientAndCurvatureOnActualSkewNativeMesh)
 {
     const auto mesh = skew_native();
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     std::vector<double> scalar(mesh->num_owned_cells());
     std::vector<VoF::Vector> normal(scalar.size());
     for (std::size_t c = 0; c < scalar.size(); ++c)
@@ -79,7 +79,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, AffinePhysicalGradientAndCurvatureOnActua
 TEST(ExactGeneralVoFFlowWorkspaceTest, NonorthogonalProjectionChecksPhysicalDivergenceAndViscousRigidMode)
 {
     const auto mesh = skew_native();
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     const auto n = mesh->num_owned_cells();
     std::vector<VoF::Vector> velocity(n, {.2, -.1, .3});
     const auto rigid = flow.viscous_force(velocity, std::vector<double>(n, 1));
@@ -107,7 +107,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, NonorthogonalProjectionChecksPhysicalDive
 TEST(ExactGeneralVoFFlowWorkspaceTest, ProjectionArithmeticRequiresOriginalDefectCorrections)
 {
     const auto mesh = skew_native();
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     const auto n = mesh->num_owned_cells();
     std::vector<double> face(mesh->num_faces()), rho(n, 1000), fraction(n), curvature(n), pressure;
     std::vector<VoF::Vector> velocity(n);
@@ -134,7 +134,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, ProjectionArithmeticRequiresOriginalDefec
 TEST(ExactGeneralVoFFlowWorkspaceTest, ConstantCurvaturePressureAndWallCapillaryReactionBalance)
 {
     const auto mesh = skew_native();
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     const auto n = mesh->num_owned_cells();
     std::vector<double> rho(n, 1), fraction(n), curvature(n, 1), pressure, face(mesh->num_faces());
     std::vector<VoF::Vector> velocity(n);
@@ -193,7 +193,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, IndependentInteriorPolynomialRecoversFull
     auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, Tpetra::getDefaultComm());
     const auto mesh = AMR::assemble_adaptive_native(*hierarchy, schema).mesh;
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     std::vector<VoF::Vector> velocity(mesh->num_owned_cells());
     for (std::size_t c = 0; c < velocity.size(); ++c)
     {
@@ -223,7 +223,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, PrimaryRatePreservesSubUlpPressureCorrect
 {
     using M = Meshes::ExactGeometryMeasure;
     const auto mesh = skew_native();
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     const auto n = mesh->num_owned_cells();
     std::vector<double> initial(mesh->num_faces()), rho(n, 1), fraction(n), curvature(n), pressure;
     std::vector<VoF::Vector> velocity(n);
@@ -295,7 +295,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, ZeroRadiusOrthogonalPressureUsesSameExact
     auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
         std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, Tpetra::getDefaultComm());
     const auto mesh = AMR::assemble_adaptive_native(*hierarchy, schema).mesh;
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     const auto n = mesh->num_owned_cells();
     std::vector<double> face(mesh->num_faces()), rho(n, 1), fraction(n), curvature(n), pressure;
     std::vector<VoF::Vector> velocity(n, {1, 0, 0});
@@ -337,7 +337,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, ZeroRadiusOrthogonalPressureUsesSameExact
 TEST(ExactGeneralVoFFlowWorkspaceTest, PreparedGradientRetainsNonlinearResultsAfterRejectedSamplesAndNewWorkspaces)
 {
     const auto mesh = skew_native();
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     std::vector<double> scalar(mesh->num_owned_cells());
     for (std::size_t c = 0; c < scalar.size(); ++c)
     {
@@ -371,7 +371,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, GeometryReplacementRejectsAllRetainedGeom
         std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("moving", native)},
             std::vector<MultiRegionMesh::Interface>{});
     const auto mesh = std::make_shared<MeshHandle<>>(composite);
-    detail::GeneralVoFFlowWorkspace flow(mesh);
+    detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     std::vector<double> scalar(mesh->num_owned_cells(), 3), face(mesh->num_faces());
     EXPECT_NO_THROW((void) flow.gradient(scalar));
     if (Tpetra::getDefaultComm()->getRank() == 0)
@@ -390,7 +390,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, GeometryReplacementRejectsAllRetainedGeom
         std::make_shared<MultiRegionMesh>(std::vector<MultiRegionMesh::Region>{native_region("replacement", native)},
             std::vector<MultiRegionMesh::Interface>{});
     const auto target = std::make_shared<MeshHandle<>>(replacement);
-    detail::GeneralVoFFlowWorkspace rebuilt(target);
+    detail::GeneralVoFFlowWorkspace rebuilt(target, ArithmeticMode::Exact);
     for (const auto& g : rebuilt.gradient(std::vector<double>(target->num_owned_cells(), 3)))
         for (double component : g)
             EXPECT_EQ(component, 0);

@@ -698,17 +698,31 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   # Fixed-width finite arithmetic has independent capacity/empty-owner coverage.
   foreach(_finite_projection_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(
+      NAME GeneralVoFOrdinaryMomentum_${_finite_projection_procs}procs
+      TARGET testConservativeVoFTransport
+      PROCS ${_finite_projection_procs}
+      ARGS "--gtest_filter=ConservativeVoFTransportTest.OrdinaryWideMomentumPreservesPhysicalStorageWithoutIntervalAdmission"
+      LABELS "mpi;vof;ordinary;momentum;collective"
+      TIMEOUT 180)
+    simplefluid_add_mpi_test(
+      NAME GeneralVoFFinitePassage_${_finite_projection_procs}procs
+      TARGET testGeneralVoFSolver
+      PROCS ${_finite_projection_procs}
+      ARGS "--gtest_filter=GeneralVoFSolverTest.NonzeroSkewCoarseFinePhasePassagePreservesIndependentInventories"
+      LABELS "mpi;vof;finite;general_mesh;integration"
+      TIMEOUT 1800)
+    simplefluid_add_mpi_test(
       NAME GeneralVoFFiniteProjection_${_finite_projection_procs}procs
       TARGET testGeneralVoFFlowWorkspace
       PROCS ${_finite_projection_procs}
-      ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.FiniteProjectionKeepsOriginalPhysicalThresholdWithObservedEmptyOwners"
+      ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.OrdinaryProjectionKeepsPhysicalThresholdWithoutIntervalAdmission:GeneralVoFFlowWorkspaceTest.ArithmeticModeMismatchRejectsIncludingEmptyOwners:GeneralVoFFlowWorkspaceTest.FiniteProjectionKeepsOriginalPhysicalThresholdWithObservedEmptyOwners:GeneralVoFFlowWorkspaceTest.FiniteExpressionBoundsRetainCanceledOperandsAndCachedCoefficientError:GeneralVoFFlowWorkspaceTest.FiniteConstantCurvatureRetainsPressureWallForceAndMassError"
       LABELS "mpi;vof;finite;projection;collective;empty_rank"
       TIMEOUT 180)
     simplefluid_add_mpi_test(
       NAME GeneralVoFFinitePhiClosure_${_finite_projection_procs}procs
       TARGET testGeneralVoFPhiClosure
       PROCS ${_finite_projection_procs}
-      ARGS "--gtest_filter=GeneralVoFPhiClosureTest.FiniteSparseForestPreservesCirculationAndRejectsIndependentCapacityExhaustion"
+      ARGS "--gtest_filter=GeneralVoFPhiClosureTest.CertifiedClosureRequiresExplicitBoundedMode:GeneralVoFPhiClosureTest.FiniteSparseForestPreservesCirculationAndRejectsIndependentCapacityExhaustion:GeneralVoFPhiClosureTest.FiniteCapacityRoutingPreservesFixedEdgesAndAvoidsNarrowShortcuts:GeneralVoFPhiClosureTest.FiniteWidestParentDepthPropagatesThroughLowerCapacityLeaf"
       LABELS "mpi;vof;finite;conservation;collective"
       TIMEOUT 180)
   endforeach()
@@ -717,6 +731,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   # Source properties are directory-scoped, so repeat the production policy here.
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
       set_source_files_properties(
+          testGeneralVoFFlowWorkspace.cc
           testExactGeneralVoFFlowWorkspace.cc
           ../GeneralVoFSolver.cc
           ../details/ConservativeVoFTransport.cc

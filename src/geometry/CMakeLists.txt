@@ -104,7 +104,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         ExactDepartureGeometry.cc
         PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
-        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
 endif()
 
 # Require profiles for every Mesh archive member linked into Shiri. The listed

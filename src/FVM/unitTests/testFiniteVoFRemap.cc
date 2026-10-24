@@ -29,7 +29,7 @@ struct Input
     GeometryHalfspace plane;
 };
 Input input(double scale = 1, GeometryPoint origin = {}, bool reverse = false, bool pure_carrier = false,
-    unsigned char domain = 1)
+    unsigned char domain = 1, double intercept = 6)
 {
     const auto comm = Tpetra::getDefaultComm();
     AMRGrid grid;
@@ -39,12 +39,12 @@ Input input(double scale = 1, GeometryPoint origin = {}, bool reverse = false, b
     CartesianAMR mesh(grid);
     std::vector<std::uint64_t> owned;
     for (std::uint64_t id = 0; id < 8; ++id)
-        if (int(id % std::min(2, comm->getSize())) == comm->getRank())
+        if (comm->getRank() == 0)
             owned.push_back(id);
     auto detached = mesh.detach_owned(owned, {'f', 'p', 'r', static_cast<char>(domain)});
     auto hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(detached.owned), std::move(detached.families), detached.kernel, comm);
-    GeometryHalfspace plane{{1, 2, 3}, origin, 6 * scale};
+    GeometryHalfspace plane{{1, 2, 3}, origin, intercept * scale};
     if (reverse)
     {
         for (auto& n : plane.normal)
@@ -71,7 +71,9 @@ Input input(double scale = 1, GeometryPoint origin = {}, bool reverse = false, b
             carrier.push_back(cut.outside ? cut.outside->moments().volume.as_double() : 0);
         }
     }
-    return {std::make_shared<const GeneralVoF>(hierarchy, order, gas, carrier), plane};
+    GeneralVoFOptions certified;
+    certified.arithmetic_mode = ArithmeticMode::BoundedCertification;
+    return {std::make_shared<const GeneralVoF>(hierarchy, order, gas, carrier, certified), plane};
 }
 std::shared_ptr<const DistributedAdaptiveHierarchy> bound_target(
     const std::shared_ptr<const DistributedAdaptiveHierarchy>& source, const DistributedAdaptiveHierarchy::Plan& plan)
@@ -145,6 +147,58 @@ Measure absolute(Measure value)
 {
     return value.sign() < 0 ? value.scaled(-1) : value;
 }
+Measure exact_wide(long double value)
+{
+    const auto parts = wide_parts(value);
+    return Measure::from_value(parts[0]) + Measure::from_value(parts[1]);
+}
+Measure exact_product(const Measure& a, const Measure& b)
+{
+    return b.sign() == 0 ? Measure{} : a.divided_by(Measure::from_value(1).divided_by(b));
+}
+void allocation_oracle(const GeneralVoF& source, const GeneralVoF& target, const GeneralVoF::FiniteRemapTrial& trial)
+{
+    const auto planes = source.reconstruct();
+    std::map<AdaptiveCellKey, std::size_t> source_index;
+    for (std::size_t i = 0; i < source.owned_order().size(); ++i)
+        source_index.emplace(source.owned_order()[i], i);
+    for (const auto& route : trial.owned_routes())
+    {
+        // Refinement preserves this fixture's owner. MPI migration has its
+        // separate bit-for-bit copy oracle and does not enter this helper.
+        ASSERT_EQ(route.source_owner, route.target_owner);
+        const auto i = source_index.at(route.source_key);
+        const auto& plane = planes[i];
+        if (plane.pure_gas || plane.pure_carrier)
+        {
+            EXPECT_EQ(route.fit_allocation.value, 0);
+            EXPECT_EQ(route.fit_allocation.absolute_error, 0);
+            continue;
+        }
+        const auto source_geometry = source.hierarchy()->geometry(source.hierarchy()->owned().at(route.source_key));
+        const auto piece = target.hierarchy()->geometry(target.hierarchy()->owned().at(route.target_key));
+        const auto source_cut = source_geometry->clip(plane.gas);
+        const auto piece_cut = piece->clip(plane.gas);
+        const auto volume = Measure::volume(*source_geometry);
+        const auto piece_volume = Measure::volume(*piece);
+        const auto raw_gas = Measure::volume(*source_cut.inside);
+        const auto raw_carrier = Measure::volume(*source_cut.outside);
+        const auto piece_gas = piece_cut.inside ? Measure::volume(*piece_cut.inside) : Measure{};
+        const auto piece_carrier = piece_cut.outside ? Measure::volume(*piece_cut.outside) : Measure{};
+        const auto gas = Measure::from_value(source.gas_volumes()[i]);
+        const auto carrier = Measure::from_value(source.carrier_volumes()[i]);
+        // Independent exact model evaluation: form physical piece labels first,
+        // then remove piece bulk and the uniformly transported source defect.
+        // This never calls the production centered-allocation arithmetic.
+        const auto labelled = exact_product(gas, piece_gas.divided_by(raw_gas)) +
+                              exact_product(carrier, piece_carrier.divided_by(raw_carrier));
+        const auto uniform_defect = exact_product(gas + carrier - volume, piece_volume.divided_by(volume));
+        const auto expected = labelled - piece_volume - uniform_defect;
+        const auto observed = exact_wide(route.fit_allocation.value);
+        const auto radius = exact_wide(route.fit_allocation.absolute_error);
+        EXPECT_LE(absolute(observed - expected).compare(radius), 0);
+    }
+}
 void phase_balance(const GeneralVoF& before, const GeneralVoF& after)
 {
     for (unsigned phase = 0; phase < 2; ++phase)
@@ -205,6 +259,14 @@ void plane_oracle(const GeneralVoF& state, GeometryHalfspace plane)
         EXPECT_LE(std::abs(p.carrier - carrier), approximation + state.phase_roundoff_bounds()[i].carrier);
         EXPECT_GE(p.gas, 0);
         EXPECT_GE(p.carrier, 0);
+        // Independent evidence that public occupancy provenance encloses the
+        // represented physical inventories against the original exact cell.
+        // This oracle is outside production and uses no remap residual helper.
+        const auto physical_defect =
+            Measure::from_value(p.gas) + Measure::from_value(p.carrier) - Measure::volume(*geometry);
+        EXPECT_LE(
+            absolute(physical_defect).compare(Measure::from_value(state.initial_occupancy_errors()[i].admitted_bound)),
+            0);
         if (gas > 0 && carrier > 0)
             local_nonbinary = local_nonbinary || std::ldexp(gas / bulk, 16) != std::floor(std::ldexp(gas / bulk, 16));
     }
@@ -219,12 +281,21 @@ std::vector<long double> history_values(const GeneralVoF& state, unsigned phase)
         result.push_back(phase ? e.carrier : e.gas);
     return result;
 }
+std::vector<long double> category_values(const GeneralVoF& state, unsigned category)
+{
+    std::vector<long double> result;
+    for (const auto& error : state.initial_occupancy_errors())
+        result.push_back(category == 0   ? error.phase_input_bound
+                         : category == 1 ? error.transferred_bound
+                                         : error.fit_allocation_bound);
+    return result;
+}
 void expect_empty_owners(const GeneralVoF& state)
 {
     int empty = state.owned_order().empty(), total = 0;
     const auto comm = Tpetra::getDefaultComm();
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &total);
-    EXPECT_EQ(total, std::max(0, comm->getSize() - 2));
+    EXPECT_EQ(total, comm->getSize() - 1);
 }
 std::array<double, 8> occupancy(const PhaseError& e)
 {
@@ -278,7 +349,9 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
     {
         const double scale = shifted ? 8 : 1;
         const GeometryPoint origin = shifted ? GeometryPoint{64, -32, 16} : GeometryPoint{};
-        const auto initial = input(scale, origin, shifted);
+        // Keep the ordinary success case away from exact grid tangencies.
+        // The tangent fixture has its separate strict arithmetic rejection test.
+        const auto initial = input(scale, origin, shifted, false, 1, 6.137);
         const auto source = initial.state;
         const auto control = source->accepted_control();
         const auto identity = source->accepted_identity();
@@ -286,11 +359,11 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
         const auto schema = options();
         const auto original_channels = channels(*source);
         const auto plan = refine(*source);
-        const auto trial =
-            source->plan_remap(plan, bound_target(source->hierarchy(), plan), original_channels, schema);
+        const auto trial = source->plan_remap(plan, bound_target(source->hierarchy(), plan), original_channels, schema);
         const auto fine = trial.candidate();
         EXPECT_FALSE(trial.ownership_only());
         EXPECT_EQ(fine->hierarchy()->global_cells(), 64u);
+        allocation_oracle(*source, *fine, trial);
         plane_oracle(*fine, initial.plane);
         phase_balance(*source, *fine);
         channel_balance(original_channels, trial.owned_channels(), schema.channels.size());
@@ -313,6 +386,17 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
                 (exact_global_sum(history_values(*coarse, phase)) - exact_global_sum(history_values(*fine, phase)))
                     .sign(),
                 0);
+        for (unsigned category = 0; category < 3; ++category)
+        {
+            EXPECT_GE((exact_global_sum(category_values(*fine, category)) -
+                          exact_global_sum(category_values(*source, category)))
+                          .sign(),
+                0);
+            EXPECT_GE((exact_global_sum(category_values(*coarse, category)) -
+                          exact_global_sum(category_values(*fine, category)))
+                          .sign(),
+                0);
+        }
         EXPECT_EQ(source->accepted_control(), control);
         EXPECT_EQ(source->accepted_identity(), identity);
         EXPECT_EQ(source->gas_volumes(), original_gas);
@@ -324,7 +408,7 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
 
 TEST(FiniteVoFRemap, MigrationCopiesNonbinaryInventoriesAndInheritedBoundsExactly)
 {
-    const auto initial = input();
+    const auto initial = input(1, {}, false, false, 1, 6.137);
     const auto schema = options();
     const auto plan = refine(*initial.state);
     const auto refined = initial.state->plan_remap(
@@ -334,8 +418,8 @@ TEST(FiniteVoFRemap, MigrationCopiesNonbinaryInventoriesAndInheritedBoundsExactl
     const auto comm = Tpetra::getDefaultComm();
     std::vector<int> destinations(source->owned_order().size(), (comm->getRank() + 1) % comm->getSize());
     const auto migration = source->hierarchy()->plan_migration(destinations);
-    const auto trial = source->plan_remap(
-        migration, bound_target(source->hierarchy(), migration), refined.owned_channels(), schema);
+    const auto trial =
+        source->plan_remap(migration, bound_target(source->hierarchy(), migration), refined.owned_channels(), schema);
     EXPECT_TRUE(trial.ownership_only());
     const auto after = trial.candidate();
     EXPECT_EQ(publication(*after, trial.owned_channels()), before);
@@ -344,6 +428,42 @@ TEST(FiniteVoFRemap, MigrationCopiesNonbinaryInventoriesAndInheritedBoundsExactl
     expect_empty_owners(*after);
     for (unsigned phase = 0; phase < 2; ++phase)
         EXPECT_GT(exact_global_sum(history_values(*after, phase)).sign(), 0);
+}
+
+TEST(FiniteVoFRemap, TangentFittingArtifactRejectsWithoutSpendingAnotherPhaseBudget)
+{
+    const auto initial = input();
+    const auto& source = initial.state;
+    const auto control = source->accepted_control();
+    const auto identity = source->accepted_identity();
+    const auto values = channels(*source, true);
+    const auto before = publication(*source, values);
+    const auto plan = refine(*source);
+    bool rejected = false;
+    int local_phase_gate = 0;
+    try
+    {
+        (void) source->plan_remap(plan, bound_target(source->hierarchy(), plan), values, options());
+    }
+    catch (const std::invalid_argument& error)
+    {
+        rejected = true;
+        // This fixture's geometric fit produces a positive carrier receipt of
+        // about 4.63e-45 with radius 2.99e-49 at the tangent child. Its own
+        // unchanged relative budget is about 3.71e-59. No bulk/other-phase
+        // or historical allowance may qualify that arithmetic uncertainty.
+        local_phase_gate = std::string(error.what()).find("independent phase budget") != std::string::npos;
+    }
+    EXPECT_TRUE(rejected);
+    // Only the rejecting owner retains its local diagnostic. Empty ranks
+    // correctly receive the collective's generic remote-rejection message.
+    int phase_gate_reports = 0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_phase_gate, &phase_gate_reports);
+    EXPECT_EQ(phase_gate_reports, 1);
+    EXPECT_EQ(source->accepted_control(), control);
+    EXPECT_EQ(source->accepted_identity(), identity);
+    EXPECT_EQ(publication(*source, values), before);
+    expect_empty_owners(*source);
 }
 
 TEST(FiniteVoFRemap, ForeignStalePlansSchemasAndCapsRejectWithoutPublicationChanges)
@@ -363,8 +483,8 @@ TEST(FiniteVoFRemap, ForeignStalePlansSchemasAndCapsRejectWithoutPublicationChan
     EXPECT_THROW((void) source->plan_remap(plan, bound_target(source->hierarchy(), other_plan), values, schema),
         std::invalid_argument);
     const auto valid = source->plan_remap(plan, target, values, schema);
-    EXPECT_THROW((void) valid.candidate()->plan_remap(plan, target, valid.owned_channels(), schema),
-        std::invalid_argument);
+    EXPECT_THROW(
+        (void) valid.candidate()->plan_remap(plan, target, valid.owned_channels(), schema), std::invalid_argument);
     auto malformed = schema;
     malformed.byte_budget = 1;
     EXPECT_THROW((void) source->plan_remap(plan, target, values, malformed), std::invalid_argument);
@@ -417,5 +537,25 @@ TEST(FiniteVoFRemap, WholeCellMigrationCannotGiveAChannelAnAbsentPhysicalCarrier
     EXPECT_THROW((void) source->plan_remap(plan, target, invalid, schema), std::invalid_argument);
     EXPECT_TRUE(
         std::all_of(source->gas_volumes().begin(), source->gas_volumes().end(), [](double v) { return v == 0; }));
+
+    const auto split = refine(*source);
+    const auto refinement = source->plan_remap(split, bound_target(source->hierarchy(), split));
+    const auto fine = refinement.candidate();
+    const auto fine_identity = fine->accepted_identity();
+    const auto fine_control = fine->accepted_control();
+    std::vector<AdaptiveBytes> families;
+    for (const auto& [key, family] : fine->hierarchy()->families())
+        families.push_back(key);
+    const auto coarsen = fine->hierarchy()->plan_adaptation({}, families);
+    const auto coarse_target = bound_target(fine->hierarchy(), coarsen);
+    std::vector<GeneralVoFFiniteOwnedChannels> invalid_fine;
+    for (const auto& key : fine->owned_order())
+        invalid_fine.push_back({key, {{0, 0}}});
+    if (comm->getRank() == 0 && !invalid_fine.empty())
+        invalid_fine.front().amounts[0] = {-1, 0}; // Signed still requires a real carrier.
+    EXPECT_THROW((void) fine->plan_remap(coarsen, coarse_target, invalid_fine, schema), std::invalid_argument);
+    EXPECT_EQ(fine->accepted_identity(), fine_identity);
+    EXPECT_EQ(fine->accepted_control(), fine_control);
+    EXPECT_TRUE(std::all_of(fine->gas_volumes().begin(), fine->gas_volumes().end(), [](double v) { return v == 0; }));
 }
 } // namespace

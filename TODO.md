@@ -1589,8 +1589,10 @@ qualify general VoF, sparse ALE, production scaling or physical applications.
 
 **Deferred from the reacting-flow refactor:** VoF execution, the bounded floating-point path and the exact-rational path remain disabled or omitted. The historical implementation records below do not change that boundary.
 
-Implementation has focused numerical coverage for the bounded source-free,
-closed, nonperiodic convex-native backend. Overall Stage 7 physical
+**Floating-point arithmetic is the primary VoF implementation and development
+priority.** `ArithmeticMode::Ordinary` is the general-VoF default, with explicit
+`BoundedCertification` and `Exact` selections. Focused numerical coverage is
+available for the source-free, closed, nonperiodic convex-native backend. Overall Stage 7 physical
 qualification remains incomplete. The [general AMR design](docs/architecture/general_amr.md#qualification-status)
 maintains the scope and limits. Checked items below mean implementation plus
 the specified focused coverage, not production or application qualification.
@@ -1598,7 +1600,8 @@ the specified focused coverage, not production or application qualification.
 - [x] Implement polyhedral PLIC, canonical unsplit swept-volume transport,
       independent complementary phase ledgers and finite accepted histories.
       Publish independent binary64 gas/carrier amounts once per step/remap with
-      counted roundoff bounds; retain representable tiny phases without clipping.
+      counted roundoff bounds; retain conservative inventory accounting without
+      clipping. Arithmetic range support alone does not qualify interface resolution.
 - [x] Implement source-free compatible implicit momentum, physical-coordinate
       pressure/capillary/viscous operators, geometry-based timestep controls,
       attainable inner solves and original physical-residual acceptance under
@@ -1606,17 +1609,57 @@ the specified focused coverage, not production or application qualification.
 - [x] Verify focused reconstruction, donor budgets, microscopic/subnormal
       inventories, stale identity, rejection, rollback, regrid, policy and
       empty-owner contracts in serial and MPI.
-- [x] Complete the original ten-step skew coarse/fine phase passage to 0.02 s
-      in serial/MPI2/MPI4 with its original physical gates. Earlier resource
-      failures are superseded for this fixture only.
-- [x] Retain `ExperimentalExact` as a separately delivered, explicit opt-in
-      policy with source/result/capsule pins and same-mode remap. Reject
-      cross-policy adoption and silent fallback; finite history remains default.
-- [x] Reuse authenticated preparation, immutable topology, volume-only queries
-      and certification-local exact support planes without weakening proofs.
-- [ ] Integrate the separately staged bounded integer signs and certified
-      binary64/lazy-distance candidate. Its recorded focused matrix and full
-      coarse/fine runs pass; preserve exact fallback and compiler/mode guards.
+- [x] Share immutable topology and geometry preparation with identity/epoch/map
+      invalidation. Reuse numerical operators only for matching preparation.
+      The optional rational-route implementation/history and backlog are owned
+      by [ExactVoF](docs/architecture/exact_vof.md#recorded-implementation-and-remaining-work),
+      [ExactTransport](docs/architecture/exact_transport.md) and
+      [ExactGeometry](docs/architecture/exact_geometry.md).
+- [x] Implement a necessary scale-invariant interface-support/model screen
+      and typed refinement requests, retaining small grazing cuts when their
+      neighborhood is supported. Reject without changing accepted inventory.
+      This does not establish full physical thickness/curvature resolution.
+- [ ] Qualify physical resolution and convergence, including caller/controller
+      refinement or reinitialization, reevaluation and exhausted/unavailable
+      refinement. Use neither an absolute phase-volume cutoff nor arbitrary
+      precision as a substitute for spatial resolution. Mandatory arbitrary
+      subcell-phase fit success is retired; preserve accepted mass throughout.
+- [ ] Complete full-flow qualification of the implemented default
+      [finite arithmetic policy](docs/architecture/general_amr.md#primary-floating-point-policy).
+      Ordinary FP uses represented values and physical residual tolerances;
+      interval certification remains an explicit mode. Mode tags and source
+      provenance are separate from imported native authority. Numerical finite
+      geometry and ledgers use no rational construction/measure or fallback.
+      Count native authority imports separately. Keep explicit Exact work
+      separate, and retain independent inventories, physical tolerances and caps.
+- [ ] Complete matched candidate measurements against the recorded full-horizon
+      Release baseline: fragment/pair work, certificate reuse,
+      exact operations by predicate/construction/measure/ledger, operand sizes,
+      bounded retries/rejections, per-rank compute/wait and peak memory. The
+      serial/MPI2/MPI4 baseline passed; candidate full-horizon qualification is
+      still open. Reference/oracle work must be separately attributable;
+      sampling alone is insufficient.
+- [ ] Qualify canonical FP intersections/support, volume evaluation, only required
+      first moments, and immutable geometry/measure reuse with epoch invalidation.
+      Propagate construction/arithmetic error and allow only bounded FP retries
+      under the FP arithmetic policy; unresolved arithmetic rejects.
+      Preserve ordinary-volume signed support, complementary fits and phase-aware
+      accuracy. No exact result for each positive intermediate piece is required;
+      bounded aggregate accounting must retain all contributions without mass loss.
+- [ ] Qualify the implemented structural partition evidence, bounded closure
+      and lazy moment evaluation across full physical horizons. Finite face
+      rates, inventory calculations and residuals use scaled/compensated FP with
+      propagated bounds. Preserve canonical shared transfers, nonnegative amounts
+      and unchanged physical acceptance; no clipping, inventory renormalization
+      or policy switching. Keep rational geometry out of finite caches/MPI payloads.
+- [ ] Complete the [FP geometry acceptance gates](docs/verification/vof_solver_contracts.md#floating-point-acceptance-gates):
+      independent exact/analytic oracles, resolution/refinement and unit invariance,
+      MPI/shared-face and coarse/fine agreement, conservative aggregate accounting,
+      boundedness, atomic rejection and full physical horizons. Assert zero
+      rational construction/measure/ledger operations in finite numerical steps,
+      with native authority imports and selected reference work counted
+      separately. Compare matched Release serial and 2/4-rank runs with empty
+      owners, operation counts, operand sizes and memory.
 - [ ] Complete a coherent physical campaign on the integrated source, including
       reflected-cylinder capillarity and finite-duration viscous decay. Later
       optimization campaigns did not repeat those two long methods.
@@ -1626,12 +1669,9 @@ the specified focused coverage, not production or application qualification.
 - [ ] Resolve the recorded Release failure in
       `DistributedAdaptiveBalance.MeasuredOperationsDrivePinnedHierarchyMigration`;
       the later selected balance matrix excluded it explicitly.
-- [ ] Qualify optional exact-history physical accuracy, rational-history growth,
-      storage/RSS, long-horizon performance and scaling. Focused policy tests
-      do not close these gates.
 - [ ] Qualify production runtime and distributed scaling with matched source,
       runtime and complete physical horizons. Small-case speedups and operation
-      counts do not establish bounded rational width or whole-process memory.
+      counts do not establish whole-process memory bounds or production scaling.
 
 Periodic images, material-volume/species sources, low-Mach thermodynamics,
 population drift and representation coupling remain outside this backend;

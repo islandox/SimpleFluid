@@ -46,6 +46,33 @@ Fixture fixture(bool dilute = false)
     }
     return result;
 }
+Fixture coarse_fine_fixture()
+{
+    const auto comm = Tpetra::getDefaultComm();
+    AMRGrid grid;
+    grid.root_blocks = {2, 1, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {4, 2, 2};
+    CartesianAMR mesh(grid);
+    std::vector<std::uint64_t> owned;
+    for (std::uint64_t id = 0; id < 16; ++id)
+        if (int(id % std::min(2, comm->getSize())) == comm->getRank()) owned.push_back(id);
+    auto source = mesh.detach_owned(owned, {'q', 'u', 'o', 't', 'a', '_', 's', 'e', 'a', 'm'});
+    const auto initial = std::make_shared<const DistributedAdaptiveHierarchy>(std::move(source.owned),
+        std::move(source.families), source.kernel, comm);
+    std::vector<AdaptiveMark> marks;
+    if (initial->owned().contains(mesh.cell_key(0)))
+        marks.push_back({mesh.cell_key(0), AdaptiveSplit::Isotropic});
+    Fixture result;
+    result.hierarchy = initial->apply(initial->plan_adaptation(marks));
+    for (const auto& [key, leaf] : result.hierarchy->owned())
+    {
+        result.order.push_back(key);
+        result.gas.push_back(0);
+        result.carrier.push_back(result.hierarchy->metrics(leaf).volume);
+    }
+    return result;
+}
 std::vector<GeneralVoFNodeVelocity> stationary(const GeneralVoF& state)
 {
     std::vector<GeneralVoFNodeVelocity> result;

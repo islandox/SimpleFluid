@@ -1055,7 +1055,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     throw std::invalid_argument(
                         "General VoF transport changed the independent source occupancy defect.");
                 cell.retained_interface.reset();
-                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                if (inventory_policy_for(data.options.arithmetic_mode) == PhaseInventoryPolicy::ExperimentalExact)
                 {
                     cell.experimental_exact = detail::experimental_advance(*data.cells.at(key).experimental_exact,
                         {total.bulk, total.gas, total.carrier}, *cell.phase.geometry, cell.native_volume, limit);
@@ -1125,7 +1125,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                 sums[1] += static_cast<long double>(next.phase.carrier_volume) - old.phase.carrier_volume;
                 sums[2] += next.roundoff.gas;
                 sums[3] += next.roundoff.carrier;
-                if (data.options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                if (inventory_policy_for(data.options.arithmetic_mode) == PhaseInventoryPolicy::ExperimentalExact)
                 {
                     sums[2] += old.roundoff.gas;
                     sums[3] += old.roundoff.carrier;

@@ -29,18 +29,13 @@ documentation consolidation is not a new execution of those tests.
 | 4. Convex polyhedra | Actual occupied octants, shared face/edge overlays, saved-parent recovery, sparse exact native providers and physical remap | Canonical planning remains bounded and replicated; nonconvex cells are excluded |
 | 5. Local/mixed products | Shared base/run storage, typed participants, closed face/edge/vertex grading, native tiles and conservative remap | Unsupported crossed patch groupings reject; contacts have separate domains and no implicit exchange law; storage reports are nonadditive |
 | 6. Distributed state | Detached owner-local closure, typed ancestry, sparse native/state migration, accepted/history frames, final packet-cost admission and asserted empty owners | Initial complete-source bootstrap, unsupported topology changes, sparse ALE and production scaling remain outside qualification |
-| 7. General flow | Finite-default inventories; explicit experimental exact policy; PLIC, unsplit transport, physical-residual pressure/momentum, rollback/regrid and selected serial/MPI flow checks | Complete physical, long-horizon, high-contrast curved-seam and production-scale qualification remains open |
-| 8–9 | No general-mesh reacting-gas/representation integration or certified nonconvex flow is claimed | Implement and qualify the separate stages below |
+| 7. General flow | Ordinary FP default and independent finite inventories; explicit bounded-certification and exact modes; PLIC, unsplit transport, physical-residual pressure/momentum, rollback/regrid and selected serial/MPI flow checks | Complete physical, long-horizon, high-contrast curved-seam and production-scale qualification remains open |
+| 8–9 | No general-mesh reacting/representation integration or certified nonconvex flow is claimed | Implement and qualify the separate stages below |
 
-The finite-default ten-step skew coarse/fine passage fixture has completed its
-original 0.02 s endpoint and unchanged inventory, momentum, positivity and
-divergence gates in serial and at two/four ranks. This supersedes the early
-resource failures for that fixture. Selected hydrostatic and solver transaction
-checks also have passing recorded coverage. The latest geometry-optimization
-campaigns excluded the long reflected-cylinder and viscous methods; earlier
-bounded passes and timeouts do not establish their qualification on every later
-source. The optional exact policy has focused policy/API/history/remap coverage,
-but no full physical, long-horizon, storage/RSS or scaling qualification.
+The finite arithmetic modes have focused component coverage. Full physical
+horizons and matched production performance remain qualification gates. Historical
+rational-route results are recorded in [ExactVoF](exact_vof.md#verification-and-historical-qualification)
+and cannot establish a pass or speedup for the primary FP implementation.
 
 The separate Release balance fixture
 `DistributedAdaptiveBalance.MeasuredOperationsDrivePinnedHierarchyMigration`
@@ -48,13 +43,10 @@ has a recorded topology/geometry numbering failure before balancing. It was
 excluded explicitly from the later six-method balance selection. Passing
 migration checks do not close this unresolved fixture.
 
-The bounded integer-sign and certified floating-point/lazy-distance helpers are
-integrated. Their recorded focused correctness matrix and complete coarse/fine
-runs cover serial/MPI2/MPI4 on the qualified source. They accelerate predicates
-and defer exact distances; intersections, measures and coverage proofs still use
-rational arithmetic. The broader
-[FP geometry proposal](#proposed-floating-point-geometry-for-finite-vof) below is
-separate, unimplemented work. This documentation update adds no runtime evidence.
+Optional rational-route predicate acceleration is documented in
+[ExactGeometry](exact_geometry.md#measures-coverage-and-predicate-acceleration).
+The [primary FP policy](#floating-point-geometry-and-arithmetic) owns numerical
+geometry and acceptance. Documentation changes provide no new runtime evidence.
 
 The objective is one immutable adaptive hierarchy with provider-specific
 Cartesian, XY-base × Z-product, and polyhedral ancestry. All providers continue
@@ -709,66 +701,118 @@ measure shape, curvature, transport, and coupled-solution convergence.
 
 ## General VoF and flow backend
 
-`VoF::GeneralVoF` and `GeneralVoFSolver` provide an independent backend on
-source-pinned, authority-certified convex native cells. The Cartesian backend
-retains its specialized reconstruction and directional transport. General flow
-currently admits source-free, closed physical boundaries and nonperiodic
-geometry. Periodic images explicitly reject until their swept geometry is
-qualified; low-Mach thermodynamics, material/species sources and drift require
-Stage 8.
+**Ordinary floating-point arithmetic is the default for general VoF.**
+`GeneralVoFOptions::arithmetic_mode` is the single writable selector:
+`ArithmeticMode::Ordinary`, `BoundedCertification`, or `Exact`. The solver,
+reconstruction and remap inherit the accepted phase state's mode. Both finite
+modes retain independent binary64 gas/carrier inventories; the compatibility
+`inventory_policy()` getter derives `Finite` for them and `ExperimentalExact`
+for explicit `Exact`. Mode agreement is collective and reusable geometry,
+state and packets cannot mix modes. No failure triggers a backend fallback. Focused component coverage is implemented; full coupled-flow,
+complete-horizon performance and application qualification remain open.
 
-`PolyhedralReconstruction` fits the normal and offset against actual clipped
-physical-cell volumes. A least-squares gradient supplies an initial normal;
-every angular evaluation solves the target offset again. Conditioning,
-optimizer convergence, target-volume residual and curved-stencil model defect
-have separate checks. An underresolved or ill-conditioned stencil rejects.
-Curved-model admission does not establish planar-exact reconstruction or
-curvature convergence.
+The Cartesian backend retains its specialized reconstruction and directional
+transport. General flow currently admits source-free, closed physical boundaries
+and nonperiodic geometry. Periodic swept images, low-Mach thermodynamics,
+material/species sources and drift need their own qualification in Stage 8.
 
-`ExactSweptGeometry` uses canonical face triangulations, shared-node traces and
-signed swept simplices corrected to the canonical projected integrated face
-volume. This shared-vertex/signed-simplex/private-face-correction direction is
-informed by [Owkes and Desjardins, sections 3.2–3.5](https://ctflab.mae.cornell.edu/papers/Owkes%2C%20Desjardins.%202014.%20A%20computational%20framework%20for%20conservative%2C%20three-dimensional%2C%20unsplit%2C%20geometric%20transport%20with%20application%20to%20the%20volume-of-fluid%20%28VOF%29%20method.pdf).
-Their structured-mesh results do not qualify this general native backend.
-Recipient-local positive pullback proofs and owner-routed donor cover
-checks establish positive physical transfers independently of the signed raw
-face ledger. Opposite signed contributions remain distinct before donor
-accounting. An optional certified departure fan can replace the recipient's
-signed overlay with positive tetrahedra only after authenticating the original
-sweep chains, closed oriented manifold topology, a strict interior kernel,
-pairwise interior disjointness, and independent exact volume and first moments.
-Every resulting donor intersection still passes the original raw-face coverage
-and owner-routed donor-column proofs. A missing derived fan certificate falls
-back to the original overlay using the same remaining work budget. Corrupt
-original inputs and exhausted resource limits reject rather than selecting a
-fallback; the path diagnostic is informational, not an admission switch.
-Private certified convex intersections first admit exact zero-volume separation
-certificates: disjoint or touching axis intervals, then vertices entirely
-on/outside a supporting plane of either certified shell. This check precedes
-clipping scratch and shell copies for primary departure-tetrahedron/donor
-intersections, fan disjointness, signed fragments and owner-column proofs.
-Positive penetration, however small, cannot satisfy those certificates; absent
-a certificate, the original exact intersection test runs. Every caller's pair
-work charge, containment, independent volume/first moments and complete donor
-coverage checks remain required. Fixed exact locals add no retained geometry
-cache; existing uncached rational-temporary accounting remains explicit.
-Source/native identity and revisions pin reconstruction support;
-complete canonical node fans and fixed support rings supply physical neighbors,
-subject to explicit stencil, halo, packet and opaque-storage capacity guards.
-Exact wall-nullspace projection uses the complete authenticated catalog of
-incident exterior walls. Shared raw node input and the full exact departure
-must agree. Point, edge and corner wall constraints are exact; nearby planes
-are never merged by tolerance. This constrains the departure while preserving
-the physical inventory and canonical projected face volume.
+`VoF::PolyhedralReconstruction` inherits its numerical geometry's mode. A necessary
+neighborhood support/model screen precedes fitting; insufficient support emits
+a refinement request and rejects atomically. The normal fit uses physical-cell volumes, with enclosures in certification
+mode, and every angular evaluation refits the target offset. A
+nearby minority support anchor and an outward signed bracket preserve offset
+precision. Conditioning, optimizer convergence, target-volume accuracy and model
+defect remain separate gates. See the [resolution policy](#resolution-before-additional-precision).
 
-The default Stage 7 evolving phase state uses independent finite-precision
-extensive gas and carrier volumes, exposed as `PhaseVolumes`, rather than persistent rational
-inventories. Neither phase is recovered by subtracting the other from bulk
-volume. Exact geometry predicates, intersections, moments and coverage proofs
-remain distinct from evolving physics. Short-lived exact lifts of represented
-phase values may certify a trial; they do not carry a rational remainder into
-the next accepted step or remap. Momentum and named histories also publish
-finite physical values rather than recursively unrolling rational history.
+Canonical face triangulations share node traces and owner-oriented controls.
+Bounded signed swept pieces and recipient pullbacks establish physical phase
+transfers with donor coverage, non-overlap, occupancy and phase-error checks.
+Complete authenticated complement ancestry can certify a partition; independently
+constructed pieces require their own coverage evidence. Shared wall constraints
+use the complete authenticated incident catalog. Certified cross and triple
+products establish their rank; a normalized common tangent constructs motion
+along two independent walls without subtracting nearly parallel projections.
+No angular tolerance merges distinct walls, and unresolved rank rejects.
+Unsupported or ambiguous
+geometry rejects under the existing work and storage caps.
+
+Tetrahedral measures intersect four equivalent vertex-anchored determinant
+enclosures. This retains short-edge dependencies in thin swept intersections;
+their first moments use the same bounded volume and the tetrahedral centroid
+identity. Positive volume and downstream phase accuracy still require their
+original bounds. If the usual general-polyhedron volume enclosure cannot
+establish positivity, bounded vertex-anchored decompositions supply additional
+enclosures for the same shell. Their intersection must establish positivity
+within the existing work caps; no uncertain face triangle is dropped. Lazy
+moments use the same decomposition and a common physical reference.
+An ambiguous clip sign may also reuse a source-face vertex when three shared,
+independent support equations prove that it is the same point. Every incidence
+must be authenticated or have a singleton-zero residual; coordinate proximity
+does not establish identity. The immutable parent and its coordinate bounds
+remain unchanged.
+Global bounded-point import retains a valid sealed construction identity before
+converting coordinates to a local frame. Admitted faces keep weak references
+to their original point identities, so separate swept tetrahedra can recognize
+a reused uncertain input point without comparing coordinate boxes. Physical
+translation clears these identities; public relative-coordinate import and
+numerical packet decoding do not create them. Identity lookup and retained
+storage consume the existing caps.
+Three noncollinear shared source-face points can certify that a target support
+and query support are the same affine plane. This establishes zero distance
+independently of winding; signed-side decisions still require their own proof.
+Two independent shared supports can also certify line incidence: two distinct
+source-face edge endpoints on both supports prove that their entire intersection
+line lies in the queried plane, including target points beyond the segment.
+Source-face scalar-triple evaluations may refine a nonzero ambiguous sign while
+retaining shared edge factors. A certified signed normal ratio restores the
+original support orientation, frame and distance scale before clipping uses
+the refined bounds. A nearby point is never declared incident by tolerance.
+For two supports sharing a proved source edge, an affine coordinate on the
+target support can factor the query residual through another original point.
+This retains the small nonzero residual between nearly coincident swept
+planes. The original query-distance units, signed affine coordinate, bounded
+work and independent enclosure checks are preserved.
+Two retained independent supports can similarly identify a line through two
+original points. Query distances along that line use signed affine endpoint
+weights, without restricting the target to the endpoint segment or changing
+its coordinate enclosure.
+When rounded coordinates do not resolve that coefficient, two other retained
+supports can supply a bounded 2-by-2 affine solve. Each equation retains its
+original plane units, the determinant must exclude zero, and the solved
+coefficient intersects the coordinate-derived bound. Endpoint refinement is
+nonrecursive and all searches use the existing work and storage caps.
+Recipient overlays retain an atom unchanged when outward local bounds certify
+that it and a signed swept piece have no common positive-volume interior.
+This includes zero-volume contact, but does not assert that their surfaces are
+disjoint. Zero-coefficient atoms remain available to later pieces, and both
+pair visits and output buffers retain the original resource accounting.
+Surviving candidates apply all source halfspaces in a deterministic order that
+prioritizes nominally broad faces of thin swept pieces. The approximate area
+score schedules work only; classification and measures remain bounded. If the
+complete intersection is certified empty, intermediate complements reunite
+into the original atom with its original coefficient and measure. Preprocessing,
+comparisons and discarded constructions remain charged to the existing caps.
+Strict opposite endpoint distances certify a unique intersection in the open
+edge. This construction certificate replaces a redundant interval-fraction
+endpoint check; full coordinate uncertainty, range checks and subsequent
+topology and measure gates remain in force.
+Cut-cap winding follows the directed boundary of the retained outward faces.
+Internal edges cancel in opposite pairs; unmatched edges must form one closed
+cycle and every cap edge must oppose its adjacent retained-face edge. The
+complement uses the reversed cap. Numerical section area and centroid queries
+retain their quantitative checks.
+
+Strict opposite signs on a certified full-dimensional parent also prove that
+both clipped children have positive interior. When integration cannot supply
+a positive numerical lower bound, this construction permits intersection of
+the volume enclosure with the nonnegative domain only. The lower bound stays
+zero; the complete upper bound and error remain available to phase accounting.
+No fragment is removed or given an invented positive minimum. Convex coordinate
+bounds likewise enclose first moments. Independent imports remain subject to
+strict quantitative admission, and centroids, divisions, phase accuracy and
+conservation retain their numerical gates. Numerical packet export requires
+a positive quantitative volume bound; a local construction proof alone is not
+exported as an unchecked positivity flag.
 
 Canonical phase transfers are shared by both incident cells. Accumulation and
 once-rounded publication use cancellation-resistant sums and explicit,
@@ -776,7 +820,7 @@ scale-aware per-phase arithmetic/conversion bounds from the actual terms and
 operation counts. There is no cell-volume minority floor or magnitude-based
 phase deletion: independent representable microscopic phases remain supported
 by the current inventory arithmetic. This does not establish spatial resolution
-of their interface; the proposed FP path follows the
+of their interface; admission follows the
 [resolution policy](#resolution-before-additional-precision) below.
 Sub-range rounding is governed by the stated finite-precision arithmetic policy,
 not a requirement to retain below-binary64 physical inventory indefinitely.
@@ -784,184 +828,60 @@ Material capacity, positivity, conservation or occupancy errors reject. Any
 permitted arithmetic repair is bounded and canonical-face conservative; cell
 clipping, inventory renormalization and tolerance inflation cannot hide errors.
 Numerical occupancy and accumulated rounding provenance remain explicit finite
-bounds; regrid must not erase them by granting a fresh allowance.
+bounds; regrid must not erase them by granting a fresh allowance. Finite transport
+and remap carry each donor's admitted occupancy bound by its geometric bulk
+share. They separately record the signed fitting redistribution
+`A = (G-g)*(piece_g/g-piece_bulk/B) + (C-c)*(piece_c/c-piece_bulk/B)`, where
+`B,g,c` are source geometric measures and `G,C` are independent physical phases.
+The uniform source discrepancy and `A` together explain the recipient's physical
+phase sum minus geometric bulk. This known model contribution is not relabeled
+as arithmetic uncertainty, and no old recipient-local allowance substitutes for
+incoming donor evidence. Pure labels use their common bulk share and therefore
+have structural zero redistribution. Historical fitting-allocation bounds remain
+separate diagnostics and are not added twice to an inherited occupancy bound.
 
 The shared geometric label map is a bounded geometric consistency service,
 not the authoritative physical inventory. `geometric_phases()`,
 `geometric_gas_fractions()` and solver fractions are fitting/CSF views; they may
 round to zero or one while an independent physical minority remains positive.
 With omitted declarations, fresh input with one exactly zero phase and a
-positive other phase supplies proven pure geometry. That evidence persists
-under its qualified consistency bound even if transport creates a microscopic
-minority. A nonzero initial minority is never declared pure by magnitude;
-explicit declarations, including `Infer`, and adopted capsule geometry remain
+positive other phase supplies proven pure geometry. Finite transport keeps that
+hint when the same pure geometry carries an independent minority trace label.
+Authenticated positive minority geometry from a mixed or opposite pure donor
+invalidates the hint regardless of its amount; no bulk-scaled minority cutoff
+can establish geometric absence. A nonzero initial minority is never declared
+pure by magnitude; explicit declarations, including `Infer`, and adopted capsule
+geometry remain
 authoritative. Exceeding the retained declaration's bound requires inference or
 rejection, without erasing an inventory or relaxing the plane-model gate.
 
-`ExactPhaseTransfer` denotes exact-geometry transfer of finite phase volumes,
-optional independent phase mass, signed momentum and named histories through
-ownership migration, split and coarsen. Exact overlap weights and transient
-certificates establish geometric coverage; independently accumulated finite
-phase outputs retain derived rounding, occupancy and fitting bounds. Optional
-bounded mass-weighted momentum and pressure-volume products may remain exact
-only within an authenticated remap transaction, freshly formed from current
-finite phases and physical fields. This preserves individually sub-range
-products until aggregation and final finite velocity/pressure publication;
-these products are never adopted into phase/error state or reused as an evolving
-physical-step history. Same-key ownership copies preserve represented values;
-topology changes publish once-rounded target phases with bounded per-source
-conservation and target occupancy checks. No rational phase remainder survives
-adoption. Solver regrid
-and repartition rebuild candidate geometry-dependent operators without advancing
-the clock; a failed step or adaptation retains the complete accepted publication.
+Finite `plan_remap` transfers independent phases and declared weighted channels
+through pinned source/target observations and bounded overlaps. Ownership-only
+migration carries the represented phase values and error history. Topology
+changes publish each target once after source conservation, recipient occupancy,
+positivity and provenance admission. Regrid/repartition preserve the physical
+clock and map momentum/pressure histories; a failed operation leaves the entire
+accepted publication intact.
 
-An explicit `PhaseInventoryPolicy::ExperimentalExact` retains an experimental
-exact-inventory path; `Finite` remains the default. The cold exact phase/error
-payload is allocated only in the opt-in policy. Its ordinary finite views and
-conversion bounds remain diagnostics; the cold payload is that mode's authority.
-Source, result, capsules, imported records and accepted-control checks pin the
-policy, including empty owners. Cross-policy adoption rejects; resource or
-numerical failure never silently switches policy. The finite branch stores no
-exact phase/error remainder, and transaction-local weighted momentum products
-remain a separate concept in both modes.
+The flow workspace uses physical face geometry, center displacements,
+wall-normal pressure/capillary balance and normal viscous traction. Projection
+propagates errors through the actual FP operations, cached coefficients and
+represented face changes. Sparse closure routes corrections within the original
+face and incident-cell allowances, using compensated defects and verified forest
+parent/depth relations. Physical pressure/divergence targets and the shared
+iteration budget remain independent gates. An unresolved FP trial rejects.
 
-The default floating-point transport, remap, momentum, projection and closure
-definitions live directly in their owning `.cc` files and use unsuffixed
-entry points, including `plan_transport`, `plan_remap`, `solve` and `project`.
-Optional rational operations live in the owning component's `Exact` namespace:
-`SimpleFluid::VoF::Exact`, `SimpleFluid::detail::Exact` or
-`SimpleFluid::Exact`. Non-template definitions live in the owning compiled
-`.cc` translation units; the solver's exact template implementation lives in
-`details/GeneralVoFExactSolver.tcc`, included only by `GeneralVoFSolver.cc`.
-Shared geometry, packet framing and collective admission
-helpers remain common. This organization preserves the arithmetic compiler
-flags and policy dispatch; exact operations are not a finite-path fallback.
-Shared scalar arithmetic lives in `utils/BoundedFloatingPoint.hh`,
-`utils/DirectedFloatingPoint.hh`, `utils/BoundedInterval.hh`, and
-`utils/ExactRational.hh`. Geometry, phase accounting, and solver state remain in
-their owning components. Private headers declare shared state and helper
-interfaces; separate compiled translation units implement geometry, finite and
-exact transport, projection, and adaptive solver subsystems. Each numerical
-implementation retains its owning target's arithmetic compiler settings.
+The default transport, remap, momentum, projection and closure use unsuffixed
+entry points (`plan_transport`, `plan_remap`, `solve`, `project`) defined in their
+owning `.cc` files. Immutable topology and geometry preparation are shared with
+identity/epoch/map invalidation; candidate fields and ledgers stay private.
+Application-storage caps retain their configured scope, and do not bound backend,
+allocator, Krylov or whole-process RSS.
 
-Explicit rational reconstruction uses `VoF::Exact::PolyhedralReconstruction`;
-the unsuffixed `VoF::PolyhedralReconstruction` accepts bounded geometry.
-
-Experimental exact handoff preserves its authoritative phases and provenance
-through same-policy ownership migration and certified overlap transfer. Positive
-owned exact inventories must still have representable positive scalar views;
-tiny internal fragments are aggregated before that unchanged admission boundary.
-The retained exact implementation is experimental: focused policy/API/remap
-contracts do not qualify general physical use, performance or total storage. Normalized history denominators, rational arithmetic and packets
-can grow with accepted steps even after allocation slack and duplicate retention
-are removed. It has no long-horizon, centimetric-bubble or production-scaling
-qualification. The finite and experimental policies were delivered separately. Prototype
-results do not qualify the integrated opt-in path; its focused policy tests
-must remain distinct from its pending physical and performance gates.
-
-A multi-plan transfer names each actual native-bound candidate explicitly. The
-next plan must originate from that candidate's observed maps and geometry;
-an equivalent rebuilt view or a retargeted earlier plan is not a substitute.
-The bounded chain authenticates every intermediate observation, then transfers
-physical ledgers directly from the original accepted source to the final target,
-without generating intermediate physical histories. Existing ancestry-factor
-overlap restrictions still apply.
-
-Adoption validation reads the actual accepted identity, control and owned finite
-capsules without exporting or reconstructing snapshots. A weak source witness,
-source control, transfer transaction and adopted target control bind the opaque
-handoff to that publication. A separately constructed look-alike or a later
-transported state cannot stand in for the adopted target. Native geometry and
-map observations and physical phase/error provenance remain independently checked;
-the witness does not retain an old accepted-state chain.
-
-`ExactFaceTransfer` transfers accepted owner-canonical exact face rates at a
-fixed clock. Source-free exact rate `q` is independent of cell momentum `M*u`
-and pressure history `pV`; transferring those cell quantities cannot recreate
-it. Exact oriented common-refinement area fractions preserve inherited boundary
-rates. Only new internal face degrees of freedom on that common refinement are
-extended from declared physical velocity seeds and closed by a deterministic
-local divergence construction. Product intersections use their actual common
-refinement, not a nested-refinement shortcut. Source/target coverage, exact
-boundary-rate preservation and exact target divergence are checked against the
-actual accepted source and adopted target publications. This operation performs
-no pressure projection and changes neither momentum nor pressure histories.
-These fixed-clock and optional-fan paths remain subject to Stage 7 qualification.
-
-The flow workspace uses actual face geometry, physical center displacements,
-wall-normal pressure/capillary balance and normal viscous traction. Optional
-derived physical mass certificates can be rebuilt from the current finite
-phase values and represented material properties without a storage floor.
-Physical-coordinate curvature uses tangent spans and conditioning gates.
-The pressure iterate retains exact primary owner-canonical face rates, including
-updates below a represented velocity's ulp. Its defect RHS is normalized exactly
-before narrowing. The fixed pressure reference comes from the initial exact
-rate divergence; the original absolute/relative threshold remains fixed during
-corrections. Physical pressure and force increments recover the same exact
-normalization scale, and momentum impulses use the independent physical phase
-mass. These bounded step-local certificates are not persistent phase-history
-remainders; a new projection starts from the represented physical predictor.
-
-Projection arithmetic intervals derive only from performed operations and exclude
-Krylov and model error. A persistent sparse forest adjusts only faces with
-positive arithmetic radius, checks exact component compatibility and checks
-final divergence on every face. Actual bounded-forest feasibility shares the
-original pressure correction and iteration budget; failure does not widen any
-arithmetic bound. A zero-radius residual can invoke bounded rational CG only
-when every represented tangential pressure offset is exactly zero and the
-canonical face mobilities are positive. The same exact pressure supplies the
-face-rate update, interior pressure force and physical WLS wall reaction before
-any scalar view is published. This fallback does not qualify a nonorthogonal
-operator. Unresolved arithmetic feasibility, breakdown or resource exhaustion
-rejects the candidate.
-
-The accepted exact face rate is immutable and scales exactly by subsequent
-timesteps without another rounded volume-flux closure. It introduces no physical
-source. Explicit Input/Scratch/Result admission bounds application exact storage.
-Persistent scalar caps and a separate temporary operation lease share the same
-configured per-rank budget, whose default is 64 MiB; allocating a temporary lease
-does not enlarge that total. This is a configurable per-phase engineering
-admission limit, not a physical constraint or a universal production sizing.
-Changing it does not change numerical tolerances or make a failed physical gate
-acceptable. Immutable exact compaction can remove unused
-arithmetic allocation capacity before retaining a scalar/vector value, but must
-preflight overlapping source and destination storage within its operation lease.
-It preserves the exact rational value and the source object; the compact result
-must still satisfy its retained capacity cap. It is not a rounded conversion,
-a larger budget or a change to phase, model, convergence or physical gates.
-The final donor phase accounts immutable exact payloads by live identity and
-reference-counted leases, including source slots and pending replacements.
-Scoped raw, paired and correction temporaries release their charges only after
-their last retained handle is gone; proof and self-route aliases remain charged.
-Its arithmetic arena shares the same phase cap. The per-call label-map cap
-cannot exceed the captured construction limit and covers its inputs and
-intermediates without changing exact coefficients. This does not claim to
-preflight preceding geometric clipping internals.
-Raw-face/positive-transfer binding likewise reserves synchronous arithmetic
-from its remaining ledger, keeping decoded values, original face terms and
-communication buffers accounted through their actual lifetimes. The arithmetic
-growth envelope includes its returned result: after synchronous work ends,
-that result is immediately admitted to the retained ledger before another
-growing allocation. Separate tracking-metadata headroom remains reserved; a
-freed operation arena is not permanently charged again as retained payload.
-The exact original physical-norm reduction divides the caller's remaining
-capacity into pending scalar, operation/compaction and communication arenas.
-Codec temporaries die before exchange; exported packets, receive buffers and
-sender authentication fit the communication arena concurrently. The exact
-squared residual and original zero-RHS reference determine acceptance before
-any diagnostic square-root view, including when a tiny positive defect rounds
-away in that view. Legacy unleased calls keep their existing contracts. A failed
-operation, communication or retained-result admission rejects collectively;
-these leases cannot widen physical residual or phase-capacity bounds. Their
-implementation alone does not establish physical-flow qualification.
-Backend, allocator and Krylov allocations remain outside that accounting. Nested sparse owner queries and overlap services
-receive bounded transient caps from the caller's remaining service reservation;
-their live inputs, returned records and communication scratch must fit the
-caller's simultaneous application-storage accounting. Such a cap neither
-changes the retained hierarchy's configured budget nor enlarges the caller's
-total. Omitting an optional service cap preserves the service's existing default
-admission policy. These are phase-local application-capacity bounds, not a claim
-about process RSS, allocator overhead or the combined accepted/candidate peak.
+The current native authority import is described in
+[ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary).
+Explicit rational reconstruction/inventory and transport contracts have separate
+owners: [ExactVoF](exact_vof.md) and [ExactTransport](exact_transport.md).
 
 Let `Phi_f` be the owner-oriented projected volume transported over one step
 [m3], `s_cf` its outward incidence sign for cell `c`, and `DeltaG_c`, `DeltaC_c`
@@ -1318,7 +1238,7 @@ when extending representation geometry. Keep raw commands, manifests and results
 maintain qualification scope and unresolved gates here. Support claims change
 only after the corresponding stage gates pass.
 
-## General-flow preparation and exact geometry costs
+## Floating-point preparation
 
 The committed backend shares immutable native topology between accepted and
 trial states, with indexed cell/node incidence. Mutable phase arrays and cell
@@ -1329,70 +1249,19 @@ preparation. Unsampled coordinate directions have zero derivative; nonconstant
 fields still need conditioned stencils in sampled directions. Constant finite
 fields have exactly zero gradient, and nonfinite inputs reject collectively.
 
-PLIC support extrema use exact vertices, retain the signed displacement from
-the displayed anchor, and round search endpoints outward. Acceptance uses the
-original exact minority-volume residual. Rounded pure fractions never authorize
-discarding a positive phase.
+<a id="proposed-floating-point-geometry-for-finite-vof"></a>
 
-Momentum preparation authenticates exact ledger payloads, capacities, routes,
-face identities, donors, amounts, maps and budgets. Identical rounded views do
-not identify identical ledgers. Cache hits rerun RHS, physical-residual,
-iteration, positivity and final-publication gates; rejected preparation cannot
-leave a partially valid cache. Pressure proposes bounded-significand dyadic
-rates within existing arithmetic allowances, followed by exact closure or the
-original exact fallback. Final exact width also depends on exponent span and
-closure structure. A small dyadic inner normalization does not change the
-original physical residual or shared iteration budget.
+## Floating-point geometry and arithmetic
 
-Exact volume-only queries omit unused first moments while using the same
-oriented determinants. Admission and coverage proofs still calculate all three
-moments. Exactly zero determinants and inactive normal axes can be skipped;
-no positive piece is removed by a tolerance. Certification-local support planes
-use the first nonzero exact outward fan normal, including collinear prefixes.
-Optional caches account planes, ranges and rational limb capacities under live
-scratch leases. Only typed optional-cache exhaustion selects the uncached path;
-geometry, incidence and allocation failures propagate. Independent containment,
-pairwise disjointness, volume and first-moment proofs remain mandatory.
-
-### Implemented predicate acceleration
-
-The private integer helper evaluates rational support signs with checked
-fraction-free integer sums and positive denominators. Its bounded 32,768-bit
-workspace is leased before allocation. Unavailable capacity or checked overflow
-releases that lease and uses the original rational expression. Reserve-callback
-exceptions propagate. The result supplies only a sign, never approximate geometry.
-
-The floating-point helper encloses rational plane distances with outward
-binary64 intervals. Only an interval strictly on one side of zero certifies a
-sign; contact, cancellation, subnormal/overflow or unsupported arithmetic falls
-back to integer/rational evaluation. It is enabled only for guarded strict GCC
-on x86-64 SSE2 with round-to-nearest, masked exceptions and FTZ/DAZ disabled.
-Clang uses exact fallback. Every query rechecks the floating-point environment;
-cached intervals cannot bypass that check. Control bits are never changed.
-
-Lazy clipping materializes the original exact distance when a sign is uncertain
-or an edge crosses. Exact intersection coordinates, equality, vertex identity,
-incidence and moments therefore remain rational constructions. Scratch denial
-releases optional storage before uncached retry. Neither helper changes physical
-tolerances, mandatory resource limits, finite/exact policy or atomic rejection.
-
-Recorded matched runs show bounded workload improvements, not universal speedups.
-The coarse/fine case still costs hundreds of seconds for 50 cells. Exact clipping,
-moments and rational normalization remain substantial costs. Inclusive profile
-rows overlap; sample shares are not operation counts, fallback rates or elapsed
-time. Payload admission excludes backend/allocator/Krylov internals and is not
-an RSS cap. Large migration and process-memory costs still need qualification.
-
-### Proposed floating-point geometry for finite VoF
-
-**Status: design and qualification work only; no FP construction/measure backend
-is implemented or selected by this document.** The implemented predicate filters
-above leave exact coordinates, volumes, moments and coverage proofs intact.
-The proposed change targets that remaining construction and certification cost.
-No physical tolerance, current exact-API guarantee, resource limit or inventory
-policy changes through this proposal alone. The production requirement to fit
-arbitrarily thin phase features on the current mesh is withdrawn; the proposed
-resolution/adaptation policy below replaces that requirement.
+**Status: ordinary FP is the default, bounded certification is explicit, and
+full coupled-flow and performance qualification remain open.**
+Finite numerical values and points carry their arithmetic mode. Ordinary
+results are marked uncertified; a zero radius does not claim exactness, and
+certificate-only bound access rejects them. Bounded mode retains values,
+enclosures and source provenance without rational construction/measure fallback. Physical tolerances,
+exact-API guarantees and resource caps are retained. Arbitrary subcell-phase
+fit success is no longer required. Automatic refinement and full physical
+resolution/convergence qualification are not implemented.
 
 Conservative VoF requires consistent face transfers, bounded phase amounts and
 sufficient geometric accuracy. It does not generally require rational measures
@@ -1406,21 +1275,28 @@ See [Dyadechko and Shashkov](https://laro.lanl.gov/esploro/outputs/journalArticl
 These references motivate the distinction, not a new dependency or a claim that
 their mesh support or accuracy qualifies this backend.
 
-#### Finite arithmetic policy and permitted exact work
+<a id="finite-arithmetic-policy-and-permitted-exact-work"></a>
 
-The target production `Finite` path uses bounded floating-point geometry and
-accounting once the mesh/stencil resolution criterion is satisfied. Exact
-rational coordinates, measures and whole-partition replay are no longer design
-requirements for that path. This changes the target arithmetic contract; the
-current implementation remains exact until a separate numerical representation
-and its acceptance gates are qualified.
+### Primary floating-point policy
 
-Use the following routing rules:
+`ArithmeticMode::Ordinary` uses scalar finite geometry, compensated sums and
+actual residual checks against the configured physical tolerances. Interval
+admission, enclosure intersections and certification retries are disabled.
+`ArithmeticMode::BoundedCertification` uses bounded floating-point geometry and
+accounting after the necessary mesh/stencil support screen. It has a separate numerical
+representation; rational coordinates, measures and whole-partition replay are
+not its acceptance fallback. Component coverage does not establish full flow
+qualification or physical mesh convergence. The following rules also constrain
+future extensions.
+
+The following enclosure-routing rules apply to `BoundedCertification`.
+Ordinary mode retains the physical/model and resource requirements, using
+scalar residuals without claiming these interval certificates:
 
 1. Check physical resolution before attempting progressively more expensive
    reconstruction. Underresolved features request refinement and recheck, or
    reject atomically. Extra precision cannot satisfy this admission gate.
-2. Use locally scaled binary64 constructions, compensated sums and propagated
+2. Use locally scaled fixed-width FP constructions, compensated sums and propagated
    error bounds for intersections, support distances, volumes, required moments,
    PLIC fits, face transfers and finite inventory/residual calculations.
    Canonical ownership determines shared values; independently recomputing an
@@ -1429,35 +1305,38 @@ Use the following routing rules:
    wider FP or a fixed, bounded expansion whose error/environment assumptions
    are qualified. Retries count against the existing work and storage caps.
    Do not convert the construction, volume, moment or ledger to rational form.
-4. Permit exact arithmetic only as a narrowly scoped sign/ordering predicate
-   when qualified FP predicates cannot decide topology. It must classify the
-   original construction using authenticated provenance, return only the
-   discrete decision, and have bounded work/storage charged to the same caps.
-   It cannot export rational vertices or start an exact measure/coverage replay.
-   An exact sign of an already rounded point is insufficient evidence.
+4. Use certified FP predicates with retained source provenance for topology
+   decisions. An unresolved predicate rejects; the current numerical kernel
+   has no exact fallback.
 5. If those bounded calculations cannot establish the required sign, range,
    nonnegativity or error budget, reject collectively with an arithmetic
    diagnostic. Do not silently retry the whole geometry operation or timestep
    through the exact backend, switch inventory policy, or increase resource
    limits. An arithmetic failure alone is not proof of spatial underresolution.
 
-Exact geometry remains available as an explicit reference/debug oracle and for
-clients of the existing exact APIs. `ExperimentalExact` retains its separate
-inventory contract. Neither is an automatic acceptance fallback for the proposed
-finite path; reference comparisons run as explicitly selected verification work.
-Discrete entity keys, owner identity, incidence signs and exactly-once routing
-remain exact independently of the choice of numerical coordinates.
+Both finite modes retain binary64 public values and wide/scaled working
+arithmetic with compensated accumulation. Certification additionally requires
+its qualified IEEE environment and error-free residual assumptions; unresolved
+certification rejects. Ordinary mode checks finite scalar results and physical
+residuals without interval-width admission.
 
-#### Finite-path numerical representation
+The existing native source importer remains an explicit bootstrap boundary;
+[ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary)
+owns its authority/export contract. Numerical FP work, source import and any
+selected reference oracle require separate attribution. Discrete entity keys,
+owner identity, incidence signs and exactly-once routing retain their ordinary
+identity guarantees independently of numerical coordinates.
 
-| Current exact quantity or condition | Proposed finite-path treatment | Required replacement guarantee |
+### Finite-path numerical representation
+
+| Quantity or condition | Primary FP treatment | Required guarantee |
 | --- | --- | --- |
 | Cell, clipped and swept phase volumes | Local-coordinate FP integration with compensated accumulation and derived construction/arithmetic bounds; cache immutable measures | Fit and transfer errors satisfy the existing physical targets and independent per-phase budgets; all users share compatible canonical values |
 | First moments and centroids | FP integration about local anchors, evaluated only when reconstruction, remapping or physical operators need it | Bounds use the appropriate volume/length scales and handle translation, cancellation and small denominators; basic VoF does not acquire a new moment-conservation requirement |
-| Intersection coordinates and backward trajectories | Shared FP constructions with propagated error and source/support provenance; no persistent rational vertices | Canonical shared edges/faces remain coherent; bounded FP retries and the sign-only exception above must establish the decision, otherwise reject |
+| Intersection coordinates and backward trajectories | Shared FP constructions with propagated error and source/support provenance; no persistent rational vertices | Canonical shared edges/faces remain coherent; bounded FP calculations must establish the decision, otherwise reject |
 | PLIC offsets and volume matching | Check mesh resolution first, then use bracketed FP fitting with conservatively bounded support extrema and phase-aware residuals | Underresolved features request refinement or rejection; admitted fits retain signed support and physical error targets without exact-volume root finding or deleting phase mass |
 | Donor/recipient volume-equality certificates | Structural partition evidence plus bounded geometric/ledger closure residuals | Establish containment, ownership and non-overlap; retain occupancy and constant-state compatibility, with no unexplained source or residual normalization |
-| Repeated exact first-moment cover checks | Omit routine recomputation only where an adequate coverage proof already implies the moment property; retain independent reference/debug checks | The implication is proved for the actual piece class and arithmetic policy; moments needed elsewhere are still evaluated |
+| Repeated first-moment cover checks | Omit routine recomputation only where an adequate coverage proof already implies the moment property; retain independent reference/debug checks | The implication is proved for the actual piece class and arithmetic policy; moments needed elsewhere are still evaluated |
 | Transient inventory products, sums, face-rate closure and residual ratios in `Finite` mode | Scaled FP arithmetic, compensated sums and propagated bounds; no unconditional rational lifts or rational history | Preserve independent phases, finite publication, source-free closure, physical residual thresholds and zero-reference handling; unresolved range/budgets reject rather than silently underflow or switch policy |
 
 The first-moment implication has a precise scope. For bounded, positive-volume
@@ -1479,16 +1358,88 @@ exists. Exact reference comparisons validate the replacement; they are not a
 hidden runtime fallback in the finite path. A certificate must identify whether
 it proves an exact partition or bounds a numerical construction.
 
-#### Invariants retained by the FP proposal
+The finite swept-donor path uses `BoundedConvexPartition`, an immutable donor
+set whose disjointness is validated before any assignment. It retains the
+actual geometry objects and constructs a common complementary split tree for
+each swept simplex. Every outside fragment remains in the remainder; a nonempty
+remainder rejects. The complete witness tree proves coverage, while one original
+parent/donor intersection per used donor supplies the measured transfer. The
+validated disjoint donor set proves that this intersection equals that donor's
+witness union up to shared zero-volume boundaries. Temporary subdivision does
+not introduce additional transfer-measure requirements. A private certificate
+binds the parent identity and the exact complete set of measured output identities,
+replacing geometric cover replay for those outputs. Subsets, duplicates, mixed
+batches and changed descendants cannot use that certificate; generic validation
+retains its existing physical-budget policy. Weak member identities avoid retaining
+other outputs' ancestry graphs after those outputs are released.
+Overlapping input donors reject before construction, so processing order
+cannot hide multiple ownership. Donor tags do not certify signed multiplicity:
+the signed face-chain and recipient overlay checks remain independent.
+
+Immutable local coordinate bounds are computed with each shell and follow
+numerical rebasing. Outward transformed bounds reject separated intersections
+before and during clipping; touching bounds prove only zero-volume contact,
+and overlapping bounds prove nothing. Subset ancestry and opposite branches
+of the same private split also replace geometric containment/overlap tests.
+All certificate traversal and construction remain resource-bounded. Translation
+starts a new ancestry root, and packet decoding does not inherit sender-local
+certificates. Independently built recipient arrangements and decoded geometry
+retain generic validation wherever no authenticated construction proof exists.
+
+For independently intersected finite pieces, containment and pairwise interior
+disjointness are checked before completeness. If independent measure intervals
+cannot establish the original closure budget, bounded complementary subtraction
+may instead prove that the parent has an empty geometric remainder. Every
+positive outside fragment is retained, and all clips and proof storage share the
+original operation, pair and byte caps. Ambiguous signs and a nonempty remainder
+reject; this proof does not reduce any piece's measure uncertainty or relax
+downstream phase and inventory budgets.
+The subtraction witnesses are private geometry-only shells: strict signs on both
+sides of each cut of a full-dimensional convex parent prove positive interiors,
+and closed oriented cap construction preserves the shell. Every outside witness
+is retained even when its numerical volume would be unresolved. Witnesses cannot
+supply public volumes, moments, measured intersections or MPI packets, and cannot
+escape the completeness check. The originally supplied donor/transfer pieces
+retain their measured positivity and error bounds.
+
+Finite intersection constructs and measures only its requested inside piece.
+It retains the same input sign, crossing and section-topology checks, but does
+not require a volume certificate for an unused outside piece. Complementary
+clipping, phase splitting and geometric remainder proofs still construct both
+sides; retained transfers and every positive remainder keep their original
+measure and acceptance requirements.
+Before clipping an intersection, opposing halfspaces on an authenticated common
+support can prove disjoint interiors directly. Plane identity, identical or
+reversed input expressions, or an imported support key establish the common
+plane; certified normal orientation establishes opposition. Nearby coordinates
+or a rounded plane match cannot supply this proof. Face-pair searches consume
+the existing pair-work cap, and unresolved orientation retains ordinary clipping.
+
+New crossing vertices retain their incident plane equations. Up to three fixed
+interval-isolation sweeps intersect their coordinate enclosures with those
+equations, propagating shared support relationships before further clipping.
+Only a coefficient interval excluding zero can be used as a divisor. The
+contractor retains source uncertainty, rejects inconsistent enclosures, and
+charges its arithmetic to the existing operation cap. It neither snaps points
+to rounded planes nor changes previously published geometry or inventories.
+If an independently evaluated support residual remains ambiguous, a retained
+incident equation can eliminate one coordinate algebraically before bounded
+evaluation. The resulting residual enclosure is intersected with the original
+one. This preserves correlations for nearly parallel supports without inferring
+coplanarity from a small value; unresolved signs and inconsistent enclosures
+still reject under the same work cap.
+
+### Invariants retained by the FP implementation
 
 - Each face has one owner-canonical phase-transfer record, consumed with opposite
   signs on its two sides and consistently across MPI replicas. Identity, routing,
   incidence and exactly-once application remain discrete guarantees.
 - Canonical coarse/fine subfaces have compatible flux sums. Phase fluxes and total
-  volume flux must agree under the declared arithmetic bounds; source-free
+  volume flux must remain compatible under derived arithmetic bounds and the
+  authenticated transported occupancy/fitting provenance; source-free
   constant-state and pure-phase preservation remain required. A future moving-mesh
   extension must additionally satisfy its mesh-relative flux and old/new-volume
-  geometric conservation law; this proposal adds no ALE support.
+  geometric conservation law; this backend adds no ALE support.
 - Donors cannot export more of either phase than they own, and recipients cannot
   exceed their admitted capacity. Any limiting or roundoff repair changes the
   shared transfer ledger conservatively and stays within a justified arithmetic
@@ -1500,14 +1451,13 @@ it proves an exact partition or bounds a numerical construction.
 - Topology and orientation decisions need reliable predicates. A predicate that
   is exact for an already rounded vertex does not certify the original
   construction. Retain original inputs or construction provenance and propagate
-  their uncertainty through later queries. Use the bounded FP retries and
-  sign-only exact exception above; unresolved constructions reject without
+  their uncertainty through later queries. Use bounded FP evaluation; unresolved constructions reject without
   rationalizing the vertices or replaying exact coverage.
 - Rejection remains collective and atomic. Native geometry, topology, partition,
   maps, policy, units and provenance pin caches and certificates; a failed trial
   or refresh cannot mutate accepted state or leave reusable partial evidence.
 
-#### Error budgets and policy boundaries
+### Error budgets and policy boundaries
 
 Geometric approximation, FP arithmetic/publication, physical solver residuals
 and model/discretization error are distinct. Derive local arithmetic bounds from
@@ -1517,60 +1467,88 @@ and remap. A bound is evidence about error, not permission to enlarge a physical
 tolerance. Once adequate spatial resolution has been established, an arithmetic
 bound that cannot establish the original acceptance target permits only the
 bounded retries above, then rejection; no exact volume, moment or ledger retry
-is required or permitted within this proposed path. A physical resolution failure
+is required or permitted within this finite path. A physical resolution failure
 calls for refinement or rejection as specified below. An interval containing zero
 is not proof of exact zero. Repeated steps and regrids cannot reset accumulated
 error provenance or create a new unexplained allowance.
 
 Accepted phase amounts remain independent extensive inventories. Resolution
 failure must not erase them or turn a geometric approximation into a mass sink.
+The finite transport recipient gate applies the unchanged reconstruction volume
+tolerance independently to the positive lower enclosure of each incoming phase,
+before binary64 publication. It admits current-step geometric and ledger
+arithmetic error only. A large donor or dominant phase cannot supply the error
+allowance for a newly small receipt. Final binary64 narrowing and transported
+historical error are recorded separately; this gate is neither a cumulative
+physical-horizon ceiling nor a phase-amount cutoff. Failure requests atomic
+arithmetic rejection and does not, by itself, establish spatial underresolution.
+Finite transport and remap distinguish accepted phase amounts from the fitted
+geometric partition. For each source, let `delta_g` and `delta_c` be accepted
+minus fitted whole-phase volumes, and let `s_g`, `s_c`, `s_b` be the fragment
+shares of the raw gas, carrier and bulk geometry. The signed redistribution
+`A = delta_g * (s_g - s_b) + delta_c * (s_c - s_b)` explains how source fitting
+defect moves with the phase labels. The old source occupancy follows `s_b`;
+receiver admission bounds the unexplained residual after subtracting `A`.
+This provenance is derived from source data, never from the magnitude of the
+observed recipient defect. It cannot fund the separate incoming-phase accuracy
+gate. Transported phase-input, fitting and accumulated rounding history retain
+their categories through repartition and remap.
+
 For admitted states, phase-aware bounds and stable arithmetic still matter;
 small carrier amounts or zero-reference residuals are numerical accounting
 cases, not evidence that a phase interface is physically resolved.
 
-#### Resolution before additional precision
+### Resolution before additional precision
 
 Successful reconstruction of the former `1e-18` unit-cell phase case is no
 longer a production acceptance requirement. The corresponding dedicated success
 regression, and the still-smaller phase-fit success cases, are replaced by
 ordinary-volume fitting coverage. Historical results remain historical; they
-must not force the future FP backend to reconstruct arbitrary subcell features.
+must not force the finite backend to reconstruct arbitrary subcell features.
 
 A physical resolution criterion must relate estimated feature thickness/scale,
 curvature, stencil support and geometric uncertainty to local mesh spacing and
 the required interface accuracy. Absolute phase volume or FP representability
 alone is not that criterion. Changing units must not change the decision, and a
 tiny cut fraction from a well-resolved interface grazing a cell corner does not
-automatically require refinement. Criterion definitions and thresholds remain
-planned work; this change introduces no universal fraction or volume cutoff.
+automatically require refinement. The implemented preflight is a necessary
+neighborhood-support screen: a mixed reconstruction needs at least four
+physical neighbors, a full-rank conditioned gradient stencil, and both phases
+to reach `minimum_phase_support_fraction` (default `0.5`) somewhere in the
+target/stencil neighborhood. It is not a cutoff on the target-cell amount.
+Pure geometry declarations remain distinct from independent trace inventory.
+The existing angular convergence and `maximum_model_residual` checks also
+apply. Thickness/curvature and application convergence qualification remain
+open; passing this screen alone does not establish them.
 
-When a feature is underresolved, the proposed backend requests refinement of
-the relevant interface/stencil neighborhood and reevaluates resolution before
-accepting the reconstructed state. If refinement cannot meet the criterion,
+`PolyhedralResolutionAssessment` records the reason, local span, suggested
+half-span and stencil support. `PolyhedralResolutionRequired` rejects unresolved
+reconstruction; `GeneralVoF::resolution_requests()` exposes owned keyed
+requests collectively. The caller can refine/reinitialize the relevant
+interface neighborhood and reevaluate before accepting the reconstructed
+state. If refinement cannot meet the criterion,
 is unavailable, or exhausts its limits, reject with an actionable resolution
 diagnostic and retain accepted state atomically. Refining an already underresolved
 reconstruction does not recover missing initial interface information;
 reinitialization or independent convergence evidence may be required.
 
 The bounded arithmetic routing above applies only to otherwise resolved
-constructions; even a successful exact sign predicate does not qualify an
-underresolved interface. Shared-face conservation, independent phase accounting
+constructions; passing an arithmetic check does not qualify an underresolved
+interface. Shared-face conservation, independent phase accounting
 and boundedness remain required during refinement/remap and rejection; no phase
 clipping, renormalization, mass deletion or implicit change of physical model is
 authorized.
-The resolution gate and refinement-request integration are unimplemented tasks,
-not behavior supplied merely by retiring the old success tests.
+The screen and refinement-request API are implemented. Automatic adaptation,
+exhausted-refinement control and independent physical convergence evidence
+remain the responsibility of a future controller or the caller.
 
-The following distinctions must be explicit before implementing a new backend:
-
-| Contract | Policy disposition |
-| --- | --- |
-| Physical phase resolution | Require adequate mesh/stencil resolution; request refinement or reject underresolved features instead of requiring arbitrary-precision reconstruction |
-| Accepted extensive phase inventories and physical acceptance thresholds | Retain conservative accounting, boundedness and unchanged residual tolerances; a resolution failure does not authorize mass deletion |
-| Exact representation of every positive intermediate fragment, including values below FP output range | Retain only in the exact API/reference contract. The finite path may accumulate bounded aggregate contributions without an exact value for each piece; include every contribution in the aggregate error/accounting and reject if phase budgets cannot be established |
-| Rejection of every nonzero geometric gap, however small | Keep in the existing exact path. The finite path requires structural coverage plus bounded residuals within the unchanged physical targets; it must still detect holes/overlaps beyond those bounds and cannot infer coverage from a net volume sum |
-| Bitwise or exact-real equality of global sums, coordinates or moments | Distinguish from conservative FP updates with bounded roundoff; do not claim these from shared fluxes alone |
-| `PhaseInventoryPolicy::ExperimentalExact`, exact geometry APIs and authenticated lossless certificates | Preserve their current meaning; approximate values cannot silently replace their authority |
+The primary FP contract retains spatial resolution admission, independent
+inventories, shared conservative transfers, positivity and physical residual
+thresholds. Bitwise equality of independently summed global totals is not an
+acceptance requirement. Explicit rational-API guarantees are owned by
+[ExactVoF](exact_vof.md), [ExactTransport](exact_transport.md) and
+[ExactGeometry](exact_geometry.md); they do not add arbitrary-precision duties
+to the FP path.
 
 A contribution smaller than an individual FP output can be represented through
 scaled/compensated accumulation and an aggregate uncertainty bound; this is not
@@ -1580,11 +1558,12 @@ nonnegative transfer cannot be established within the existing per-phase error
 budget, reject the trial. A cell-volume-relative cutoff is not a substitute for
 this accounting, particularly when the other phase dominates the cell volume.
 
-Geometry evaluation policy is separate from phase inventory policy. `Finite`
-already publishes finite physical states while using rational geometry and
-transient exact lifts. The replacement needs a separate internal representation
-carrying values, bounds and provenance, with distinct certificate authority;
-this document names no new public selector or option. Wrapping a rounded FP value
+Geometry evaluation policy is separate from phase inventory policy. Default
+`PolyhedralReconstruction` and `GeneralVoF` use the selected finite arithmetic mode
+values, error evidence and distinct provenance. Explicit `VoF::Exact` APIs and
+`ExperimentalExact` retain rational authority. The finite path publishes
+independent binary64 phase amounts once; it retains transported error history
+separately from the current-step receipt gate. Wrapping a rounded FP value
 in `ExactGeometryMeasure` makes it exact only for that rounded value, not for the
 original construction, and cannot manufacture a coverage or owner certificate.
 Keep rational measure/construction objects out of finite-path caches and MPI
@@ -1594,38 +1573,37 @@ Retries must not erase history, enlarge resource caps or hide malformed input.
 Changes to work/storage accounting semantics need an explicit contract as well
 as unchanged limit values.
 
-#### Implementation priorities and acceptance
+### Remaining FP qualification
 
-1. Specify and implement the physical resolution gate, refinement requests and
+1. Qualify the implemented support screen, refinement requests and
    atomic rejection on unresolved or exhausted adaptation. Qualify unit/scale
    invariance and grazing-interface cases. Resolution admission is a prerequisite
-   for the new path, not a reason to relax accepted inventory accounting.
-2. Establish a baseline and instrument complete physical steps: fragment/pair
-   work, distance/volume/moment evaluations, certificate reuse, exact operations
-   separated by predicate/construction/measure/ledger, operand-size distributions,
-   and per-rank computation, waiting and peak memory. Record bounded retries and
-   rejections. Inclusive sample profiles do not supply these counts.
-3. Introduce the separate FP value/bound/provenance representation, canonical
+   for FP reconstruction and does not relax accepted inventory accounting.
+2. Compare matched complete physical horizons: FP fragment/pair work,
+   distance/volume/moment evaluations, certificate reuse, bounded retries,
+   rejections and per-rank computation, waiting and peak memory. Attribute native
+   import and selected reference work separately. Inclusive sample profiles do
+   not supply operation counts.
+3. Qualify the separate FP value/bound/provenance representation, canonical
    intersections and support, volume integration and only the moments actually
    consumed. Reuse immutable geometry and measures with topology, partition and
-   geometry invalidation. Qualify against independently selected exact/analytic
-   oracles; retain the existing implementation until replacement gates pass.
-4. Replace cover-proof replay with demonstrated structural certificates and
-   bounded conservative closure. Move finite face-rate, inventory and residual
-   calculations to the same bounded FP contract. Keep rational construction,
+   geometry invalidation. Compare with independent analytic or verified reference
+   data; qualify the primary implementation against its own acceptance gates.
+4. Qualify structural coverage certificates, bounded conservative closure and
+   FP face-rate, inventory and residual calculations. Keep rational construction,
    measure and ledger operations out of this path, including retries and caches.
-   Exact predicates remain limited to the documented discrete-decision exception.
-5. Execute the [proposed acceptance matrix](../verification/vof_solver_contracts.md#proposed-fp-geometry-acceptance-gates)
+   Reference-oracle work remains explicitly selected and separately measured.
+5. Execute the [FP acceptance matrix](../verification/vof_solver_contracts.md#floating-point-acceptance-gates)
    and the [Stage 7 roadmap](../../TODO.md#stage-7--general-vof-and-flow-qualification)
-   before integration or changing defaults. Preserve complete physical horizons
+   to qualify the integrated default. Preserve complete physical horizons
    and compare matched Release serial/MPI cases with empty owners. Require zero
    rational construction, volume/moment and ledger operations in the finite
-   backend, with exact predicate use separately counted and bounded. Report
-   reference-oracle cost separately; demonstrate accuracy and scaling, not just
-   fewer exact calls.
+   backend, with native import and selected reference work counted separately.
+   Demonstrate physical accuracy and complete-case performance.
 
-These are unimplemented tasks, not evidence of a faster FP backend or a working
-resolution controller. The arbitrary subcell-phase success requirement is retired;
-existing exact APIs retain their guarantees. Finite-path replacements must pass
-the revised numerical acceptance gates and all retained conservation, positivity,
+These are qualification obligations, not a claim of a faster backend or an
+automatic resolution controller. Component implementations and focused tests
+do not establish a complete physical horizon. The arbitrary subcell-phase
+success requirement is retired. The FP implementation must pass the numerical
+acceptance gates and all retained conservation, positivity,
 physical-tolerance, resource-cap and atomic-rejection requirements.

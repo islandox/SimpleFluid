@@ -50,8 +50,9 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 cell.revision = leaf.revision;
                 cell.phase = {hierarchy->geometry(leaf), gas[i], carrier[i]};
                 cell.native_volume = hierarchy->metrics(leaf).volume;
-                if (options.inventory_policy == PhaseInventoryPolicy::Finite)
-                    cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(*cell.phase.geometry);
+                if (options.arithmetic_mode != ArithmeticMode::Exact)
+                    cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(
+                        *cell.phase.geometry, geometry_limits(options.arithmetic_mode, options.byte_budget));
                 if (capsules)
                 {
                     cell.inherited = true;
@@ -66,17 +67,18 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     const auto& e = capsule.error;
                     cell.occupancy = {e.difference, e.admitted_bound, e.native_conversion, e.phase_input_bound,
                         e.fit_residual, e.fit_bound, e.transferred_bound, e.fit_allocation_bound};
-                    if (capsule.geometry_ready && options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                    if (capsule.geometry_ready && options.arithmetic_mode == ArithmeticMode::Exact)
                         cell.retained_interface = capsule.geometry;
                 }
                 else
                     occupancy(cell);
-                if (options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                if (options.arithmetic_mode == ArithmeticMode::Exact)
                 {
                     if (capsules)
                     {
                         const auto& capsule = capsules->at(i);
-                        if (capsule.policy != options.inventory_policy || !capsule.experimental_exact)
+                        if (capsule.policy != inventory_policy_for(options.arithmetic_mode) ||
+                            !capsule.experimental_exact)
                             throw std::invalid_argument("Experimental adoption policy/payload differs.");
                         cell.experimental_exact = capsule.experimental_exact;
                     }
@@ -193,8 +195,9 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                         cell.owner = binding.owner;
                         cell.revision = leaf.revision;
                         cell.phase.geometry = retained_geometry;
-                        if (options.inventory_policy == PhaseInventoryPolicy::Finite)
-                            cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(*retained_geometry);
+                        if (options.arithmetic_mode != ArithmeticMode::Exact)
+                            cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(
+                                *retained_geometry, geometry_limits(options.arithmetic_mode, options.byte_budget));
                         budget.add(cell.phase.geometry->storage_bytes());
                         found = data->cells.emplace(binding.key, std::move(cell)).first;
                     }
@@ -247,6 +250,22 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 for (auto node : tile.node_gids)
                     append_index(topology->node_tiles, node, index);
             }
+            for (const auto& [key, leaf] : hierarchy->owned())
+            {
+                auto& cell = data->cells.at(key);
+                cell.canonical_face_count = topology->cell_tiles.at(key).size();
+                if (!cell.canonical_face_count)
+                    throw std::invalid_argument("General VoF owned cell has no canonical boundary tiles.");
+                if (options.arithmetic_mode == ArithmeticMode::Ordinary)
+                {
+                    const auto volume = std::min(static_cast<long double>(cell.native_volume),
+                        cell.finite_geometry->volume().value);
+                    cell.ordinary_quota_scale = std::nextafter(
+                        volume / static_cast<long double>(cell.canonical_face_count), 0.L);
+                    if (!(cell.ordinary_quota_scale > 0) || !std::isfinite(cell.ordinary_quota_scale))
+                        throw std::invalid_argument("General VoF ordinary face quota has invalid capacity.");
+                }
+            }
             std::set<std::uint64_t> control_nodes;
             for (const auto& tile : topology->tiles)
                 control_nodes.insert(tile.node_gids.begin(), tile.node_gids.end());
@@ -255,7 +274,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     topology->nodes.push_back(node);
             std::map<std::uint64_t, std::set<Key>> node_source_cells;
             std::map<AMR::AdaptiveBytes, const AMR::AdaptiveTile*> wall_tiles;
-            if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+            if (options.arithmetic_mode != ArithmeticMode::Exact)
                 for (const auto& tile : topology->draft.tiles)
                 {
                     for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
@@ -266,7 +285,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     if (tile.exterior)
                         wall_tiles.try_emplace(tile.identity, &tile);
                 }
-            if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+            if (options.arithmetic_mode != ArithmeticMode::Exact)
                 for (const auto& node : topology->draft.nodes)
                 {
                     const auto fan = topology->node_fans.find(node.gid);
@@ -279,7 +298,8 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                             incident_sources.push_back(data->cells.at(key).phase.geometry);
                     if (incident_sources.empty())
                         throw std::invalid_argument("Finite VoF canonical node lacks an authenticated source fan.");
-                    auto p = Meshes::bounded_source_point(incident_sources, node.exact_identity);
+                    auto p =
+                        Meshes::bounded_source_point(incident_sources, node.exact_identity, options.arithmetic_mode);
                     topology->finite_nodes.emplace(node.gid, std::move(p));
                 }
             std::map<std::uint64_t, std::map<AMR::AdaptiveBytes, Meshes::ExactPlanarFacePtr>> walls;
@@ -319,8 +339,9 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 for (const auto& [identity, geometry] : walls[node.gid])
                 {
                     Meshes::BoundedPoint normal;
+                    normal.arithmetic_mode = options.arithmetic_mode;
                     Meshes::BoundedFaceConstraint constraint;
-                    if (options.inventory_policy == PhaseInventoryPolicy::Finite)
+                    if (options.arithmetic_mode != ArithmeticMode::Exact)
                     {
                         const auto found_face = wall_tiles.find(identity);
                         if (found_face == wall_tiles.end() || found_face->second->node_gids.size() < 3)
@@ -339,10 +360,17 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                         if (!matched)
                             throw std::invalid_argument("Finite VoF source wall has no authenticated cell support.");
                         const auto& a = topology->finite_nodes.at(face->node_gids[0]);
-                        for (std::size_t i = 1; i + 1 < face->node_gids.size(); ++i)
-                            normal = finite_detail::add(normal, finite_detail::cross(
-                                finite_detail::subtract(topology->finite_nodes.at(face->node_gids[i]), a),
-                                finite_detail::subtract(topology->finite_nodes.at(face->node_gids[i + 1]), a)));
+                        const auto construct_normal = [&]<ArithmeticMode Mode>()
+                        {
+                            using Math = finite_detail::Arithmetic<Mode>;
+                            for (std::size_t i = 1; i + 1 < face->node_gids.size(); ++i)
+                                normal = Math::add(normal, Math::cross(
+                                    Math::subtract(topology->finite_nodes.at(face->node_gids[i]), a),
+                                    Math::subtract(topology->finite_nodes.at(face->node_gids[i + 1]), a)));
+                        };
+                        if (options.arithmetic_mode == ArithmeticMode::Ordinary)
+                            construct_normal.template operator()<ArithmeticMode::Ordinary>();
+                        else construct_normal.template operator()<ArithmeticMode::BoundedCertification>();
                     }
                     retained.push_back({identity, geometry, normal, constraint});
                 }
@@ -439,18 +467,26 @@ const std::vector<PhaseVolumes>& GeneralVoF::phase_volumes() const noexcept
 }
 PhaseInventoryPolicy GeneralVoF::inventory_policy() const noexcept
 {
-    return data_->options.inventory_policy;
+    return inventory_policy_for(data_->options.arithmetic_mode);
+}
+ArithmeticMode GeneralVoF::arithmetic_mode() const noexcept
+{
+    return data_->options.arithmetic_mode;
+}
+std::vector<GeneralVoFPhaseGeometry> GeneralVoF::phase_geometry_declarations() const
+{
+    std::vector<GeneralVoFPhaseGeometry> declarations;
+    declarations.reserve(data_->topology->order.size());
+    for (const auto& key : data_->topology->order)
+        declarations.push_back(data_->cells.at(key).declaration);
+    return declarations;
 }
 std::vector<Meshes::ExactPhaseMeasures> GeneralVoF::inventory_measures() const
 {
-    if (inventory_policy() == PhaseInventoryPolicy::ExperimentalExact)
-        return experimental_phases();
-    std::vector<Meshes::ExactPhaseMeasures> result;
-    result.reserve(data_->phases.size());
-    for (const auto& value : data_->phases)
-        result.push_back(
-            {Measure::from_value(value.bulk), Measure::from_value(value.gas), Measure::from_value(value.carrier)});
-    return result;
+    if (arithmetic_mode() != ArithmeticMode::Exact)
+        throw std::invalid_argument(
+            "Exact inventory view requires explicit Exact mode; use phase_volumes for finite storage.");
+    return experimental_phases();
 }
 const std::vector<Meshes::ExactPhaseMeasures>& GeneralVoF::experimental_phases() const
 {
@@ -468,6 +504,8 @@ const std::vector<PhaseRoundoff>& GeneralVoF::accumulated_phase_errors() const n
 }
 std::vector<Meshes::ExactPhaseMeasures> GeneralVoF::geometric_phases() const
 {
+    if (arithmetic_mode() != ArithmeticMode::Exact)
+        throw std::invalid_argument("Exact geometric phase view requires explicit Exact arithmetic mode.");
     agree_transaction(data_->hierarchy->communicator(), data_->control);
     std::vector<Meshes::ExactPhaseMeasures> result;
     wire::collective(*data_->hierarchy->communicator(),
@@ -631,6 +669,14 @@ std::vector<Meshes::BoundedConvexGeometryPtr> GeneralVoF::owned_finite_geometry(
         result.push_back(data_->cells.at(key).finite_geometry);
     return result;
 }
+const std::vector<GeneralVoFFaceChainDiagnostic>& GeneralVoF::Trial::finite_face_chain_diagnostics() const noexcept
+{
+    return finite_face_chain_;
+}
+const std::vector<GeneralVoFCellClosureDiagnostic>& GeneralVoF::Trial::finite_cell_closure_diagnostics() const noexcept
+{
+    return finite_cell_closure_;
+}
 const std::vector<GeneralVoFFiniteFaceContribution>& GeneralVoF::Trial::finite_face_contributions() const noexcept
 {
     return finite_faces_;
@@ -712,7 +758,8 @@ std::vector<GeneralVoFSupportCell> GeneralVoF::support_cells() const
 {
     std::vector<GeneralVoFSupportCell> result;
     for (const auto& [key, cell] : data_->cells)
-        result.push_back({cell.gid, cell.revision, cell.owner, cell.phase.geometry, cell.centroid, key, cell.finite_geometry});
+        result.push_back(
+            {cell.gid, cell.revision, cell.owner, cell.phase.geometry, cell.centroid, key, cell.finite_geometry});
     return result;
 }
 const std::vector<GeneralVoFDonorBudget>& GeneralVoF::Trial::donor_budgets() const noexcept
@@ -746,7 +793,7 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::Trial::candidate() const
         [&]
         {
             current(*source_);
-            if (candidate_->options.inventory_policy != source_->options.inventory_policy)
+            if (candidate_->options.arithmetic_mode != source_->options.arithmetic_mode)
                 throw std::invalid_argument("General VoF trial candidate inventory policy differs.");
             result = std::shared_ptr<const GeneralVoF>(new GeneralVoF(candidate_));
         });
@@ -759,7 +806,7 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::apply(const Trial& trial) const
         {
             current(*data_);
             if (trial.source_ != data_ || !trial.candidate_ ||
-                trial.candidate_->options.inventory_policy != data_->options.inventory_policy)
+                trial.candidate_->options.arithmetic_mode != data_->options.arithmetic_mode)
                 throw std::invalid_argument("General VoF trial belongs to another source.");
         });
     return trial.candidate();

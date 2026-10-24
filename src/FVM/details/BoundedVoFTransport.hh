@@ -1,9 +1,12 @@
 /** @file BoundedVoFTransport.hh
- * @brief Bounded signed face chains and complementary closed-cell overlays.
+ * @brief Finite signed face chains and complementary closed-cell overlays.
  */
 #pragma once
 #include "FVM/details/BoundedPhaseArithmetic.hh"
 #include "geometry/ExactSweptGeometry.hh"
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <map>
 #include <set>
 #include <span>
@@ -14,6 +17,8 @@ using GeometryPtr = Meshes::BoundedConvexGeometryPtr;
 struct Work
 {
     Meshes::ExactSweepLimits limits;
+    ArithmeticMode arithmetic_mode = ArithmeticMode::BoundedCertification;
+    double volume_tolerance = 8e-15;
     std::size_t bytes = 0, pair_tests = 0;
     void charge(std::size_t n)
     {
@@ -68,6 +73,8 @@ struct Sweep
     std::vector<Point> current, departure;
     Point center, backcenter;
     Value control;
+    Value constructed_volume, signed_control_difference;
+    long double ordinary_volume_budget = 0;
 };
 inline bool same_point(const Point& a, const Point& b)
 {
@@ -101,74 +108,92 @@ inline std::vector<std::array<Point, 3>> sweep_boundary(std::span<const std::uin
     }
     return result;
 }
-inline Sweep make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
-    const std::map<std::uint64_t, std::pair<Point, Point>>& traces, Value control, Work& work)
-{
-    if (nodes.size() < 3 || nodes.size() > work.limits.maximum_simplices / 4)
-        throw std::invalid_argument("Finite VoF face simplex limit is exhausted.");
-    Sweep result;
-    result.face = face;
-    result.control = control;
-    std::set<std::uint64_t> unique;
-    for (auto node : nodes)
-    {
-        if (!unique.insert(node).second)
-            throw std::invalid_argument("Finite VoF canonical face repeats a node.");
-        const auto& trace = traces.at(node);
-        result.current.push_back(trace.first);
-        result.departure.push_back(trace.second);
-        result.center = add(result.center, trace.first);
-        result.backcenter = add(result.backcenter, trace.second);
-    }
-    result.center = Meshes::bounded_point_average(result.current);
-    result.backcenter = Meshes::bounded_point_average(result.departure);
-    Point normal{};
-    for (std::size_t i = 0; i < nodes.size(); ++i)
-        normal = add(normal, cross(subtract(result.current[i], result.center),
-            subtract(result.current[(i + 1) % nodes.size()], result.center)));
-    const auto triangles = sweep_boundary(nodes, result.current, result.departure, result.center, result.backcenter);
-    Sum original;
-    for (const auto& triangle : triangles)
-        original.add(cone_determinant(result.center, triangle));
-    // Only the departure cap depends on the private center. Its linear
-    // coefficient follows directly from the determinant's multilinearity.
-    Sum coefficient;
-    for (std::size_t i = 0; i < nodes.size(); ++i)
-    {
-        const auto j = (i + 1) % nodes.size();
-        coefficient.add(dot(normal, cross(subtract(result.departure[j], result.center),
-            subtract(result.departure[i], result.center))));
-    }
-    const auto difference = subtract(multiply(control, {6, 0}), original.value());
-    if (difference.value != 0 || difference.absolute_error != 0)
-        result.backcenter = Meshes::bounded_point_displaced(result.backcenter,
-            scale(normal, divide(difference, coefficient.value())));
-    Sum check;
-    const auto corrected = sweep_boundary(nodes, result.current, result.departure, result.center, result.backcenter);
-    for (const auto& triangle : corrected)
-    {
-        const auto volume = cone_determinant(result.center, triangle);
-        if (volume.value == 0 && volume.absolute_error == 0)
-            continue;
-        if (!(std::abs(volume.value) > volume.absolute_error))
-            throw std::invalid_argument("Finite VoF swept simplex orientation is arithmetically unresolved.");
-        auto geometry = Geometry::tetrahedron({result.center, triangle[0], triangle[1], triangle[2]});
-        if (!geometry)
-            throw std::invalid_argument("Finite VoF positive swept simplex disappeared.");
-        work.atom(geometry);
-        result.pieces.push_back({std::move(geometry), volume.value > 0 ? 1 : -1});
-        check.add(volume);
-    }
-    const auto residual = subtract(divide(check.value(), {6, 0}), control);
-    if (std::abs(residual.value) > residual.absolute_error)
-        throw std::invalid_argument("Finite VoF corrected face chain does not match its canonical control.");
-    return result;
-}
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_EXPORT Sweep make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
+    const std::map<std::uint64_t, std::pair<Point, Point>>& traces, Value control, Work& work,
+    long double ordinary_volume_budget = 0);
+
 struct OverlayAtom
 {
     GeometryPtr geometry;
     int coefficient = 0;
 };
+struct OverlayFace
+{
+    std::size_t index;
+    long double priority;
+};
+inline std::vector<OverlayFace> overlay_face_order(const Geometry& geometry, Work& work)
+{
+    const auto charge = [&](std::size_t count, std::size_t size)
+    {
+        if (count > std::numeric_limits<std::size_t>::max() / size)
+            throw std::invalid_argument("Finite VoF face-order capacity overflows.");
+        work.charge(count * size);
+    };
+    charge(geometry.faces().size(), sizeof(OverlayFace));
+    std::vector<OverlayFace> result;
+    result.reserve(geometry.faces().size());
+    for (std::size_t f = 0; f < geometry.faces().size(); ++f)
+        result.push_back({f, 0});
+    charge(geometry.points().size(), sizeof(Point));
+    const auto points = geometry.local_points();
+    long double magnitude = 0;
+    for (const auto& p : points)
+        for (const auto x : p.value)
+        {
+            if (!std::isfinite(x))
+                return result;
+            magnitude = std::max(magnitude, std::abs(x));
+        }
+    if (!(magnitude > 0))
+        return result;
+    int exponent = 0;
+    std::frexp(magnitude, &exponent);
+    const auto coordinates = [&](std::size_t index)
+    {
+        std::array<long double, 3> p;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            p[axis] = std::scalbn(points[index].value[axis], -exponent);
+        return p;
+    };
+    for (auto& entry : result)
+    {
+        const auto& face = geometry.faces()[entry.index];
+        const auto a = coordinates(face.front());
+        std::array<long double, 3> normal{};
+        for (std::size_t i = 1; i + 1 < face.size(); ++i)
+        {
+            work.test(); // Preprocessing shares the existing pair-work limit.
+            auto b = coordinates(face[i]), c = coordinates(face[i + 1]);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                b[axis] -= a[axis];
+                c[axis] -= a[axis];
+            }
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                const auto next = (axis + 1) % 3, last = (axis + 2) % 3;
+                normal[axis] += b[next] * c[last] - b[last] * c[next];
+            }
+        }
+        for (const auto n : normal)
+        {
+            if (!std::isfinite(n))
+                return result; // Original indices still have their initial order.
+            entry.priority = std::max(entry.priority, std::abs(n));
+        }
+    }
+    // Nominal areas schedule work only. Every geometric decision still uses
+    // the selected finite kernel. Broad faces first avoid extending thin-piece side
+    // planes unnecessarily through the full donor; original indices break ties.
+    std::sort(result.begin(), result.end(), [&](const auto& a, const auto& b)
+    {
+        work.test();
+        return a.priority != b.priority ? a.priority > b.priority : a.index < b.index;
+    });
+    return result;
+}
 /** Each overlay replaces one convex set by complementary descendants. Thus
  * disjointness/containment is inherited; integer multiplicity is never inferred
  * from a net volume sum. Every outside piece retains its original coefficient.
@@ -177,13 +202,27 @@ inline std::vector<OverlayAtom> overlay(std::vector<OverlayAtom> atoms, const Si
     int incidence, Work& work)
 {
     std::vector<OverlayAtom> result;
+    std::vector<OverlayFace> order;
     for (const auto& atom : atoms)
     {
         work.test();
-        auto inside = atom.geometry;
-        for (std::size_t face = 0; inside && face < piece.geometry->faces().size(); ++face)
+        if (atom.geometry->bounds_prove_disjoint_interiors(*piece.geometry))
         {
-            const auto split = inside->clip_by_face(*piece.geometry, face);
+            // Disjoint spatial bounds leave this coefficient
+            // unchanged. Retain even zero atoms for later signed pieces, and
+            // charge the output buffer through the same resource guard.
+            work.push(result, atom);
+            continue;
+        }
+        if (order.empty())
+            order = overlay_face_order(*piece.geometry, work);
+        const auto first_output = result.size();
+        auto inside = atom.geometry;
+        for (const auto& face : order)
+        {
+            if (!inside)
+                break;
+            const auto split = inside->clip_by_face(*piece.geometry, face.index);
             if (split.outside)
             {
                 work.created(split.outside, inside);
@@ -196,6 +235,14 @@ inline std::vector<OverlayAtom> overlay(std::vector<OverlayAtom> atoms, const Si
         {
             work.push(result, OverlayAtom{inside, atom.coefficient + incidence * piece.sign});
         }
+        else
+        {
+            // The emitted complements cover the original atom with the same
+            // coefficient. Empty intersection permits reconstruction
+            // reuse; retain all charges for the work already performed.
+            result.resize(first_output);
+            work.push(result, atom);
+        }
     }
     return result;
 }
@@ -204,34 +251,25 @@ struct Atom
     std::uint64_t donor = 0, recipient = 0;
     GeometryPtr geometry;
 };
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_EXPORT std::vector<Atom> recipient_partition(std::uint64_t recipient,
+    const std::map<std::uint64_t, GeometryPtr>& donors, const std::vector<std::pair<const Sweep*, int>>& faces,
+    Work& work, double physical_budget);
+
+inline Sweep make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
+    const std::map<std::uint64_t, std::pair<Point, Point>>& traces, Value control, Work& work,
+    long double ordinary_volume_budget = 0)
+{
+    if (work.arithmetic_mode == ArithmeticMode::Ordinary)
+        return make_sweep<ArithmeticMode::Ordinary>(face, nodes, traces, control, work, ordinary_volume_budget);
+    return make_sweep<ArithmeticMode::BoundedCertification>(face, nodes, traces, control, work, ordinary_volume_budget);
+}
 inline std::vector<Atom> recipient_partition(std::uint64_t recipient,
     const std::map<std::uint64_t, GeometryPtr>& donors, const std::vector<std::pair<const Sweep*, int>>& faces,
     Work& work, double physical_budget)
 {
-    std::vector<Atom> result;
-    Sum volume;
-    for (const auto& [donor, geometry] : donors)
-    {
-        std::vector<OverlayAtom> atoms{{geometry, donor == recipient ? 1 : 0}};
-        for (const auto& [sweep, incidence] : faces)
-            for (const auto& piece : sweep->pieces)
-                atoms = overlay(std::move(atoms), piece, -incidence, work);
-        for (const auto& atom : atoms)
-        {
-            if (atom.coefficient != 0 && atom.coefficient != 1)
-                throw std::invalid_argument("Finite VoF closed-cell pullback has invalid signed multiplicity.");
-            if (atom.coefficient)
-            {
-                volume.add(atom.geometry->volume());
-                work.push(result, Atom{donor, recipient, atom.geometry});
-            }
-        }
-    }
-    const auto target = donors.at(recipient)->volume();
-    const auto difference = subtract(volume.value(), target);
-    if (std::abs(difference.value) > difference.absolute_error ||
-        difference.absolute_error > std::abs(target.value) * physical_budget)
-        throw std::invalid_argument("Finite VoF recipient closure exceeds its original arithmetic/physical budget.");
-    return result;
+    if (work.arithmetic_mode == ArithmeticMode::Ordinary)
+        return recipient_partition<ArithmeticMode::Ordinary>(recipient, donors, faces, work, physical_budget);
+    return recipient_partition<ArithmeticMode::BoundedCertification>(recipient, donors, faces, work, physical_budget);
 }
 } // namespace SimpleFluid::VoF::finite_detail

@@ -1,6 +1,12 @@
 # Uniform-mesh volume of fluid
 
-`VoFSolver` is the Stage 1 flow core of the resolved/dispersed reacting-gas-bubble
+Floating-point arithmetic is the primary VoF choice. The shared
+[transport contract](../architecture/vof_transport.md) defines conservative
+accounting and acceptance; the [general-native FP policy](../architecture/general_amr.md#floating-point-geometry-and-arithmetic)
+owns its separate mesh support and qualification limits. Optional rational
+APIs are documented under [ExactVoF](../architecture/exact_vof.md).
+
+`VoFSolver` is the Stage 1 flow core of the resolved/dispersed reacting-bubble
 roadmap in [TODO.md](../../TODO.md). It advances two incompressible, isothermal
 phases on a fixed uniform Cartesian grid. Gas volume fraction `f=1` denotes gas;
 `f=0` denotes liquid. Density differences enter momentum storage, transport, and

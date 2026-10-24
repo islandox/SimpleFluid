@@ -6,14 +6,20 @@ namespace SimpleFluid::VoF
 {
 void GeneralVoF::validate_transfer_target(const ExactPhaseTransferResult& result) const
 {
+    if (arithmetic_mode() != ArithmeticMode::Exact)
+        throw std::invalid_argument("Exact transfer API requires explicit Exact arithmetic mode.");
     Exact::GeneralVoF::validate_transfer_target(*this, result);
 }
 ExactPhaseTransferSource GeneralVoF::export_transfer_source(bool prepare_geometry) const
 {
+    if (arithmetic_mode() != ArithmeticMode::Exact)
+        throw std::invalid_argument("Exact transfer API requires explicit Exact arithmetic mode.");
     return Exact::GeneralVoF::export_transfer_source(*this, prepare_geometry);
 }
 std::shared_ptr<const GeneralVoF> GeneralVoF::adopt_transfer(const ExactPhaseTransferResult& result) const
 {
+    if (arithmetic_mode() != ArithmeticMode::Exact)
+        throw std::invalid_argument("Exact transfer API requires explicit Exact arithmetic mode.");
     return Exact::GeneralVoF::adopt_transfer(*this, result);
 }
 namespace Exact
@@ -28,7 +34,7 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
                 result.target_hierarchy()->communicator().getRawPtr() != comm.getRawPtr())
                 throw std::invalid_argument("General VoF transfer target communicator differs.");
             current(*self.data_);
-            if (result.inventory_policy() != self.data_->options.inventory_policy)
+            if (result.inventory_policy() != self.inventory_policy())
                 throw std::invalid_argument("General VoF transfer target policy differs.");
         });
     result.validate_observations();
@@ -56,7 +62,7 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
                 if (found == self.data_->cells.end() || !self.data_->hierarchy->owned().contains(capsule.key))
                     throw std::invalid_argument("General VoF adopted transfer ownership differs.");
                 const auto& cell = found->second;
-                if (capsule.policy != self.data_->options.inventory_policy ||
+                if (capsule.policy != self.inventory_policy() ||
                     bool(capsule.experimental_exact) != bool(cell.experimental_exact))
                     throw std::invalid_argument("General VoF adopted policy/payload differs.");
                 if (cell.experimental_exact)
@@ -83,7 +89,7 @@ void GeneralVoF::validate_transfer_target(const State& self, const ExactPhaseTra
                 if (cell.revision != capsule.revision || cell.declaration != declaration ||
                     bool(cell.retained_interface) !=
                         (capsule.geometry_ready &&
-                            self.data_->options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact) ||
+                            self.inventory_policy() == PhaseInventoryPolicy::ExperimentalExact) ||
                     cell.native_volume != capsule.phases.bulk || cell.phase.gas_volume != capsule.phases.gas ||
                     cell.phase.carrier_volume != capsule.phases.carrier || cell.roundoff.gas != capsule.roundoff.gas ||
                     cell.roundoff.carrier != capsule.roundoff.carrier ||
@@ -121,7 +127,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                 const auto& cell = self.data_->cells.at(key);
                 ExactPhaseTransferCapsule capsule;
                 capsule.key = key;
-                capsule.policy = self.data_->options.inventory_policy;
+                capsule.policy = self.inventory_policy();
                 capsule.experimental_exact = cell.experimental_exact;
                 capsule.revision = cell.revision;
                 capsule.phases = {cell.native_volume, cell.phase.gas_volume, cell.phase.carrier_volume};
@@ -130,7 +136,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                 const auto& e = cell.occupancy;
                 capsule.error = {e.difference, e.admitted_bound, e.native_conversion, e.phase_input_bound,
                     e.fit_residual, e.fit_bound, e.transferred_bound, e.fit_allocation_bound};
-                if (self.data_->options.inventory_policy == PhaseInventoryPolicy::Finite)
+                if (self.inventory_policy() == PhaseInventoryPolicy::Finite)
                 {
                     // This explicitly selected reference export reconstructs
                     // diagnostic centers only; the accepted finite allowance
@@ -151,7 +157,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                     capsule.geometry_ready = true;
                 }
                 else if (cell.retained_interface &&
-                         self.data_->options.inventory_policy == PhaseInventoryPolicy::ExperimentalExact)
+                         self.inventory_policy() == PhaseInventoryPolicy::ExperimentalExact)
                 {
                     capsule.geometry = *cell.retained_interface;
                     capsule.geometry_ready = true;
@@ -211,7 +217,7 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
         [&]
         {
             result.emplace(ExactPhaseTransferSource(self.data_->hierarchy, self.data_, self.data_->control,
-                std::move(capsules), self.data_->options.inventory_policy));
+                std::move(capsules), self.inventory_policy()));
         });
     return std::move(*result);
 }
@@ -227,7 +233,7 @@ std::shared_ptr<const VoF::GeneralVoF> GeneralVoF::adopt_transfer(
         [&]
         {
             current(*self.data_);
-            if (result.inventory_policy() != self.data_->options.inventory_policy)
+            if (result.inventory_policy() != self.inventory_policy())
                 throw std::invalid_argument("General VoF adoption inventory policy differs.");
             if (result.source_identity().get() != self.data_.get() || result.source_control() != self.data_->control ||
                 result.source_hierarchy().get() != self.data_->hierarchy.get())

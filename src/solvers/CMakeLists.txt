@@ -1,5 +1,8 @@
 set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     GeneralVoFSolver.cc
+    details/GeneralVoFSolverFinite.tcc
+    details/GeneralVoFFiniteProjection.tcc
+    details/ConservativeVoFFiniteTransport.tcc
     details/GeneralVoFExactSolver.tcc
     VoFSolver.cc
     details/ConservativeVoFTransport.cc
@@ -12,6 +15,7 @@ set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     details/GeneralVoFExactPressure.cc
     details/GeneralVoFFlowWorkspace.cc
     details/GeneralVoFExactProjection.cc
+    details/GeneralVoFFiniteProjectionArithmetic.hh
     details/GeneralVoFCurvature.cc
     details/GeneralVoFExactStorage.cc
     details/ConservativeVoFExactArithmetic.cc
@@ -102,6 +106,9 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
             GeneralVoFSolver.cc
+    details/GeneralVoFSolverFinite.tcc
+    details/GeneralVoFFiniteProjection.tcc
+    details/ConservativeVoFFiniteTransport.tcc
             details/ConservativeVoFTransport.cc
             details/GeneralVoFFlowWorkspace.cc
             details/GeneralVoFPhiClosure.cc

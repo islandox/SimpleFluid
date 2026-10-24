@@ -2,19 +2,19 @@
  * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
-#include "geometry/ConvexCellGeometry.hh"
 #include "geometry/BoundedConvexGeometry.hh"
+#include "geometry/ConvexCellGeometry.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactPressure.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
+#include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cfenv>
+#include <cmath>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -23,6 +23,7 @@
 namespace SimpleFluid::detail
 {
 using namespace flow_support;
+/** Optional rational projection backend. */
 namespace Exact
 {
 void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std::vector<double>& face_velocity,
@@ -32,7 +33,7 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
     std::optional<std::span<const Meshes::ExactGeometryMeasure>> physical_mass,
     const GeneralVoFProjectionClosureTopology* closure_topology)
 {
-    self.require(!self.finite_arithmetic_,
+    self.require(self.arithmetic_mode_ == ArithmeticMode::Exact,
         "Exact projection requires an exact workspace; finite policy cannot switch arithmetic.");
     int closure_requested = bool(closure_topology), closure_minimum = 0, closure_maximum = 0;
     Teuchos::reduceAll(

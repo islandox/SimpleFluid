@@ -25,6 +25,52 @@ using namespace SimpleFluid;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
+TEST(ConservativeVoFTransportTest, OrdinaryWideMomentumPreservesPhysicalStorageWithoutIntervalAdmission)
+{
+    Meshes::AMR::AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {2, 2, 2};
+    grid.periodic = {true, true, true};
+    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::AMR::CartesianAMR>(grid));
+    const auto mesh = geometry.mesh();
+    const auto n = mesh->num_owned_cells();
+    std::vector<long double> old(n, 1), source(n), capacity(n, 2), outgoing(n), uncertainty(n, 4);
+    const std::vector<detail::ConservativeVoFTransport::FiniteTransfer> routes;
+    const std::vector<detail::ConservativeVoFTransport::FiniteFaceContribution> faces;
+    const auto comm = mesh->owned_cell_map()->getComm();
+    if (comm->getSize() > 1)
+    {
+        detail::ConservativeVoFTransport mismatched(mesh);
+        const auto mode = comm->getRank() + 1 == comm->getSize() ?
+            ArithmeticMode::BoundedCertification : ArithmeticMode::Ordinary;
+        EXPECT_THROW((void) mismatched.solve(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12,
+                         64 * 1024 * 1024, {}, {}, {}, {}, mode), std::runtime_error);
+    }
+    detail::ConservativeVoFTransport transport(mesh);
+    const auto carried = transport.solve(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12,
+        64 * 1024 * 1024, uncertainty, {}, uncertainty, {});
+    EXPECT_LE(carried.physical_relative_residual, 1e-12);
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        EXPECT_EQ(carried.cell_trace[c], .5);
+        EXPECT_EQ(carried.amount[c], 1);
+    }
+    EXPECT_THROW((void) transport.solve(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12,
+                     64 * 1024 * 1024, {}, {}, {}, {}, ArithmeticMode::BoundedCertification),
+        std::runtime_error);
+    detail::ConservativeVoFTransport bounded(mesh);
+    EXPECT_THROW((void) bounded.solve(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12,
+                     64 * 1024 * 1024, uncertainty, {}, uncertainty, {}, ArithmeticMode::BoundedCertification),
+        std::runtime_error);
+    for (auto& value : capacity)
+        value = -1;
+    EXPECT_THROW(
+        (void) transport.solve(old, source, capacity, outgoing, routes, faces, true, 3000), std::runtime_error);
+    for (auto& value : capacity)
+        value = 2;
+    EXPECT_NO_THROW((void) transport.solve(old, source, capacity, outgoing, routes, faces, true, 3000));
+}
+
 TEST(ConservativeVoFTransportTest, SplitCounterexampleHasBoundedConservativeImplicitTracesForEveryFirstAxis)
 {
     SimpleFluid::Meshes::AMR::AMRGrid grid;

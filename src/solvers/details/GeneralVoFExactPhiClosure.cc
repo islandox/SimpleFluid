@@ -2,6 +2,7 @@
  * @brief Sparse persistent-identity forest closure with bounded floating-point arithmetic.
  */
 #include "solvers/details/GeneralVoFPhiClosure.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
@@ -18,6 +19,7 @@
 namespace SimpleFluid::detail
 {
 using namespace phi_support;
+/** Optional rational backend in the Exact namespace. */
 namespace Exact
 {
 namespace

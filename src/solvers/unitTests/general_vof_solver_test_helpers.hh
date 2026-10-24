@@ -198,6 +198,8 @@ std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(unsigned nx, unsign
 }
 std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
 {
+    Meshes::BoundedGeometryLimits limits;
+    limits.arithmetic_mode = ArithmeticMode::Ordinary;
     AMR::ExtrudedAMRGrid grid;
     for (unsigned y = 0; y < 3; ++y)
         for (unsigned x = 0; x < 5; ++x)
@@ -234,13 +236,15 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
     {
         order.push_back(key);
         zero.push_back(0);
-        full.push_back(raw->geometry(leaf)->moments().volume.as_double());
+        full.push_back(
+            Meshes::BoundedConvexGeometry::from_geometry(*raw->geometry(leaf), limits)->volume().as_double());
     }
     auto bound = std::make_shared<const VoF::GeneralVoF>(raw, order, zero, full);
     std::vector<AMR::AdaptiveMark> marks;
     for (const auto& [key, leaf] : bound->hierarchy()->owned())
     {
-        const auto center = bound->hierarchy()->geometry(leaf)->centroid();
+        const auto center =
+            Meshes::BoundedConvexGeometry::from_geometry(*bound->hierarchy()->geometry(leaf), limits)->centroid();
         const double xi = center[0] - .2 * center[1];
         if (xi > .5 && xi < .75)
             marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
@@ -251,11 +255,13 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
     std::vector<double> gas, carrier;
     for (const auto& [key, leaf] : refined->owned())
     {
-        const auto shell = refined->geometry(leaf);
-        const auto clip = shell->clip({{1, .17, .11}, {0, 0, 0}, .65});
+        // Initialize both phases with ordinary FP geometry. Native authority
+        // import supplies supports only; no rational reference clip or measure.
+        const auto shell = Meshes::BoundedConvexGeometry::from_geometry(*refined->geometry(leaf), limits);
+        const auto amounts = shell->phases({{1, .17, .11}, {0, 0, 0}, .65});
         order.push_back(key);
-        gas.push_back(clip.inside ? clip.inside->moments().volume.as_double() : 0);
-        carrier.push_back(clip.outside ? clip.outside->moments().volume.as_double() : 0);
+        gas.push_back(amounts.gas.as_double());
+        carrier.push_back(amounts.carrier.as_double());
     }
     return std::make_shared<const VoF::GeneralVoF>(refined, std::move(order), std::move(gas), std::move(carrier));
 }

@@ -3,6 +3,7 @@
  * @brief Sparse persistent-identity forest closure with bounded floating-point arithmetic.
  */
 #include "solvers/details/GeneralVoFPhiClosure.hh"
+#include "FVM/details/BoundedPhaseArithmetic.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
@@ -18,6 +19,10 @@
 namespace SimpleFluid::detail
 {
 using namespace phi_support;
+namespace fp = VoF::finite_detail;
+using CertifiedArithmetic = fp::Arithmetic<ArithmeticMode::BoundedCertification>;
+using CertifiedSum = fp::SumFor<ArithmeticMode::BoundedCertification>;
+/** Bounded floating-point canonical rate certification and closure. */
 namespace finite_phi
 {
 long double leased_add(long double a, long double b, std::size_t)
@@ -93,6 +98,9 @@ struct FNode
     std::vector<FEdge> edges;
     GO parent_face = -1, parent = -1;
     long double defect = 0, radius = 0, used = 0, roundoff = 0;
+    long double bottleneck = std::numeric_limits<long double>::max();
+    CertifiedSum defect_sum, used_sum;
+    bool parent_verified = false;
 };
 } // namespace
 static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHandle<>>& mesh,
@@ -144,6 +152,7 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
             storage.capacity(Domain::Scratch, e, 3 * sizeof(GO) + 2 * sizeof(int) + 8 * sizeof(void*));
             storage.capacity(Domain::Scratch, n, 3 * (sizeof(std::pair<const GO, long double>) + 4 * sizeof(void*)));
             storage.capacity(Domain::Result, 2 * f, sizeof(long double));
+            storage.capacity(Domain::Scratch, f, sizeof(long double)); // Canonical application rounding.
             const auto packet_pool = storage.remaining() / 2;
             storage.capacity(Domain::Scratch, packet_pool, 1);
             packet_budget = packet_pool / 8;
@@ -162,9 +171,13 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
     std::map<GO, std::size_t> face_index;
     std::set<GO> endpoint_set;
     GeneralVoFFiniteRateClosure result;
+    std::vector<long double> application_error;
     collective(*comm,
         [&]
         {
+            application_error.resize(faces.size());
+            if (application_error.capacity() > faces.size())
+                throw PhiProposalResource("Phi application error storage exceeds its preflight capacity.");
             result.rate.reserve(faces.size());
             result.correction.reserve(faces.size());
             if (cells.size() != mesh->num_owned_cells())
@@ -272,8 +285,10 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                 if (std::any_of(n.edges.begin(), n.edges.end(), [&](const auto& e) { return e.face == face; }))
                     throw std::runtime_error("Duplicate incident closure edge.");
                 n.edges.push_back({face, other, peer, p.peer, sign, identity, volume, radius});
-                n.roundoff += 8 * std::numeric_limits<long double>::epsilon() * (std::abs(n.defect) + std::abs(volume));
-                n.defect = E::leased_add(n.defect, E::leased_scale(volume, sign, scalar_budget), scalar_budget);
+                n.defect_sum.add({E::leased_scale(volume, sign, scalar_budget), 0});
+                const auto accumulated = n.defect_sum.value();
+                n.defect = accumulated.value;
+                n.roundoff = accumulated.absolute_error;
                 auth_faces.push_back(face);
                 auth_senders.push_back(p.peer);
             }
@@ -315,6 +330,7 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                         c.put(std::uint64_t(e.face));
                         c.put(n.label);
                         c.put(n.depth);
+                        c.put(n.bottleneck, scalar_budget);
                         enqueue(e.peer, std::move(c.bytes));
                     }
             });
@@ -331,14 +347,31 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                     const GO gid = c.get(), other = c.get(), face = c.get();
                     const auto label = c.blob();
                     const auto depth = c.get();
+                    const auto offered_bottleneck = c.finite_measure(scalar_budget);
                     c.done();
                     auto& n = nodes.at(gid);
                     const auto found = std::find_if(n.edges.begin(), n.edges.end(),
                         [&](const auto& e) { return e.face == face && e.other == other && e.peer == p.peer; });
-                    if (found == n.edges.end() || found->radius <= 0 || label.empty() || depth >= count)
+                    if (found == n.edges.end() || found->radius <= 0 || label.empty() || depth >= count ||
+                        !(offered_bottleneck > 0))
                         throw std::runtime_error("Unauthenticated forest label.");
-                    bool better = label < n.label || (label == n.label && depth + 1 < n.depth);
-                    if (label == n.label && depth + 1 == n.depth && n.parent_face >= 0)
+                    if (depth + 1 >= count)
+                        continue; // A widest simple path has at most count-1 edges.
+                    const auto bottleneck = std::min(offered_bottleneck, found->radius);
+                    // Persistent root identity is primary. Within that component,
+                    // maximize the independently available path capacity before
+                    // minimizing depth; immutable identities resolve exact ties.
+                    // A parent's wider path can become longer without
+                    // changing this child's smaller bottleneck. Propagate that
+                    // parent depth too; retaining the stale depth would route
+                    // the child after its parent during subtree elimination.
+                    const bool follows_changed_parent = label == n.label && bottleneck == n.bottleneck &&
+                                                        face == n.parent_face && other == n.parent &&
+                                                        depth + 1 != n.depth;
+                    bool better = follows_changed_parent || label < n.label ||
+                                  (label == n.label && (bottleneck > n.bottleneck ||
+                                                           (bottleneck == n.bottleneck && depth + 1 < n.depth)));
+                    if (label == n.label && bottleneck == n.bottleneck && depth + 1 == n.depth && n.parent_face >= 0)
                     {
                         const auto parent = std::find_if(
                             n.edges.begin(), n.edges.end(), [&](const auto& e) { return e.face == n.parent_face; });
@@ -348,6 +381,7 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                     {
                         n.label = label;
                         n.depth = depth + 1;
+                        n.bottleneck = bottleneck;
                         n.parent_face = face;
                         n.parent = other;
                         changed = 1;
@@ -357,7 +391,45 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
         Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &changed, &global_changed);
         result.forest_rounds = std::size_t(round + 1);
         if (!global_changed)
+        {
+            // Reuse the last authenticated neighbor records to certify that
+            // every parent is exactly one level nearer its root. This proves
+            // acyclicity before routing, without another exchange or an extra
+            // forest round. The original count bound remains unchanged.
+            collective(*comm,
+                [&]
+                {
+                    for (auto& [gid, n] : nodes)
+                    {
+                        n.parent_verified = n.parent_face < 0;
+                        if (n.parent_verified && (n.depth != 0 || n.label != n.identity))
+                            throw GeneralVoFPhiInfeasible("Finite Phi root-depth certificate is inconsistent.");
+                    }
+                    for (const auto& p : updates.packets)
+                    {
+                        FCodec c{p.bytes, update_decode_budget};
+                        const GO gid = c.get(), other = c.get(), face = c.get();
+                        const auto label = c.blob();
+                        const auto parent_depth = c.get();
+                        const auto parent_bottleneck = c.finite_measure(scalar_budget);
+                        c.done();
+                        auto& n = nodes.at(gid);
+                        if (face != n.parent_face)
+                            continue;
+                        const auto edge = std::find_if(n.edges.begin(), n.edges.end(),
+                            [&](const auto& e) { return e.face == face && e.other == other && e.peer == p.peer; });
+                        if (edge == n.edges.end() || other != n.parent || label != n.label ||
+                            parent_depth + 1 != n.depth || std::min(parent_bottleneck, edge->radius) != n.bottleneck)
+                            throw GeneralVoFPhiInfeasible(
+                                "Finite Phi parent-depth/capacity certificate is inconsistent.");
+                        n.parent_verified = true;
+                    }
+                    for (const auto& [gid, n] : nodes)
+                        if (!n.parent_verified)
+                            throw GeneralVoFPhiInfeasible("Finite Phi parent certificate is absent.");
+                });
             break;
+        }
         collective(*comm,
             [&]
             {
@@ -388,7 +460,6 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                         if (std::abs(delta) > e->radius)
                             throw GeneralVoFPhiInfeasible("Face closure exceeds arithmetic radius.");
                         local_correction[e->face] = delta;
-                        n.used = E::leased_add(n.used, std::abs(delta), scalar_budget);
                         FCodec c(packet_budget);
                         c.put(std::uint64_t(e->other));
                         c.put(std::uint64_t(gid));
@@ -417,10 +488,11 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                         [&](const auto& e) { return e.face == face && e.other == child && e.peer == p.peer; });
                     if (e == n.edges.end())
                         throw std::runtime_error("Wrong forest sum route.");
-                    n.roundoff += sum_error + 8 * std::numeric_limits<long double>::epsilon() *
-                                                  (std::abs(n.defect) + std::abs(sum));
-                    n.defect = E::leased_add(n.defect, sum, scalar_budget);
-                    n.used = E::leased_add(n.used, std::abs(delta), scalar_budget);
+                    n.defect_sum.add({sum, sum_error});
+                    const auto accumulated = n.defect_sum.value();
+                    n.defect = accumulated.value;
+                    n.roundoff = accumulated.absolute_error;
+                    (void) delta; // Actual represented spending is checked after application.
                 }
             });
     }
@@ -429,8 +501,8 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
         {
             for (const auto& [gid, n] : nodes)
             {
-                if ((!n.depth && std::abs(n.defect) > n.roundoff) || n.used > n.radius)
-                    throw GeneralVoFPhiInfeasible("Incompatible closed component or cell arithmetic radius.");
+                if (!n.depth && std::abs(n.defect) > n.roundoff)
+                    throw GeneralVoFPhiInfeasible("Incompatible closed component arithmetic residual.");
             }
         });
     packets.clear();
@@ -469,15 +541,27 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                 if (!seen.insert(face).second || (child != f.first && child != f.second) || owner.at(child) != p.peer ||
                     std::abs(delta) > f.arithmetic_radius)
                     throw std::runtime_error("Invalid canonical face correction.");
-                result.correction[i] = E::leased_add(result.correction[i], delta, scalar_budget);
-                result.rate[i] = E::leased_add(result.rate[i], delta, scalar_budget);
-                if (std::abs(result.correction[i]) > f.arithmetic_radius)
-                    throw std::runtime_error("Canonical rate change exceeds its original face certificate.");
+                const auto applied = CertifiedArithmetic::add({f.volume, 0}, {delta, 0});
+                const auto actual = CertifiedArithmetic::subtract({applied.value, 0}, {f.volume, 0});
+                // The returned correction is the change that was represented,
+                // rather than an unrealizable requested sub-ulp increment.
+                if (actual.absolute_error != 0 || std::abs(actual.value) > f.arithmetic_radius)
+                    throw GeneralVoFPhiInfeasible(
+                        "Represented canonical rate change exceeds its original face certificate.");
+                result.correction[i] = actual.value;
+                result.rate[i] = applied.value;
+                application_error[i] = applied.absolute_error;
             }
         });
     corrections = {}; // Do not retain old receive payload across final exchange.
-    // Reassemble canonical corrected controls independently of the forest.
-    // Only the derived wide-FP accumulation error admits a nonzero residual.
+    // Reassemble actual canonical controls and incident spending independently.
+    // Only operation-derived application/assembly/subtree errors admit a
+    // residual; original face/cell capacities are never enlarged.
+    for (auto& [gid, n] : nodes)
+    {
+        n.defect_sum = CertifiedSum{};
+        n.used_sum = CertifiedSum{};
+    }
     packets.clear();
     packet_bytes = 0;
     collective(*comm,
@@ -491,6 +575,7 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
                     c.put(std::uint64_t(endpoint));
                     c.put(std::uint64_t(faces[i].face));
                     c.put(E::leased_scale(result.rate[i], sign, scalar_budget), scalar_budget);
+                    c.put(application_error[i], scalar_budget);
                     enqueue(owner.at(endpoint), std::move(c.bytes));
                 }
         });
@@ -500,33 +585,44 @@ static GeneralVoFFiniteRateClosure close_finite_phi_impl(const SP<const MeshHand
     collective(*comm,
         [&]
         {
-            std::map<GO, long double> divergence, uncertainty;
             std::map<GO, std::set<GO>> seen;
             for (const auto& p : final_controls.packets)
             {
                 FCodec c{p.bytes, final_decode_budget};
                 const GO endpoint = c.get(), face = c.get();
                 const auto value = c.finite_measure(scalar_budget);
+                const auto error = c.finite_measure(scalar_budget);
                 c.done();
-                const auto& n = nodes.at(endpoint);
+                auto& n = nodes.at(endpoint);
                 const auto e = std::find_if(n.edges.begin(), n.edges.end(),
                     [&](const auto& e) { return e.face == face && e.authority == p.peer; });
                 if (e == n.edges.end() || !seen[endpoint].insert(face).second)
                     throw std::runtime_error("Invalid corrected Phi authority.");
-                uncertainty[endpoint] += 16 * std::numeric_limits<long double>::epsilon() *
-                                         (std::abs(divergence[endpoint]) + std::abs(value));
-                divergence[endpoint] = E::leased_add(divergence[endpoint], value, scalar_budget);
+                if (error < 0)
+                    throw std::runtime_error("Invalid corrected Phi rounding certificate.");
+                n.defect_sum.add({value, error});
+                const auto actual = CertifiedArithmetic::subtract({value, 0}, {E::leased_scale(e->volume, e->sign, scalar_budget), 0});
+                n.used_sum.add({std::abs(actual.value), actual.absolute_error});
             }
-            for (const auto& [gid, n] : nodes)
-                if (seen[gid].size() != n.edges.size() || std::abs(divergence[gid]) > uncertainty[gid])
-                    throw std::runtime_error("Finite corrected Phi exceeds its operation-derived closure error.");
+            for (auto& [gid, n] : nodes)
+            {
+                const auto residual = n.defect_sum.value(), spent = n.used_sum.value();
+                n.used = fp::bound_add(std::abs(spent.value), spent.absolute_error);
+                if (seen[gid].size() != n.edges.size())
+                    throw std::runtime_error("Incomplete corrected Phi incidence.");
+                if (n.used > n.radius)
+                    throw GeneralVoFPhiInfeasible(
+                        "Represented incident changes exceed the original cell arithmetic radius.");
+                if (std::abs(residual.value) > fp::bound_add(residual.absolute_error, n.roundoff))
+                    throw GeneralVoFPhiInfeasible("Finite corrected Phi exceeds its operation-derived closure error.");
+            }
         });
     result.admitted_storage_bytes = budget - storage.remaining();
     return result;
 }
 GeneralVoFFiniteRateClosure close_general_vof_finite_rate(const SP<const MeshHandle<>>& mesh,
     std::span<const long double> rate, std::span<const long double> face_radius,
-    std::span<const long double> cell_radius, std::size_t budget,
+    std::span<const long double> cell_radius, std::size_t budget, ArithmeticMode arithmetic_mode,
     const GeneralVoFFiniteProjectionClosureTopology* topology)
 {
     std::vector<FCell> cells;
@@ -535,9 +631,15 @@ GeneralVoFFiniteRateClosure close_general_vof_finite_rate(const SP<const MeshHan
     collective(*comm,
         [&]
         {
+            if (arithmetic_mode != ArithmeticMode::BoundedCertification)
+                throw std::runtime_error("Certified Phi closure requires explicit BoundedCertification mode.");
+        });
+    collective(*comm,
+        [&]
+        {
             if (rate.size() != mesh->num_owned_faces() || face_radius.size() != rate.size() ||
                 cell_radius.size() != mesh->num_owned_cells() || std::numeric_limits<long double>::digits > 106 ||
-                !std::numeric_limits<long double>::is_iec559)
+                !std::numeric_limits<long double>::is_iec559 || !Meshes::bounded_geometry_environment())
                 throw std::runtime_error("Finite Phi shapes or FP environment are unsupported.");
             const auto identity = [](GO gid)
             {
