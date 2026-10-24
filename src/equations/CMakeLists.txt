@@ -2,6 +2,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     ReactionMechanism.cc
     SpeciesDiffusion.cc
     ReactingThermodynamics.cc
+    PressureConditionedThermal.cc
     LowMachPressureEquation.cc
     explicit_instantiation/VariableDensityMomentumEquation.cc
     explicit_instantiation/BoilingSourceModel.cc

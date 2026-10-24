@@ -7,6 +7,7 @@
 #include "equations/CollectiveValidation.hh"
 #include "equations/EquationValidation.hh"
 #include "equations/VariableDensityMomentumEquation.hh"
+#include "solvers/details/LowMachConditionedThermal.hh"
 #include "solvers/details/LowMachSourceStage.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -67,12 +68,38 @@ struct CaloricCell
     Solver::CellState cell;
     std::vector<double> volumes;
     double volume = 0, derivative = 0, work = 0, roundoff = 0, work_magnitude = 0, pressure_operands = 0;
+    std::optional<PressureConditionedThermalEvaluation> conditioned;
 };
 // U_new+p_new*V_new = U_adv+source+p_new*V_adv owns actual phase-volume work once.
 CaloricCell recover_enthalpy(const Solver::CellState& transported, std::span<const double> advected_volumes, double p0,
-    const Solver::Options& options)
+    const Solver::Options& options, const FrozenInterphasePlan* conditioned_plan = nullptr,
+    std::span<const double> advected_energy = {})
 {
     CaloricCell result{transported, std::vector<double>(transported.phases.size()), 0, 0, 0};
+    if (conditioned_plan)
+    {
+        PressureConditionedThermalEvaluation evaluated;
+        try
+        {
+            evaluated = evaluate_pressure_conditioned_thermal(*conditioned_plan, transported.phases, advected_energy,
+                advected_volumes, p0 + transported.mechanical_pressure, options.thermal_mode,
+                {options.conservation_relative_tolerance, options.thermal_relative_tolerance});
+        }
+        catch (const ThermalCaloricRangeError& error)
+        {
+            throw CaloricRangeError(error.what());
+        }
+        result.cell.phases = evaluated.phases;
+        result.volumes = evaluated.volumes;
+        result.volume = evaluated.total_volume;
+        result.derivative = evaluated.volume_pressure_derivative;
+        result.work = evaluated.pressure_work;
+        result.roundoff = evaluated.empty_phase_energy_roundoff;
+        result.work_magnitude = evaluated.work_magnitude;
+        result.pressure_operands = evaluated.pressure_operands;
+        result.conditioned = std::move(evaluated);
+        return result;
+    }
     const size_t count = transported.phases.size();
     std::vector<std::vector<double>> x(count);
     std::vector<double> mass(count), targets(count);
@@ -761,7 +788,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
     std::optional<TransportSnapshot> previous_transport;
     std::vector<CellSources> previous_sources;
     std::vector<std::vector<double>> gross_events, previous_events;
-    std::optional<bool> event_channel;
+    std::optional<bool> event_channel, conditioned_channel;
+    std::shared_ptr<const PressureConditionedThermalBatch> thermal_batch, previous_thermal_batch;
+    std::vector<PressureConditionedThermalEvaluation> last_thermal_evaluations, previous_thermal_evaluations;
+    std::optional<TransportSnapshot> previous_conditioned_transport;
+    std::optional<std::string> conditioned_signature;
+    std::vector<std::vector<double>> advected_energy;
     d->publish_fields(accepted, false, ale ? ale->old_cell_volumes() : std::span<const double>{});
     d->old_rho.owned_data().update(1.0, d->rho.owned_data(), 0.0);
     d->old_rho.sync_ghosts();
@@ -1061,6 +1093,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         source_stage_detail::validate_phase_numbers(cell, d->options.phase_roles);
                     last_transport = {};
                     last_transport.cells.resize(nc);
+                    advected_energy.resize(nc);
                     last_transport.old_control_volumes.resize(nc);
                     last_transport.new_control_volumes.resize(nc);
                     last_transport.accepted_revision = accepted.revision;
@@ -1100,11 +1133,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         last_transport.new_control_volumes[c] =
                             ale ? ale->new_cell_volumes()[c] : last_transport.old_control_volumes[c];
                         last_transport.cells[c].phases.resize(np);
+                        advected_energy[c].resize(np);
                         for (size_t a = 0; a < np; ++a)
                         {
                             auto& inventory = last_transport.cells[c].phases[a];
                             inventory.moles = trial.cells[c].phases[a].moles;
                             inventory.internal_energy = trial.cells[c].phases[a].internal_energy;
+                            advected_energy[c][a] = inventory.internal_energy;
                             inventory.advected_material_volume = adv_volumes[c][a];
                             inventory.population_number = trial.cells[c].phase_numbers[a];
                         }
@@ -1131,6 +1166,49 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         source_stage_detail::validate_events(evaluated.gross_events, nc);
                         source_stage_detail::validate_number_packets(evaluated.sources, nc, d->options.phase_roles);
                     });
+                collective_detail::require_uniform_value(
+                    mesh, int(bool(evaluated.thermal_receipt)), "Conditioned thermal batch presence");
+                std::string thermal_signature;
+                collective_detail::collective_local_validation(mesh, "Conditioned thermal source receipt",
+                    [&]
+                    {
+                        check(!conditioned_channel || *conditioned_channel == bool(evaluated.thermal_receipt),
+                            "Source changed conditioned thermal ownership within one preview.");
+                        if (evaluated.thermal_receipt)
+                        {
+                            check(!thermal_batch || thermal_batch->configuration.get() ==
+                                                        evaluated.thermal_receipt->configuration.get(),
+                                "Conditioned source replaced its configured law object within one preview.");
+                            conditioned_thermal_detail::validate_batch(*evaluated.thermal_receipt,
+                                SourceStageContext{last_transport, thermodynamic_guess, mesh}, evaluated.sources);
+                            thermal_signature =
+                                conditioned_thermal_detail::signature(*evaluated.thermal_receipt->configuration);
+                            check(thermal_signature.size() <= size_t(std::numeric_limits<int>::max()),
+                                "Conditioned law schema is too large.");
+                            check(!conditioned_signature || *conditioned_signature == thermal_signature,
+                                "Conditioned law/slot metadata changed within one preview.");
+                            last_thermal_evaluations.resize(nc);
+                        }
+                    });
+                if (evaluated.thermal_receipt)
+                {
+                    collective_detail::require_uniform_value(
+                        mesh, thermal_signature.size(), "Conditioned law signature length");
+                    std::string rank_zero_signature;
+                    collective_detail::collective_local_validation(
+                        mesh, "Conditioned law signature buffer", [&] { rank_zero_signature = thermal_signature; });
+                    Teuchos::broadcast(*mesh.owned_cell_map()->getComm(), 0,
+                        static_cast<int>(rank_zero_signature.size()), rank_zero_signature.data());
+                    collective_detail::collective_local_validation(mesh, "Conditioned law signature equality",
+                        [&]
+                        {
+                            check(rank_zero_signature == thermal_signature,
+                                "Conditioned configured laws/slots differ across ranks.");
+                            conditioned_signature = thermal_signature;
+                        });
+                }
+                conditioned_channel = bool(evaluated.thermal_receipt);
+                thermal_batch = std::move(evaluated.thermal_receipt);
                 int local_events = !evaluated.gross_events.empty(), global_events = 0;
                 Teuchos::reduceAll(
                     *mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_events, &global_events);
@@ -1212,6 +1290,13 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     {
                         local_domain_volume += mesh.cell_volume(static_cast<LO>(c));
                         trial.cells[c].mechanical_pressure = d->mechanical_pressure.local_value(static_cast<LO>(c));
+                        if (thermal_batch)
+                        {
+                            const auto domain =
+                                interphase_pressure_bounds(thermal_batch->cells[c], trial.cells[c].phases);
+                            local_lower = std::max(local_lower, domain.lower - trial.cells[c].mechanical_pressure);
+                            local_upper = std::min(local_upper, domain.upper - trial.cells[c].mechanical_pressure);
+                        }
                         for (const auto& phase : trial.cells[c].phases)
                             if (phase_mass(phase) > 0)
                             {
@@ -1248,9 +1333,19 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             std::vector<double> offsets(np, trial.cells[c].mechanical_pressure);
                             const CaloricPressureQuery query{trial.cells[c].phases, adv_volumes[c], offsets,
                                 {lower, upper}, d->options.thermal_mode};
-                            auto domain = exact_caloric_pressure_domain(query);
+                            // Composite anchors/partial h are NOT certified affine by the final EOS kind/capability.
+                            auto domain =
+                                thermal_batch ? CaloricPressureDomain{} : exact_caloric_pressure_domain(query);
                             bool supplied = false;
-                            if (domain.knowledge == CaloricDomainKnowledge::Unresolved &&
+                            if (thermal_batch && thermal_batch->configuration->caloric_domain)
+                            {
+                                const ConditionedCaloricQuery whole{thermal_batch->cells[c], trial.cells[c].phases,
+                                    advected_energy[c], adv_volumes[c], {lower, upper},
+                                    trial.cells[c].mechanical_pressure, d->options.thermal_mode};
+                                domain = thermal_batch->configuration->caloric_domain->evaluate(whole);
+                                supplied = true;
+                            }
+                            if (!thermal_batch && domain.knowledge == CaloricDomainKnowledge::Unresolved &&
                                 d->options.caloric_domain_provider)
                             {
                                 // MPI-free supplied hook, fenced before global interval work.
@@ -1357,8 +1452,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                             for (size_t c = 0; c < nc; ++c)
                                 try
                                 {
-                                    thermal[c] =
-                                        recover_enthalpy(trial.cells[c], adv_volumes[c], candidate, d->options);
+                                    thermal[c] = recover_enthalpy(trial.cells[c], adv_volumes[c], candidate, d->options,
+                                        thermal_batch ? &thermal_batch->cells[c] : nullptr, advected_energy[c]);
                                 }
                                 catch (const CaloricRangeError&)
                                 {
@@ -1388,7 +1483,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         {
                             try
                             {
-                                thermal[c] = recover_enthalpy(trial.cells[c], adv_volumes[c], p0, d->options);
+                                thermal[c] = recover_enthalpy(trial.cells[c], adv_volumes[c], p0, d->options,
+                                    thermal_batch ? &thermal_batch->cells[c] : nullptr, advected_energy[c]);
                                 local_volume += thermal[c].volume;
                                 local_derivative += thermal[c].derivative;
                             }
@@ -1507,7 +1603,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 theta_mesh_correction.sync_ghosts();
             }
             double occupancy = 0, local_work = 0, local_roundoff = 0, local_work_magnitude = 0,
-                   local_pressure_operands = 0;
+                   local_pressure_operands = 0, local_raw_roundoff = 0;
             collective_detail::collective_local_validation(mesh, "Low-Mach EOS transport candidate",
                 [&]
                 {
@@ -1516,6 +1612,12 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                         const LO cell = static_cast<LO>(c);
                         const double volume = mesh.cell_volume(cell);
                         trial.cells[c] = thermal[c].cell;
+                        if (thermal_batch)
+                        {
+                            check(thermal[c].conditioned.has_value(), "Missing final conditioned caloric evaluation.");
+                            last_thermal_evaluations[c] = *thermal[c].conditioned;
+                            local_raw_roundoff += thermal[c].conditioned->raw_channel_roundoff_bound;
+                        }
                         const double advected_volume =
                             std::accumulate(adv_volumes[c].begin(), adv_volumes[c].end(), 0.0);
                         volume_susceptibility[c] = -thermal[c].derivative;
@@ -1575,6 +1677,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             phase_work_magnitude = d->sum(local_work_magnitude);
             pressure_operand_magnitude = d->sum(local_pressure_operands);
             result.empty_phase_energy_roundoff = d->sum(local_roundoff);
+            result.conditioned_raw_energy_roundoff_bound = d->sum(local_raw_roundoff);
             FVM::cell_gradient(d->mechanical_pressure, BoundaryConditionMap{}, d->pressure_gradient, d->gradient_cache,
                 FVM::CellGradientScheme::LeastSquares);
             d->pressure_gradient.sync_ghosts();
@@ -1662,12 +1765,31 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
             collective_detail::collective_local_validation(mesh, "Pressure/thermal corrector convergence",
                 [&] { thermal_residual = source_stage_detail::thermal_error(trial, thermodynamic_guess, d->options); });
             result.maximum_thermal_residual = d->maximum(thermal_residual);
+            if (thermal_batch)
+            {
+                double local_conditioned = std::numeric_limits<double>::infinity();
+                collective_detail::collective_local_validation(mesh, "Actual conditioned energy/plan convergence",
+                    [&]
+                    {
+                        if (previous_thermal_batch && previous_conditioned_transport)
+                            local_conditioned =
+                                conditioned_thermal_detail::convergence(*thermal_batch, *previous_thermal_batch,
+                                    last_thermal_evaluations, previous_thermal_evaluations, last_transport,
+                                    *previous_conditioned_transport, source_options.source_relative_tolerance);
+                        previous_thermal_batch = thermal_batch;
+                        previous_thermal_evaluations = last_thermal_evaluations;
+                        previous_conditioned_transport = last_transport;
+                    });
+                result.maximum_conditioned_thermal_residual = d->maximum(local_conditioned);
+                result.maximum_source_residual =
+                    std::max(result.maximum_source_residual, result.maximum_conditioned_thermal_residual);
+            }
             thermodynamic_guess = trial;
             if (result.maximum_occupancy_error <= d->options.volume_relative_tolerance &&
                 flux_change <= d->options.volume_relative_tolerance &&
                 result.maximum_continuity_residual <=
                     d->options.continuity_tolerance * std::max(1.0, projected.continuity_scale) &&
-                result.maximum_thermal_residual <= 1 &&
+                result.maximum_thermal_residual <= 1 && result.maximum_conditioned_thermal_residual <= 1 &&
                 (!provider ||
                     (iteration >= 1 && result.maximum_source_residual <= 1 && result.maximum_transport_residual <= 1 &&
                         result.maximum_thermal_residual <= 1 && result.maximum_event_residual <= 1)))
@@ -1736,8 +1858,11 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 new_phase.thermodynamics
                                     ->evaluate(new_phase.temperature, new_phase.absolute_pressure, fractions(new_phase))
                                     .internal_energy_temperature;
-                        const double source_energy =
-                            !sources.empty() && !sources[c].internal_energy.empty() ? sources[c].internal_energy[a] : 0;
+                        const double source_energy = thermal_batch
+                                                         ? last_thermal_evaluations[c].applied_phase_energy[a]
+                                                         : (!sources.empty() && !sources[c].internal_energy.empty()
+                                                                   ? sources[c].internal_energy[a]
+                                                                   : 0);
                         double source_mass = 0;
                         if (!sources.empty() && !sources[c].species_moles.empty())
                             for (size_t species = 0; species < ns; ++species)
@@ -1752,8 +1877,7 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                                 std::abs(source_mass * reference);
                         old_energy += accepted.cells[c].phases[a].internal_energy;
                         new_energy += trial.cells[c].phases[a].internal_energy;
-                        if (!sources.empty() && !sources[c].internal_energy.empty())
-                            external_energy += sources[c].internal_energy[a];
+                        external_energy += source_energy;
                         for (size_t s = 0; s < ns; ++s)
                         {
                             old_species[s] += accepted.cells[c].phases[a].moles[s];
@@ -1790,7 +1914,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                 energy_transport_operand_magnitude + phase_work_magnitude +
                                 std::abs(result.empty_phase_energy_roundoff);
         const double ranks = mesh.owned_cell_map()->getComm()->getSize();
-        result.internal_energy_roundoff_bound = (64 + 2 * ranks) * std::numeric_limits<double>::epsilon() * operands;
+        result.internal_energy_roundoff_bound = (64 + 2 * ranks) * std::numeric_limits<double>::epsilon() * operands +
+                                                result.conditioned_raw_energy_roundoff_bound;
         const double physical_budget = d->options.conservation_relative_tolerance * result.caloric_energy_scale;
         check(std::isfinite(physical_budget) && physical_budget > 0 &&
                   std::isfinite(result.internal_energy_roundoff_bound),
@@ -1873,6 +1998,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
         staged.sources = std::move(sources);
         staged.gross_events = std::move(gross_events);
         staged.provider = std::move(provider);
+        staged.thermal_receipt = std::move(thermal_batch);
+        staged.thermal_evaluations = std::move(last_thermal_evaluations);
         staged.owner = this;
         staged.nonce = d->trial_nonce;
         staged.base_revision = accepted.revision;

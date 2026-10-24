@@ -4,6 +4,7 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "equations/LowMachPressureEquation.hh"
+#include "equations/PressureConditionedThermal.hh"
 #include "equations/ReactingThermodynamics.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include <cstddef>
@@ -124,6 +125,8 @@ public:
          * between correctors. Empty owners still participate in all collectives.
          */
         std::vector<std::vector<double>> gross_events;
+        std::shared_ptr<const PressureConditionedThermalBatch>
+            thermal_receipt; ///< Frozen events, raw energy; no rates inside pressure roots.
     };
     using SourceStageCallback = std::function<SourceStageResult(const SourceStageContext&)>;
     /** Immutable metadata and shared callback lifetime, independent of any controller object.
@@ -161,6 +164,10 @@ public:
         int correctors = 0, source_evaluations = 0;
         double maximum_source_residual = 0, maximum_transport_residual = 0, maximum_thermal_residual = 0;
         double maximum_event_residual = 0;
+        double maximum_conditioned_thermal_residual =
+            0; ///< Actual evaluated energy + raw plan convergence, normalized physical gate.
+        double conditioned_raw_energy_roundoff_bound =
+            0; ///< Additional raw channel uncertainty included in energy gate, J.
         ///< Residuals above are normalized by their declared gates; acceptance requires <=1.
         double maximum_occupancy_error = 0, maximum_continuity_residual = 0;
         double mass_error = 0, internal_energy_error = 0, pressure_work = 0;
@@ -212,6 +219,8 @@ public:
         std::vector<CellSources> sources;
         std::vector<std::vector<double>> gross_events;
         std::shared_ptr<const SourceStageProvider> provider;
+        std::shared_ptr<const PressureConditionedThermalBatch> thermal_receipt;
+        std::vector<PressureConditionedThermalEvaluation> thermal_evaluations;
         std::vector<double> face_flux;
         std::vector<PhaseFaceTransport> phase_transport;
         const LowMachMixtureSolver* owner = nullptr;
@@ -220,10 +229,22 @@ public:
 
     public:
         [[nodiscard]] const TransportSnapshot& transport_snapshot() const noexcept { return transport; }
+        /** Exact provider-returned static packets. A conditioned trial must be replayed with its thermal receipt;
+         * final applied phase energies are retained in final_thermal_evaluations().
+         */
         [[nodiscard]] std::span<const CellSources> integrated_sources() const noexcept { return sources; }
         [[nodiscard]] std::span<const std::vector<double>> integrated_gross_events() const noexcept
         {
             return gross_events;
+        }
+        [[nodiscard]] const std::shared_ptr<const PressureConditionedThermalBatch>&
+        conditioned_thermal_receipt() const noexcept
+        {
+            return thermal_receipt;
+        }
+        [[nodiscard]] std::span<const PressureConditionedThermalEvaluation> final_thermal_evaluations() const noexcept
+        {
+            return thermal_evaluations;
         }
         [[nodiscard]] const SourceStageMetadata& source_stage() const noexcept { return transport.stage; }
         [[nodiscard]] const State& state() const noexcept { return candidate; }

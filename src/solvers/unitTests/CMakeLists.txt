@@ -67,6 +67,13 @@ foreach(_native_ale_ranks IN ITEMS 2 4)
     endforeach()
 endforeach()
 
+# Configured local interphase thermal events, including the prescribed ALE transaction.
+foreach(_interphase_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME ReactingMixtureInterphaseTransfer_${_interphase_ranks}procs
+        TARGET testReactingMixtureInterphaseTransfer PROCS ${_interphase_ranks}
+        LABELS "mpi;reacting;low_mach;thermal;ale;conservation;transaction;empty_rank" TIMEOUT 180)
+endforeach()
+
 # Conservative native mixture flow and its external reaction controller.
 foreach(_mixture_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME LowMachMixture_${_mixture_ranks}procs

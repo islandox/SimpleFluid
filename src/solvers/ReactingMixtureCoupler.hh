@@ -81,6 +81,26 @@ struct MixturePlanarMotionProvider
     const std::function<double(double accepted_time, double time_step)> target_surface;
 };
 
+/** Kinetics-only local input. Configured slots/laws are immutable; callback returns amounts only. */
+struct MixtureInterphaseContext
+{
+    const SpeciesCatalog& catalog;
+    const CellSpeciesState& post_faces;
+    const LowMachMixtureSolver::TransportCellInventory& transported;
+    const LowMachMixtureSolver::CellState& thermodynamic_guess;
+    const LowMachMixtureSolver::SourceStageMetadata& source_stage;
+    std::size_t owned_cell = 0;
+    double time_step = 0, accepted_time = 0;
+    std::optional<ReactionLocation>
+        location; ///< Shared source-location prerequisite; actual trial geometry, never algebraic row identity.
+};
+struct MixtureInterphaseEventProvider
+{
+    const ThermalLawIdentity metadata;
+    const std::shared_ptr<const InterphaseConfiguration> configuration;
+    const std::function<std::vector<std::vector<double>>(const MixtureInterphaseContext&)> integrate;
+};
+
 struct ReactingMixtureOptions
 {
     std::shared_ptr<const ReactionMechanism> mechanism;
@@ -108,6 +128,8 @@ struct ReactingMixtureOptions
     std::shared_ptr<const MixturePopulationEventProvider>
         population_events;                                            ///< Optional explicit post-face number law.
     std::shared_ptr<const MixturePlanarMotionProvider> planar_motion; ///< Optional prescribed closed planar ALE.
+    std::shared_ptr<const MixtureInterphaseEventProvider>
+        interphase; ///< Frozen material amounts before explicit number law.
 };
 
 class SIMPLEFLUID_SOLVERS_EXPORT ReactingMixtureCoupler
@@ -132,6 +154,8 @@ public:
         /** Chemistry and declared reservoir ledgers; internal face packets remain distinct private receipts. */
         [[nodiscard]] const std::vector<SpeciesSourceLedger>& local_sources() const;
         [[nodiscard]] const std::vector<MixturePopulationEventReceipt>& local_population_events() const;
+        [[nodiscard]] const std::shared_ptr<const PressureConditionedThermalBatch>& interphase_receipt() const;
+        [[nodiscard]] std::span<const PressureConditionedThermalEvaluation> final_thermal_evaluations() const;
         [[nodiscard]] const LowMachMixtureSolver::TransportSnapshot& transport_snapshot() const;
 
     private:

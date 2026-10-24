@@ -714,6 +714,34 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::LowMachPressureEquation::project_material_ale_with_eos[(]${simplefluid_stage3_scalar_cell} const&, double, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face} const&, ${simplefluid_stage3_scalar_face}&, ${simplefluid_stage3_scalar_cell}&, ${simplefluid_stage3_vector_cell}&, SimpleFluid::FVM::ALEControlVolumeState const&, SimpleFluid::LinearSolverOptions const&, double[)]$" 1)
 
+# Pressure-conditioned local thermal transfer: four pure kernels, two receipt
+# queries and the three definitions of the typed caloric-range error.
+set(simplefluid_conditioned_thermal_public_symbol_budget 9)
+set(simplefluid_thermal_double_vector
+    "${simplefluid_stage3_std}vector<double, ${simplefluid_stage3_std}allocator<double>[ ]*>")
+set(simplefluid_thermal_long_vector
+    "${simplefluid_stage3_std}vector<long double, ${simplefluid_stage3_std}allocator<long double>[ ]*>")
+set(simplefluid_thermal_double_vectors
+    "${simplefluid_stage3_std}vector<${simplefluid_thermal_double_vector}, ${simplefluid_stage3_std}allocator<${simplefluid_thermal_double_vector}[ ]*>[ ]*>")
+set(simplefluid_thermal_long_vectors
+    "${simplefluid_stage3_std}vector<${simplefluid_thermal_long_vector}, ${simplefluid_stage3_std}allocator<${simplefluid_thermal_long_vector}[ ]*>[ ]*>")
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::validate_interphase_configuration[(]SimpleFluid::Reacting::InterphaseConfiguration const&, ${simplefluid_reacting_phase_span}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::compile_interphase_plan[(]${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::InterphaseConfiguration const>, ${simplefluid_reacting_phase_span}, ${simplefluid_thermal_double_vectors}, ${simplefluid_thermal_long_vectors}, ${simplefluid_thermal_long_vector}[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::evaluate_pressure_conditioned_thermal[(]SimpleFluid::Reacting::FrozenInterphasePlan const&, ${simplefluid_reacting_phase_span}, ${simplefluid_reacting_const_double_span}, ${simplefluid_reacting_const_double_span}, double, SimpleFluid::Reacting::PhaseThermalMode, SimpleFluid::Reacting::ThermalEvaluationControls[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::interphase_pressure_bounds[(]SimpleFluid::Reacting::FrozenInterphasePlan const&, ${simplefluid_reacting_phase_span}[)]$" 1)
+foreach(simplefluid_thermal_query IN ITEMS interphase_receipt final_thermal_evaluations)
+    simplefluid_require_reacting_api(
+        "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::${simplefluid_thermal_query}[(][)] const$" 1)
+endforeach()
+foreach(simplefluid_thermal_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
+    simplefluid_require_exact_api(
+        "^${simplefluid_thermal_rtti} SimpleFluid::Reacting::ThermalCaloricRangeError$" 1)
+endforeach()
+
 # Typed surface receipts (8), supplied headspace configuration (1), base metadata
 # constructor/query (3), and closed-mixture headspace methods/RTTI (13): exactly 25.
 set(simplefluid_species_surface_public_symbol_budget 25)
@@ -1165,7 +1193,7 @@ foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
     endif()
 
     if(simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::"
-       AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::CaloricDomainUnresolved$")
+       AND NOT simplefluid_demangled_symbol MATCHES "^(typeinfo( name)? for|vtable for) SimpleFluid::Reacting::(CaloricDomainUnresolved|ThermalCaloricRangeError)$")
         message(FATAL_ERROR
             "Unreviewed reacting RTTI definition: ${simplefluid_demangled_symbol}")
     endif()
@@ -1243,13 +1271,15 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # disabled ceiling 1579. No previous export is removed and private helpers stay hidden.
 # Native ALE adds six exact anchors: measured GCC Debug 1582, disabled ceiling 1585.
 # The existing three-entry headroom and all earlier API anchors are retained.
+# Conditioned thermal transfer adds nine anchors: measured GCC Debug 1591,
+# disabled ceiling 1594; no earlier definition or private guard is removed.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

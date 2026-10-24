@@ -23,6 +23,8 @@ class LocalSourceAccumulator
     std::vector<std::vector<std::vector<Sum>>> material_;
     std::vector<std::vector<Sum>> energy_;
     std::vector<Sum> declared_energy_;
+    std::vector<std::vector<std::vector<long double>>> raw_energy_;
+    std::vector<std::vector<long double>> raw_declared_;
     std::vector<std::array<Sum, 3>> momentum_;
     static double narrow(long double value)
     {
@@ -38,6 +40,8 @@ public:
         material_.assign(cells, std::vector<std::vector<Sum>>(phases, std::vector<Sum>(species)));
         energy_.assign(cells, std::vector<Sum>(phases));
         declared_energy_.assign(cells, {});
+        raw_energy_.assign(cells, std::vector<std::vector<long double>>(phases));
+        raw_declared_.assign(cells, {});
         momentum_.assign(cells, {});
     }
     void add_material(std::size_t c, std::size_t phase, std::size_t species, long double moles)
@@ -52,6 +56,7 @@ public:
         if (!std::isfinite(joules))
             throw std::invalid_argument("Nonfinite declared raw energy source.");
         declared_energy_.at(c) += joules;
+        raw_declared_.at(c).push_back(joules);
     }
     /** Add only an already allocated user result; original channels must be declared separately. */
     void add_allocated_energy(std::size_t c, std::size_t phase, long double joules)
@@ -59,6 +64,7 @@ public:
         if (!std::isfinite(joules))
             throw std::invalid_argument("Nonfinite allocated energy source.");
         energy_.at(c).at(phase) += joules;
+        raw_energy_.at(c).at(phase).push_back(joules);
     }
     /** Default raw allocation both assigns and declares exactly the same physical channel. */
     void add_energy(std::size_t c, std::size_t phase, long double joules)
@@ -87,6 +93,8 @@ public:
             // The same-carrier barycentric diffusion convention contributes exactly no impulse.
         }
     }
+    const std::vector<std::vector<long double>>& raw_energy(std::size_t c) const { return raw_energy_.at(c); }
+    const std::vector<long double>& raw_declared(std::size_t c) const { return raw_declared_.at(c); }
     std::vector<Flow::CellSources> finalize() const
     {
         std::vector<Flow::CellSources> result(material_.size());
@@ -171,9 +179,12 @@ struct ComposedSourceStage
  * and provide prepared caloric T/p/EOS guesses.
  * No outer collective_local_validation may wrap this function: face adapters communicate.
  */
+using PostFaceLocalStage = std::function<void(const Flow::SourceStageContext&, std::vector<CellSpeciesState>&,
+    LocalSourceAccumulator&, std::vector<std::vector<double>>&, std::span<const Flow::CellState>)>;
 inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageContext& context,
     const SpeciesCatalog& catalog, std::span<const LowMachFaceTransportAdapter* const> adapters,
-    const std::function<void(const Flow::SourceStageContext&, LocalChemistryStage&)>& prepare_chemistry)
+    const std::function<void(const Flow::SourceStageContext&, LocalChemistryStage&)>& prepare_chemistry,
+    const PostFaceLocalStage& post_faces = {})
 {
     collective_detail::require_uniform_value(
         context.mesh, static_cast<unsigned long long>(adapters.size()), "Ordered mixture face-stage count");
@@ -212,6 +223,12 @@ inline ComposedSourceStage compose_post_chemistry_faces(const Flow::SourceStageC
                 result.faces.push_back(std::make_shared<const Receipt>(std::move(face)));
             });
     }
+    collective_detail::collective_local_validation(context.mesh, "Frozen post-face interphase material stage",
+        [&]
+        {
+            if (post_faces)
+                post_faces(context, donors, chemistry.sums, chemistry.gross_events, chemistry.caloric_guesses);
+        });
     collective_detail::collective_local_validation(context.mesh, "Finalize composed raw source channels",
         [&]
         {

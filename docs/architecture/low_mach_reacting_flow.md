@@ -417,9 +417,12 @@ fields in a source snapshot alone do not authorize motion; use the explicit ALE
 transaction and its support boundary.
 
 Supplied same-carrier species diffusion and Fourier contact laws use the explicit
-ordered face adapter described above. Interphase thermal exchange and latent
-material-transfer energy are not yet wired into this backend. Their complete
-conservative ownership and acceptance contracts remain required before use. VoF solvers
+ordered face adapter described above. Configured local interphase heat and
+material stages use [pressure-conditioned thermal ownership](reacting_interphase_thermal.md)
+with frozen amounts, supplied partial-molar enthalpies and the same physical work
+and acceptance gates. Upstream complete depletion and nonlocal pressure-conditioned
+face transfer need their own pre-transfer state/Jacobian contracts and remain rejected.
+VoF solvers
 remain disabled by default and excluded from the supported reacting-flow scope
 while their qualification remains incomplete.
 

@@ -3,6 +3,7 @@
  */
 #include "solvers/ReactingMixtureCoupler.hh"
 #include "equations/CollectiveValidation.hh"
+#include "solvers/details/LowMachConditionedThermal.hh"
 #include "solvers/details/LowMachFaceSourceComposition.hh"
 #include "solvers/details/LowMachPopulationSource.hh"
 #include "utils/CompensatedSum.hh"
@@ -316,11 +317,94 @@ struct SourceEngine
     {
         std::vector<const Faces::LowMachFaceTransportAdapter*> ordered;
         std::function<void(const Solver::SourceStageContext&, Faces::LocalChemistryStage&)> local_prepare;
+        Faces::PostFaceLocalStage interphase_stage;
+        std::shared_ptr<PressureConditionedThermalBatch> thermal_batch;
         collective_detail::collective_local_validation(context.mesh, "Ordered face-stage views",
             [&]
             {
                 local_prepare = [this](const Solver::SourceStageContext& current, Faces::LocalChemistryStage& local)
                 { prepare_chemistry(current, local); };
+                if (options.interphase)
+                {
+                    thermal_batch = std::make_shared<PressureConditionedThermalBatch>();
+                    thermal_batch->configuration = options.interphase->configuration;
+                    thermal_batch->source = conditioned_thermal_detail::identity(context.transport);
+                    thermal_batch->cells.reserve(context.transport.cells.size());
+                    interphase_stage = [this, thermal_batch](const Solver::SourceStageContext& current,
+                                           std::vector<CellSpeciesState>& donors, Faces::LocalSourceAccumulator& sums,
+                                           std::vector<std::vector<double>>& gross,
+                                           std::span<const Solver::CellState> guesses)
+                    {
+                        const auto& catalog = options.mechanism->catalog();
+                        const auto np = options.phases.size();
+                        require(donors.size() == current.transport.cells.size() && guesses.size() == donors.size(),
+                            "Interphase actual predecessor rows differ.");
+                        for (size_t c = 0; c < donors.size(); ++c)
+                        {
+                            auto guess = guesses[c];
+                            guess.phase_numbers.resize(np);
+                            for (size_t a = 0; a < np; ++a)
+                            {
+                                guess.phase_numbers[a] = current.transport.cells[c].phases[a].population_number;
+                                bool occupied = false;
+                                for (size_t i = 0; i < catalog.species().size(); ++i)
+                                {
+                                    auto& n = guess.phases.at(a).moles.at(i);
+                                    n = donors[c].amount(catalog, catalog.species()[i].id,
+                                        compartment(options.phases[a], i), options.phases[a].population);
+                                    occupied = occupied || n > 0;
+                                }
+                                if (!occupied)
+                                {
+                                    guess.phases[a].temperature = 0;
+                                    guess.phases[a].internal_energy = 0;
+                                }
+                            }
+                            require(current.transport.new_geometry_epoch == current.mesh.geometry_epoch(),
+                                "Interphase rate location belongs to stale trial geometry.");
+                            const auto local = static_cast<Solver::Pack::local_ordinal_type>(c);
+                            const auto geometry_cell = current.mesh.cell_geometry_global_id(local);
+                            require(std::in_range<std::uint64_t>(geometry_cell),
+                                "Canonical interphase cell identity is not representable.");
+                            const auto center = current.mesh.cell_centroid(local);
+                            const ReactionLocation location{static_cast<std::uint64_t>(geometry_cell),
+                                current.transport.new_geometry_epoch, {center.x, center.y, center.z}, c};
+                            const auto amounts = options.interphase->integrate(
+                                {catalog, donors[c], current.transport.cells[c], guess, current.transport.stage, c,
+                                    current.transport.time_step, current.transport.accepted_time, location});
+                            auto plan = compile_interphase_plan(options.interphase->configuration, guess.phases,
+                                amounts, sums.raw_energy(c), sums.raw_declared(c));
+                            for (size_t j = 0; j < plan.amounts.size(); ++j)
+                            {
+                                const auto& stage = plan.configuration->stages[j];
+                                for (size_t i = 0; i < plan.amounts[j].size(); ++i)
+                                {
+                                    const double amount = plan.amounts[j][i];
+                                    if (stage.kind == InterphaseStageKind::Material)
+                                    {
+                                        const auto& slot = stage.material[i];
+                                        const auto species = catalog.index(slot.species);
+                                        sums.add_material(c, slot.donor, species, -static_cast<long double>(amount));
+                                        sums.add_material(c, slot.recipient, species, amount);
+                                        gross[c].push_back(amount);
+                                    }
+                                    else
+                                    {
+                                        gross[c].push_back(std::max(amount, 0.));
+                                        gross[c].push_back(std::max(-amount, 0.));
+                                    }
+                                }
+                            }
+                            for (size_t a = 0; a < np; ++a)
+                                for (size_t i = 0; i < catalog.species().size(); ++i)
+                                    donors[c].set_amount(catalog, catalog.species()[i].id,
+                                        compartment(options.phases[a], i), plan.final_moles[a][i],
+                                        options.phases[a].population);
+                            donors[c].validate(catalog);
+                            thermal_batch->cells.push_back(std::move(plan));
+                        }
+                    };
+                }
                 ordered.reserve(face_stages.size());
                 for (const auto& stage : face_stages)
                 {
@@ -328,13 +412,14 @@ struct SourceEngine
                     ordered.push_back(stage.get());
                 }
             });
-        auto composed =
-            Faces::compose_post_chemistry_faces(context, options.mechanism->catalog(), ordered, local_prepare);
+        auto composed = Faces::compose_post_chemistry_faces(
+            context, options.mechanism->catalog(), ordered, local_prepare, interphase_stage);
         Prepared result;
         collective_detail::collective_local_validation(context.mesh, "Immutable composed source receipt",
             [&]
             {
                 result.result = std::move(composed.result);
+                result.result.thermal_receipt = std::move(thermal_batch);
                 result.ledgers = std::move(composed.chemistry_ledgers);
                 result.face_receipts = std::move(composed.faces);
                 result.post_faces = std::move(composed.post_faces);
@@ -357,9 +442,14 @@ struct SourceEngine
                                     compartment(options.phases[p], i), options.phases[p].population);
                             occupied[p] |= moles[i] > 0;
                         }
+                        if (!occupied[p])
+                        {
+                            guess.phases[p].temperature = 0;
+                            guess.phases[p].internal_energy = 0;
+                        }
                     }
-                    // Post-face moles and Nadv are actual inventories. T/p remains the existing candidate guess;
-                    // never manufacture a separate-phase temperature just to call an optional number law.
+                    // Final post-material moles and Nadv are actual inventories. T/p remains the existing candidate
+                    // guess; never manufacture a separate-phase temperature just to call an optional number law.
                     std::vector<BubbleGasPhysics::PopulationNumberEvent> events;
                     if (options.population_events)
                         events = options.population_events->evaluate(
@@ -512,6 +602,21 @@ struct ReactingMixtureCoupler::Implementation
                                 law.revision > 0 && law.target_surface,
                         "Prescribed planar motion requires its exact mutable mesh and immutable target law metadata.");
                 }
+                if (options.interphase)
+                {
+                    const auto& event = *options.interphase;
+                    require(event.configuration && event.integrate && !event.metadata.identity.empty() &&
+                                event.metadata.revision > 0 &&
+                                event.metadata.schema_fingerprint == options.mechanism->catalog().fingerprint(),
+                        "Interphase kinetics needs explicit immutable slots, identity/revision/schema and a pure local "
+                        "law.");
+                    auto configuration = std::make_shared<const InterphaseConfiguration>(*event.configuration);
+                    options.interphase = std::make_shared<const MixtureInterphaseEventProvider>(
+                        MixtureInterphaseEventProvider{event.metadata, std::move(configuration), event.integrate});
+                    if (!flow->state().cells.empty())
+                        validate_interphase_configuration(
+                            *options.interphase->configuration, flow->state().cells.front().phases);
+                }
                 // Callback copies/immutable engine allocation are local and may fail even on an empty owner.
                 source_engine = std::make_shared<const SourceEngine>(SourceEngine{flow, options, {}});
                 const auto& catalog = options.mechanism->catalog();
@@ -556,6 +661,22 @@ struct ReactingMixtureCoupler::Implementation
                         require(options.phases[p].phase == SpeciesPhase::Resolved ||
                                     options.phases[p].phase == SpeciesPhase::Dispersed,
                             "Only one physical liquid phase is supported; dissolved species share it.");
+                if (options.interphase)
+                {
+                    const auto& config = *options.interphase->configuration;
+                    require(config.phase_enthalpy.size() == options.phases.size() &&
+                                config.metadata.schema_fingerprint == catalog.fingerprint(),
+                        "Interphase immutable phase/schema layout differs.");
+                    for (const auto& stage : config.stages)
+                        for (const auto& slot : stage.material)
+                        {
+                            const auto i = catalog.index(slot.species);
+                            require(slot.donor < options.phases.size() && slot.recipient < options.phases.size() &&
+                                        catalog.allows(slot.species, compartment(options.phases[slot.donor], i)) &&
+                                        catalog.allows(slot.species, compartment(options.phases[slot.recipient], i)),
+                                "Interphase species must be explicitly allowed in both bound physical compartments.");
+                        }
+                }
                 for (const auto& reaction : options.mechanism->reactions())
                     for (const auto& term : reaction.changes)
                         require(mapped.contains({term.species, term.phase, term.population}),
@@ -685,6 +806,16 @@ struct ReactingMixtureCoupler::Implementation
                     const auto& law = *options.planar_motion;
                     signature << ':' << law.identity.size() << ':' << law.identity << ':' << law.revision;
                 }
+                signature << ":interphase:" << bool(options.interphase);
+                if (options.interphase)
+                {
+                    const auto& law = *options.interphase;
+                    signature << ':' << law.metadata.identity.size() << ':' << law.metadata.identity << ':'
+                              << law.metadata.revision << ':' << law.metadata.schema_fingerprint << ':'
+                              << bool(law.integrate);
+                    const auto configuration = conditioned_thermal_detail::signature(*law.configuration);
+                    signature << ':' << configuration.size() << ':' << configuration;
+                }
                 schema_signature = signature.str();
             });
         uniform_text(mesh, schema_signature);
@@ -738,7 +869,8 @@ struct ReactingMixtureCoupler::Implementation
     }
 
     Diagnostics totals(const std::vector<SpeciesSourceLedger>& ledgers, std::span<const Solver::CellSources> applied,
-        std::span<const MixturePopulationEventReceipt> populations, int correctors,
+        std::span<const MixturePopulationEventReceipt> populations,
+        std::span<const PressureConditionedThermalEvaluation> thermal, int correctors,
         const Solver::Diagnostics& flow_statistics) const
     {
         const auto nr = options.mechanism->reactions().size();
@@ -765,9 +897,15 @@ struct ReactingMixtureCoupler::Implementation
                 }
                 // These are the final applied physical packets, after every raw face/source cancellation.
                 // Keep one rank-local sum across all cells and phases rather than first rounding cell totals.
-                for (const auto& source : applied)
-                    for (const auto value : source.internal_energy)
+                require(!options.interphase || thermal.size() == applied.size(),
+                    "Final thermal diagnostic receipt row mismatch.");
+                for (size_t c = 0; c < applied.size(); ++c)
+                {
+                    const auto& energies =
+                        options.interphase ? thermal[c].applied_phase_energy : applied[c].internal_energy;
+                    for (const auto value : energies)
                         sums[3 * nr + 4] += value;
+                }
                 local.resize(sums.size());
                 global.resize(sums.size());
                 for (size_t i = 0; i < local.size(); ++i)
@@ -874,6 +1012,17 @@ const std::vector<MixturePopulationEventReceipt>& ReactingMixtureCoupler::Trial:
     return d->population_events;
 }
 
+const std::shared_ptr<const PressureConditionedThermalBatch>& ReactingMixtureCoupler::Trial::interphase_receipt() const
+{
+    require(bool(d), "Empty reacting mixture trial.");
+    return d->flow.conditioned_thermal_receipt();
+}
+std::span<const PressureConditionedThermalEvaluation> ReactingMixtureCoupler::Trial::final_thermal_evaluations() const
+{
+    require(bool(d), "Empty reacting mixture trial.");
+    return d->flow.final_thermal_evaluations();
+}
+
 const Solver::TransportSnapshot& ReactingMixtureCoupler::Trial::transport_snapshot() const
 {
     require(bool(d), "Empty reacting mixture trial.");
@@ -914,6 +1063,11 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                             ? (":motion:" + std::to_string(d->options.planar_motion->identity.size()) + ":" +
                                   d->options.planar_motion->identity + ":" +
                                   std::to_string(d->options.planar_motion->revision))
+                            : std::string{}) +
+                    (d->options.interphase
+                            ? (":interphase:" + std::to_string(d->options.interphase->metadata.identity.size()) + ":" +
+                                  d->options.interphase->metadata.identity + ":" +
+                                  std::to_string(d->options.interphase->metadata.revision))
                             : std::string{}),
                 d->options.source_revision, d->options.mechanism->catalog().fingerprint(),
                 [engine = d->source_engine, receipt](const Solver::SourceStageContext& context)
@@ -943,6 +1097,23 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
                 "Reaction receipt does not match the accepted transport trial.");
             require(identical_sources(receipt->prepared.result.sources, flow_trial.integrated_sources()),
                 "Reaction receipt does not match the exact applied source packets.");
+            require(receipt->prepared.result.thermal_receipt.get() == flow_trial.conditioned_thermal_receipt().get(),
+                "Interphase receipt does not match the exact frozen flow thermal plan.");
+            if (flow_trial.conditioned_thermal_receipt())
+            {
+                const auto evaluations = flow_trial.final_thermal_evaluations();
+                require(evaluations.size() == flow_trial.state().cells.size(), "Final thermal receipt layout differs.");
+                for (size_t c = 0; c < evaluations.size(); ++c)
+                    for (size_t a = 0; a < evaluations[c].phases.size(); ++a)
+                    {
+                        const auto& x = evaluations[c].phases[a];
+                        const auto& y = flow_trial.state().cells[c].phases[a];
+                        require(x.thermodynamics.get() == y.thermodynamics.get() && x.moles == y.moles &&
+                                    x.internal_energy == y.internal_energy && x.temperature == y.temperature &&
+                                    x.absolute_pressure == y.absolute_pressure,
+                            "Final thermal evaluation does not match the exact accepted phase state.");
+                    }
+            }
             const auto events = flow_trial.integrated_gross_events();
             require(events.size() == receipt->prepared.result.gross_events.size() &&
                         std::equal(events.begin(), events.end(), receipt->prepared.result.gross_events.begin()),
@@ -955,7 +1126,8 @@ ReactingMixtureCoupler::Trial ReactingMixtureCoupler::preview(double dt)
     if (!d->motion)
         d->source_engine->validate_face_receipts(receipt->prepared, final_context);
     auto statistics = d->totals(receipt->prepared.ledgers, flow_trial.integrated_sources(),
-        receipt->prepared.population_events, flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
+        receipt->prepared.population_events, flow_trial.final_thermal_evaluations(),
+        flow_trial.diagnostics().source_evaluations, flow_trial.diagnostics());
     std::shared_ptr<Trial::Data> data;
     collective_detail::collective_local_validation(mesh, "Retain immutable reacting trial",
         [&]
