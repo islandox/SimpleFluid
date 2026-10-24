@@ -46,6 +46,28 @@ inline double mass(const Reacting::SpeciesCatalog& catalog, std::span<const doub
         sum += static_cast<long double>(amounts[i]) * catalog.species()[i].molarMass;
     return narrow(sum.value());
 }
+inline double reference_gas_volume(const Reacting::BoussReferenceVolume& reference, std::span<const double> moles)
+{
+    detail::CompensatedSum<long double> sum;
+    for (std::size_t s = 0; s < moles.size(); ++s)
+        sum += static_cast<long double>(moles[s]) * reference.gasMolarVolumes.at(s);
+    return narrow(sum.value());
+}
+inline double liquid_density(
+    const ReactingGasOptions& options, double temperature, double pressure, std::span<const double> moles)
+{
+    return options.bouss_reference
+               ? options.bouss_reference->liquidDensity
+               : options.liquid_thermodynamics->evaluate(temperature, pressure, composition(moles)).density;
+}
+inline double gas_volume(const ReactingGasOptions& options, const Reacting::SpeciesCatalog& catalog, double temperature,
+    double pressure, std::span<const double> moles)
+{
+    return options.bouss_reference
+               ? reference_gas_volume(*options.bouss_reference, moles)
+               : mass(catalog, moles) /
+                     options.gas_thermodynamics->evaluate(temperature, pressure, composition(moles)).density;
+}
 inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
 {
     std::uint64_t signature = 14695981039346656037ULL;
@@ -64,22 +86,43 @@ inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
         for (const unsigned char c : value)
             integer(c);
     };
-    integer(options.reaction_mechanism->catalog().fingerprint());
-    integer(static_cast<std::uint64_t>(options.reaction_mechanism->energy_convention()));
-    for (const auto& reaction : options.reaction_mechanism->reactions())
+    integer(static_cast<bool>(options.reaction_mechanism));
+    if (options.reaction_mechanism)
     {
-        integer(reaction.id);
-        string(reaction.name);
-        number(reaction.heatPerExtent);
-        integer(reaction.changes.size());
-        for (const auto& term : reaction.changes)
+        integer(options.reaction_mechanism->catalog().fingerprint());
+        integer(static_cast<std::uint64_t>(options.reaction_mechanism->energy_convention()));
+        for (const auto& reaction : options.reaction_mechanism->reactions())
         {
-            integer(term.species);
-            integer(static_cast<std::uint64_t>(term.phase));
-            number(term.coefficient);
-            string(term.population);
+            integer(reaction.id);
+            string(reaction.name);
+            number(reaction.heatPerExtent);
+            integer(reaction.changes.size());
+            for (const auto& term : reaction.changes)
+            {
+                integer(term.species);
+                integer(static_cast<std::uint64_t>(term.phase));
+                number(term.coefficient);
+                string(term.population);
+            }
         }
     }
+    integer(static_cast<std::uint64_t>(options.mode));
+    integer(static_cast<std::uint64_t>(options.heaviside_mode));
+    integer(static_cast<std::uint64_t>(options.kinetics_mode));
+    integer(static_cast<std::uint64_t>(options.diffusivity_mode));
+    integer(static_cast<std::uint64_t>(options.nucleation_radius_mode));
+    integer(static_cast<bool>(options.hydrogen_diffusivity_correlation));
+    integer(static_cast<bool>(options.nucleation_radius_correlation));
+    for (const double value : {options.hydrogen_yield_mol_per_j, options.gas_release_efficiency, options.gas_constant,
+             options.max_source_alpha_rate, options.henry_coefficient, options.hydrogen_diffusivity,
+             options.nucleation_radius, options.microbubble_lifetime, options.large_bubble_dissolution_time,
+             options.micro_to_large_conversion_coefficient, options.smooth_heaviside_width, options.bubble_gas_density,
+             options.initial_dissolved_hydrogen, options.initial_micro_number_density, options.initial_micro_moles,
+             options.initial_large_number_density, options.initial_large_moles, options.min_population,
+             options.max_population, options.max_concentration, options.local_ode_tolerance,
+             options.liquid_compressibility, options.liquid_thermal_expansion})
+        number(value);
+    integer(options.max_radius_iterations);
     integer(static_cast<std::uint64_t>(options.pressure_mode));
     integer(static_cast<std::uint64_t>(options.dissolved_transport));
     integer(static_cast<std::uint64_t>(options.bulk_diffusion));
@@ -125,8 +168,13 @@ inline std::uint64_t configuration_signature(const ReactingGasOptions& options)
         integer(static_cast<bool>(property.equilibrium_concentration));
         integer(static_cast<bool>(property.carried_molar_enthalpy));
     }
+    integer(static_cast<bool>(options.bouss_reference));
+    if (options.bouss_reference)
+        integer(Reacting::bouss_configuration_signature(*options.bouss_reference, *options.bouss_sources));
     for (const auto& eos : {options.liquid_thermodynamics, options.gas_thermodynamics})
     {
+        if (!eos)
+            continue;
         integer(eos->catalog().fingerprint());
         integer(static_cast<std::uint64_t>(eos->kind()));
         integer(static_cast<std::uint64_t>(eos->energy_convention()));
@@ -160,12 +208,15 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
     ++d_species_generation;
     d_species_fields.clear();
     d_additional_population_numbers.clear();
+    d_bouss_diagnostics.clear();
     d_population_volume_fractions.clear();
     d_population_slip_fields.clear();
     d_species_source_ledgers.clear();
     d_species_population_ledgers.clear();
     d_species_escape_ledgers.clear();
     d_species_history = {};
+    d_bouss_receipts.clear();
+    d_active_bouss_wall_heat = nullptr;
     d_species_thermal_source.put_scalar(0.0);
     d_species_material_source.put_scalar(0.0);
     d_species_liquid_mass.put_scalar(0.0);
@@ -220,6 +271,14 @@ template<TpetraTypePack Pack, class MeshType> void ReactingGasModel<Pack, MeshTy
             std::make_unique<field_type>(d_mesh, 0.0, "population_alpha_" + population));
         d_population_slip_fields.push_back(std::make_unique<field_type>(d_mesh, 0.0, "population_slip_" + population));
     }
+    if (d_options.bouss_reference)
+        for (const auto* name : {"bouss_evaporation_moles_rate", "bouss_condensation_moles_rate", "bouss_latent_power",
+                 "bouss_sensible_power", "bouss_vapor_volume_source"})
+        {
+            auto field = std::make_unique<field_type>(d_mesh, 0.0, name);
+            d_output_fields.emplace(name, field.get());
+            d_bouss_diagnostics.push_back(std::move(field));
+        }
     d_output_fields.emplace("species_thermal_source", &d_species_thermal_source);
     d_output_fields.emplace("species_material_volume_source", &d_species_material_source);
     d_initial_state_initialized = false;
@@ -408,6 +467,8 @@ void ReactingGasModel<Pack, MeshType>::initialize_species(
 template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::append_species_fields(std::vector<field_type*>& fields)
 {
+    for (const auto& field : d_bouss_diagnostics)
+        fields.push_back(field.get());
     fields.push_back(&d_species_thermal_source);
     fields.push_back(&d_species_material_source);
     fields.push_back(&d_species_liquid_mass);
@@ -429,6 +490,8 @@ void ReactingGasModel<Pack, MeshType>::append_species_fields(std::vector<field_t
 template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::append_species_fields(std::vector<const field_type*>& fields) const
 {
+    for (const auto& field : d_bouss_diagnostics)
+        fields.push_back(field.get());
     fields.push_back(&d_species_thermal_source);
     fields.push_back(&d_species_material_source);
     fields.push_back(&d_species_liquid_mass);
@@ -508,7 +571,20 @@ std::vector<BubbleGasPhysics::PopulationCondition> ReactingGasModel<Pack, MeshTy
         BubbleGasPhysics::PopulationCondition condition{numbers[p].population, numbers[p].number};
         if (reacting_species_detail::total(amounts) > 0.0)
         {
-            if (condition.number > 0.0)
+            if (d_options.bouss_reference)
+            {
+                const double volume =
+                    reacting_species_detail::reference_gas_volume(*d_options.bouss_reference, amounts);
+                condition.properties.density = reacting_species_detail::mass(catalog, amounts) / volume;
+                if (condition.number > 0)
+                {
+                    condition.radius = std::cbrt(3 * volume / (4 * std::numbers::pi * condition.number));
+                    require(std::isfinite(condition.radius) && condition.radius >= d_options.min_radius &&
+                                condition.radius <= d_options.max_radius,
+                        "Bouss representative radius is outside supplied bounds.");
+                }
+            }
+            else if (condition.number > 0.0)
             {
                 const auto bubble = Reacting::solve_bubble_radius(*d_options.gas_thermodynamics, amounts,
                     environment.temperature, environment.absolutePressure, sigma, condition.number,
@@ -556,16 +632,11 @@ void ReactingGasModel<Pack, MeshType>::reconstruct_species_derived(
                 double liquidVolume = 0.0, resolvedVolume = 0.0, gasVolume = 0.0, microMoles = 0.0, largeMoles = 0.0;
                 if (reacting_species_detail::total(liquid) > 0.0)
                     liquidVolume = reacting_species_detail::mass(catalog, liquid) /
-                                   d_options.liquid_thermodynamics
-                                       ->evaluate(environment.temperature, environment.absolutePressure,
-                                           reacting_species_detail::composition(liquid))
-                                       .density;
+                                   reacting_species_detail::liquid_density(
+                                       d_options, environment.temperature, environment.absolutePressure, liquid);
                 if (reacting_species_detail::total(resolved) > 0.0)
-                    resolvedVolume = reacting_species_detail::mass(catalog, resolved) /
-                                     d_options.gas_thermodynamics
-                                         ->evaluate(environment.temperature, environment.absolutePressure,
-                                             reacting_species_detail::composition(resolved))
-                                         .density;
+                    resolvedVolume = reacting_species_detail::gas_volume(
+                        d_options, catalog, environment.temperature, environment.absolutePressure, resolved);
                 d_alpha_g_micro.owned_write_view()(owned, 0) = 0.0;
                 d_alpha_g_large.owned_write_view()(owned, 0) = 0.0;
                 for (std::size_t p = 0; p < populations.size(); ++p)
@@ -641,6 +712,18 @@ BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>:
 {
     using P = Reacting::SpeciesPhase;
     using reacting_species_detail::require;
+    if (d_options.bouss_reference && d_options.bouss_sources->populationProcess)
+    {
+        std::vector<Reacting::BoussPopulationCondition> reference;
+        for (std::size_t p = 0; p < populations.size(); ++p)
+        {
+            const auto volume = reacting_species_detail::reference_gas_volume(
+                *d_options.bouss_reference, chemistry.state.dispersedPopulations[p].amounts);
+            reference.push_back({populations[p].id, populations[p].number, populations[p].radius, volume,
+                populations[p].properties.density});
+        }
+        return d_options.bouss_sources->populationProcess({chemistry, reference}, duration);
+    }
     if (d_options.population_process)
         return d_options.population_process({chemistry, populations}, duration);
     BubbleGasPhysics::MultispeciesPopulationPacket packet;
@@ -672,7 +755,8 @@ BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>:
                         population.id, "large", amounts[s] * conversion});
             }
         }
-        if (population.number == 0.0 || population.radius == 0.0 || chemistry.environment.liquidVolume == 0.0)
+        if (d_options.bouss_reference || population.number == 0.0 || population.radius == 0.0 ||
+            chemistry.environment.liquidVolume == 0.0)
             continue;
         std::vector<double> liquid(chemistry.catalog.species().size());
         for (std::size_t s = 0; s < liquid.size(); ++s)
@@ -720,8 +804,29 @@ template<TpetraTypePack Pack, class MeshType>
 void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, scalar_type dt,
     const field_type& temperature, const field_type& gauge_pressure, const velocity_field_type& velocity,
     const face_flux_field_type& liquid_flux, const material_type& material, const FVM::ALEControlVolumeState* ale,
-    Dimension axis)
+    Dimension axis, const std::vector<Reacting::BoussWallHeatBudget>* wall_heat)
 {
+    collective_detail::collective_local_validation(*d_mesh, "Bouss fixed carrier support",
+        [&]
+        {
+            reacting_species_detail::require(!d_options.bouss_reference || ale == nullptr,
+                "Coordinated Bouss reference-volume source does not qualify ALE transport.");
+            if (d_options.bouss_reference && d_options.bouss_sources->vapor &&
+                !d_options.bouss_sources->vapor->walls.empty())
+            {
+                reacting_species_detail::require(wall_heat && wall_heat->size() == d_mesh->num_owned_cells(),
+                    "Wall-enabled finite vapor requires certified heat packets, including empty owners.");
+                for (const auto& packet : *wall_heat)
+                    reacting_species_detail::require(
+                        packet.producer && packet.geometryEpoch == mesh_geometry_epoch(*d_mesh) &&
+                            packet.configurationSignature ==
+                                Reacting::bouss_configuration_signature(
+                                    *d_options.bouss_reference, *d_options.bouss_sources) &&
+                            packet.intervalEnd == time && packet.duration == dt,
+                        "Stale or foreign finite wall-heat owner/geometry/interval packet.");
+            }
+        });
+
     using reacting_species_detail::narrow;
     using reacting_species_detail::require;
     using P = Reacting::SpeciesPhase;
@@ -740,6 +845,11 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 require(&temperature.mesh() == d_mesh.get() && &gauge_pressure.mesh() == d_mesh.get() &&
                             &velocity.mesh() == d_mesh.get() && &liquid_flux.mesh() == d_mesh.get(),
                     "Reacting input field mesh mismatch.");
+                if (d_options.bouss_reference)
+                    for (const auto face : liquid_flux.owned_face_ids())
+                        require(!d_mesh->is_boundary_face(face) || liquid_flux.value(face) == 0,
+                            "Coordinated Bouss finite material sources require closed zero-carrier-flux boundaries.");
+
                 require(d_options.bubble_transport == BubbleTransportMode::General,
                     "General multispecies transport requires the owner-oriented general carrier/slip flux.");
                 if (ale)
@@ -1026,10 +1136,10 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     }
                     if (amount.value() == 0)
                         continue;
-                    const auto point = d_options.liquid_thermodynamics->evaluate(
-                        d_previous_temperature.local_value(donor), d_absolute_pressure.local_value(donor),
-                        reacting_species_detail::composition(concentration));
-                    const double packet = narrow(mass_rate.value() / point.density);
+                    const auto density =
+                        reacting_species_detail::liquid_density(d_options, d_previous_temperature.local_value(donor),
+                            d_absolute_pressure.local_value(donor), concentration);
+                    const double packet = narrow(mass_rate.value() / density);
                     require((carrier > 0 && packet >= 0) || (carrier < 0 && packet <= 0),
                         "Liquid material-volume packet changed canonical orientation.");
                     d_transport_liquid_material_volume_flux.owned_write_view()(
@@ -1091,11 +1201,14 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
         std::vector<double> transportedGas(volumes.size()), transportedMaterial(volumes.size());
         d_species_source_ledgers.resize(volumes.size());
         d_species_population_ledgers.resize(volumes.size());
-        collective_detail::collective_local_validation(*d_mesh, "Reacting history scratch", [&]
-        {
-            interphase_step.resize(catalog.species().size() * (4 + d_options.population_ids.size()));
-            chemical_receipts.resize(volumes.size());
-        });
+        if (d_options.bouss_reference)
+            d_bouss_receipts.resize(volumes.size());
+        collective_detail::collective_local_validation(*d_mesh, "Reacting history scratch",
+            [&]
+            {
+                interphase_step.resize(catalog.species().size() * (4 + d_options.population_ids.size()));
+                chemical_receipts.resize(volumes.size());
+            });
         collective_detail::collective_local_validation(*d_mesh, "Reacting joint species and population preview",
             [&]
             {
@@ -1104,15 +1217,35 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     const auto cell = static_cast<local_ordinal_type>(owned);
                     auto state = cell_species_state(cell, volumes[owned]);
                     auto numbers = cell_population_numbers(cell, volumes[owned]);
+                    const auto transportedNumbers = numbers;
                     auto environment = species_environment(cell, time - dt, temperature.value(cell), volumes[owned]);
                     transportedGas[owned] = d_alpha_g.value(cell);
                     transportedMaterial[owned] = d_alpha_l.value(cell) + d_alpha_g.value(cell);
                     Reacting::ReactionContext context{catalog, state, environment};
                     const auto source = d_options.species_source ? d_options.species_source(context, dt)
                                                                  : Reacting::ReactionSourceInput{};
-                    const auto chemistry = Reacting::advance_reactions(
-                        *d_options.reaction_mechanism, state, environment, dt, source, d_options.reaction_advance);
-                    state = chemistry.state;
+                    std::optional<Reacting::BoussSourceAdvance> bouss;
+                    Reacting::ReactionAdvance chemistry;
+                    if (d_options.bouss_reference)
+                    {
+                        bouss =
+                            Reacting::advance_bouss_sources(*d_options.reaction_mechanism, *d_options.bouss_reference,
+                                *d_options.bouss_sources, state, numbers, environment, dt, d_options.alpha_max, source,
+                                d_options.reaction_advance, wall_heat ? &(*wall_heat)[owned] : nullptr);
+                        chemistry = bouss->chemistry;
+                        state = bouss->state;
+                        numbers = bouss->numbers;
+                        d_bouss_receipts[owned] = {bouss->admissions, bouss->vapor, bouss->numberEvents,
+                            Reacting::bouss_configuration_signature(
+                                *d_options.bouss_reference, *d_options.bouss_sources),
+                            bouss->thermalContributions};
+                    }
+                    else
+                    {
+                        chemistry = Reacting::advance_reactions(
+                            *d_options.reaction_mechanism, state, environment, dt, source, d_options.reaction_advance);
+                        state = chemistry.state;
+                    }
                     d_species_source_ledgers[owned] = chemistry.ledger;
                     // Reporting ledgers may round away a channel before a later physical cancellation.
                     // Accumulate the accepted local receipt and each original reservoir packet before one division.
@@ -1123,11 +1256,19 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                                     d_options.reaction_mechanism->reactions().size(),
                         "Field thermal receipt does not match its mechanism/schema.");
                     detail::CompensatedSum<long double> thermalEnergy;
-                    thermalEnergy += raw.externalHeat;
-                    for (const auto heat : raw.reactionHeatContributions)
-                        thermalEnergy += heat;
-                    for (const auto& transfer : chemistry.ledger.externalTransfers)
-                        thermalEnergy += transfer.energy;
+                    if (bouss)
+                    {
+                        for (const auto contribution : bouss->thermalContributions)
+                            thermalEnergy += contribution;
+                    }
+                    else
+                    {
+                        thermalEnergy += raw.externalHeat;
+                        for (const auto heat : raw.reactionHeatContributions)
+                            thermalEnergy += heat;
+                        for (const auto& transfer : chemistry.ledger.externalTransfers)
+                            thermalEnergy += transfer.energy;
+                    }
                     const auto measure = static_cast<long double>(dt) * volumes[owned];
                     require(std::isfinite(measure) && measure > 0,
                         "Field thermal source needs a finite positive time-volume measure.");
@@ -1135,37 +1276,103 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     require(thermalEnergy.value() == 0 || powerDensity != 0,
                         "Field thermal source underflows its physical rate.");
                     d_species_thermal_source.owned_write_view()(owned, 0) = narrow(powerDensity);
+                    if (bouss)
+                    {
+                        const auto& vapor = bouss->vapor;
+                        const double molarVolume =
+                            d_options.bouss_sources->vapor
+                                ? d_options.bouss_reference
+                                      ->gasMolarVolumes[catalog.index(d_options.bouss_sources->vapor->solvent)]
+                                : 0;
+                        const std::array<long double, 5> values{vapor.evaporation / measure,
+                            vapor.condensation / measure, vapor.latentEnergy / measure, vapor.sensibleEnergy / measure,
+                            (static_cast<long double>(vapor.evaporation) - vapor.condensation) * molarVolume / measure};
+                        for (std::size_t field = 0; field < values.size(); ++field)
+                            d_bouss_diagnostics[field]->owned_write_view()(owned, 0) = narrow(values[field]);
+                    }
+                    if (bouss)
+                        for (const auto& transfer : bouss->transfers)
+                        {
+                            const auto donor =
+                                species_compartment_index(transfer.species, transfer.donor, transfer.donorPopulation);
+                            const auto receiver = species_compartment_index(
+                                transfer.species, transfer.receiver, transfer.receiverPopulation);
+                            interphase_step[donor].source_change += -static_cast<long double>(transfer.moles);
+                            interphase_step[receiver].source_change += transfer.moles;
+                            const auto species = catalog.index(transfer.species);
+                            const long double intoGas = transfer.receiver == P::Liquid
+                                                            ? -static_cast<long double>(transfer.moles)
+                                                            : transfer.moles;
+                            interphase_step[species].gas_subset_source += intoGas;
+                            interphase_step[species].solution_subset_source += -intoGas;
+                            interphase_step[donor].amount[Reacting::history_detail::InterphaseOutflow] +=
+                                transfer.moles;
+                            interphase_step[receiver].amount[Reacting::history_detail::InterphaseInflow] +=
+                                transfer.moles;
+                        }
                     auto populationLedger = Reacting::SpeciesSourceLedger{};
                     populationLedger.chemicalChange = reacting_species_detail::zero_like(state);
                     populationLedger.externalChange = reacting_species_detail::zero_like(state);
                     const auto populationInitial = state;
                     const auto initialNumbers = numbers;
                     std::vector<detail::CompensatedSum<long double>> countEndpoints(numbers.size());
+                    require(
+                        transportedNumbers.size() == numbers.size(), "Bouss source changed population count shape.");
                     for (std::size_t p = 0; p < numbers.size(); ++p)
-                        countEndpoints[p] += numbers[p].number;
+                    {
+                        require(transportedNumbers[p].population == numbers[p].population,
+                            "Bouss source changed population count identity.");
+                        countEndpoints[p] += transportedNumbers[p].number;
+                    }
+                    if (bouss)
+                        for (const auto& event : bouss->numberEvents)
+                        {
+                            const auto found = std::ranges::find(
+                                numbers, event.population, &BubbleGasPhysics::PopulationNumberState::population);
+                            require(found != numbers.end(), "Bouss count source names an unknown population.");
+                            auto& endpoint = countEndpoints[static_cast<std::size_t>(found - numbers.begin())];
+                            endpoint += -static_cast<long double>(event.deaths);
+                            endpoint += event.births;
+                        }
+                    for (std::size_t p = 0; p < numbers.size(); ++p)
+                        require(
+                            countEndpoints[p].value() >= 0 && narrow(countEndpoints[p].value()) == numbers[p].number,
+                            "Bouss raw source count does not project to its actual count state.");
                     std::vector<detail::CompensatedSum<long double>> changes(
                         state.amounts.size() + state.dispersedPopulations.size() * catalog.species().size());
                     auto materialEndpoints = changes;
                     require(raw.postSourceAmounts.size() == materialEndpoints.size(),
                         "Raw source endpoint has the wrong compartment schema.");
-                    std::size_t initialSlot = 0;
-                    const auto seedMaterial = [&](double represented)
+                    for (std::size_t slot = 0; slot < materialEndpoints.size(); ++slot)
                     {
-                        const auto& parts = raw.postSourceAmounts[initialSlot];
+                        const auto& parts = raw.postSourceAmounts[slot];
                         require(std::isfinite(parts[0]) && std::isfinite(parts[1]),
                             "Raw source endpoint contains a nonfinite part.");
-                        auto& stock = materialEndpoints[initialSlot++];
-                        stock += parts[0];
-                        stock += parts[1];
-                        const auto amount = stock.value();
+                        materialEndpoints[slot] += parts[0];
+                        materialEndpoints[slot] += parts[1];
+                    }
+                    // Chemistry receipt excludes paired vapor. Append each
+                    // actual source transfer once, before population donors.
+                    if (bouss)
+                        for (const auto& transfer : bouss->transfers)
+                        {
+                            materialEndpoints[species_compartment_index(transfer.species, transfer.donor,
+                                transfer.donorPopulation)] += -static_cast<long double>(transfer.moles);
+                            materialEndpoints[species_compartment_index(
+                                transfer.species, transfer.receiver, transfer.receiverPopulation)] += transfer.moles;
+                        }
+                    std::size_t initialSlot = 0;
+                    const auto validateMaterial = [&](double represented)
+                    {
+                        const auto amount = materialEndpoints[initialSlot++].value();
                         require(std::isfinite(amount) && amount >= 0 && narrow(amount) == represented,
-                            "Raw source endpoint does not project to the actual chemical state.");
+                            "Raw source/vapor endpoint does not project to its actual state.");
                     };
                     for (const auto value : state.amounts)
-                        seedMaterial(value);
+                        validateMaterial(value);
                     for (const auto& population : state.dispersedPopulations)
                         for (const auto value : population.amounts)
-                            seedMaterial(value);
+                            validateMaterial(value);
                     double elapsed = 0.0, next = dt;
                     std::size_t substeps = 0;
                     while (elapsed < dt)
@@ -1191,17 +1398,47 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                                 stageEnvironment.liquidVolume =
                                     reacting_species_detail::total(stageLiquid) > 0.0
                                         ? reacting_species_detail::mass(catalog, stageLiquid) /
-                                              d_options.liquid_thermodynamics
-                                                  ->evaluate(stageEnvironment.temperature,
-                                                      stageEnvironment.absolutePressure,
-                                                      reacting_species_detail::composition(stageLiquid))
-                                                  .density
+                                              reacting_species_detail::liquid_density(d_options,
+                                                  stageEnvironment.temperature, stageEnvironment.absolutePressure,
+                                                  stageLiquid)
                                         : 0.0;
                                 const auto conditions = population_conditions(state, numbers, stageEnvironment);
                                 const Reacting::ReactionContext stageContext{catalog, state, stageEnvironment};
                                 const auto packet = population_packet(stageContext, conditions, step);
-                                const auto result = BubbleGasPhysics::advance_multispecies_population_exchange(
-                                    catalog, state, numbers, stageEnvironment, packet);
+                                if (d_options.bouss_reference && d_options.bouss_sources->vapor)
+                                    for (const auto& transfer : packet.transfers)
+                                    {
+                                        const auto solution = [](P phase)
+                                        { return phase == P::Liquid || phase == P::Dissolved; };
+                                        require(transfer.species != d_options.bouss_sources->vapor->solvent ||
+                                                    solution(transfer.donor) == solution(transfer.receiver),
+                                            "Bound solvent phase change must use its coordinated latent owner, "
+                                            "not a population packet with no thermal channel.");
+                                    }
+
+                                // Reserve this packet's gross deaths from
+                                // current raw stock before any incoming birth.
+                                auto countDonors = countEndpoints;
+                                for (const auto& event : packet.numberEvents)
+                                {
+                                    const auto found = std::ranges::find(numbers, event.population,
+                                        &BubbleGasPhysics::PopulationNumberState::population);
+                                    require(found != numbers.end() && std::isfinite(event.deaths) && event.deaths >= 0,
+                                        "Population count donor event is invalid.");
+                                    countDonors[static_cast<std::size_t>(found - numbers.begin())] +=
+                                        -static_cast<long double>(event.deaths);
+                                }
+                                for (const auto& donor : countDonors)
+                                    if (!std::isfinite(donor.value()) || donor.value() < 0)
+                                        throw std::runtime_error(
+                                            "Population deaths overdraw raw pre-packet count stock.");
+
+                                const auto result = d_options.bouss_reference
+                                                        ? Reacting::advance_bouss_population_exchange(catalog,
+                                                              *d_options.bouss_reference, state, numbers,
+                                                              stageEnvironment, d_options.alpha_max, packet)
+                                                        : BubbleGasPhysics::advance_multispecies_population_exchange(
+                                                              catalog, state, numbers, stageEnvironment, packet);
                                 auto acceptedChanges = changes;
                                 auto acceptedMaterial = materialEndpoints;
                                 auto donorMargins = materialEndpoints;
@@ -1358,6 +1595,34 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     for (auto& population : populationLedger.chemicalChange.dispersedPopulations)
                         for (auto& value : population.amounts)
                             value = narrow(changes[i++].value());
+                    if (bouss)
+                        for (const auto& transfer : bouss->transfers)
+                        {
+                            const auto add = [&](P phase, std::string_view population, long double change)
+                            {
+                                const auto species = catalog.index(transfer.species);
+                                double* target = nullptr;
+                                if (population.empty())
+                                    target = &populationLedger.chemicalChange
+                                                  .amounts[static_cast<std::size_t>(phase) * catalog.species().size() +
+                                                           species];
+                                else
+                                {
+                                    const auto p =
+                                        std::ranges::find(populationLedger.chemicalChange.dispersedPopulations,
+                                            population, &Reacting::SpeciesPopulationState::id);
+                                    require(p != populationLedger.chemicalChange.dispersedPopulations.end(),
+                                        "Vapor phase receipt names an absent population.");
+                                    target = &p->amounts[species];
+                                }
+                                detail::CompensatedSum<long double> amount;
+                                amount += *target;
+                                amount += change;
+                                *target = narrow(amount.value());
+                            };
+                            add(transfer.donor, transfer.donorPopulation, -static_cast<long double>(transfer.moles));
+                            add(transfer.receiver, transfer.receiverPopulation, transfer.moles);
+                        }
                     populationLedger.substeps = substeps;
                     d_species_population_ledgers[owned] = std::move(populationLedger);
                     candidates.push_back(std::move(state));
@@ -1496,10 +1761,9 @@ ReactingGasOptions ReactingGasModel<Pack, MeshType>::require_options(
     collective_detail::require_uniform_value(
         *mesh, static_cast<int>(static_cast<bool>(options.reaction_mechanism)), "Reacting typed schema presence");
     collective_detail::require_uniform_value(*mesh, static_cast<int>(options.mode), "Reacting model selection");
-    if (options.reaction_mechanism)
-        collective_detail::require_uniform_value(*mesh,
-            static_cast<unsigned long long>(reacting_species_detail::configuration_signature(options)),
-            "Reacting ordered mechanism/property/source control-flow metadata");
+    collective_detail::require_uniform_value(*mesh,
+        static_cast<unsigned long long>(reacting_species_detail::configuration_signature(options)),
+        "Reacting complete options/mechanism/property/source control-flow metadata");
     return options;
 }
 } // namespace SimpleFluid

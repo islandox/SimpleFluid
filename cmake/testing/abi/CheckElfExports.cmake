@@ -238,6 +238,8 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::ReactingVoFCoupler::Impl::"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(].*BoussinesqSolver<.*>&[)]$"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::PlanarALEStep::"
+    "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::BoussWallTrial::"
+    "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::(prepare_bouss_wall_heat|validate_bouss_wall_heat|restore_bouss_wall_heat)[(]"
     "SimpleFluid::BoilingSourceModel<.*>[ ]*::(validate_void_inputs|limit_to_available_void|add_bulk_boiling|add_wall_boiling)[(]"
     "SimpleFluid::ScalarSourceDecayTransport<.*>[ ]*::(validate_collective_configuration|validate_collective_advance_selection|validate_liquid_fraction_field|reconstruct_concentrations|transport|update_inventory_diagnostics)[(]"
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::(require_uniform_value|require_uniform_configuration|copy_scaled_field|integrate|apply_base_profile|apply_time_multiplier)[(]"
@@ -367,7 +369,7 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
-# VoF solvers remain an explicit experimental build selection. Disabled builds
+# VoF configuration currently rejects ON. Disabled builds
 # must contain no solver/controller/caloric exports from that path; reusable FVM
 # geometry and transport kernels are audited separately in their owning library.
 if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
@@ -740,6 +742,33 @@ endforeach()
 foreach(simplefluid_thermal_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
     simplefluid_require_exact_api(
         "^${simplefluid_thermal_rtti} SimpleFluid::Reacting::ThermalCaloricRangeError$" 1)
+endforeach()
+
+# Fixed-reference finite vapor: seven pure functions, one controller entry point,
+# and one accepted-receipt query for each supported field mesh. No private wall
+# certificate or orchestration helper is part of the dynamic API.
+set(simplefluid_bouss_vapor_public_symbol_budget 10)
+set(simplefluid_bouss_number_span
+    "${simplefluid_stage3_std}span<SimpleFluid::BubbleGasPhysics::PopulationNumberState const, [0-9]+u?l*>")
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::bouss_configuration_signature[(]SimpleFluid::Reacting::BoussReferenceVolume const&, SimpleFluid::Reacting::BoussCoordinatedSources const&[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::validate_bouss_reference[(]SimpleFluid::Reacting::ReactionMechanism const&, SimpleFluid::Reacting::BoussReferenceVolume const&[)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::validate_bouss_sources[(]SimpleFluid::Reacting::ReactionMechanism const&, SimpleFluid::Reacting::BoussReferenceVolume const&, SimpleFluid::Reacting::BoussCoordinatedSources const&[)]$" 1)
+foreach(simplefluid_bouss_volume IN ITEMS gas liquid)
+    simplefluid_require_reacting_api(
+        "^SimpleFluid::Reacting::bouss_${simplefluid_bouss_volume}_volume[(]SimpleFluid::Reacting::SpeciesCatalog const&, SimpleFluid::Reacting::BoussReferenceVolume const&, SimpleFluid::Reacting::CellSpeciesState const&[)]$" 1)
+endforeach()
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::advance_bouss_sources[(]SimpleFluid::Reacting::ReactionMechanism const&, SimpleFluid::Reacting::BoussReferenceVolume const&, SimpleFluid::Reacting::BoussCoordinatedSources const&, SimpleFluid::Reacting::CellSpeciesState const&, ${simplefluid_bouss_number_span}, SimpleFluid::Reacting::ReactionEnvironment const&, double, double, SimpleFluid::Reacting::ReactionSourceInput const&, SimpleFluid::Reacting::ReactionAdvanceOptions const&, SimpleFluid::Reacting::BoussWallHeatBudget const[*][)]$" 1)
+simplefluid_require_reacting_api(
+    "^SimpleFluid::Reacting::advance_bouss_population_exchange[(]SimpleFluid::Reacting::SpeciesCatalog const&, SimpleFluid::Reacting::BoussReferenceVolume const&, SimpleFluid::Reacting::CellSpeciesState const&, ${simplefluid_bouss_number_span}, SimpleFluid::Reacting::ReactionEnvironment const&, double, SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket const&[)]$" 1)
+simplefluid_require_exact_api(
+    "^SimpleFluid::MultiphysicsSolverCoupler<SimpleFluid::TpetraTypes<.*>[ ]*>::configure_bouss_sources[(]${simplefluid_stage3_std}shared_ptr<SimpleFluid::Reacting::BoussCoordinatedSources const>[)]$" 1)
+foreach(simplefluid_bouss_mesh_kind IN ITEMS native legacy)
+    simplefluid_require_exact_api(
+        "^SimpleFluid::ReactingGasModel<SimpleFluid::TpetraTypes<.*>, ${simplefluid_stage3_${simplefluid_bouss_mesh_kind}_mesh}[ ]*>::bouss_receipts[(][)] const$" 1)
 endforeach()
 
 # Typed surface receipts (8), supplied headspace configuration (1), base metadata
@@ -1273,13 +1302,14 @@ set(simplefluid_api_symbol_lower_bound 1250)
 # The existing three-entry headroom and all earlier API anchors are retained.
 # Conditioned thermal transfer adds nine anchors: measured GCC Debug 1591,
 # disabled ceiling 1594; no earlier definition or private guard is removed.
+# Finite vapor adds ten exact anchors: GCC Debug 1601, disabled ceiling 1604.
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count}")
 if(simplefluid_api_symbol_count LESS simplefluid_api_symbol_lower_bound
    OR simplefluid_api_symbol_count GREATER simplefluid_api_symbol_upper_bound)
     message(FATAL_ERROR

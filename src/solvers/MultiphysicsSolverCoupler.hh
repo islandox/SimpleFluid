@@ -316,6 +316,12 @@ public:
      * @brief Configure the optional reacting gas model from explicit options.
      */
     reacting_gas_model_type& configure_reacting_gas(const ReactingGasOptions& options);
+    /** Replace only coordinated Bouss gas/vapor laws, preserving actual inventories,
+     * counts, scalar void and histories. Canonical catalog/reference binding is
+     * configured once through configure_reacting_gas(); sub-laws may be enabled in
+     * either order. Old model snapshots become stale after this configuration change.
+     */
+    void configure_bouss_sources(std::shared_ptr<const Reacting::BoussCoordinatedSources> sources);
     /**
      * @brief Configure the optional reacting gas model from database keys.
      */
@@ -483,6 +489,10 @@ public:
 private:
     SIMPLEFLUID_SOLVERS_LOCAL void refresh_geometry_dependent_state();
     SIMPLEFLUID_SOLVERS_LOCAL void advance_temperature_transport(scalar_type time_step);
+    struct SIMPLEFLUID_SOLVERS_LOCAL BoussWallTrial;
+    SIMPLEFLUID_SOLVERS_LOCAL void prepare_bouss_wall_heat(scalar_type time_step);
+    SIMPLEFLUID_SOLVERS_LOCAL void validate_bouss_wall_heat() const;
+    SIMPLEFLUID_SOLVERS_LOCAL void restore_bouss_wall_heat();
     SIMPLEFLUID_SOLVERS_LOCAL VTUWriter solution_writer(const SolutionOutputOptions& options) const;
     SIMPLEFLUID_SOLVERS_LOCAL void initialize_primary_state();
     SIMPLEFLUID_SOLVERS_LOCAL void refresh_geometry_dependent_models();
@@ -629,6 +639,8 @@ private:
     std::weak_ptr<const CouplingState> d_active_coupling_checkpoint;
     std::unique_ptr<prescribed_heat_source_type> d_prescribed_heat_source;
     std::unique_ptr<reacting_gas_model_type> d_reacting_gas_model;
+    std::shared_ptr<BoussWallTrial> d_bouss_wall_trial;
+    std::unique_ptr<field_type> d_bouss_temperature_density;
     std::unique_ptr<field_type> d_combined_heat_release; ///< Reusable derived source workspace, never a ledger.
     std::unique_ptr<boiling_source_model_type> d_boiling_source_model;
     std::unique_ptr<scalar_void_fraction_model_type> d_scalar_void_fraction_model;

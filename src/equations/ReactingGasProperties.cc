@@ -10,6 +10,7 @@
  */
 
 #include "equations/ReactingGasProperties.hh"
+#include "equations/BoussFiniteVapor.hh"
 
 #include "dataclass/DatabaseOptionReader.hh"
 
@@ -431,6 +432,8 @@ void validate_reacting_gas_options(
     const ReactingGasOptions& options)
 {
     using namespace BubbleGasPhysics;
+    if ((options.bouss_reference || options.bouss_sources) && !options.reaction_mechanism)
+        throw std::invalid_argument("Bouss finite material sources require an explicit canonical reaction schema.");
     require_positive(options.reference_pressure, "reference pressure");
     require_positive(options.gas_constant, "gas constant");
     require_non_negative(options.alpha_min, "minimum void fraction");
@@ -464,15 +467,42 @@ void validate_reacting_gas_options(
             (options.surface_tension_mode != SurfaceTensionMode::Constant &&
                 options.surface_tension_mode != SurfaceTensionMode::External) ||
             (options.surface_tension_mode == SurfaceTensionMode::External && !options.surface_tension_correlation))
-            throw std::invalid_argument("General reacting transport/process selection is invalid or lacks its callback.");
-        (void)select_bubble_mass_transfer_evaluator(options.mass_transfer_mode);
-        if (options.mode != ReactingGasMode::TwoPopulation || !options.gas_thermodynamics ||
-            !options.liquid_thermodynamics || options.gas_thermodynamics->kind() != Reacting::EOSKind::Gas ||
-            options.liquid_thermodynamics->kind() != Reacting::EOSKind::Liquid ||
-            options.gas_thermodynamics->catalog().fingerprint() != catalog.fingerprint() ||
-            options.liquid_thermodynamics->catalog().fingerprint() != catalog.fingerprint() ||
-            options.gas_thermodynamics->energy_convention() != options.reaction_mechanism->energy_convention() ||
-            options.liquid_thermodynamics->energy_convention() != options.reaction_mechanism->energy_convention())
+            throw std::invalid_argument(
+                "General reacting transport/process selection is invalid or lacks its callback.");
+        (void) select_bubble_mass_transfer_evaluator(options.mass_transfer_mode);
+        if (options.bouss_reference)
+        {
+            if (!options.bouss_sources || options.mode != ReactingGasMode::TwoPopulation || options.alpha_min != 0 ||
+                options.gas_thermodynamics || options.liquid_thermodynamics || options.population_process ||
+                options.surface_tension_mode != SurfaceTensionMode::Constant || options.surface_tension != 0 ||
+                options.rise_velocity_mode == BubbleRiseVelocityMode::Celata2007 ||
+                !options.free_surface_patches.empty())
+                throw std::invalid_argument(
+                    "Bouss reference volumes require a paired source binding, sigma=0, "
+                    "prescribed/zero slip, closed boundaries and no supplied phase EOS/general EOS process; use "
+                    "the distinct Bouss populationProcess callback.");
+            Reacting::validate_bouss_sources(
+                *options.reaction_mechanism, *options.bouss_reference, *options.bouss_sources);
+            for (const auto& property : options.species_properties)
+                if (property.diffusivity != 0 || property.diffusivity_provider || property.henry_coefficient != 0 ||
+                    property.equilibrium_concentration)
+                    throw std::invalid_argument(
+                        "Bouss reference-volume binding does not supply EOS film/fugacity laws.");
+            if (options.bouss_sources->vapor &&
+                options.bouss_sources->vapor->vaporPhase == Reacting::SpeciesPhase::Dispersed &&
+                std::ranges::find(options.population_ids, options.bouss_sources->vapor->population) ==
+                    options.population_ids.end())
+                throw std::invalid_argument("Bouss vapor population must be an explicit configured identity.");
+        }
+        else if (options.bouss_sources)
+            throw std::invalid_argument("Bouss sources require their explicit reference-volume/thermal owner.");
+        else if (options.mode != ReactingGasMode::TwoPopulation || !options.gas_thermodynamics ||
+                 !options.liquid_thermodynamics || options.gas_thermodynamics->kind() != Reacting::EOSKind::Gas ||
+                 options.liquid_thermodynamics->kind() != Reacting::EOSKind::Liquid ||
+                 options.gas_thermodynamics->catalog().fingerprint() != catalog.fingerprint() ||
+                 options.liquid_thermodynamics->catalog().fingerprint() != catalog.fingerprint() ||
+                 options.gas_thermodynamics->energy_convention() != options.reaction_mechanism->energy_convention() ||
+                 options.liquid_thermodynamics->energy_convention() != options.reaction_mechanism->energy_convention())
             throw std::invalid_argument(
                 "General reacting fields require matching species/energy schemas and supplied liquid/gas EOS.");
         if (options.pressure_mode == ReactingPressureMode::Inertial)

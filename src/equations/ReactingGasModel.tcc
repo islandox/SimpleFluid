@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include "equations/BoussFiniteVapor.hh"
 #include "equations/BubblePopulationKinetics.hh"
 #include "equations/ReactingGasModel.hh"
 
@@ -3128,9 +3129,14 @@ void ReactingGasModel<Pack, MeshType>::advance(
 {
     if (species_enabled())
     {
-        if (!enabled()) { d_source_alpha_reaction.put_scalar(0.0); d_species_thermal_source.put_scalar(0.0); return; }
-        advance_species_fields(
-            time, time_step, temperature, gauge_pressure, velocity, liquid_face_flux, material, ale, slip_axis);
+        if (!enabled())
+        {
+            d_source_alpha_reaction.put_scalar(0.0);
+            d_species_thermal_source.put_scalar(0.0);
+            return;
+        }
+        advance_species_fields(time, time_step, temperature, gauge_pressure, velocity, liquid_face_flux, material, ale,
+            slip_axis, d_active_bouss_wall_heat);
         return;
     }
     d_last_statistics = {};
@@ -3397,6 +3403,7 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     StateSnapshot result;
     result.d_owner = this;
     result.d_species_generation = d_species_generation;
+    result.d_source_configuration_generation = d_source_configuration_generation;
     result.d_species_fingerprint = species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0;
     if constexpr (requires { d_mesh->geometry_epoch(); })
         result.d_geometry_epoch = d_mesh->geometry_epoch();
@@ -3404,6 +3411,7 @@ auto ReactingGasModel<Pack, MeshType>::snapshot() const -> StateSnapshot
     result.d_species_populations = d_species_population_ledgers;
     result.d_species_escapes = d_species_escape_ledgers;
     result.d_species_history = d_species_history;
+    result.d_bouss_receipts = d_bouss_receipts;
     result.d_species_event_receipt = d_species_event_receipt;
     for (const auto* field : state_fields())
     {
@@ -3463,6 +3471,7 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
     // Typed snapshots bind the initialized schema generation. Legacy snapshots retain
     // the same-owner/same-storage restore contract across cache-clearing configure().
     int local_invalid = snapshot.d_owner != this ||
+                        snapshot.d_source_configuration_generation != d_source_configuration_generation ||
                         (species_enabled() && snapshot.d_species_generation != d_species_generation) ||
                         snapshot.d_species_fingerprint !=
                             (species_enabled() ? d_options.reaction_mechanism->catalog().fingerprint() : 0) ||
@@ -3483,7 +3492,15 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
         *d_mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_invalid, &any_invalid);
     if (any_invalid != 0)
     {
-        throw std::invalid_argument("ReactingGasModel snapshot is foreign or has incompatible storage.");
+        throw std::invalid_argument("ReactingGasModel snapshot is foreign or has incompatible storage: owner=" +
+            std::to_string(snapshot.d_owner == this) + ", configuration=" +
+            std::to_string(snapshot.d_source_configuration_generation) + "/" +
+            std::to_string(d_source_configuration_generation) + ", initialization=" +
+            std::to_string(snapshot.d_species_generation) + "/" + std::to_string(d_species_generation) +
+            ", fields=" + std::to_string(snapshot.d_fields.size()) + "/" + std::to_string(fields.size()) +
+            ", face_layout=" +
+            std::to_string(snapshot.d_transport_slip_face_ids == d_transport_bubble_slip_volume_flux.owned_face_ids()) +
+            ".");
     }
     for (size_t field_index = 0; field_index < fields.size(); ++field_index)
     {
@@ -3528,6 +3545,7 @@ void ReactingGasModel<Pack, MeshType>::restore_state(const StateSnapshot& snapsh
     d_species_population_ledgers = snapshot.d_species_populations;
     d_species_escape_ledgers = snapshot.d_species_escapes;
     d_species_history = snapshot.d_species_history;
+    d_bouss_receipts = snapshot.d_bouss_receipts;
     d_species_event_receipt = snapshot.d_species_event_receipt;
     d_donor_tracking_enabled = snapshot.d_donor_tracking_enabled;
     if (d_donor_tracking_enabled)

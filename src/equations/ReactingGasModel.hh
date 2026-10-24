@@ -13,6 +13,7 @@
 #include "SimpleFluidExport.hh"
 
 #include "FVM/TransportSystem.hh"
+#include "equations/BoussFiniteVapor.hh"
 #include "equations/BoussinesqModel.hh"
 #include "equations/CollectiveValidation.hh"
 #include "equations/ReactingGasProperties.hh"
@@ -121,6 +122,8 @@ public:
     using material_type = MaterialPropertyFields<Pack, mesh_type>;
     using statistics_type = ReactingGasStepStatistics<scalar_type>;
 
+    /** Accepted fixed-reference source receipts in owned-cell order; restored with the model snapshot. */
+    const std::vector<Reacting::BoussAcceptedReceipt>& bouss_receipts() const noexcept { return d_bouss_receipts; }
     /** True when the authoritative inventories use the declared general species schema. */
     bool species_enabled() const noexcept { return static_cast<bool>(d_options.reaction_mechanism); }
     /** Collective atomic initialization, one extensive state and optional population-count vector per owned cell.
@@ -189,8 +192,10 @@ public:
         friend class ReactingGasModel;
         const ReactingGasModel* d_owner = nullptr;
         std::uint64_t d_species_generation = 0, d_species_fingerprint = 0, d_geometry_epoch = 0;
+        std::uint64_t d_source_configuration_generation = 0;
         std::vector<Reacting::SpeciesSourceLedger> d_species_sources, d_species_populations, d_species_escapes;
         Reacting::history_detail::State d_species_history;
+        std::vector<Reacting::BoussAcceptedReceipt> d_bouss_receipts;
         Reacting::SpeciesEventReceipt d_species_event_receipt;
         std::vector<std::vector<scalar_type>> d_fields;
         std::vector<local_ordinal_type> d_transport_slip_face_ids;
@@ -772,7 +777,8 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL void advance_species_fields(scalar_type time, scalar_type time_step,
         const field_type& temperature, const field_type& gauge_pressure, const velocity_field_type& velocity,
         const face_flux_field_type& liquid_face_flux, const material_type& material,
-        const FVM::ALEControlVolumeState* ale, Dimension slip_axis);
+        const FVM::ALEControlVolumeState* ale, Dimension slip_axis,
+        const std::vector<Reacting::BoussWallHeatBudget>* wall_heat = nullptr);
     SIMPLEFLUID_EQUATIONS_LOCAL std::vector<BubbleGasPhysics::PopulationNumberState> cell_population_numbers(
         local_ordinal_type cell, double volume) const;
     SIMPLEFLUID_EQUATIONS_LOCAL Reacting::ReactionEnvironment species_environment(
@@ -816,12 +822,18 @@ private:
 
     std::vector<SpeciesFieldBundle> d_species_fields;
     std::vector<std::unique_ptr<field_type>> d_additional_population_numbers;
+    std::vector<std::unique_ptr<field_type>> d_bouss_diagnostics;
     std::vector<std::unique_ptr<field_type>> d_population_volume_fractions, d_population_slip_fields;
     std::vector<Reacting::SpeciesSourceLedger> d_species_source_ledgers, d_species_population_ledgers,
         d_species_escape_ledgers;
     Reacting::history_detail::State d_species_history;
+    std::vector<Reacting::BoussAcceptedReceipt> d_bouss_receipts;
+    const std::vector<Reacting::BoussWallHeatBudget>* d_active_bouss_wall_heat =
+        nullptr; ///< Transient controller-owned certificate, never accepted state.
     Reacting::SpeciesEventReceipt d_species_event_receipt;
     std::uint64_t d_species_generation = 0;
+    std::uint64_t d_source_configuration_generation =
+        0; ///< Snapshot invalidation only; never accepted-event provenance.
     SP<const mesh_type> d_mesh;
     FVM::TransportGeometryCache<mesh_type> d_transport_geometry_cache;
     ReactingGasOptions d_options;

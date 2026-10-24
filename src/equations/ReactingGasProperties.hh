@@ -129,6 +129,11 @@ struct MultispeciesPopulationContext;
 struct MultispeciesPopulationPacket;
 } // namespace BubbleGasPhysics
 
+namespace Reacting
+{
+struct BoussReferenceVolume;
+struct BoussCoordinatedSources;
+} // namespace Reacting
 /** Explicit species film-transfer data; zero diffusivity disables that process. */
 enum class ReactingBulkDiffusionMode
 {
@@ -158,6 +163,11 @@ struct ReactingGasOptions
      * captured laws; spatial variation comes from the supplied local context.
      */
     std::shared_ptr<const Reacting::ReactionMechanism> reaction_mechanism;
+    /** Explicit fixed-density scalar-volume/cp*T approximation, mutually exclusive with supplied phase EOS.
+     * Both objects are immutable shared laws; every material species/count remains authoritative.
+     */
+    std::shared_ptr<const Reacting::BoussReferenceVolume> bouss_reference;
+    std::shared_ptr<const Reacting::BoussCoordinatedSources> bouss_sources;
     std::shared_ptr<const Reacting::MixtureThermodynamics> gas_thermodynamics;
     std::shared_ptr<const Reacting::MixtureThermodynamics> liquid_thermodynamics;
     std::function<Reacting::ReactionSourceInput(const Reacting::ReactionContext&, double)> species_source;

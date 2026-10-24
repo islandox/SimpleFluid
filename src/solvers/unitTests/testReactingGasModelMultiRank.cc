@@ -374,13 +374,11 @@ TEST(ReactingGasModelMultiRankTest, KineticsModeMustBeCollective)
     auto options = sheng_options();
     if (comm->getRank() == 0)
         options.kinetics_mode = SimpleFluid::ReactingKineticsMode::ExactInactive;
-    ReactingModelType model(mesh, options);
-    FieldType temperature(mesh, 300., "temperature"), pressure(mesh, 0., "pressure"), power(mesh, 0., "power");
-    VelocityFieldType velocity(mesh, MeshType::Vec3{}, "velocity");
-    FaceFieldType flux(mesh, 0., "flux");
-    auto material = make_water_properties(mesh);
-    EXPECT_THROW(model.advance(1.e-5, 1.e-5, temperature, pressure, velocity, flux, material, &power),
-        std::invalid_argument);
+    // Complete metadata preflight now rejects divergent policy before fields
+    // or communicating model storage are constructed.
+    EXPECT_THROW((void) ReactingModelType(mesh, options), std::invalid_argument);
+    options = sheng_options();
+    EXPECT_NO_THROW((void) ReactingModelType(mesh, options));
 }
 
 /** @brief Collective policy selection rejects divergent ranks and supports GS. */

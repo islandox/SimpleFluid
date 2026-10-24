@@ -10,7 +10,8 @@ void ReactingGasModel<Pack, MeshType>::validate_species_pressure_metadata(scalar
     collective_detail::collective_local_validation(*d_mesh, "Reacting candidate pressure metadata",
         [&]
         {
-            reacting_species_detail::require(species_enabled() && d_initial_state_initialized &&
+            reacting_species_detail::require(species_enabled() && !d_options.bouss_reference &&
+                                                 d_initial_state_initialized &&
                                                  (d_options.pressure_mode == ReactingPressureMode::Constant ||
                                                      d_options.pressure_mode == ReactingPressureMode::Reconstructed) &&
                                                  std::isfinite(pressure_offset),

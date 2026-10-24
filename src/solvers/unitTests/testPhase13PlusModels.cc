@@ -9,14 +9,15 @@
  *
  */
 
+#include "FiniteBoussMixtureTestSupport.hh"
 #include <gtest/gtest.h>
 #include <memory>
 
 #include "dataclass/Database.hh"
 #include "equations/BoilingSourceModel.hh"
-#include "equations/ScalarSourceDecayTransport.hh"
 #include "equations/FeedbackMap.hh"
 #include "equations/MaterialFeedbackModel.hh"
+#include "equations/ScalarSourceDecayTransport.hh"
 #include "equations/ScalarVoidFractionModel.hh"
 #include "geometry/MeshHandle.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
@@ -24,6 +25,8 @@
 #include "geometry/unitTests/test_skewed_prism_mesh_helpers.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
+#include "solvers/unitTests/ReactingMixtureTestSupport.hh"
+#include "utils/CompensatedSum.hh"
 #include "utils/testing_environment.hh"
 
 #include <Teuchos_CommHelpers.hpp>
@@ -135,25 +138,23 @@ SimpleFluid::TimeStepperOptions make_energy_test_time_options(
     return options;
 }
 
-/** @brief Build stable Sheng two-population test options. @return ReactingGas options. */
-SimpleFluid::ReactingGasOptions make_sheng_test_options()
+/** Explicit manufactured finite species, with optional independently prescribed gas stock. */
+SimpleFluid::ReactingGasOptions make_species_test_options(double initial_gas_fraction = 0.)
 {
-    SimpleFluid::ReactingGasOptions options;
-    options.mode =
-        SimpleFluid::ReactingGasMode::TwoPopulation;
-    options.hydrogen_yield_mol_per_j = 2.0e-7;
-    options.max_source_alpha_rate = 1.0;
-    options.reference_pressure = 1.0e5;
-    options.henry_coefficient = 1.0e-5;
-    options.surface_tension = 0.07;
-    options.hydrogen_diffusivity = 1.0e-8;
-    options.nucleation_radius = 6.6359547089482127e-8;
-
-    options.min_radius = 1.0e-12;
-    options.max_radius = 1.0e-3;
-    options.min_population = 1.0e-40;
-    options.max_population = 1.0e40;
-    options.micro_to_large_conversion_coefficient = 0.0;
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    const M::Mixture mixture(false, false, SimpleFluid::Reacting::EnergyConvention::SensibleEnergy, 0.);
+    M::InitialMixture seed;
+    seed.dissolved_one_concentration = seed.dissolved_two_concentration = 0.;
+    if (initial_gas_fraction > 0)
+    {
+        constexpr double number_density = 1e6;
+        const double molar_volume = M::gas_constant * M::reference_temperature / M::reference_pressure;
+        seed.populations = {
+            {"micro", number_density, initial_gas_fraction / (number_density * molar_volume), .5}, {"large"}};
+    }
+    auto options = M::field_options(mixture, seed);
+    for (auto& species : options.species_properties)
+        species.diffusivity = 0.;
     return options;
 }
 
@@ -890,9 +891,8 @@ TEST(ScalarVoidFractionModelTest, MirrorDerivesRealizedRateAndComplement)
     EXPECT_NEAR(model.source_alpha_total().value(0), -0.4, 1.0e-14);
 }
 
-/** @brief Verify initial Sheng state publication is not reported as evolution. */
-TEST(Phase13PlusCouplingTest,
-     AdvancedMirrorDoesNotReportInitialPublicationAsAStateChange)
+/** @brief Verify initial species state publication is not reported as evolution. */
+TEST(Phase13PlusCouplingTest, AdvancedMirrorDoesNotReportInitialPublicationAsAStateChange)
 {
     auto mesh = make_single_cell_mesh();
     auto solver_shared =
@@ -910,7 +910,7 @@ TEST(Phase13PlusCouplingTest,
     SimpleFluid::ScalarVoidFractionOptions void_options;
     void_options.initial_alpha = 0.1;
     auto& void_model = solver_coupling.configure_scalar_void_fraction(void_options);
-    auto& reacting_gas = solver_coupling.configure_reacting_gas(make_sheng_test_options());
+    auto& reacting_gas = solver_coupling.configure_reacting_gas(make_species_test_options());
 
     solver_coupling.step();
 
@@ -921,147 +921,231 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_DOUBLE_EQ(void_model.source_alpha_total().value(0), 0.0);
 }
 
-/** @brief Verify ideal reacting_gas seeds only implicit pre-step void models. */
-TEST(Phase13PlusCouplingTest,
-     IdealReactingGasSeedsOnlyImplicitPreStepVoidConfiguration)
+/** Actual species seed the implicit mirror; conflicting explicit bounds reject without mutation. */
+TEST(Phase13PlusCouplingTest, SpeciesConfigurationSeedsImplicitBoundsAndRejectsConflictingExplicitMirror)
 {
-    SimpleFluid::ReactingGasOptions reacting_gas;
-    reacting_gas.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-    reacting_gas.hydrogen_yield_mol_per_j = 1.0e-7;
-    reacting_gas.max_source_alpha_rate = 1.0;
-    reacting_gas.alpha_min = 0.05;
-    reacting_gas.alpha_max = 0.2;
-
+    auto reacting_gas = make_species_test_options(.05);
+    reacting_gas.alpha_min = .05;
+    reacting_gas.alpha_max = .2;
     {
         auto mesh = make_single_cell_mesh();
-        auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh,
-            SimpleFluid::BoundaryConditionSet{}, make_energy_test_time_options(0.1), SimpleFluid::LinearSolverOptions{},
-            make_energy_test_model_options());
-        auto& solver = *solver_shared;
-        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        solver_coupling.configure_boiling_source(SimpleFluid::BoilingSourceOptions{});
-        solver_coupling.configure_reacting_gas(reacting_gas);
-
-        const auto* void_model = solver_coupling.find_scalar_void_fraction_model();
-        ASSERT_NE(void_model, nullptr);
-        EXPECT_DOUBLE_EQ(void_model->options().alpha_min, 0.05);
-        EXPECT_DOUBLE_EQ(void_model->options().alpha_max, 0.2);
-        EXPECT_DOUBLE_EQ(void_model->alpha_g().value(0), 0.05);
+        auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+            make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+        coupling.initialize_heated_box(300., 300.);
+        coupling.configure_boiling_source(SimpleFluid::BoilingSourceOptions{}); // A disabled output owner only.
+        auto& gas = coupling.configure_reacting_gas(reacting_gas);
+        const auto* mirror = coupling.find_scalar_void_fraction_model();
+        ASSERT_NE(mirror, nullptr);
+        EXPECT_DOUBLE_EQ(mirror->options().alpha_min, .05);
+        EXPECT_DOUBLE_EQ(mirror->options().alpha_max, .2);
+        EXPECT_NEAR(gas.alpha_g().value(0), .05, 1e-14);
+        EXPECT_NEAR(mirror->alpha_g().value(0), .05, 1e-14);
     }
-
     {
         auto mesh = make_single_cell_mesh();
-        auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh,
-            SimpleFluid::BoundaryConditionSet{}, make_energy_test_time_options(0.1), SimpleFluid::LinearSolverOptions{},
-            make_energy_test_model_options());
-        auto& solver = *solver_shared;
-        SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        SimpleFluid::ScalarVoidFractionOptions void_options;
-        void_options.alpha_max = 0.3;
-        void_options.initial_alpha = 0.1;
-        auto& void_model = solver_coupling.configure_scalar_void_fraction(void_options);
-        solver_coupling.configure_reacting_gas(reacting_gas);
-
-        EXPECT_DOUBLE_EQ(void_model.options().alpha_min, 0.0);
-        EXPECT_DOUBLE_EQ(void_model.options().alpha_max, 0.3);
-        EXPECT_DOUBLE_EQ(void_model.alpha_g().value(0), 0.1);
+        auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+            make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+        SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+        coupling.initialize_heated_box(300., 300.);
+        SimpleFluid::ScalarVoidFractionOptions explicit_bounds;
+        explicit_bounds.alpha_max = .3;
+        explicit_bounds.initial_alpha = .1;
+        auto& mirror = coupling.configure_scalar_void_fraction(explicit_bounds);
+        EXPECT_THROW(coupling.configure_reacting_gas(reacting_gas), std::invalid_argument);
+        EXPECT_DOUBLE_EQ(mirror.options().alpha_min, 0.);
+        EXPECT_DOUBLE_EQ(mirror.options().alpha_max, .3);
+        EXPECT_DOUBLE_EQ(mirror.alpha_g().value(0), .1);
     }
 }
 
-/** @brief Verify late reacting_gas configuration preserves evolved implicit void. */
-TEST(Phase13PlusCouplingTest,
-     ReactingGasConfigurationPreservesEvolvedImplicitVoid)
+/** Positive coordinated finite-solvent gas/vapor setup preserves evolved actual stocks and void. */
+TEST(Phase13PlusCouplingTest, FiniteSolventGasConfigurationPreservesEvolvedBoilingVoid)
+{
+    namespace F = SimpleFluid::Testing::FiniteBouss;
+    namespace R = SimpleFluid::Reacting;
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    const F::Mixture mixture;
+    auto mesh = make_single_cell_mesh();
+    auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+        make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+    auto options = mixture.options();
+    options.bouss_sources = mixture.vapor(options);
+    auto& model = coupling.configure_reacting_gas(options);
+    coupling.initialize_heated_box(383, 383);
+    coupling.step();
+    auto* scalar = coupling.find_scalar_void_fraction_model();
+    ASSERT_NE(scalar, nullptr);
+    const auto alpha = scalar->alpha_g().value(0);
+    const auto vapor = model.species_field(M::solvent, R::SpeciesPhase::Resolved).value(0);
+    const auto receipt = model.species_event_receipt();
+    using Model = SimpleFluid::MultiphysicsSolverCoupler<Pack>::reacting_gas_model_type;
+    const M::SavedReactingState<Model> saved(model);
+    ASSERT_GT(alpha, 0);
+    ASSERT_GT(vapor, 0);
+    coupling.configure_bouss_sources(mixture.gas(model.options(), .1));
+    EXPECT_DOUBLE_EQ(scalar->options().alpha_max, .95);
+    EXPECT_DOUBLE_EQ(scalar->alpha_g().value(0), alpha);
+    EXPECT_DOUBLE_EQ(model.species_field(M::solvent, R::SpeciesPhase::Resolved).value(0), vapor);
+    EXPECT_EQ(model.species_event_receipt(), receipt);
+    saved.expect_restored(model);
+    coupling.step();
+    EXPECT_GT(model.species_field(M::gas_two, R::SpeciesPhase::Resolved).value(0), 0);
+    EXPECT_GT(model.species_field(M::solvent, R::SpeciesPhase::Resolved).value(0), vapor);
+}
+
+/** An independent legacy vapor owner cannot coexist with the coordinated typed source owner. */
+TEST(Phase13PlusCouplingTest, RejectsTypedGasAfterEvolvedIndependentBoilingWithoutMutation)
 {
     auto mesh = make_single_cell_mesh();
-    auto solver_shared =
-        std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
-            make_energy_test_time_options(1.0), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
-    auto& solver = *solver_shared;
-    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-    solver_coupling.initialize_heated_box(383.0, 383.0);
-
+    auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+        make_energy_test_time_options(1.), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+    coupling.initialize_heated_box(383., 383.);
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = true;
-    boiling.saturation_temperature = 373.0;
-    boiling.boiling_time_scale = 1.0;
-    boiling.latent_heat = 1000.0;
-    boiling.gas_density = 1.0;
-    solver_coupling.configure_boiling_source(boiling);
-    solver_coupling.step();
-
-    auto* void_model = solver_coupling.find_scalar_void_fraction_model();
-    ASSERT_NE(void_model, nullptr);
-    const auto evolved_alpha = void_model->alpha_g().value(0);
-    ASSERT_GT(evolved_alpha, 0.0);
-
-    SimpleFluid::ReactingGasOptions reacting_gas;
-    reacting_gas.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-    reacting_gas.hydrogen_yield_mol_per_j = 1.0e-7;
-    reacting_gas.max_source_alpha_rate = 1.0;
-    reacting_gas.alpha_max = 0.2;
-    solver_coupling.configure_reacting_gas(reacting_gas);
-
-    EXPECT_DOUBLE_EQ(void_model->options().alpha_max, 0.95);
-    EXPECT_DOUBLE_EQ(void_model->alpha_g().value(0), evolved_alpha);
+    boiling.saturation_temperature = 373.;
+    boiling.boiling_time_scale = 1.;
+    boiling.latent_heat = 1000.;
+    boiling.gas_density = 1.;
+    coupling.configure_boiling_source(boiling);
+    coupling.step();
+    auto* mirror = coupling.find_scalar_void_fraction_model();
+    ASSERT_NE(mirror, nullptr);
+    const double alpha = mirror->alpha_g().value(0), temperature = solver->temperature().value(0);
+    ASSERT_GT(alpha, 0.);
+    EXPECT_THROW(coupling.configure_reacting_gas(make_species_test_options()), std::invalid_argument);
+    EXPECT_EQ(coupling.find_reacting_gas_model(), nullptr);
+    EXPECT_DOUBLE_EQ(mirror->alpha_g().value(0), alpha);
+    EXPECT_DOUBLE_EQ(solver->temperature().value(0), temperature);
+    EXPECT_EQ(solver->step_index(), 1);
 }
 
-/** @brief Verify ideal reacting_gas honors the authoritative scalar void limit. */
-TEST(Phase13PlusCouplingTest,
-     IdealReactingGasUsesAuthoritativeScalarVoidLimit)
+/** The original positive source-admission case requires coordinated finite chemistry/vapor ownership. */
+TEST(Phase13PlusCouplingTest, FiniteSolventSourcesShareAuthoritativeVoidCapacity)
 {
+    namespace F = SimpleFluid::Testing::FiniteBouss;
+    namespace R = SimpleFluid::Reacting;
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    const F::Mixture mixture;
     auto mesh = make_single_cell_mesh();
-    auto time_options = make_energy_test_time_options(0.1);
-    auto solver_shared =
-        std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{}, time_options,
-            SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
-    auto& solver = *solver_shared;
-    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-    solver_coupling.initialize_heated_box(300.0, 300.0);
+    auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+        make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+    SimpleFluid::ScalarVoidFractionOptions bounds;
+    bounds.alpha_max = .2;
+    bounds.initial_alpha = .19;
+    auto& scalar = coupling.configure_scalar_void_fraction(bounds);
+    auto options = mixture.options(.19, .2);
+    options.bouss_sources = mixture.vapor(options);
+    options.bouss_sources = mixture.gas(options, 10);
+    auto& model = coupling.configure_reacting_gas(options);
+    coupling.initialize_heated_box(300, 300);
+    SimpleFluid::PrescribedHeatSourceOptions heat;
+    heat.profile = SimpleFluid::PrescribedHeatProfile::Constant;
+    heat.power_density = 100;
+    coupling.configure_prescribed_heat_source(heat);
+    coupling.step();
+    EXPECT_NEAR(model.source_alpha_reaction().value(0), .1, 1e-13);
+    EXPECT_NEAR(scalar.source_alpha_total().value(0), .1, 1e-13);
+    EXPECT_NEAR(scalar.alpha_g().value(0), .2, 1e-13);
+    EXPECT_NEAR(scalar.alpha_l().value(0), .8, 1e-13);
+    EXPECT_NEAR(model.alpha_g().value(0), scalar.alpha_g().value(0), 1e-13);
+    const auto product = model.species_field(M::gas_two, R::SpeciesPhase::Resolved).value(0);
+    EXPECT_GT(product, 0);
+    EXPECT_DOUBLE_EQ(model.thermal_source().value(0), 0);
+    const auto volume = model.thermal_source().mesh().cell_volume(0);
+    const auto margin = [&](const R::CellSpeciesState& state)
+    {
+        SimpleFluid::detail::CompensatedSum<long double> remaining;
+        remaining += static_cast<long double>(volume) * bounds.alpha_max;
+        for (std::size_t i = 0; i < mixture.catalog->species().size(); ++i)
+        {
+            const auto id = mixture.catalog->species()[i].id;
+            for (const auto phase : {R::SpeciesPhase::Resolved, R::SpeciesPhase::Dispersed})
+                remaining += -static_cast<long double>(state.amount(*mixture.catalog, id, phase)) *
+                             mixture.reference->gasMolarVolumes[i];
+            for (const auto& population : state.dispersedPopulations)
+                remaining += -static_cast<long double>(population.amounts[i]) *
+                             mixture.reference->gasMolarVolumes[i];
+        }
+        return remaining.value();
+    };
+    const auto remaining = margin(model.cell_species_state(0));
+    EXPECT_GE(remaining, 0);
+    const long double volumePerExtent =
+        static_cast<long double>(mixture.reference->gasMolarVolumes[mixture.catalog->index(M::gas_one)]) +
+        mixture.reference->gasMolarVolumes[mixture.catalog->index(M::gas_two)];
+    coupling.step();
+    EXPECT_NEAR(model.source_alpha_reaction().value(0), 0, 1e-13);
+    EXPECT_NEAR(scalar.source_alpha_total().value(0), 0, 1e-13);
+    ASSERT_EQ(model.bouss_receipts().size(), 1u);
+    ASSERT_EQ(model.bouss_receipts()[0].gas.size(), 1u);
+    const auto admitted = model.bouss_receipts()[0].gas[0].admittedMoles;
+    // Stored rounding can leave a small real capacity remainder after the first
+    // request. Any second admission must fit it and appear once in stoichiometry.
+    EXPECT_GE(admitted, 0);
+    EXPECT_LE(static_cast<long double>(admitted) * volumePerExtent, remaining);
+    EXPECT_GE(margin(model.cell_species_state(0)), 0);
+    EXPECT_DOUBLE_EQ(model.source_ledgers()[0].reactionExtents[0], admitted);
+    EXPECT_DOUBLE_EQ(model.species_field(M::gas_two, R::SpeciesPhase::Resolved).value(0), product + admitted / volume);
+}
 
-    SimpleFluid::PrescribedHeatSourceOptions prescribed_heat;
-    prescribed_heat.profile = SimpleFluid::PrescribedHeatProfile::Constant;
-    prescribed_heat.power_density = 100.0;
-    solver_coupling.configure_prescribed_heat_source(prescribed_heat);
-
-    SimpleFluid::ReactingGasOptions reacting_gas;
-    reacting_gas.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-    reacting_gas.hydrogen_yield_mol_per_j = 1.0;
-    reacting_gas.reference_pressure = 1.0e5;
-    reacting_gas.max_source_alpha_rate = 1.0;
-    auto& reacting_model = solver_coupling.configure_reacting_gas(reacting_gas);
-
-    SimpleFluid::ScalarVoidFractionOptions void_options;
-    void_options.alpha_max = 0.2;
-    void_options.initial_alpha = 0.19;
-    auto& void_model = solver_coupling.configure_scalar_void_fraction(void_options);
-
-    solver_coupling.step();
-
-    const auto capacity_rate =
-        (void_options.alpha_max - void_options.initial_alpha) / 0.1;
-    EXPECT_NEAR(
-        reacting_model.source_alpha_reaction().value(0),
-        capacity_rate,
-        1.0e-13);
-    EXPECT_NEAR(
-        void_model.source_alpha_total().value(0),
-        capacity_rate,
-        1.0e-13);
-    EXPECT_NEAR(
-        void_model.alpha_g().value(0), void_options.alpha_max, 1.0e-13);
-    EXPECT_NEAR(void_model.alpha_l().value(0), 0.8, 1.0e-13);
-    EXPECT_NEAR(
-        reacting_model.alpha_g().value(0),
-        void_model.alpha_g().value(0),
-        1.0e-13);
-    EXPECT_NEAR(
-        reacting_model.alpha_l().value(0),
-        void_model.alpha_l().value(0),
-        1.0e-13);
-
-    solver_coupling.step();
-    EXPECT_DOUBLE_EQ(reacting_model.source_alpha_reaction().value(0), 0.0);
-    EXPECT_DOUBLE_EQ(void_model.source_alpha_total().value(0), 0.0);
+/** Physical capacity rejection preserves all actual species/count/source fields and supports an admissible retry. */
+TEST(Phase13PlusCouplingTest, SpeciesCapacityRejectsWithoutPartialPublicationAndSupportsAdmissibleRetry)
+{
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    namespace R = SimpleFluid::Reacting;
+    const M::Mixture mixture(false, false, R::EnergyConvention::SensibleEnergy, 0.);
+    const double molar_volume = M::gas_constant * 300. / 100000.;
+    const double moles_per_bubble = .19 / (1e6 * molar_volume);
+    M::InitialMixture seed;
+    seed.dissolved_one_concentration = seed.dissolved_two_concentration = 10.;
+    seed.populations = {{"micro", 1e6, moles_per_bubble, .5}, {"large"}};
+    auto options = M::field_options(mixture, seed);
+    options.alpha_max = .2;
+    for (auto& species : options.species_properties)
+        species.diffusivity = 0.;
+    const auto packet = [molar_volume, moles_per_bubble](double gas_fraction)
+    {
+        return [gas_fraction, molar_volume, moles_per_bubble](const auto& context, double)
+        {
+            SimpleFluid::BubbleGasPhysics::MultispeciesPopulationPacket event;
+            if (context.chemistry.environment.time == 0.)
+            {
+                const double amount = gas_fraction * context.chemistry.environment.bulkVolume / molar_volume;
+                event.transfers = {{M::gas_one, M::Phase::Dissolved, M::Phase::Dispersed, {}, "micro", .5 * amount},
+                    {M::gas_two, M::Phase::Dissolved, M::Phase::Dispersed, {}, "micro", .5 * amount}};
+                event.numberEvents = {{"micro", amount / moles_per_bubble, 0.}};
+            }
+            return event;
+        };
+    };
+    options.population_process = packet(.02); // Actual .21 occupancy must reject, never become a capped .2 source.
+    auto mesh = make_single_cell_mesh();
+    auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+        make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+    coupling.initialize_heated_box(300., 300.);
+    auto& gas = coupling.configure_reacting_gas(options);
+    const M::SavedReactingState saved(gas);
+    const double temperature = solver->temperature().value(0);
+    EXPECT_THROW(coupling.step(), std::exception);
+    saved.expect_restored(gas);
+    EXPECT_DOUBLE_EQ(solver->temperature().value(0), temperature);
+    EXPECT_DOUBLE_EQ(solver->time(), 0.);
+    EXPECT_EQ(solver->step_index(), 0);
+    options.population_process = packet(.005); // New explicit admissible law, not hidden substep clipping.
+    coupling.configure_reacting_gas(options);
+    ASSERT_NO_THROW(coupling.step());
+    EXPECT_NEAR(gas.alpha_g().value(0), .195, 1e-13);
+    EXPECT_NEAR(coupling.find_scalar_void_fraction_model()->alpha_g().value(0), .195, 1e-13);
+    EXPECT_GT(gas.population_number_field("micro").value(0), 0.);
+    EXPECT_NEAR(gas.source_alpha_reaction().value(0), .05, 1e-13);
+    ASSERT_NO_THROW(coupling.step());
+    EXPECT_DOUBLE_EQ(gas.source_alpha_reaction().value(0), 0.);
+    EXPECT_DOUBLE_EQ(coupling.find_scalar_void_fraction_model()->source_alpha_total().value(0), 0.);
 }
 
 /** @brief Verify boiling energy matches void admitted at the scalar limit. */
@@ -1153,9 +1237,8 @@ TEST(Phase13PlusCouplingTest,
     EXPECT_NEAR(solver.temperature().value(0), 373.0, 1.0e-10);
 }
 
-/** @brief Verify Sheng reacting_gas rejects unconserved boiling combinations. */
-TEST(Phase13PlusCouplingTest,
-     RejectsUnconservedShengBoilingCombinationInEitherOrder)
+/** @brief Verify inventory-owned reacting_gas rejects unconserved boiling combinations. */
+TEST(Phase13PlusCouplingTest, RejectsUnconservedSpeciesBoilingCombinationInEitherOrder)
 {
     auto time_options = make_energy_test_time_options(0.1);
     SimpleFluid::BoilingSourceOptions boiling_options;
@@ -1168,7 +1251,7 @@ TEST(Phase13PlusCouplingTest,
                 time_options, SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        solver_coupling.configure_reacting_gas(make_sheng_test_options());
+        solver_coupling.configure_reacting_gas(make_species_test_options());
         EXPECT_THROW(solver_coupling.configure_boiling_source(boiling_options), std::invalid_argument);
     }
 
@@ -1180,7 +1263,7 @@ TEST(Phase13PlusCouplingTest,
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         solver_coupling.configure_boiling_source(boiling_options);
-        EXPECT_THROW(solver_coupling.configure_reacting_gas(make_sheng_test_options()), std::invalid_argument);
+        EXPECT_THROW(solver_coupling.configure_reacting_gas(make_species_test_options()), std::invalid_argument);
     }
 
     {
@@ -1190,23 +1273,18 @@ TEST(Phase13PlusCouplingTest,
                 time_options, SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        SimpleFluid::ReactingGasOptions ideal;
-        ideal.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-        ideal.hydrogen_yield_mol_per_j = 1.0e-7;
-        ideal.max_source_alpha_rate = 1.0;
-        auto& reacting_gas = solver_coupling.configure_reacting_gas(ideal);
-        solver_coupling.configure_boiling_source(boiling_options);
-
-        reacting_gas.configure(make_sheng_test_options());
+        auto& reacting_gas = solver_coupling.configure_reacting_gas(make_species_test_options());
+        auto& boiling = solver_coupling.configure_boiling_source(SimpleFluid::BoilingSourceOptions{});
+        // Direct late reconfiguration bypasses setup; the coupled step must still reject before publication.
+        boiling.configure(boiling_options);
         EXPECT_THROW(solver_coupling.step(), std::logic_error);
         EXPECT_DOUBLE_EQ(solver.time(), 0.0);
         EXPECT_EQ(solver.step_index(), 0);
     }
 }
 
-/** @brief Verify Sheng reacting_gas rejects unconserved void collapse. */
-TEST(Phase13PlusCouplingTest,
-     RejectsUnconservedShengCollapseCombinationInEitherOrder)
+/** @brief Verify inventory-owned reacting_gas rejects unconserved void collapse. */
+TEST(Phase13PlusCouplingTest, RejectsUnconservedSpeciesCollapseCombinationInEitherOrder)
 {
     const auto time_options = make_energy_test_time_options(0.1);
     SimpleFluid::ScalarVoidFractionOptions collapse_options;
@@ -1220,7 +1298,7 @@ TEST(Phase13PlusCouplingTest,
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
         solver_coupling.configure_scalar_void_fraction(collapse_options);
-        EXPECT_THROW(solver_coupling.configure_reacting_gas(make_sheng_test_options()), std::invalid_argument);
+        EXPECT_THROW(solver_coupling.configure_reacting_gas(make_species_test_options()), std::invalid_argument);
     }
 
     {
@@ -1230,7 +1308,7 @@ TEST(Phase13PlusCouplingTest,
                 time_options, SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        solver_coupling.configure_reacting_gas(make_sheng_test_options());
+        solver_coupling.configure_reacting_gas(make_species_test_options());
         EXPECT_THROW(solver_coupling.configure_scalar_void_fraction(collapse_options), std::invalid_argument);
     }
 
@@ -1241,7 +1319,7 @@ TEST(Phase13PlusCouplingTest,
                 time_options, SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
         auto& solver = *solver_shared;
         SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-        solver_coupling.configure_reacting_gas(make_sheng_test_options());
+        solver_coupling.configure_reacting_gas(make_species_test_options());
         auto* void_model = solver_coupling.find_scalar_void_fraction_model();
         ASSERT_NE(void_model, nullptr);
         void_model->configure(collapse_options);
@@ -2189,63 +2267,95 @@ TEST(FeedbackMapTest, PreservesVolumeIntegralForCoarsenedField)
         averages[0] * mapped_volume, source_integral, 1.0e-14);
 }
 
-/** @brief Advance the complete optional physical stack on a native handle. */
-TEST(Phase13PlusCouplingTest, NativeMeshHandleAdvancesExtendedPhysicalStack)
+/** Positive combined native gas/vapor/heat/feedback uses one sensible thermal owner. */
+TEST(Phase13PlusCouplingTest, NativeMeshHandleAdvancesFiniteSpeciesAndBoilingStack)
 {
+    namespace F = SimpleFluid::Testing::FiniteBouss;
+    namespace R = SimpleFluid::Reacting;
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    const F::Mixture mixture;
     const auto mesh = make_native_single_cell_mesh();
-    auto time_options = make_energy_test_time_options(0.1);
-    auto model_options = make_energy_test_model_options();
-    auto solver_shared = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
-        mesh, SimpleFluid::BoundaryConditionSet{}, time_options, SimpleFluid::LinearSolverOptions{}, model_options);
-    auto& solver = *solver_shared;
-    SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
-    solver_coupling.initialize_heated_box(383.0, 383.0);
-
-    SimpleFluid::PrescribedHeatSourceOptions prescribed_heat;
-    prescribed_heat.profile = SimpleFluid::PrescribedHeatProfile::Constant;
-    prescribed_heat.power_density = 100.0;
-    solver_coupling.configure_prescribed_heat_source(prescribed_heat);
-
-    SimpleFluid::ScalarVoidFractionOptions void_options;
-    void_options.alpha_max = 0.9;
-    void_options.initial_alpha = 0.1;
-    auto& void_model = solver_coupling.configure_scalar_void_fraction(void_options);
-
-    SimpleFluid::ReactingGasOptions reacting_gas;
-    reacting_gas.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-    reacting_gas.hydrogen_yield_mol_per_j = 1.0e-7;
-    reacting_gas.max_source_alpha_rate = 1.0;
-    auto& reacting_model = solver_coupling.configure_reacting_gas(reacting_gas);
-
-    SimpleFluid::BoilingSourceOptions boiling;
-    boiling.enable_bulk_boiling = true;
-    boiling.saturation_temperature = 373.0;
-    boiling.boiling_time_scale = 1.0;
-    boiling.latent_heat = 1000.0;
-    boiling.gas_density = 1.0;
-    auto& boiling_model = solver_coupling.configure_boiling_source(boiling);
-
+    auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+        make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+    SimpleFluid::ScalarVoidFractionOptions bounds;
+    bounds.alpha_max = .9;
+    bounds.initial_alpha = .1;
+    auto& scalar = coupling.configure_scalar_void_fraction(bounds);
+    auto options = mixture.options(.1, .9);
+    options.bouss_sources = mixture.vapor(options, 1000);
+    options.bouss_sources = mixture.gas(options, .001);
+    auto& model = coupling.configure_reacting_gas(options);
+    coupling.initialize_heated_box(383, 383);
+    SimpleFluid::PrescribedHeatSourceOptions heat;
+    heat.profile = SimpleFluid::PrescribedHeatProfile::Constant;
+    heat.power_density = 100;
+    coupling.configure_prescribed_heat_source(heat);
     SimpleFluid::MaterialFeedbackOptions feedback;
     feedback.density_mode = SimpleFluid::DensityFeedbackMode::Mixture;
-    feedback.reference_density = 2.0;
-    feedback.liquid_density = 2.0;
-    feedback.gas_density = 1.0;
-    feedback.reference_dynamic_viscosity = 0.0;
-    feedback.min_viscosity = 0.0;
-    auto& feedback_model = solver_coupling.configure_material_feedback(feedback);
-
-
-    solver_coupling.step();
-
+    feedback.reference_density = feedback.liquid_density = 2;
+    feedback.gas_density = 1;
+    feedback.reference_dynamic_viscosity = feedback.min_viscosity = 0;
+    auto& material = coupling.configure_material_feedback(feedback);
+    coupling.step();
     EXPECT_FALSE(mesh->legacy_mesh());
-    EXPECT_EQ(solver.temperature().mesh_ptr(), mesh);
-    EXPECT_EQ(solver.material_properties().density.mesh_ptr(), mesh);
-    EXPECT_EQ(void_model.alpha_g().mesh_ptr(), mesh);
-    EXPECT_EQ(reacting_model.source_alpha_reaction().mesh_ptr(), mesh);
-    EXPECT_EQ(boiling_model.source_alpha_boil().mesh_ptr(), mesh);
+    EXPECT_EQ(solver->temperature().mesh_ptr(), mesh);
+    EXPECT_EQ(solver->material_properties().density.mesh_ptr(), mesh);
+    EXPECT_EQ(scalar.alpha_g().mesh_ptr(), mesh);
+    EXPECT_EQ(model.source_alpha_reaction().mesh_ptr(), mesh);
+    EXPECT_EQ(material.density_feedback().mesh_ptr(), mesh);
+    EXPECT_GT(model.species_field(M::gas_two, R::SpeciesPhase::Resolved).value(0), 0);
+    EXPECT_GT(model.species_field(M::solvent, R::SpeciesPhase::Resolved).value(0), 0);
+    EXPECT_NEAR(model.thermal_source().value(0), -100, 1e-10);
+    EXPECT_NEAR(solver->temperature().value(0), 383, 1e-10);
+}
+
+/** Independently supported native heat/species/feedback path; does not claim active boiling integration. */
+TEST(Phase13PlusCouplingTest, NativeMeshHandleAdvancesSpeciesHeatAndFeedback)
+{
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    auto mesh = make_native_single_cell_mesh();
+    auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(mesh, SimpleFluid::BoundaryConditionSet{},
+        make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, make_energy_test_model_options());
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+    coupling.initialize_heated_box(383., 383.);
+    SimpleFluid::PrescribedHeatSourceOptions heat;
+    heat.profile = SimpleFluid::PrescribedHeatProfile::Constant;
+    heat.power_density = 100.;
+    coupling.configure_prescribed_heat_source(heat);
+    auto gas_options = make_species_test_options(.05);
+    gas_options.alpha_max = .9;
+    gas_options.species_source = [](const auto& context, double dt)
+    {
+        SimpleFluid::Reacting::ReactionSourceInput input;
+        input.integratedExtents = {{M::conversion, .001 * context.environment.bulkVolume * dt}};
+        return input;
+    };
+    auto& gas = coupling.configure_reacting_gas(gas_options);
+    SimpleFluid::MaterialFeedbackOptions feedback;
+    feedback.density_mode = SimpleFluid::DensityFeedbackMode::Mixture;
+    feedback.reference_density = feedback.liquid_density = 2.;
+    feedback.gas_density = 1.;
+    feedback.reference_dynamic_viscosity = 0.;
+    feedback.min_viscosity = 0.;
+    auto& feedback_model = coupling.configure_material_feedback(feedback);
+    const double one_before = gas.global_species_moles(M::gas_one);
+    const double two_before = gas.global_species_moles(M::gas_two);
+    const double extent = .001 * mesh->cell_volume(0) * .1;
+    ASSERT_NO_THROW(coupling.step());
+    EXPECT_FALSE(mesh->legacy_mesh());
+    EXPECT_EQ(solver->temperature().mesh_ptr(), mesh);
+    EXPECT_EQ(solver->material_properties().density.mesh_ptr(), mesh);
+    EXPECT_EQ(gas.species_field(M::gas_one, M::Phase::Dissolved).mesh_ptr(), mesh);
+    EXPECT_EQ(gas.species_field(M::gas_two, M::Phase::Dispersed, "micro").mesh_ptr(), mesh);
     EXPECT_EQ(feedback_model.density_feedback().mesh_ptr(), mesh);
-    EXPECT_TRUE(std::isfinite(solver.temperature().value(0)));
-    EXPECT_TRUE(std::isfinite(void_model.alpha_g().value(0)));
+    EXPECT_TRUE(std::isfinite(solver->temperature().value(0)));
+    EXPECT_NEAR(gas.global_species_moles(M::gas_one), one_before + extent, 1e-14);
+    EXPECT_NEAR(gas.global_species_moles(M::gas_two), two_before + extent, 1e-14);
+    const auto* mirror = coupling.find_scalar_void_fraction_model();
+    ASSERT_NE(mirror, nullptr);
+    EXPECT_TRUE(std::isfinite(mirror->alpha_g().value(0)));
+    EXPECT_NEAR(mirror->alpha_g().value(0), gas.alpha_g().value(0), 1e-14);
 }
 
 /** @brief Verify configured multiphysics fields are published to VTU output. */
@@ -2263,11 +2373,8 @@ TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
     auto& solver = *solver_shared;
     SimpleFluid::MultiphysicsSolverCoupler<Pack> solver_coupling(solver_shared);
 
-    SimpleFluid::ReactingGasOptions reacting_gas;
-    reacting_gas.mode = SimpleFluid::ReactingGasMode::IdealGasSource;
-    reacting_gas.hydrogen_yield_mol_per_j = 1.0e-7;
-    reacting_gas.max_source_alpha_rate = 1.0;
-    solver_coupling.configure_reacting_gas(reacting_gas);
+    solver_coupling.initialize_heated_box(300., 300.);
+    solver_coupling.configure_reacting_gas(make_species_test_options());
     SimpleFluid::BoilingSourceOptions boiling;
     boiling.enable_bulk_boiling = false;
     solver_coupling.configure_boiling_source(boiling);
@@ -2298,6 +2405,12 @@ TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
     EXPECT_NE(contents.find("Name=\"condensationMassRate\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"rhoFeedback\""), std::string::npos);
     EXPECT_NE(contents.find("Name=\"muFeedback\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"species_101_phase_1\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"species_709_population_micro\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"species_thermal_source\""), std::string::npos);
+    EXPECT_NE(contents.find("Name=\"species_material_volume_source\""), std::string::npos);
+    // The transitional mirror is removed in the following shared API cleanup.
+    EXPECT_NE(contents.find("Name=\"C_H2\""), std::string::npos);
     std::filesystem::remove(output);
 }
 
@@ -2312,4 +2425,33 @@ TEST(ScalarSourceDecayTransportTest, RejectsRetiredPrecursorControls)
         database.set(key, std::string{"disabled"});
         EXPECT_THROW(SimpleFluid::scalar_source_decay_options_from_database(database), std::invalid_argument);
     }
+}
+
+/** Original legacy Mesh input retains identity while mapped cp*T owns actual finite wall latent. */
+TEST(Phase13PlusCouplingTest, LegacyMeshInputAdvancesFiniteWallVaporWithOneBoundaryHeatOwner)
+{
+    namespace F = SimpleFluid::Testing::FiniteBouss;
+    namespace R = SimpleFluid::Reacting;
+    namespace M = SimpleFluid::Testing::ReactingMixture;
+    const F::Mixture mixture;
+    const auto mesh = make_single_cell_mesh();
+    auto boundaries = SimpleFluid::BoundaryConditionSet{};
+    boundaries.temperature["zmax"] = {SimpleFluid::BoundaryConditionType::Neumann, 40};
+    auto material = make_energy_test_model_options();
+    material.thermal_conductivity = 1;
+    auto solver = std::make_shared<SimpleFluid::BoussinesqSolver<Pack>>(
+        mesh, boundaries, make_energy_test_time_options(.1), SimpleFluid::LinearSolverOptions{}, material);
+    SimpleFluid::MultiphysicsSolverCoupler<Pack> coupling(solver);
+    auto options = mixture.options(0, .9);
+    auto sources = mixture.vapor(options, 10);
+    sources->vapor->bulkEnabled = false;
+    sources->vapor->walls = {{"zmax", 40, .25}};
+    options.bouss_sources = sources;
+    auto& gas = coupling.configure_reacting_gas(options);
+    coupling.initialize_heated_box(373, 373);
+    coupling.step();
+    EXPECT_EQ(solver->temperature().mesh_ptr()->legacy_mesh(), mesh);
+    EXPECT_NEAR(gas.species_field(M::solvent, R::SpeciesPhase::Resolved).value(0) * .018, .1, 1e-13);
+    EXPECT_NEAR(gas.thermal_source().value(0), -10, 1e-12);
+    EXPECT_NEAR(solver->temperature().value(0), 373.3, 1e-10);
 }

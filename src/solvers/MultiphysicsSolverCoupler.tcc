@@ -2,6 +2,8 @@
  * @file MultiphysicsSolverCoupler.tcc
  * @brief Optional-model orchestration, planar ALE trials, and checkpoint replay.
  */
+#include "FVM/BoundaryCache.hh"
+#include "equations/BoussFiniteVapor.hh"
 #include "solvers/BoussinesqSolver.hh"
 #include "solvers/FieldStateTransaction.hh"
 #include "solvers/MultiphysicsSolverCoupler.hh"
@@ -486,91 +488,111 @@ auto MultiphysicsSolverCoupler<Pack>::find_prescribed_heat_source() const noexce
  * @throws std::invalid_argument if options or coupled-model combinations are invalid.
  */
 template<TpetraTypePack Pack>
-auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOptions& options)
+auto MultiphysicsSolverCoupler<Pack>::configure_reacting_gas(const ReactingGasOptions& supplied_options)
     -> reacting_gas_model_type&
 {
-    if (d_free_surface_model && d_free_surface_model->initialized())
+    validate_collective_model_state();
+    std::optional<ReactingGasOptions> staged_options;
+    collective_detail::collective_local_validation(
+        *d_solver->d_mesh, "Reacting options copy", [&] { staged_options.emplace(supplied_options); });
+    // Even default population-vector construction belongs inside the local
+    // allocation fence. The private preflight receives only the staged move.
+    auto options = reacting_gas_model_type::require_options(d_solver->d_mesh, std::move(*staged_options));
+    const bool replace_mirror = options.mode != ReactingGasMode::Disabled &&
+                                (!d_scalar_void_fraction_model ||
+                                    (!d_scalar_void_fraction_explicitly_configured && d_solver->d_step_index == 0));
+    collective_detail::require_uniform_value(
+        *d_solver->d_mesh, static_cast<int>(replace_mirror), "Reacting scalar mirror setup branch");
+    collective_detail::collective_local_validation(*d_solver->d_mesh, "Reacting coupled support preflight",
+        [&]
+        {
+            if (d_bouss_wall_trial)
+                throw std::logic_error("Cannot replace a reacting model during certified wall admission.");
+            if (d_free_surface_model && d_free_surface_model->initialized())
+                throw std::logic_error("Remove the initialized free-surface model before reconfiguring reacting gas.");
+            if (options.reaction_mechanism && options.mode != ReactingGasMode::Disabled &&
+                options.reaction_mechanism->energy_convention() != Reacting::EnergyConvention::SensibleEnergy)
+                throw std::invalid_argument("Boussinesq temperature storage requires sensible-energy chemistry.");
+            if (d_free_surface_model && options.mode == ReactingGasMode::IdealGasSource)
+                throw std::invalid_argument("Planar surface closure needs an actual conservative gas inventory.");
+            if (d_free_surface_model && options.mode == ReactingGasMode::TwoPopulation &&
+                options.pressure_mode != ReactingPressureMode::Constant &&
+                options.pressure_mode != ReactingPressureMode::Reconstructed)
+                throw std::invalid_argument("Planar surface closure requires constant or reconstructed gas pressure.");
+            if (options.mode == ReactingGasMode::TwoPopulation && d_boiling_source_model &&
+                d_boiling_source_model->enabled())
+                throw std::invalid_argument("Independent boiling cannot also own coupled gas/vapor inventory.");
+            if (options.bouss_reference &&
+                (d_free_surface_model || d_thermal_participant || d_active_ale ||
+                    d_solver->stored_material_properties().has_updater() ||
+                    options.bouss_reference->heatCapacity != d_solver->d_model_options.specific_heat_capacity ||
+                    options.bouss_reference->thermalDensity != d_solver->d_model_options.reference_density))
+                throw std::invalid_argument("Finite Bouss sources require fixed reference-density/cp temperature "
+                                            "storage without surface/ALE/native thermal participation.");
+            if (options.mode == ReactingGasMode::TwoPopulation && !replace_mirror)
+            {
+                const auto& mirror = d_scalar_void_fraction_model->options();
+                if (mirror.alpha_min != options.alpha_min || mirror.alpha_max != options.alpha_max)
+                    throw std::invalid_argument(
+                        "Reacting inventories and retained scalar mirror need identical bounds.");
+                if (std::isfinite(mirror.alpha_collapse_time))
+                    throw std::invalid_argument("Scalar collapse has no conservative bubble inventory owner.");
+            }
+        });
+    if (options.bouss_reference)
     {
-        throw std::logic_error("Remove the initialized free-surface model before reconfiguring "
-                               "reacting gas, then configure free surface last.");
+        if (!d_bouss_temperature_density)
+            d_bouss_temperature_density =
+                std::make_unique<field_type>(d_solver->d_mesh, "boussReferenceThermalDensity");
+        d_bouss_temperature_density->put_scalar(options.bouss_reference->thermalDensity);
     }
-    validate_reacting_gas_options(options);
-    collective_detail::collective_local_validation(*d_solver->d_mesh, "Boussinesq reaction energy convention", [&]
-    {
-        if (options.reaction_mechanism && options.mode != ReactingGasMode::Disabled &&
-            options.reaction_mechanism->energy_convention() != Reacting::EnergyConvention::SensibleEnergy)
-            throw std::invalid_argument("Boussinesq temperature storage requires the sensible-energy reaction "
-                "convention; use a low-Mach mixture solver for formation-energy phase storage.");
-    });
-
-    if (d_free_surface_model && options.mode == ReactingGasMode::IdealGasSource)
-    {
-        throw std::invalid_argument("The planar free-surface budget cannot use idealGasSource "
-                                    "reacting_gas because it does not own a conservative gas inventory.");
-    }
-    if (d_free_surface_model && options.mode == ReactingGasMode::TwoPopulation &&
-        options.pressure_mode != ReactingPressureMode::Constant &&
-        options.pressure_mode != ReactingPressureMode::Reconstructed)
-    {
-        throw std::invalid_argument("Planar free-surface coupling requires constant or reconstructed "
-                                    "reacting absolute pressure.");
-    }
-    if (options.mode == ReactingGasMode::TwoPopulation && d_boiling_source_model &&
-        d_boiling_source_model->enabled())
-    {
-        throw std::invalid_argument("Sheng two-population reacting_gas cannot be combined with "
-                                    "boiling until vapor mass is coupled to bubble inventories.");
-    }
+    else
+        d_bouss_temperature_density.reset();
     d_solver->d_physical_model_enabled = true;
-    if (options.mode != ReactingGasMode::Disabled &&
-        (!d_scalar_void_fraction_model ||
-            (!d_scalar_void_fraction_explicitly_configured && d_solver->d_step_index == 0)))
+    if (replace_mirror)
     {
-        ScalarVoidFractionOptions void_options;
-        void_options.alpha_min = options.alpha_min;
-        void_options.alpha_max = options.alpha_max;
-        void_options.initial_alpha = options.alpha_min;
+        ScalarVoidFractionOptions mirror;
+        mirror.alpha_min = options.alpha_min;
+        mirror.alpha_max = options.alpha_max;
+        mirror.initial_alpha = options.alpha_min;
         if (!d_scalar_void_fraction_model)
-        {
-            d_scalar_void_fraction_model =
-                std::make_unique<scalar_void_fraction_model_type>(d_solver->d_mesh, void_options);
-        }
+            d_scalar_void_fraction_model = std::make_unique<scalar_void_fraction_model_type>(d_solver->d_mesh, mirror);
         else
-        {
-            d_scalar_void_fraction_model->configure(void_options);
-        }
+            d_scalar_void_fraction_model->configure(mirror);
     }
     else
-    {
         ensure_scalar_void_fraction_model();
-    }
-    if (options.mode == ReactingGasMode::TwoPopulation)
-    {
-        const auto& void_options = d_scalar_void_fraction_model->options();
-        if (void_options.alpha_min != options.alpha_min || void_options.alpha_max != options.alpha_max)
-        {
-            throw std::invalid_argument("Sheng reacting_gas and its scalar mirror require identical "
-                                        "void-fraction bounds.");
-        }
-        if (std::isfinite(void_options.alpha_collapse_time))
-        {
-            throw std::invalid_argument("Sheng reacting_gas cannot use scalar void collapse until "
-                                        "bubble inventory removal is coupled conservatively.");
-        }
-    }
     if (!d_reacting_gas_model)
-    {
         d_reacting_gas_model = std::make_unique<reacting_gas_model_type>(d_solver->d_mesh, options);
-    }
     else
-    {
         d_reacting_gas_model->configure(options);
-    }
     if (options.mode == ReactingGasMode::TwoPopulation && d_solver->d_primary_fields_initialized)
-    {
         initialize_reacting_gas_state();
-    }
     return *d_reacting_gas_model;
+}
+
+template<TpetraTypePack Pack>
+void MultiphysicsSolverCoupler<Pack>::configure_bouss_sources(
+    std::shared_ptr<const Reacting::BoussCoordinatedSources> sources)
+{
+    collective_detail::collective_local_validation(*d_solver->d_mesh, "Bouss source replacement",
+        [&]
+        {
+            if (d_bouss_wall_trial || !d_reacting_gas_model || !d_reacting_gas_model->options().bouss_reference ||
+                !sources || d_free_surface_model || d_thermal_participant || d_active_ale ||
+                d_reacting_gas_model->d_source_configuration_generation == std::numeric_limits<std::uint64_t>::max())
+                throw std::invalid_argument("Bouss source replacement needs an existing fixed-grid canonical "
+                                            "reference binding and immutable supplied laws.");
+            auto options = d_reacting_gas_model->options();
+            options.bouss_sources = sources;
+            validate_reacting_gas_options(options);
+        });
+    const auto& reference = *d_reacting_gas_model->options().bouss_reference;
+    collective_detail::require_uniform_value(*d_solver->d_mesh,
+        static_cast<unsigned long long>(Reacting::bouss_configuration_signature(reference, *sources)),
+        "Bouss replacement source metadata");
+    d_reacting_gas_model->d_options.bouss_sources = std::move(sources);
+    ++d_reacting_gas_model->d_source_configuration_generation;
 }
 
 /**
@@ -1588,8 +1610,12 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::refresh_phys
         // bubble radii and liquid reference mass are reconstructed.
         refresh_material_feedback(d_solver->d_time);
     }
-    initialize_reacting_gas_state(
-        d_solver->d_step_index == 0 && !(d_free_surface_model && d_free_surface_model->initialized()));
+    // Explicit primary-field initialization owns typed finite inventories. A
+    // first-step material refresh must not reset them or invalidate the snapshot
+    // already captured for rollback. The legacy derived-state refresh is retained.
+    initialize_reacting_gas_state(d_solver->d_step_index == 0 &&
+        !(d_free_surface_model && d_free_surface_model->initialized()) &&
+        !(d_reacting_gas_model && d_reacting_gas_model->species_enabled()));
     refresh_material_feedback(d_solver->d_time);
     d_solver->stored_temperature_sources().update(context);
 }
@@ -1673,6 +1699,9 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_col
             "Boussinesq optional-model presence, enabled state, modes, and dependent ownership must match on every "
             "mesh rank.");
     }
+    collective_detail::require_uniform_value(*d_solver->d_mesh,
+        static_cast<int>(d_reacting_gas_model && bool(d_reacting_gas_model->options().bouss_reference)),
+        "Bouss reference thermal owner presence");
 }
 
 /**
@@ -1686,6 +1715,9 @@ template<TpetraTypePack Pack>
 void MultiphysicsSolverCoupler<Pack>::validate_free_surface_configuration(
     const FreeSurfaceOptions& options, const HeadspaceModel* proposed_headspace) const
 {
+    if (d_reacting_gas_model && d_reacting_gas_model->options().bouss_reference)
+        throw std::invalid_argument("Reference-volume Bouss vapor has no supplied-EOS free-surface/ALE contract.");
+
     validate_free_surface_options(options);
     if (!options.enabled)
     {
@@ -2588,7 +2620,8 @@ void MultiphysicsSolverCoupler<Pack>::initialize_free_surface_if_needed(
         }
         if (!dependencies_already_refreshed)
         {
-            initialize_reacting_gas_state(d_solver->d_step_index == 0);
+            initialize_reacting_gas_state(d_solver->d_step_index == 0 &&
+                !(d_reacting_gas_model && d_reacting_gas_model->species_enabled()));
             if (d_material_feedback_model && d_reacting_gas_model && d_reacting_gas_model->supplies_void_fraction())
             {
                 refresh_material_feedback(d_solver->d_time);
@@ -2953,6 +2986,30 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_ste
             "accepted state before retrying.");
     }
     d_solver->validate_step_state();
+    if (d_reacting_gas_model && d_reacting_gas_model->options().bouss_reference)
+    {
+        collective_detail::collective_local_validation(*d_solver->d_mesh, "Coordinated Bouss scalar storage",
+            [&]
+            {
+                const auto& reference = *d_reacting_gas_model->options().bouss_reference;
+                if (d_free_surface_model || d_active_ale || d_thermal_participant ||
+                    (d_boiling_source_model && d_boiling_source_model->enabled()) ||
+                    d_solver->d_problem.time_options().pressure_velocity_coupling ==
+                        PressureVelocityCoupling::CoupledNonlinear ||
+                    !d_bouss_temperature_density || !d_solver->physical_transport_enabled() ||
+                    d_solver->stored_material_properties().has_updater() ||
+                    reference.thermalDensity != d_solver->d_model_options.reference_density)
+                    throw std::invalid_argument("Coordinated Bouss vapor supports fixed-grid sensible storage only; "
+                                                "independent boiling, coupled nonlinear flow, free surface/ALE and "
+                                                "phase-U owners are not combined.");
+                const auto& cp = d_solver->stored_material_properties().specific_heat_capacity;
+                for (std::size_t owned = 0; owned < d_solver->d_mesh->num_owned_cells(); ++owned)
+                    if (cp.value(static_cast<local_ordinal_type>(owned)) != reference.heatCapacity)
+                        throw std::invalid_argument(
+                            "Coordinated Bouss vapor requires its declared constant cp; "
+                            "variable-cp storage schedules are not implemented by this adapter.");
+            });
+    }
 
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() &&
         d_reacting_gas_model->supplies_void_fraction() && d_boiling_source_model && d_boiling_source_model->enabled())
@@ -2992,10 +3049,24 @@ template<TpetraTypePack Pack>
 bool MultiphysicsSolverCoupler<Pack>::advance_pre_temperature_models(scalar_type time_step)
 {
     const auto phase_timing = d_solver->d_solver_timings.scope(SolverPhase::PreTemperatureModels);
-    const bool species_before_temperature = d_reacting_gas_model && d_reacting_gas_model->enabled() &&
-        d_reacting_gas_model->species_enabled();
+    prepare_bouss_wall_heat(time_step);
+    if (d_reacting_gas_model && d_reacting_gas_model->options().bouss_reference)
+        collective_detail::collective_local_validation(*d_solver->d_mesh, "Updated Bouss scalar cp",
+            [&]
+            {
+                const auto cp = d_reacting_gas_model->options().bouss_reference->heatCapacity;
+                for (std::size_t owned = 0; owned < d_solver->d_mesh->num_owned_cells(); ++owned)
+                    if (d_solver->stored_material_properties().specific_heat_capacity.value(
+                            static_cast<local_ordinal_type>(owned)) != cp)
+                        throw std::invalid_argument(
+                            "Updated variable cp is outside the fixed-capacity Bouss vapor contract.");
+            });
+
+    const bool species_before_temperature =
+        d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled();
     const auto two_population_after_temperature = d_reacting_gas_model && d_reacting_gas_model->enabled() &&
-        d_reacting_gas_model->supplies_void_fraction() && !species_before_temperature;
+                                                  d_reacting_gas_model->supplies_void_fraction() &&
+                                                  !species_before_temperature;
     if (species_before_temperature)
     {
         if (species_surface_enabled())
@@ -3078,9 +3149,12 @@ void MultiphysicsSolverCoupler<Pack>::advance_post_temperature_models(
 
     if (d_reacting_gas_model && d_reacting_gas_model->enabled() && d_reacting_gas_model->species_enabled())
     {
-        d_reacting_gas_model->refresh_species_thermodynamics(d_solver->d_time + time_step, d_solver->temperature(), d_solver->pressure(),
-            d_solver->velocity(), d_solver->stored_material_properties());
-        update_void_fraction_models(time_step);
+        d_reacting_gas_model->refresh_species_thermodynamics(d_solver->d_time + time_step, d_solver->temperature(),
+            d_solver->pressure(), d_solver->velocity(), d_solver->stored_material_properties());
+        // Fixed reference molar volumes cannot change in this refresh. Mirroring
+        // twice would erase the accepted whole-step scalar void source diagnostic.
+        if (!d_reacting_gas_model->options().bouss_reference)
+            update_void_fraction_models(time_step);
     }
     refresh_material_feedback(d_solver->d_time + time_step);
     advance_free_surface(time_step);
@@ -3130,6 +3204,9 @@ void MultiphysicsSolverCoupler<Pack>::set_thermal_step_participant(SP<thermal_pa
     collective_detail::collective_local_validation(*d_solver->d_mesh, "ALE thermal participant installation",
         [&]
         {
+            if (participant && d_reacting_gas_model && d_reacting_gas_model->options().bouss_reference)
+                throw std::invalid_argument(
+                    "A finite Bouss cp*T/latent owner cannot also own native phase-U thermal coupling.");
             if (!d_active_coupling_checkpoint.expired() || d_active_ale ||
                 (d_ale_motion && d_ale_motion->has_active_trial()))
                 throw std::logic_error("Cannot replace thermal participant during a live coupling transaction.");
@@ -3560,6 +3637,7 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
     }
     catch (...)
     {
+        restore_bouss_wall_heat();
         if (nonlinear_flow && !flow_accepted && !transactional_physics)
         {
             d_solver->stored_material_properties().restore(*nonlinear_material_snapshot);
@@ -3715,6 +3793,209 @@ void MultiphysicsSolverCoupler<Pack>::set_ale_convergence_observer(ALEConvergenc
     d_ale_convergence_observer = std::move(observer);
 }
 
+template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::BoussWallTrial
+{
+    using Cache = typename temperature_equation_type::boundary_cache_type;
+    struct Face
+    {
+        int batch = 0;
+        std::size_t slot = 0;
+        local_ordinal_type owner = 0;
+        scalar_type conductivity = 0, owned_conductivity = 0;
+    };
+    SP<const Cache> original, flux;
+    std::shared_ptr<const Reacting::ReactionMechanism> mechanism;
+    const field_type* conductivity = nullptr;
+    const Cache* boundary_conductivity = nullptr;
+    std::vector<Face> faces;
+    std::vector<Reacting::BoussWallHeatBudget> cells;
+    std::uint64_t epoch = 0, signature = 0;
+    scalar_type interval_end = 0, time_step = 0;
+};
+
+template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::prepare_bouss_wall_heat(scalar_type time_step)
+{
+    if (!d_reacting_gas_model || !d_reacting_gas_model->options().bouss_reference ||
+        !d_reacting_gas_model->options().bouss_sources->vapor ||
+        d_reacting_gas_model->options().bouss_sources->vapor->walls.empty())
+        return;
+    using Cache = typename temperature_equation_type::boundary_cache_type;
+    const auto& options = d_reacting_gas_model->options();
+    const auto& walls = options.bouss_sources->vapor->walls;
+    const auto& mesh = *d_solver->d_mesh;
+    std::shared_ptr<BoussWallTrial> trial;
+    std::shared_ptr<Cache> flux;
+    std::string wall_flux_name;
+    std::vector<int> face_present, global_face_present;
+    const auto* turbulence = d_solver->find_turbulence_model();
+    collective_detail::collective_local_validation(mesh, "Finite vapor wall owner storage",
+        [&]
+        {
+            if (d_bouss_wall_trial || d_active_ale || !std::isfinite(time_step) || time_step <= 0)
+                throw std::logic_error("Wall heat preparation needs a new fixed-grid physical interval.");
+            wall_flux_name = "certifiedBoussWallHeatFlux";
+            trial = std::make_shared<BoussWallTrial>();
+            trial->original = d_solver->temperature_equation().boundary_heat_flux();
+            if (!trial->original || trial->original->mesh.get() != &mesh)
+                throw std::invalid_argument("Wall heat owner is null or belongs to another mesh.");
+            flux = std::make_shared<Cache>(*trial->original);
+            trial->conductivity = turbulence ? &turbulence->effective_thermal_conductivity()
+                                             : &d_solver->stored_material_properties().thermal_conductivity;
+            trial->boundary_conductivity =
+                turbulence ? turbulence->effective_thermal_conductivity_boundary_cache() : nullptr;
+            trial->epoch = mesh_geometry_epoch(mesh);
+            trial->signature =
+                Reacting::bouss_configuration_signature(*options.bouss_reference, *options.bouss_sources);
+            trial->mechanism = options.reaction_mechanism;
+            trial->interval_end = d_solver->d_time + time_step;
+            trial->time_step = time_step;
+            trial->cells.resize(mesh.num_owned_cells());
+            for (auto& cell : trial->cells)
+            {
+                cell.producer = flux.get();
+                cell.geometryEpoch = trial->epoch;
+                cell.configurationSignature = trial->signature;
+                cell.intervalEnd = trial->interval_end;
+                cell.duration = time_step;
+            }
+            face_present.assign(walls.size(), 0);
+            global_face_present.resize(walls.size());
+        });
+    // Inline construction introduces no extra rank-local heap allocation before
+    // FieldStored's communicating constructor. Canonical face import also gives
+    // ghost-only/empty owners the exact producer values, not a recomputed flux.
+    std::optional<face_flux_field_type> wall_flux;
+    wall_flux.emplace(d_solver->d_mesh, scalar_type{}, std::move(wall_flux_name));
+    collective_detail::collective_local_validation(mesh, "Finite vapor actual wall heat owner",
+        [&]
+        {
+            const auto& boundaries = d_solver->d_problem.boundary_conditions();
+            for (const auto& [batch_id, batch] : mesh.boundary_batches())
+            {
+                const auto name = mesh.boundary_batch_name(batch_id);
+                for (std::size_t wall = 0; wall < walls.size(); ++wall)
+                {
+                    if (walls[wall].patch != name)
+                        continue;
+                    auto& values = flux->value[batch_id];
+                    values.resize(batch.face_lids.size());
+                    const auto prescribed = trial->original->value.find(batch_id);
+                    const bool explicit_flux = prescribed != trial->original->value.end();
+                    const auto condition = boundaries.temperature.find(name);
+                    if (explicit_flux && prescribed->second.size() != batch.face_lids.size())
+                        throw std::invalid_argument("Wall heat owner has a stale local boundary shape.");
+                    for (std::size_t slot = 0; slot < batch.face_lids.size(); ++slot)
+                    {
+                        const auto face = batch.face_lids[slot];
+                        const auto owner = mesh.owner_cell(face);
+                        if (!mesh.is_owned_cell(owner))
+                            continue;
+                        if (!mesh.is_geometry_exterior_face(face) || !wall_flux->is_owned_face(face))
+                            throw std::invalid_argument("Wall vapor needs a physical, canonical owned boundary face.");
+                        if (!explicit_flux &&
+                            (boundaries.convection.contains(name) || condition == boundaries.temperature.end() ||
+                                condition->second.type != BoundaryConditionType::Neumann))
+                            throw std::invalid_argument(
+                                "Finite wall vapor requires actual prescribed flux or Neumann "
+                                "heat; Dirichlet/Robin/convection heat is not known before this solve.");
+                        const auto owned_k = trial->conductivity->value(owner);
+                        if (!std::isfinite(owned_k) || owned_k < 0)
+                            throw std::invalid_argument("Wall vapor requires valid owned thermal conductivity.");
+                        const auto k = FVM::boundary_coefficient<Pack>(
+                            trial->boundary_conductivity, batch_id, slot, owned_k);
+                        const auto outward = explicit_flux ? prescribed->second[slot] : -k * condition->second.value;
+                        if (!std::isfinite(k) || k < 0 || !std::isfinite(outward) || (outward != 0 && k == 0) ||
+                            outward > 0)
+                            throw std::invalid_argument(
+                                "Wall vapor needs valid conductivity and nonnegative inward heat.");
+                        const auto inward = -outward;
+                        const auto scale = std::max(std::abs(inward), std::abs(walls[wall].inwardHeatFlux));
+                        if (std::abs(inward - walls[wall].inwardHeatFlux) >
+                            64 * std::numeric_limits<scalar_type>::epsilon() * scale)
+                            throw std::invalid_argument(
+                                "Wall vapor heat mismatches the actual temperature boundary owner.");
+                        if (d_solver->projected_face_fluxes().value(face) != 0)
+                            throw std::invalid_argument("Wall phase change requires a closed zero-carrier-flux wall.");
+                        wall_flux->set_owned_value(face, outward);
+                        trial->faces.push_back({batch_id, slot, owner, k, owned_k});
+                        face_present[wall] = 1;
+                        const auto energy = static_cast<long double>(inward) * mesh.face_area(face) * time_step;
+                        if (!std::isfinite(energy) || (inward != 0 && energy == 0))
+                            throw std::invalid_argument(
+                                "Wall heat event overflows or underflows its extensive energy.");
+                        trial->cells[static_cast<std::size_t>(owner)].packets.push_back(
+                            {wall, static_cast<std::int64_t>(mesh.face_geometry_global_id(face)), energy});
+                    }
+                }
+            }
+        });
+    wall_flux->sync_ghosts();
+    collective_detail::collective_local_validation(mesh, "Finite vapor canonical wall heat snapshot",
+        [&]
+        {
+            for (const auto& [batch_id, batch] : mesh.boundary_batches())
+                if (std::ranges::find(walls, mesh.boundary_batch_name(batch_id),
+                        &Reacting::BoussWallHeatBinding::patch) != walls.end())
+                    for (std::size_t slot = 0; slot < batch.face_lids.size(); ++slot)
+                        flux->value.at(batch_id)[slot] = wall_flux->local_value(batch.face_lids[slot]);
+            trial->flux = flux;
+        });
+    Teuchos::reduceAll(*mesh.owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, static_cast<int>(face_present.size()),
+        face_present.data(), global_face_present.data());
+    collective_detail::collective_local_validation(mesh, "Finite vapor wall patch ownership",
+        [&]
+        {
+            for (const auto present : global_face_present)
+                if (!present)
+                    throw std::invalid_argument("A configured wall vapor patch has no physical boundary faces.");
+        });
+    d_solver->temperature_equation().set_boundary_heat_flux_snapshot(trial->flux);
+    d_bouss_wall_trial = std::move(trial);
+    d_reacting_gas_model->d_active_bouss_wall_heat = &d_bouss_wall_trial->cells;
+}
+
+template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::validate_bouss_wall_heat() const
+{
+    if (!d_bouss_wall_trial)
+        return;
+    const auto& trial = *d_bouss_wall_trial;
+    const auto* turbulence = d_solver->find_turbulence_model();
+    const auto* conductivity = turbulence ? &turbulence->effective_thermal_conductivity()
+                                          : &d_solver->stored_material_properties().thermal_conductivity;
+    const auto* boundary_k = turbulence ? turbulence->effective_thermal_conductivity_boundary_cache() : nullptr;
+    collective_detail::collective_local_validation(*d_solver->d_mesh, "Finite wall immutable heat-owner receipt",
+        [&]
+        {
+            if (trial.epoch != mesh_geometry_epoch(*d_solver->d_mesh) ||
+                trial.flux.get() != d_solver->temperature_equation().boundary_heat_flux().get() ||
+                conductivity != trial.conductivity || boundary_k != trial.boundary_conductivity ||
+                trial.mechanism.get() != d_reacting_gas_model->options().reaction_mechanism.get() ||
+                trial.interval_end != d_solver->d_time + trial.time_step ||
+                trial.signature !=
+                    Reacting::bouss_configuration_signature(*d_reacting_gas_model->options().bouss_reference,
+                        *d_reacting_gas_model->options().bouss_sources))
+                throw std::logic_error(
+                    "Wall source heat owner, geometry, interval or configuration changed during the trial.");
+            for (const auto& face : trial.faces)
+            {
+                const auto owned_k = conductivity->value(face.owner);
+                if (owned_k != face.owned_conductivity ||
+                    FVM::boundary_coefficient<Pack>(boundary_k, face.batch, face.slot, owned_k) != face.conductivity)
+                    throw std::logic_error(
+                        "Wall thermal conductivity changed after the admitted physical heat snapshot.");
+            }
+        });
+}
+template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::restore_bouss_wall_heat()
+{
+    if (!d_bouss_wall_trial)
+        return;
+    if (d_reacting_gas_model)
+        d_reacting_gas_model->d_active_bouss_wall_heat = nullptr;
+    d_solver->temperature_equation().set_boundary_heat_flux_snapshot(d_bouss_wall_trial->original);
+    d_bouss_wall_trial.reset();
+}
+
 template<TpetraTypePack Pack>
 MultiphysicsSolverCoupler<Pack>::MultiphysicsSolverCoupler(solver_pointer solver) : d_solver(std::move(solver))
 {
@@ -3791,11 +4072,23 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::advance_temp
     }
     const typename solver_type::TemperatureTransportInputs inputs{d_active_ale ? &*d_active_ale : nullptr,
         d_active_ale && d_liquid_mass_inventory ? &d_liquid_mass_inventory->cellMassInventory() : nullptr,
-        d_active_ale ? d_ale_old_heat_capacity.get() : nullptr, d_active_ale ? d_ale_temperature_density : nullptr,
+        d_active_ale ? d_ale_old_heat_capacity.get() : nullptr,
+        d_reacting_gas_model && d_reacting_gas_model->options().bouss_reference
+            ? d_bouss_temperature_density.get()
+            : (d_active_ale ? d_ale_temperature_density : nullptr),
         d_active_ale ? d_mesh_relative_face_flux.get() : nullptr,
-        d_boiling_source_model ? &d_boiling_source_model->latent_heat_sink() : nullptr,
-        power_release};
-    d_solver->advance_temperature_transport(time_step, inputs);
+        d_boiling_source_model ? &d_boiling_source_model->latent_heat_sink() : nullptr, power_release};
+    validate_bouss_wall_heat();
+    try
+    {
+        d_solver->advance_temperature_transport(time_step, inputs);
+    }
+    catch (...)
+    {
+        restore_bouss_wall_heat();
+        throw;
+    }
+    restore_bouss_wall_heat();
 }
 
 /** @brief Drive only this controller's coupled step, preserving core progress formatting. */

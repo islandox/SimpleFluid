@@ -1,10 +1,5 @@
 # SimpleFluid
 
-**Excluded interface-capturing scope:** VoF and general AMR are not included
-in this source snapshot. No experimental-enable path supplies those absent
-solvers, tests, or applications. Reusable lower-level FVM and geometry
-mathematics remain available.
-
 A finite-volume computational fluid dynamics code for incompressible Boussinesq
 natural convection, built on [Trilinos](https://trilinos.github.io) for distributed-memory,
 GPU-portable parallelism.

@@ -18,6 +18,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     LumpedInnerCavityCoupling.cc
     explicit_instantiation/PressureProjectionEquation.cc
     BubbleGasPhysics.cc
+    BoussFiniteVapor.cc
     ReactingGasProperties.cc
     BubblePopulationKinetics.cc
     explicit_instantiation/SolidHeatConductionEquation.cc

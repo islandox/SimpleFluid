@@ -10,7 +10,9 @@
  *
  */
 
+#include "equations/BoussFiniteVapor.hh"
 #include "examples/ExampleRunner.hh"
+#include "examples/ReactingMixtureExampleSupport.hh"
 
 #include <Tpetra_Core.hpp>
 
@@ -124,27 +126,101 @@ int main(int argc, char** argv)
             prescribed_heat.power_density = 2.5e3;
             coupling.configure_prescribed_heat_source(prescribed_heat);
 
+            namespace Mixture = SimpleFluid::Examples::ReactingMixture;
+            namespace R = SimpleFluid::Reacting;
+            using P = R::SpeciesPhase;
+            const auto catalog = Mixture::make_catalog();
+            auto mechanism = std::make_shared<const R::ReactionMechanism>(catalog,
+                std::vector<R::ReactionDefinition>{{Mixture::conversion, "finite_A_to_B_and_two_ordinary_gases",
+                    {{Mixture::reactant, P::Liquid, -1}, {Mixture::product, P::Liquid, 1},
+                        {Mixture::gas_one, P::Resolved, 1}, {Mixture::gas_two, P::Resolved, 1}},
+                    100}},
+                R::EnergyConvention::SensibleEnergy);
+            auto reference = std::make_shared<R::BoussReferenceVolume>();
+            reference->identity = "manufactured.cylinder.fixed_reference_volumes";
+            reference->revision = 1;
+            reference->schemaFingerprint = catalog->fingerprint();
+            reference->liquidDensity = reference->thermalDensity = liquid_density;
+            reference->heatCapacity = specific_heat_capacity;
+            reference->gasMolarVolumes.resize(catalog->species().size());
+            const double ordinaryGasMolarVolume = Mixture::gas_constant * 300 / 100000;
+            reference->gasMolarVolumes[catalog->index(Mixture::gas_one)] = ordinaryGasMolarVolume;
+            reference->gasMolarVolumes[catalog->index(Mixture::gas_two)] = ordinaryGasMolarVolume;
+            reference->gasMolarVolumes[catalog->index(Mixture::solvent)] = .018; // W_solvent/rho_v with rho_v=1.
+            auto sources = std::make_shared<R::BoussCoordinatedSources>();
+            sources->identity = "manufactured.cylinder.finite_bulk_and_wall_vapor";
+            sources->revision = 1;
+            sources->schemaFingerprint = catalog->fingerprint();
+            sources->vapor = R::BoussVaporBinding{Mixture::solvent, P::Resolved, {}, 299.99, 2.256e6, .05, 0};
+            sources->vapor->admissionPolicy = R::BoussVaporAdmissionPolicy::ProportionalRequests;
+            sources->vapor->walls = {{"zmax", wall_heat_flux, .2}};
             SimpleFluid::ReactingGasOptions reacting_gas;
-            reacting_gas.mode =
-                SimpleFluid::ReactingGasMode::IdealGasSource;
-            reacting_gas.hydrogen_yield_mol_per_j = 2.0e-7;
-            reacting_gas.max_source_alpha_rate = 10.0;
-            reacting_gas.reference_pressure = 101325.0;
-            coupling.configure_reacting_gas(reacting_gas);
-
+            reacting_gas.mode = SimpleFluid::ReactingGasMode::TwoPopulation;
+            reacting_gas.alpha_max = .5;
+            reacting_gas.reference_pressure = 100000;
+            reacting_gas.reaction_mechanism = mechanism;
+            reacting_gas.bouss_reference = reference;
+            reacting_gas.bouss_sources = sources;
+            reacting_gas.population_ids = {"micro", "large"};
+            reacting_gas.min_radius = 1e-10;
+            reacting_gas.max_radius = .1;
+            reacting_gas.dissolved_transport = SimpleFluid::ReactingTransportMode::Advective;
+            reacting_gas.initial_species_state = [catalog, ordinaryGasMolarVolume, liquid_density](
+                                                     const R::ReactionEnvironment& environment, std::int64_t)
+            {
+                R::CellSpeciesState state(*catalog);
+                const auto volume = environment.bulkVolume;
+                state.dispersedPopulations = {{"micro", std::vector<double>(catalog->species().size())},
+                    {"large", std::vector<double>(catalog->species().size())}};
+                const double micro = 1e6 * volume * 1e-12, large = 1e4 * volume * 1e-9;
+                state.set_amount(*catalog, Mixture::gas_one, P::Dispersed, .25 * micro, "micro");
+                state.set_amount(*catalog, Mixture::gas_two, P::Dispersed, .75 * micro, "micro");
+                state.set_amount(*catalog, Mixture::gas_one, P::Dispersed, .6 * large, "large");
+                state.set_amount(*catalog, Mixture::gas_two, P::Dispersed, .4 * large, "large");
+                const double liquidVolume = volume - (micro + large) * ordinaryGasMolarVolume;
+                const double reactant = .1 * liquidVolume, dissolvedOne = .2 * liquidVolume,
+                             dissolvedTwo = .1 * liquidVolume;
+                state.set_amount(*catalog, Mixture::reactant, P::Liquid, reactant);
+                state.set_amount(*catalog, Mixture::gas_one, P::Dissolved, dissolvedOne);
+                state.set_amount(*catalog, Mixture::gas_two, P::Dissolved, dissolvedTwo);
+                const double soluteMass = .010 * reactant + .002 * dissolvedOne + .004 * dissolvedTwo;
+                const double solventMass = liquid_density * liquidVolume - soluteMass;
+                if (!(liquidVolume > 0 && solventMass > 0))
+                    throw std::invalid_argument("Cylinder explicit finite species exceed the initial liquid capacity.");
+                state.set_amount(*catalog, Mixture::solvent, P::Liquid, solventMass / .018);
+                return state;
+            };
+            reacting_gas.initial_population_numbers = [](const R::ReactionContext& context)
+            { return std::vector<double>{1e6 * context.environment.bulkVolume, 1e4 * context.environment.bulkVolume}; };
+            reacting_gas.species_source = [catalog](const R::ReactionContext&, double)
+            {
+                R::ReactionSourceInput input;
+                R::ReactionRateProvider law;
+                law.identity = "manufactured.cylinder.independent_molar_rate";
+                law.revision = 1;
+                law.schemaRevision = catalog->revision();
+                law.schemaFingerprint = catalog->fingerprint();
+                law.validityDescription = "Manufactured finite A/B/two-gas reference-CV smoke problem.";
+                law.parameterUnits = "mol reaction/(m3 liquid s)";
+                law.validate = [](const R::ReactionContext& context)
+                {
+                    if (!(context.environment.temperature > 0 && context.environment.absolutePressure > 0))
+                        throw std::invalid_argument("Cylinder molar source needs positive thermodynamic inputs.");
+                };
+                law.evaluate = [](const R::ReactionContext&)
+                {
+                    return std::vector<R::ReactionRate>{
+                        {Mixture::conversion, 2e-4, R::SourceVolumeBasis::LiquidVolume}};
+                };
+                input.rates = std::move(law);
+                return input;
+            };
             SimpleFluid::ScalarVoidFractionOptions alpha_options;
-            alpha_options.alpha_max = 0.5;
+            alpha_options.alpha_max = .5;
             coupling.configure_scalar_void_fraction(alpha_options);
-
-            SimpleFluid::BoilingSourceOptions boiling;
-            boiling.enable_bulk_boiling = true;
-            boiling.enable_wall_boiling = true;
-            boiling.saturation_temperature = 299.99;
-            boiling.boiling_time_scale = 5.0e-2;
-            boiling.wall_evaporation_fraction = 0.2;
-            boiling.wall_heat_flux = wall_heat_flux;
-            boiling.wall_boiling_patches = {"zmax"};
-            coupling.configure_boiling_source(boiling);
+            coupling.configure_reacting_gas(reacting_gas);
+            // The actual top Neumann boundary supplies q'' once. Finite wall/bulk
+            // requests share solvent/void admission and debit admitted latent once.
 
             SimpleFluid::MaterialFeedbackOptions feedback;
             feedback.density_mode =

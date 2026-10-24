@@ -35,6 +35,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
 endforeach()
 
+# Finite-solvent fixed-reference Bouss bulk/wall sources and rank-coherent setup.
+foreach(_bouss_vapor_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME BoussFiniteVapor_${_bouss_vapor_ranks}procs
+        TARGET testBoussFiniteVaporCoupling PROCS ${_bouss_vapor_ranks}
+        LABELS "mpi;species;boussinesq;boiling;wall_heat;conservation;transaction;empty_rank" TIMEOUT 180)
+endforeach()
+
 # Typed species surface coupling and exact transported liquid-volume packets.
 foreach(_species_surface_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME BoussinesqSpeciesFreeSurface_${_species_surface_ranks}procs
