@@ -220,7 +220,7 @@ each nonlinear velocity-pressure solve. Their ordinary updates run once after
 the accepted flow solve. It is not a monolithic nonlinear solve of all transported
 fields. See the [nonlinear solver contract](../../../docs/architecture/coupled_nonlinear_solver.md).
 
-The active 1120-cell scale-1 reference is unqualified for a two-step NOX startup.
+The active 1008-cell scale-1 reference is unqualified for a two-step NOX startup.
 With prescribed sources and forcing controls unchanged, GMRES corrections reject
 the first step and BiCGStab corrections reject the second at the strict explicit
 residual-forcing gate. Smaller registered NOX/SAS/rollback tests do not establish

@@ -260,6 +260,23 @@ iterations, residual evaluations, line-search rejections, scaled residual,
 and achieved linear tolerance. Direct problem statistics count residual
 evaluations and linearizations. Existing coupled cache statistics remain
 available through the native coupled solver interfaces.
+For a failed backend solve, `NonlinearSolveResult::reason` retains the original
+failure description followed by the complete ordered correction history,
+including successful predecessors. Each entry reports the base nonlinear
+iteration, backend, Belos return status, per-correction and cumulative Krylov
+iterations, requested forcing tolerance, Belos-reported tolerance and loss of
+accuracy, and independently recomputed scaled RHS/true-residual norms and
+ratios per RHS column. Component L2 norms use global GID modulo four
+(`u`, `v`, `w`, pressure/continuity for the native interleaved system), including
+empty-owned ranks. A thrown Belos solve reports `Exception` and retains its
+available pre-solve data; unavailable residual diagnostics are marked `nan`
+and `residuals_recomputed=0`. These records do not change the requirement for
+both Belos convergence and a true residual meeting the requested tolerance.
+The physical driver's existing exception includes this history without
+replacing accepted-state diagnostics. Successful results keep their existing
+summary and counters; private correction history resets on every solve and
+produces no unconditional per-iteration console output. No public result
+layout changes are required by this diagnostic history.
 The backend also reports maximum-rank total, residual-callback, linearization,
 and linear-solve elapsed times. These include nested work and independently
 maximized rank times, so they are not an additive exclusive phase breakdown.

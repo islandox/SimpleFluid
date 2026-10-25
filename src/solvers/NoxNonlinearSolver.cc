@@ -8,8 +8,11 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <iomanip>
 #include <limits>
+#include <locale>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -215,8 +218,125 @@ private:
     RCP<const Space> space_;
 };
 
+/** Private history for one scaled Newton correction; never accepted-state output. */
+struct CorrectionColumnDiagnostics
+{
+    double rhs_norm = std::numeric_limits<double>::quiet_NaN();
+    double true_residual_norm = std::numeric_limits<double>::quiet_NaN();
+    double relative_residual = std::numeric_limits<double>::quiet_NaN();
+    std::array<double, 4> rhs_components{}, true_residual_components{};
+};
+
+struct CorrectionDiagnostics
+{
+    int correction = 0;
+    int nonlinear_iteration = 0;
+    LinearSolverBackend backend = LinearSolverBackend::Gmres;
+    std::string belos_status = "NotReturned";
+    int iterations = 0;
+    int total_iterations = 0;
+    double requested_tolerance = 0.0;
+    double reported_tolerance = std::numeric_limits<double>::quiet_NaN();
+    bool loss_of_accuracy = false;
+    bool residuals_recomputed = false;
+    std::vector<CorrectionColumnDiagnostics> columns;
+};
+
+/** Use GID component membership and scaled sums to retain empty-rank ordering
+ * and avoid overflow from squaring finite dimensional residuals. All columns
+ * participate in the same two reductions, including on empty-owned ranks.
+ */
+void correction_component_norms(const MultiVector& rhs, const MultiVector& residual,
+    const std::vector<unsigned char>& components, CorrectionDiagnostics& diagnostics)
+{
+    const auto b = rhs.getLocalViewHost(Tpetra::Access::ReadOnly);
+    const auto r = residual.getLocalViewHost(Tpetra::Access::ReadOnly);
+    const std::size_t count = 8 * rhs.getNumVectors();
+    std::vector<double> local_max(count), global_max(count), local_sum(count), global_sum(count);
+    for (std::size_t j = 0; j < rhs.getNumVectors(); ++j)
+        for (std::size_t i = 0; i < b.extent(0); ++i)
+        {
+            const auto c = 8 * j + components[i];
+            const auto magnitude = [](double value)
+            {
+                return std::isfinite(value) ? std::abs(value) : std::numeric_limits<double>::infinity();
+            };
+            local_max[c] = std::max(local_max[c], magnitude(b(i, j)));
+            local_max[c + 4] = std::max(local_max[c + 4], magnitude(r(i, j)));
+        }
+    const auto comm = rhs.getMap()->getComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, static_cast<int>(count), local_max.data(), global_max.data());
+    for (std::size_t j = 0; j < rhs.getNumVectors(); ++j)
+        for (std::size_t i = 0; i < b.extent(0); ++i)
+        {
+            const auto c = 8 * j + components[i];
+            if (global_max[c] > 0.0 && std::isfinite(global_max[c]))
+            {
+                const double scaled = b(i, j) / global_max[c];
+                local_sum[c] += scaled * scaled;
+            }
+            if (global_max[c + 4] > 0.0 && std::isfinite(global_max[c + 4]))
+            {
+                const double scaled = r(i, j) / global_max[c + 4];
+                local_sum[c + 4] += scaled * scaled;
+            }
+        }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, static_cast<int>(count), local_sum.data(), global_sum.data());
+    for (std::size_t j = 0; j < rhs.getNumVectors(); ++j)
+        for (std::size_t c = 0; c < 4; ++c)
+        {
+            const auto norm = [&](std::size_t index)
+            {
+                return std::isfinite(global_max[index]) ? global_max[index] * std::sqrt(global_sum[index])
+                                                        : global_max[index];
+            };
+            diagnostics.columns[j].rhs_components[c] = norm(8 * j + c);
+            diagnostics.columns[j].true_residual_components[c] = norm(8 * j + 4 + c);
+        }
+}
+
+void append_correction_diagnostics(NonlinearSolveResult& result, const std::vector<CorrectionDiagnostics>& history)
+{
+    if (result.converged || history.empty())
+        return;
+    std::ostringstream message;
+    message.imbue(std::locale::classic());
+    message << std::scientific << std::setprecision(17);
+    message << result.reason << "\nNOX correction history (scaled system; components follow global GID modulo 4):";
+    const auto components = [&](const std::array<double, 4>& values)
+    {
+        message << '[' << values[0] << ',' << values[1] << ',' << values[2] << ',' << values[3] << ']';
+    };
+    for (const auto& entry : history)
+    {
+        message << "\ncorrection=" << entry.correction << " nonlinear_iteration=" << entry.nonlinear_iteration
+                << " backend=" << (entry.backend == LinearSolverBackend::BiCGStab ? "BiCGStab" : "GMRES")
+                << " belos_status=" << entry.belos_status << " iterations=" << entry.iterations
+                << " total_iterations=" << entry.total_iterations
+                << " requested_tolerance=" << entry.requested_tolerance
+                << " reported_tolerance=" << entry.reported_tolerance << " loss_of_accuracy=" << entry.loss_of_accuracy
+                << " residuals_recomputed=" << entry.residuals_recomputed;
+        for (std::size_t j = 0; j < entry.columns.size(); ++j)
+        {
+            const auto& column = entry.columns[j];
+            message << "\n  column=" << j << " rhs_norm=" << column.rhs_norm
+                    << " true_residual_norm=" << column.true_residual_norm
+                    << " relative_residual=" << column.relative_residual;
+            if (entry.residuals_recomputed)
+            {
+                message << " rhs_component_l2=";
+                components(column.rhs_components);
+                message << " true_residual_component_l2=";
+                components(column.true_residual_components);
+            }
+        }
+    }
+    result.reason = message.str();
+}
+
 struct SolveContext
 {
+    std::vector<CorrectionDiagnostics> correction_history;
     NonlinearSolveResult result;
     NonlinearSolverOptions nonlinear;
     LinearSolverOptions linear;
@@ -318,23 +438,60 @@ protected:
         else
             solver_->setParameters(parameters);
         ++context_->result.linear_solves;
-        const auto belos_status = solver_->solve();
+        auto& correction = context_->correction_history.emplace_back();
+        correction.correction = context_->result.linear_solves;
+        correction.nonlinear_iteration = context_->result.nonlinear_iterations;
+        correction.backend = context_->linear.backend;
+        correction.requested_tolerance = tolerance;
+        correction.total_iterations = context_->result.krylov_iterations;
+        const std::size_t columns = b->getNumVectors();
+        correction.columns.resize(columns);
+        Teuchos::Array<double> norms(columns), rhs_norms(columns);
+        b->norm2(rhs_norms());
+        for (int j = 0; j < rhs_norms.size(); ++j)
+            correction.columns[j].rhs_norm = rhs_norms[j];
+        Belos::ReturnType belos_status;
+        try
+        {
+            belos_status = solver_->solve();
+        }
+        catch (...)
+        {
+            // No new collectives in this path: preserve the existing solver
+            // exception propagation and the available pre-solve diagnostics.
+            correction.belos_status = "Exception";
+            throw;
+        }
+        correction.belos_status = belos_status == Belos::Converged ? "Converged" : "Unconverged";
         const int iterations = solver_->getNumIters();
         context_->result.krylov_iterations += iterations;
-        const std::size_t columns = b->getNumVectors();
+        correction.iterations = iterations;
+        correction.total_iterations = context_->result.krylov_iterations;
+        correction.loss_of_accuracy = solver_->isLOADetected();
+        try
+        {
+            correction.reported_tolerance = solver_->achievedTol();
+        }
+        catch (const std::exception&)
+        {
+            // SolverManager's default accessor can be unimplemented. A missing
+            // diagnostic must not change the original acceptance decision.
+        }
         if (residual_.is_null() || residual_->getNumVectors() != columns)
             residual_ = rcp(new MultiVector(b->getMap(), columns));
         generation->jacobian->apply(*x, *residual_);
         residual_->update(1.0, *b, -1.0);
-        Teuchos::Array<double> norms(columns), rhs_norms(columns);
         residual_->norm2(norms());
-        b->norm2(rhs_norms());
         double achieved = 0.0;
         for (int j = 0; j < norms.size(); ++j)
         {
             const double relative = rhs_norms[j] > 0.0 ? norms[j] / rhs_norms[j] : norms[j];
             achieved = std::isfinite(relative) ? std::max(achieved, relative) : std::numeric_limits<double>::infinity();
+            correction.columns[j].true_residual_norm = norms[j];
+            correction.columns[j].relative_residual = relative;
         }
+        correction_component_norms(*b, *residual_, context_->component_ids, correction);
+        correction.residuals_recomputed = true;
         context_->result.achieved_linear_tolerance = achieved;
         Thyra::SolveStatus<double> status;
         status.achievedTol = achieved;
@@ -904,6 +1061,7 @@ NonlinearSolveResult NOXNonlinearSolver::solve(DefaultTpetraTypes::vector_type& 
     validate(callbacks, physical_x, nonlinear, correction_options);
     auto context = impl.context;
     context->result = {};
+    context->correction_history.clear();
     context->nonlinear = nonlinear;
     context->linear = correction_options;
     try
@@ -970,6 +1128,7 @@ NonlinearSolveResult NOXNonlinearSolver::solve(DefaultTpetraTypes::vector_type& 
         if (context->result.reason.empty())
             context->result.reason = error.what();
     }
+    append_correction_diagnostics(context->result, context->correction_history);
     context->result.total_seconds = std::chrono::duration<double>(WallClock::now() - started).count();
     const std::array<double, 4> local_times = {context->result.total_seconds, context->result.residual_seconds,
         context->result.linearization_seconds, context->result.linear_solve_seconds};

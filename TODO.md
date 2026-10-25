@@ -854,7 +854,7 @@ only their documented configurations; skipped or omitted tests are not passes.
 - [ ] Qualify broader material, toolchain, solver and mesh combinations and hosted
       coverage without treating local focused tests as a full-suite/CI result.
 - [ ] Resolve the strict correction-forcing rejection and qualify the active
-      1120-cell scale-1 bottom-convection two-step NOX startup. GMRES fails the
+      1008-cell scale-1 bottom-convection two-step NOX startup. GMRES fails the
       first step and BiCGStab the second with unchanged prescribed sources and
       forcing controls; retain every residual and physical gate. Smaller
       registered NOX cases do not qualify this application.

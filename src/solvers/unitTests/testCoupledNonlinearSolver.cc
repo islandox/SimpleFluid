@@ -25,6 +25,7 @@
 #include <limits>
 #include <memory>
 #include <numbers>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -1151,6 +1152,106 @@ TEST(CoupledNonlinearProblemTest, RecycledWorkspaceRefreshesPhysicalModeAndOptio
 }
 
 #ifdef SIMPLEFLUID_ENABLE_NOX
+TEST(CoupledNonlinearSolverTest, FailedCorrectionReportsTrueResidualAndClearsHistoryAcrossSolves)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    Teuchos::Array<Pack::global_ordinal_type> gids;
+    // Reverse the local ordering and interleave global components across ranks.
+    // More than eight ranks also exercises diagnostic reductions on empty owners.
+    for (int gid = 7; gid >= 0; --gid)
+        if ((gid + 1) % comm->getSize() == comm->getRank())
+            gids.push_back(gid);
+    const auto map = Teuchos::rcp(new Pack::map_type(8, gids(), 0, comm));
+    State state;
+    Vector x(map);
+    x.putScalar(0.);
+    NOXNonlinearSolver solver(affine_callbacks(map, 1., 1.));
+    const auto success = solver.solve(x, state.nonlinear, state.linear);
+    ASSERT_TRUE(success.converged) << success.reason;
+    EXPECT_GT(success.linear_solves, 0);
+    EXPECT_EQ(success.reason.find("NOX correction history"), std::string::npos);
+
+    auto callbacks = affine_callbacks(map, 1., 1.);
+    auto diagonal = Teuchos::rcp(new Pack::matrix_type(map, 1));
+    for (std::size_t row = 0; row < map->getLocalNumElements(); ++row)
+    {
+        const auto gid = map->getGlobalElement(static_cast<LO>(row));
+        const Teuchos::Array<Pack::global_ordinal_type> columns{gid};
+        const Teuchos::Array<double> coefficients{static_cast<double>(gid + 1)};
+        diagonal->insertGlobalValues(gid, columns(), coefficients());
+    }
+    diagonal->fillComplete(map, map);
+    callbacks.linearize = [diagonal](const Vector&) { return NonlinearLinearization{diagonal, Teuchos::null}; };
+    callbacks.residual = [](const Vector& input, Vector& residual)
+    {
+        const auto values = input.getLocalViewHost(Tpetra::Access::ReadOnly);
+        auto output = residual.getLocalViewHost(Tpetra::Access::OverwriteAll);
+        for (std::size_t row = 0; row < input.getLocalLength(); ++row)
+        {
+            const auto gid = input.getMap()->getGlobalElement(static_cast<LO>(row));
+            output(row, 0) = static_cast<double>(gid + 1) * (values(row, 0) - 1.);
+        }
+        return true;
+    };
+    solver.set_callbacks(callbacks);
+    x.putScalar(0.);
+    const auto initial = values(x);
+    state.linear.max_iterations = 1;
+    state.nonlinear.forcing_initial = 1.e-10;
+    state.nonlinear.forcing_minimum = 1.e-10;
+    const auto failure = solver.solve(x, state.nonlinear, state.linear);
+    // Compare the complete collective payload before any fatal test assertion.
+    int length = static_cast<int>(failure.reason.size());
+    Teuchos::broadcast(*comm, 0, 1, &length);
+    auto root_reason = failure.reason;
+    root_reason.resize(static_cast<std::size_t>(length));
+    Teuchos::broadcast(*comm, 0, length, root_reason.data());
+    EXPECT_EQ(failure.reason, root_reason);
+    EXPECT_FALSE(failure.converged);
+    EXPECT_EQ(values(x), initial);
+    EXPECT_EQ(failure.linear_solves, 1);
+    EXPECT_EQ(failure.krylov_iterations, 1);
+    EXPECT_TRUE(failure.reason.starts_with("Correction solve failed the explicit residual forcing tolerance"));
+    EXPECT_NE(failure.reason.find("correction=1 nonlinear_iteration=0 backend=GMRES belos_status=Unconverged"),
+        std::string::npos);
+    EXPECT_NE(failure.reason.find("iterations=1 total_iterations=1"), std::string::npos);
+    EXPECT_EQ(failure.reason.find("correction=2 "), std::string::npos);
+    EXPECT_NE(failure.reason.find("reported_tolerance="), std::string::npos);
+    EXPECT_NE(failure.reason.find("loss_of_accuracy="), std::string::npos);
+    EXPECT_NE(failure.reason.find("residuals_recomputed=1"), std::string::npos);
+    const auto number = [&](const std::string& key)
+    {
+        const auto start = failure.reason.find(key);
+        EXPECT_NE(start, std::string::npos) << key;
+        return start == std::string::npos ? std::numeric_limits<double>::quiet_NaN()
+                                          : std::stod(failure.reason.substr(start + key.size()));
+    };
+    EXPECT_DOUBLE_EQ(number("requested_tolerance="), state.nonlinear.forcing_initial);
+    EXPECT_NEAR(number("rhs_norm="), std::sqrt(204.), 1.e-12);
+    EXPECT_NEAR(number("relative_residual="), failure.achieved_linear_tolerance, 1.e-15);
+    EXPECT_NEAR(number("true_residual_norm=") / number("rhs_norm="), failure.achieved_linear_tolerance, 1.e-15);
+    EXPECT_GT(failure.achieved_linear_tolerance, state.nonlinear.forcing_initial);
+    const auto start = failure.reason.find("rhs_component_l2=[");
+    ASSERT_NE(start, std::string::npos);
+    auto component_text = failure.reason.substr(start + std::string("rhs_component_l2=[").size());
+    std::replace(component_text.begin(), component_text.end(), ',', ' ');
+    std::istringstream component_values(component_text);
+    for (int component = 0; component < 4; ++component)
+    {
+        double actual = 0.;
+        component_values >> actual;
+        const double first = component + 1., second = component + 5.;
+        EXPECT_NEAR(actual, std::hypot(first, second), 1.e-12);
+    }
+
+    solver.set_callbacks(affine_callbacks(map, 1., 1.));
+    state.linear.max_iterations = 250;
+    const auto recovered = solver.solve(x, state.nonlinear, state.linear);
+    EXPECT_TRUE(recovered.converged) << recovered.reason;
+    EXPECT_EQ(recovered.reason.find("NOX correction history"), std::string::npos);
+    EXPECT_EQ(success.reason.find("NOX correction history"), std::string::npos);
+}
+
 TEST(CoupledNonlinearSolverTest, OwningSolverResetsConvergenceBaselineAndReusesVectorAndLinearCaches)
 {
     State state;
@@ -1278,6 +1379,15 @@ TEST(CoupledNonlinearSolverTest, ArmijoRejectsInadmissibleTrialsAndExhaustionIsT
     EXPECT_EQ(values(x), initial);
 
     state.nonlinear.maximum_backtracks = 12;
+    state.nonlinear.maximum_iterations = 2;
+    const auto exhausted = solver.solve(x, state.nonlinear, state.linear);
+    EXPECT_FALSE(exhausted.converged);
+    EXPECT_EQ(exhausted.linear_solves, 2);
+    EXPECT_NE(exhausted.reason.find("correction=1 "), std::string::npos);
+    EXPECT_NE(exhausted.reason.find("correction=2 "), std::string::npos);
+    EXPECT_EQ(values(x), initial);
+
+    state.nonlinear.maximum_iterations = 40;
     const auto recovered = solver.solve(x, state.nonlinear, state.linear);
     ASSERT_TRUE(recovered.converged) << recovered.reason;
     for (const auto value : values(x))
@@ -1523,16 +1633,38 @@ TEST(CoupledNonlinearSolverTest, NativeDriverLinearFailurePreservesAcceptedField
     state.time.nonlinear = state.nonlinear;
     state.time.nonlinear.forcing_initial = 1.e-10;
     state.time.nonlinear.forcing_minimum = 1.e-10;
-    state.linear.max_iterations = 1;
     FluidSolver<Pack> solver(state.mesh, state.boundaries, state.time, state.linear);
     State::seed(solver.velocity(), solver.pressure());
+    solver.step();
+    const auto accepted_result = solver.last_nonlinear_result();
+    ASSERT_TRUE(accepted_result.converged);
     const auto accepted_u = values(solver.velocity().owned_data());
     const auto accepted_p = values(solver.pressure().owned_data());
-    EXPECT_THROW(solver.step(), std::runtime_error);
-    EXPECT_EQ(solver.step_index(), 0);
-    EXPECT_DOUBLE_EQ(solver.time(), 0.);
+    const auto accepted_flux = values(solver.pressure_corrected_face_fluxes().owned_data());
+    state.linear.max_iterations = 1;
+    solver.set_linear_solver_options(state.linear);
+    try
+    {
+        solver.step();
+        FAIL() << "A one-iteration correction must fail its original forcing gate";
+    }
+    catch (const std::runtime_error& error)
+    {
+        const std::string message = error.what();
+        EXPECT_TRUE(message.starts_with("FluidSolver coupled nonlinear solve failed: "));
+        EXPECT_NE(message.find("NOX correction history"), std::string::npos);
+        EXPECT_NE(message.find("belos_status=Unconverged"), std::string::npos);
+        EXPECT_NE(message.find("true_residual_norm="), std::string::npos);
+    }
+    EXPECT_EQ(solver.step_index(), 1);
+    EXPECT_DOUBLE_EQ(solver.time(), state.time.time_step);
     EXPECT_EQ(values(solver.velocity().owned_data()), accepted_u);
     EXPECT_EQ(values(solver.pressure().owned_data()), accepted_p);
+    EXPECT_EQ(values(solver.pressure_corrected_face_fluxes().owned_data()), accepted_flux);
+    EXPECT_EQ(solver.last_nonlinear_result().reason, accepted_result.reason);
+    EXPECT_EQ(solver.last_nonlinear_result().linear_solves, accepted_result.linear_solves);
+    EXPECT_EQ(solver.last_nonlinear_result().krylov_iterations, accepted_result.krylov_iterations);
+    EXPECT_DOUBLE_EQ(solver.last_nonlinear_result().scaled_residual, accepted_result.scaled_residual);
 }
 
 TEST(CoupledNonlinearSolverTest, BoussinesqAdvancesHeatAndMaterialUpdaterOnceAfterAcceptedFlow)
