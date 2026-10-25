@@ -14,91 +14,18 @@ template<class Context> struct GeneralVoFSolver
                                           SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>>;
     void phase_storage(State& state) const
     {
-        const auto& gas = state.phases->gas_volumes();
-        const auto& carrier = state.phases->carrier_volumes();
-        const auto geometric_fraction = state.phases->geometric_gas_fractions();
-        std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> authority;
-        self.require(gas.size() == self.volume.size() && carrier.size() == self.volume.size(),
-            "General VoF phase/native storage dimensions differ.");
-        std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> geometry;
-        self.collective(
-            [&]
-            {
-                authority = current_inventory(*state.phases);
-                geometry = state.phases->owned_geometry();
-                state.fraction.resize(self.volume.size());
-                state.density.resize(self.volume.size());
-                state.physical_mass.resize(self.volume.size());
-            });
-        self.collective(
-            [&]
-            {
-                for (std::size_t c = 0; c < self.volume.size(); ++c)
-                {
-                    state.fraction[c] = geometric_fraction[c];
-                    state.physical_mass[c] = phase_mass_measure(authority[c]);
-                    const auto& mass = state.physical_mass[c];
-                    const auto density = mass.divided_by(
-                        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*geometry[c]),
-                        self.options.byte_budget);
-                    state.density[c] = density.sign() ? density.certified().as_double() : 0;
-                    if (mass.sign() <= 0 || !std::isfinite(state.density[c]) || !(state.density[c] > 0) ||
-                        !std::isfinite(state.fraction[c]) || state.fraction[c] < 0 || state.fraction[c] > 1)
-                        throw std::runtime_error("General VoF final extensive mixture mass/fraction is invalid.");
-                }
-            });
+        auto result = detail::general_vof::PhaseStorage<ArithmeticMode::Exact>::evaluate(
+            *self.mesh, *state.phases, self.material, self.options.byte_budget);
+        state.fraction = std::move(result.fraction);
+        state.density = std::move(result.density);
+        state.physical_mass = std::move(result.mass);
     }
 
     void budget(State& state) const
     {
-        std::array<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>, 7> local;
-        std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> authority;
-        bool valid = true;
-        self.collective(
-            [&]
-            {
-                authority = current_inventory(*state.phases);
-                for (std::size_t c = 0; c < self.volume.size(); ++c)
-                {
-                    const auto& gas = authority[c].gas;
-                    const auto& carrier = authority[c].carrier;
-                    const auto& mass = state.physical_mass[c];
-                    const auto& velocity = state.velocity[c];
-                    local[0] = detail::vof_exact::add(local[0], gas, self.options.byte_budget);
-                    local[1] = detail::vof_exact::add(
-                        local[1], gas.scaled(self.material.gas_density), self.options.byte_budget);
-                    local[2] = detail::vof_exact::add(
-                        local[2], carrier.scaled(self.material.liquid_density), self.options.byte_budget);
-                    for (unsigned a = 0; a < 3; ++a)
-                    {
-                        const auto momentum = mass.scaled(velocity[a]);
-                        local[3 + a] = detail::vof_exact::add(local[3 + a], momentum, self.options.byte_budget);
-                        valid = valid && std::isfinite(velocity[a]);
-                    }
-                    local[6] = detail::vof_exact::add(
-                        local[6], mass.scaled(.5 * dot(velocity, velocity)), self.options.byte_budget);
-                    valid = valid && std::isfinite(state.density[c]) && state.density[c] > 0;
-                }
-            });
-        self.require(valid, "General VoF accepted candidate has nonfinite velocity/storage.");
-        std::array<double, 7> global{};
-        for (unsigned a = 0; a < 7; ++a)
-        {
-            const auto exact = global_sum({local[a]});
-            self.collective([&] { global[a] = exact.sign() ? exact.certified().as_double() : 0; });
-        }
-        state.diagnostics.gas_volume = global[0];
-        state.diagnostics.gas_mass = global[1];
-        state.diagnostics.liquid_mass = global[2];
-        for (unsigned a = 0; a < 3; ++a)
-            state.diagnostics.momentum[a] = global[3 + a];
-        state.diagnostics.kinetic_energy = global[6];
-        double speed = 0;
-        for (const auto& velocity : state.velocity)
-            speed = std::max(speed, std::sqrt(dot(velocity, velocity)));
-        state.diagnostics.maximum_velocity = self.maximum(speed);
-        self.require(std::all_of(global.begin(), global.end(), [](double value) { return std::isfinite(value); }),
-            "General VoF global accepted budget is nonfinite.");
+        state.diagnostics =
+            detail::general_vof::Diagnostics<ArithmeticMode::Exact>::evaluate(*self.mesh, *state.phases, self.material,
+                state.physical_mass, state.velocity, state.density, self.options.byte_budget, state.diagnostics);
     }
 
     std::shared_ptr<State> prepare_step(double dt)
@@ -591,88 +518,8 @@ template<class Context> struct GeneralVoFSolver
 
     void verify_phase_publication(const VoF::GeneralVoF::Trial& trial, const VoF::GeneralVoF& candidate) const
     {
-        self.collective(
-            [&]
-            {
-                using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
-                using Domain = detail::GeneralVoFStorageDomain;
-                detail::GeneralVoFExactStorage storage(self.options.byte_budget);
-                // Only finite centers/bounds enter these small interval sums.
-                // Keep their pending values and one operation disjoint from
-                // the variable-size recipient aggregation below.
-                storage.capacity(Domain::Scratch, 16 * 1024, 1);
-                const auto n = self.volume.size();
-                storage.capacity(Domain::Scratch, n, 4 * sizeof(M));
-                M zero;
-                storage.measure(Domain::Input, zero);
-                for (const auto& route : trial.transfers())
-                {
-                    storage.measure(Domain::Input, route.exact.gas);
-                    storage.measure(Domain::Input, route.exact.carrier);
-                }
-                std::vector<M> gas(n, zero), carrier(n, zero);
-                if (gas.capacity() > 2 * n || carrier.capacity() > 2 * n)
-                    throw std::runtime_error("General VoF publication vector capacity exceeds admission.");
-                for (std::size_t c = 0; c < n; ++c)
-                {
-                    storage.measure(Domain::Scratch, gas[c]);
-                    storage.measure(Domain::Scratch, carrier[c]);
-                }
-                const auto add = [&](M& value, const M& part)
-                {
-                    const auto remaining = storage.remaining();
-                    if (remaining <= 2048)
-                        throw std::runtime_error("General VoF finite publication proof exhausted its operation lease.");
-                    auto sum = detail::vof_exact::add(value, part, remaining - 1024);
-                    storage.measure(Domain::Scratch, sum);
-                    storage.release(Domain::Scratch, value);
-                    value = std::move(sum);
-                };
-                for (const auto& route : trial.transfers())
-                {
-                    const auto local = self.mesh->owned_cell_map()->getLocalElement(GO(route.recipient));
-                    if (local < 0)
-                        throw std::runtime_error("General VoF publication proof has a foreign recipient.");
-                    add(gas[local], route.exact.gas);
-                    add(carrier[local], route.exact.carrier);
-                }
-                if (candidate.inventory_policy() != self.accepted->phases->inventory_policy())
-                    throw std::runtime_error("General VoF trial changed inventory authority policy.");
-                if (candidate.inventory_policy() == VoF::PhaseInventoryPolicy::ExperimentalExact)
-                {
-                    const auto& exact = candidate.experimental_phases();
-                    if (exact.size() != n)
-                        throw std::runtime_error("Experimental exact phase publication shape differs.");
-                    for (std::size_t c = 0; c < n; ++c)
-                        if (gas[c].compare(exact[c].gas) || carrier[c].compare(exact[c].carrier))
-                            throw std::runtime_error("Experimental exact phase publication differs from its routes.");
-                    return;
-                }
-                const auto& phases = candidate.phase_volumes();
-                // Identity trials retain the accepted object and its historical
-                // publication metadata; only THIS trial's bounds may admit error.
-                const auto& bounds = trial.phase_roundoff_bounds();
-                if (phases.size() != n || bounds.size() != n)
-                    throw std::runtime_error("General VoF finite publication bound shape differs.");
-                const auto check = [&](double value, double bound, const M& expected)
-                {
-                    if (!std::isfinite(value) || !std::isfinite(bound) || bound < 0)
-                        throw std::runtime_error("General VoF finite publication bound is invalid.");
-                    const auto center = M::from_value(value);
-                    const auto lower = detail::vof_exact::add(center, M::from_value(-bound), 8192);
-                    const auto upper = detail::vof_exact::add(center, M::from_value(bound), 8192);
-                    if (expected.compare(lower) < 0 || expected.compare(upper) > 0)
-                        throw std::runtime_error("General VoF phase publication exceeds its own conversion bound.");
-                };
-                for (std::size_t c = 0; c < n; ++c)
-                {
-                    check(phases[c].gas, bounds[c].gas, gas[c]);
-                    check(phases[c].carrier, bounds[c].carrier, carrier[c]);
-                }
-                // Positive densities give |Mnew-Mrouted| <= rhoG*boundG+
-                // rhoC*boundC. This is arithmetic provenance only: momentum
-                // still solves its original equation with represented Mnew.
-            });
+        detail::general_vof::PhaseStorage<ArithmeticMode::Exact>::validate(
+            *self.mesh, *self.accepted->phases, trial, candidate, self.options.byte_budget);
     }
 
     FaceMeasures exchange_face_measures(
@@ -854,61 +701,7 @@ template<class Context> struct GeneralVoFSolver
     SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> global_sum(
         const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& values) const
     {
-        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> local;
-        std::vector<OwnerPacket> packets;
-        self.collective(
-            [&]
-            {
-                for (const auto& value : values)
-                    local = detail::vof_exact::add(local, value, self.options.byte_budget);
-                packets.push_back({0, local.encode(self.options.byte_budget)});
-            });
-        const auto received =
-            exchange_owner_packets(packets, self.mesh->owned_cell_map()->getComm(), self.options.byte_budget);
-        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> sum;
-        self.collective(
-            [&]
-            {
-                if (self.mesh->owned_cell_map()->getComm()->getRank() == 0)
-                {
-                    std::set<int> senders;
-                    for (const auto& p : received.packets)
-                    {
-                        if (!senders.insert(p.peer).second)
-                            throw std::runtime_error("Duplicate exact global inventory sender.");
-                        sum = detail::vof_exact::add(sum,
-                            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(
-                                p.bytes, self.options.byte_budget),
-                            self.options.byte_budget);
-                    }
-                    if (senders.size() != std::size_t(self.mesh->owned_cell_map()->getComm()->getSize()))
-                        throw std::runtime_error("Incomplete exact global inventory reduction.");
-                }
-            });
-        std::vector<char> encoded;
-        self.collective(
-            [&]
-            {
-                if (self.mesh->owned_cell_map()->getComm()->getRank() == 0)
-                    encoded = sum.encode(self.options.byte_budget);
-            });
-        std::uint64_t count = encoded.size();
-        Teuchos::broadcast(*self.mesh->owned_cell_map()->getComm(), 0, 1, &count);
-        self.collective(
-            [&]
-            {
-                if (count > self.options.byte_budget || count > std::uint64_t(std::numeric_limits<int>::max()))
-                    throw std::runtime_error("Exact global inventory broadcast exceeds budget.");
-                encoded.resize(std::size_t(count));
-            });
-        Teuchos::broadcast(*self.mesh->owned_cell_map()->getComm(), 0, int(count), encoded.data());
-        self.collective(
-            [&]
-            {
-                sum = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(
-                    encoded, self.options.byte_budget);
-            });
-        return sum;
+        return detail::general_vof::exact::global_sum(*self.mesh, values, self.options.byte_budget);
     }
 };
 } // namespace SimpleFluid::Exact
