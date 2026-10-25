@@ -169,7 +169,10 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
     {
         auto displayed =
             bounded<Mode>(scaled<Mode>(v.coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin));
-        DynamicGeometryAccess::seal(displayed, v.authorities);
+        if (v.source_identity || poly.construction || poly.numerical_only)
+            DynamicGeometryAccess::seal_export(displayed, v.source_identity, v.authorities, poly.numerical_only);
+        else
+            DynamicGeometryAccess::seal(displayed, v.authorities);
         active_work->charge(dynamic_point_storage_bytes(displayed) - sizeof(DynamicPoint), 1);
         poly.displayed.push_back(std::move(displayed));
         active_work->charge(v.incident.size(), sizeof(PlanePtr));
@@ -519,10 +522,19 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::make(
         reject("invalid or excessive shell size before conversion allocation.");
     active_work->charge(vertices.size(), sizeof(DynamicPoint));
     std::vector<DynamicPoint> relative;
+    active_work->charge(vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
+    std::vector<std::shared_ptr<const DynamicPointProvenance>> identities;
+    identities.reserve(vertices.size());
     for (const auto& vertex : vertices)
+    {
+        DynamicPoint source{{vertex[0], vertex[1], vertex[2]}, {}, Mode};
+        active_work->charge(1, sizeof(DynamicPointProvenance));
+        DynamicGeometryAccess::seal_represented_source(source, {});
+        identities.push_back(DynamicGeometryAccess::identity(source));
         relative.push_back(bounded<Mode>(point<Mode>(vertex) - point<Mode>(vertices.front())));
+    }
     return DynamicConvexGeometryPtr(
-        new DynamicConvexGeometry(import<Mode>(vertices.front(), relative, faces, limits, false)));
+        new DynamicConvexGeometry(import<Mode>(vertices.front(), relative, faces, limits, false, identities)));
 }
 
 template<ArithmeticMode Mode>
@@ -604,8 +616,19 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
     // Ordinary source topology is not an interval certificate. Treat the
     // represented local coordinates as fresh inputs and independently establish
     // planarity/convexity; inherited source IDs cannot force a zero residual.
+    active_work->charge(relative.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
+    std::vector<std::shared_ptr<const DynamicPointProvenance>> identities;
+    identities.reserve(relative.size());
+    for (const auto& point : relative)
+    {
+        auto global = bounded<Mode>(certification_kernel::point<Mode>(point) +
+                                    certification_kernel::point<Mode>(shell.origin));
+        active_work->charge(1, sizeof(DynamicPointProvenance));
+        DynamicGeometryAccess::seal_represented_source(global, {});
+        identities.push_back(DynamicGeometryAccess::identity(global));
+    }
     return DynamicConvexGeometryPtr(
-        new DynamicConvexGeometry(import<Mode>(shell.origin, relative, shell.outward_faces, limits, false)));
+        new DynamicConvexGeometry(import<Mode>(shell.origin, relative, shell.outward_faces, limits, false, identities)));
 }
 
 template<ArithmeticMode Mode>

@@ -21,11 +21,14 @@ set(SIMPLEFLUID_MESH_SOURCES
     PLIC/details/exact/ConvexCellGeometry.cc
     PLIC/CertifiedGeometryProperties.cc
     PLIC/details/ordinary/GeometryMeasure.cc
+    PLIC/details/ordinary/Predicates.cc
     PLIC/details/ordinary/NativePlanarGeometry.cc
     PLIC/details/ordinary/PolyhedralComplex.cc
     PLIC/details/ordinary/ExtrudedConstruction.cc
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/ConvexGeometry.cc
+    PLIC/ConstructionRegistry.cc
+    PLIC/GeometryAllocationLedger.cc
     PLIC/ConvexConstruction.cc
     PLIC/ConvexClipping.cc
     PLIC/ConvexPartitions.cc
@@ -96,8 +99,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
     set_source_files_properties(PLIC/details/exact/ConvexCellGeometry.cc PLIC/ConvexGeometry.cc
+        PLIC/ConstructionRegistry.cc
+        PLIC/GeometryAllocationLedger.cc
         PLIC/CertifiedGeometryProperties.cc
         PLIC/details/ordinary/GeometryMeasure.cc
+        PLIC/details/ordinary/Predicates.cc
         PLIC/details/ordinary/NativePlanarGeometry.cc
         PLIC/details/ordinary/PolyhedralComplex.cc
         PLIC/details/ordinary/ExtrudedConstruction.cc
@@ -119,6 +125,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE
         SKIP_PRECOMPILE_HEADERS TRUE)
+    # Compensated predicates isolate their rounding mode and restore the
+    # caller's environment; prohibit motion across those fenv boundaries.
+    set_property(SOURCE PLIC/details/ordinary/Predicates.cc APPEND PROPERTY COMPILE_OPTIONS -frounding-math)
 endif()
 
 # Require profiles for every Mesh archive member linked into Shiri. The listed
@@ -148,11 +157,14 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     PLIC/details/exact/ConvexCellGeometry.cc
     PLIC/CertifiedGeometryProperties.cc
     PLIC/details/ordinary/GeometryMeasure.cc
+    PLIC/details/ordinary/Predicates.cc
     PLIC/details/ordinary/NativePlanarGeometry.cc
     PLIC/details/ordinary/PolyhedralComplex.cc
     PLIC/details/ordinary/ExtrudedConstruction.cc
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/ConvexGeometry.cc
+    PLIC/ConstructionRegistry.cc
+    PLIC/GeometryAllocationLedger.cc
     PLIC/ConvexConstruction.cc
     PLIC/ConvexClipping.cc
     PLIC/ConvexPartitions.cc

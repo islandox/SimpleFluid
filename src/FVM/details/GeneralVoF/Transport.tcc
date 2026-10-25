@@ -1,51 +1,16 @@
 /** @file Transport.tcc
  * @brief Moving phase transport; collective stages remain coordinated here.
  */
+#include "FVM/details/GeneralVoF/ConstructionControls.tcc"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 namespace SimpleFluid::VoF
 {
 using fp::runtime_phases;
 using fp::runtime_value;
+namespace auth = construction_controls;
 namespace
 {
-using PhasePoint = PLIC::DynamicPoint;
-void finite_point(wire::Writer& w, const PhasePoint& p)
-{
-    for (unsigned a = 0; a < 3; ++a)
-        finite_value(w, {p.value[a], p.absolute_error[a], p.arithmetic_mode});
-}
-PhasePoint finite_point(wire::Reader& r)
-{
-    PhasePoint p;
-    for (unsigned a = 0; a < 3; ++a)
-    {
-        const auto v = finite_value(r);
-        p.value[a] = v.value;
-        p.absolute_error[a] = v.absolute_error;
-        if (a && p.arithmetic_mode != v.arithmetic_mode)
-            throw std::invalid_argument("Finite VoF wire point mixes arithmetic modes.");
-        p.arithmetic_mode = v.arithmetic_mode;
-    }
-    return p;
-}
-template<ArithmeticMode Mode>
-PLIC::Point<Mode> constrained_finite_departure(
-    const GeneralVoF::Data& data, std::uint64_t node, const SimpleFluid::PLIC::GeometryPoint& velocity, double dt)
-{
-    std::vector<PLIC::FaceConstraint<Mode>> walls;
-    for (const auto& wall : data.topology->node_walls.at(node))
-        walls.push_back({PLIC::ConvexCellGeometry<Mode>::from_dynamic(wall.finite_constraint.geometry),
-            wall.finite_constraint.face});
-    if (walls.size() > SimpleFluid::PLIC::TrajectoryLimits{}.maximum_constraints)
-        throw std::invalid_argument("Finite VoF complete wall catalog exceeds the unchanged constraint limit.");
-    PLIC::GeometryLimits limits;
-    limits.byte_budget = data.options.byte_budget;
-    limits.arithmetic_mode = data.options.arithmetic_mode;
-    limits.maximum_operations = SimpleFluid::PLIC::TrajectoryLimits{}.maximum_operations;
-    return PLIC::backtrace_constrained<Mode>(
-        PLIC::Point<Mode>(data.topology->finite_nodes.at(node)), velocity, dt, walls, limits);
-}
 // Local stage. The operation coordinator provides collective error propagation.
 template<ArithmeticMode Mode>
 void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const GeneralVoFNodeVelocity> node_velocity,
@@ -53,7 +18,7 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
     std::map<Key, PLIC::ConvexGeometryPtr<Mode>>& cell_geometry,
     std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces,
     std::map<std::uint64_t, PhaseValue>& flux, std::map<std::uint64_t, long double>& face_budgets,
-    std::vector<OwnerPacket>& packets)
+    const PLIC::GeometryPacketContext& packet_context, std::vector<OwnerPacket>& packets)
 {
     using Math = fp::Arithmetic<Mode>;
     const auto comm = data.hierarchy->communicator();
@@ -86,28 +51,15 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
         if (!velocity.contains(node.gid))
             throw std::invalid_argument("Finite VoF node controls contain a foreign identity.");
         const PLIC::Point<Mode> source(data.topology->finite_nodes.at(node.gid));
-        const auto departure = constrained_finite_departure<Mode>(data, node.gid, velocity.at(node.gid), timestep);
+        const auto departure = auth::departure<Mode>(data, node.gid, velocity.at(node.gid), timestep);
         budget.add(sizeof(typename std::remove_reference_t<decltype(traces)>::value_type) + 4 * sizeof(void*) +
                    PLIC::dynamic_point_storage_bytes(source.dynamic()) +
                    PLIC::dynamic_point_storage_bytes(departure.dynamic()));
         traces.emplace(node.gid, std::pair{source, departure});
-        wire::Writer w;
-        w.word(0);
-        w.word(node.gid);
-        w.bytes(node.identity);
-        finite_point(w, source.dynamic());
-        finite_point(w, departure.dynamic());
-        for (auto x : velocity.at(node.gid))
-            real(w, x);
-        real(w, timestep);
-        w.word(data.topology->node_walls.at(node.gid).size());
-        for (const auto& wall : data.topology->node_walls.at(node.gid))
-        {
-            w.bytes(wall.identity);
-            finite_point(w, wall.finite_normal);
-        }
-        budget.packet(w.data.size());
-        packets.push_back({int(node.gid % comm->getSize()), std::move(w.data)});
+        auto bytes =
+            auth::node_record<Mode>(data, node.gid, source, departure, velocity.at(node.gid), timestep, packet_context);
+        budget.packet(bytes.size());
+        packets.push_back({int(node.gid % comm->getSize()), std::move(bytes)});
     }
     for (const auto& face : face_volume)
     {
@@ -133,12 +85,6 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
         const auto phi = flux.at(tile.face_gid);
         if ((tile.exterior || timestep == 0) && phi.value != 0)
             throw std::invalid_argument("Finite VoF impermeable boundary has nonzero flux.");
-        wire::Writer w;
-        w.word(1);
-        w.word(tile.face_gid);
-        w.bytes(tile.domain);
-        w.bytes(tile.surface);
-        w.bytes(tile.identity);
         long double allowed = 0;
         if constexpr (Mode == ArithmeticMode::Ordinary)
         {
@@ -151,17 +97,15 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
                 throw std::invalid_argument("General VoF canonical face budget has invalid capacity.");
         }
         face_budgets.emplace(tile.face_gid, allowed);
-        finite_value(w, phi);
-        finite_real(w, allowed);
-        budget.packet(w.data.size());
-        packets.push_back({int(tile.face_gid % comm->getSize()), std::move(w.data)});
+        auto bytes = auth::face_record(data, tile.face_gid, phi, allowed, timestep, packet_context);
+        budget.packet(bytes.size());
+        packets.push_back({int(tile.face_gid % comm->getSize()), std::move(bytes)});
     }
     wire::Writer w;
-    w.word(2);
-    w.word(0);
-    w.word(data.control);
-    w.word(std::uint64_t(data.options.arithmetic_mode));
+    auth::header(w, 2, 0, packet_context, Mode);
     real(w, timestep);
+    w.bytes(auth::algorithm(data.options));
+    budget.packet(w.data.size());
     packets.push_back({0, std::move(w.data)});
 }
 } // namespace
@@ -174,8 +118,11 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     std::map<Key, PLIC::ConvexGeometryPtr<Mode>> cell_geometry;
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
-    PLIC::GeometryPacketContext packet_context{
-        {data.control, data.hierarchy->topology_generation(), data.hierarchy->partition_generation(), 0}};
+    Trial trial;
+    trial.source_ = data_;
+    trial.transaction_ = transaction(comm);
+    const PLIC::GeometryPacketContext packet_context{{data.control, data.hierarchy->topology_generation(),
+        data.hierarchy->partition_generation(), trial.transaction_}};
     std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>> traces;
     std::map<std::uint64_t, PhaseValue> flux;
     std::map<std::uint64_t, long double> face_budgets;
@@ -183,46 +130,60 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     wire::collective(*comm,
         [&]
         {
-            prepare_transport_controls<Mode>(
-                data, node_velocity, face_volume, timestep, cell_geometry, traces, flux, face_budgets, packets);
+            prepare_transport_controls<Mode>(data, node_velocity, face_volume, timestep, cell_geometry, traces, flux,
+                face_budgets, packet_context, packets);
         });
-    const auto controls = exchange_owner_packets(packets, comm, limit);
-    wire::collective(*comm,
-        [&]
-        {
-            wire::Budget budget{limit};
-            std::map<std::pair<std::uint64_t, std::uint64_t>, std::vector<char>> canonical;
-            for (const auto& packet : controls.packets)
+    auth::Records authoritative_controls;
+    std::size_t authoritative_bytes = 0;
+    {
+        auto received = exchange_owner_packets(packets, comm, limit);
+        wire::collective(*comm,
+            [&]
             {
-                wire::Reader r{packet.bytes};
-                const auto type = r.word(), id = r.word();
-                if (type > 2 || int(id % comm->getSize()) != comm->getRank())
-                    throw std::invalid_argument("Finite VoF control reached a foreign authority.");
-                budget.add(packet.bytes.size() + sizeof(typename decltype(canonical)::value_type));
-                auto [it, inserted] = canonical.emplace(std::pair{type, id}, packet.bytes);
-                if (!inserted && it->second != packet.bytes)
-                    throw std::invalid_argument("Finite VoF shared node/face controls disagree.");
-            }
-            for (const auto& key : data.topology->order)
-            {
-                fp::SumFor<Mode> sum;
-                for (auto index : data.topology->cell_tiles.at(key))
+                wire::Budget budget{limit};
+                budget.add(received.packets.capacity() * sizeof(OwnerPacket));
+                for (const auto& packet : received.packets)
+                    budget.add(packet.bytes.capacity());
+                for (auto& packet : received.packets)
                 {
-                    const auto& tile = data.topology->tiles[index];
-                    const int sign = tile.first == key ? 1 : -1;
-                    sum.add(sign > 0 ? flux.at(tile.face_gid) : Math::negate(flux.at(tile.face_gid)));
+                    wire::Reader r{packet.bytes};
+                    const auto key = auth::header(r, packet_context, Mode);
+                    if (key.first > 2 || int(key.second % comm->getSize()) != comm->getRank())
+                        throw std::invalid_argument("Finite VoF control reached a foreign authority.");
+                    auto found = authoritative_controls.find(key);
+                    if (found != authoritative_controls.end())
+                    {
+                        if (found->second != packet.bytes)
+                            throw std::invalid_argument("Finite VoF shared node/face controls disagree.");
+                    }
+                    else
+                    {
+                        budget.add(sizeof(auth::Records::value_type) + 4 * sizeof(void*));
+                        authoritative_controls.emplace(key, std::move(packet.bytes));
+                    }
                 }
-                const auto residual = sum.value();
-                const auto bulk = runtime_value<Mode>(cell_geometry.at(key)->volume());
-                const auto bound = phase_allowance<Mode>(bulk, data.options.reconstruction.volume_tolerance);
-                if (!Math::closure_within(residual, bound))
-                    throw std::invalid_argument("Finite VoF canonical controls violate source-free occupancy.");
-            }
-        });
-    Trial trial;
-    trial.source_ = data_;
-    trial.transaction_ = transaction(comm);
-    packet_context.publication[3] = trial.transaction_;
+                wire::Budget retained{limit};
+                for (const auto& [key, bytes] : authoritative_controls)
+                    retained.add(sizeof(auth::Records::value_type) + 4 * sizeof(void*) + bytes.capacity());
+                authoritative_bytes = retained.used;
+                for (const auto& key : data.topology->order)
+                {
+                    fp::SumFor<Mode> sum;
+                    for (auto index : data.topology->cell_tiles.at(key))
+                    {
+                        const auto& tile = data.topology->tiles[index];
+                        const int sign = tile.first == key ? 1 : -1;
+                        sum.add(sign > 0 ? flux.at(tile.face_gid) : Math::negate(flux.at(tile.face_gid)));
+                    }
+                    const auto residual = sum.value();
+                    const auto bulk = runtime_value<Mode>(cell_geometry.at(key)->volume());
+                    const auto bound = phase_allowance<Mode>(bulk, data.options.reconstruction.volume_tolerance);
+                    if (!Math::closure_within(residual, bound))
+                        throw std::invalid_argument("Finite VoF canonical controls violate source-free occupancy.");
+                }
+            });
+    }
+    std::vector<OwnerPacket>().swap(packets);
     int local_motion = 0, motion = 0;
     wire::collective(*comm,
         [&]
@@ -270,6 +231,20 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             });
         return trial;
     }
+    PLIC::GeometryLimits registry_limits = geometry_limits(Mode, limit);
+    registry_limits.maximum_pair_tests = data.options.sweep.maximum_pair_tests;
+    std::optional<PLIC::ConstructionRegistry<Mode>> construction;
+    wire::collective(*comm,
+        [&]
+        {
+            construction.emplace(packet_context, registry_limits);
+            for (const auto& [key, cell] : data.cells)
+                construction->register_native(cell.gid, cell.revision, cell_geometry.at(key));
+            wire::Budget retained{limit};
+            retained.add(authoritative_bytes);
+            retained.add(construction->storage_bytes());
+        });
+    auto& registry = *construction;
     const auto planes = import_planes<Mode>(data);
     std::map<Key, PhaseLabel<Mode>> labels;
     std::map<std::uint64_t, fp::Sweep<Mode>> sweeps;
@@ -282,6 +257,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             work.arithmetic_mode = data.options.arithmetic_mode;
             work.volume_tolerance = data.options.reconstruction.volume_tolerance;
             work.limits.byte_budget = std::min(limit, work.limits.byte_budget);
+            work.charge(authoritative_bytes);
+            work.charge(registry.storage_bytes());
             work.charge(data.topology->tiles.size() * sizeof(GeneralVoFFaceChainDiagnostic));
             work.charge(data.topology->order.size() * sizeof(GeneralVoFCellClosureDiagnostic));
             trial.finite_face_chain_.reserve(data.topology->tiles.size());
@@ -315,6 +292,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 work.pair_tests = 0; // Existing face-partition work-cap scope.
                 auto sweep = fp::make_sweep<Mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid), work,
                     face_budgets.at(tile.face_gid));
+                for (std::size_t ordinal = 0; ordinal < sweep.pieces.size(); ++ordinal)
+                {
+                    const auto before = registry.storage_bytes();
+                    registry.register_sweep(tile.face_gid, ordinal, sweep.pieces[ordinal].geometry);
+                    work.charge(registry.storage_bytes() - before);
+                }
                 // Construct one complete complementary partition per signed simplex.
                 // The immutable donor set has already proved disjointness; the
                 // shared split tree certifies coverage without replaying geometry.
@@ -406,7 +389,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 if (donor.owner == comm->getRank())
                     w.word(i);
                 else
-                    w.bytes(atom.geometry->encode(packet_context, limit));
+                    w.bytes(atom.geometry->encode(registry, limit));
                 budget.packet(w.data.size());
                 packets.push_back({donor.owner, std::move(w.data)});
             }
@@ -421,24 +404,32 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     };
     std::vector<Routed> routed;
     std::vector<Key> recipient_keys;
-    std::vector<PLIC::ConvexGeometryPtr<Mode>> source_registry;
-    for (const auto& [key, cell] : data.cells)
-        source_registry.push_back(cell_geometry.at(key));
+    struct PendingAtom
+    {
+        Routed value;
+        std::span<const char> packet;
+    };
+    std::vector<PendingAtom> pending;
+    std::set<PLIC::ConstructionRootKey> dependencies;
+    std::set<std::uint64_t> missing_faces;
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{limit};
+            budget.add(authoritative_bytes);
+            budget.add(registry.storage_bytes());
             for (const auto& packet : routed_packets.packets)
             {
                 wire::Reader r{packet.bytes};
-                auto donor_key = AMR::decode_adaptive_key(r.bytes());
+                auto donor_key = AMR::decode_adaptive_key(auth::packet_view(r));
                 const auto revision = r.word(), gid = r.word();
-                auto recipient_key = AMR::decode_adaptive_key(r.bytes());
+                auto recipient_key = AMR::decode_adaptive_key(auth::packet_view(r));
                 const auto recipient_gid = r.word(), local = r.word();
                 const auto& donor = data.cells.at(donor_key);
                 if (donor.owner != comm->getRank() || donor.gid != gid || donor.revision != revision)
                     throw std::invalid_argument("Finite VoF atom donor authentication failed.");
                 PLIC::ConvexGeometryPtr<Mode> geometry;
+                std::span<const char> encoded;
                 if (local == 1)
                 {
                     const auto index = r.word();
@@ -452,20 +443,147 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 }
                 else if (local == 0 && packet.peer != comm->getRank())
                 {
-                    PLIC::GeometryLimits decode_limits;
-                    decode_limits.arithmetic_mode = data.options.arithmetic_mode;
-                    decode_limits.byte_budget = limit;
-                    geometry = PLIC::ConvexCellGeometry<Mode>::decode(
-                        r.bytes(), packet_context, source_registry, decode_limits);
+                    encoded = auth::packet_view(r);
+                    const auto roots =
+                        PLIC::ConstructionRegistry<Mode>::required_roots(encoded, packet_context, registry_limits);
+                    bool donor_root = false;
+                    for (const auto& root : roots)
+                    {
+                        auth::admit_root(data, root, gid, revision, recipient_key);
+                        donor_root = donor_root || root.kind == PLIC::ConstructionRootKey::Kind::Native;
+                        if (registry.contains(root))
+                            continue;
+                        if (root.kind != PLIC::ConstructionRootKey::Kind::Sweep)
+                            throw std::invalid_argument("Finite VoF packet lacks an admitted native source root.");
+                        if (sweeps.contains(root.entity))
+                            throw std::invalid_argument("Finite VoF packet requests a "
+                                                        "nonexistent source-sweep ordinal.");
+                        if (dependencies.insert(root).second)
+                            budget.add(sizeof(root) + 4 * sizeof(void*));
+                        if (missing_faces.insert(root.entity).second)
+                            budget.add(sizeof(std::uint64_t) + 4 * sizeof(void*));
+                    }
+                    if (!donor_root)
+                        throw std::invalid_argument(
+                            "Finite VoF atom construction omits its authenticated native donor.");
                 }
                 else
                     throw std::invalid_argument("Finite VoF atom routing tag is malformed.");
                 r.done();
-                budget.add(sizeof(Routed) + geometry->storage_bytes());
-                recipient_keys.push_back(recipient_key);
-                routed.push_back({donor_key, recipient_key, recipient_gid, packet.peer, std::move(geometry)});
+                budget.add(sizeof(PendingAtom) + AMR::encode_adaptive_key(donor_key).size() +
+                           AMR::encode_adaptive_key(recipient_key).size());
+                pending.push_back(
+                    {{std::move(donor_key), std::move(recipient_key), recipient_gid, packet.peer, std::move(geometry)},
+                        encoded});
             }
         });
+    std::size_t retained_protocol_bytes = 0;
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{limit};
+            budget.add(authoritative_bytes);
+            budget.add(registry.storage_bytes());
+            budget.add(dependencies.size() * (sizeof(PLIC::ConstructionRootKey) + 4 * sizeof(void*)));
+            budget.add(missing_faces.size() * (sizeof(std::uint64_t) + 4 * sizeof(void*)));
+            budget.add(pending.capacity() * sizeof(PendingAtom));
+            for (const auto& item : pending)
+                budget.add(AMR::encode_adaptive_key(item.value.donor).size() +
+                           AMR::encode_adaptive_key(item.value.recipient).size());
+            retained_protocol_bytes = budget.used;
+        });
+    auto face_records = auth::request_records(
+        1, missing_faces, authoritative_controls, packet_context, Mode, comm, limit, retained_protocol_bytes);
+    std::set<std::uint64_t> missing_nodes;
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{limit};
+            budget.add(retained_protocol_bytes);
+            for (const auto& [face, bytes] : face_records)
+            {
+                budget.add(sizeof(decltype(face_records)::value_type) + 4 * sizeof(void*) + bytes.capacity());
+                const auto [control, allowance] =
+                    auth::accept_face_record<Mode>(data, face, bytes, timestep, packet_context);
+                budget.add(sizeof(decltype(flux)::value_type) + sizeof(decltype(face_budgets)::value_type) +
+                           8 * sizeof(void*));
+                if (!flux.emplace(face, control).second || !face_budgets.emplace(face, allowance).second)
+                    throw std::invalid_argument("Finite VoF source-sweep control was "
+                                                "already retained without its root.");
+                for (const auto node : data.topology->construction_faces.at(face).node_gids)
+                {
+                    if (!data.topology->construction_nodes.contains(node) ||
+                        !data.topology->finite_nodes.contains(node) || !data.topology->node_walls.contains(node))
+                        throw std::invalid_argument("Finite VoF source sweep needs a node "
+                                                    "outside its admitted native halo.");
+                    if (!traces.contains(node) && missing_nodes.insert(node).second)
+                        budget.add(sizeof(std::uint64_t) + 4 * sizeof(void*));
+                }
+            }
+            retained_protocol_bytes = budget.used;
+        });
+    auto node_records = auth::request_records(
+        0, missing_nodes, authoritative_controls, packet_context, Mode, comm, limit, retained_protocol_bytes);
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{limit};
+            budget.add(retained_protocol_bytes);
+            for (const auto& [node, bytes] : node_records)
+            {
+                budget.add(sizeof(decltype(node_records)::value_type) + 4 * sizeof(void*) + bytes.capacity());
+                auto trace = auth::accept_node_record<Mode>(data, node, bytes, timestep, packet_context);
+                budget.add(sizeof(typename decltype(traces)::value_type) + 4 * sizeof(void*) +
+                           PLIC::dynamic_point_storage_bytes(trace.first.dynamic()) +
+                           PLIC::dynamic_point_storage_bytes(trace.second.dynamic()));
+                if (!traces.emplace(node, std::move(trace)).second)
+                    throw std::invalid_argument("Finite VoF source-node trace was independently registered twice.");
+            }
+            fp::Work reconstruction{data.options.sweep};
+            reconstruction.arithmetic_mode = Mode;
+            reconstruction.volume_tolerance = data.options.reconstruction.volume_tolerance;
+            reconstruction.limits.byte_budget = std::min(limit, reconstruction.limits.byte_budget);
+            reconstruction.charge(budget.used);
+            for (const auto face : missing_faces)
+            {
+                reconstruction.pair_tests = 0;
+                reconstruction.charge(sizeof(typename decltype(sweeps)::value_type) + 4 * sizeof(void*));
+                const auto& native = data.topology->construction_faces.at(face);
+                auto sweep = fp::make_sweep<Mode>(
+                    face, native.node_gids, traces, flux.at(face), reconstruction, face_budgets.at(face));
+                for (std::size_t ordinal = 0; ordinal < sweep.pieces.size(); ++ordinal)
+                {
+                    const auto before = registry.storage_bytes();
+                    registry.register_sweep(face, ordinal, sweep.pieces[ordinal].geometry);
+                    reconstruction.charge(registry.storage_bytes() - before);
+                }
+                if (!sweeps.emplace(face, std::move(sweep)).second)
+                    throw std::invalid_argument("Finite VoF source sweep was reconstructed twice.");
+            }
+            for (const auto& root : dependencies)
+                if (!registry.contains(root))
+                    throw std::invalid_argument("Finite VoF packet requires an "
+                                                "unconstructed source-sweep ordinal.");
+        });
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{limit};
+            budget.add(authoritative_bytes);
+            budget.add(registry.storage_bytes());
+            for (auto& item : pending)
+            {
+                if (!item.value.geometry)
+                    item.value.geometry =
+                        PLIC::ConvexCellGeometry<Mode>::decode(item.packet, registry, registry_limits);
+                const auto& donor = data.cells.at(item.value.donor);
+                auth::require_donor_ancestry(registry, *item.value.geometry, donor.gid, donor.revision);
+                budget.add(sizeof(Routed) + item.value.geometry->storage_bytes());
+                recipient_keys.push_back(item.value.recipient);
+                routed.push_back(std::move(item.value));
+            }
+        });
+    std::vector<PendingAtom>().swap(pending);
     const auto recipients = data.hierarchy->lookup_cells(recipient_keys);
     // Signed fitting redistribution is distinct from arithmetic uncertainty.
     // The other entries carry source bounds by the same geometric bulk share.

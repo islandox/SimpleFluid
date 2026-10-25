@@ -2,11 +2,33 @@
  * @brief Ordinary convex construction and compensated nominal integration.
  */
 #include <sstream>
+#include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
 
 namespace SimpleFluid::PLIC::details
 {
 namespace ordinary_kernel SIMPLEFLUID_LOCAL
 {
+namespace
+{
+ordinary_predicates::Point predicate_point(const Point& point)
+{
+    return {point[0].value, point[1].value, point[2].value};
+}
+Scalar measured_volume(const ordinary_predicates::Result& determinant, int exponent)
+{
+    (void) ordinary_predicates::require_sign(determinant);
+    const auto result = scaled<kernel_mode>(Scalar(determinant.value) / Scalar(6), exponent);
+    if (result.value == 0 && determinant.value != 0)
+    {
+        ++statistics.rejections;
+        throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+            "Ordinary volume scaling would lose a nonzero measure.");
+    }
+    return result;
+}
+} // namespace
+
 template<ArithmeticMode Mode> Integrals integrate_ordinary(const StoredGeometry& poly, bool moments)
 {
     static_assert(Mode == kernel_mode);
@@ -20,11 +42,11 @@ template<ArithmeticMode Mode> Integrals integrate_ordinary(const StoredGeometry&
             for (const auto& face : poly.faces)
                 if (std::find(face.begin(), face.end(), 0) == face.end())
                 {
-                    result.volume = scaled<Mode>(dot<Mode>(poly.vertices[face[0]].coordinates - anchor,
-                                                     cross<Mode>(poly.vertices[face[1]].coordinates - anchor,
-                                                         poly.vertices[face[2]].coordinates - anchor)) /
-                                                     Scalar(6),
-                        3 * poly.frame.exponent);
+                    const auto determinant = ordinary_predicates::orientation({predicate_point(anchor),
+                        predicate_point(poly.vertices[face[0]].coordinates),
+                        predicate_point(poly.vertices[face[1]].coordinates),
+                        predicate_point(poly.vertices[face[2]].coordinates)});
+                    result.volume = measured_volume(determinant, 3 * poly.frame.exponent);
                     break;
                 }
         }
@@ -42,7 +64,7 @@ template<ArithmeticMode Mode> Integrals integrate_ordinary(const StoredGeometry&
     for (const auto& vertex : poly.vertices)
         pivot = pivot + vertex.coordinates;
     pivot = pivot * (Scalar(1) / Scalar(static_cast<long double>(poly.vertices.size())));
-    Accumulator<Mode> volume;
+    ordinary_predicates::ResultAccumulator volume;
     std::array<Accumulator<Mode>, 3> first;
     for (const auto& face : poly.faces)
         for (std::size_t i = 1; i + 1 < face.size(); ++i)
@@ -50,17 +72,26 @@ template<ArithmeticMode Mode> Integrals integrate_ordinary(const StoredGeometry&
             const auto& a = poly.vertices[face[0]].coordinates;
             const auto& b = poly.vertices[face[i]].coordinates;
             const auto& c = poly.vertices[face[i + 1]].coordinates;
-            const auto determinant = dot<Mode>(a - pivot, cross<Mode>(b - pivot, c - pivot));
+            const auto determinant = ordinary_predicates::orientation(
+                {predicate_point(pivot), predicate_point(a), predicate_point(b), predicate_point(c)});
             volume.add(determinant);
             if (moments)
             {
-                const auto weighted = (pivot + a + b + c) * determinant;
+                const auto weighted = (pivot + a + b + c) * Scalar(determinant.value);
                 for (std::size_t axis = 0; axis < 3; ++axis)
                     first[axis].add(weighted[axis]);
             }
         }
     Integrals result;
-    result.volume = moments ? Scalar(poly.volume) : scaled<Mode>(volume.result() / Scalar(6), 3 * poly.frame.exponent);
+    if (moments)
+        result.volume = poly.volume;
+    else
+    {
+        // Individual signed cones can be unresolved near a contact. Retain
+        // every contribution and its evaluation bound; qualify the total.
+        const auto determinant = volume.result();
+        result.volume = measured_volume(determinant, 3 * poly.frame.exponent);
+    }
     if (moments)
         for (std::size_t axis = 0; axis < 3; ++axis)
             result.first[axis] = scaled<Mode>(first[axis].result() / Scalar(24), 4 * poly.frame.exponent);
@@ -87,7 +118,10 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
     {
         auto displayed =
             bounded<Mode>(scaled<Mode>(v.coordinates, poly.frame.exponent) + point<Mode>(poly.frame.origin));
-        DynamicGeometryAccess::seal(displayed, v.authorities);
+        if (v.source_identity || poly.construction || poly.numerical_only)
+            DynamicGeometryAccess::seal_export(displayed, v.source_identity, v.authorities, poly.numerical_only);
+        else
+            DynamicGeometryAccess::seal(displayed, v.authorities);
         active_work->charge(dynamic_point_storage_bytes(displayed) - sizeof(DynamicPoint), 1);
         poly.displayed.push_back(std::move(displayed));
         active_work->charge(v.incident.size(), sizeof(PlanePtr));
@@ -245,6 +279,11 @@ std::shared_ptr<StoredGeometry> import(GeometryPoint origin, std::span<const Dyn
         {
             const auto index = defining[i];
             original_points[i] = result->vertices[index].coordinates;
+            if (!authenticated_planarity && !identities.empty() && identities[index] && identities[index]->constructed)
+            {
+                known_normal = false;
+                break;
+            }
             const auto error =
                 source_point_error(vertices[index], identities.empty() ? nullptr : identities[index].get(),
                     result->frame, original_points[i], authenticated_planarity);
@@ -433,24 +472,10 @@ template<ArithmeticMode Mode> DynamicGeometryValue dynamic_orientation(const std
         for (std::size_t j = 0; j < i; ++j)
             if (DynamicGeometryAccess::same_source(vertices[i], vertices[j]))
                 return bounded<Mode>(Scalar{});
-    // An identical exact input vertex establishes zero, unlike identical
-    // distinct coordinates from unrelated constructions.
-    for (std::size_t i = 0; i < 4; ++i)
-        for (std::size_t j = 0; j < i; ++j)
-            if (same<Mode>(p[i], p[j]))
-                return bounded<Mode>(Scalar{});
-    Point a = p[1] - p[0], b = p[2] - p[0], c = p[3] - p[0];
-    long double extent = 0;
-    for (const auto* vector : {&a, &b, &c})
-        for (const auto x : *vector)
-            extent = std::max(extent, std::abs(x.value));
-    if (extent == 0)
-        return bounded<Mode>(Scalar{});
-    int exponent;
-    std::frexp(extent, &exponent);
-    return bounded<Mode>(scaled<Mode>(
-        dot<Mode>(scaled<Mode>(a, -exponent), cross<Mode>(scaled<Mode>(b, -exponent), scaled<Mode>(c, -exponent))),
-        3 * exponent));
+    const auto determinant = ordinary_predicates::orientation(
+        {predicate_point(p[0]), predicate_point(p[1]), predicate_point(p[2]), predicate_point(p[3])});
+    (void) ordinary_predicates::require_sign(determinant);
+    return bounded<Mode>(Scalar(determinant.value));
 }
 
 template<ArithmeticMode Mode>
@@ -576,8 +601,25 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
             DynamicGeometryAccess::seal(relative.at(index), std::move(supports));
         }
     }
+    // This is an explicit native-authority import, not a numerical atom decode.
+    // Retain its original global point definitions so generated points can
+    // later identify native source edges, including independently rebuilt roots.
+    active_work->charge(relative.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
+    std::vector<std::shared_ptr<const DynamicPointProvenance>> identities;
+    identities.reserve(relative.size());
+    for (const auto& point : relative)
+    {
+        auto global = bounded<Mode>(ordinary_kernel::point<Mode>(point) + ordinary_kernel::point<Mode>(shell.origin));
+        const auto& supports = point.supports();
+        active_work->charge(1, sizeof(DynamicPointProvenance));
+        active_work->charge(supports.size(), sizeof(PlaneAuthority));
+        for (const auto& key : supports)
+            active_work->charge(key.key.size(), sizeof(std::uint64_t));
+        DynamicGeometryAccess::seal_represented_source(global, supports);
+        identities.push_back(DynamicGeometryAccess::identity(global));
+    }
     return DynamicConvexGeometryPtr(
-        new DynamicConvexGeometry(import<Mode>(shell.origin, relative, shell.outward_faces, limits, true)));
+        new DynamicConvexGeometry(import<Mode>(shell.origin, relative, shell.outward_faces, limits, true, identities)));
 }
 
 template<ArithmeticMode Mode>

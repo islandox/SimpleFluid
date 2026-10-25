@@ -314,8 +314,17 @@ TEST(BoundedConvexGeometryTest, OrdinaryStorageRetainsOneScalarAcrossGeometryAnd
 
     if (!SimpleFluid::PLIC::certification_environment())
         GTEST_SKIP() << "Bounded wider floating-point environment unavailable.";
-    const auto ordinary = Geometry<ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1}, geometry_limits(ordinary_mode));
-    const auto certified = cube();
+    // Match the source payload: the global Ordinary constructor also retains
+    // native-source identities, which are distinct from scalar storage cost.
+    std::array<SimpleFluid::PLIC::Point<ordinary_mode>, 8> ordinary_points;
+    std::array<SimpleFluid::PLIC::Point<certified_mode>, 8> certified_points;
+    for (std::size_t vertex = 0; vertex < 8; ++vertex)
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            ordinary_points[vertex].value[axis] = certified_points[vertex].value[axis] =
+                (vertex >> axis) & 1 ? 1.L : 0.L;
+    const Faces faces{{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}};
+    const auto ordinary = Geometry<ordinary_mode>::make_local({}, ordinary_points, faces, geometry_limits(ordinary_mode));
+    const auto certified = Geometry<certified_mode>::make_local({}, certified_points, faces, geometry_limits(certified_mode));
     EXPECT_LT(ordinary->storage_bytes(), certified->storage_bytes());
     EXPECT_EQ(ordinary->volume().value, 1);
     encloses(certified->volume(), 1);

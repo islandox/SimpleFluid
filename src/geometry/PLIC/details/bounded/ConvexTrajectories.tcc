@@ -34,6 +34,11 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
     }
     // An ordinary point packet defines a represented coordinate, not a
     // certified incidence with the source's retained construction supports.
+    // The public native-input boundary independently checked membership before
+    // entering this kernel. Only the exact represented input point is shared;
+    // no ordinary support keys or clipping provenance are imported.
+    active_work->charge(1, sizeof(DynamicPointProvenance));
+    DynamicGeometryAccess::seal_represented_source(result, {});
     return result;
 }
 

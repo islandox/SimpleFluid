@@ -47,7 +47,11 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
             active_work->charge(authority.key.size(), sizeof(std::uint64_t));
             supports.push_back(std::move(authority));
         }
-    DynamicGeometryAccess::seal(result, std::move(supports));
+    if (supports.empty())
+        reject("source point has no authenticated source-face membership.");
+    active_work->charge(1, sizeof(DynamicPointProvenance));
+    active_work->charge(supports.capacity(), sizeof(PlaneAuthority));
+    DynamicGeometryAccess::seal_represented_source(result, std::move(supports));
     return result;
 }
 

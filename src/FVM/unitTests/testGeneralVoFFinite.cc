@@ -1,5 +1,6 @@
 /** @file testGeneralVoFFinite.cc */
 #include "FVM/details/FiniteVoFTransport.hh"
+#include "FVM/details/GeneralVoF/ConstructionControls.tcc"
 #include "general_vof_finite_test_helpers.hh"
 namespace
 {
@@ -730,4 +731,161 @@ TEST(GeneralVoFFinite, TinyReceiptArithmeticRejectionPreservesAcceptedIndependen
         EXPECT_EQ(state.accumulated_phase_errors()[i].carrier, history[i].carrier);
     }
 }
+
+TEST(GeneralVoFFinite, ConstructionControlsBindEveryPinAndServeEmptyAuthorities)
+{
+    namespace controls = SimpleFluid::VoF::construction_controls;
+    namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
+    const auto input = fixture();
+    const auto comm = Tpetra::getDefaultComm();
+    const std::uint64_t id = std::min(2, comm->getSize() - 1);
+    const PLIC::GeometryPacketContext context{{101, 103, 107, 109}};
+    wire::Writer writer;
+    controls::header(writer, 1, id, context, ArithmeticMode::Ordinary);
+    writer.word(127);
+    controls::Records authority;
+    std::size_t retained = 0;
+    if (comm->getRank() == int(id))
+    {
+        authority.emplace(std::pair<std::uint64_t, std::uint64_t>{1, id}, writer.data);
+        retained = sizeof(controls::Records::value_type) + 4 * sizeof(void*) + writer.data.size();
+        if (comm->getSize() > 2)
+            EXPECT_TRUE(input.order.empty());
+    }
+    std::set<std::uint64_t> requested;
+    if (comm->getRank() == 0)
+        requested.insert(id);
+    const auto received = controls::request_records(
+        1, requested, authority, context, ArithmeticMode::Ordinary, comm, 64 * 1024, retained);
+    const bool complete = comm->getRank() == 0
+                              ? received.contains(id) && received.at(id) == writer.data && received.size() == 1
+                              : received.empty();
+    int local = complete, global = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local, &global);
+    EXPECT_EQ(global, 1);
+    if (!global)
+        return;
+    for (std::size_t pin = 0; pin < context.publication.size(); ++pin)
+    {
+        auto stale = context;
+        ++stale.publication[pin];
+        EXPECT_THROW((void) controls::request_records(
+                         1, requested, authority, stale, ArithmeticMode::Ordinary, comm, 64 * 1024, retained),
+            std::invalid_argument);
+    }
+    EXPECT_THROW((void) controls::request_records(
+                     1, requested, authority, context, ArithmeticMode::BoundedCertification, comm, 64 * 1024, retained),
+        std::invalid_argument);
+    auto unknown = requested;
+    if (comm->getRank() == 0)
+    {
+        unknown.clear();
+        unknown.insert(id + comm->getSize());
+    }
+    EXPECT_THROW((void) controls::request_records(
+                     1, unknown, authority, context, ArithmeticMode::Ordinary, comm, 64 * 1024, retained),
+        std::invalid_argument);
+    const std::size_t local_limit = comm->getRank() == 0 ? 1 : 64 * 1024;
+    EXPECT_THROW((void) controls::request_records(
+                     1, requested, authority, context, ArithmeticMode::Ordinary, comm, local_limit, retained),
+        std::invalid_argument);
+    EXPECT_EQ(authority.size(), comm->getRank() == int(id) ? 1u : 0u);
+}
+
+TEST(GeneralVoFFinite, ConstructionDependenciesBindDonorRecipientAndAdmittedHalo)
+{
+    namespace controls = SimpleFluid::VoF::construction_controls;
+    using Root = PLIC::ConstructionRootKey;
+    GeneralVoF::Data data;
+    auto topology = std::make_shared<GeneralVoF::Data::Topology>();
+    data.topology = topology;
+    GeneralVoF::Key donor{}, recipient{}, foreign{};
+    recipient.region = 1;
+    foreign.region = 2;
+    SimpleFluid::VoF::general_vof_detail::Cell cell;
+    cell.gid = 11;
+    cell.revision = 7;
+    cell.key = donor;
+    data.cells.emplace(donor, cell);
+    topology->by_gid.emplace(11, donor);
+    GeneralVoF::Data::FaceAuthority face;
+    face.first = recipient;
+    face.second = donor;
+    face.node_gids = {1, 2, 3};
+    topology->construction_faces.emplace(17, face);
+    Root native{Root::Kind::Native, 11, 7, 0, {}};
+    Root sweep{Root::Kind::Sweep, 17, 0, 0, {}};
+    EXPECT_NO_THROW(controls::admit_root(data, native, 11, 7, recipient));
+    EXPECT_NO_THROW(controls::admit_root(data, sweep, 11, 7, recipient));
+    EXPECT_THROW(controls::admit_root(data, native, 12, 7, recipient), std::invalid_argument);
+    EXPECT_THROW(controls::admit_root(data, native, 11, 8, recipient), std::invalid_argument);
+    EXPECT_THROW(controls::admit_root(data, sweep, 11, 7, foreign), std::invalid_argument);
+    sweep.entity = 99;
+    EXPECT_THROW(controls::admit_root(data, sweep, 11, 7, recipient), std::invalid_argument);
+    sweep.entity = 17;
+    sweep.slot = 9;
+    EXPECT_THROW(controls::admit_root(data, sweep, 11, 7, recipient), std::invalid_argument);
+    sweep.slot = 0;
+    sweep.revision = 1;
+    EXPECT_THROW(controls::admit_root(data, sweep, 11, 7, recipient), std::invalid_argument);
+    sweep.revision = 0;
+    sweep.identity = {'u', 'n', 't', 'r', 'u', 's', 't', 'e', 'd'};
+    EXPECT_THROW(controls::admit_root(data, sweep, 11, 7, recipient), std::invalid_argument);
+    sweep.identity.clear();
+    sweep.kind = Root::Kind::InputPlane;
+    EXPECT_THROW(controls::admit_root(data, sweep, 11, 7, recipient), std::invalid_argument);
+    sweep.kind = Root::Kind::LocalSource;
+    EXPECT_THROW(controls::admit_root(data, sweep, 11, 7, recipient), std::invalid_argument);
+
+    // Merely mentioning the donor as a cutting-plane source does not prove
+    // that the atom descends from that donor, even if the final coordinates fit.
+    using Geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+    const auto donor_geometry = Geometry::box({0, 0, 0}, {1, 1, 1});
+    const auto other_base = Geometry::box({0, 0, 0}, {2, 1, 1});
+    PLIC::ConstructionRegistry<ArithmeticMode::Ordinary> registry({{101, 103, 107, 109}});
+    registry.register_native(11, 7, donor_geometry);
+    registry.register_sweep(17, 0, other_base);
+    std::size_t right = donor_geometry->faces().size();
+    for (std::size_t f = 0; f < donor_geometry->faces().size(); ++f)
+        if (std::all_of(donor_geometry->faces()[f].begin(), donor_geometry->faces()[f].end(),
+                [&](auto vertex) { return donor_geometry->points()[vertex].value[0] == 1; }))
+            right = f;
+    ASSERT_LT(right, donor_geometry->faces().size());
+    const auto borrowed = other_base->clip_by_face(*donor_geometry, right, false).inside;
+    ASSERT_TRUE(borrowed);
+    const auto decoded = Geometry::decode(borrowed->encode(registry), registry);
+    ASSERT_TRUE(decoded);
+    EXPECT_THROW(controls::require_donor_ancestry(registry, *decoded, 11, 7), std::invalid_argument);
+    EXPECT_NO_THROW(controls::require_donor_ancestry(registry, *donor_geometry, 11, 7));
+}
+
+TEST(GeneralVoFFinite, MovingConstructionReplayPreservesControlsWithRankLocalByteBudgets)
+{
+    const auto input = fixture();
+    const auto comm = Tpetra::getDefaultComm();
+    GeneralVoFOptions options;
+    options.byte_budget = (32u + std::size_t(comm->getRank())) * 1024 * 1024;
+    options.sweep.byte_budget = (16u + std::size_t(comm->getRank())) * 1024 * 1024;
+    const GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto node_count = state.nodes().size(), face_count = state.tiles().size();
+    const auto trial = state.plan_transport(stationary(state), circulation(state), 1);
+    EXPECT_EQ(trial.finite_node_trajectories().size(), node_count);
+    EXPECT_EQ(trial.finite_face_chain_diagnostics().size(), face_count);
+    EXPECT_EQ(state.nodes().size(), node_count);
+    EXPECT_EQ(state.tiles().size(), face_count);
+    check_budget_diagnostics(state, trial);
+    const auto next = state.apply(trial);
+    double local[2]{}, global[2]{};
+    for (const auto& phases : next->phase_volumes())
+    {
+        EXPECT_GE(phases.gas, 0);
+        EXPECT_GE(phases.carrier, 0);
+        local[0] += phases.gas;
+        local[1] += phases.carrier;
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local, global);
+    EXPECT_NEAR(global[0], 1, 1e-14);
+    EXPECT_NEAR(global[1], 7, 1e-14);
+}
+
 } // namespace

@@ -1,6 +1,8 @@
 /** @file ordinary/ConvexGeometry.tcc
  * @brief Ordinary scalar geometry arithmetic and nominal-value conversion.
  */
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
+
 namespace SimpleFluid::PLIC::details
 {
 namespace ordinary_kernel SIMPLEFLUID_LOCAL
@@ -356,13 +358,17 @@ template<ArithmeticMode Mode> DynamicPoint converted_point(const DynamicPoint& i
 template<ArithmeticMode Mode> Scalar raw_distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane)
 {
     static_assert(Mode == kernel_mode);
-    // Move the plane anchor into the vertex frame before forming the small
-    // displacement. Moving the vertex into a distant plane frame first would
-    // lose thin-fragment coordinates in the addition to that distant anchor.
-    const auto local_anchor = transform<Mode>(plane->anchor, plane->frame, frame);
-    return dot<Mode>(
-               plane->normal, scaled<Mode>(vertex.coordinates - local_anchor, frame.exponent - plane->frame.exponent)) -
-           plane->offset;
+    const auto coordinates = [](const Point& point)
+    { return ordinary_predicates::Point{point[0].value, point[1].value, point[2].value}; };
+    // Keep both original frame origins and local coordinates in the predicate.
+    // A rounded world-coordinate conversion can erase a thin displacement
+    // before the determinant or dot product has an opportunity to compensate it.
+    const ordinary_predicates::FramedPoint point{coordinates(vertex.coordinates), frame.origin, frame.exponent};
+    const ordinary_predicates::FramedPoint anchor{
+        coordinates(plane->anchor), plane->frame.origin, plane->frame.exponent};
+    const auto result = ordinary_predicates::plane_distance(point, anchor, coordinates(plane->normal), plane->offset.value);
+    (void) ordinary_predicates::require_sign(result);
+    return Scalar(result.value);
 }
 
 template<ArithmeticMode Mode> Scalar distance(const Vertex& vertex, const Frame& frame, const PlanePtr& plane)

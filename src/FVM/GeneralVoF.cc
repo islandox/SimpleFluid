@@ -237,6 +237,19 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 if (hierarchy->owned().contains(tile.first) ||
                     (tile.second && hierarchy->owned().contains(*tile.second)))
                     topology->tiles.push_back(tile);
+                if constexpr (Mode != ArithmeticMode::Exact)
+                {
+                    budget.add(sizeof(Data::FaceAuthority) + sizeof(std::uint64_t) + 4 * sizeof(void*) +
+                               tile.domain.size() + tile.surface.size() + tile.identity.size() +
+                               tile.node_gids.size() * sizeof(std::uint64_t) +
+                               AMR::encode_adaptive_key(tile.first).size() +
+                               (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
+                    if (!topology->construction_faces
+                            .emplace(tile.face_gid, Data::FaceAuthority{tile.domain, tile.surface, tile.identity,
+                                                        tile.node_gids, tile.first, tile.second, tile.exterior})
+                            .second)
+                        throw std::invalid_argument("Finite VoF construction face identity is duplicated.");
+                }
             }
             // Preserve canonical tile order in every incidence row. Transport
             // sums and node-wall packets use this same order after publication.
@@ -319,16 +332,26 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                         throw std::invalid_argument("Finite VoF canonical node lacks an authenticated source fan.");
                     auto p = PLIC::source_point<Mode>(incident_sources, node.coordinate_identity).dynamic();
                     topology->finite_nodes.emplace(node.gid, std::move(p));
+                    budget.add(
+                        sizeof(std::uint64_t) + sizeof(AMR::AdaptiveBytes) + 4 * sizeof(void*) + node.identity.size());
+                    if (!topology->construction_nodes.emplace(node.gid, node.identity).second)
+                        throw std::invalid_argument("Finite VoF construction node identity is duplicated.");
                 }
+            const auto node_sources = [&](std::uint64_t node) -> const std::set<Key>&
+            {
+                if (const auto complete = topology->node_fans.find(node); complete != topology->node_fans.end())
+                    return complete->second;
+                return node_source_cells.at(node);
+            };
             std::map<std::uint64_t,
                 std::map<AMR::AdaptiveBytes, SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary>>>
                 walls;
             std::map<std::uint64_t, std::set<Key>> incident;
             for (const auto& tile : topology->draft.tiles)
                 for (auto node : tile.node_gids)
-                    if (control_nodes.contains(node))
+                    if (control_nodes.contains(node) || Mode != ArithmeticMode::Exact)
                     {
-                        const auto& fan = topology->node_fans.at(node);
+                        const auto& fan = node_sources(node);
                         for (const auto* key : {&tile.first, tile.second ? &*tile.second : nullptr})
                             if (key && fan.contains(*key) && incident[node].insert(*key).second)
                                 budget.add(sizeof(Key) + AMR::encode_adaptive_key(*key).size() + 4 * sizeof(void*));
@@ -347,12 +370,19 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                                 throw std::invalid_argument("General VoF canonical wall certificates differ.");
                         }
                     }
-            for (const auto& node : topology->nodes)
+            const auto& wall_nodes = [&]() -> const std::vector<AMR::AdaptiveNode>&
             {
-                if (incident[node.gid] != topology->node_fans.at(node.gid))
+                if constexpr (Mode == ArithmeticMode::Exact)
+                    return topology->nodes;
+                else
+                    return topology->draft.nodes;
+            }();
+            for (const auto& node : wall_nodes)
+            {
+                if (control_nodes.contains(node.gid) && incident[node.gid] != topology->node_fans.at(node.gid))
                     throw std::invalid_argument(
                         "General VoF wall catalog lacks a complete authenticated incident fan.");
-                for (const auto& key : topology->node_fans.at(node.gid))
+                for (const auto& key : node_sources(node.gid))
                     if (!leaves.contains(key))
                         throw std::invalid_argument("General VoF wall catalog requires full incident native shells.");
                 auto& retained = topology->node_walls[node.gid];

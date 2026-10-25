@@ -40,9 +40,14 @@ struct SIMPLEFLUID_LOCAL DynamicPointProvenance
     std::array<long double, 3> value, absolute_error;
     std::vector<PlaneAuthority> supports;
     ArithmeticMode arithmetic_mode;
-    /** Only explicit global-coordinate source constructors issue this marker.
-     * Rounded clipping/interpolation outputs do not acquire it implicitly. */
+    /** Explicit represented global-input identity in the selected finite mode.
+     * This is not native support, ownership or trial authority. Rounded or
+     * uncertain construction outputs do not acquire it implicitly. */
     bool represented_native_source = false;
+    bool constructed = false;
+    bool numerical_only = false;
+    std::shared_ptr<const DynamicPointProvenance> source_origin;
+    std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>> source_edges;
 };
 
 class SIMPLEFLUID_LOCAL DynamicGeometryAccess
@@ -54,8 +59,19 @@ public:
     static bool same_source(const DynamicPoint& a, const DynamicPoint& b);
     static void seal(DynamicPoint& point, std::vector<PlaneAuthority> supports);
     static void seal_represented_source(DynamicPoint& point);
+    static void seal_represented_source(DynamicPoint&, std::vector<PlaneAuthority>);
     static bool same_represented_source(
         const std::shared_ptr<const DynamicPointProvenance>&, const std::shared_ptr<const DynamicPointProvenance>&);
+    static std::shared_ptr<const DynamicPointProvenance> original_source(
+        std::shared_ptr<const DynamicPointProvenance>);
+    static void seal_export(DynamicPoint&, const std::shared_ptr<const DynamicPointProvenance>&,
+        std::vector<PlaneAuthority>, bool numerical_only = false);
+    static void seal_generated(DynamicPoint&,
+        std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>>,
+        std::vector<PlaneAuthority> = {}, bool numerical_only = false);
+    static void seal_numerical(DynamicPoint&);
+    static const std::shared_ptr<const DynamicConvexGeometry::Impl>& implementation(const DynamicConvexGeometry&);
+    static DynamicConvexGeometryPtr geometry(std::shared_ptr<const DynamicConvexGeometry::Impl>);
 };
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
@@ -128,6 +144,28 @@ struct Frame
     int exponent = 0;
 };
 
+struct GeometryConstruction;
+struct GeometryClipConstruction
+{
+    std::shared_ptr<const GeometryConstruction> parent;
+    std::shared_ptr<const void> plane;
+    std::vector<std::shared_ptr<const DynamicPointProvenance>> retained_points;
+    ArithmeticMode mode = ArithmeticMode::Ordinary;
+    int orientation = 1;
+    bool measure_section = false, construct_outside = true, partition_proof = false;
+};
+struct GeometryConstruction
+{
+    enum class Kind { Source, Clip, Rebase };
+    Kind kind = Kind::Source;
+    std::shared_ptr<const DynamicConvexGeometry::Impl> source;
+    std::vector<std::shared_ptr<const DynamicPointProvenance>> retained_points;
+    std::shared_ptr<const GeometryClipConstruction> clip;
+    bool outside = false;
+    std::shared_ptr<const GeometryConstruction> parent;
+    GeometryHalfspace rebase_input;
+};
+
 // Spatial coordinate ranges are not uncertainty scalars: keep their full extent
 // even when ordinary arithmetic uses only each point's nominal coordinates.
 struct CoordinateRange
@@ -166,6 +204,7 @@ template<ArithmeticMode Mode> struct StoredVertex
     std::vector<StoredPlanePtr<Mode>> incident;
     std::vector<PlaneAuthority> authorities;
     std::shared_ptr<const DynamicPointProvenance> source_identity;
+    bool numerical_only = false;
 };
 
 using Face = std::vector<std::size_t>;
@@ -222,8 +261,10 @@ struct SIMPLEFLUID_LOCAL DynamicConvexGeometry::Impl
     GeometryLimits limits;
     CoordinateBox bounds;
     bool partition_proof_only = false;
+    bool numerical_only = false;
     std::shared_ptr<const Ancestry> ancestry = std::make_shared<Ancestry>();
     std::shared_ptr<const PartitionCertificate> partition_certificate;
+    std::shared_ptr<const GeometryConstruction> construction;
 };
 
 namespace details
@@ -244,6 +285,17 @@ std::shared_ptr<const GeometryStorage<Mode>> checked_geometry_storage(
     require_mode(source->limits.arithmetic_mode, Mode);
     return std::static_pointer_cast<const GeometryStorage<Mode>>(source);
 }
+template<ArithmeticMode Mode>
+std::shared_ptr<const GeometryConstruction> construction_source(
+    const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
+std::size_t construction_storage_bytes(const std::shared_ptr<const GeometryConstruction>&);
+template<ArithmeticMode Mode>
+std::size_t geometry_allocation_footprint(const std::shared_ptr<const DynamicConvexGeometry::Impl>&);
+template<ArithmeticMode Mode>
+bool construction_edge_incident(const StoredVertex<Mode>&, const StoredPlanePtr<Mode>&);
+template<ArithmeticMode Mode>
+void preserve_crossing_incidence(StoredVertex<Mode>&, const StoredVertex<Mode>&, const StoredVertex<Mode>&,
+    const Frame&, bool numerical_only);
 } // namespace details
 
 } // namespace SimpleFluid::PLIC

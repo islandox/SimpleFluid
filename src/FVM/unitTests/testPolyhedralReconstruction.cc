@@ -5,6 +5,7 @@
 #include "FVM/GeometricVoF.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/PLIC/details/AngularFit.hh"
 #include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -372,7 +373,7 @@ TEST(PolyhedralReconstruction, FarMinoritySupportRetainsOffsetPrecisionForBothLa
                 static_cast<long double>(1e-6) * 8e-15);
         }
 }
-TEST(PolyhedralReconstruction, CoarseFinePassageMinorityFitDoesNotStallBetweenAdjacentOffsets)
+template<ArithmeticMode Mode> void coarse_fine_passage_minority_fit()
 {
     // Physical sample captured from the moving coarse/fine case. The old
     // cell-origin offset bracket exhausted adjacent binary64 offsets while its
@@ -380,21 +381,278 @@ TEST(PolyhedralReconstruction, CoarseFinePassageMinorityFitDoesNotStallBetweenAd
     const long double skew = static_cast<long double>(.6) - .5L;
     const std::array<std::array<long double, 3>, 8> normalized{{{0, 0, 0}, {-skew, -.5L, 0}, {.25L - skew, -.5L, 0},
         {.25L, 0, 0}, {0, 0, .5L}, {-skew, -.5L, .5L}, {.25L - skew, -.5L, .5L}, {.25L, 0, .5L}}};
-    std::array<PLIC::Point<ArithmeticMode::BoundedCertification>, 8> local;
+    std::array<PLIC::Point<Mode>, 8> local;
     for (std::size_t p = 0; p < local.size(); ++p)
         for (unsigned axis = 0; axis < 3; ++axis)
             local[p].value[axis] = normalized[p][axis] * .5L;
-    const auto geometry = BoundedGeometry::make_local(
+    const auto geometry = PLIC::ConvexCellGeometry<Mode>::make_local(
         {.6, .5, .5}, local, {{3, 2, 1, 0}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}});
-    const BoundedSample sample{geometry, 6.3984438984441292e-8, .0078124360155610159};
-    const auto fitted = PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::solve_offset(
+    const PLIC::PolyhedralPhaseSample<Mode> sample{geometry, 6.3984438984441292e-8, .0078124360155610159};
+    const auto fitted = PLIC::PolyhedralReconstruction<Mode>::solve_offset(
         sample, {.96128421995518143, .27109170276597788, .049415960545162486});
     const auto actual = geometry->phases(fitted.gas);
-    EXPECT_TRUE(actual.gas.relative_error_at_most(sample.gas_volume, 8e-15));
+    if constexpr (Mode == ArithmeticMode::BoundedCertification)
+        EXPECT_TRUE(actual.gas.relative_error_at_most(sample.gas_volume, 8e-15));
+    else
+        EXPECT_LE(std::abs(actual.gas.value - sample.gas_volume), static_cast<long double>(sample.gas_volume) * 8e-15);
     EXPECT_LE(
         std::abs(fitted.finite_target_volume_difference.value) + fitted.finite_target_volume_difference.absolute_error,
         static_cast<long double>(sample.gas_volume) * 8e-15);
     EXPECT_EQ(sample.carrier_volume, .0078124360155610159);
+    EXPECT_EQ(fitted.finite_target_volume_difference.arithmetic_mode, Mode);
+}
+
+TEST(PolyhedralReconstruction, CoarseFinePassageMinorityFitDoesNotStallBetweenAdjacentOffsets)
+{
+    if (!PLIC::certification_environment())
+        GTEST_SKIP() << "Bounded certification requires its supported FP environment.";
+    coarse_fine_passage_minority_fit<ArithmeticMode::BoundedCertification>();
+}
+
+TEST(PolyhedralReconstruction, OrdinaryCoarseFinePassageMinorityFitDoesNotStallBetweenAdjacentOffsets)
+{
+    coarse_fine_passage_minority_fit<ArithmeticMode::Ordinary>();
+}
+
+struct AngularEvaluation
+{
+    std::vector<double> residual;
+    double objective = 0;
+    long double objective_upper = 0;
+    unsigned stamp = 0;
+};
+using AngularVector = PLIC::angular_detail::Vector;
+AngularVector angular_unit(AngularVector value)
+{
+    const auto length = std::hypot(value[0], value[1], value[2]);
+    for (auto& component : value)
+        component /= length;
+    return value;
+}
+AngularEvaluation angular_model(AngularVector normal, double target_y, double target_z, unsigned stamp)
+{
+    normal = angular_unit(normal);
+    AngularEvaluation result{{normal[1] - target_y, normal[2] - target_z}, 0, 0, stamp};
+    for (const auto value : result.residual)
+        result.objective += value * value;
+    result.objective_upper = result.objective;
+    return result;
+}
+
+TEST(PolyhedralReconstruction, AngularOptionalUnresolvedTrialUsesSmallerStepWithoutChangingCurrent)
+{
+    namespace angular = PLIC::angular_detail;
+    AngularVector normal{1, 0, 0};
+    auto current = angular_model(normal, .2, 0, 0);
+    const auto old_normal = normal;
+    const auto old_residual = current.residual;
+    unsigned evaluations = 0;
+    const auto evaluate = [&](AngularVector trial)
+    {
+        ++evaluations; // The caller owns and charges every attempted evaluation.
+        EXPECT_EQ(normal, old_normal);
+        EXPECT_EQ(current.residual, old_residual);
+        EXPECT_EQ(current.stamp, 0u);
+        if (evaluations == 5)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, "unresolved trial");
+        return angular_model(trial, .2, 0, evaluations);
+    };
+    angular::Qualification qualification;
+    EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+        angular::IterationResult::Advanced);
+    EXPECT_EQ(evaluations, 6u);
+    EXPECT_EQ(current.stamp, 6u);
+    EXPECT_LT(current.objective, .04);
+    EXPECT_GT(normal[1], .09);
+    EXPECT_LT(normal[1], .11); // The half step, not the failed full step.
+}
+
+TEST(PolyhedralReconstruction, AngularFatalTrialsPropagateWithoutChangingCurrentOrTryingSmallerSteps)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const auto code : {PLIC::GeometryErrorCode::ResourceLimit, PLIC::GeometryErrorCode::ProvenanceMismatch,
+             PLIC::GeometryErrorCode::InvalidInput, PLIC::GeometryErrorCode::InvalidTopology})
+    {
+        SCOPED_TRACE(int(code));
+        AngularVector normal{1, 0, 0};
+        auto current = angular_model(normal, .2, 0, 0);
+        const auto old_normal = normal;
+        const auto old_residual = current.residual;
+        unsigned evaluations = 0;
+        const auto evaluate = [&](AngularVector trial)
+        {
+            if (++evaluations == 5)
+                throw PLIC::GeometryError(code, "unresolved-looking text must not select recovery");
+            return angular_model(trial, .2, 0, evaluations);
+        };
+        angular::Qualification qualification;
+        try
+        {
+            (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+            FAIL() << "Fatal angular trial was swallowed.";
+        }
+        catch (const PLIC::GeometryError& error)
+        {
+            EXPECT_EQ(error.code(), code);
+        }
+        EXPECT_EQ(evaluations, 5u);
+        EXPECT_EQ(normal, old_normal);
+        EXPECT_EQ(current.residual, old_residual);
+        EXPECT_EQ(current.stamp, 0u);
+    }
+    AngularVector normal{1, 0, 0};
+    auto current = angular_model(normal, .2, 0, 0);
+    unsigned evaluations = 0;
+    const auto untyped = [&](AngularVector trial)
+    {
+        if (++evaluations == 5)
+            throw std::invalid_argument("unresolved arithmetic");
+        return angular_model(trial, .2, 0, evaluations);
+    };
+    angular::Qualification qualification;
+    EXPECT_THROW((void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, untyped, angular_unit, qualification),
+        std::invalid_argument);
+    EXPECT_EQ(evaluations, 5u);
+    EXPECT_EQ(current.stamp, 0u);
+}
+
+TEST(PolyhedralReconstruction, AngularFailedTrialRemainsChargedWhenNextAttemptExhaustsBudget)
+{
+    namespace angular = PLIC::angular_detail;
+    AngularVector normal{1, 0, 0};
+    auto current = angular_model(normal, .2, 0, 0);
+    unsigned evaluations = 0;
+    const auto evaluate = [&](AngularVector trial)
+    {
+        if (evaluations++ >= 5)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+        if (evaluations == 5)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, "failed fifth evaluation");
+        return angular_model(trial, .2, 0, evaluations);
+    };
+    angular::Qualification qualification;
+    try
+    {
+        (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+        FAIL() << "Budget exhaustion was swallowed.";
+    }
+    catch (const PLIC::GeometryError& error)
+    {
+        EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+    }
+    EXPECT_EQ(evaluations, 6u);
+    EXPECT_EQ(normal, (AngularVector{1, 0, 0}));
+    EXPECT_EQ(current.stamp, 0u);
+}
+
+TEST(PolyhedralReconstruction, AngularQualificationRetriesOnlyArithmeticAndUsesActualProbeStep)
+{
+    namespace angular = PLIC::angular_detail;
+    const AngularVector normal{1, 0, 0}, tangent{0, 1, 0}, second{0, 0, 1};
+    const std::array residual{.2, .4};
+    unsigned evaluations = 0;
+    const auto evaluate = [&](AngularVector trial)
+    {
+        if (++evaluations == 2)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, "second probe unresolved");
+        return AngularEvaluation{{2 * trial[1], 4 * trial[2]}};
+    };
+    const auto qualification = angular::qualify_normal(normal, tangent, second, residual, 1e8, evaluate);
+    EXPECT_EQ(evaluations, 6u); // Two first-step attempts, then a complete smaller-step quartet.
+    EXPECT_EQ(qualification.probe_step, 5e-5);
+    EXPECT_NEAR(qualification.first_step, -.1, 1e-15);
+    EXPECT_NEAR(qualification.second_step, -.1, 1e-15);
+    EXPECT_NEAR(qualification.condition, 4, 1e-14);
+
+    evaluations = 0;
+    const auto fatal = [&](AngularVector trial)
+    {
+        if (++evaluations == 2)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "probe budget exhausted");
+        return AngularEvaluation{{trial[1], trial[2]}};
+    };
+    EXPECT_THROW((void) angular::qualify_normal(normal, tangent, second, residual, 1e8, fatal), PLIC::GeometryError);
+    EXPECT_EQ(evaluations, 2u);
+}
+
+TEST(PolyhedralReconstruction, AngularConvergenceStillRequiresObservableCurrentNormal)
+{
+    namespace angular = PLIC::angular_detail;
+    AngularVector normal{1, 0, 0};
+    auto current = angular_model(normal, 0, 0, 0);
+    unsigned evaluations = 0;
+    const auto observable = [&](AngularVector trial)
+    {
+        if (++evaluations > 4)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, "unused optional trial");
+        return angular_model(trial, 0, 0, evaluations);
+    };
+    angular::Qualification qualification;
+    EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, observable, angular_unit, qualification),
+        angular::IterationResult::Converged);
+    EXPECT_EQ(evaluations, 4u);
+    EXPECT_EQ(current.stamp, 0u);
+    evaluations = 0;
+    const auto unobservable = [&](AngularVector)
+    {
+        ++evaluations;
+        return AngularEvaluation{{0, 0}};
+    };
+    EXPECT_THROW((void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, unobservable, angular_unit, qualification),
+        std::invalid_argument);
+    EXPECT_EQ(evaluations, 4u); // Computed rank failure does not retry another h.
+    EXPECT_EQ(current.stamp, 0u);
+}
+
+TEST(PolyhedralReconstruction, AngularQualificationLimitsProbeRetriesAndRetainsSignalGate)
+{
+    namespace angular = PLIC::angular_detail;
+    const AngularVector normal{1, 0, 0}, tangent{0, 1, 0}, second{0, 0, 1};
+    const std::array residual{0., 0.};
+    std::vector<double> attempted;
+    const auto unresolved = [&](AngularVector trial) -> AngularEvaluation
+    {
+        attempted.push_back(std::max(std::abs(trial[1]), std::abs(trial[2])));
+        throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, "all probe steps unresolved");
+    };
+    EXPECT_THROW(
+        (void) angular::qualify_normal(normal, tangent, second, residual, 1e8, unresolved), PLIC::GeometryError);
+    EXPECT_EQ(attempted, (std::vector<double>{1e-4, 5e-5, 2.5e-5}));
+    unsigned evaluations = 0;
+    const double signal = .75 * std::sqrt(2.) * 64 * std::numeric_limits<double>::epsilon() / 5e-5;
+    const auto weak_signal = [&](AngularVector trial)
+    {
+        if (++evaluations == 1)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, "first probe unresolved");
+        return AngularEvaluation{{signal * trial[1], signal * trial[2]}};
+    };
+    EXPECT_THROW(
+        (void) angular::qualify_normal(normal, tangent, second, residual, 1e8, weak_signal), std::invalid_argument);
+    EXPECT_EQ(evaluations, 5u); // The signal gate uses h=5e-5 and remains fatal.
+}
+
+TEST(PolyhedralReconstruction, OrdinaryOffsetIterationAndClipBudgetsRemainFatal)
+{
+    const auto sample = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .3);
+    for (const bool clips : {false, true})
+    {
+        PLIC::PolyhedralReconstructionOptions options;
+        if (clips)
+            options.maximum_clip_evaluations = 1;
+        else
+            options.maximum_offset_iterations = 1;
+        try
+        {
+            (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(sample, {1, 0, 0}, options);
+            FAIL() << "Insufficient offset work budget was accepted.";
+        }
+        catch (const PLIC::GeometryError& error)
+        {
+            EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+        }
+        EXPECT_EQ(sample.gas_volume, .3);
+        EXPECT_EQ(sample.carrier_volume, .7);
+    }
 }
 
 } // namespace

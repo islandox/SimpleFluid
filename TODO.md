@@ -1660,9 +1660,18 @@ the specified focused coverage, not production or application qualification.
       Preserve ordinary-volume signed support, complementary fits and phase-aware
       accuracy. No exact result for each positive intermediate piece is required;
       bounded aggregate accounting must retain all contributions without mass loss.
-- [ ] Preserve generated shared-edge/contact incidence through complementary cuts
-      and authenticated trial packets; qualify determinant permutation invariance,
-      defining-plane admission and recoverable optional PLIC trials together.
+- [x] Retain generated source-edge incidence and authenticated construction replay,
+      with focused finite predicate, planar-admission, optional PLIC trial and
+      serial/MPI transport coverage. Account shared immutable allocations once
+      without increasing construction caps. Full physical horizons remain open.
+- [ ] Add private structural split finalization before bounded approximation:
+      canonicalize proven identities, preserve contacts and shared cap topology,
+      and support one deterministic reconstruction attempt. Preserve inside-only
+      operations without requiring an unused sibling measure.
+- [ ] Admit contact-like computational-fragment coalescence only through explicit
+      conservative bounds and shared existing face/cell/phase budgets. Keep face
+      streams, donor/recipient inventories, momentum and replay consistent; retain
+      independent moment/section requirements for surface-sensitive consumers.
 - [ ] Replace full retained-donor and route scans with conservative spatial
       candidates and donor indexing; reuse overlay buffers and measure local work
       scaling without changing cumulative construction-budget semantics.

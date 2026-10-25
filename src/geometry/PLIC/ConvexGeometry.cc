@@ -1,4 +1,5 @@
 #include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/GeometryError.hh"
 
 #include "geometry/PLIC/details/bounded/ConvexGeometry.tcc"
 #include "geometry/PLIC/details/ordinary/ConvexGeometry.tcc"
@@ -18,6 +19,13 @@ const std::vector<PlaneAuthority>& DynamicPoint::supports() const
 namespace SimpleFluid::PLIC::details
 {
 thread_local GeometryStatistics statistics;
+
+[[noreturn]] void resource_failure(ArithmeticMode mode, std::string_view reason)
+{
+    ++statistics.rejections;
+    const char* prefix = mode == ArithmeticMode::Ordinary ? "Ordinary FP geometry: " : "Bounded FP geometry: ";
+    throw GeometryError(GeometryErrorCode::ResourceLimit, std::string(prefix) + std::string(reason));
+}
 
 [[noreturn]] void reject(ArithmeticMode mode, std::string_view reason)
 {
@@ -83,9 +91,26 @@ std::size_t DynamicGeometryAccess::identity_bytes(const std::shared_ptr<const Dy
 {
     if (!p)
         return 0;
-    std::size_t bytes = sizeof(DynamicPointProvenance) + p->supports.capacity() * sizeof(PlaneAuthority);
-    for (const auto& key : p->supports)
-        bytes += key.key.capacity() * sizeof(std::uint64_t);
+    std::size_t bytes = 0;
+    std::set<const DynamicPointProvenance*> visited;
+    std::vector<std::shared_ptr<const DynamicPointProvenance>> pending{p};
+    for (std::size_t i = 0; i < pending.size(); ++i)
+    {
+        const auto point = pending[i];
+        if (!point || !visited.insert(point.get()).second)
+            continue;
+        bytes += sizeof(DynamicPointProvenance) + point->supports.capacity() * sizeof(PlaneAuthority) +
+                 point->source_edges.capacity() * sizeof(point->source_edges.front());
+        for (const auto& key : point->supports)
+            bytes += key.key.capacity() * sizeof(std::uint64_t);
+        if (point->source_origin)
+            pending.push_back(point->source_origin);
+        for (const auto& edge : point->source_edges)
+        {
+            pending.push_back(edge[0]);
+            pending.push_back(edge[1]);
+        }
+    }
     return bytes;
 }
 } // namespace SimpleFluid::PLIC
@@ -97,9 +122,7 @@ std::size_t DynamicGeometryAccess::storage_bytes(const DynamicPoint& p)
     std::size_t bytes = sizeof(DynamicPoint);
     if (p.provenance_)
     {
-        bytes += sizeof(DynamicPointProvenance) + p.provenance_->supports.capacity() * sizeof(PlaneAuthority);
-        for (const auto& key : p.provenance_->supports)
-            bytes += key.key.capacity() * sizeof(std::uint64_t);
+        bytes += identity_bytes(p.provenance_);
     }
     return bytes;
 }
@@ -125,6 +148,77 @@ void DynamicGeometryAccess::seal(DynamicPoint& point, std::vector<PlaneAuthority
     point.provenance_ = std::make_shared<DynamicPointProvenance>(
         DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
 }
+
+std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::original_source(
+    std::shared_ptr<const DynamicPointProvenance> point)
+{
+    // Immutable exports point only to an earlier construction. Packet replay
+    // validates dependency order before any such links are created.
+    while (point && point->source_origin)
+    {
+        if (point->numerical_only || point->source_origin->arithmetic_mode != point->arithmetic_mode)
+            return {};
+        if (active_work)
+            active_work->pair();
+        point = point->source_origin;
+    }
+    return point && !point->numerical_only ? point : nullptr;
+}
+
+void DynamicGeometryAccess::seal_export(DynamicPoint& point,
+    const std::shared_ptr<const DynamicPointProvenance>& source, std::vector<PlaneAuthority> supports,
+    bool numerical_only)
+{
+    if (numerical_only || (source && source->numerical_only))
+    {
+        seal_numerical(point);
+        return;
+    }
+    std::sort(supports.begin(), supports.end());
+    supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
+    auto record = std::make_shared<DynamicPointProvenance>(
+        DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
+    record->constructed = !source || source->constructed || source->value != point.value ||
+                          source->absolute_error != point.absolute_error;
+    record->source_origin = source;
+    point.provenance_ = std::move(record);
+}
+
+void DynamicGeometryAccess::seal_generated(DynamicPoint& point,
+    std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>> edges,
+    std::vector<PlaneAuthority> supports, bool numerical_only)
+{
+    if (numerical_only)
+    {
+        seal_numerical(point);
+        return;
+    }
+    auto record = std::make_shared<DynamicPointProvenance>(
+        DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
+    record->constructed = true;
+    record->source_edges = std::move(edges);
+    point.provenance_ = std::move(record);
+}
+
+void DynamicGeometryAccess::seal_numerical(DynamicPoint& point)
+{
+    auto record = std::make_shared<DynamicPointProvenance>(
+        DynamicPointProvenance{point.value, point.absolute_error, {}, point.arithmetic_mode});
+    record->constructed = true;
+    record->numerical_only = true;
+    point.provenance_ = std::move(record);
+}
+
+const std::shared_ptr<const DynamicConvexGeometry::Impl>& DynamicGeometryAccess::implementation(
+    const DynamicConvexGeometry& geometry)
+{
+    return geometry.impl_;
+}
+
+DynamicConvexGeometryPtr DynamicGeometryAccess::geometry(std::shared_ptr<const DynamicConvexGeometry::Impl> impl)
+{
+    return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(impl)));
+}
 } // namespace SimpleFluid::PLIC
 
 namespace SimpleFluid::PLIC::details
@@ -141,13 +235,13 @@ Work::Work(GeometryLimits requested) : limits(requested)
         const auto checked_add = [this](std::size_t a, std::size_t b)
         {
             if (b > std::numeric_limits<std::size_t>::max() - a)
-                reject(limits.arithmetic_mode, "derived scalar-work guard overflow.");
+                resource_failure(limits.arithmetic_mode, "derived scalar-work guard overflow.");
             return a + b;
         };
         const auto checked_multiply = [this](std::size_t a, std::size_t b)
         {
             if (b && a > std::numeric_limits<std::size_t>::max() / b)
-                reject(limits.arithmetic_mode, "derived scalar-work guard overflow.");
+                resource_failure(limits.arithmetic_mode, "derived scalar-work guard overflow.");
             return a * b;
         };
         const auto v = limits.maximum_vertices, f = limits.maximum_faces;
@@ -162,7 +256,7 @@ namespace SimpleFluid::PLIC::details
 void Work::charge(std::size_t count, std::size_t size)
 {
     if (size && count > (limits.byte_budget - bytes) / size)
-        reject(limits.arithmetic_mode, "construction storage cap exhausted.");
+        resource_failure(limits.arithmetic_mode, "construction storage cap exhausted.");
     bytes += count * size;
 }
 } // namespace SimpleFluid::PLIC::details
@@ -172,7 +266,7 @@ namespace SimpleFluid::PLIC::details
 void Work::pair()
 {
     if (++pairs > limits.maximum_pair_tests)
-        reject(limits.arithmetic_mode, "pair-test cap exhausted.");
+        resource_failure(limits.arithmetic_mode, "pair-test cap exhausted.");
 }
 } // namespace SimpleFluid::PLIC::details
 
@@ -188,7 +282,7 @@ Operation::Operation(GeometryLimits limits) : work(limits), previous(active_work
     if (limits.arithmetic_mode == ArithmeticMode::BoundedCertification && !certification_environment())
         reject(limits.arithmetic_mode, "unsupported floating-point environment; no exact fallback.");
     if (!limits.maximum_vertices || !limits.maximum_faces || !limits.maximum_pair_tests || !limits.byte_budget)
-        reject(limits.arithmetic_mode, "zero resource cap.");
+        resource_failure(limits.arithmetic_mode, "zero resource cap.");
     if (!previous)
     {
         active_work = &work;
@@ -201,20 +295,34 @@ namespace SimpleFluid::PLIC
 {
 void DynamicGeometryAccess::seal_represented_source(DynamicPoint& point)
 {
-    auto supports = point.supports();
+    seal_represented_source(point, point.supports());
+}
+void DynamicGeometryAccess::seal_represented_source(DynamicPoint& point, std::vector<PlaneAuthority> supports)
+{
+    std::sort(supports.begin(), supports.end());
+    supports.erase(std::unique(supports.begin(), supports.end()), supports.end());
     const bool represented =
-        point.arithmetic_mode == ArithmeticMode::Ordinary && point.absolute_error == std::array<long double, 3>{};
+        (point.arithmetic_mode == ArithmeticMode::Ordinary || point.arithmetic_mode == ArithmeticMode::BoundedCertification) &&
+        point.absolute_error == std::array<long double, 3>{} &&
+        std::all_of(point.value.begin(), point.value.end(), [](long double x) { return std::isfinite(x); });
     point.provenance_ = std::make_shared<DynamicPointProvenance>(DynamicPointProvenance{
         point.value, point.absolute_error, std::move(supports), point.arithmetic_mode, represented});
 }
 bool DynamicGeometryAccess::same_represented_source(
     const std::shared_ptr<const DynamicPointProvenance>& a, const std::shared_ptr<const DynamicPointProvenance>& b)
 {
-    // Native source coordinates are themselves the represented authority.
-    // This comparison never promotes an arbitrary rounded construction token.
-    return a && b &&
-           (a == b || (a->represented_native_source && b->represented_native_source &&
-                          a->arithmetic_mode == ArithmeticMode::Ordinary &&
-                          b->arithmetic_mode == ArithmeticMode::Ordinary && a->value == b->value));
+    // Explicit exact represented-input triples identify a point, not a native
+    // support, ownership, epoch or trial. Generated/uncertain inputs do not
+    // acquire this relation merely because their nominal coordinates agree.
+    if ((a && a->numerical_only) || (b && b->numerical_only) ||
+        (a && b && a->arithmetic_mode != b->arithmetic_mode))
+        return false;
+    const auto first = original_source(a), second = original_source(b);
+    return first && second &&
+           (first == second || (first->represented_native_source && second->represented_native_source &&
+                                   !first->constructed && !second->constructed &&
+                                   first->arithmetic_mode == second->arithmetic_mode &&
+                                   first->absolute_error == std::array<long double, 3>{} &&
+                                   second->absolute_error == std::array<long double, 3>{} && first->value == second->value));
 }
 } // namespace SimpleFluid::PLIC

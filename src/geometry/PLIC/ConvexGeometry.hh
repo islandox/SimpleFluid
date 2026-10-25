@@ -14,6 +14,7 @@
 
 namespace SimpleFluid::PLIC
 {
+template<ArithmeticMode> class ConstructionRegistry;
 namespace details
 {
 class NativeSupportAccess;
@@ -171,6 +172,7 @@ private:
     template<ArithmeticMode> friend class details::ordinary_kernel::PartitionKernel;
     template<ArithmeticMode> friend class details::certification_kernel::PartitionKernel;
     template<ArithmeticMode> friend class ConvexCellGeometry;
+    friend class DynamicGeometryAccess;
     explicit DynamicConvexGeometry(std::shared_ptr<const Impl>);
     std::shared_ptr<const Impl> impl_;
 };
@@ -316,6 +318,11 @@ public:
         const GeometryPacketContext& context, std::size_t byte_budget = 64 * 1024 * 1024) const;
     [[nodiscard]] static ConvexGeometryPtr<Mode> decode(std::span<const char>, const GeometryPacketContext&,
         std::span<const ConvexGeometryPtr<Mode>> authenticated_sources, GeometryLimits = {});
+    /** Version 4 preserves authenticated construction incidence by replay. */
+    [[nodiscard]] std::vector<char> encode(
+        const ConstructionRegistry<Mode>&, std::size_t byte_budget = 64 * 1024 * 1024) const;
+    [[nodiscard]] static ConvexGeometryPtr<Mode> decode(
+        std::span<const char>, const ConstructionRegistry<Mode>&, GeometryLimits = {});
     [[nodiscard]] const void* storage_identity() const noexcept { return geometry_->storage_identity(); }
     /** Retained payload plus both typed and runtime-adapter wrappers; shared
      * control blocks and allocator overhead are excluded. */

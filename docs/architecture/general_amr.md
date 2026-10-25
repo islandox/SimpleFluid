@@ -1408,6 +1408,28 @@ starts a new ancestry root, and packet decoding does not inherit sender-local
 certificates. Independently built recipient arrangements and decoded geometry
 retain generic validation wherever no authenticated construction proof exists.
 
+Finite transport v4 packets reconstruct their geometry from independently
+registered native cells and canonical sweep controls. The registry binds all
+four transaction pins, arithmetic mode, dependency order and the replayed
+numerical shell. A donor atom must descend from its declared donor; naming that
+donor only as a cutting-plane dependency is insufficient. Numerical-only legacy
+packets cannot become construction authority. Replay rebuilds local provenance;
+it does not import sender-local certificate pointers. Missing sweep roots use
+canonical face/node control exchanges, including on empty owners.
+
+Generated crossings retain authenticated source-edge and support incidence
+through complementary cuts and replay. Nearby coordinates alone do not prove
+identity. Ordinary compensated predicates bound evaluation on represented inputs;
+they do not certify that rounded construction coordinates represent the intended
+intersection. A resolved negative measured volume therefore still rejects.
+
+Immutable geometry allocation accounting counts shared owners and their buffers
+once per construction work scope. Strong pins prevent address reuse from hiding
+later allocations. Charges for distinct owners, bookkeeping and temporary buffers
+remain cumulative; rejected admission poisons that scope. This is tracked payload
+accounting, not RSS or a numerical-error ledger. It retains allocations until the
+scope ends and does not enlarge byte, pair or atom limits.
+
 For independently intersected finite pieces, containment and pairwise interior
 disjointness are checked before completeness. If independent measure intervals
 cannot establish the original closure budget, bounded complementary subtraction
@@ -1591,6 +1613,11 @@ original construction, and cannot manufacture a coverage or owner certificate.
 Keep rational measure/construction objects out of finite-path caches and MPI
 payloads; exchange canonical FP values, their error evidence and discrete identity.
 Do not silently adopt an exact-policy state or capsule into the finite path.
+Optional PLIC angular trials may backtrack only on typed unresolved arithmetic.
+Required current-normal qualification uses a fixed finite-difference retry list;
+conditioning, observability and final fit requirements remain independent gates.
+All attempted evaluations consume the same work budget. Invalid input/topology,
+resource exhaustion and model failures are not recoverable arithmetic trials.
 Retries must not erase history, enlarge resource caps or hide malformed input.
 Changes to work/storage accounting semantics need an explicit contract as well
 as unchanged limit values.

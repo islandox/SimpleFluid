@@ -4,6 +4,7 @@
 #pragma once
 #include "FVM/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -20,6 +21,7 @@ struct Work
     ArithmeticMode arithmetic_mode = ArithmeticMode::BoundedCertification;
     double volume_tolerance = 8e-15;
     std::size_t bytes = 0, pair_tests = 0;
+    PLIC::GeometryAllocationLedger allocations;
     void charge(std::size_t n)
     {
         if (n > limits.byte_budget - std::min(bytes, limits.byte_budget))
@@ -51,7 +53,7 @@ struct Work
     template<ArithmeticMode Mode> void created(const GeometryPtr<Mode>& p, const GeometryPtr<Mode>& source = {})
     {
         if (!source || p->storage_identity() != source->storage_identity())
-            charge(p->storage_bytes());
+            allocations.retain<Mode>(p, bytes, limits.byte_budget);
         else
             charge(sizeof(Geometry<Mode>) + sizeof(PLIC::DynamicConvexGeometry));
     }

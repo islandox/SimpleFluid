@@ -2,6 +2,7 @@
  * @brief Resolution admission and mode-selected finite PLIC reconstruction.
  */
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include <algorithm>
 #include <array>
@@ -268,8 +269,10 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
         result.gas.offset = result.pure_gas ? hi : lo;
         return result;
     }
-    if (!(hi > lo))
-        throw std::invalid_argument("Finite PLIC support bracket is unresolved.");
+    if (hi < lo)
+        throw GeometryError(GeometryErrorCode::InvalidTopology, "Finite PLIC support bracket is inverted.");
+    if (hi == lo)
+        throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, "Finite PLIC support bracket is unresolved.");
     const long double requested = gas ? sample.gas_volume : sample.carrier_volume;
     const long double allowed = fit_allowance<Mode>(requested, options.volume_tolerance);
     const auto bulk = sample.geometry->volume();
@@ -278,11 +281,13 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
     if (!(offset > lo && offset < hi))
         offset = std::midpoint(lo, hi);
     long double best_bound = infinity;
-    bool have_best = false;
+    bool have_best = false, arithmetic_stalled = false;
+    unsigned offset_iterations = 0;
     for (unsigned iteration = 0; iteration < options.maximum_offset_iterations; ++iteration)
     {
+        ++offset_iterations;
         if (evaluations++ >= options.maximum_clip_evaluations)
-            throw std::invalid_argument("Finite PLIC clip evaluation budget exhausted.");
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Finite PLIC clip evaluation budget exhausted.");
         auto plane = result.gas;
         plane.offset = offset;
         const auto phases = sample.geometry->phases(plane);
@@ -316,20 +321,30 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
                 hi = offset;
         }
         else
+        {
+            arithmetic_stalled = true;
             break;
+        }
         if (std::nextafter(lo, hi) >= hi)
+        {
+            arithmetic_stalled = true;
             break;
+        }
         offset = std::midpoint(lo, hi);
     }
     if (!have_best || best_bound > allowed)
     {
         std::ostringstream message;
         message.precision(std::numeric_limits<long double>::max_digits10);
-        message << "Finite PLIC arithmetic cannot establish the original target-volume tolerance: target=" << requested
-                << ", residual=" << result.finite_target_volume_difference.value
+        const bool exhausted = offset_iterations >= options.maximum_offset_iterations;
+        message << (exhausted ? "Finite PLIC offset iteration budget exhausted before target-volume acceptance: target="
+                              : "Finite PLIC arithmetic cannot establish the original target-volume tolerance: target=")
+                << requested << ", residual=" << result.finite_target_volume_difference.value
                 << ", radius=" << result.finite_target_volume_difference.absolute_error << ", bound=" << best_bound
                 << ", allowed=" << allowed << ", bracket=[" << lo << "," << hi << "].";
-        throw std::invalid_argument(message.str());
+        throw GeometryError(!exhausted && arithmetic_stalled ? GeometryErrorCode::UnresolvedArithmetic
+                                                             : GeometryErrorCode::ResourceLimit,
+            message.str());
     }
     return result;
 }
@@ -489,7 +504,7 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
             const auto& sample = stencil[i];
             const bool gas = sample.gas_volume <= sample.carrier_volume;
             if (evaluations++ >= options.maximum_clip_evaluations)
-                throw std::invalid_argument("Finite PLIC clip evaluation budget exhausted.");
+                throw GeometryError(GeometryErrorCode::ResourceLimit, "Finite PLIC clip evaluation budget exhausted.");
             const auto phases = sample.geometry->phases(value.plane.gas);
             const auto residual =
                 difference<Mode>(gas ? phases.gas : phases.carrier, gas ? sample.gas_volume : sample.carrier_volume);
@@ -516,64 +531,18 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     for (unsigned iteration = 0; iteration < options.maximum_fit_iterations; ++iteration)
     {
         iterations = iteration + 1;
-        Vector axis = std::abs(normal[0]) < .8 ? Vector{1, 0, 0} : Vector{0, 1, 0};
-        Vector tangent = unit(
-            minus(axis, {normal[0] * dot(axis, normal), normal[1] * dot(axis, normal), normal[2] * dot(axis, normal)}));
-        Vector second{normal[1] * tangent[2] - normal[2] * tangent[1], normal[2] * tangent[0] - normal[0] * tangent[2],
-            normal[0] * tangent[1] - normal[1] * tangent[0]};
-        constexpr double h = 1e-4;
-        Vector a = normal, b = normal, am = normal, bm = normal;
-        for (unsigned i = 0; i < 3; ++i)
-        {
-            a[i] += h * tangent[i];
-            b[i] += h * second[i];
-            am[i] -= h * tangent[i];
-            bm[i] -= h * second[i];
-        }
-        auto ea = evaluate(a), eb = evaluate(b), ema = evaluate(am), emb = evaluate(bm);
-        double aa = 0, ab = 0, bb = 0, ra = 0, rb = 0;
-        for (std::size_t i = 0; i < stencil.size(); ++i)
-        {
-            double da = (ea.residual[i] - ema.residual[i]) / (2 * h), db = (eb.residual[i] - emb.residual[i]) / (2 * h);
-            aa += da * da;
-            ab += da * db;
-            bb += db * db;
-            ra += da * current.residual[i];
-            rb += db * current.residual[i];
-        }
-        const double det = aa * bb - ab * ab;
-        if (!(det > std::numeric_limits<double>::epsilon() * aa * bb))
-            throw std::invalid_argument("PLIC volume-fit orientation is underdetermined.");
-        const double largest = .5 * (aa + bb + std::hypot(aa - bb, 2 * ab)), smallest = det / largest;
-        if (largest / smallest > options.maximum_condition ||
-            std::sqrt(smallest / stencil.size()) <= 64 * std::numeric_limits<double>::epsilon() / h)
-            throw std::invalid_argument("PLIC clipped-volume orientation is ill-conditioned or unobservable.");
-        condition = std::max(condition, largest / smallest);
-        const double da = (-bb * ra + ab * rb) / det, db = (ab * ra - aa * rb) / det;
-        last_step = std::hypot(da, db);
-        if (std::sqrt(current.objective_upper / stencil.size()) <= options.fit_tolerance ||
-            last_step <= options.orientation_tolerance)
+        angular_detail::Qualification qualification;
+        const auto status = angular_detail::advance(
+            normal, current, options.maximum_condition, options.fit_tolerance, options.orientation_tolerance, evaluate,
+            [](Vector value) { return unit(value); }, qualification);
+        condition = std::max(condition, qualification.condition);
+        last_step = qualification.step;
+        if (status == angular_detail::IterationResult::Converged)
         {
             converged = true;
             break;
         }
-        bool accepted = false;
-        for (double scale = 1; scale >= 1. / 128; scale *= .5)
-        {
-            Vector trial = normal;
-            for (unsigned i = 0; i < 3; ++i)
-                trial[i] += scale * (da * tangent[i] + db * second[i]);
-            trial = unit(trial);
-            auto next = evaluate(trial);
-            if (next.objective < current.objective)
-            {
-                normal = trial;
-                current = std::move(next);
-                accepted = true;
-                break;
-            }
-        }
-        if (!accepted)
+        if (status == angular_detail::IterationResult::Stalled)
             throw std::invalid_argument("PLIC angular volume optimizer did not reach stationarity.");
     }
     current.plane.stencil_volume_residual = static_cast<double>(std::sqrt(current.objective_upper / stencil.size()));
@@ -582,7 +551,8 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     current.plane.fit_iterations = iterations;
     current.plane.fit_converged = converged;
     if (!converged)
-        throw std::invalid_argument("PLIC angular volume optimizer iteration budget exhausted.");
+        throw GeometryError(
+            GeometryErrorCode::ResourceLimit, "PLIC angular volume optimizer iteration budget exhausted.");
     if (current.plane.stencil_volume_residual > options.maximum_model_residual)
     {
         resolution.reason = PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel;

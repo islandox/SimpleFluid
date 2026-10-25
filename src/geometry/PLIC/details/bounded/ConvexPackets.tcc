@@ -117,6 +117,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
         if (reader.word() != pin)
             reject("stale or foreign numerical geometry publication/trial pins.");
     auto result = std::make_shared<Impl>();
+    result->numerical_only = true;
     result->frame = reader.frame();
     const auto reference = reader.frame();
     if (reference.exponent != 0)
@@ -190,6 +191,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::decode(std::span<const char> pack
     for (std::size_t i = 0; i < vertices; ++i)
     {
         Vertex vertex;
+        vertex.numerical_only = true;
         vertex.coordinates = reader.coordinates();
         const auto count = reader.count(plane_count, sizeof(std::uint64_t));
         std::set<std::size_t> distinct;
