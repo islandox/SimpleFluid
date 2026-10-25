@@ -132,17 +132,19 @@ TEST(PolyhedralAMRTest, ActualPartitionPinsResidentIdentityAndMixedRegionsReject
 
 TEST(PolyhedralAMRTest, SliverCandidateRejectsWithoutPublishingAnyChildren)
 {
-    const auto cube = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
-    const auto root = cube->clip(GeometryHalfspace{{1, 1, 1e-8}, {0, 0, 0}, 1 + 1e-8}).inside;
+    const auto cube =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
+    const auto root = cube->clip(SimpleFluid::PLIC::GeometryHalfspace{{1, 1, 1e-8}, {0, 0, 0}, 1 + 1e-8}).inside;
     ASSERT_TRUE(root);
     const ::SimpleFluid::Meshes::AMR::AdaptiveCellKey key{19, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{0, {}}};
-    std::vector<PolyhedralSurfaceUse> surfaces;
+    std::vector<SimpleFluid::PLIC::PolyhedralSurfaceUse> surfaces;
     for (std::uint64_t f = 0; f < root->num_faces(); ++f)
-        surfaces.push_back({PolyhedralSurfaceKey{PolyhedralSurfaceKey::Kind::Root, 19,
-                                ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{f, {}}, 0},
+        surfaces.push_back({SimpleFluid::PLIC::PolyhedralSurfaceKey{SimpleFluid::PLIC::PolyhedralSurfaceKey::Kind::Root,
+                                19, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{f, {}}, 0},
             1, true, "wall"});
-    const auto complex = ExactPolyhedralComplex::make({PolyhedralComplexCell{key, 0, root, surfaces}});
-    const auto provider = ExplicitRegionProvider::from_exact_complex(complex);
+    const auto complex = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Ordinary>::make(
+        {SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Ordinary>{key, 0, root, surfaces}});
+    const auto provider = ExplicitRegionProvider::from_complex(complex);
     const auto native = std::make_shared<MultiRegionMesh>(
         std::vector<MultiRegionMesh::Region>{DistributedExplicitRegion("cut", provider, provider)},
         std::vector<MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()));

@@ -148,21 +148,24 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, ConstantCurvaturePressureAndWallCapillary
     options.pressure_relative_tolerance = 1e-12;
     VoFStepDiagnostics diagnostics;
     detail::GeneralVoFProjectionProvenance provenance;
-    std::vector<Meshes::ExactGeometryMeasure> mass(n);
+    std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> mass(n);
     const auto* native = std::get_if<MeshHandle<>::MultiRegionPtr>(&mesh->variant());
     ASSERT_TRUE(native && *native);
     for (std::size_t c = 0; c < n; ++c)
-        mass[c] = Meshes::ExactGeometryMeasure::volume(
-            *Meshes::ConvexCellGeometry::from_native_cell(**native, mesh->cell_geometry_global_id(LO(c))));
+        mass[c] = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(
+            *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::from_native_cell(
+                **native, mesh->cell_geometry_global_id(LO(c))));
     auto inconsistent = mass;
     if (!inconsistent.empty())
         inconsistent[0] = inconsistent[0].scaled(2);
     EXPECT_THROW(
         detail::Exact::GeneralVoFFlowWorkspace::project(flow, face, velocity, pressure, rho, fraction, curvature, .01,
-            1, options, diagnostics, &provenance, std::span<const Meshes::ExactGeometryMeasure>(inconsistent)),
+            1, options, diagnostics, &provenance,
+            std::span<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>(inconsistent)),
         std::runtime_error);
     ASSERT_NO_THROW(detail::Exact::GeneralVoFFlowWorkspace::project(flow, face, velocity, pressure, rho, fraction,
-        curvature, .01, 1, options, diagnostics, &provenance, std::span<const Meshes::ExactGeometryMeasure>(mass)));
+        curvature, .01, 1, options, diagnostics, &provenance,
+        std::span<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>(mass)));
     const auto gradient = flow.gradient(pressure);
     for (std::size_t c = 0; c < n; ++c)
     {
@@ -221,7 +224,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, IndependentInteriorPolynomialRecoversFull
 
 TEST(ExactGeneralVoFFlowWorkspaceTest, PrimaryRatePreservesSubUlpPressureCorrectionsAndRecovers)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     const auto mesh = skew_native();
     detail::GeneralVoFFlowWorkspace flow(mesh, ArithmeticMode::Exact);
     const auto n = mesh->num_owned_cells();
@@ -281,7 +284,7 @@ TEST(ExactGeneralVoFFlowWorkspaceTest, PrimaryRatePreservesSubUlpPressureCorrect
 
 TEST(ExactGeneralVoFFlowWorkspaceTest, ZeroRadiusOrthogonalPressureUsesSameExactRateAndWallImpulse)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     AMR::AMRGrid grid;
     grid.block_cells = {2, 2, 2};
     grid.extent = {1, 1, 1};

@@ -4,11 +4,9 @@
 #include "solvers/GeneralVoFSolver.hh"
 #include "FVM/ExactFaceTransfer.hh"
 #include "FVM/ExactPhaseTransfer.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
-#include <cstring>
-#include <tuple>
-#include "geometry/ExactPlanarFace.hh"
-#include "geometry/BoundedPlanarFace.hh"
+#include "geometry/PLIC/PlanarFace.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
@@ -23,11 +21,13 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstring>
 #include <exception>
 #include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 namespace SimpleFluid
@@ -153,18 +153,19 @@ const VoFStepDiagnostics& GeneralVoFSolver::diagnostics() const noexcept
 
 namespace SimpleFluid
 {
-void GeneralVoFSolver::enable_exact_geometry_statistics(bool enabled)
+void GeneralVoFSolver::enable_geometry_statistics(bool enabled)
 {
-    Meshes::enable_exact_geometry_statistics(enabled);
+    SimpleFluid::PLIC::enable_backend_statistics<SimpleFluid::ArithmeticMode::Exact>(enabled);
 }
 void GeneralVoFSolver::reset_geometry_statistics()
 {
-    Meshes::reset_exact_geometry_statistics();
-    Meshes::reset_bounded_geometry_statistics();
+    SimpleFluid::PLIC::reset_backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
+    PLIC::reset_geometry_statistics();
 }
 Meshes::GeometryStatisticsSnapshot GeneralVoFSolver::geometry_statistics()
 {
-    return {Meshes::exact_geometry_statistics_domain(), Meshes::bounded_geometry_statistics_domain(),
-        Meshes::exact_geometry_statistics(), Meshes::bounded_geometry_statistics()};
+    return {SimpleFluid::PLIC::backend_statistics_domain<SimpleFluid::ArithmeticMode::Exact>(),
+        PLIC::geometry_statistics_domain(), SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>(),
+        PLIC::geometry_statistics()};
 }
 }

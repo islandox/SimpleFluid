@@ -7,9 +7,9 @@
  * @copyright Copyright (c) 2026
  */
 #include "geometry/mesh/MultiRegionMesh.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/PolyhedralComplex.hh"
 #include "geometry/mesh/SparseNativeMesh.hh"
-#include "geometry/ExactPlanarFace.hh"
-#include "geometry/ExactPolyhedralComplex.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
@@ -442,39 +442,39 @@ InterfaceFacePolygon MultiRegionMesh::interface_polygon(RegionFace f) const
         p.vertices.push_back(geometry(f.region,[&](const auto& g){return g.node_coordinates(n);}));
     return p;
 }
-ExactPlanarFacePtr MultiRegionMesh::native_face_certificate(RegionFace face) const
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> MultiRegionMesh::native_face_certificate(RegionFace face) const
 {
     return geometry(face.region,
-        [&](const auto& provider) -> ExactPlanarFacePtr
+        [&](const auto& provider) -> PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
         {
             if constexpr (requires { provider.certified_face_geometry(face.face); })
                 if (auto certificate = provider.certified_face_geometry(face.face))
                     return certificate;
-            if constexpr (requires { provider.has_exact_construction(); })
-                if (provider.has_exact_construction())
+            if constexpr (requires { provider.has_construction(); })
+                if (provider.has_construction())
                     throw std::invalid_argument("Constructed join requires an authoritative face certificate.");
             if (region_layout(face.region).family == RegionLayout::Family::Cylindrical)
                 throw std::invalid_argument("Analytic curved native faces lack an exact planar join certificate.");
-            std::vector<GeometryPoint> vertices;
+            std::vector<PLIC::GeometryPoint> vertices;
             for (const auto node : topology(face.region, [&](const auto& t) { return t.face_nodes(face.face); }))
             {
                 const auto point = provider.node_coordinates(node);
                 vertices.push_back({point.x, point.y, point.z});
             }
-            auto certificate = ExactPlanarFace::make(vertices);
+            auto certificate = PLIC::PlanarFace<ArithmeticMode::Ordinary>::make(vertices);
             const auto vector = provider.face_area_vector(face.face);
             return certificate->oriented_like({vector.x, vector.y, vector.z});
         });
 }
-void MultiRegionMesh::validate_exact_nested_faces(RegionFace coarse, std::span<const RegionFace> fine) const
+void MultiRegionMesh::validate_nested_faces(RegionFace coarse, std::span<const RegionFace> fine) const
 {
     const auto parent = native_face_certificate(coarse);
-    std::vector<ExactPlanarFacePtr> tiles;
+    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> tiles;
     for (const auto face : fine)
     {
         auto tile = native_face_certificate(face);
         if (!parent->oppositely_oriented(*tile))
-            throw std::invalid_argument("Exact nested join normals are not opposite.");
+            throw std::invalid_argument("Native nested join normals are not opposite.");
         tiles.push_back(std::move(tile));
     }
     parent->certify_partition(tiles);
@@ -1247,7 +1247,7 @@ void MultiRegionMesh::initialize_regions(InterfaceTolerance tolerance, BoundaryN
                 unique_face(coarse);
                 for (const auto fine : group.fine_faces)
                     unique_face(fine);
-                validate_exact_nested_faces(coarse, group.fine_faces);
+                validate_nested_faces(coarse, group.fine_faces);
             }
         }
     }
@@ -1371,7 +1371,8 @@ size_t MultiRegionMesh::interface_uses(RegionFace f) const
 bool MultiRegionMesh::supports_axial_motion() const noexcept
 {
     if(d_sparse_native)return false;
-    if(has_exact_construction())return false;
+    if (has_construction())
+        return false;
     for(size_t r=0;r<d_regions.size();++r)
         if(region_layout(r).family==RegionLayout::Family::Explicit) return false;
     for(const auto& interface:d_interfaces)
@@ -1379,7 +1380,7 @@ bool MultiRegionMesh::supports_axial_motion() const noexcept
             return false;
     return true;
 }
-bool MultiRegionMesh::has_qualified_exact_interfaces() const noexcept
+bool MultiRegionMesh::has_qualified_geometry_interfaces() const noexcept
 {
     const auto constructed = [&](size_t region)
     {
@@ -1388,8 +1389,8 @@ bool MultiRegionMesh::has_qualified_exact_interfaces() const noexcept
         return std::visit(
             [](const auto& r)
             {
-                if constexpr (requires { r.geometry().has_exact_construction(); })
-                    return r.geometry().has_exact_construction();
+                if constexpr (requires { r.geometry().has_construction(); })
+                    return r.geometry().has_construction();
                 else
                     return false;
             },
@@ -1418,11 +1419,20 @@ bool MultiRegionMesh::has_qualified_exact_interfaces() const noexcept
     }
     return true;
 }
-bool MultiRegionMesh::has_exact_construction() const noexcept
+bool MultiRegionMesh::has_construction() const noexcept
 {
     if(d_sparse_native)return true;
     for(const auto& region:d_regions)
-        if(std::visit([](const auto& r){if constexpr(requires{r.geometry().has_exact_construction();})return r.geometry().has_exact_construction();else return false;},region))return true;
+        if (std::visit(
+                [](const auto& r)
+                {
+                    if constexpr (requires { r.geometry().has_construction(); })
+                        return r.geometry().has_construction();
+                    else
+                        return false;
+                },
+                region))
+            return true;
     return false;
 }
 MultiRegionMesh::Vec3 MultiRegionMesh::periodic_translation(ID f) const
@@ -1604,9 +1614,12 @@ std::string MultiRegionMesh::configuration_signature() const
                     for (const auto& row : native.rz_cell_nodes()) values(row);
                     values(native.theta_edges());
                 }
-                else if constexpr (requires { native.cell_records(); native.has_exact_construction(); })
+                else if constexpr (requires {
+                                       native.cell_records();
+                                       native.has_construction();
+                                   })
                 {
-                    if (native.has_exact_construction())
+                    if (native.has_construction())
                     {
                         if(!native.construction())throw std::invalid_argument("Local explicit certificates have no global catalog signature.");
                         out<<" exact-explicit ";
@@ -1617,8 +1630,8 @@ std::string MultiRegionMesh::configuration_signature() const
                     for (size_t a = 0; a < 3; ++a) values(native.cell_edges()[a]);
                 else if constexpr (requires { native.xy_nodes(); native.z_edges(); })
                 {
-                    if constexpr(requires{native.has_exact_construction();})
-                        if(native.has_exact_construction())
+                    if constexpr (requires { native.has_construction(); })
+                        if (native.has_construction())
                         {out<<" exact-construction ";for(unsigned char byte:native.construction()->encode())out<<unsigned(byte)<<' ';}
                     for (const auto& p : native.xy_nodes()) out << p.x << ' ' << p.y << ' ';
                     for (const auto& row : native.xy_cell_nodes()) values(row);

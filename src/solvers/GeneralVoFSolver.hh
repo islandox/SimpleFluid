@@ -59,7 +59,7 @@ class SIMPLEFLUID_SOLVERS_EXPORT GeneralVoFSolver
 public:
     /** This library image's calling-thread counters. Call every observed
      * image's bridge and deduplicate snapshots by their separate domain IDs. */
-    static void enable_exact_geometry_statistics(bool enabled);
+    static void enable_geometry_statistics(bool enabled);
     static void reset_geometry_statistics();
     [[nodiscard]] static Meshes::GeometryStatisticsSnapshot geometry_statistics();
     explicit GeneralVoFSolver(

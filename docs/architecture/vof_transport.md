@@ -56,12 +56,75 @@ scalar numerical providers and retains one `long double` per coordinate, without
 interval endpoint accessors. Separate certified providers retain two endpoints
 and a nominal estimate and own interval propagation and certification retries.
 Vertices, planes, integral caches and planar geometry use the selected scalar
-storage behind the same public geometry facade. Mode checks precede typed access,
+storage behind checked runtime adapters. Mode checks precede typed access,
 and allocation accounting uses the actual retained types. Spatial bounding boxes
 still retain both coordinate extrema. Heavy template definitions remain in
 compiled `.tcc` providers with explicit instantiations for the supported modes.
 
-Public value/error views and source-provenance snapshots retain their existing
+PLIC reconstruction, convex geometry, planar geometry and their private helpers
+live under `src/geometry/PLIC`. Shared headers use neutral filenames such as
+`ConvexGeometry.hh`; mode-specific providers live in `details/ordinary/`,
+`details/bounded/`, and `details/exact/`, with neutral filenames within each
+directory. Shared finite reconstruction and arithmetic helpers live directly in
+`details/`. Include paths use `geometry/PLIC/`. Reconstruction and phase arithmetic retain their existing
+`SimpleFluidFVM` compilation and export ownership.
+
+The typed geometry API lives in `SimpleFluid::PLIC`.
+`ConvexCellGeometry<Mode>`, `Point<Mode>`, `GeometryValue<Mode>` and typed
+clip/moment results carry arithmetic policy in their types. Ordinary values
+store one scalar and expose no enclosure queries or error field. Bounded values
+retain their error enclosure. The exact cell specialization retains rational
+geometry; its published `CertifiedGeometryValue<Exact>` is a floating-point
+view with conversion uncertainty and an independent nonzero marker, not the
+rational scalar itself. `GeometryValue<Mode>` aliases the corresponding published
+value type. Binary64 publication rejects overflow and nonzero disappearance;
+its error query includes additional narrowing error. In Ordinary that query
+bounds only narrowing of the stored scalar, not untracked construction error.
+
+The solver's runtime arithmetic selection uses explicitly named `Dynamic*`
+adapters. Conversion to a typed finite geometry checks the active mode, and
+cross-mode geometry arguments are incompatible at the typed API. Metadata such
+as `PlaneAuthority`, `GeometryPacketContext` and resource caps remains independent
+of scalar representation. Native mesh/AMR clients use the ordinary PLIC types
+directly. The former `Meshes` geometry aliases and public `Exact*` geometry
+headers are removed; consumers must migrate and rebuild.
+
+`PlanarGeometry.hh`, `PolyhedralComplex.hh`, `ExtrudedConstruction.hh`,
+`GeometryMeasure.hh` and `SweptGeometry.hh` are public PLIC boundaries. Backend
+specializations live under `details/ordinary/`, `details/bounded/`, or
+`details/exact/`. Native source preparation, packets and AMR no longer construct
+rational geometry as a prerequisite. Exact algorithms explicitly import the
+represented ordinary source through the Exact specialization when that route is
+selected. No arithmetic-mode conversion is an automatic failure fallback.
+
+Native AMR consumes Ordinary cells, planar faces, extrusions and complexes.
+BoundedCertification applies to the finite convex and planar-overlap kernels;
+it is not a second native hierarchy implementation. Exact swept geometry is
+available through `SweptFace<Exact>` and its related public interfaces; finite
+sweep transport remains FVM-owned. Unsupported family/mode combinations do not
+silently select another backend.
+
+Include `geometry/PLIC/ConvexGeometry.hh` for the finite typed API:
+
+```cpp
+using Cell = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>;
+const auto cell = Cell::box({0, 0, 0}, {1, 1, 1});
+const auto cut = cell->clip({{1, 0, 0}, {0, 0, 0}, .25});
+const auto volume = cut.inside->volume(); // GeometryValue<Ordinary>; scalar only.
+```
+
+Simple one-line member queries and forwarding functions remain in the public
+headers. Conversion, allocation, and resource-accounting implementations remain
+in compiled providers with explicit instantiations for supported finite modes.
+
+Geometry rejection diagnostics identify `Ordinary FP geometry` or
+`Bounded FP geometry` when the arithmetic mode is known. Ordinary construction
+requires a strictly positive computed signed volume and reports its scalar value
+on failure; it does not apply an interval positivity certificate. Certification
+retains its lower-bound and construction-proof checks. A diagnostic without an
+established mode uses the neutral `Finite FP geometry` prefix.
+
+Runtime value/error views and source-provenance snapshots retain their checked
 interfaces. Version 3 numerical packets retain their two-endpoint encoding for
 compatibility: Ordinary writes its scalar twice, verifies equal endpoints when
 decoding, and stores one scalar in memory. Packet encoding does not introduce
@@ -83,13 +146,30 @@ ordinary arithmetic accepts represented scalar results against the configured
 physical tolerances, without interval-width admission. Finite values, actual
 phase nonnegativity, conservation, topology, solver residuals and resource caps
 remain checked. `BoundedCertification` additionally propagates enclosures and
-rejects unresolved certification. Source-authority import remains an explicit
-bootstrap boundary described in
+rejects unresolved certification. Source import consumes represented native
+coordinates and retained support identities. Bounded certification encloses
+operations on those represented inputs; it does not retrospectively certify
+untracked ordinary construction error. Optional rational conversion is described in
 [ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary).
 Small intermediate contributions still enter conservative
 aggregate accounting and error bounds. Removing exact per-fragment values does
 not authorize a phase cutoff, mass deletion, looser physical tolerances or larger
 resource caps.
+
+Ordinary edge intersections may recover an original source point when its sealed
+identity belongs to every retained support and three of those original supports
+are independently determined. A scalar rank filter accounts for normal
+construction and determinant roundoff; it guards identity reuse without changing
+volume or solver tolerances. Coordinate proximity and small residuals do not
+establish identity. Missing or ambiguous evidence leaves the nominal construction
+unchanged. Packet coordinates cannot create source identities; a decoded native
+plane can recover rank evidence only from its pinned source registry after the
+existing authority checks and an identical or opposite normal match.
+Two triangular supports with the same three distinct live source identities and
+proved noncollinear defining points establish the same unoriented plane. This
+preserves zero incidence across opposite windings without inferring an inside or
+outside orientation from the identity proof. Rounded normals alone, expired
+tokens and coordinate look-alikes cannot establish this equivalence.
 
 For ordinary general-native transport, each canonical face receives a fixed
 construction allowance from its incident cells: `B_f = tau * min(V_L/N_L,

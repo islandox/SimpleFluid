@@ -5,7 +5,7 @@
 #include "FVM/GeneralVoF.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
@@ -22,8 +22,11 @@ namespace W = A::adaptive_detail;
 using H = A::DistributedAdaptiveHierarchy;
 using Key = A::AdaptiveCellKey;
 using Tile = A::AdaptiveTile;
-using Face = Meshes::ExactPlanarFacePtr;
-using M = Meshes::ExactGeometryMeasure;
+using Face = SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>;
+using NativeFace = SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary>;
+using ExactCell = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>;
+using ExactCellPtr = SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact>;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 using GO = DefaultTpetraTypes::global_ordinal_type;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 using Bytes = A::AdaptiveBytes;
@@ -32,6 +35,9 @@ struct Budget
     ExactFaceTransferOptions options;
     W::Budget memory;
     std::size_t tests = 0, patches = 0, scalar_limit;
+    // Retain both the finite source and its explicit exact import. Ownership
+    // identity prevents a recycled temporary face address from aliasing a cache entry.
+    std::map<NativeFace, Face, std::owner_less<NativeFace>> imported_faces;
     explicit Budget(ExactFaceTransferOptions o) : options(o), memory{o.byte_budget}, scalar_limit(o.byte_budget / 160)
     {
         if (!o.byte_budget || !o.maximum_common_cells || !o.maximum_patches || !o.maximum_pair_tests ||
@@ -91,7 +97,7 @@ struct Budget
         blob(value.domain);
         blob(value.surface);
         blob(value.identity);
-        blob(value.exact_second_image);
+        blob(value.second_image_identity);
         records(value.node_gids.capacity() + value.second_node_gids.capacity(), sizeof(std::uint64_t));
     }
     void test()
@@ -120,6 +126,19 @@ struct Budget
         ++patches;
         memory.add(sizeof(Face) + p->storage_bytes());
     }
+    Face face(const NativeFace& source)
+    {
+        if (!source)
+            throw std::invalid_argument("Exact face transfer received a null finite source face.");
+        if (const auto found = imported_faces.find(source); found != imported_faces.end())
+            return found->second;
+        records(1, sizeof(decltype(imported_faces)::value_type) + 4 * sizeof(void*));
+        memory.add(source->storage_bytes());
+        auto exact = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*source);
+        patch(exact);
+        imported_faces.emplace(source, exact);
+        return exact;
+    }
     M keep(M value)
     {
         if (value.storage_bytes() > scalar_limit)
@@ -147,14 +166,18 @@ Bytes identity(const Tile& tile)
 }
 Bytes support(const Face& p)
 {
-    return Meshes::exact_planar_support(*p);
+    return SimpleFluid::PLIC::planar_support<SimpleFluid::ArithmeticMode::Exact>(*p);
 }
-Face outward(const Tile& tile, const Key& key)
+Face outward(const Tile& tile, const Key& key, Budget& budget)
 {
     if (tile.first == key)
-        return tile.geometry;
+        return budget.face(tile.geometry);
     if (tile.second && *tile.second == key)
-        return tile.geometry->reversed();
+    {
+        auto reversed = budget.face(tile.geometry)->reversed();
+        budget.patch(reversed);
+        return reversed;
+    }
     throw std::invalid_argument("Face transfer cell is not incident on its canonical tile.");
 }
 std::map<GO, int> owners(const DefaultTpetraTypes::map_type& map, const std::set<GO>& query)
@@ -295,7 +318,7 @@ std::map<Key, std::vector<Tile>> target_tiles(
                     const auto tile_identity = identity(tile);
                     budget.blob(tile_identity, 2);
                     budget.records(1, sizeof(Bytes) + 4 * sizeof(void*));
-                    if (!tile.exact_second_image.empty() || !seen.insert(tile_identity).second)
+                    if (!tile.second_image_identity.empty() || !seen.insert(tile_identity).second)
                         throw std::invalid_argument("Periodic or duplicate target native tile.");
                     budget.memory.add(sizeof(Tile) + A::encode_adaptive_tile(tile).size());
                     tiles.push_back(std::move(tile));
@@ -414,7 +437,7 @@ struct Facet
 struct Common
 {
     Key target;
-    Meshes::ConvexGeometryPtr geometry;
+    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
     std::vector<std::size_t> facets;
 };
 struct Internal
@@ -433,19 +456,25 @@ struct Output
     M rate;
 };
 std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
-    const Meshes::ConvexCellGeometry& source_geometry, std::vector<Common> cells,
-    const std::vector<const Tile*>& boundary, const std::map<std::uint64_t, M>& old_rates,
-    Meshes::GeometryPoint velocity, const std::map<Key, std::vector<Tile>>& targets, Budget& budget)
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>& source_geometry,
+    std::vector<Common> cells, const std::vector<const Tile*>& boundary, const std::map<std::uint64_t, M>& old_rates,
+    SimpleFluid::PLIC::GeometryPoint velocity, const std::map<Key, std::vector<Tile>>& targets, Budget& budget)
 {
     std::sort(cells.begin(), cells.end(), [](const auto& a, const auto& b) { return a.target < b.target; });
     if (cells.empty())
         throw std::invalid_argument("Empty source common refinement.");
-    budget.records(cells.size(), sizeof(Meshes::ConvexGeometryPtr) + 2 * sizeof(std::size_t));
-    std::vector<Meshes::ConvexGeometryPtr> cover;
+    budget.records(cells.size(), sizeof(ExactCellPtr) + 2 * sizeof(std::size_t));
+    const auto exact_source = ExactCell::from_geometry(source_geometry);
+    budget.memory.add(sizeof(ExactCellPtr) + exact_source->storage_bytes());
+    std::vector<ExactCellPtr> cover;
     cover.reserve(cells.size());
     for (const auto& cell : cells)
-        cover.push_back(cell.geometry);
-    budget.certify(source_geometry, cover);
+    {
+        auto imported = ExactCell::from_geometry(*cell.geometry);
+        budget.memory.add(imported->storage_bytes());
+        cover.push_back(std::move(imported));
+    }
+    budget.certify(*exact_source, cover);
     M old_divergence;
     for (const auto* tile : boundary)
         old_divergence = budget.add(old_divergence,
@@ -458,7 +487,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
     for (std::size_t i = 0; i < cells.size(); ++i)
         for (std::size_t f = 0; f < cells[i].geometry->num_faces(); ++f)
         {
-            Facet facet{i, cells[i].geometry->face_geometry(f), {}};
+            Facet facet{i, cover[i]->face_geometry(f), {}};
             budget.patch(facet.shape);
             facet.plane = support(facet.shape);
             budget.blob(facet.plane);
@@ -467,15 +496,15 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
             for (const auto* tile : boundary)
             {
                 budget.test();
-                const auto old = outward(*tile, key);
+                const auto old = outward(*tile, key, budget);
                 if (support(old) != support(facet.shape))
                     continue;
                 if (const auto piece = facet.shape->intersection(*old))
                 {
                     budget.patch(piece);
                     const auto sign = tile->first == key ? 1 : -1;
-                    const auto rate = budget.product(
-                        old_rates.at(tile->face_gid), piece->coplanar_area_ratio(*tile->geometry, budget.scalar_limit));
+                    const auto rate = budget.product(old_rates.at(tile->face_gid),
+                        piece->coplanar_area_ratio(*budget.face(tile->geometry), budget.scalar_limit));
                     budget.grow(facet.parts);
                     budget.grow(pieces);
                     if (!old_cover.contains(tile->face_gid))
@@ -503,7 +532,7 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
             facets.push_back(std::move(facet));
         }
     for (const auto* tile : boundary)
-        budget.certify(*tile->geometry, old_cover.at(tile->face_gid));
+        budget.certify(*budget.face(tile->geometry), old_cover.at(tile->face_gid));
     std::vector<Internal> internal;
     for (std::size_t f = 0; f < facets.size(); ++f)
     {
@@ -620,13 +649,16 @@ std::vector<Output> extend(const Key& key, const A::AdaptiveLeaf& source_leaf,
         for (const auto& part : face.parts)
             for (const auto& tile : targets.at(cells[face.cell].target))
             {
-                if (tile.first != cells[face.cell].target || support(part.shape) != support(tile.geometry))
+                if (tile.first != cells[face.cell].target)
+                    continue;
+                const auto target_face = budget.face(tile.geometry);
+                if (support(part.shape) != support(target_face))
                     continue;
                 budget.test();
-                const auto piece = part.shape->intersection(*tile.geometry);
+                const auto piece = part.shape->intersection(*target_face);
                 if (!piece)
                     continue;
-                if (part.shape->oppositely_oriented(*tile.geometry))
+                if (part.shape->oppositely_oriented(*target_face))
                     throw std::invalid_argument("Target face has inconsistent outward orientation.");
                 budget.patch(piece);
                 const auto rate =
@@ -700,7 +732,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
     target.validate_transfer_target(phase);
     std::shared_ptr<ExactFaceTransferResult::Data> result;
     std::unique_ptr<Budget> budget;
-    std::map<Key, Meshes::GeometryPoint> seeds;
+    std::map<Key, SimpleFluid::PLIC::GeometryPoint> seeds;
     W::collective(*comm,
         [&]
         {
@@ -715,7 +747,8 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
             if (!phase.ownership_only() && velocity.size() != source.hierarchy()->owned().size())
                 throw std::invalid_argument(
                     "Topology face transfer needs one physical velocity seed per source owner.");
-            budget->records(velocity.size(), sizeof(std::pair<const Key, Meshes::GeometryPoint>) + 4 * sizeof(void*));
+            budget->records(
+                velocity.size(), sizeof(std::pair<const Key, SimpleFluid::PLIC::GeometryPoint>) + 4 * sizeof(void*));
             for (const auto& item : velocity)
                 budget->key(item.key);
             for (const auto& item : velocity)
@@ -783,7 +816,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 }
             for (const auto& tile : source.tiles())
             {
-                if (!tile.exact_second_image.empty())
+                if (!tile.second_image_identity.empty())
                     throw std::invalid_argument("General face transfer periodic images remain unqualified.");
                 if (source.hierarchy()->owned().contains(tile.first) ||
                     (tile.second && source.hierarchy()->owned().contains(*tile.second)))
@@ -812,7 +845,8 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                         boundary.push_back(&tile);
                 const auto geometry = source.hierarchy()->geometry(leaf);
                 auto generated = extend(key, leaf, *geometry, std::move(groups.at(key)), boundary, old_rates,
-                    phase.ownership_only() ? Meshes::GeometryPoint{} : seeds.at(key), native_targets, *budget);
+                    phase.ownership_only() ? SimpleFluid::PLIC::GeometryPoint{} : seeds.at(key), native_targets,
+                    *budget);
                 for (auto& item : generated)
                 {
                     budget->memory.add(sizeof(Output) + A::encode_adaptive_key(item.source).size() +
@@ -875,7 +909,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 item.target = A::decode_adaptive_key(r.bytes());
                 item.face = r.word();
                 item.face_identity = r.bytes();
-                item.shape = Meshes::ExactPlanarFace::decode(r.bytes());
+                item.shape = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>::decode(r.bytes());
                 item.rate = budget->keep(M::decode(r.bytes(), budget->scalar_limit));
                 r.done();
                 budget->patch(item.shape);
@@ -910,9 +944,10 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
                 const auto& item = decoded[i].output;
                 const auto& owner = source_owners[i];
                 const auto& tile = *actual.at(item.face);
+                const auto target_face = budget->face(tile.geometry);
                 if (owner.owner != decoded[i].peer || owner.revision != item.source_revision ||
                     tile.first != item.target || identity(tile) != item.face_identity ||
-                    item.shape->oppositely_oriented(*tile.geometry) || !tile.geometry->contains(*item.shape) ||
+                    item.shape->oppositely_oriented(*target_face) || !target_face->contains(*item.shape) ||
                     !seen.emplace(item.face, item.shape->encode()).second)
                     throw std::invalid_argument("Foreign, overlapping or duplicate target face proof.");
                 budget->grow(cover[item.face]);
@@ -924,7 +959,7 @@ ExactFaceTransferResult ExactFaceTransfer::prepare(const GeneralVoF& source, con
             for (std::size_t i = 0; i < target.mesh()->num_owned_faces(); ++i)
             {
                 const auto gid = std::uint64_t(target.mesh()->face_global_id(LO(i)));
-                budget->certify(*actual.at(gid)->geometry, cover.at(gid));
+                budget->certify(*budget->face(actual.at(gid)->geometry), cover.at(gid));
                 if (actual.at(gid)->exterior && target_rates.at(gid).sign())
                     throw std::invalid_argument("Transferred physical wall rate is nonzero.");
                 budget->grow(result->rates);

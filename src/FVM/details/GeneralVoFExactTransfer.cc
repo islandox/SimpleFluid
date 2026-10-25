@@ -176,7 +176,9 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                     const bool gas = phase_measures(cell).gas.compare(phase_measures(cell).carrier) <= 0;
                     const auto target = gas ? phase_measures(cell).gas : phase_measures(cell).carrier;
                     const auto raw =
-                        phases(*Meshes::ExactConvexFragment::from_geometry(*cell.phase.geometry), capsule.geometry);
+                        phases(*SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                                   *cell.phase.geometry),
+                            capsule.geometry);
                     const auto fit_diagnostic = detail::round_phase_residual(target - (gas ? raw.gas : raw.carrier));
                     capsule.error.fit_residual = fit_diagnostic.value;
                     const auto view = Measure::from_value(

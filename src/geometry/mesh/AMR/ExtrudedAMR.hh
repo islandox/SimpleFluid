@@ -11,7 +11,7 @@ namespace SimpleFluid::Meshes::AMR
 {
 struct ExtrudedAMRGrid
 {
-    std::vector<GeometryPoint> xy_nodes;
+    std::vector<PLIC::GeometryPoint> xy_nodes;
     std::vector<std::vector<unsigned>> base_cells;
     std::vector<SemiStructMeshTopo::BoundaryEdge> boundaries;
     std::vector<double> z_edges;
@@ -41,7 +41,7 @@ public:
     [[nodiscard]] const std::vector<BaseCellKey>& base_keys() const noexcept;
     [[nodiscard]] const std::vector<BaseEdgeKey>& base_edge_keys(std::size_t base_cell) const;
     [[nodiscard]] const std::vector<AxialIntervalKey>& interval_keys() const noexcept;
-    [[nodiscard]] ConvexGeometryPtr cell_geometry(std::uint64_t cell) const;
+    [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> cell_geometry(std::uint64_t cell) const;
     [[nodiscard]] std::vector<ProductContactViolation> contact_violations(
         double maximum_span_ratio, unsigned maximum_trace_jump = 1, std::size_t contact_budget = 65536) const;
     [[nodiscard]] AdaptiveBootstrap detach_owned(

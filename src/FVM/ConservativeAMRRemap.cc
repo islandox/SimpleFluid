@@ -54,12 +54,14 @@ void identical(double value, const char* message)
     Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, 1, &value, &hi);
     require(std::isfinite(value) && lo == hi, message);
 }
-Meshes::ConvexGeometryPtr owner_geometry(const ConservativeAMRRemap::Handle& mesh, LO cell)
+SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> owner_geometry(
+    const ConservativeAMRRemap::Handle& mesh, LO cell)
 {
     const auto* native = std::get_if<ConservativeAMRRemap::Handle::MultiRegionPtr>(&mesh.variant());
     if (!native || !*native)
         throw std::invalid_argument("AMR certificate requires native MultiRegion geometry.");
-    return Meshes::ConvexCellGeometry::from_native_cell(**native, mesh.cell_global_id(cell));
+    return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::from_native_cell(
+        **native, mesh.cell_global_id(cell));
 }
 
 void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
@@ -124,8 +126,8 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
                 auto& certificate = certificates[static_cast<GO>(gid)];
                 if (!certificate)
                 {
-                    auto bytes = owner_geometry(mesh, owned_map->getLocalElement(static_cast<GO>(gid)))
-                                     ->encode_exact_certificate();
+                    auto bytes =
+                        owner_geometry(mesh, owned_map->getLocalElement(static_cast<GO>(gid)))->encode_certificate();
                     budget.add(bytes.size());
                     certificate = std::make_shared<const std::vector<char>>(std::move(bytes));
                 }
@@ -159,7 +161,9 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
                 if (key != expected.key || material != expected.material)
                     throw std::invalid_argument(
                         "Catalog GID " + std::to_string(gid) + " ancestry/material differs from its owner binding.");
-                const auto geometry = Meshes::ConvexCellGeometry::decode_exact_certificate(r.bytes());
+                const auto geometry =
+                    SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::decode_certificate(
+                        r.bytes());
                 r.done();
                 if (!expected.geometry->equivalent(*geometry))
                     throw std::invalid_argument(
@@ -171,7 +175,7 @@ void validate_catalog_shells(const ConservativeAMRRemap::Handle& mesh,
         });
 }
 
-Wide measure(const Meshes::ConvexGeometryPtr& geometry)
+Wide measure(const SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>& geometry)
 {
     return geometry ? geometry->moments().volume.value : 0.0L;
 }
@@ -406,7 +410,7 @@ AMRRemapReport ConservativeAMRRemap::apply(const AMRRemapPhases& phases,
         {
             const auto& geometry = p.source_cells[c]->geometry;
             const Wide full = measure(geometry), gas = phases.gas_volume[c], liquid = phases.carrier_volume[c];
-            const Wide bound = 64 * epsilon * full + geometry->moments().volume.absolute_error;
+            const Wide bound = 64 * epsilon * full + geometry->moments().volume.binary64_absolute_error();
             if (!std::isfinite(gas) || !std::isfinite(liquid) || gas < 0 || liquid < 0 ||
                 std::abs(gas + liquid - full) > bound || gas > full + bound || liquid > full + bound)
             {
@@ -474,7 +478,7 @@ AMRRemapReport ConservativeAMRRemap::apply(const AMRRemapPhases& phases,
             const auto donor = p.donors->getLocalElement(static_cast<GO>(record.source_gid));
             bulk[r] = record.moments.volume.value;
             const Wide full = halo[0][donor], g = halo[1][donor], l = halo[2][donor];
-            Meshes::GeometryHalfspace plane;
+            SimpleFluid::PLIC::GeometryHalfspace plane;
             for (std::size_t a = 0; a < 3; ++a)
             {
                 plane.normal[a] = halo[5 + a][donor];

@@ -1,16 +1,16 @@
 /** @file ConservativeVoFTransport.cc
  * @brief Native conservative implicit upwind assembly and per-inventory validation.
  */
-#include "solvers/details/ConservativeVoFTransport.hh"
-#include "geometry/ExactSweptGeometry.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "parallel/SparseOwnerExchange.hh"
-#include <bit>
-#include <tuple>
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
+#include "solvers/details/ConservativeVoFTransport.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFTransferBinding.hh"
 #include "utils/CompensatedSum.hh"
+#include <bit>
+#include <tuple>
 
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -29,17 +29,17 @@ using namespace transport_support;
 /** Optional rational backend in the Exact namespace. */
 namespace Exact
 {
-struct TransportPreparation
+struct SIMPLEFLUID_SOLVERS_LOCAL TransportPreparation
 {
     using ExactTransfer = detail::ConservativeVoFTransport::ExactTransfer;
     using ExactFaceContribution = detail::ConservativeVoFTransport::ExactFaceContribution;
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     std::vector<M> capacity, outgoing, diagonal;
     std::vector<ExactTransfer> incoming;
     std::vector<ExactFaceContribution> contributions;
     std::vector<std::map<GO, M>> routes;
     std::vector<GeneralVoFOriginalRow> original;
-    std::vector<Meshes::CertifiedGeometryValue> coefficient_conversion;
+    std::vector<SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>> coefficient_conversion;
     Teuchos::RCP<const Pack::map_type> owned_map, overlap_map, owned_face_map, overlap_face_map, donor_map;
     std::unique_ptr<Pack::import_type> donor_import;
     Teuchos::RCP<Pack::matrix_type> matrix;
@@ -49,13 +49,14 @@ struct TransportPreparation
 };
 
 ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::ConservativeVoFTransport& self,
-    const std::vector<Meshes::ExactGeometryMeasure>& old, const std::vector<Meshes::ExactGeometryMeasure>& source,
-    const std::vector<Meshes::ExactGeometryMeasure>& capacity,
-    const std::vector<Meshes::ExactGeometryMeasure>& outgoing, const std::vector<ExactTransfer>& incoming,
-    const std::vector<ExactFaceContribution>& contributions, bool nonnegative, int maximum_iterations, double tolerance,
-    std::size_t byte_budget)
+    const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& old,
+    const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& source,
+    const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& capacity,
+    const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& outgoing,
+    const std::vector<ExactTransfer>& incoming, const std::vector<ExactFaceContribution>& contributions,
+    bool nonnegative, int maximum_iterations, double tolerance, std::size_t byte_budget)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     namespace E = vof_exact;
     const auto map = self.mesh_->owned_cell_map();
     const auto n = self.mesh_->num_owned_cells();
@@ -202,7 +203,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
             storage.capacity(Domain::Scratch, n, 3 * sizeof(M));
             storage.capacity(Domain::Scratch, incoming.size(), sizeof(ExactTransfer));
             storage.capacity(Domain::Scratch, contributions.size(), sizeof(ExactFaceContribution));
-            storage.capacity(Domain::Scratch, incoming.size(), sizeof(Meshes::CertifiedGeometryValue));
+            storage.capacity(Domain::Scratch, incoming.size(),
+                sizeof(SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>));
             if (!prepared)
             {
                 prepared = std::make_shared<ExactPreparation>();
@@ -235,8 +237,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
             extra_capacity(prepared->incoming.capacity(), incoming.size(), sizeof(ExactTransfer));
             extra_capacity(prepared->contributions.capacity(), contributions.size(), sizeof(ExactFaceContribution));
             extra_capacity(prepared->routes.capacity(), n, sizeof(std::map<GO, M>));
-            extra_capacity(
-                prepared->coefficient_conversion.capacity(), incoming.size(), sizeof(Meshes::CertifiedGeometryValue));
+            extra_capacity(prepared->coefficient_conversion.capacity(), incoming.size(),
+                sizeof(SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>));
             for (const auto* array : {&prepared->capacity, &prepared->outgoing})
                 for (const auto& value : *array)
                     storage.measure(Domain::Scratch, value);
@@ -327,7 +329,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
     const auto width = prepared->width;
     std::vector<M> diagonal, right, accumulated, amount, residual, defect;
     std::vector<double> concentration;
-    std::vector<Meshes::CertifiedGeometryValue> conversion;
+    std::vector<SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>> conversion;
     std::size_t conversion_capacity = 0;
     guard(
         [&]
@@ -337,9 +339,10 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
             conversion_capacity = 9 * n + incoming.size();
             storage.capacity(Domain::Scratch, n, 6 * sizeof(M) + sizeof(double));
             storage.capacity(Domain::Result, n, 2 * sizeof(double));
-            storage.capacity(
-                Domain::Result, self.mesh_->num_owned_faces(), sizeof(M) + sizeof(Meshes::CertifiedGeometryValue));
-            storage.capacity(Domain::Result, conversion_capacity, sizeof(Meshes::CertifiedGeometryValue));
+            storage.capacity(Domain::Result, self.mesh_->num_owned_faces(),
+                sizeof(M) + sizeof(SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>));
+            storage.capacity(Domain::Result, conversion_capacity,
+                sizeof(SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>));
             if (width && n > std::numeric_limits<std::size_t>::max() / width)
                 throw std::runtime_error("Exact matrix graph capacity overflow.");
             storage.capacity(Domain::Scratch, n * width, sizeof(double) + sizeof(GO) + sizeof(LO));
@@ -389,7 +392,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
                 coefficients.push_back(1);
                 for (const auto& [gid, value] : routes[c])
                 {
-                    Meshes::CertifiedGeometryValue enclosure;
+                    SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact> enclosure;
                     coefficients.push_back(
                         E::view(E::divide(E::scale(value, -1, arithmetic_budget()), diagonal[c], arithmetic_budget()),
                             enclosure));
@@ -403,7 +406,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
             else
                 for (std::size_t i = 0; i < routes[c].size(); ++i)
                     conversion.push_back(prepared->coefficient_conversion[coefficient++]);
-            Meshes::CertifiedGeometryValue enclosure;
+            SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact> enclosure;
             self.rhs_.replaceLocalValue(
                 LO(c), E::view(E::divide(right[c], diagonal[c], arithmetic_budget()), enclosure));
             conversion.push_back(enclosure);
@@ -520,7 +523,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
         {
             for (std::size_t c = 0; c < n; ++c)
             {
-                Meshes::CertifiedGeometryValue enclosure;
+                SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact> enclosure;
                 self.rhs_.replaceLocalValue(
                     LO(c), E::view(E::divide(defect[c], scale, arithmetic_budget()), enclosure));
                 conversion.push_back(enclosure);
@@ -541,7 +544,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(detail::Conserv
             {
                 store(accumulated[c],
                     E::add(accumulated[c], E::scale(scale, correction[c], arithmetic_budget()), arithmetic_budget()));
-                Meshes::CertifiedGeometryValue enclosure;
+                SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact> enclosure;
                 concentration[c] = E::view(accumulated[c], enclosure);
                 conversion.push_back(enclosure);
             }

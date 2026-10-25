@@ -7,7 +7,7 @@
 #include <stdexcept>
 namespace SimpleFluid::VoF::detail
 {
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 double phase_signed_value(const M& value)
 {
     const auto result = static_cast<double>(value.enclosure().value);

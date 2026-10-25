@@ -11,7 +11,7 @@ struct GeneralVoFSolver::Impl
         // Derived from the source-selected authority. Finite mode always
         // rebuilds from represented phases; experimental exact mode opts into
         // its separately retained authority, never a solver-side reinterpretation.
-        std::vector<Meshes::ExactGeometryMeasure> physical_mass;
+        std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> physical_mass;
         std::vector<long double> finite_mass, finite_mass_error;
         detail::GeneralVoFFiniteProjectionProvenance finite_projection;
         detail::GeneralVoFProjectionProvenance projection_arithmetic;
@@ -104,7 +104,7 @@ struct GeneralVoFSolver::Impl
         const auto geometry = phases->owned_geometry();
         const auto bounded_geometry = arithmetic_mode_ != ArithmeticMode::Exact
                                           ? phases->owned_finite_geometry()
-                                          : std::vector<Meshes::BoundedConvexGeometryPtr>{};
+                                          : std::vector<PLIC::DynamicConvexGeometryPtr>{};
         volume.resize(mesh->num_owned_cells());
         thickness.resize(volume.size());
         collective(
@@ -337,7 +337,7 @@ struct GeneralVoFSolver::Impl
                     OwnerPacket packet;
                     packet.peer = int(node.gid % comm->getSize());
                     append_word(packet.bytes, node.gid);
-                    const auto& node_identity = finite(state) ? node.identity : node.exact_identity;
+                    const auto& node_identity = finite(state) ? node.identity : node.coordinate_identity;
                     append_word(packet.bytes, node_identity.size());
                     packet.bytes.insert(packet.bytes.end(), node_identity.begin(), node_identity.end());
                     for (double x : node.coordinate)
@@ -731,7 +731,9 @@ struct GeneralVoFSolver::Impl
             const auto closure_topology = projection_topology(*next->phases);
             detail::Exact::GeneralVoFFlowWorkspace::project(flow, next->face_velocity, next->velocity, next->pressure,
                 next->density, next->fraction, next->curvature, 1, 0, options.flow, next->diagnostics,
-                &next->projection_arithmetic, std::span<const Meshes::ExactGeometryMeasure>(next->physical_mass),
+                &next->projection_arithmetic,
+                std::span<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>(
+                    next->physical_mass),
                 &closure_topology);
         }
         budget(*next);
@@ -813,13 +815,13 @@ struct GeneralVoFSolver::Impl
                 }
             });
     }
-    std::vector<Meshes::BoundedGeometryValue> finite_rates(const State& state) const
+    std::vector<PLIC::DynamicGeometryValue> finite_rates(const State& state) const
     {
         if (arithmetic_mode_ == ArithmeticMode::BoundedCertification)
             return finite_rates_mode<ArithmeticMode::BoundedCertification>(state);
         return finite_rates_mode<ArithmeticMode::Ordinary>(state);
     }
-    template<ArithmeticMode Mode> std::vector<Meshes::BoundedGeometryValue> finite_rates_mode(const State& state) const
+    template<ArithmeticMode Mode> std::vector<PLIC::DynamicGeometryValue> finite_rates_mode(const State& state) const
     {
         using A = VoF::finite_detail::Arithmetic<Mode>;
         require(state.phases->arithmetic_mode() == arithmetic_mode_ &&
@@ -851,7 +853,7 @@ struct GeneralVoFSolver::Impl
             });
         for (auto& value : wire)
             value = flow.faces(value);
-        std::vector<Meshes::BoundedGeometryValue> result(mesh->num_faces());
+        std::vector<PLIC::DynamicGeometryValue> result(mesh->num_faces());
         collective(
             [&]
             {
@@ -1092,7 +1094,7 @@ struct GeneralVoFSolver::Impl
         std::vector<long double> outgoing(volume.size()), outgoing_error(volume.size()), source(volume.size());
         std::vector<detail::ConservativeVoFTransport::FiniteTransfer> incoming;
         std::vector<detail::ConservativeVoFTransport::FiniteFaceContribution> face_contributions;
-        const auto mass = [&](const Meshes::BoundedPhaseMeasures& p)
+        const auto mass = [&](const PLIC::DynamicPhaseMeasures& p)
         {
             return A::add(A::multiply(p.gas, A::make_value(material.gas_density, 0)),
                 A::multiply(p.carrier, A::make_value(material.liquid_density, 0)));
@@ -1215,11 +1217,11 @@ struct GeneralVoFSolver::Impl
         require(target.arithmetic_mode_ == arithmetic_mode_ && state.phases->arithmetic_mode() == arithmetic_mode_,
             "General VoF adapted handoff changed arithmetic mode.");
         namespace fp = VoF::finite_detail;
-        using Point = Meshes::BoundedPoint;
-        using Value = Meshes::BoundedGeometryValue;
+        using Point = PLIC::DynamicPoint;
+        using Value = PLIC::DynamicGeometryValue;
         using Key = VoF::GeneralVoF::Key;
         using Loop = std::vector<Point>;
-        using Support = Meshes::BoundedPlaneAuthority;
+        using Support = PLIC::PlaneAuthority;
         const auto comm = mesh->owned_cell_map()->getComm();
         const auto& common = trial.source_common_cells();
         std::vector<Key> requested;
@@ -1230,7 +1232,7 @@ struct GeneralVoFSolver::Impl
             requested.push_back(common[i].target_key);
         }
         const auto draft = Meshes::AMR::fetch_adaptive_native_draft(*state.phases->hierarchy(), requested);
-        std::map<Key, Meshes::ConvexGeometryPtr> native_sources;
+        std::map<Key, SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> native_sources;
         std::map<std::uint64_t, std::set<Key>> native_fans;
         collective(
             [&]
@@ -1253,11 +1255,11 @@ struct GeneralVoFSolver::Impl
                     const auto fan = native_fans.find(node.gid);
                     if (fan == native_fans.end() || fan->second.empty())
                         continue;
-                    std::vector<Meshes::ConvexGeometryPtr> cells;
+                    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> cells;
                     for (const auto& key : fan->second)
                         cells.push_back(native_sources.at(key));
                     native_points.emplace(
-                        node.gid, Meshes::bounded_source_point(cells, node.exact_identity, arithmetic_mode_));
+                        node.gid, PLIC::dynamic_source_point(cells, node.coordinate_identity, arithmetic_mode_));
                 }
             });
         std::map<std::uint64_t, Loop> target_loops;
@@ -1291,7 +1293,7 @@ struct GeneralVoFSolver::Impl
                     source_loops.emplace(tile.face_gid, old.phases->finite_face_points(tile.face_gid));
                 }
             });
-        Meshes::BoundedGeometryLimits geometry_limits;
+        PLIC::GeometryLimits geometry_limits;
         geometry_limits.byte_budget = options.byte_budget / 2;
         geometry_limits.arithmetic_mode = arithmetic_mode_;
         std::size_t pairs = 0, patches = 0, retained_bytes = 0;
@@ -1303,7 +1305,7 @@ struct GeneralVoFSolver::Impl
         };
         const auto shared_support = [](const Loop& first, const Loop& second) -> std::optional<Support>
         {
-            const auto a = Meshes::bounded_common_supports(first), b = Meshes::bounded_common_supports(second);
+            const auto a = PLIC::dynamic_common_supports(first), b = PLIC::dynamic_common_supports(second);
             for (const auto& key : a)
                 if (std::find(b.begin(), b.end(), key) != b.end())
                     return key;
@@ -1315,19 +1317,19 @@ struct GeneralVoFSolver::Impl
                 throw std::runtime_error("Finite common-face pair cap exhausted.");
             const auto support = shared_support(first, second);
             if (!support)
-                return Meshes::BoundedPlanarFaceOverlap{};
-            auto result = Meshes::bounded_planar_face_overlap(first, second, *support, geometry_limits);
+                return PLIC::DynamicPlanarFaceOverlap{};
+            auto result = PLIC::dynamic_planar_face_overlap(first, second, *support, geometry_limits);
             if (!result.overlap_vertices.empty())
             {
                 if (++patches > VoF::ExactFaceTransferOptions{}.maximum_patches)
                     throw std::runtime_error("Finite common-face patch cap exhausted.");
                 charge(sizeof(result) + result.overlap_vertices.capacity() * sizeof(Point));
                 for (const auto& point : result.overlap_vertices)
-                    charge(Meshes::bounded_point_storage_bytes(point) - sizeof(Point));
+                    charge(PLIC::dynamic_point_storage_bytes(point) - sizeof(Point));
             }
             return result;
         };
-        const auto nonempty = [](const Meshes::BoundedPlanarFaceOverlap& value)
+        const auto nonempty = [](const PLIC::DynamicPlanarFaceOverlap& value)
         {
             if (value.overlap_projected_area.value == 0 && value.overlap_projected_area.absolute_error == 0)
                 return false;

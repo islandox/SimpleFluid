@@ -71,7 +71,7 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> plan(cons
 AMRRemapPhases phases(const Bound& source)
 {
     AMRRemapPhases result;
-    const GeometryHalfspace plane{{1, 0, 1}, {0.1, 0.1, 0.1}, 0.075};
+    const SimpleFluid::PLIC::GeometryHalfspace plane{{1, 0, 1}, {0.1, 0.1, 0.1}, 0.075};
     for (std::size_t c = 0; c < source.mesh->num_owned_cells(); ++c)
     {
         const auto gid = source.mesh->cell_global_id(static_cast<LO>(c));
@@ -139,8 +139,10 @@ TEST(ProductAMRRemapTest, CrossedActiveProductsRejectDespiteDisjointSurrogateShe
 {
     const auto observation = geometry_observation();
     const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> cells{
-        {product_key({}, {0}), 0, 3, ConvexCellGeometry::box({0, 0, 0}, {1, 1, 0.5})},
-        {product_key({0}, {}), 1, 3, ConvexCellGeometry::box({0, 0, 0.5}, {1, 1, 1})}};
+        {product_key({}, {0}), 0, 3,
+            SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 0.5})},
+        {product_key({0}, {}), 1, 3,
+            SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0.5}, {1, 1, 1})}};
     const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> identities{
         {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Unchanged, 0, 0},
         {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Unchanged, 1, 1}};
@@ -148,14 +150,16 @@ TEST(ProductAMRRemapTest, CrossedActiveProductsRejectDespiteDisjointSurrogateShe
                      observation, observation, cells, cells, identities),
         std::invalid_argument);
     const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> disjoint{
-        {product_key({0}, {0}), 0, 3, ConvexCellGeometry::box({0, 0, 0}, {1, 1, 0.5})},
-        {product_key({1}, {0}), 1, 3, ConvexCellGeometry::box({0, 0, 0.5}, {1, 1, 1})}};
+        {product_key({0}, {0}), 0, 3,
+            SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 0.5})},
+        {product_key({1}, {0}), 1, 3,
+            SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0.5}, {1, 1, 1})}};
     EXPECT_NO_THROW((void) ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(
         observation, observation, disjoint, disjoint, identities));
-    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> from{
-        {product_key({}, {0}), 0, 3, ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})}};
-    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> to{
-        {product_key({0}, {}), 0, 3, ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})}};
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> from{{product_key({}, {0}), 0, 3,
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1})}};
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> to{{product_key({0}, {}), 0, 3,
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1})}};
     const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> crossed{
         {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::ProductIntersection, 0, 0}};
     const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> wrong{
@@ -179,7 +183,7 @@ TEST(ProductAMRRemapTest, DecimalChildrenUseAuthoritativeVolumeAcrossNativePacke
     const double expected = (width * width * width / 8).convert_to<double>();
     bool changed_display = false;
     const auto resident = std::get<Handle::MultiRegionPtr>(native.mesh->variant());
-    EXPECT_TRUE(resident->has_exact_construction());
+    EXPECT_TRUE(resident->has_construction());
     for (std::uint64_t gid = 0; gid < 8; ++gid)
     {
         EXPECT_EQ(xy_z->cell_key(gid), z_xy->cell_key(gid));
@@ -189,7 +193,9 @@ TEST(ProductAMRRemapTest, DecimalChildrenUseAuthoritativeVolumeAcrossNativePacke
     {
         const auto gid = native.mesh->cell_global_id(static_cast<LO>(c));
         EXPECT_EQ(native.mesh->cell_volume(static_cast<LO>(c)), expected);
-        EXPECT_TRUE(ConvexCellGeometry::from_native_cell(*resident, gid)->equivalent(*xy_z->cell_geometry(gid)));
+        EXPECT_TRUE(SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::from_native_cell(
+            *resident, gid)
+                ->equivalent(*xy_z->cell_geometry(gid)));
         std::array<double, 3> lo{1, 1, 1}, hi{};
         for (const auto node : resident->cell_nodes(gid))
         {
@@ -234,7 +240,8 @@ TEST(ProductAMRRemapTest, CrossedFactorRemapPreservesTiltedPhaseMassMomentumAndP
         if (output.inventories[2].amount[c] > 0)
             EXPECT_NEAR(output.inventories[1].amount[c] / output.inventories[2].amount[c], 11.0 / 3.0, 2e-14);
     AMRRemapPhases next{output.gas_volume, output.carrier_volume,
-        std::vector<GeometryHalfspace>(output.gas_volume.size(), {{1, 0, 1}, {0.1, 0.1, 0.1}, 0.075})};
+        std::vector<SimpleFluid::PLIC::GeometryHalfspace>(
+            output.gas_volume.size(), {{1, 0, 1}, {0.1, 0.1, 0.1}, 0.075})};
     (void) reverse.apply(next, output.inventories, restored, 1000, 2);
     for (std::size_t c = 0; c < restored.gas_volume.size(); ++c)
     {
@@ -403,7 +410,7 @@ TEST(ProductAMRRemapTest, EqualAggregateVolumeRoundedDisplaySurrogatesRejectOwne
         }
         total += (Rational(hi[0]) - Rational(lo[0])) * (Rational(hi[1]) - Rational(lo[1])) *
                  (Rational(hi[2]) - Rational(lo[2]));
-        cell.geometry = ConvexCellGeometry::box(lo, hi);
+        cell.geometry = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box(lo, hi);
     }
     const Rational width = Rational(0.2) - Rational(0.1);
     EXPECT_EQ(total, width * width * width);

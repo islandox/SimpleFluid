@@ -34,7 +34,9 @@ void closed(const MultiRegionMesh& mesh)
             }
         }
         EXPECT_LE(sum.norm(), 64 * std::numeric_limits<double>::epsilon() * total);
-        EXPECT_NO_THROW((void) ConvexCellGeometry::from_native_cell_atomic(mesh, c));
+        EXPECT_NO_THROW((void)
+                SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::from_native_cell_atomic(
+                    mesh, c));
     }
 }
 TEST(MixedAMRTest, LocalRunsCloseWholeNativeTilesAndRoundTripSharedCatalogs)
@@ -101,7 +103,9 @@ TEST(MixedAMRTest, LocalRunsCloseWholeNativeTilesAndRoundTripSharedCatalogs)
     EXPECT_EQ(decoded->num_cells(), refined->geometry()->num_cells());
     closed(*decoded);
     for (auto c : ids)
-        EXPECT_TRUE(ConvexCellGeometry::from_native_cell(*decoded, c)->equivalent(*refined->cell_geometry(c)));
+        EXPECT_TRUE(
+            SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::from_native_cell(*decoded, c)
+                ->equivalent(*refined->cell_geometry(c)));
     EXPECT_LE(decoded->storage_report().topology, refined->geometry()->storage_report().topology);
 }
 TEST(MixedAMRTest, ProductPolyhedralJoinAdaptsWithPersistentPatchIdentityAndPhysicalClosure)
@@ -392,7 +396,8 @@ TEST(MixedAMRTest, FourFineFacesAcrossTwoSharedRunProvidersRetainOneCanonicalFlu
     std::vector<MultiRegionMesh::Region> regions{cartesian_region("coarse", {{{0, 1}, {0, 1}, {0, 1}}})};
     for (size_t z = 0; z < 2; ++z)
     {
-        auto view = ExactExtrudedConstruction::shared_view(one, anchor, anchor, z, 1);
+        auto view = SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::shared_view(
+            one, anchor, anchor, z, 1);
         regions.emplace_back(
             ExtrudedRegion("fine_run_" + std::to_string(z), one, std::make_shared<ExtrudedGeometry>(one, view)));
     }
@@ -446,7 +451,7 @@ TEST(MixedAMRTest, FourFineFacesAcrossTwoSharedRunProvidersRetainOneCanonicalFlu
         cap.faces.push_back({lower[i], {{2, upper[i]}}});
     MultiRegionMesh mesh(regions, {side, cap}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
     closed(mesh);
-    EXPECT_TRUE(mesh.has_qualified_exact_interfaces());
+    EXPECT_TRUE(mesh.has_qualified_geometry_interfaces());
     size_t cross = 0;
     double integrated = 0;
     for (std::uint64_t f = 0; f < mesh.num_faces(); ++f)

@@ -2,16 +2,16 @@
 /** @file ConservativeVoFTransport.cc
  * @brief Native conservative implicit upwind assembly and per-inventory validation.
  */
-#include "solvers/details/ConservativeVoFTransport.hh"
-#include "geometry/ExactSweptGeometry.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "parallel/SparseOwnerExchange.hh"
-#include <bit>
-#include <tuple>
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
+#include "solvers/details/ConservativeVoFTransport.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFTransferBinding.hh"
 #include "utils/CompensatedSum.hh"
+#include <bit>
+#include <tuple>
 
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -410,7 +410,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_impl(const std:
             donor.doImport(cell_owned_, *sparse->donor_import, Tpetra::INSERT);
             const auto trace = donor.getData();
             std::vector<CompensatedSum<>> amounts(mesh_->num_owned_faces());
-            std::map<LO, Meshes::ExactGeometryMeasure> exact;
+            std::map<LO, SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> exact;
             bool representable = true;
             try
             {
@@ -419,8 +419,11 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_impl(const std:
                     const double value = trace[sparse->donor_map->getLocalElement(face.donor)];
                     if (sparse->exact_faces.contains(face.face))
                     {
-                        const auto group = face.exact_amount ? *face.exact_amount
-                                                             : Meshes::ExactGeometryMeasure::from_value(face.amount);
+                        const auto group =
+                            face.exact_amount
+                                ? *face.exact_amount
+                                : SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                                      face.amount);
                         exact[face.face] = exact[face.face] + group.scaled(value);
                     }
                     else
@@ -587,7 +590,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
     std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode)
 {
     namespace fp = VoF::finite_detail;
-    using Value = Meshes::BoundedGeometryValue;
+    using Value = PLIC::DynamicGeometryValue;
     const auto map = mesh_->owned_cell_map();
     const auto comm = map->getComm();
     const auto n = mesh_->num_owned_cells();

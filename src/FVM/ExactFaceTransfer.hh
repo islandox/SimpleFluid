@@ -9,12 +9,12 @@ class GeneralVoF;
 struct ExactOwnedFaceRate
 {
     std::uint64_t face = 0;
-    Meshes::ExactGeometryMeasure rate;
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> rate;
 };
 struct ExactOwnedCellVelocity
 {
     Meshes::AMR::AdaptiveCellKey key;
-    Meshes::GeometryPoint velocity{};
+    SimpleFluid::PLIC::GeometryPoint velocity{};
 };
 struct ExactFaceTransferOptions
 {

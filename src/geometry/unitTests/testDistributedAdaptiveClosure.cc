@@ -23,7 +23,8 @@ public:
     {
         return {'f', 'i', 'x', 't', 'u', 'r', 'e'};
     }
-    ConvexGeometryPtr geometry(const ::SimpleFluid::Meshes::AMR::AdaptiveLeaf& leaf) const override
+    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry(
+        const ::SimpleFluid::Meshes::AMR::AdaptiveLeaf& leaf) const override
     {
         return leaf.geometry;
     }
@@ -49,14 +50,14 @@ public:
         throw std::invalid_argument("Fixture has no refinement kernel.");
     }
 };
-::SimpleFluid::Meshes::AMR::AdaptiveLeaf leaf(
-    unsigned id, GeometryPoint lower, GeometryPoint upper, unsigned depth = 0, std::uint64_t region = 0)
+::SimpleFluid::Meshes::AMR::AdaptiveLeaf leaf(unsigned id, SimpleFluid::PLIC::GeometryPoint lower,
+    SimpleFluid::PLIC::GeometryPoint upper, unsigned depth = 0, std::uint64_t region = 0)
 {
     ::SimpleFluid::Meshes::AMR::AdaptiveLeaf value;
     value.key = {region, ::SimpleFluid::Meshes::AMR::CartesianCellAncestry{depth, {id, 0, 0}}};
     value.domain = {'d'};
     value.provider = ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Polyhedral;
-    value.geometry = ConvexCellGeometry::box(lower, upper);
+    value.geometry = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box(lower, upper);
     for (std::size_t f = 0; f < value.geometry->num_faces(); ++f)
     {
         ::SimpleFluid::Meshes::AMR::adaptive_detail::Writer key;

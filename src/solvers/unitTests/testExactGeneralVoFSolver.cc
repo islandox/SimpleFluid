@@ -83,8 +83,11 @@ TEST(ExactGeneralVoFSolverTest, ExperimentalInventoryIsExplicitAndRollbackPreser
     int local_remainder = 0, remainders = 0;
     for (std::size_t c = 0; c < before.size(); ++c)
         local_remainder +=
-            before[c].gas.compare(Meshes::ExactGeometryMeasure::from_value(source->gas_volumes()[c])) != 0 ||
-            before[c].carrier.compare(Meshes::ExactGeometryMeasure::from_value(source->carrier_volumes()[c])) != 0;
+            before[c].gas.compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                source->gas_volumes()[c])) != 0 ||
+            before[c].carrier.compare(
+                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                    source->carrier_volumes()[c])) != 0;
     Teuchos::reduceAll(
         *source->mesh()->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_remainder, &remainders);
     ASSERT_GT(remainders, 0);
@@ -116,14 +119,16 @@ TEST(ExactGeneralVoFSolverTest, ExperimentalInventoryIsExplicitAndRollbackPreser
     }
     const auto expected_packets_received =
         exchange_owner_packets(expected_packets, snapshot->mesh()->owned_cell_map()->getComm(), 1024 * 1024);
-    std::map<AMR::AdaptiveCellKey, std::pair<Meshes::ExactGeometryMeasure, Meshes::ExactGeometryMeasure>> expected;
+    std::map<AMR::AdaptiveCellKey, std::pair<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>,
+                                       SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>>
+        expected;
     bool expected_valid = true;
     for (const auto& packet : expected_packets_received.packets)
     {
         wire::Reader r{packet.bytes};
         auto key = AMR::decode_adaptive_key(r.bytes());
-        auto gas = Meshes::ExactGeometryMeasure::decode(r.bytes());
-        auto carrier = Meshes::ExactGeometryMeasure::decode(r.bytes());
+        auto gas = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(r.bytes());
+        auto carrier = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(r.bytes());
         r.done();
         expected_valid =
             expected.emplace(std::move(key), std::pair{std::move(gas), std::move(carrier)}).second && expected_valid;
@@ -244,7 +249,7 @@ TEST(ExactGeneralVoFSolverTest, GeometryInstrumentationObservesActualFiniteAndEx
     EXPECT_GE(combined.exact.measure_arithmetic, after_exact_solver.exact.measure_arithmetic);
     enable_observed_exact_geometry_statistics(false);
     const auto disabled_before = observed_geometry_statistics();
-    (void) Meshes::ExactGeometryMeasure::from_value(13).scaled(3);
+    (void) SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(13).scaled(3);
     const auto disabled_after = observed_geometry_statistics();
     EXPECT_EQ(disabled_after.exact.measure_values, disabled_before.exact.measure_values);
     EXPECT_EQ(disabled_after.exact.measure_arithmetic, disabled_before.exact.measure_arithmetic);

@@ -18,20 +18,26 @@ set(SIMPLEFLUID_MESH_SOURCES
     mesh/AMR/ExtrudedAMR.cc
     mesh/AMR/PolyhedralAMR.cc
     mesh/AMR/MixedAMR.cc
-    ConvexCellGeometry.cc
-    BoundedConvexGeometry.cc
-    BoundedConvexConstruction.cc
-    BoundedConvexClipping.cc
-    BoundedConvexPartitions.cc
-    BoundedConvexTrajectories.cc
-    BoundedConvexPackets.cc
-    BoundedPlanarFace.cc
-    ExactExtrudedConstruction.cc
-    ExactPolyhedralComplex.cc
-    ExactExtrudedGeometry.cc
-    ExactPlanarFace.cc
-    ExactSweptGeometry.cc
-    ExactDepartureGeometry.cc
+    PLIC/details/exact/ConvexCellGeometry.cc
+    PLIC/CertifiedGeometryProperties.cc
+    PLIC/details/ordinary/GeometryMeasure.cc
+    PLIC/details/ordinary/NativePlanarGeometry.cc
+    PLIC/details/ordinary/PolyhedralComplex.cc
+    PLIC/details/ordinary/ExtrudedConstruction.cc
+    PLIC/details/ordinary/ExtrudedGeometry.cc
+    PLIC/ConvexGeometry.cc
+    PLIC/ConvexConstruction.cc
+    PLIC/ConvexClipping.cc
+    PLIC/ConvexPartitions.cc
+    PLIC/ConvexTrajectories.cc
+    PLIC/ConvexPackets.cc
+    PLIC/PlanarFace.cc
+    PLIC/details/exact/ExtrudedConstruction.cc
+    PLIC/details/exact/PolyhedralComplex.cc
+    PLIC/details/exact/ExtrudedGeometry.cc
+    PLIC/details/exact/PlanarFace.cc
+    PLIC/details/exact/SweptGeometry.cc
+    PLIC/details/exact/DepartureGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc
@@ -89,19 +95,25 @@ set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
-    set_source_files_properties(ConvexCellGeometry.cc BoundedConvexGeometry.cc
-        BoundedConvexConstruction.cc
-        BoundedConvexClipping.cc
-        BoundedConvexPartitions.cc
-        BoundedConvexTrajectories.cc
-        BoundedConvexPackets.cc
-        BoundedPlanarFace.cc
-        ExactExtrudedConstruction.cc
-        ExactPolyhedralComplex.cc
-        ExactExtrudedGeometry.cc
-        ExactPlanarFace.cc
-        ExactSweptGeometry.cc
-        ExactDepartureGeometry.cc
+    set_source_files_properties(PLIC/details/exact/ConvexCellGeometry.cc PLIC/ConvexGeometry.cc
+        PLIC/CertifiedGeometryProperties.cc
+        PLIC/details/ordinary/GeometryMeasure.cc
+        PLIC/details/ordinary/NativePlanarGeometry.cc
+        PLIC/details/ordinary/PolyhedralComplex.cc
+        PLIC/details/ordinary/ExtrudedConstruction.cc
+        PLIC/details/ordinary/ExtrudedGeometry.cc
+        PLIC/ConvexConstruction.cc
+        PLIC/ConvexClipping.cc
+        PLIC/ConvexPartitions.cc
+        PLIC/ConvexTrajectories.cc
+        PLIC/ConvexPackets.cc
+        PLIC/PlanarFace.cc
+        PLIC/details/exact/ExtrudedConstruction.cc
+        PLIC/details/exact/PolyhedralComplex.cc
+        PLIC/details/exact/ExtrudedGeometry.cc
+        PLIC/details/exact/PlanarFace.cc
+        PLIC/details/exact/SweptGeometry.cc
+        PLIC/details/exact/DepartureGeometry.cc
         PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
@@ -130,23 +142,29 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/MultiRegionMeshFrozen.cc
     mesh/AMR/AdaptiveOverlap.cc
     mesh/AMR/ExtrudedAMR.cc
-    ConvexCellGeometry.cc
-    BoundedConvexGeometry.cc
     mesh/DecomposedOrthogonalTopology.cc
     mesh/DecomposedSemiStructuredTopology.cc
     details/SemiStructuredPartition.cc
-    BoundedConvexConstruction.cc
-    BoundedConvexClipping.cc
-    BoundedConvexPartitions.cc
-    BoundedConvexTrajectories.cc
-    BoundedConvexPackets.cc
-    BoundedPlanarFace.cc
-    ExactExtrudedConstruction.cc
-    ExactPolyhedralComplex.cc
-    ExactExtrudedGeometry.cc
-    ExactPlanarFace.cc
-    ExactSweptGeometry.cc
-    ExactDepartureGeometry.cc
+    PLIC/details/exact/ConvexCellGeometry.cc
+    PLIC/CertifiedGeometryProperties.cc
+    PLIC/details/ordinary/GeometryMeasure.cc
+    PLIC/details/ordinary/NativePlanarGeometry.cc
+    PLIC/details/ordinary/PolyhedralComplex.cc
+    PLIC/details/ordinary/ExtrudedConstruction.cc
+    PLIC/details/ordinary/ExtrudedGeometry.cc
+    PLIC/ConvexGeometry.cc
+    PLIC/ConvexConstruction.cc
+    PLIC/ConvexClipping.cc
+    PLIC/ConvexPartitions.cc
+    PLIC/ConvexTrajectories.cc
+    PLIC/ConvexPackets.cc
+    PLIC/PlanarFace.cc
+    PLIC/details/exact/ExtrudedConstruction.cc
+    PLIC/details/exact/PolyhedralComplex.cc
+    PLIC/details/exact/ExtrudedGeometry.cc
+    PLIC/details/exact/PlanarFace.cc
+    PLIC/details/exact/SweptGeometry.cc
+    PLIC/details/exact/DepartureGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc

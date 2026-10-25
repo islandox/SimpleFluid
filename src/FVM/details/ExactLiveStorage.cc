@@ -151,7 +151,7 @@ void ExactLiveStorage::retain(const M& value)
     auto lease = pin(value);
     retained_.push_back(std::move(lease));
 }
-void ExactLiveStorage::retain(const Meshes::ExactPhaseMeasures& value)
+void ExactLiveStorage::retain(const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& value)
 {
     retain(value.bulk);
     retain(value.gas);

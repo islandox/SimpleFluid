@@ -1,10 +1,10 @@
 /** @file testConvexCellGeometry.cc
  * @brief Independent convex clipping, represented coverage and ancestry oracles.
  */
-#include "geometry/ConvexCellGeometry.hh"
-#include "geometry/ExactGeometryInstrumentation.hh"
-#include "geometry/ExactPlanarFace.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryInstrumentation.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
@@ -19,18 +19,20 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 using Faces = std::vector<std::vector<std::size_t>>;
 const Faces cube_faces{{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}};
 
-ConvexGeometryPtr cube()
+SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact> cube()
 {
-    return ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
 }
 
-void near_value(const CertifiedGeometryValue& actual, long double expected, long double relative = 2e-17L)
+void near_value(const SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>& actual,
+    long double expected, long double relative = 2e-17L)
 {
     EXPECT_LE(std::abs(actual.value - expected), std::abs(expected) * relative + actual.absolute_error);
     EXPECT_GE(actual.absolute_error, 0);
 }
 
-::SimpleFluid::Meshes::AMR::HierarchyObservation observation(const ConvexGeometryPtr& geometry)
+template<SimpleFluid::ArithmeticMode Mode>
+::SimpleFluid::Meshes::AMR::HierarchyObservation observation(const SimpleFluid::PLIC::ConvexGeometryPtr<Mode>& geometry)
 {
     std::shared_ptr<const void> identity = geometry;
     return {identity, identity, identity, 0, 0, 0, geometry.get(), nullptr};
@@ -62,27 +64,30 @@ TEST(ConvexCellGeometryTest, CubeObliqueTetrahedronAndIndependentComplementMomen
     EXPECT_EQ(cut.section.vertices.size(), 3U);
     const std::array pieces{cut.inside, cut.outside};
     EXPECT_NO_THROW(parent->certify_partition(pieces));
-    const std::array<GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
-    auto tetra = ConvexCellGeometry::make(vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    auto tetra = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(
+        vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
     EXPECT_TRUE(tetra->equivalent(*cut.inside));
 }
 
 TEST(ConvexCellGeometryTest, TriangularPrismAndAffineSkewUseActualShell)
 {
-    const std::array<GeometryPoint, 6> prism{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 2}, {1, 0, 2}, {0, 1, 2}}};
-    auto geometry = ConvexCellGeometry::make(prism, {{0, 2, 1}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 6> prism{
+        {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 2}, {1, 0, 2}, {0, 1, 2}}};
+    auto geometry = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(
+        prism, {{0, 2, 1}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
     auto m = geometry->moments();
     near_value(m.volume, 1);
     near_value(m.first_moment[0], 1.0L / 3);
     near_value(m.first_moment[1], 1.0L / 3);
     near_value(m.first_moment[2], 1);
-    std::array<GeometryPoint, 8> skew;
+    std::array<SimpleFluid::PLIC::GeometryPoint, 8> skew;
     for (std::size_t i = 0; i < 8; ++i)
     {
         const double x = i & 1, y = (i >> 1) & 1, z = (i >> 2) & 1;
         skew[i] = {x + .5 * y + .25 * z, y + .25 * z, z};
     }
-    auto sheared = ConvexCellGeometry::make(skew, cube_faces);
+    auto sheared = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(skew, cube_faces);
     near_value(sheared->moments().volume, 1);
     auto cut = sheared->clip({{1, -.5, -.125}, {.25, 0, 0}});
     ASSERT_TRUE(cut.inside);
@@ -97,8 +102,10 @@ TEST(ConvexCellGeometryTest, TriangularPrismAndAffineSkewUseActualShell)
 TEST(ConvexCellGeometryTest, ProductBulkIntersectionAndTiltedPrismCutHaveIndependentOracles)
 {
     const std::array<std::array<double, 2>, 3> triangle{{{0, 0}, {2, 0}, {0, 2}}};
-    auto prism = ConvexCellGeometry::extruded_polygon(triangle, 0, 2);
-    auto inner = ConvexCellGeometry::box({.25, .25, .5}, {1.25, 1.25, 1.5});
+    auto prism =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::extruded_polygon(triangle, 0, 2);
+    auto inner = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
+        {.25, .25, .5}, {1.25, 1.25, 1.5});
     auto overlap = prism->intersect(*inner);
     ASSERT_TRUE(overlap);
     const auto m = overlap->moments();
@@ -107,7 +114,8 @@ TEST(ConvexCellGeometryTest, ProductBulkIntersectionAndTiltedPrismCutHaveIndepen
     near_value(m.first_moment[1], 59.0L / 96);
     near_value(m.first_moment[2], 7.0L / 8);
     const std::array<std::array<double, 2>, 3> unit_triangle{{{0, 0}, {1, 0}, {0, 1}}};
-    auto unit = ConvexCellGeometry::extruded_polygon(unit_triangle, 0, 1);
+    auto unit = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::extruded_polygon(
+        unit_triangle, 0, 1);
     auto tilted = unit->clip({{1, 0, 1}, {.5, 0, 0}});
     ASSERT_TRUE(tilted.inside);
     ASSERT_TRUE(tilted.outside);
@@ -125,11 +133,15 @@ TEST(ConvexCellGeometryTest, NativePrismExportCorrectsBottomCapOrientation)
         Arr<SemiStructuredXY_Z::BoundaryEdge>{{0, 1, "bottom"}, {1, 2, "slope"}, {2, 0, "left"}});
     MultiRegionMesh native(std::vector<MultiRegionMesh::Region>{native_region("prism", provider)},
         std::vector<MultiRegionMesh::Interface>{});
-    const auto shell = ConvexCellGeometry::native_cell_shell(native, 0);
-    auto rebuilt = ConvexCellGeometry::make(shell.vertices, shell.outward_faces);
+    const auto shell =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::native_cell_shell(native, 0);
+    auto rebuilt = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(
+        shell.vertices, shell.outward_faces);
     const std::array<std::array<double, 2>, 3> base{{{0, 0}, {1, 0}, {0, 1}}};
-    EXPECT_TRUE(rebuilt->equivalent(*ConvexCellGeometry::extruded_polygon(base, 0, 1)));
-    EXPECT_TRUE(rebuilt->equivalent(*ConvexCellGeometry::from_native_cell(native, 0)));
+    EXPECT_TRUE(rebuilt->equivalent(
+        *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::extruded_polygon(base, 0, 1)));
+    EXPECT_TRUE(rebuilt->equivalent(
+        *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::from_native_cell(native, 0)));
     unsigned bottom_caps = 0;
     for (const auto& face : shell.outward_faces)
         if (std::all_of(face.begin(), face.end(), [&](auto i) { return shell.vertices[i][2] == 0; }))
@@ -211,7 +223,8 @@ TEST(ConvexCellGeometryTest, Binary64MomentIntervalsRetainResolvedTinyVolume)
 TEST(ConvexCellGeometryTest, AnchoredScalarOffsetPreservesTranslatedMicroscopicCuts)
 {
     constexpr double origin = 1e6, tiny = 1e-200;
-    const auto translated = ConvexCellGeometry::box({origin, origin, origin}, {origin + 1, origin + 1, origin + 1});
+    const auto translated = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
+        {origin, origin, origin}, {origin + 1, origin + 1, origin + 1});
     EXPECT_EQ(origin + tiny, origin); // A global point on this plane cannot encode the cut.
     const auto cut = translated->clip({{1, 0, 0}, {origin, origin, origin}, tiny});
     ASSERT_TRUE(cut.inside);
@@ -219,7 +232,7 @@ TEST(ConvexCellGeometryTest, AnchoredScalarOffsetPreservesTranslatedMicroscopicC
     const auto local = cube()->clip({{1, 0, 0}, {0, 0, 0}, tiny});
     const auto actual = cut.inside->moments(), expected = local.inside->moments();
     near_value(actual.volume, expected.volume.value);
-    EXPECT_EQ(actual.origin, (GeometryPoint{origin, origin, origin}));
+    EXPECT_EQ(actual.origin, (SimpleFluid::PLIC::GeometryPoint{origin, origin, origin}));
     for (std::size_t a = 0; a < 3; ++a)
     {
         near_value(actual.first_moment[a], expected.first_moment[a].value);
@@ -244,13 +257,16 @@ TEST(ConvexCellGeometryTest, MomentOverflowRejectsRatherThanLosingExactMeasure)
     // this platform has an extended-range native long double.
     if (std::numeric_limits<long double>::max_exponent > 1400)
     {
-        const auto large = ConvexCellGeometry::box({0, 0, 0}, {1e100, 1e100, 1e100});
+        const auto large = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
+            {0, 0, 0}, {1e100, 1e100, 1e100});
         EXPECT_GT(large->moments().volume.value, 0);
         EXPECT_THROW((void) large->moments_binary64(), std::runtime_error);
     }
     else
     {
-        EXPECT_THROW((void) ConvexCellGeometry::box({0, 0, 0}, {1e100, 1e100, 1e100}), std::runtime_error);
+        EXPECT_THROW((void) SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
+                         {0, 0, 0}, {1e100, 1e100, 1e100}),
+            std::runtime_error);
     }
 }
 
@@ -258,7 +274,8 @@ TEST(ConvexCellGeometryTest, ScaleTranslationAndActualGapOverlapCertificates)
 {
     for (const auto [origin, size] : std::array<std::pair<double, double>, 3>{{{0, 1e-100}, {0, 1e75}, {1e12, .125}}})
     {
-        auto parent = ConvexCellGeometry::box({origin, origin, origin}, {origin + size, origin + size, origin + size});
+        auto parent = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
+            {origin, origin, origin}, {origin + size, origin + size, origin + size});
         const auto span = static_cast<long double>(origin + size) - origin;
         near_value(parent->moments().volume, span * span * span, 1e-16L);
         const double mid = origin + size / 2;
@@ -281,41 +298,48 @@ TEST(ConvexCellGeometryTest, ScaleTranslationAndActualGapOverlapCertificates)
 
 TEST(ConvexCellGeometryTest, RejectsInvalidShellsButRetainsCollinearEdgesAndAtomicFaces)
 {
-    std::vector<GeometryPoint> v{
+    std::vector<SimpleFluid::PLIC::GeometryPoint> v{
         {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {1, 1, 1}};
     auto faces = cube_faces;
     std::reverse(faces[0].begin(), faces[0].end());
-    EXPECT_THROW((void) ConvexCellGeometry::make(v, faces), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(v, faces),
+        std::invalid_argument);
     faces = cube_faces;
     faces.pop_back();
-    EXPECT_THROW((void) ConvexCellGeometry::make(v, faces), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(v, faces),
+        std::invalid_argument);
     faces = cube_faces;
     faces[0] = {0, 6, 4, 2};
-    EXPECT_THROW((void) ConvexCellGeometry::make(v, faces), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(v, faces),
+        std::invalid_argument);
     faces = cube_faces;
     v[7][2] = .75;
-    EXPECT_THROW((void) ConvexCellGeometry::make(v, faces), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(v, faces),
+        std::invalid_argument);
     v[7][2] = 1;
     v.push_back({.5, 0, 0});
     faces = {{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 8, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1, 8}, {4, 5, 7, 6}};
-    EXPECT_NO_THROW((void) ConvexCellGeometry::make(v, faces));
+    EXPECT_NO_THROW((void) SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(v, faces));
     // Coplanar atomic top triangles share one canonical internal diagonal.
     faces.back() = {4, 5, 7};
     faces.push_back({4, 7, 6});
-    auto tiled = ConvexCellGeometry::make(v, faces);
+    auto tiled = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(v, faces);
     EXPECT_TRUE(tiled->equivalent(*cube()));
     EXPECT_NO_THROW((void) tiled->clip({{1, 0, 0}, {.5, 0, 0}}));
     // One coarse loop omits the fine edge point; native adaptation propagates
     // it exactly into all incident loops before the strict manifold check.
     faces[4] = {0, 2, 3, 1};
-    EXPECT_THROW((void) ConvexCellGeometry::make(v, faces), std::invalid_argument);
-    auto propagated = ConvexCellGeometry::from_native_shell(v, faces);
+    EXPECT_THROW((void) SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(v, faces),
+        std::invalid_argument);
+    auto propagated =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::from_native_shell(v, faces);
     EXPECT_TRUE(propagated->equivalent(*cube()));
 }
 
 TEST(AdaptiveOverlapTest, TypedRefinementCoarseningAndExactSourceObservation)
 {
-    auto parent = cube();
+    auto parent =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
     auto split = parent->clip({{1, 0, 0}, {.5, 0, 0}});
     const auto source = observation(parent), target = observation(split.inside);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> old{{key(), 17, 3, parent}};
@@ -326,7 +350,7 @@ TEST(AdaptiveOverlapTest, TypedRefinementCoarseningAndExactSourceObservation)
         {::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation::Kind::Refinement, 17, 12}};
     auto plan = ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan::build(source, target, old, children, relations);
     ASSERT_EQ(plan->records().size(), 2U);
-    near_value(plan->records()[0].moments.volume, .5L);
+    EXPECT_EQ(plan->records()[0].moments.volume.value, .5L);
     EXPECT_EQ(plan->records()[0].source_key, key());
     auto stale = source;
     ++stale.geometry;
@@ -358,7 +382,8 @@ TEST(AdaptiveOverlapTest, TypedRefinementCoarseningAndExactSourceObservation)
 
 TEST(AdaptiveOverlapTest, ActiveCatalogAncestryMustBeALeafAntichain)
 {
-    auto parent = cube();
+    auto parent =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
     const auto split = parent->clip({{1, 0, 0}, {.5, 0, 0}});
     const auto obs = observation(parent);
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> root{{key(), 0, 0, parent}};
@@ -393,62 +418,72 @@ namespace
 {
 TEST(ConvexCellGeometryTest, OptInExactStatisticsCountKernelEventsAndResetWithoutChangingEnablement)
 {
-    enable_exact_geometry_statistics(false);
-    reset_exact_geometry_statistics();
-    const auto ignored = ExactGeometryMeasure::from_value(7).scaled(2);
+    SimpleFluid::PLIC::enable_backend_statistics<SimpleFluid::ArithmeticMode::Exact>(false);
+    SimpleFluid::PLIC::reset_backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
+    const auto ignored =
+        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(7).scaled(2);
     (void) ignored;
-    EXPECT_EQ(exact_geometry_statistics().measure_values, 0);
-    EXPECT_EQ(exact_geometry_statistics().measure_arithmetic, 0);
+    EXPECT_EQ(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().measure_values, 0);
+    EXPECT_EQ(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().measure_arithmetic, 0);
     struct DisableOnExit
     {
-        ~DisableOnExit() { enable_exact_geometry_statistics(false); }
+        ~DisableOnExit() { SimpleFluid::PLIC::enable_backend_statistics<SimpleFluid::ArithmeticMode::Exact>(false); }
     } disable;
-    enable_exact_geometry_statistics(true);
-    reset_exact_geometry_statistics();
-    const auto a = ExactGeometryMeasure::from_value(1), b = ExactGeometryMeasure::from_value(3);
+    SimpleFluid::PLIC::enable_backend_statistics<SimpleFluid::ArithmeticMode::Exact>(true);
+    SimpleFluid::PLIC::reset_backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
+    const auto a = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(1),
+               b = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(3);
     const auto third = a.divided_by(b);
-    EXPECT_GT(exact_geometry_statistics().measure_values, 0);
-    EXPECT_GT(exact_geometry_statistics().measure_arithmetic, 0);
-    EXPECT_GE(exact_geometry_statistics().maximum_result_denominator_bits, 2);
+    EXPECT_GT(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().measure_values, 0);
+    EXPECT_GT(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().measure_arithmetic, 0);
+    EXPECT_GE(
+        SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().maximum_result_denominator_bits, 2);
     (void) third;
-    reset_exact_geometry_statistics();
+    SimpleFluid::PLIC::reset_backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
     const auto arithmetic = a + b;
     (void) arithmetic;
-    EXPECT_EQ(exact_geometry_statistics().measure_arithmetic, 1);
-    const std::array<GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
-    const auto tetra = ConvexCellGeometry::make(vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
-    const auto before_tetra_moments = exact_geometry_statistics();
+    EXPECT_EQ(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().measure_arithmetic, 1);
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    const auto tetra = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(
+        vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
+    const auto before_tetra_moments = SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
     (void) tetra->moments();
-    EXPECT_GT(exact_geometry_statistics().moment_evaluations, before_tetra_moments.moment_evaluations);
-    const auto before_tetra_volume = exact_geometry_statistics();
-    (void) ExactGeometryMeasure::volume(*tetra);
-    EXPECT_GT(exact_geometry_statistics().volume_evaluations, before_tetra_volume.volume_evaluations);
-    const auto product = ConvexCellGeometry::extruded_polygon(
+    EXPECT_GT(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().moment_evaluations,
+        before_tetra_moments.moment_evaluations);
+    const auto before_tetra_volume = SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
+    (void) SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*tetra);
+    EXPECT_GT(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().volume_evaluations,
+        before_tetra_volume.volume_evaluations);
+    const auto product = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::extruded_polygon(
         std::array<std::array<double, 2>, 3>{{{0, 0}, {1, 0}, {0, 1}}}, 0, 1);
-    const auto before_product = exact_geometry_statistics();
+    const auto before_product = SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
     (void) product->moments();
-    EXPECT_GT(exact_geometry_statistics().moment_evaluations, before_product.moment_evaluations);
-    const auto face = ExactPlanarFace::make(std::array<GeometryPoint, 3>{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}});
-    const auto before_face = exact_geometry_statistics();
+    EXPECT_GT(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().moment_evaluations,
+        before_product.moment_evaluations);
+    const auto face = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>::make(
+        std::array<SimpleFluid::PLIC::GeometryPoint, 3>{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}});
+    const auto before_face = SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
     (void) face->area();
     (void) face->area_vector();
     (void) face->centroid();
-    EXPECT_EQ(exact_geometry_statistics().face_measure_evaluations, before_face.face_measure_evaluations + 3);
-    EXPECT_TRUE(face->contains_exact_point(face->vertex_identities().front()));
-    EXPECT_GT(exact_geometry_statistics().source_membership_predicates, before_face.source_membership_predicates);
-    const auto counted = exact_geometry_statistics();
+    EXPECT_EQ(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().face_measure_evaluations,
+        before_face.face_measure_evaluations + 3);
+    EXPECT_TRUE(face->contains_point(face->vertex_identities().front()));
+    EXPECT_GT(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().source_membership_predicates,
+        before_face.source_membership_predicates);
+    const auto counted = SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
     EXPECT_GT(counted.moment_evaluations, 0);
     EXPECT_GT(counted.volume_evaluations, 0);
     EXPECT_GT(counted.maximum_result_numerator_bits, 0);
-    enable_exact_geometry_statistics(false);
+    SimpleFluid::PLIC::enable_backend_statistics<SimpleFluid::ArithmeticMode::Exact>(false);
     (void) a.scaled(4);
     (void) tetra->moments();
-    const auto disabled = exact_geometry_statistics();
+    const auto disabled = SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
     EXPECT_EQ(disabled.measure_values, counted.measure_values);
     EXPECT_EQ(disabled.measure_arithmetic, counted.measure_arithmetic);
     EXPECT_EQ(disabled.moment_evaluations, counted.moment_evaluations);
-    reset_exact_geometry_statistics();
-    EXPECT_EQ(exact_geometry_statistics().measure_values, 0);
-    EXPECT_EQ(exact_geometry_statistics().moment_evaluations, 0);
+    SimpleFluid::PLIC::reset_backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
+    EXPECT_EQ(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().measure_values, 0);
+    EXPECT_EQ(SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>().moment_evaluations, 0);
 }
 } // namespace

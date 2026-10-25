@@ -1,5 +1,5 @@
 /** @file testGeneralVoFFinite.cc */
-#include "FVM/details/BoundedVoFTransport.hh"
+#include "FVM/details/FiniteVoFTransport.hh"
 #include "general_vof_finite_test_helpers.hh"
 namespace
 {
@@ -110,7 +110,7 @@ TEST(GeneralVoFFinite, OrdinaryDefaultAndBoundedOptInKeepSeparateAcceptancePolic
     EXPECT_EQ(certified.arithmetic_mode(), ArithmeticMode::BoundedCertification);
     auto controls = circulation(ordinary);
     for (auto& face : controls)
-        face.bounded_integrated_volume = BoundedGeometryValue{face.integrated_volume, 1e-3L};
+        face.bounded_integrated_volume = SimpleFluid::PLIC::DynamicGeometryValue{face.integrated_volume, 1e-3L};
     // An Ordinary state explicitly consumes nominal controls. Opt-in interval
     // certification must still reject these unresolved source-cell controls.
     const auto trial = ordinary.plan_transport(stationary(ordinary), controls, 1);
@@ -147,19 +147,18 @@ TEST(GeneralVoFFinite, OrdinaryModeRejectsInvalidPhysicalDataAndImplicitExactVie
 
 TEST(GeneralVoFFinite, SparseOverlayRetainsDisjointAndContactAtomsAndCoefficients)
 {
-    const std::vector<fp::OverlayAtom> atoms{
-        {BoundedConvexGeometry::box({0, 0, 0}, {1, 1, 1}), 0},
-        {BoundedConvexGeometry::box({0, 0, 2}, {1, 1, 3}), 1},
-        {BoundedConvexGeometry::box({0, 0, 4}, {1, 1, 5}), -1}};
-    const std::array pieces{BoundedConvexGeometry::box({3, 0, 0}, {4, 1, 5}),
-        BoundedConvexGeometry::box({1, 0, 0}, {2, 1, 5})};
+    const std::vector<fp::OverlayAtom> atoms{{SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1}), 0},
+        {SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 2}, {1, 1, 3}), 1},
+        {SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 4}, {1, 1, 5}), -1}};
+    const std::array pieces{SimpleFluid::PLIC::DynamicConvexGeometry::box({3, 0, 0}, {4, 1, 5}),
+        SimpleFluid::PLIC::DynamicConvexGeometry::box({1, 0, 0}, {2, 1, 5})};
     for (const auto& geometry : pieces)
         for (const int sign : {-1, 1})
             for (const int incidence : {-1, 1})
             {
                 fp::Work work;
                 work.limits.maximum_pair_tests = atoms.size();
-                reset_bounded_geometry_statistics();
+                SimpleFluid::PLIC::reset_geometry_statistics();
                 const auto result = fp::overlay(atoms, {geometry, sign}, incidence, work);
                 ASSERT_EQ(result.size(), atoms.size());
                 EXPECT_EQ(work.pair_tests, atoms.size());
@@ -169,7 +168,7 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsDisjointAndContactAtomsAndCoefficient
                     EXPECT_EQ(result[i].geometry.get(), atoms[i].geometry.get());
                     EXPECT_EQ(result[i].coefficient, atoms[i].coefficient);
                 }
-                const auto stats = bounded_geometry_statistics();
+                const auto stats = SimpleFluid::PLIC::geometry_statistics();
                 EXPECT_EQ(stats.support_distances, 0u);
                 EXPECT_EQ(stats.volume_evaluations, 0u);
                 EXPECT_EQ(stats.constructions, 0u);
@@ -179,9 +178,9 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsDisjointAndContactAtomsAndCoefficient
 
 TEST(GeneralVoFFinite, SparseOverlayRetainsZeroCoefficientAtomsForLaterActivation)
 {
-    const auto root = BoundedConvexGeometry::box({0, 0, 0}, {1, 1, 1});
-    const auto far = BoundedConvexGeometry::box({3, 0, 0}, {4, 1, 1});
-    const auto half = BoundedConvexGeometry::box({.5, 0, 0}, {1, 1, 1});
+    const auto root = SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1});
+    const auto far = SimpleFluid::PLIC::DynamicConvexGeometry::box({3, 0, 0}, {4, 1, 1});
+    const auto half = SimpleFluid::PLIC::DynamicConvexGeometry::box({.5, 0, 0}, {1, 1, 1});
     fp::Work work;
     auto atoms = fp::overlay({{root, 0}}, {far, -1}, -1, work);
     ASSERT_EQ(atoms.size(), 1u);
@@ -206,8 +205,8 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsZeroCoefficientAtomsForLaterActivatio
 
 TEST(GeneralVoFFinite, SparseOverlayFastPathStillChargesPairAtomAndByteCaps)
 {
-    const auto root = BoundedConvexGeometry::box({0, 0, 0}, {1, 1, 1});
-    const fp::SignedPiece far{BoundedConvexGeometry::box({3, 0, 0}, {4, 1, 1}), 1};
+    const auto root = SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1});
+    const fp::SignedPiece far{SimpleFluid::PLIC::DynamicConvexGeometry::box({3, 0, 0}, {4, 1, 1}), 1};
     const std::vector<fp::OverlayAtom> atoms{{root, 0}};
     const auto rejected = [&](fp::Work& work, const char* reason)
     {
@@ -246,6 +245,21 @@ TEST(GeneralVoFFinite, SparseOverlayFastPathStillChargesPairAtomAndByteCaps)
 
 TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAndEmptyOwners)
 {
+    struct StatisticsScope
+    {
+        StatisticsScope()
+        {
+            GeneralVoF::enable_geometry_statistics(true);
+            GeneralVoF::reset_geometry_statistics();
+            SimpleFluid::PLIC::enable_backend_statistics<ArithmeticMode::Exact>(true);
+            SimpleFluid::PLIC::reset_backend_statistics<ArithmeticMode::Exact>();
+        }
+        ~StatisticsScope()
+        {
+            GeneralVoF::enable_geometry_statistics(false);
+            SimpleFluid::PLIC::enable_backend_statistics<ArithmeticMode::Exact>(false);
+        }
+    } statistics_scope;
     const auto input = fixture();
     GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier);
     EXPECT_EQ(state.arithmetic_mode(), ArithmeticMode::Ordinary);
@@ -253,15 +267,7 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
         EXPECT_EQ(geometry->arithmetic_mode(), ArithmeticMode::Ordinary);
     const auto velocities = stationary(state);
     const auto controls = circulation(state);
-    struct StatisticsScope
-    {
-        StatisticsScope()
-        {
-            GeneralVoF::enable_exact_geometry_statistics(true);
-            GeneralVoF::reset_geometry_statistics();
-        }
-        ~StatisticsScope() { GeneralVoF::enable_exact_geometry_statistics(false); }
-    } statistics_scope;
+    const auto prepared = GeneralVoF::geometry_statistics();
     const auto trial = state.plan_transport(velocities, controls, 1);
     const auto candidate = state.apply(trial);
     check_budget_diagnostics(state, trial);
@@ -309,9 +315,20 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
     EXPECT_EQ(observed.exact.measure_values, 0);
     EXPECT_EQ(observed.exact.measure_arithmetic, 0);
     EXPECT_EQ(observed.exact.cover_certifications, 0);
-    EXPECT_EQ(statistics.source_imports, 0);
+    const auto native = SimpleFluid::PLIC::backend_statistics<ArithmeticMode::Exact>();
+    EXPECT_EQ(native.source_coordinate_exports, 0);
+    EXPECT_EQ(native.source_support_exports, 0);
+    EXPECT_EQ(native.volume_evaluations, 0);
+    EXPECT_EQ(native.moment_evaluations, 0);
+    EXPECT_EQ(native.clip_constructions, 0);
+    EXPECT_EQ(native.intersection_constructions, 0);
+    EXPECT_EQ(native.measure_values, 0);
+    EXPECT_EQ(native.measure_arithmetic, 0);
+    EXPECT_EQ(native.cover_certifications, 0);
+    EXPECT_EQ(statistics.source_imports, prepared.bounded.source_imports);
     EXPECT_EQ(statistics.interval_operations, 0);
-    const std::uint64_t local_work = statistics.constructions + statistics.volume_evaluations;
+    const std::uint64_t local_work = statistics.constructions - prepared.bounded.constructions +
+                                     statistics.volume_evaluations - prepared.bounded.volume_evaluations;
     std::uint64_t global_work = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_work, &global_work);
     EXPECT_GT(global_work, 0);
@@ -331,7 +348,7 @@ TEST(GeneralVoFFinite, RankLocalMalformedAndCrossPolicyControlsRejectWithoutChan
     EXPECT_EQ(state.accepted_control(), control);
     faces = circulation(state, true);
     if (Tpetra::getDefaultComm()->getRank() == 0 && !faces.empty())
-        faces.front().bounded_integrated_volume = BoundedGeometryValue{0, 0, ArithmeticMode::Exact};
+        faces.front().bounded_integrated_volume = SimpleFluid::PLIC::DynamicGeometryValue{0, 0, ArithmeticMode::Exact};
     EXPECT_THROW(state.plan_transport(stationary(state), faces, 1), std::invalid_argument);
     EXPECT_EQ(state.gas_volumes(), input.gas);
     EXPECT_EQ(state.carrier_volumes(), input.carrier);
@@ -622,7 +639,7 @@ TEST(GeneralVoFFinite, TinyReceiptArithmeticRejectionPreservesAcceptedIndependen
     // is shared by every owner incidence and is never hidden in phase history.
     for (auto& face : faces)
         if (face.integrated_volume != 0)
-            face.bounded_integrated_volume = BoundedGeometryValue{face.integrated_volume, 1e-19L};
+            face.bounded_integrated_volume = SimpleFluid::PLIC::DynamicGeometryValue{face.integrated_volume, 1e-19L};
     std::string diagnostic;
     try
     {

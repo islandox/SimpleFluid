@@ -1,7 +1,7 @@
 /** Shared test-local native fixtures; no test cases or environment registration. */
 #pragma once
 #include "FVM/GeneralVoF.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>

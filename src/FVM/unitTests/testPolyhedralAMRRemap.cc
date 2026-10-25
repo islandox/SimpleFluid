@@ -50,7 +50,7 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> plan(cons
 AMRRemapPhases phases(const Bound& bound)
 {
     AMRRemapPhases result;
-    const GeometryHalfspace plane{{1, 0.3, 0.7}, {0, 0, 0}, 0.85};
+    const SimpleFluid::PLIC::GeometryHalfspace plane{{1, 0.3, 0.7}, {0, 0, 0}, 0.85};
     for (std::size_t c = 0; c < bound.mesh->num_owned_cells(); ++c)
     {
         const auto cut = bound.hierarchy->cell_geometry(bound.mesh->cell_global_id(static_cast<LO>(c)))->clip(plane);
@@ -117,7 +117,7 @@ TEST(PolyhedralAMRRemapTest, UnequalSkewCutsAndCoarseningKeepNativeFluxesAndPhys
         if (output.inventories[2].amount[c] > 0)
             EXPECT_NEAR(output.inventories[1].amount[c] / output.inventories[2].amount[c], 11.0 / 3.0, 3e-14);
     AMRRemapPhases next{output.gas_volume, output.carrier_volume,
-        std::vector<GeometryHalfspace>(output.gas_volume.size(), {{1, 0.3, 0.7}, {0, 0, 0}, 0.85})};
+        std::vector<SimpleFluid::PLIC::GeometryHalfspace>(output.gas_volume.size(), {{1, 0.3, 0.7}, {0, 0, 0}, 0.85})};
     (void) reverse.apply(next, output.inventories, restored, 1000, 2);
     for (std::size_t c = 0; c < restored.gas_volume.size(); ++c)
     {

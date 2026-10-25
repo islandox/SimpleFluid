@@ -421,7 +421,7 @@ void check_frame_budget(const Data& source, std::size_t n)
         budget.add(frame.name.size());
         product(frame.inventories.size(), sizeof(ConservedQuantity));
         product(frame.pairs.size(), sizeof(AdaptiveInventoryPair));
-        product(n, 2 * sizeof(double) + sizeof(GeometryHalfspace) + sizeof(AMRPhaseGeometry));
+        product(n, 2 * sizeof(double) + sizeof(SimpleFluid::PLIC::GeometryHalfspace) + sizeof(AMRPhaseGeometry));
         for (const auto& q : frame.inventories)
         {
             budget.add(q.name.size());
@@ -1139,7 +1139,7 @@ AdaptiveStateStorage DistributedAdaptiveState::storage() const
             report.state_metadata_estimate_bytes += pair.number.capacity() + pair.moles.capacity();
         report.frame_capacity_bytes +=
             (frame.phases.gas_volume.capacity() + frame.phases.carrier_volume.capacity()) * sizeof(double) +
-            frame.phases.gas_halfspace.capacity() * sizeof(GeometryHalfspace) +
+            frame.phases.gas_halfspace.capacity() * sizeof(SimpleFluid::PLIC::GeometryHalfspace) +
             frame.phases.geometry_declaration.capacity() * sizeof(AMRPhaseGeometry);
         for (const auto& q : frame.inventories)
             report.frame_capacity_bytes += q.amount.capacity() * sizeof(double) + q.name.capacity();

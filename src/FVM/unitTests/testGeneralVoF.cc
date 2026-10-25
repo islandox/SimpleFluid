@@ -3,12 +3,15 @@
 namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-std::vector<ExactPhaseMeasures> published_phase_lifts(const GeneralVoF& state)
+std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> published_phase_lifts(
+    const GeneralVoF& state)
 {
-    std::vector<ExactPhaseMeasures> result;
+    std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> result;
     for (const auto& value : state.phase_volumes())
-        result.push_back({ExactGeometryMeasure::from_value(value.bulk), ExactGeometryMeasure::from_value(value.gas),
-            ExactGeometryMeasure::from_value(value.carrier)});
+        result.push_back(
+            {SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(value.bulk),
+                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(value.gas),
+                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(value.carrier)});
     return result;
 }
 
@@ -38,14 +41,14 @@ TEST(GeneralVoF, CanonicalNodeFanUsesAllIncidentOwnersBeforeFixedPhysicalSupport
         }
         std::sort(expected.begin(), expected.end());
         EXPECT_EQ(actual, expected);
-        if (node.coordinate == GeometryPoint{1, 1, 1})
+        if (node.coordinate == SimpleFluid::PLIC::GeometryPoint{1, 1, 1})
             EXPECT_EQ(actual.size(), 8);
     }
 }
 TEST(GeneralVoF, GeometricFractionPreservesPhysicalInventoriesNativeConversionAndSubnormalPresence)
 {
     const auto comm = Tpetra::getDefaultComm();
-    auto make = [&](GeometryPoint extent)
+    auto make = [&](SimpleFluid::PLIC::GeometryPoint extent)
     {
         AMRGrid grid;
         grid.block_cells = {2, 2, 2};
@@ -107,7 +110,10 @@ TEST(GeneralVoF, GeometricFractionPreservesPhysicalInventoriesNativeConversionAn
     {
         EXPECT_EQ(fraction[i], 0);
         EXPECT_EQ(tiny.gas_volumes()[i], std::numeric_limits<double>::denorm_min());
-        EXPECT_EQ(exact[i].gas.compare(ExactGeometryMeasure::from_value(std::numeric_limits<double>::denorm_min())), 0);
+        EXPECT_EQ(
+            exact[i].gas.compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                std::numeric_limits<double>::denorm_min())),
+            0);
         EXPECT_EQ(published_phase_lifts(tiny)[i].gas.compare(exact[i].gas), 0);
     }
 }
@@ -174,9 +180,9 @@ TEST(GeneralVoF, InferredCoarseFineCirculationUsesActualFourSubfaceSeam)
         const auto center = hierarchy->geometry(hierarchy->owned().at(key))->centroid();
         const auto source_index = std::find(order.begin(), order.end(), key) - order.begin();
         double expected = gas.at(source_index);
-        if (center == GeometryPoint{1.75, .25, .25})
+        if (center == SimpleFluid::PLIC::GeometryPoint{1.75, .25, .25})
             expected -= phi;
-        if (center == GeometryPoint{2.5, .5, .5})
+        if (center == SimpleFluid::PLIC::GeometryPoint{2.5, .5, .5})
             expected += phi;
         EXPECT_EQ(candidate->gas_volumes()[i], expected);
         EXPECT_EQ(candidate->carrier_volumes()[i], hierarchy->metrics(hierarchy->owned().at(key)).volume - expected);
@@ -189,7 +195,7 @@ TEST(GeneralVoF, InferredObliquePLICDrivesActualSkewPolyhedralUnsplitTransport)
     auto fixture = skew_setup();
     GeneralVoF source(fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier);
     const auto reconstruction = source.reconstruct();
-    const GeometryPoint normal{-1, 0, 1};
+    const SimpleFluid::PLIC::GeometryPoint normal{-1, 0, 1};
     const double norm = std::hypot(normal[0], normal[1], normal[2]);
     for (std::size_t i = 0; i < reconstruction.size(); ++i)
         if (fixture.gas[i] > 0)
@@ -231,7 +237,7 @@ TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
     GeneralVoF state(fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier);
     auto velocity = nodes(state);
     for (std::size_t i = 0; i < state.nodes().size(); ++i)
-        if (state.nodes()[i].coordinate == GeometryPoint{1, 1, 1})
+        if (state.nodes()[i].coordinate == SimpleFluid::PLIC::GeometryPoint{1, 1, 1})
             velocity[i].velocity = {1. / 64, 1. / 64, 1. / 64};
     std::vector<GeneralVoFFaceVolume> zero;
     for (const auto& face : state.tiles())
@@ -250,8 +256,8 @@ TEST(GeneralVoF, ThreeAxisCornerTransferUsesIncidentFaceDonorUnion)
         const auto recipient = std::find_if(
             support.begin(), support.end(), [&](const auto& cell) { return cell.cell == transfer.recipient; });
         if (donor != support.end() && recipient != support.end() &&
-            donor->geometry->centroid() == GeometryPoint{.5, .5, .5} &&
-            recipient->geometry->centroid() == GeometryPoint{1.5, 1.5, 1.5})
+            donor->geometry->centroid() == SimpleFluid::PLIC::GeometryPoint{.5, .5, .5} &&
+            recipient->geometry->centroid() == SimpleFluid::PLIC::GeometryPoint{1.5, 1.5, 1.5})
         {
             EXPECT_GT(transfer.amount.bulk.value, transfer.amount.bulk.absolute_error);
             EXPECT_NEAR(transfer.amount.gas.value, transfer.amount.bulk.value, transfer.amount.gas.absolute_error + transfer.amount.bulk.absolute_error);
@@ -274,7 +280,7 @@ TEST(GeneralVoF, HighValenceNativeVertexFansIncludeDonorsBeyondBothFaceNeighborh
     const auto comm = Tpetra::getDefaultComm();
     ExtrudedAMRGrid grid;
     grid.xy_nodes.push_back({0, 0, 0});
-    const std::array<GeometryPoint, 8> rays{
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 8> rays{
         {{1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {-1, 1, 0}, {-1, 0, 0}, {-1, -1, 0}, {0, -1, 0}, {1, -1, 0}}};
     for (const auto& point : rays)
         grid.xy_nodes.push_back({point[0], point[1], 0});
@@ -304,7 +310,7 @@ TEST(GeneralVoF, HighValenceNativeVertexFansIncludeDonorsBeyondBothFaceNeighborh
     GeneralVoF state(hierarchy, order, gas, carrier);
     auto velocity = nodes(state);
     for (std::size_t i = 0; i < state.nodes().size(); ++i)
-        if (state.nodes()[i].coordinate == GeometryPoint{0, 0, 1})
+        if (state.nodes()[i].coordinate == SimpleFluid::PLIC::GeometryPoint{0, 0, 1})
             velocity[i].velocity = {1. / 64, 0, 0};
     std::vector<GeneralVoFFaceVolume> zero;
     for (const auto& face : state.tiles())
@@ -435,7 +441,9 @@ TEST(GeneralVoF, DeclaredSubnormalInventorySurvivesWithoutInventingAnIdentifiabl
     {
         EXPECT_EQ(moved->gas_volumes()[i], 1e-310);
         EXPECT_EQ(moved->carrier_volumes()[i], 1);
-        EXPECT_EQ(published_phase_lifts(*moved)[i].gas.compare(ExactGeometryMeasure::from_value(1e-310)), 0);
+        EXPECT_EQ(published_phase_lifts(*moved)[i].gas.compare(
+                      SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(1e-310)),
+            0);
         EXPECT_EQ(moved->initial_occupancy_errors()[i].difference, 1e-310);
     }
     ASSERT_EQ(transported.finite_donor_budgets().size(), state.owned_order().size());

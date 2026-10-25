@@ -2,8 +2,8 @@
  * @brief Resolution requests, bounded PLIC fitting and retained finite inventories.
  */
 #include "FVM/GeometricVoF.hh"
-#include "FVM/PolyhedralReconstruction.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -22,16 +22,17 @@ std::vector<std::array<int, 3>> neighbors()
 FinitePolyhedralPhaseSample uniform_sample(
     std::array<int, 3> index, double scale, double fraction, ArithmeticMode mode = ArithmeticMode::BoundedCertification)
 {
-    GeometryPoint lower{}, upper{};
+    SimpleFluid::PLIC::GeometryPoint lower{}, upper{};
     for (unsigned a = 0; a < 3; ++a)
     {
         lower[a] = index[a] * scale;
         upper[a] = (index[a] + 1) * scale;
     }
     const double volume = scale * scale * scale;
-    BoundedGeometryLimits limits;
+    SimpleFluid::PLIC::GeometryLimits limits;
     limits.arithmetic_mode = mode;
-    return {BoundedConvexGeometry::box(lower, upper, limits), fraction * volume, (1 - fraction) * volume};
+    return {SimpleFluid::PLIC::DynamicConvexGeometry::box(lower, upper, limits), fraction * volume,
+        (1 - fraction) * volume};
 }
 
 TEST(PolyhedralReconstruction, OrdinaryOffsetFitRetainsPhysicalMinorityResidualAndInputAmounts)
@@ -105,9 +106,9 @@ TEST(PolyhedralReconstruction, OrdinarySupportAndModelGatesRemainIndependentOfCe
 }
 
 FinitePolyhedralPhaseSample plane_sample(
-    std::array<int, 3> index, GeometryPoint normal, double offset, double scale = 1)
+    std::array<int, 3> index, SimpleFluid::PLIC::GeometryPoint normal, double offset, double scale = 1)
 {
-    GeometryPoint lower{}, upper{};
+    SimpleFluid::PLIC::GeometryPoint lower{}, upper{};
     for (unsigned a = 0; a < 3; ++a)
     {
         lower[a] = index[a] * scale;
@@ -115,7 +116,7 @@ FinitePolyhedralPhaseSample plane_sample(
     }
     const auto gas = GeometricVoF::box_plane_volume(lower, upper, normal, offset * scale);
     const double volume = scale * scale * scale;
-    return {BoundedConvexGeometry::box(lower, upper), gas, volume - gas};
+    return {SimpleFluid::PLIC::DynamicConvexGeometry::box(lower, upper), gas, volume - gas};
 }
 
 TEST(PolyhedralReconstruction, DiluteFeatureRequestsRefinementBeforeClippingAndPreservesAmounts)
@@ -125,7 +126,7 @@ TEST(PolyhedralReconstruction, DiluteFeatureRequestsRefinementBeforeClippingAndP
     for (const auto index : neighbors())
         stencil.push_back(uniform_sample(index, 1, .01));
     const auto before = target;
-    reset_bounded_geometry_statistics();
+    SimpleFluid::PLIC::reset_geometry_statistics();
     const auto assessment = PolyhedralReconstruction::assess_resolution(target, stencil);
     EXPECT_EQ(assessment.reason, PolyhedralResolutionAssessment::Reason::InsufficientPhaseSupport);
     EXPECT_EQ(assessment.local_cell_span, 1);
@@ -133,8 +134,8 @@ TEST(PolyhedralReconstruction, DiluteFeatureRequestsRefinementBeforeClippingAndP
     EXPECT_THROW(PolyhedralReconstruction::reconstruct(target, stencil), PolyhedralResolutionRequired);
     EXPECT_EQ(target.gas_volume, before.gas_volume);
     EXPECT_EQ(target.carrier_volume, before.carrier_volume);
-    EXPECT_EQ(bounded_geometry_statistics().constructions, 0u);
-    EXPECT_EQ(bounded_geometry_statistics().rational_measures, 0u);
+    EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().constructions, 0u);
+    EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().rational_measures, 0u);
 }
 TEST(PolyhedralReconstruction, ResolutionAdmissionIsInvariantUnderUnitScaling)
 {
@@ -152,7 +153,7 @@ TEST(PolyhedralReconstruction, ResolutionAdmissionIsInvariantUnderUnitScaling)
 }
 TEST(PolyhedralReconstruction, ResolvedGrazingPlaneUsesNeighborSupport)
 {
-    const GeometryPoint normal{1, 1, 1};
+    const SimpleFluid::PLIC::GeometryPoint normal{1, 1, 1};
     const auto target = plane_sample({0, 0, 0}, normal, .05);
     ASSERT_LT(target.gas_volume, 1e-4);
     std::vector<FinitePolyhedralPhaseSample> stencil;
@@ -175,12 +176,13 @@ TEST(PolyhedralReconstruction, RefinementRechecksThePhysicalSupportOfAThinLayer)
     // mesh. Splitting the old uniform average alone cannot recover its faces.
     const auto layer = [](std::array<int, 3> index, double h, double shift)
     {
-        GeometryPoint lower{shift + index[0] * h, index[1] * h, index[2] * h};
-        GeometryPoint upper{shift + (index[0] + 1) * h, (index[1] + 1) * h, (index[2] + 1) * h};
+        SimpleFluid::PLIC::GeometryPoint lower{shift + index[0] * h, index[1] * h, index[2] * h};
+        SimpleFluid::PLIC::GeometryPoint upper{shift + (index[0] + 1) * h, (index[1] + 1) * h, (index[2] + 1) * h};
         const double width = std::max(0., std::min(upper[0], .2) - std::max(lower[0], .1));
         const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
         const double gas = width * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-        return FinitePolyhedralPhaseSample{BoundedConvexGeometry::box(lower, upper), gas, volume - gas};
+        return FinitePolyhedralPhaseSample{
+            SimpleFluid::PLIC::DynamicConvexGeometry::box(lower, upper), gas, volume - gas};
     };
     const auto coarse = layer({0, 0, 0}, 1, 0);
     std::vector<FinitePolyhedralPhaseSample> coarse_stencil;
@@ -217,8 +219,11 @@ TEST(PolyhedralReconstruction, DeficientAndUnobservableStencilsRequestMoreSuppor
 }
 TEST(PolyhedralReconstruction, RationalSupportFitsComplementaryOrdinaryVolumes)
 {
-    const auto exact = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})->clip({{-10, 0, 0}, {}, -1}).inside;
-    const auto numerical = BoundedConvexGeometry::from_geometry(*exact);
+    const auto exact =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1})
+            ->clip({{-10, 0, 0}, {}, -1})
+            .inside;
+    const auto numerical = SimpleFluid::PLIC::DynamicConvexGeometry::from_geometry(*exact);
     for (double direction : {-1., 1.})
         for (bool minority_gas : {false, true})
         {
@@ -228,16 +233,20 @@ TEST(PolyhedralReconstruction, RationalSupportFitsComplementaryOrdinaryVolumes)
             ASSERT_TRUE(fit.finite_geometry);
             const auto measured = numerical->phases(fit.gas);
             EXPECT_TRUE((minority_gas ? measured.gas : measured.carrier).relative_error_at_most(.225, 8e-15));
-            const auto reference = ExactConvexFragment::from_geometry(*exact)->phases(fit.gas);
+            const auto reference =
+                SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*exact)->phases(
+                    fit.gas);
             EXPECT_TRUE((minority_gas ? reference.gas : reference.carrier)
-                            .relative_error_at_most(ExactGeometryMeasure::from_value(.225), 8e-15));
+                    .relative_error_at_most(
+                        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(.225),
+                        8e-15));
             EXPECT_EQ(sample.gas_volume, minority_gas ? .225 : .675);
             EXPECT_EQ(sample.carrier_volume, minority_gas ? .675 : .225);
         }
 }
 TEST(PolyhedralReconstruction, PureEndpointsAndRejectedArithmeticDoNotChangePolicyOrAmounts)
 {
-    const auto geometry = BoundedConvexGeometry::box({0, 0, 0}, {1, 1, 1});
+    const auto geometry = SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1});
     for (double direction : {-1., 1.})
         for (bool gas : {false, true})
         {
@@ -259,7 +268,7 @@ TEST(PolyhedralReconstruction, PureEndpointsAndRejectedArithmeticDoNotChangePoli
 
 TEST(PolyhedralReconstruction, FarMinoritySupportRetainsOffsetPrecisionForBothLabelsAndNormals)
 {
-    const auto geometry = BoundedConvexGeometry::box({0, 0, 0}, {1, 1, 1});
+    const auto geometry = SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1});
     for (double direction : {-1., 1.})
         for (bool gas : {false, true})
         {
@@ -282,12 +291,12 @@ TEST(PolyhedralReconstruction, CoarseFinePassageMinorityFitDoesNotStallBetweenAd
     const std::array<std::array<long double, 3>, 8> normalized{{
         {0, 0, 0}, {-skew, -.5L, 0}, {.25L - skew, -.5L, 0}, {.25L, 0, 0},
         {0, 0, .5L}, {-skew, -.5L, .5L}, {.25L - skew, -.5L, .5L}, {.25L, 0, .5L}}};
-    std::array<BoundedPoint, 8> local;
+    std::array<SimpleFluid::PLIC::DynamicPoint, 8> local;
     for (std::size_t p = 0; p < local.size(); ++p)
         for (unsigned axis = 0; axis < 3; ++axis)
             local[p].value[axis] = normalized[p][axis] * .5L;
-    const auto geometry = BoundedConvexGeometry::make_bounded_local({.6, .5, .5}, local,
-        {{3, 2, 1, 0}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}});
+    const auto geometry = SimpleFluid::PLIC::DynamicConvexGeometry::make_bounded_local(
+        {.6, .5, .5}, local, {{3, 2, 1, 0}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}});
     const FinitePolyhedralPhaseSample sample{geometry, 6.3984438984441292e-8, .0078124360155610159};
     const auto fitted = PolyhedralReconstruction::solve_offset(
         sample, {.96128421995518143, .27109170276597788, .049415960545162486});

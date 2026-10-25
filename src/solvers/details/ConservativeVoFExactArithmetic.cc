@@ -146,7 +146,7 @@ Measure leased_divide(const Measure& a, const Measure& b, std::size_t cap)
     retained(result, cap);
     return result;
 }
-double view(const Measure& value, Meshes::CertifiedGeometryValue& enclosure)
+double view(const Measure& value, SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>& enclosure)
 {
     enclosure = value.enclosure();
     const double result = static_cast<double>(enclosure.value);

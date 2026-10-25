@@ -2,11 +2,11 @@
  * @brief Operation-derived fixed-storage arithmetic for represented projection leaves.
  */
 #pragma once
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include <array>
 namespace SimpleFluid::detail::vof_projection_fp
 {
-using Value = Meshes::BoundedGeometryValue;
+using Value = PLIC::DynamicGeometryValue;
 namespace fp = VoF::finite_detail;
 /** Retain arithmetic uncertainty when an operator coefficient is cached in
  * binary64. Geometry and prepared gradients are represented input leaves;

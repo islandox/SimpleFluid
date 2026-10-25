@@ -8,12 +8,12 @@ namespace SimpleFluid::Meshes::AMR
 struct AdaptiveJoinRule
 {
     AdaptiveBytes original_support, canonical_support;
-    ExactPlanarFacePtr original_root_selection;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> original_root_selection;
 };
 struct AdaptiveBoundaryRule
 {
     AdaptiveBytes original_support;
-    ExactPlanarFacePtr original_root_selection;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> original_root_selection;
     std::string boundary; ///< Accepted physical destination; empty means unnamed.
 };
 /** The immutable route is a participant/root identity, never a current native

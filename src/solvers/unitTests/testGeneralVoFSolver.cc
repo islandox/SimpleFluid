@@ -289,7 +289,10 @@ TEST(GeneralVoFSolverTest, MicroscopicDeclaredTraceAggregatesPhaseMassBeforeDiag
     GeneralVoFSolver solver(source, material);
     // The accepted phase eta is representable. Its weighted mass eta/2 is a
     // transient product; aggregate before narrowing rather than dropping it.
-    const auto expected = Meshes::ExactGeometryMeasure::from_value(eta).scaled(13.5).certified().as_double();
+    const auto expected = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(eta)
+                              .scaled(13.5)
+                              .certified()
+                              .as_double();
     EXPECT_EQ(solver.diagnostics().gas_mass, expected);
     const auto before = solver.phases();
     const auto after = solver.step(.001);
@@ -572,8 +575,11 @@ TEST(GeneralVoFSolverTest, TinyCellRepartitionRetainsIndependentZeroRatesAndSubn
     std::vector<double> gas, carrier;
     for (const auto& [key, leaf] : hierarchy->owned())
     {
-        const auto exact_volume = Meshes::ExactGeometryMeasure::volume(*hierarchy->geometry(leaf));
-        ASSERT_EQ(exact_volume.compare(Meshes::ExactGeometryMeasure::from_value(eta)), 0);
+        const auto exact_volume =
+            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*hierarchy->geometry(leaf));
+        ASSERT_EQ(exact_volume.compare(
+                      SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(eta)),
+            0);
         order.push_back(key);
         gas.push_back(0);
         carrier.push_back(eta);

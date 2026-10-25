@@ -65,7 +65,7 @@ public:
     [[nodiscard]] const Teuchos::RCP<const Teuchos::Comm<int>>& communicator() const noexcept;
     [[nodiscard]] const DistributedAdaptiveOptions& options() const noexcept;
     [[nodiscard]] std::uint64_t global_cells() const noexcept;
-    [[nodiscard]] ConvexGeometryPtr geometry(const AdaptiveLeaf&) const;
+    [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf&) const;
     [[nodiscard]] AdaptiveCellMetrics metrics(const AdaptiveLeaf&) const;
     [[nodiscard]] std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf&) const;
     [[nodiscard]] HierarchyObservation observation() const noexcept;

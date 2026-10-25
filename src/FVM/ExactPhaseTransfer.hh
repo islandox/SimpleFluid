@@ -4,8 +4,8 @@
 #pragma once
 #include "FVM/ExperimentalPhaseInventory.hh"
 #include "FVM/PhaseVolumes.hh"
-#include "FVM/PolyhedralReconstruction.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include <optional>
 #include <string>
@@ -31,7 +31,7 @@ struct ExactTransferChannel
  * Not an accepted physical-state remainder or a physical-step history. */
 struct ExactTransferPhaseMass
 {
-    Meshes::ExactGeometryMeasure gas, carrier;
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> gas, carrier;
 };
 /** Provenance remains distinct: physical phase inputs are never normalized to
  * erase numerical occupancy or PLIC fitting differences. */
@@ -56,12 +56,12 @@ struct ExactPhaseTransferCapsule
     /** Transaction-local weighted products, never adopted as accepted physical
      * phase/history state. Rebuild from the current selected authority and
      * physical fields per remap; these are distinct from the optional payload. */
-    std::vector<Meshes::ExactGeometryMeasure> amounts;
+    std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> amounts;
 };
 struct ExactTransferOwnedChannels
 {
     Meshes::AMR::AdaptiveCellKey key;
-    std::vector<Meshes::ExactGeometryMeasure> amounts;
+    std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> amounts;
     std::optional<ExactTransferPhaseMass> phase_mass;
 };
 struct ExactPhaseTransferOptions

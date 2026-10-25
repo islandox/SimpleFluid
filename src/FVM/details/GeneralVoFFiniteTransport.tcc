@@ -6,9 +6,9 @@ namespace SimpleFluid::VoF
 {
 namespace
 {
-using FValue = Meshes::BoundedGeometryValue;
-using FPoint = Meshes::BoundedPoint;
-using FPhases = Meshes::BoundedPhaseMeasures;
+using FValue = PLIC::DynamicGeometryValue;
+using FPoint = PLIC::DynamicPoint;
+using FPhases = PLIC::DynamicPhaseMeasures;
 void finite_point(wire::Writer& w, const FPoint& p)
 {
     for (unsigned a = 0; a < 3; ++a)
@@ -61,19 +61,19 @@ FPhases finite_inventory(const Cell& cell)
     return {cell.finite_geometry->volume(), Math::make_value(mode, cell.phase.gas_volume),
         Math::make_value(mode, cell.phase.carrier_volume)};
 }
-FPoint constrained_finite_departure(const GeneralVoF::Data& data, std::uint64_t node,
-    const Meshes::GeometryPoint& velocity, double dt)
+FPoint constrained_finite_departure(
+    const GeneralVoF::Data& data, std::uint64_t node, const SimpleFluid::PLIC::GeometryPoint& velocity, double dt)
 {
-    std::vector<Meshes::BoundedFaceConstraint> walls;
+    std::vector<PLIC::DynamicFaceConstraint> walls;
     for (const auto& wall : data.topology->node_walls.at(node))
         walls.push_back(wall.finite_constraint);
-    if (walls.size() > Meshes::ExactTrajectoryLimits{}.maximum_constraints)
+    if (walls.size() > SimpleFluid::PLIC::TrajectoryLimits{}.maximum_constraints)
         throw std::invalid_argument("Finite VoF complete wall catalog exceeds the unchanged constraint limit.");
-    Meshes::BoundedGeometryLimits limits;
+    PLIC::GeometryLimits limits;
     limits.byte_budget = data.options.byte_budget;
     limits.arithmetic_mode = data.options.arithmetic_mode;
-    limits.maximum_operations = Meshes::ExactTrajectoryLimits{}.maximum_operations;
-    return Meshes::bounded_backtrace_constrained(data.topology->finite_nodes.at(node), velocity, dt, walls, limits);
+    limits.maximum_operations = SimpleFluid::PLIC::TrajectoryLimits{}.maximum_operations;
+    return PLIC::dynamic_backtrace_constrained(data.topology->finite_nodes.at(node), velocity, dt, walls, limits);
 }
 template<ArithmeticMode Mode>
 struct FLabel
@@ -95,7 +95,7 @@ struct FLabel
         return Math::add(Math::multiply(gas_deviation, Math::subtract(gas_share, bulk_share)),
             Math::multiply(carrier_deviation, Math::subtract(carrier_share, bulk_share)));
     }
-    FPhases apply(const Meshes::BoundedConvexGeometry& geometry, const PolyhedralInterface& plane,
+    FPhases apply(const PLIC::DynamicConvexGeometry& geometry, const PolyhedralInterface& plane,
         std::array<bool, 2>* geometric_presence = nullptr, FValue* fit_allocation = nullptr) const
     {
         const auto bulk = geometry.volume();
@@ -117,7 +117,7 @@ struct FLabel
         return {bulk, Math::multiply(gas_bulk ? bulk : raw.gas, gas_factor),
             Math::multiply(carrier_bulk ? bulk : raw.carrier, carrier_factor)};
     }
-    FPhases history(const Meshes::BoundedConvexGeometry& geometry, const PolyhedralInterface& plane) const
+    FPhases history(const PLIC::DynamicConvexGeometry& geometry, const PolyhedralInterface& plane) const
     {
         const auto bulk = geometry.volume();
         const auto raw =
@@ -215,8 +215,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     const auto& data = *data_;
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
-    Meshes::BoundedGeometryPacketContext packet_context{{data.control,
-        data.hierarchy->topology_generation(), data.hierarchy->partition_generation(), 0}};
+    PLIC::GeometryPacketContext packet_context{
+        {data.control, data.hierarchy->topology_generation(), data.hierarchy->partition_generation(), 0}};
     std::map<std::uint64_t, std::pair<FPoint, FPoint>> traces;
     std::map<std::uint64_t, FValue> flux;
     std::map<std::uint64_t, long double> face_budgets;
@@ -228,7 +228,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             face_volume.size() != data.topology->tiles.size())
             throw std::invalid_argument("Finite VoF controls do not cover retained nodes/faces.");
         wire::Budget budget{limit};
-        std::map<std::uint64_t, Meshes::GeometryPoint> velocity;
+        std::map<std::uint64_t, SimpleFluid::PLIC::GeometryPoint> velocity;
         for (const auto& node : node_velocity)
         {
             if (!std::all_of(node.velocity.begin(), node.velocity.end(), [](auto x) { return std::isfinite(x); }) ||
@@ -242,7 +242,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             const auto& source = data.topology->finite_nodes.at(node.gid);
             const auto departure = constrained_finite_departure(data, node.gid, velocity.at(node.gid), timestep);
             budget.add(sizeof(typename decltype(traces)::value_type) + 4 * sizeof(void*) +
-                Meshes::bounded_point_storage_bytes(source) + Meshes::bounded_point_storage_bytes(departure));
+                       PLIC::dynamic_point_storage_bytes(source) + PLIC::dynamic_point_storage_bytes(departure));
             traces.emplace(node.gid, std::pair{source, departure});
             wire::Writer w;
             w.word(0);
@@ -417,10 +417,10 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             work.charge(sizeof(typename decltype(labels)::value_type) + 4 * sizeof(void*));
             labels.emplace(key, finite_label<Mode>(cell, planes.at(key), data.options.reconstruction.volume_tolerance));
         }
-        std::map<std::uint64_t, Meshes::BoundedConvexGeometryPtr> donors;
-        std::vector<Meshes::BoundedConvexGeometryPtr> donor_geometries;
+        std::map<std::uint64_t, PLIC::DynamicConvexGeometryPtr> donors;
+        std::vector<PLIC::DynamicConvexGeometryPtr> donor_geometries;
         std::vector<const Key*> donor_keys;
-        work.charge(data.cells.size() * (sizeof(Meshes::BoundedConvexGeometryPtr) + sizeof(const Key*)));
+        work.charge(data.cells.size() * (sizeof(PLIC::DynamicConvexGeometryPtr) + sizeof(const Key*)));
         donor_geometries.reserve(data.cells.size());
         donor_keys.reserve(data.cells.size());
         for (const auto& [key, cell] : data.cells)
@@ -429,11 +429,11 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             donor_geometries.push_back(cell.finite_geometry);
             donor_keys.push_back(&key);
         }
-        Meshes::BoundedGeometryLimits partition_limits;
+        PLIC::GeometryLimits partition_limits;
         partition_limits.arithmetic_mode = data.options.arithmetic_mode;
         partition_limits.maximum_pair_tests = work.limits.maximum_pair_tests;
         partition_limits.byte_budget = work.limits.byte_budget;
-        const Meshes::BoundedConvexPartition donor_partition(donor_geometries, partition_limits);
+        const PLIC::DynamicConvexPartition donor_partition(donor_geometries, partition_limits);
         work.charge(donor_partition.storage_bytes());
         for (const auto& tile : data.topology->tiles)
         {
@@ -541,11 +541,11 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
         Key donor, recipient;
         std::uint64_t recipient_gid;
         int recipient_owner;
-        Meshes::BoundedConvexGeometryPtr geometry;
+        PLIC::DynamicConvexGeometryPtr geometry;
     };
     std::vector<Routed> routed;
     std::vector<Key> recipient_keys;
-    std::vector<Meshes::BoundedConvexGeometryPtr> source_registry;
+    std::vector<PLIC::DynamicConvexGeometryPtr> source_registry;
     for (const auto& [key, cell] : data.cells)
         source_registry.push_back(cell.finite_geometry);
     wire::collective(*comm, [&]
@@ -561,7 +561,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             const auto& donor = data.cells.at(donor_key);
             if (donor.owner != comm->getRank() || donor.gid != gid || donor.revision != revision)
                 throw std::invalid_argument("Finite VoF atom donor authentication failed.");
-            Meshes::BoundedConvexGeometryPtr geometry;
+            PLIC::DynamicConvexGeometryPtr geometry;
             if (local == 1)
             {
                 const auto index = r.word();
@@ -575,11 +575,11 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             }
             else if (local == 0 && packet.peer != comm->getRank())
             {
-                Meshes::BoundedGeometryLimits decode_limits;
+                PLIC::GeometryLimits decode_limits;
                 decode_limits.arithmetic_mode = data.options.arithmetic_mode;
                 decode_limits.byte_budget = limit;
                 geometry =
-                    Meshes::BoundedConvexGeometry::decode(r.bytes(), packet_context, source_registry, decode_limits);
+                    PLIC::DynamicConvexGeometry::decode(r.bytes(), packet_context, source_registry, decode_limits);
             }
             else
                 throw std::invalid_argument("Finite VoF atom routing tag is malformed.");
@@ -621,7 +621,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
         work.arithmetic_mode = data.options.arithmetic_mode;
         work.volume_tolerance = data.options.reconstruction.volume_tolerance;
         work.limits.byte_budget = std::min(limit, work.limits.byte_budget);
-        std::map<Key, std::vector<Meshes::BoundedConvexGeometryPtr>> covers;
+        std::map<Key, std::vector<PLIC::DynamicConvexGeometryPtr>> covers;
         std::map<std::pair<Key, Key>, FPhaseSum<Mode>> groups, history_groups;
         std::map<std::pair<Key, Key>, Evidence> evidence;
         std::map<Key, std::pair<int, std::uint64_t>> target_metadata;
@@ -1082,7 +1082,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         std::uint64_t source_gid, source_revision, target_gid, target_revision;
         AMR::AdaptiveAncestryRelation::Kind kind;
         int target_owner;
-        Meshes::BoundedConvexGeometryPtr overlap;
+        PLIC::DynamicConvexGeometryPtr overlap;
     };
     std::vector<Relation> requests;
     std::vector<Key> source_keys;
@@ -1162,7 +1162,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
     });
     const auto target_locations = target->lookup_cells(target_keys);
     const auto target_leaves = target->fetch_leaves(target_keys, limit);
-    std::map<Key, Meshes::BoundedConvexGeometryPtr> imported_targets;
+    std::map<Key, PLIC::DynamicConvexGeometryPtr> imported_targets;
     std::map<Key, std::vector<std::size_t>> by_source;
     wire::collective(*comm, [&]
     {
@@ -1180,10 +1180,10 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                 throw std::invalid_argument("Finite remap target owner/material/revision differs.");
             if (!imported_targets.contains(column.target))
             {
-                Meshes::BoundedGeometryLimits limits;
+                PLIC::GeometryLimits limits;
                 limits.arithmetic_mode = data.options.arithmetic_mode;
                 limits.byte_budget = limit;
-                auto geometry = Meshes::BoundedConvexGeometry::from_geometry(*target->geometry(leaf), limits);
+                auto geometry = PLIC::DynamicConvexGeometry::from_geometry(*target->geometry(leaf), limits);
                 budget.add(geometry->storage_bytes());
                 imported_targets.emplace(column.target, std::move(geometry));
             }
@@ -1229,7 +1229,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             if (found == by_source.end() || found->second.empty())
                 throw std::invalid_argument("Finite remap has an uncovered source owner.");
             const auto& indices = found->second;
-            std::vector<Meshes::BoundedConvexGeometryPtr> cover;
+            std::vector<PLIC::DynamicConvexGeometryPtr> cover;
             for (auto i : indices)
                 cover.push_back(columns[i].overlap);
             source.finite_geometry->certify_partition(cover, options.maximum_relative_target_defect);
@@ -1500,8 +1500,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
     });
     // Independently validate recipient geometry before physical publication.
     // Sparse ancestry selects candidates; a net volume sum cannot certify cover.
-    std::map<Key, Meshes::BoundedConvexGeometryPtr> local_source_geometry;
-    std::map<Key, std::vector<Meshes::BoundedConvexGeometryPtr>> target_covers;
+    std::map<Key, PLIC::DynamicConvexGeometryPtr> local_source_geometry;
+    std::map<Key, std::vector<PLIC::DynamicConvexGeometryPtr>> target_covers;
     wire::collective(*comm, [&]
     {
         wire::Budget budget{limit};
@@ -1510,17 +1510,16 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             if (!local_source_geometry.contains(request.source))
             {
                 const auto existing = data.cells.find(request.source);
-                auto geometry =
-                    existing != data.cells.end()
-                        ? existing->second.finite_geometry
-                        : Meshes::BoundedConvexGeometry::from_geometry(*from.at(request.source_gid)->geometry,
-                              geometry_limits(data.options.arithmetic_mode, limit));
+                auto geometry = existing != data.cells.end()
+                                    ? existing->second.finite_geometry
+                                    : PLIC::DynamicConvexGeometry::from_geometry(*from.at(request.source_gid)->geometry,
+                                          geometry_limits(data.options.arithmetic_mode, limit));
                 budget.add(geometry->storage_bytes());
                 local_source_geometry.emplace(request.source, std::move(geometry));
             }
             if (!imported_targets.contains(request.target))
             {
-                auto geometry = Meshes::BoundedConvexGeometry::from_geometry(
+                auto geometry = PLIC::DynamicConvexGeometry::from_geometry(
                     *to.at(request.target_gid)->geometry, geometry_limits(data.options.arithmetic_mode, limit));
                 budget.add(geometry->storage_bytes());
                 imported_targets.emplace(request.target, std::move(geometry));

@@ -2,7 +2,7 @@
  * @brief Sparse authoritative exact explicit-provider bindings and metric validation.
  */
 #include "geometry/mesh/ExplicitRegionProvider.hh"
-#include "geometry/ExactPolyhedralComplex.hh"
+#include "geometry/PLIC/PolyhedralComplex.hh"
 #include <algorithm>
 
 namespace SimpleFluid::Meshes
@@ -16,13 +16,13 @@ bool same(MeshUtils::Vec3 a, MeshUtils::Vec3 b)
 } // namespace
 ExplicitRegionProvider::ExplicitRegionProvider(RegionLayout layout, std::vector<Cell> cells, std::vector<Face> faces,
     std::vector<Node> nodes, std::map<int, std::string> boundaries,
-    std::shared_ptr<const ExactPolyhedralComplex> construction)
+    std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> construction)
     : ExplicitRegionProvider(layout, std::move(cells), std::move(faces), std::move(nodes), std::move(boundaries))
 {
     if (!construction || layout.cells != construction->global_cells() || layout.faces != construction->global_faces() ||
         layout.nodes != construction->global_nodes() || d_cells.size() != construction->cell_ids().size() ||
         d_faces.size() != construction->face_ids().size() || d_nodes.size() != construction->node_ids().size())
-        throw std::invalid_argument("Exact explicit construction differs from native residency/layout.");
+        throw std::invalid_argument("Native explicit construction differs from native residency/layout.");
     for (const auto id : construction->cell_ids())
     {
         const auto& cell = d_cells.at(id);
@@ -30,7 +30,7 @@ ExplicitRegionProvider::ExplicitRegionProvider(RegionLayout layout, std::vector<
             cell.faces != construction->cell_faces(id) || cell.nodes != construction->cell_nodes(id) ||
             (!cell.faces.empty()) != construction->has_full_cell(id))
             throw std::invalid_argument(
-                "Exact explicit cell topology or metrics differ from authoritative construction.");
+                "Native explicit cell topology or metrics differ from authoritative construction.");
     }
     for (const auto id : construction->face_ids())
     {
@@ -42,16 +42,16 @@ ExplicitRegionProvider::ExplicitRegionProvider(RegionLayout layout, std::vector<
             (surface.exterior && !surface.boundary.empty()
                     ? (!d_boundaries.contains(face.boundary) || d_boundaries.at(face.boundary) != surface.boundary)
                     : face.boundary != UnstructuredMesh::invalid_boundary_id))
-            throw std::invalid_argument("Exact explicit face topology, patch or metrics differ from construction.");
+            throw std::invalid_argument("Native explicit face topology, patch or metrics differ from construction.");
     }
     for (const auto id : construction->node_ids())
         if (!same(d_nodes.at(id), construction->node_coordinates(id)))
-            throw std::invalid_argument("Exact explicit displayed node differs from its authoritative construction.");
+            throw std::invalid_argument("Native explicit displayed node differs from its authoritative construction.");
     d_construction = std::move(construction);
 }
 
-std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_exact_complex(
-    std::shared_ptr<const ExactPolyhedralComplex> construction)
+std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_complex(
+    std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> construction)
 {
     if (!construction || construction->resident_cell_ids().size() != construction->global_cells())
         throw std::invalid_argument("Sparse exact explicit factory requires an explicit global boundary schema.");
@@ -63,13 +63,14 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_exact
     int next = 0;
     for (const auto& name : names)
         boundaries.emplace(next++, name);
-    return from_exact_complex(std::move(construction), std::move(boundaries));
+    return from_complex(std::move(construction), std::move(boundaries));
 }
-std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_exact_complex(
-    std::shared_ptr<const ExactPolyhedralComplex> construction, std::map<int, std::string> boundaries)
+std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_complex(
+    std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> construction,
+    std::map<int, std::string> boundaries)
 {
     if (!construction)
-        throw std::invalid_argument("Exact explicit provider requires a construction.");
+        throw std::invalid_argument("Native explicit provider requires a construction.");
     std::map<std::string, int> ids;
     for (const auto& [id, name] : boundaries)
         if (!ids.emplace(name, id).second)
@@ -102,7 +103,8 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_exact
 }
 std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_certified_records(RegionLayout layout,
     std::vector<Cell> cells, std::vector<Face> faces, std::vector<Node> nodes, std::map<int, std::string> boundaries,
-    std::map<ID, ConvexGeometryPtr> cell_certificates, std::map<ID, ExactPlanarFacePtr> face_certificates,
+    std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_certificates,
+    std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_certificates,
     const std::map<ID, std::vector<char>>& node_certificates)
 {
     auto provider = std::make_shared<ExplicitRegionProvider>(
@@ -111,7 +113,7 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_certi
         throw std::invalid_argument("Certified explicit fragment requires every resident node/face proof.");
     for (const auto& [id, node] : provider->d_nodes)
     {
-        const auto point = exact_point_display(node_certificates.at(id));
+        const auto point = PLIC::point_display<ArithmeticMode::Ordinary>(node_certificates.at(id));
         if (node.x != point[0] || node.y != point[1] || node.z != point[2])
             throw std::invalid_argument("Certified explicit displayed node differs from exact authority point.");
     }
@@ -144,7 +146,7 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_certi
             const auto center = certificate->centroid();
             if (cell.centroid.x != center[0] || cell.centroid.y != center[1] || cell.centroid.z != center[2])
                 throw std::invalid_argument("Certified explicit cell center differs from native record.");
-            std::vector<ExactPlanarFacePtr> outward;
+            std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> outward;
             for (auto face : cell.faces)
             {
                 auto geometry = face_certificates.at(face);
@@ -152,7 +154,7 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_certi
                     geometry = geometry->reversed();
                 outward.push_back(std::move(geometry));
             }
-            if (!ExactPlanarFace::cell_shell(outward)->equivalent(*certificate))
+            if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(outward)->equivalent(*certificate))
                 throw std::invalid_argument("Certified explicit outward shell differs from canonical cell.");
         }
     for (const auto& [id, certificate] : cell_certificates)
@@ -162,7 +164,8 @@ std::shared_ptr<const ExplicitRegionProvider> ExplicitRegionProvider::from_certi
     provider->d_face_certificates = std::move(face_certificates);
     return provider;
 }
-ConvexGeometryPtr ExplicitRegionProvider::certified_cell_geometry(std::size_t cell) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::certified_cell_geometry(
+    std::size_t cell) const
 {
     if (!d_cell_certificates.empty())
         return d_cell_certificates.at(cell);
@@ -172,11 +175,11 @@ ConvexGeometryPtr ExplicitRegionProvider::certified_cell_geometry(std::size_t ce
         throw std::invalid_argument("Metric-only neighbor has no resident exact cell certificate.");
     return d_construction->cell_geometry(cell);
 }
-ConvexGeometryPtr ExplicitRegionProvider::atomic_cell_geometry(std::size_t cell) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::atomic_cell_geometry(std::size_t cell) const
 {
     if (!d_cell_certificates.empty())
     {
-        std::vector<ExactPlanarFacePtr> faces;
+        std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
         for (auto face : d_cells.at(cell).faces)
         {
             auto geometry = d_face_certificates.at(face);
@@ -186,7 +189,7 @@ ConvexGeometryPtr ExplicitRegionProvider::atomic_cell_geometry(std::size_t cell)
         }
         if (faces.empty())
             throw std::invalid_argument("Metric-only explicit neighbor has no atomic cell certificate.");
-        return ExactPlanarFace::cell_shell(faces);
+        return PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces);
     }
     if (!d_construction)
         return {};
@@ -194,11 +197,11 @@ ConvexGeometryPtr ExplicitRegionProvider::atomic_cell_geometry(std::size_t cell)
         throw std::invalid_argument("Metric-only neighbor has no resident atomic certificate.");
     return d_construction->atomic_cell_geometry(cell);
 }
-ExactPlanarFacePtr ExplicitRegionProvider::certified_face_geometry(std::size_t face) const
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> ExplicitRegionProvider::certified_face_geometry(std::size_t face) const
 {
     if (!d_face_certificates.empty())
         return d_face_certificates.at(face);
-    return d_construction ? d_construction->face_geometry(face) : ExactPlanarFacePtr{};
+    return d_construction ? d_construction->face_geometry(face) : PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>{};
 }
 real_t ExplicitRegionProvider::native_area_magnitude(Vec3 vector)
 {
@@ -217,7 +220,7 @@ real_t ExplicitRegionProvider::face_area(std::size_t face) const
         return d_face_certificates.at(face)->area().as_double();
     return d_construction ? d_construction->face_area(face) : native_area_magnitude(d_faces.at(face).area_vector);
 }
-std::size_t ExplicitRegionProvider::exact_storage_bytes() const
+std::size_t ExplicitRegionProvider::construction_storage_bytes() const
 {
     if (d_construction)
         return d_construction->storage_bytes();

@@ -1602,6 +1602,16 @@ the specified focused coverage, not production or application qualification.
       Publish independent binary64 gas/carrier amounts once per step/remap with
       counted roundoff bounds; retain conservative inventory accounting without
       clipping. Arithmetic range support alone does not qualify interface resolution.
+- [x] Expose mode-typed PLIC geometry, points, measures and results, with checked
+      runtime adapters for configured solver policies. Preserve publication
+      uncertainty, provenance and resource caps; keep simple members inline and
+      heavier conversions in compiled providers. Cover type separation and
+      finite analytic geometry without changing the numerical acceptance gates.
+- [x] Remove the native exact-geometry prerequisite and legacy geometry aliases.
+      Use ordinary PLIC cells, faces, extrusion recipes and atomic complexes in
+      AMR, with optional Exact conversions behind public PLIC interfaces. Retain
+      source support ancestry and geometric coverage gates, independently validate
+      bounded imports, and test zero exact work in native/FVM/solver finite paths.
 - [x] Implement source-free compatible implicit momentum, physical-coordinate
       pressure/capillary/viscous operators, geometry-based timestep controls,
       attainable inner solves and original physical-residual acceptance under

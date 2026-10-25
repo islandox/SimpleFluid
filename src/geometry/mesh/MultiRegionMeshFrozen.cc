@@ -11,11 +11,11 @@ namespace SimpleFluid::Meshes
 namespace
 {
 using ID = std::uint64_t;
-GeometryPoint coordinates(MeshUtils::Vec3 p)
+PLIC::GeometryPoint coordinates(MeshUtils::Vec3 p)
 {
     return {p.x, p.y, p.z};
 }
-bool finite(GeometryPoint p)
+bool finite(PLIC::GeometryPoint p)
 {
     return std::all_of(p.begin(), p.end(), [](double x) { return std::isfinite(x); });
 }

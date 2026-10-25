@@ -13,14 +13,18 @@ class SIMPLEFLUID_FVM_EXPORT ExactPhaseAccumulator
 public:
     explicit ExactPhaseAccumulator(ExactLiveStorage&);
     ExactPhaseAccumulator(const ExactPhaseAccumulator&) = delete;
-    void add(const Meshes::ExactPhaseMeasures&, int sign = 1);
-    [[nodiscard]] Meshes::ExactPhaseMeasures apply(const ExactPhaseLabelMap&) const;
-    [[nodiscard]] const Meshes::ExactPhaseMeasures& raw() const noexcept { return raw_; }
+    void add(const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>&, int sign = 1);
+    [[nodiscard]] SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> apply(
+        const ExactPhaseLabelMap&) const;
+    [[nodiscard]] const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& raw() const noexcept
+    {
+        return raw_;
+    }
     [[nodiscard]] std::size_t count() const noexcept { return count_; }
 
 private:
     ExactLiveStorage& live_;
-    Meshes::ExactPhaseMeasures raw_;
+    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> raw_;
     ExactLiveStorage::Scope scope_;
     std::size_t count_ = 0;
 };

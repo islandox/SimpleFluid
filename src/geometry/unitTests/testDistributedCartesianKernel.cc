@@ -36,8 +36,9 @@ TEST(DistributedCartesianKernel, DetachedExportReleasesSourceAndKeepsNativeBlock
     for (std::size_t i = 0; i < owned.size(); ++i)
     {
         auto box = source->cell_box(owned[i]);
-        EXPECT_TRUE(
-            detached.kernel->geometry(detached.owned[i])->equivalent(*ConvexCellGeometry::box(box.lower, box.upper)));
+        EXPECT_TRUE(detached.kernel->geometry(detached.owned[i])
+                ->equivalent(*SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box(
+                    box.lower, box.upper)));
         EXPECT_EQ(detached.owned[i].key, source->cell_key(owned[i]));
         EXPECT_EQ(detached.owned[i].native_cell, owned[i]);
         EXPECT_FALSE(detached.owned[i].geometry);
@@ -143,7 +144,9 @@ TEST(DistributedCartesianKernel, RefinedNativeBlocksHaveClosedDistributedAuthori
     }
     auto tiles = ::SimpleFluid::Meshes::AMR::decide_adaptive_tiles(owned, comm, 64 * 1024 * 1024, 4096);
     int local_count = 0, global_count = 0;
-    std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey, std::vector<ExactPlanarFacePtr>> shells;
+    std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey,
+        std::vector<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary>>>
+        shells;
     for (const auto& tile : tiles)
     {
         local_count += tile.first_owner == comm->getRank();
@@ -155,7 +158,8 @@ TEST(DistributedCartesianKernel, RefinedNativeBlocksHaveClosedDistributedAuthori
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_count, &global_count);
     EXPECT_EQ(global_count, 240);
     for (const auto& leaf : owned)
-        EXPECT_TRUE(ExactPlanarFace::cell_shell(shells[leaf.key])->equivalent(*leaf.geometry));
+        EXPECT_TRUE(SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::cell_shell(shells[leaf.key])
+                ->equivalent(*leaf.geometry));
 }
 
 std::set<::SimpleFluid::Meshes::AMR::AdaptiveBytes> gathered_keys(
@@ -293,7 +297,8 @@ TEST(DistributedConvexHierarchy, SplitSiblingOwnersCoarsenExactParent)
     parent.key = {7, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{3, {}}};
     parent.domain = {'p'};
     parent.material = 9;
-    parent.geometry = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    parent.geometry =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
     for (std::size_t f = 0; f < parent.geometry->num_faces(); ++f)
         parent.surfaces.push_back({::SimpleFluid::Meshes::AMR::AdaptiveBytes{char('a' + f)},
             parent.geometry->face_geometry(f), 1, true, "wall"});
@@ -373,7 +378,8 @@ TEST(DistributedConvexHierarchy, CoarsenRejectsChangedDomainOrProvider)
     ::SimpleFluid::Meshes::AMR::AdaptiveLeaf parent;
     parent.key = {7, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{3, {}}};
     parent.domain = {'p'};
-    parent.geometry = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    parent.geometry =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
     for (std::size_t f = 0; f < parent.geometry->num_faces(); ++f)
         parent.surfaces.push_back({::SimpleFluid::Meshes::AMR::AdaptiveBytes{char('a' + f)},
             parent.geometry->face_geometry(f), 1, true, "wall"});
@@ -497,7 +503,9 @@ TEST(DistributedCartesianKernel, PeriodicPhysicalShellsRetainDistinctNodeImages)
     std::map<std::uint64_t, const ::SimpleFluid::Meshes::AMR::AdaptiveNode*> nodes;
     for (const auto& node : draft.nodes)
         nodes.emplace(node.gid, &node);
-    std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey, std::vector<ExactPlanarFacePtr>> shells;
+    std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey,
+        std::vector<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary>>>
+        shells;
     int local_periodic = 0, global_periodic = 0;
     for (const auto& tile : draft.tiles)
     {
@@ -505,13 +513,14 @@ TEST(DistributedCartesianKernel, PeriodicPhysicalShellsRetainDistinctNodeImages)
         ASSERT_TRUE(tile.second);
         ASSERT_EQ(tile.node_gids.size(), tile.geometry->vertex_identities().size());
         ASSERT_EQ(tile.second_node_gids.size(), tile.node_gids.size());
-        auto second =
-            tile.geometry->reversed()->translated_exact(exact_displacement_difference({}, tile.exact_second_image));
+        auto second = tile.geometry->reversed()->translated_packet(
+            SimpleFluid::PLIC::displacement_difference<SimpleFluid::ArithmeticMode::Ordinary>(
+                {}, tile.second_image_identity));
         if (tile.first_owner == comm->getRank())
             shells[tile.first].push_back(tile.geometry);
         if (tile.second_owner == comm->getRank())
             shells[*tile.second].push_back(second);
-        if (!tile.exact_second_image.empty())
+        if (!tile.second_image_identity.empty())
         {
             local_periodic += tile.first_owner == comm->getRank();
             EXPECT_NE(tile.node_gids, tile.second_node_gids);
@@ -529,23 +538,26 @@ TEST(DistributedCartesianKernel, PeriodicPhysicalShellsRetainDistinctNodeImages)
         auto vertices = tile.geometry->vertex_identities();
         for (std::size_t v = 0; v < vertices.size(); ++v)
         {
-            auto expected =
-                exact_point_translated(vertices[v], exact_displacement_difference({}, tile.exact_second_image));
+            auto expected = SimpleFluid::PLIC::point_translated<SimpleFluid::ArithmeticMode::Ordinary>(
+                vertices[v], SimpleFluid::PLIC::displacement_difference<SimpleFluid::ArithmeticMode::Ordinary>(
+                                 {}, tile.second_image_identity));
             ASSERT_TRUE(nodes.contains(tile.second_node_gids[v]));
-            EXPECT_EQ(nodes.at(tile.second_node_gids[v])->exact_identity, expected);
-            EXPECT_EQ(nodes.at(tile.second_node_gids[v])->coordinate, exact_point_display(expected));
+            EXPECT_EQ(nodes.at(tile.second_node_gids[v])->coordinate_identity, expected);
+            EXPECT_EQ(nodes.at(tile.second_node_gids[v])->coordinate,
+                SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(expected));
         }
         auto restored =
             ::SimpleFluid::Meshes::AMR::decode_adaptive_tile(::SimpleFluid::Meshes::AMR::encode_adaptive_tile(tile));
         EXPECT_EQ(restored.node_gids, tile.node_gids);
         EXPECT_EQ(restored.second_node_gids, tile.second_node_gids);
-        EXPECT_EQ(restored.exact_second_image, tile.exact_second_image);
+        EXPECT_EQ(restored.second_image_identity, tile.second_image_identity);
         EXPECT_EQ(restored.geometry->vertex_identities(), tile.geometry->vertex_identities());
     }
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_periodic, &global_periodic);
     EXPECT_EQ(global_periodic, 12);
     for (const auto& [key, leaf] : state->owned())
-        EXPECT_TRUE(ExactPlanarFace::cell_shell(shells[key])->equivalent(*kernel->geometry(leaf)));
+        EXPECT_TRUE(SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::cell_shell(shells[key])
+                ->equivalent(*kernel->geometry(leaf)));
     auto baseline = periodic_signature(draft);
     EXPECT_EQ(baseline.size(), 51);
     std::vector<std::uint64_t> permuted;
@@ -638,16 +650,17 @@ TEST(DistributedCartesianKernel, PeriodicCornerContactsNormalizeAllAxesWithoutPh
     auto value = ::SimpleFluid::Meshes::AMR::cartesian_adaptive_leaf(
         config, {0, ::SimpleFluid::Meshes::AMR::CartesianCellAncestry{0, {1, 1, 1}}}, {'d'});
     auto shape = kernel->geometry(value);
-    GeometryPoint lower = config.origin, upper{};
+    SimpleFluid::PLIC::GeometryPoint lower = config.origin, upper{};
     for (std::size_t a = 0; a < 3; ++a)
         upper[a] = config.origin[a] + config.extent[a];
-    auto corner = ExactPlanarFace::make(
-        std::vector<GeometryPoint>{upper, {lower[0], upper[1], upper[2]}, {upper[0], lower[1], upper[2]}})
+    auto corner = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(
+        std::vector<SimpleFluid::PLIC::GeometryPoint>{
+            upper, {lower[0], upper[1], upper[2]}, {upper[0], lower[1], upper[2]}})
                       ->vertex_identities()
                       .front();
     auto contact = kernel->contact_point(value, corner);
-    EXPECT_EQ(exact_point_display(contact), lower);
-    EXPECT_EQ(exact_point_display(corner), upper);
+    EXPECT_EQ(SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(contact), lower);
+    EXPECT_EQ(SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(corner), upper);
     EXPECT_NE(contact, corner);
     auto group = kernel->refinement_group({0, ::SimpleFluid::Meshes::AMR::CartesianCellAncestry{1, {0, 0, 0}}},
         ::SimpleFluid::Meshes::AMR::AdaptiveSplit::Isotropic);

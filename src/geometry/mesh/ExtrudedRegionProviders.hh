@@ -7,7 +7,7 @@
  * @copyright Copyright (c) 2026
  */
 #pragma once
-#include "geometry/mesh/ExactExtrudedConstruction.hh"
+#include "geometry/PLIC/ExtrudedConstruction.hh"
 #include "geometry/mesh/MeshRegion.hh"
 #include "geometry/mesh/SemiStructMeshTopo.hh"
 #include <map>
@@ -66,7 +66,7 @@ public:
     using Vec3 = MeshUtils::Vec3;
     ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology, Arr<Vec3> xy_nodes, ArrReal z_edges);
     ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology,
-        std::shared_ptr<const ExactExtrudedConstruction> construction);
+        std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> construction);
     ExtrudedGeometry& operator=(const ExtrudedGeometry&) = delete;
     ExtrudedGeometry& operator=(ExtrudedGeometry&&) = delete;
     RegionLayout layout() const { return d_topology->layout(); }
@@ -85,11 +85,14 @@ public:
     {
         return d_construction ? d_construction->z_view() : std::span<const double>(d_z);
     }
-    bool has_exact_construction() const noexcept { return bool(d_construction); }
-    const std::shared_ptr<const ExactExtrudedConstruction>& construction() const noexcept { return d_construction; }
-    ConvexGeometryPtr certified_cell_geometry(size_t cell) const;
-    ConvexGeometryPtr atomic_cell_geometry(size_t cell) const;
-    ExactPlanarFacePtr certified_face_geometry(size_t face) const;
+    bool has_construction() const noexcept { return bool(d_construction); }
+    const std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>>& construction() const noexcept
+    {
+        return d_construction;
+    }
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> certified_cell_geometry(size_t cell) const;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> atomic_cell_geometry(size_t cell) const;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> certified_face_geometry(size_t face) const;
     EntityRange<EntityRange<uint64_t>> xy_cell_nodes() const;
 
 private:
@@ -98,7 +101,7 @@ private:
     mutable ArrReal d_z;
     ArrReal d_areas, d_lengths;
     mutable std::once_flag d_z_once;
-    std::shared_ptr<const ExactExtrudedConstruction> d_construction;
+    std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> d_construction;
 };
 using ExtrudedRegion = IsoRegion<ExtrudedTopology, ExtrudedGeometry>;
 ExtrudedRegion extruded_region(

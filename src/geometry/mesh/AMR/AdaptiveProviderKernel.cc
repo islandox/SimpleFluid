@@ -31,7 +31,7 @@ void AdaptiveProviderKernel::validate(const AdaptiveLeaf& leaf) const
     const auto sides = surfaces(leaf);
     if (!shape || sides.size() != shape->num_faces())
         throw std::invalid_argument("Provider shell incidence is incomplete.");
-    std::vector<ExactPlanarFacePtr> outward;
+    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> outward;
     for (const auto& side : sides)
     {
         if (side.key.empty() || !side.geometry || (side.orientation != 1 && side.orientation != -1) ||
@@ -39,7 +39,7 @@ void AdaptiveProviderKernel::validate(const AdaptiveLeaf& leaf) const
             throw std::invalid_argument("Invalid provider surface provenance.");
         outward.push_back(side.geometry);
     }
-    if (!ExactPlanarFace::cell_shell(outward)->equivalent(*shape))
+    if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(outward)->equivalent(*shape))
         throw std::invalid_argument("Provider surfaces differ from exact cell.");
 }
 AdaptiveBytes AdaptiveProviderKernel::contact_point(const AdaptiveLeaf&, std::span<const char> point) const
@@ -76,7 +76,7 @@ AdaptiveLeaf AdaptiveProviderKernel::coarsen(const AdaptiveFamily& family, std::
 {
     validate(family.parent);
     std::set<AdaptiveCellKey> expected(family.children.begin(), family.children.end()), seen;
-    std::vector<ConvexGeometryPtr> shapes;
+    std::vector<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> shapes;
     if (expected.size() != family.children.size() || children.size() != expected.size())
         throw std::invalid_argument("Coarsen needs complete immediate family.");
     for (const auto& child : children)
@@ -125,7 +125,7 @@ public:
             throw std::invalid_argument("Convex provider/ancestry binding differs.");
         AdaptiveProviderKernel::validate(leaf);
     }
-    ConvexGeometryPtr geometry(const AdaptiveLeaf& leaf) const override
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
     {
         if (!leaf.geometry)
             throw std::invalid_argument("Convex leaf needs actual retained geometry.");
@@ -167,7 +167,7 @@ public:
             {
                 const auto origin = piece.face_origins[f];
                 AdaptiveSurface use;
-                if (origin.kind == ConvexFaceOrigin::Kind::ParentFace)
+                if (origin.kind == PLIC::ConvexFaceOrigin::Kind::ParentFace)
                     use = parent_surfaces.at(origin.index);
                 else
                 {

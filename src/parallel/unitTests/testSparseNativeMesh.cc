@@ -84,7 +84,7 @@ struct Fixture
             if (full.contains(cell))
                 (owner(cell) == comm->getRank() ? owned : ghosts).push_back(cell_gid(cell));
         }
-        std::map<GeometryPoint, std::uint64_t> native_points;
+        std::map<SimpleFluid::PLIC::GeometryPoint, std::uint64_t> native_points;
         for (auto node : nodes)
         {
             const auto p = mesh->node_coordinates(node);
@@ -102,10 +102,12 @@ struct Fixture
                 route.second = cell_gid(neighbor);
             route.native = {0, face};
             route.boundary = mesh->boundary_id(face);
-            route.override_geometry = ExactPlanarFace::from_native_face(*mesh, face);
+            route.override_geometry =
+                SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::from_native_face(*mesh, face);
             for (const auto& point : route.override_geometry->vertex_identities())
             {
-                const auto gid = node_gid(native_points.at(exact_point_display(point)));
+                const auto gid = node_gid(
+                    native_points.at(SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(point)));
                 route.override_nodes.push_back(gid);
                 input.node_certificates.emplace(gid, point);
             }

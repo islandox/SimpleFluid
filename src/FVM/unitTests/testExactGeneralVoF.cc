@@ -7,9 +7,10 @@
 namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-std::map<std::uint64_t, ExactPhaseMeasures> delivered_phases(const GeneralVoF::Trial& trial)
+std::map<std::uint64_t, SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> delivered_phases(
+    const GeneralVoF::Trial& trial)
 {
-    std::map<std::uint64_t, ExactPhaseMeasures> result;
+    std::map<std::uint64_t, SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> result;
     for (const auto& route : trial.transfers())
     {
         auto& total = result[route.recipient];
@@ -28,12 +29,14 @@ GeneralVoFOptions exact_reference_options()
 }
 TEST(ExactGeneralVoF, ComplementaryDonorLabelCorrectionIsLinearBoundedAndRejectsUnprovedDefect)
 {
-    using M = ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     const auto one = M::from_value(1), quarter = M::from_value(.25), tail = M::from_value(1e-310);
-    const ExactPhaseMeasures full{one, quarter, M::from_value(.75)};
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> full{one, quarter, M::from_value(.75)};
     const auto map = SimpleFluid::VoF::detail::ExactPhaseLabelMap::create(full, true, quarter + tail, tail, 1 << 20);
-    const ExactPhaseMeasures a{M::from_value(.25), M::from_value(.125), M::from_value(.125)};
-    const ExactPhaseMeasures b{M::from_value(.75), M::from_value(.125), M::from_value(.625)};
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> a{
+        M::from_value(.25), M::from_value(.125), M::from_value(.125)};
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> b{
+        M::from_value(.75), M::from_value(.125), M::from_value(.625)};
     const auto first = map.apply(a), second = map.apply(b), total = map.apply(full);
     const auto bounded = map.apply(a, 1 << 20);
     EXPECT_EQ(bounded.bulk.compare(first.bulk), 0);
@@ -102,7 +105,7 @@ TEST(ExactGeneralVoF, ActualUnsplitCirculationHasPositiveRoutesIndependentComple
     // Delivered exact self/remote phase records must agree independently with
     // the accepted target inventories; a local reference cannot alias a later
     // mutable column accumulator or swap gas/carrier during packet decoding.
-    std::map<std::uint64_t, Meshes::ExactPhaseMeasures> delivered;
+    std::map<std::uint64_t, SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> delivered;
     for (const auto& route : trial.transfers())
     {
         auto& total = delivered[route.recipient];
@@ -120,13 +123,18 @@ TEST(ExactGeneralVoF, ActualUnsplitCirculationHasPositiveRoutesIndependentComple
         const auto& total = delivered.at(cell->cell);
         const auto& value = moved->phase_volumes()[i];
         const auto& error = moved->phase_roundoff_bounds()[i];
-        const auto gas_error = total.gas - ExactGeometryMeasure::from_value(value.gas);
-        const auto carrier_error = total.carrier - ExactGeometryMeasure::from_value(value.carrier);
-        EXPECT_LE((gas_error.sign() < 0 ? gas_error.scaled(-1) : gas_error)
-                      .compare(ExactGeometryMeasure::from_value(error.gas)),
+        const auto gas_error =
+            total.gas - SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(value.gas);
+        const auto carrier_error =
+            total.carrier -
+            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(value.carrier);
+        EXPECT_LE(
+            (gas_error.sign() < 0 ? gas_error.scaled(-1) : gas_error)
+                .compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(error.gas)),
             0);
         EXPECT_LE((carrier_error.sign() < 0 ? carrier_error.scaled(-1) : carrier_error)
-                      .compare(ExactGeometryMeasure::from_value(error.carrier)),
+                      .compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                          error.carrier)),
             0);
     }
     int self_routes = 0, remote_routes = 0;
@@ -209,7 +217,8 @@ TEST(ExactGeneralVoF, ExactSkewWallAndEdgeTrajectoriesAreOwnershipIndependentAnd
             const auto p = node->coordinate;
             const double u = (p[0] + p[2] - .5 * p[1]) / 2, w = (p[2] - p[0]) / 2;
             const double a = p[1] == 1 ? (u - 1) / 64 : 0;
-            const auto expected = ExactNodeTrajectory::backtrace(node->exact_identity, {.25 * a, a, .25 * a}, 1);
+            const auto expected = SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(
+                node->coordinate_identity, {.25 * a, a, .25 * a}, 1);
             // The same analytic certificate is required under both owner
             // permutations, without receive-order or rounded-coordinate ties.
             EXPECT_EQ(record.trajectory.point, expected.point);
@@ -254,7 +263,8 @@ TEST(ExactGeneralVoF, ExactSkewWallAndEdgeTrajectoriesAreOwnershipIndependentAnd
         {
             const auto p = unresolved.nodes()[i].coordinate;
             const double w = (p[2] - p[0]) / 2;
-            normal_only[i].velocity = w == 0 || w == 2 ? GeometryPoint{1. / 128, 0, -1. / 128} : GeometryPoint{};
+            normal_only[i].velocity = w == 0 || w == 2 ? SimpleFluid::PLIC::GeometryPoint{1. / 128, 0, -1. / 128}
+                                                       : SimpleFluid::PLIC::GeometryPoint{};
         }
         EXPECT_THROW(unresolved.reconstruct(), std::invalid_argument);
         const auto identity = unresolved.plan_transport(normal_only, zero, 1);
@@ -269,7 +279,7 @@ TEST(ExactGeneralVoF, ExactSkewWallAndEdgeTrajectoriesAreOwnershipIndependentAnd
             auto disagree = velocity;
             if (comm->getRank() == 0)
                 for (std::size_t i = 0; i < state.nodes().size(); ++i)
-                    if (state.nodes()[i].coordinate == GeometryPoint{1.25, 1, 1.25})
+                    if (state.nodes()[i].coordinate == SimpleFluid::PLIC::GeometryPoint{1.25, 1, 1.25})
                     {
                         disagree[i].velocity[0] += 1. / 128;
                         disagree[i].velocity[2] -= 1. / 128;
@@ -297,14 +307,17 @@ TEST(ExactGeneralVoF, ExactSubquantumStreamsRemainExplicitAndFiniteRejectsCrossP
         if (face.integrated_volume != 0)
         {
             face.exact_integrated_volume =
-                ExactGeometryMeasure::from_value(tiny).scaled(face.integrated_volume > 0 ? .5 : -.5);
+                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(tiny).scaled(
+                    face.integrated_volume > 0 ? .5 : -.5);
             face.integrated_volume = 0; // Explicit diagnostic underflow, NOT physical zero.
         }
     auto trial = source.plan_transport(nodes(source), phi, 1);
     auto result = source.apply(trial);
-    const auto half_min = ExactGeometryMeasure::from_value(tiny).scaled(.5);
+    const auto half_min =
+        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(tiny).scaled(.5);
     int local = 0;
-    const auto inspect = [&](const ExactGeometryMeasure& measure, const CertifiedGeometryValue& diagnostic)
+    const auto inspect = [&](const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& measure,
+                             const SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>& diagnostic)
     {
         if (measure.sign() > 0 && measure.compare(half_min) <= 0)
         {
@@ -344,8 +357,9 @@ TEST(ExactGeneralVoF, ExactSubquantumStreamsRemainExplicitAndFiniteRejectsCrossP
     for (auto& face : tiny_phi)
         if (face.integrated_volume != 0)
         {
-            face.exact_integrated_volume = ExactGeometryMeasure::from_value(tiny).scaled(
-                face.integrated_volume > 0 ? .5 : -.5);
+            face.exact_integrated_volume =
+                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(tiny).scaled(
+                    face.integrated_volume > 0 ? .5 : -.5);
             face.integrated_volume = 0;
         }
     EXPECT_THROW(pure.plan_transport(nodes(pure), tiny_phi, 1), std::invalid_argument);
@@ -354,7 +368,9 @@ TEST(ExactGeneralVoF, ExactSubquantumStreamsRemainExplicitAndFiniteRejectsCrossP
         for (auto& face : malformed)
             if (face.exact_integrated_volume)
             {
-                face.exact_integrated_volume = *face.exact_integrated_volume + ExactGeometryMeasure::from_value(tiny);
+                face.exact_integrated_volume =
+                    *face.exact_integrated_volume +
+                    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(tiny);
                 break;
             }
     EXPECT_THROW((void) pure.plan_transport(nodes(pure), malformed, 1), std::invalid_argument);
@@ -435,9 +451,11 @@ TEST(ExactGeneralVoF, ExactZeroBootstrapRetainsPureEvidenceWithoutClassifyingNon
         const auto gid = std::uint64_t(moved->mesh()->cell_global_id(int(i)));
         const auto expected = was_gas ? delivered.at(gid).carrier : delivered.at(gid).gas;
         const auto error = was_gas ? trial.phase_roundoff_bounds()[i].carrier : trial.phase_roundoff_bounds()[i].gas;
-        const auto difference = expected - ExactGeometryMeasure::from_value(minority);
-        EXPECT_LE((difference.sign() < 0 ? difference.scaled(-1) : difference)
-                      .compare(ExactGeometryMeasure::from_value(error)),
+        const auto difference =
+            expected - SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(minority);
+        EXPECT_LE(
+            (difference.sign() < 0 ? difference.scaled(-1) : difference)
+                .compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(error)),
             0);
         if (expected.sign() > 0)
         {
@@ -498,7 +516,7 @@ TEST(ExactGeneralVoF, ExactZeroBootstrapRetainsPureEvidenceWithoutClassifyingNon
 TEST(ExactGeneralVoF, DonorLiveLeasesReleaseReplacedValuesWithoutLosingExactColumns)
 {
     using Live = SimpleFluid::VoF::detail::ExactLiveStorage;
-    using M = ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     SimpleFluid::Meshes::AMR::adaptive_detail::Budget budget{64 * 1024};
     auto quantum = M::from_value(1).divided_by(M::from_value(3));
     for (unsigned i = 0; i < 8; ++i)
@@ -539,7 +557,7 @@ TEST(ExactGeneralVoF, DonorLiveLeasesReleaseReplacedValuesWithoutLosingExactColu
 
 TEST(ExactGeneralVoF, DonorLinearRawGroupsMatchPerPieceHistoryAndRepairExactly)
 {
-    using M = ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using Accumulator = SimpleFluid::VoF::detail::ExactPhaseAccumulator;
     using Live = SimpleFluid::VoF::detail::ExactLiveStorage;
     using Map = SimpleFluid::VoF::detail::ExactPhaseLabelMap;
@@ -556,12 +574,13 @@ TEST(ExactGeneralVoF, DonorLinearRawGroupsMatchPerPieceHistoryAndRepairExactly)
     for (bool gas : {false, true})
         for (int correction : {-1, 1})
         {
-            const ExactPhaseMeasures full{
+            const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> full{
                 M::from_value(1), gas ? ratio(2, 5) : ratio(3, 5), gas ? ratio(3, 5) : ratio(2, 5)};
-            const std::array<ExactPhaseMeasures, 3> pieces{{{ratio(1, 3), ratio(1, 7), ratio(1, 3) - ratio(1, 7)},
-                {ratio(1, 5), ratio(1, 11), ratio(1, 5) - ratio(1, 11)},
-                {ratio(7, 15), full.gas - ratio(1, 7) - ratio(1, 11),
-                    ratio(7, 15) - full.gas + ratio(1, 7) + ratio(1, 11)}}};
+            const std::array<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>, 3> pieces{
+                {{ratio(1, 3), ratio(1, 7), ratio(1, 3) - ratio(1, 7)},
+                    {ratio(1, 5), ratio(1, 11), ratio(1, 5) - ratio(1, 11)},
+                    {ratio(7, 15), full.gas - ratio(1, 7) - ratio(1, 11),
+                        ratio(7, 15) - full.gas + ratio(1, 7) + ratio(1, 11)}}};
             const auto target = (gas ? full.gas : full.carrier) + history.scaled(correction);
             const auto map = Map::create(full, gas, target, history, 8 * 1024 * 1024);
             for (int sign : {-1, 1})
@@ -569,7 +588,7 @@ TEST(ExactGeneralVoF, DonorLinearRawGroupsMatchPerPieceHistoryAndRepairExactly)
                 SimpleFluid::Meshes::AMR::adaptive_detail::Budget budget{8 * 1024 * 1024};
                 Live live(budget, 2 * 1024 * 1024);
                 Accumulator grouped(live);
-                ExactPhaseMeasures expected;
+                SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> expected;
                 M old_absolute, old_bound;
                 for (const auto& piece : pieces)
                 {
@@ -597,11 +616,14 @@ TEST(ExactGeneralVoF, DonorLinearRawGroupsMatchPerPieceHistoryAndRepairExactly)
 
 TEST(ExactGeneralVoF, DonorRawGroupingPreservesMappedZeroForSingularAndIdentityMaps)
 {
-    using M = ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using Map = SimpleFluid::VoF::detail::ExactPhaseLabelMap;
-    const ExactPhaseMeasures full{M::from_value(1), M::from_value(.25), M::from_value(.75)};
-    const ExactPhaseMeasures first{M::from_value(1), M::from_value(.25), M::from_value(.75)};
-    const ExactPhaseMeasures second{M::from_value(1), M::from_value(.5), M::from_value(.5)};
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> full{
+        M::from_value(1), M::from_value(.25), M::from_value(.75)};
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> first{
+        M::from_value(1), M::from_value(.25), M::from_value(.75)};
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> second{
+        M::from_value(1), M::from_value(.5), M::from_value(.5)};
     for (bool gas : {false, true})
         for (double target : {0., 1.})
         {
@@ -633,7 +655,7 @@ TEST(ExactGeneralVoF, DonorRawGroupingPreservesMappedZeroForSingularAndIdentityM
 
 TEST(ExactGeneralVoF, FinitePublicationVerifiesOutwardBoundsAndKeepsRepresentableMinorities)
 {
-    using M = ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using SimpleFluid::VoF::detail::phase_upper_bound;
     using SimpleFluid::VoF::detail::round_phase_value;
     const auto third = M::from_value(1).divided_by(M::from_value(3));
@@ -694,7 +716,7 @@ TEST(ExactGeneralVoF, ExperimentalInventoryPolicyIsExplicitCollectiveAndIsolated
 
 TEST(ExactGeneralVoF, ExperimentalNonDyadicHistorySurvivesOnlyAfterExplicitOptIn)
 {
-    using M = ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     auto f = setup();
     GeneralVoFOptions options;
     options.arithmetic_mode = ArithmeticMode::Exact;

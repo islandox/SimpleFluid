@@ -2,21 +2,21 @@
  * @brief Source-pinned unsplit phase transport on authority-certified native cells.
  */
 #pragma once
-#include "geometry/GeometryStatisticsSnapshot.hh"
 #include "FVM/ExactPhaseTransfer.hh"
 #include "FVM/ExperimentalPhaseInventory.hh"
 #include "FVM/PhaseVolumes.hh"
-#include "FVM/PolyhedralReconstruction.hh"
-#include "geometry/ExactSweptGeometry.hh"
-#include "geometry/BoundedConvexGeometry.hh"
+#include "geometry/GeometryStatisticsSnapshot.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "utils/ArithmeticMode.hh"
 #include <array>
 #include <memory>
-#include <string>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 namespace SimpleFluid::VoF
 {
@@ -37,7 +37,7 @@ struct GeneralVoFOptions
     std::size_t byte_budget = 64 * 1024 * 1024, maximum_stencil_cells = 128, maximum_halo_cells = 65536;
     unsigned support_rings = 2;
     PolyhedralReconstructionOptions reconstruction;
-    Meshes::ExactSweepLimits sweep;
+    SimpleFluid::PLIC::SweepLimits sweep;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
 };
 enum class GeneralVoFFiniteRemapCarrier
@@ -56,24 +56,24 @@ struct GeneralVoFFiniteRemapChannel
 struct GeneralVoFFiniteOwnedChannels
 {
     Meshes::AMR::AdaptiveCellKey key;
-    std::vector<Meshes::BoundedGeometryValue> amounts;
+    std::vector<PLIC::DynamicGeometryValue> amounts;
 };
 struct GeneralVoFFiniteRemapRoute
 {
     Meshes::AMR::AdaptiveCellKey source_key, target_key;
     std::uint64_t source_gid = 0, target_gid = 0;
     int source_owner = -1, target_owner = -1;
-    Meshes::BoundedPhaseMeasures amount;
+    PLIC::DynamicPhaseMeasures amount;
     /** Signed redistribution derived from source fit deviations and raw
      * phase/bulk shares; historical allowance remains a separate bound. */
-    Meshes::BoundedGeometryValue fit_allocation, inherited_fit_allocation;
+    PLIC::DynamicGeometryValue fit_allocation, inherited_fit_allocation;
 };
 struct GeneralVoFFiniteCommonCell
 {
     Meshes::AMR::AdaptiveCellKey source_key, target_key;
     std::uint64_t source_gid = 0, target_gid = 0;
     int target_owner = -1;
-    Meshes::BoundedConvexGeometryPtr geometry;
+    PLIC::DynamicConvexGeometryPtr geometry;
 };
 struct GeneralVoFFiniteRemapOptions
 {
@@ -85,12 +85,12 @@ struct GeneralVoFFiniteRemapOptions
 struct GeneralVoFNodeVelocity
 {
     std::uint64_t node = 0;
-    Meshes::GeometryPoint velocity{};
+    SimpleFluid::PLIC::GeometryPoint velocity{};
 };
 struct GeneralVoFNodeTrajectory
 {
     std::uint64_t node = 0;
-    Meshes::ExactNodeTrajectory trajectory;
+    SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact> trajectory;
 };
 struct GeneralVoFFaceVolume
 {
@@ -101,16 +101,16 @@ struct GeneralVoFFaceVolume
      * exact route the double above is diagnostic only.
      * Projection/face-arithmetic repair remains the caller's separately gated
      * physical responsibility, never a hidden source correction here. */
-    std::optional<Meshes::ExactGeometryMeasure> exact_integrated_volume;
+    std::optional<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> exact_integrated_volume;
     /** Finite numerical authority, separate from the explicit exact control. */
-    std::optional<Meshes::BoundedGeometryValue> bounded_integrated_volume;
+    std::optional<PLIC::DynamicGeometryValue> bounded_integrated_volume;
 };
 /** Diagnostic intervals only. There is no implicit scalar conversion; a known
  * nonzero interval may contain0 below output range. Never use these to build
  * physical fluxes, budgets or matrix coefficients: use exact measures. */
 struct GeneralVoFPhaseEnclosure
 {
-    Meshes::CertifiedGeometryValue bulk, gas, carrier;
+    SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact> bulk, gas, carrier;
 };
 /** One signed simplex/donor contribution; opposite directions never net away.
  * These are geometric donor contributions, not necessarily incident upwind cells. */
@@ -118,7 +118,7 @@ struct GeneralVoFFaceContribution
 {
     std::uint64_t face = 0, donor = 0;
     int donor_owner = -1, direction = 1;
-    Meshes::ExactPhaseMeasures exact;
+    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> exact;
     GeneralVoFPhaseEnclosure diagnostic;
 };
 /** Transaction-local geometric donor-to-recipient measure, including self atoms.
@@ -128,7 +128,7 @@ struct GeneralVoFTransfer
 {
     std::uint64_t donor = 0, recipient = 0;
     int donor_owner = -1, recipient_owner = -1;
-    Meshes::ExactPhaseMeasures exact;
+    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> exact;
     GeneralVoFPhaseEnclosure diagnostic;
 };
 /** One-step certificate lifted from the current finite accepted state.
@@ -136,13 +136,13 @@ struct GeneralVoFTransfer
 struct GeneralVoFDonorBudget
 {
     std::uint64_t donor = 0;
-    Meshes::ExactPhaseMeasures exact_old, exact_exported, exact_retained;
+    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> exact_old, exact_exported, exact_retained;
     GeneralVoFPhaseEnclosure old_diagnostic, exported_diagnostic, retained_diagnostic;
     /** Exact cumulative absolute gas relabeling; carrier correction is its
      * opposite. Signed-face multiplicities are counted before cancellation. */
-    Meshes::ExactGeometryMeasure signed_repair_absolute, signed_repair_bound;
-    Meshes::ExactGeometryMeasure route_repair_absolute, route_repair_bound;
-    Meshes::ExactGeometryMeasure full_cell_fit_discrepancy;
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> signed_repair_absolute, signed_repair_bound;
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> route_repair_absolute, route_repair_bound;
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> full_cell_fit_discrepancy;
 };
 /** Fixed-storage numerical records used exclusively by the Finite route.
  * A canonical owned face contributes one signed donor group; receivers consume
@@ -152,31 +152,31 @@ struct GeneralVoFFiniteFaceContribution
 {
     std::uint64_t face = 0, donor = 0;
     int donor_owner = -1, direction = 1;
-    Meshes::BoundedPhaseMeasures amount;
+    PLIC::DynamicPhaseMeasures amount;
 };
 struct GeneralVoFFiniteTransfer
 {
     std::uint64_t donor = 0, recipient = 0;
     int donor_owner = -1, recipient_owner = -1;
-    Meshes::BoundedPhaseMeasures amount;
+    PLIC::DynamicPhaseMeasures amount;
     PhaseRoundoff inherited_error;
 };
 struct GeneralVoFFiniteDonorBudget
 {
     std::uint64_t donor = 0;
-    Meshes::BoundedPhaseMeasures old, exported, retained;
+    PLIC::DynamicPhaseMeasures old, exported, retained;
 };
 struct GeneralVoFFiniteNodeTrajectory
 {
     std::uint64_t node = 0;
-    Meshes::BoundedPoint point, departure;
+    PLIC::DynamicPoint point, departure;
 };
 /** Actual nominal face-chain quantities. The allowance is allocated from the
  * frozen incident cells, never inferred from the observed construction defect. */
 struct GeneralVoFFaceChainDiagnostic
 {
     std::uint64_t face = 0;
-    Meshes::BoundedGeometryValue control, constructed, signed_difference;
+    PLIC::DynamicGeometryValue control, constructed, signed_difference;
     long double allowed_difference = 0;
 };
 /** Owned-cell closure using the original cell allowance, including the signed
@@ -187,17 +187,17 @@ struct GeneralVoFCellClosureDiagnostic
     std::uint64_t cell = 0;
     std::size_t canonical_face_count = 0;
     long double quota_scale = 0;
-    Meshes::BoundedGeometryValue canonical_residual, signed_geometry_difference, combined_residual;
+    PLIC::DynamicGeometryValue canonical_residual, signed_geometry_difference, combined_residual;
     long double absolute_geometry_difference = 0, allowed_closure = 0;
 };
 struct GeneralVoFSupportCell
 {
     std::uint64_t cell = 0, revision = 0;
     int owner = -1;
-    Meshes::ConvexGeometryPtr geometry;
-    Meshes::GeometryPoint centroid{};
+    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
+    SimpleFluid::PLIC::GeometryPoint centroid{};
     Meshes::AMR::AdaptiveCellKey key;
-    Meshes::BoundedConvexGeometryPtr finite_geometry;
+    PLIC::DynamicConvexGeometryPtr finite_geometry;
 };
 /** Owned refinement requests, collected without preparing an expensive fit. */
 struct GeneralVoFResolutionRequest
@@ -210,16 +210,16 @@ struct GeneralVoFReconstructionPatch
 {
     std::uint64_t cell = 0;
     int owner = -1;
-    Meshes::ConvexGeometryPtr geometry;
+    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
     PolyhedralInterface interface;
-    Meshes::BoundedConvexGeometryPtr finite_geometry;
+    PLIC::DynamicConvexGeometryPtr finite_geometry;
 };
 class SIMPLEFLUID_FVM_EXPORT GeneralVoF
 {
 public:
     /** This library image's calling-thread counters. Call every observed
      * image's bridge and deduplicate snapshots by their separate domain IDs. */
-    static void enable_exact_geometry_statistics(bool enabled);
+    static void enable_geometry_statistics(bool enabled);
     static void reset_geometry_statistics();
     [[nodiscard]] static Meshes::GeometryStatisticsSnapshot geometry_statistics();
     struct Data;
@@ -249,10 +249,12 @@ public:
     [[nodiscard]] std::vector<GeneralVoFPhaseGeometry> phase_geometry_declarations() const;
     /** Exact-mode authority only. Finite modes use phase_volumes(); requesting
      * this view never performs an implicit rational lift of finite storage. */
-    [[nodiscard]] std::vector<Meshes::ExactPhaseMeasures> inventory_measures() const;
+    [[nodiscard]] std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>>
+    inventory_measures() const;
     /** Explicit experimental authority; rejects Finite mode. Unqualified for
      * finite-duration physical flow, performance and storage scalability. */
-    [[nodiscard]] const std::vector<Meshes::ExactPhaseMeasures>& experimental_phases() const;
+    [[nodiscard]] const std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>>&
+    experimental_phases() const;
     /** Latest publication arithmetic uncertainty, never a physical source. */
     [[nodiscard]] const std::vector<PhaseRoundoff>& phase_roundoff_bounds() const noexcept;
     /** Independent accumulated finite arithmetic uncertainty across accepted
@@ -260,7 +262,8 @@ public:
     [[nodiscard]] const std::vector<PhaseRoundoff>& accumulated_phase_errors() const noexcept;
     /** Exact-mode complementary geometric fitting labels in owned_order.
      * Finite callers use geometric_gas_fractions() for a diagnostic view. */
-    [[nodiscard]] std::vector<Meshes::ExactPhaseMeasures> geometric_phases() const;
+    [[nodiscard]] std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>>
+    geometric_phases() const;
     /** Geometry-only gas/V enclosure view after an exact [0,1] check. Rounding
      * to0/1 is permitted while an extensive minority remains positive. This is
      * never phase-presence, transport or mass authority; use phase_volumes(). */
@@ -280,10 +283,11 @@ public:
     /** Retained tile ordinals incident to a canonical node, in tiles() order.
      * The immutable incidence storage is shared by accepted transport states. */
     [[nodiscard]] const std::vector<std::size_t>& node_tiles(std::uint64_t node) const;
-    [[nodiscard]] std::vector<Meshes::ConvexGeometryPtr> owned_geometry() const;
-    [[nodiscard]] std::vector<Meshes::BoundedConvexGeometryPtr> owned_finite_geometry() const;
+    [[nodiscard]] std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
+    owned_geometry() const;
+    [[nodiscard]] std::vector<PLIC::DynamicConvexGeometryPtr> owned_finite_geometry() const;
     /** Immutable original node constructions for a retained canonical face. */
-    [[nodiscard]] std::vector<Meshes::BoundedPoint> finite_face_points(std::uint64_t face) const;
+    [[nodiscard]] std::vector<PLIC::DynamicPoint> finite_face_points(std::uint64_t face) const;
     [[nodiscard]] std::vector<std::uint64_t> node_cells(std::uint64_t node) const;
     [[nodiscard]] std::vector<std::uint64_t> cell_support(std::uint64_t owned_cell) const;
     [[nodiscard]] std::vector<GeneralVoFSupportCell> support_cells() const;

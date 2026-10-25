@@ -20,7 +20,7 @@ using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 using namespace SimpleFluid::test;
 void consume(const ::SimpleFluid::Meshes::AMR::FrozenNativeModel& model,
-    const std::map<std::uint64_t, GeometryPoint>& expected_normals = {})
+    const std::map<std::uint64_t, SimpleFluid::PLIC::GeometryPoint>& expected_normals = {})
 {
     auto publication = model.publication();
     EXPECT_TRUE(publication.partition->geometry()->frozen_native());
@@ -86,11 +86,11 @@ TEST(FrozenNative, ConcaveCurvedCopiesReleaseAliasedSourceAndMigrateIntoEmptyOwn
     if (comm->getRank() == 0)
         for (std::uint64_t c = 0; c < source->native_geometry()->num_cells(); ++c)
             owned.push_back(c);
-    std::map<std::uint64_t, GeometryPoint> normals;
+    std::map<std::uint64_t, SimpleFluid::PLIC::GeometryPoint> normals;
     for (std::uint64_t face = 0; face < source->native_geometry()->num_faces(); ++face)
     {
         auto normal = source->native_geometry()->face_normal(face);
-        normals.emplace(face, GeometryPoint{normal.x, normal.y, normal.z});
+        normals.emplace(face, SimpleFluid::PLIC::GeometryPoint{normal.x, normal.y, normal.z});
     }
     auto bootstrap = ::SimpleFluid::Meshes::AMR::detach_frozen_native(
         *source, owned, ::SimpleFluid::Meshes::AMR::AdaptiveBytes{'f'}, comm);
@@ -254,12 +254,12 @@ TEST(FrozenNative, SubnormalFaceAreaKeepsAcceptedDirectDivisionNormal)
         std::vector<MultiRegionMesh::Region>{cartesian_region("tiny", {{{0, 1e150}, {0, 1e-160}, {0, 1e-160}}})},
         std::vector<MultiRegionMesh::Interface>{});
     AliasHierarchy source(geometry);
-    std::map<std::uint64_t, GeometryPoint> expected;
+    std::map<std::uint64_t, SimpleFluid::PLIC::GeometryPoint> expected;
     bool subnormal = false;
     for (std::uint64_t face = 0; face < geometry->num_faces(); ++face)
     {
         auto n = geometry->face_normal(face);
-        expected.emplace(face, GeometryPoint{n.x, n.y, n.z});
+        expected.emplace(face, SimpleFluid::PLIC::GeometryPoint{n.x, n.y, n.z});
         subnormal |= std::fpclassify(geometry->face_area(face)) == FP_SUBNORMAL;
     }
     ASSERT_TRUE(subnormal);

@@ -1,7 +1,7 @@
 /** @file testExactPolyhedralComplex.cc
  * @brief Exact octants, canonical nonnested seams, sparse topology and parent recovery.
  */
-#include "geometry/ExactPolyhedralComplex.hh"
+#include "geometry/PLIC/PolyhedralComplex.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
@@ -21,77 +21,87 @@ using ID = std::uint64_t;
 constexpr ID absent = std::numeric_limits<ID>::max();
 const std::vector<std::vector<std::size_t>> cube_faces{
     {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}};
-ConvexGeometryPtr cube()
+SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact> cube()
 {
-    return ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
 }
 ::SimpleFluid::Meshes::AMR::AdaptiveCellKey key(ID root, std::vector<ID> path = {})
 {
     return {0, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{root, std::move(path)}};
 }
-PolyhedralComplexCell tagged(ConvexGeometryPtr geometry, ID root, ID gid)
+SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact> tagged(
+    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact> geometry, ID root, ID gid)
 {
-    PolyhedralComplexCell cell{key(root), gid, std::move(geometry), {}};
+    SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact> cell{
+        key(root), gid, std::move(geometry), {}};
     for (std::size_t f = 0; f < cell.geometry->num_faces(); ++f)
-        cell.surfaces.push_back({{PolyhedralSurfaceKey::Kind::Root, 0, {100 * root + f, {}}, 0}, 1, true, "wall"});
+        cell.surfaces.push_back(
+            {{SimpleFluid::PLIC::PolyhedralSurfaceKey::Kind::Root, 0, {100 * root + f, {}}, 0}, 1, true, "wall"});
     return cell;
 }
-std::vector<PolyhedralComplexCell> split(const PolyhedralComplexCell& parent, ID first)
+std::vector<SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact>> split(
+    const SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact>& parent, ID first)
 {
-    std::vector<PolyhedralComplexCell> cells;
+    std::vector<SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact>> cells;
     const auto ancestry = std::get<::SimpleFluid::Meshes::AMR::ConvexCellAncestry>(parent.key.ancestry);
     for (const auto& piece : parent.geometry->split_aabb_midpoints())
     {
         auto path = ancestry.path;
         path.push_back(piece.octant);
-        PolyhedralComplexCell cell{key(ancestry.root, std::move(path)), first + cells.size(), piece.geometry, {}};
+        SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact> cell{
+            key(ancestry.root, std::move(path)), first + cells.size(), piece.geometry, {}};
         for (const auto& origin : piece.face_origins)
         {
-            if (origin.kind == ConvexFaceOrigin::Kind::ParentFace)
+            if (origin.kind == SimpleFluid::PLIC::ConvexFaceOrigin::Kind::ParentFace)
                 cell.surfaces.push_back(parent.surfaces.at(origin.index));
             else
-                cell.surfaces.push_back({{PolyhedralSurfaceKey::Kind::Cut, 0, ancestry, origin.index},
-                    (piece.octant >> origin.index) & 1 ? -1 : 1, false, {}});
+                cell.surfaces.push_back(
+                    {{SimpleFluid::PLIC::PolyhedralSurfaceKey::Kind::Cut, 0, ancestry, origin.index},
+                        (piece.octant >> origin.index) & 1 ? -1 : 1, false, {}});
         }
         cells.push_back(std::move(cell));
     }
     return cells;
 }
-ConvexGeometryPtr skew(double x0, double x1)
+SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact> skew(double x0, double x1)
 {
-    std::array<GeometryPoint, 8> vertices;
+    std::array<SimpleFluid::PLIC::GeometryPoint, 8> vertices;
     for (unsigned i = 0; i < 8; ++i)
     {
         const double x = i & 1 ? x1 : x0, y = (i >> 1) & 1, z = (i >> 2) & 1;
         vertices[i] = {x, y + .5 * x, z + .3 * x};
     }
-    return ConvexCellGeometry::make(vertices, cube_faces);
+    return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(vertices, cube_faces);
 }
-std::pair<PolyhedralComplexCell, PolyhedralComplexCell> neighbors()
+std::pair<SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact>,
+    SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact>>
+neighbors()
 {
     auto left = tagged(skew(-1, 0), 0, 0), right = tagged(skew(0, 1), 1, 1);
-    const PolyhedralSurfaceKey seam{PolyhedralSurfaceKey::Kind::Root, 0, {999, {}}, 0};
+    const SimpleFluid::PLIC::PolyhedralSurfaceKey seam{
+        SimpleFluid::PLIC::PolyhedralSurfaceKey::Kind::Root, 0, {999, {}}, 0};
     left.surfaces[1] = {seam, 1, false, {}};
     right.surfaces[0] = {seam, -1, false, {}};
     return {left, right};
 }
-std::vector<ID> seam_faces(const ExactPolyhedralComplex& complex)
+std::vector<ID> seam_faces(const SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>& complex)
 {
     std::vector<ID> result;
     for (auto face : complex.face_ids())
         if (complex.face_surface(face).key.creator.root == 999 &&
-            complex.face_surface(face).key.kind == PolyhedralSurfaceKey::Kind::Root)
+            complex.face_surface(face).key.kind == SimpleFluid::PLIC::PolyhedralSurfaceKey::Kind::Root)
             result.push_back(face);
     return result;
 }
 TEST(ExactPolyhedralComplexTest, ActualTetrahedronHasFourOccupiedOctantsWithAnalyticVolumes)
 {
-    const std::array<GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
-    auto tetra = ConvexCellGeometry::make(vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    auto tetra = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(
+        vertices, {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}});
     auto children = tetra->split_aabb_midpoints();
     ASSERT_EQ(children.size(), 4U);
     std::set<unsigned> occupied;
-    std::vector<ConvexGeometryPtr> pieces;
+    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact>> pieces;
     for (const auto& child : children)
     {
         occupied.insert(child.octant);
@@ -102,7 +112,8 @@ TEST(ExactPolyhedralComplexTest, ActualTetrahedronHasFourOccupiedOctantsWithAnal
     }
     EXPECT_EQ(occupied, (std::set<unsigned>{0, 1, 2, 4}));
     EXPECT_NO_THROW(tetra->certify_partition(pieces));
-    auto complex = ExactPolyhedralComplex::make(split(tagged(tetra, 0, 0), 0));
+    auto complex =
+        SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make(split(tagged(tetra, 0, 0), 0));
     EXPECT_EQ(complex->global_cells(), 4U);
 }
 TEST(ExactPolyhedralComplexTest, RationalAABBBoundsAndPrismCutsRetainTruePositivePieces)
@@ -111,7 +122,7 @@ TEST(ExactPolyhedralComplexTest, RationalAABBBoundsAndPrismCutsRetainTruePositiv
     ASSERT_TRUE(parent);
     auto children = parent->split_aabb_midpoints();
     ASSERT_EQ(children.size(), 8U);
-    std::vector<ConvexGeometryPtr> pieces;
+    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact>> pieces;
     for (const auto& child : children)
     {
         EXPECT_NEAR(child.geometry->moments().volume.value, 1.0L / 24, 1e-18L);
@@ -119,10 +130,12 @@ TEST(ExactPolyhedralComplexTest, RationalAABBBoundsAndPrismCutsRetainTruePositiv
     }
     EXPECT_NO_THROW(parent->certify_partition(pieces));
     const std::array<std::array<double, 2>, 3> base{{{0, 0}, {1, 0}, {0, 1}}};
-    auto prism = ConvexCellGeometry::extruded_polygon(base, 0, 1);
+    auto prism =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::extruded_polygon(base, 0, 1);
     auto cuts = prism->split_aabb_midpoints();
     EXPECT_EQ(cuts.size(), 6U);
-    auto tiny = ConvexCellGeometry::box({0, 0, 0}, {1e-200, 1, 1});
+    auto tiny =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1e-200, 1, 1});
     auto retained = tiny->split_aabb_midpoints();
     ASSERT_EQ(retained.size(), 8U);
     for (const auto& child : retained)
@@ -134,22 +147,23 @@ TEST(ExactPolyhedralComplexTest, RationalAABBBoundsAndPrismCutsRetainTruePositiv
 }
 TEST(ExactPolyhedralComplexTest, CoplanarAtomicParentFacesKeepTheirIndividualOrigins)
 {
-    std::array<GeometryPoint, 8> vertices;
+    std::array<SimpleFluid::PLIC::GeometryPoint, 8> vertices;
     for (unsigned i = 0; i < 8; ++i)
         vertices[i] = {double(i & 1), double((i >> 1) & 1), double((i >> 2) & 1)};
     auto faces = cube_faces;
     faces.back() = {4, 5, 7};
     faces.push_back({4, 7, 6});
-    auto parent = ConvexCellGeometry::make(vertices, faces);
+    auto parent = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(vertices, faces);
     auto tagged_parent = tagged(parent, 0, 0);
     std::set<std::size_t> origins;
     auto pieces = parent->split_aabb_midpoints();
     for (const auto& piece : pieces)
         for (const auto& origin : piece.face_origins)
-            if (origin.kind == ConvexFaceOrigin::Kind::ParentFace && origin.index >= 5)
+            if (origin.kind == SimpleFluid::PLIC::ConvexFaceOrigin::Kind::ParentFace && origin.index >= 5)
                 origins.insert(origin.index);
     EXPECT_EQ(origins, (std::set<std::size_t>{5, 6}));
-    auto complex = ExactPolyhedralComplex::make(split(tagged_parent, 0));
+    auto complex =
+        SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make(split(tagged_parent, 0));
     std::set<ID> top_surface_ids;
     for (auto face : complex->face_ids())
         if (complex->face_surface(face).exterior && complex->face_surface(face).key.creator.root >= 5)
@@ -162,7 +176,7 @@ TEST(ExactPolyhedralComplexTest, UnequalNeighborTracesProduceOneNineTileSeamAndP
     auto cells = split(left, 0);
     auto right_cells = split(right, cells.size());
     cells.insert(cells.end(), right_cells.begin(), right_cells.end());
-    auto complex = ExactPolyhedralComplex::make(cells);
+    auto complex = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make(cells);
     const auto seam = seam_faces(*complex);
     ASSERT_EQ(seam.size(), 9U);
     double area = 0;
@@ -188,7 +202,7 @@ TEST(ExactPolyhedralComplexTest, UnequalNeighborTracesProduceOneNineTileSeamAndP
     }
     EXPECT_TRUE(propagated);
     std::reverse(cells.begin(), cells.end());
-    auto reordered = ExactPolyhedralComplex::make(cells);
+    auto reordered = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make(cells);
     EXPECT_EQ(complex->global_faces(), reordered->global_faces());
     for (auto face : complex->face_ids())
     {
@@ -199,30 +213,31 @@ TEST(ExactPolyhedralComplexTest, UnequalNeighborTracesProduceOneNineTileSeamAndP
     coarse.gid = 0;
     auto fine = split(right, 1);
     fine.insert(fine.begin(), coarse);
-    auto mixed = ExactPolyhedralComplex::make(fine);
+    auto mixed = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make(fine);
     EXPECT_EQ(seam_faces(*mixed).size(), 4U);
     EXPECT_GT(mixed->cell_faces(0).size(), left.geometry->num_faces());
     EXPECT_TRUE(mixed->cell_geometry(0)->equivalent(*left.geometry));
     EXPECT_EQ(mixed->atomic_cell_geometry(0)->num_faces(), mixed->cell_faces(0).size());
     EXPECT_TRUE(mixed->atomic_cell_geometry(0)->equivalent(*left.geometry));
     EXPECT_EQ(left.geometry->num_faces(), 6U);
-    auto restored = ExactPolyhedralComplex::make({left, right});
+    auto restored = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right});
     EXPECT_EQ(seam_faces(*restored).size(), 1U);
     EXPECT_TRUE(restored->cell_geometry(0)->equivalent(*left.geometry));
 }
 TEST(ExactPolyhedralComplexTest, TileIdentityIgnoresLoopStartAndRedundantCollinearVertices)
 {
     auto normal = tagged(cube(), 0, 0);
-    auto base = ExactPolyhedralComplex::make({normal});
-    std::vector<GeometryPoint> vertices{
+    auto base = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({normal});
+    std::vector<SimpleFluid::PLIC::GeometryPoint> vertices{
         {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {1, 1, 1}, {.5, 0, 0}};
     auto faces = cube_faces;
     faces[2] = {0, 8, 1, 5, 4};
     faces[4] = {0, 2, 3, 1, 8};
     for (auto& face : faces)
         std::rotate(face.begin(), face.begin() + 1, face.end());
-    auto extra = tagged(ConvexCellGeometry::make(vertices, faces), 0, 0);
-    auto refined = ExactPolyhedralComplex::make({extra});
+    auto extra =
+        tagged(SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(vertices, faces), 0, 0);
+    auto refined = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({extra});
     ASSERT_EQ(base->global_faces(), refined->global_faces());
     bool larger_loop = false;
     for (auto face : base->face_ids())
@@ -232,10 +247,10 @@ TEST(ExactPolyhedralComplexTest, TileIdentityIgnoresLoopStartAndRedundantColline
     }
     EXPECT_TRUE(larger_loop);
     auto [left, right] = neighbors();
-    auto a = ExactPolyhedralComplex::make({left, right});
+    auto a = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right});
     left.gid = 1;
     right.gid = 0;
-    auto b = ExactPolyhedralComplex::make({left, right});
+    auto b = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right});
     auto af = seam_faces(*a), bf = seam_faces(*b);
     ASSERT_EQ(af.size(), 1U);
     ASSERT_EQ(bf.size(), 1U);
@@ -244,9 +259,10 @@ TEST(ExactPolyhedralComplexTest, TileIdentityIgnoresLoopStartAndRedundantColline
 TEST(ExactPolyhedralComplexTest, SparseCodecRetainsOnlyVisibleGeometryAndMetricNeighbors)
 {
     auto [left, right] = neighbors();
-    auto complex = ExactPolyhedralComplex::make({left, right});
+    auto complex = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right});
     const std::array<ID, 1> visible{0};
-    auto sparse = ExactPolyhedralComplex::decode(complex->encode(visible));
+    auto sparse =
+        SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::decode(complex->encode(visible));
     EXPECT_EQ(sparse->global_cells(), 2U);
     EXPECT_TRUE(sparse->has_full_cell(0));
     EXPECT_FALSE(sparse->has_full_cell(1));
@@ -257,19 +273,23 @@ TEST(ExactPolyhedralComplexTest, SparseCodecRetainsOnlyVisibleGeometryAndMetricN
     EXPECT_TRUE(sparse->cell_geometry(0)->equivalent(*left.geometry));
     for (auto face : sparse->face_ids())
         EXPECT_EQ(sparse->face_identity(face), complex->face_identity(face));
-    auto empty = ExactPolyhedralComplex::decode(complex->encode(std::span<const ID>{}));
+    auto empty = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::decode(
+        complex->encode(std::span<const ID>{}));
     EXPECT_TRUE(empty->resident_cell_ids().empty());
     EXPECT_TRUE(empty->node_ids().empty());
     EXPECT_EQ(empty->global_nodes(), complex->global_nodes());
     auto packet = complex->encode();
     packet.pop_back();
-    EXPECT_THROW((void) ExactPolyhedralComplex::decode(packet), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::decode(packet),
+        std::invalid_argument);
     packet = complex->encode();
     packet[0] ^= 1;
-    EXPECT_THROW((void) ExactPolyhedralComplex::decode(packet), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::decode(packet),
+        std::invalid_argument);
     packet = complex->encode();
     packet.push_back(0);
-    EXPECT_THROW((void) ExactPolyhedralComplex::decode(packet), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::decode(packet),
+        std::invalid_argument);
 }
 TEST(ExactPolyhedralComplexTest, OrderedAtomicNativeImportDoesNotGuessConstructedFaceOrder)
 {
@@ -279,45 +299,61 @@ TEST(ExactPolyhedralComplexTest, OrderedAtomicNativeImportDoesNotGuessConstructe
     grid.z_edges = {.1, .2};
     auto hierarchy = ::SimpleFluid::Meshes::AMR::ExtrudedAMR(grid).adapt({0});
     const auto& native = *hierarchy->geometry();
-    std::vector<PolyhedralComplexCell> cells;
+    std::vector<SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact>> cells;
     for (ID cell = 0; cell < native.num_cells(); ++cell)
     {
-        auto geometry = ConvexCellGeometry::from_native_cell_atomic(native, cell);
-        PolyhedralComplexCell record{key(cell), cell, geometry, {}};
+        auto geometry =
+            SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::from_native_cell_atomic(
+                native, cell);
+        SimpleFluid::PLIC::PolyhedralComplexCell<SimpleFluid::ArithmeticMode::Exact> record{
+            key(cell), cell, geometry, {}};
         for (auto face : native.cell_faces(cell))
-            record.surfaces.push_back(
-                {{PolyhedralSurfaceKey::Kind::Root, 0, {face, {}}, 0}, native.owner_cell(face) == cell ? 1 : -1,
-                    native.neighbor_cell(face) == absent, native.neighbor_cell(face) == absent ? "wall" : ""});
+            record.surfaces.push_back({{SimpleFluid::PLIC::PolyhedralSurfaceKey::Kind::Root, 0, {face, {}}, 0},
+                native.owner_cell(face) == cell ? 1 : -1, native.neighbor_cell(face) == absent,
+                native.neighbor_cell(face) == absent ? "wall" : ""});
         ASSERT_EQ(record.surfaces.size(), geometry->num_faces());
         cells.push_back(std::move(record));
     }
-    const auto complex = ExactPolyhedralComplex::make(cells);
+    const auto complex = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make(cells);
     EXPECT_EQ(complex->global_faces(), native.num_faces());
     for (ID cell = 0; cell < native.num_cells(); ++cell)
-        EXPECT_TRUE(complex->cell_geometry(cell)->equivalent(*hierarchy->cell_geometry(cell)));
+        EXPECT_TRUE(complex->cell_geometry(cell)->equivalent(
+            *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                *hierarchy->cell_geometry(cell))));
 }
 TEST(ExactPolyhedralComplexTest, InvalidAncestralSeamsAndNativeUnrepresentabilityRejectAtomically)
 {
     const auto [left, right] = neighbors();
     auto invalid = right;
     invalid.surfaces[0].orientation = 1;
-    EXPECT_THROW((void) ExactPolyhedralComplex::make({left, invalid}), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, invalid}),
+        std::invalid_argument);
     invalid = right;
     invalid.surfaces[0].key.creator.root = 12345;
-    EXPECT_THROW((void) ExactPolyhedralComplex::make({left, invalid}), std::invalid_argument);
-    auto overlap = tagged(ConvexCellGeometry::box({-.5, 0, 0}, {.5, 1, 1}), 1, 1);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, invalid}),
+        std::invalid_argument);
+    auto overlap = tagged(
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({-.5, 0, 0}, {.5, 1, 1}), 1, 1);
     auto origin = tagged(cube(), 0, 0);
-    EXPECT_THROW((void) ExactPolyhedralComplex::make({origin, overlap}), std::invalid_argument);
-    auto near = tagged(ConvexCellGeometry::box({1e16, 0, 0}, {1e16 + 2, 1, 1}), 0, 0);
-    EXPECT_THROW((void) ExactPolyhedralComplex::make({near}), std::invalid_argument);
+    EXPECT_THROW(
+        (void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({origin, overlap}),
+        std::invalid_argument);
+    auto near = tagged(
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({1e16, 0, 0}, {1e16 + 2, 1, 1}),
+        0, 0);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({near}),
+        std::invalid_argument);
     EXPECT_GT(left.geometry->moments().volume.value, 0);
-    EXPECT_TRUE(ExactPolyhedralComplex::make({left, right})->has_full_cell(0));
+    EXPECT_TRUE(SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right})
+            ->has_full_cell(0));
 }
 TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncidence)
 {
     auto [left, right] = neighbors();
-    auto remote = tagged(ConvexCellGeometry::box({3, 3, 0}, {4, 4, 1}), 2, 2);
-    const auto complex = ExactPolyhedralComplex::make({left, right, remote});
+    auto remote = tagged(
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({3, 3, 0}, {4, 4, 1}), 2, 2);
+    const auto complex =
+        SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right, remote});
     auto packet = complex->encode();
     std::size_t cursor = 0;
     auto word = [&]()
@@ -392,7 +428,7 @@ TEST(ExactPolyhedralComplexTest, SparseDecoderRejectsMissingReverseFullCellIncid
     ASSERT_TRUE(changed);
     try
     {
-        (void) ExactPolyhedralComplex::decode(packet);
+        (void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::decode(packet);
         FAIL() << "Accepted nonreciprocal full-cell incidence.";
     }
     catch (const std::invalid_argument& error)
@@ -405,8 +441,8 @@ TEST(ExactPolyhedralComplexTest, UnnamedExteriorStaysTopologicalExteriorAcrossCo
     auto input = tagged(cube(), 0, 0);
     for (auto& surface : input.surfaces)
         surface.boundary.clear();
-    auto complex = ExactPolyhedralComplex::make({input});
-    auto copy = ExactPolyhedralComplex::decode(complex->encode());
+    auto complex = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({input});
+    auto copy = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::decode(complex->encode());
     for (auto face : copy->face_ids())
     {
         EXPECT_TRUE(copy->face_surface(face).exterior);
@@ -415,9 +451,11 @@ TEST(ExactPolyhedralComplexTest, UnnamedExteriorStaysTopologicalExteriorAcrossCo
     }
     auto invalid = input;
     invalid.surfaces[0].exterior = false;
-    EXPECT_THROW((void) ExactPolyhedralComplex::make({invalid}), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({invalid}),
+        std::invalid_argument);
     auto [left, right] = neighbors();
     left.surfaces[1].boundary = "invented-interior-patch";
-    EXPECT_THROW((void) ExactPolyhedralComplex::make({left, right}), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Exact>::make({left, right}),
+        std::invalid_argument);
 }
 } // namespace

@@ -11,7 +11,7 @@ namespace SimpleFluid::VoF::detail
 {
 namespace
 {
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 M absolute(const M& value)
 {
     return value.sign() < 0 ? value.scaled(-1) : value;
@@ -33,8 +33,9 @@ void capacity(const ExperimentalPhaseInventory& value, std::size_t limit)
     }
 }
 } // namespace
-void validate_experimental(const ExperimentalPhaseInventory& value, const Meshes::ConvexCellGeometry& geometry,
-    double native_volume, std::size_t byte_budget)
+void validate_experimental(const ExperimentalPhaseInventory& value,
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>& geometry, double native_volume,
+    std::size_t byte_budget)
 {
     capacity(value, byte_budget);
     const auto& p = value.phases;
@@ -50,8 +51,9 @@ void validate_experimental(const ExperimentalPhaseInventory& value, const Meshes
         if (bound->sign() < 0)
             throw std::invalid_argument("Experimental exact phase bound is negative.");
 }
-std::shared_ptr<const ExperimentalPhaseInventory> experimental_initial(const Meshes::ConvexCellGeometry& geometry,
-    double native_volume, double gas, double carrier, std::size_t byte_budget)
+std::shared_ptr<const ExperimentalPhaseInventory> experimental_initial(
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>& geometry, double native_volume,
+    double gas, double carrier, std::size_t byte_budget)
 {
     ExperimentalPhaseInventory value;
     value.phases = {M::volume(geometry), M::from_value(gas), M::from_value(carrier)};
@@ -68,7 +70,8 @@ std::shared_ptr<const ExperimentalPhaseInventory> experimental_initial(const Mes
     return std::make_shared<const ExperimentalPhaseInventory>(std::move(value));
 }
 std::shared_ptr<const ExperimentalPhaseInventory> experimental_advance(const ExperimentalPhaseInventory& source,
-    Meshes::ExactPhaseMeasures phases, const Meshes::ConvexCellGeometry& geometry, double native_volume,
+    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases,
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>& geometry, double native_volume,
     std::size_t byte_budget)
 {
     // Keep original exact source provenance; a physical step does not refresh

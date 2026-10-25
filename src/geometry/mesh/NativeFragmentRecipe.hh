@@ -10,7 +10,7 @@ namespace SimpleFluid::Meshes
 {
 using NativeFragmentBytes = std::vector<char>;
 /** Immutable through shared_ptr<const>. Slots are canonical whole-byte parts:
- * Cartesian: topology + three axes; ExactProduct: topology base, exact base,
+ * Cartesian: topology + three axes; ConstructedProduct: topology base, constructed base,
  * axial values, axial selection. The view holds name/layers/aliases/run address.
  * Legacy procedural providers use one detached descriptor part. */
 struct NativeFragmentDescriptor
@@ -18,7 +18,7 @@ struct NativeFragmentDescriptor
     enum class Kind : std::uint64_t
     {
         Cartesian,
-        ExactProduct,
+        ConstructedProduct,
         LegacyProcedural
     };
     Kind kind = Kind::Cartesian;

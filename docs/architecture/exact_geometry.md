@@ -8,18 +8,24 @@ used by explicit [ExactVoF](exact_vof.md) and
 
 ## Native authority and the FP import boundary
 
-The existing AMR/native-mesh substrate retains exact source authority.
-`ConvexCellGeometry`, exact fragments and lossless source certificates remain
-available independently of the chosen VoF numerical arithmetic. The hierarchy,
-ancestry, canonical incidence and migration contracts remain in the
+The AMR/native-mesh substrate uses ordinary PLIC geometry and finite coordinate
+packets. It does not require rational construction or membership queries.
+The hierarchy, ancestry, canonical incidence and migration contracts remain in the
 [AMR design](general_amr.md#implemented-certified-geometry-and-sparse-remap).
 
-The FP importer obtains bounded coordinates and opaque original support keys
-from that authority. Membership queries and coordinate/support exports are
-bootstrap work and must be measured separately from numerical steps. Opaque
-support keys identify provenance; they are not rational numerical coefficients
-in FP geometry or ledger payloads. Native authority import does not enable an
-exact numerical fallback for FP clipping, fitting or physical acceptance.
+Public PLIC headers expose mode-selected cells, faces, measures, complexes and
+sweeps. Rational specializations and their implementation headers reside in
+`PLIC/details/exact/`; higher-level code does not include those headers directly.
+An explicitly selected Exact operation can import represented ordinary cells,
+faces and point identities. That conversion constructs rational values for the
+represented source, not a recovered exact history of earlier ordinary operations.
+Default-constructed optional exact measures allocate no rational payload.
+
+Finite clipping obtains coordinates and opaque support identities from ordinary
+source geometry. Support identity is discrete provenance, not rational numeric
+storage. Bounded import starts from the represented source coordinates; it does
+not claim an enclosure of earlier untracked ordinary construction error. There
+is no exact numerical fallback for finite clipping, fitting or acceptance.
 
 ## Separation and wall trajectories
 
@@ -101,9 +107,13 @@ FP numerical kernel has no such fallback; an unresolved predicate rejects.
 
 ## Focused verification
 
-`testConvexCellGeometry`, `testExactPolyhedralComplex`,
-`testExactExplicitProvider` and `testExactExtrudedConstruction` cover the exact
-source/geometry contracts. The source remap families
+`testConvexCellGeometry`, `testExactPolyhedralComplex` and
+`testExactSweptGeometry` retain optional exact-kernel coverage.
+Native-provider cases in `testExactExplicitProvider` and
+`testExactExtrudedConstruction` now use Ordinary interfaces; independent rational
+reference cases remain explicitly selected tests. `testFiniteNativeGeometry`
+and `testPLICGeometry` cover ordinary native preparation, backend isolation and
+typed publication without rational numerical references. The source remap families
 `testConservativeAMRRemap`, `testProductAMRRemap`, `testPolyhedralAMRRemap` and
 `testMixedAMRRemap` retain their native-geometry authority. These tests do not
 substitute for `testBoundedConvexGeometry` or the finite reconstruction,

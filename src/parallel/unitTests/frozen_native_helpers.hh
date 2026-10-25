@@ -43,7 +43,8 @@ public:
 inline MultiRegionMesh::Region concave()
 {
     using P = ExplicitRegionProvider;
-    std::vector<GeometryPoint> xy{{3, -3, 0}, {5, -3, 0}, {5, -2, 0}, {4, -2, 0}, {4, -1, 0}, {3, -1, 0}};
+    std::vector<SimpleFluid::PLIC::GeometryPoint> xy{
+        {3, -3, 0}, {5, -3, 0}, {5, -2, 0}, {4, -2, 0}, {4, -1, 0}, {3, -1, 0}};
     std::vector<P::Node> nodes;
     for (std::uint64_t z = 0; z < 2; ++z)
         for (std::uint64_t i = 0; i < 6; ++i)

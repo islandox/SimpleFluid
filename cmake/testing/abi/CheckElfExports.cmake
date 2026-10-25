@@ -138,6 +138,9 @@ set(simplefluid_unexpected_symbols)
 foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
     string(REGEX REPLACE "@.*$" ""
            simplefluid_unversioned_symbol "${simplefluid_symbol}")
+    if(simplefluid_unversioned_symbol MATCHES "^_ZN(K|V|KV)?11SimpleFluid4PLIC")
+        message(FATAL_ERROR "Mesh-owned PLIC symbol exported by Solvers: ${simplefluid_symbol}")
+    endif()
     if(simplefluid_symbol MATCHES "@@SIMPLEFLUID_TRILINOS_RTTI_1[.]0$"
        AND NOT simplefluid_unversioned_symbol STREQUAL "SIMPLEFLUID_TRILINOS_RTTI_1.0")
         list(APPEND simplefluid_shared_trilinos_rtti_symbols "${simplefluid_unversioned_symbol}")

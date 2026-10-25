@@ -16,7 +16,7 @@ namespace
 using namespace SimpleFluid;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 using GO = DefaultTpetraTypes::global_ordinal_type;
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 TEST(ExactGeneralVoFPhiClosureTest, ArithmeticTracksCancellationAndRejectsUncertainDenominator)
 {

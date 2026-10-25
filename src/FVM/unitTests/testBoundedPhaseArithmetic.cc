@@ -1,7 +1,7 @@
 /** @file testBoundedPhaseArithmetic.cc
  * @brief Independent high-precision checks of finite phase arithmetic enclosures.
  */
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include <boost/multiprecision/cpp_bin_float.hpp>
 #include <gtest/gtest.h>
 namespace
@@ -164,43 +164,43 @@ template<ArithmeticMode Mode> void static_arithmetic_parity()
         EXPECT_EQ(actual.absolute_error, expected.absolute_error);
         EXPECT_EQ(actual.arithmetic_mode, expected.arithmetic_mode);
     };
-    SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+    SimpleFluid::PLIC::reset_geometry_statistics();
     const auto expected = fp::subtract(fp::multiply(a, b), fp::divide(a, b));
-    const auto expected_operations = SimpleFluid::Meshes::bounded_geometry_statistics().ledger_operations;
-    SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+    const auto expected_operations = SimpleFluid::PLIC::geometry_statistics().ledger_operations;
+    SimpleFluid::PLIC::reset_geometry_statistics();
     const auto actual = Math::subtract(Math::multiply(a, b), Math::divide(a, b));
     compare(actual, expected);
-    EXPECT_EQ(SimpleFluid::Meshes::bounded_geometry_statistics().ledger_operations, expected_operations);
+    EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().ledger_operations, expected_operations);
     if constexpr (Mode == ArithmeticMode::Ordinary)
     {
         fp::SumFor<Mode> unpinned;
         EXPECT_THROW(unpinned.add({1, 0}), std::invalid_argument);
         const fp::Value singleton{.75L, 0};
-        SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+        SimpleFluid::PLIC::reset_geometry_statistics();
         const auto dynamic_negative = fp::negate(singleton);
-        const auto dynamic_negate_events = SimpleFluid::Meshes::bounded_geometry_statistics().ledger_operations;
-        SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+        const auto dynamic_negate_events = SimpleFluid::PLIC::geometry_statistics().ledger_operations;
+        SimpleFluid::PLIC::reset_geometry_statistics();
         compare(Math::negate(singleton), dynamic_negative);
-        EXPECT_EQ(SimpleFluid::Meshes::bounded_geometry_statistics().ledger_operations, dynamic_negate_events);
+        EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().ledger_operations, dynamic_negate_events);
         const fp::Value signed_zero{-0.L, -0.L};
         const auto dynamic_zero = fp::negate(signed_zero);
         const auto fixed_zero = Math::negate(signed_zero);
         compare(fixed_zero, dynamic_zero);
         EXPECT_EQ(std::signbit(fixed_zero.value), std::signbit(dynamic_zero.value));
         EXPECT_EQ(std::signbit(fixed_zero.absolute_error), std::signbit(dynamic_zero.absolute_error));
-        SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+        SimpleFluid::PLIC::reset_geometry_statistics();
         const auto dynamic_difference = fp::subtract(a, singleton);
-        const auto dynamic_subtract_events = SimpleFluid::Meshes::bounded_geometry_statistics().ledger_operations;
-        SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+        const auto dynamic_subtract_events = SimpleFluid::PLIC::geometry_statistics().ledger_operations;
+        SimpleFluid::PLIC::reset_geometry_statistics();
         compare(Math::subtract(a, singleton), dynamic_difference);
-        EXPECT_EQ(SimpleFluid::Meshes::bounded_geometry_statistics().ledger_operations, dynamic_subtract_events);
+        EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().ledger_operations, dynamic_subtract_events);
     }
-    SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+    SimpleFluid::PLIC::reset_geometry_statistics();
     const auto dynamic_publication = a.as_double();
-    const auto dynamic_query_events = SimpleFluid::Meshes::bounded_geometry_statistics();
-    SimpleFluid::Meshes::reset_bounded_geometry_statistics();
+    const auto dynamic_query_events = SimpleFluid::PLIC::geometry_statistics();
+    SimpleFluid::PLIC::reset_geometry_statistics();
     EXPECT_EQ(Math::as_double(a), dynamic_publication);
-    const auto static_query_events = SimpleFluid::Meshes::bounded_geometry_statistics();
+    const auto static_query_events = SimpleFluid::PLIC::geometry_statistics();
     EXPECT_EQ(static_query_events.floating_operations, dynamic_query_events.floating_operations);
     EXPECT_EQ(static_query_events.interval_operations, dynamic_query_events.interval_operations);
     const auto foreign = Mode == ArithmeticMode::Ordinary ? ArithmeticMode::BoundedCertification :

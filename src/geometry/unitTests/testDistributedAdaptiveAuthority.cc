@@ -14,10 +14,11 @@ namespace
 using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
-ExactPlanarFacePtr rectangle(double x0, double y0, double x1, double y1)
+SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary> rectangle(
+    double x0, double y0, double x1, double y1)
 {
-    const std::vector<GeometryPoint> points{{x0, y0, 0}, {x1, y0, 0}, {x1, y1, 0}, {x0, y1, 0}};
-    return ExactPlanarFace::make(points);
+    const std::vector<SimpleFluid::PLIC::GeometryPoint> points{{x0, y0, 0}, {x1, y0, 0}, {x1, y1, 0}, {x0, y1, 0}};
+    return SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(points);
 }
 std::vector<::SimpleFluid::Meshes::AMR::AdaptiveLeaf> crossed(int permutation, bool missing = false)
 {
@@ -77,7 +78,8 @@ TEST(DistributedAdaptiveAuthority, CrossedOverlayIsOwnershipIndependent)
                 EXPECT_EQ(key.bytes(), tile.domain);
                 EXPECT_EQ(key.bytes(), vertices[v]);
                 key.done();
-                EXPECT_EQ(node->second->coordinate, exact_point_display(vertices[v]));
+                EXPECT_EQ(node->second->coordinate,
+                    SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(vertices[v]));
             }
             bool expected = false;
             for (int x = 0; x < 2; ++x)
@@ -160,7 +162,7 @@ TEST(DistributedAdaptiveAuthority, LongLineRepliesContainOnlyClosedSegment)
         auto vertices = rectangle(0, i, 1, i + 1)->vertex_identities();
         points.push_back(vertices[0]);
     }
-    ExactEdgePointIndex index(points);
+    SimpleFluid::PLIC::EdgePointIndex<SimpleFluid::ArithmeticMode::Ordinary> index(points);
     for (int i = 0; i < 256; ++i)
     {
         auto selected = index.closed_segment(points[i], points[i + 1]);
@@ -199,7 +201,8 @@ TEST(DistributedAdaptiveAuthority, IncidenceWireRetainsInsertedCollinearNode)
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveBytes> inserted{midpoint};
     auto enriched = face->with_edge_vertices(inserted);
     ASSERT_EQ(enriched->vertex_identities().size(), 5);
-    auto restored = ExactPlanarFace::decode(enriched->encode_incidence());
+    auto restored =
+        SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::decode(enriched->encode_incidence());
     EXPECT_EQ(restored->vertex_identities(), enriched->vertex_identities());
     EXPECT_EQ(restored->encode(), face->encode());
 }

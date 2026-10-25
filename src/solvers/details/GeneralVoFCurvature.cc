@@ -2,7 +2,7 @@
  * @brief Physical polygon centroids and gated local quadratic surface curvature.
  */
 #include "solvers/details/GeneralVoFCurvature.hh"
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -14,7 +14,7 @@ namespace SimpleFluid::detail
 namespace
 {
 using Point = std::array<long double, 3>;
-Point point(const Meshes::GeometryPoint& p)
+Point point(const SimpleFluid::PLIC::GeometryPoint& p)
 {
     return {p[0], p[1], p[2]};
 }
@@ -44,7 +44,7 @@ Point unit(Point p)
         v /= length;
     return p;
 }
-std::array<Point, 3> frame(const Meshes::GeometryPoint& normal)
+std::array<Point, 3> frame(const SimpleFluid::PLIC::GeometryPoint& normal)
 {
     auto n = unit(point(normal));
     unsigned axis = 0;
@@ -62,12 +62,14 @@ void require(bool value, const char* message)
         throw std::runtime_error(message);
 }
 } // namespace
-std::optional<GeneralVoFCurvaturePatch> Exact::GeneralVoFCurvature::patch(
-    std::uint64_t cell, const Meshes::ConvexCellGeometry& geometry, const VoF::PolyhedralInterface& plane)
+std::optional<GeneralVoFCurvaturePatch> Exact::GeneralVoFCurvature::patch(std::uint64_t cell,
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>& geometry,
+    const VoF::PolyhedralInterface& plane)
 {
     if (plane.pure_gas || plane.pure_carrier)
         return {};
-    const auto section = geometry.clip(plane.gas).section;
+    const auto source = PLIC::ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(geometry);
+    const auto section = source->clip(plane.gas).section;
     require(section.vertices.size() >= 3, "A mixed general VoF cell has no physical PLIC polygon.");
     auto vertices = section.vertices;
     const auto basis = frame(plane.gas.normal);
@@ -102,19 +104,19 @@ std::optional<GeneralVoFCurvaturePatch> Exact::GeneralVoFCurvature::patch(
         result.centroid[a] = static_cast<double>(origin[a] + centroid[a] / total);
         result.normal[a] = static_cast<double>(basis[2][a]);
     }
-    const auto spans = geometry.axis_spans();
+    const auto spans = source->axis_spans();
     result.physical_spans = {spans[0].as_double(), spans[1].as_double(), spans[2].as_double()};
     result.cell_scale = std::min({spans[0].as_double(), spans[1].as_double(), spans[2].as_double()});
     long double surface = 0;
-    for (std::size_t face = 0; face < geometry.num_faces(); ++face)
-        surface += geometry.face_geometry(face)->area().value;
-    result.cell_scale = std::min(result.cell_scale, static_cast<double>(2 * geometry.moments().volume.value / surface));
+    for (std::size_t face = 0; face < source->num_faces(); ++face)
+        surface += source->face_geometry(face)->area().value;
+    result.cell_scale = std::min(result.cell_scale, static_cast<double>(2 * source->moments().volume.value / surface));
     require(std::isfinite(result.cell_scale) && result.cell_scale > 0,
         "General VoF curvature has no positive physical cell scale.");
     return result;
 }
 std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
-    std::uint64_t cell, const Meshes::BoundedConvexGeometry& geometry, const VoF::PolyhedralInterface& plane)
+    std::uint64_t cell, const PLIC::DynamicConvexGeometry& geometry, const VoF::PolyhedralInterface& plane)
 {
     if (plane.pure_gas || plane.pure_carrier)
         return {};

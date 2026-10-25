@@ -8,7 +8,7 @@
  */
 #pragma once
 
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/ConservativeInterface.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/ExtrudedRegionProviders.hh"
@@ -28,8 +28,6 @@ namespace SimpleFluid::Meshes
 struct SparseNativeIndex;
 struct SparseNativeMeshInput;
 class FrozenNativeMeshInput;
-
-class ConvexCellGeometry;
 
 /**
  * @brief Rectangular subset of a structured exterior patch, parametrized by two logical axes.
@@ -312,8 +310,9 @@ public:
         SparseNativeMeshInput input, Teuchos::RCP<const Teuchos::Comm<int>> communicator);
     static std::shared_ptr<MultiRegionMesh> from_frozen_native(FrozenNativeMeshInput,Teuchos::RCP<const Teuchos::Comm<int>>);
     bool frozen_native() const noexcept;
-    std::shared_ptr<const ConvexCellGeometry> certified_sparse_cell_geometry(ID cell) const;
-    ExactPlanarFacePtr certified_sparse_face_geometry(ID face) const;
+    std::shared_ptr<const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>> certified_sparse_cell_geometry(
+        ID cell) const;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> certified_sparse_face_geometry(ID face) const;
     int sparse_cell_owner(ID cell) const;
     /**
      * @brief Encode local geometry for selected visible composite cells.
@@ -378,9 +377,9 @@ public:
     std::uint64_t geometry_epoch() const { validate_query(); return d_geometry_state.epoch; }
     const ArrReal& axial_edges() const noexcept { return d_axial_edges; }
     bool supports_axial_motion() const noexcept;
-    bool has_exact_construction() const noexcept;
+    bool has_construction() const noexcept;
     /** Constructed joins are qualified only through exact nested descriptors. */
-    bool has_qualified_exact_interfaces() const noexcept;
+    bool has_qualified_geometry_interfaces() const noexcept;
     Vec3 cell_center_vector(ID face,ID cell) const;
     Vec3 face_center_vector(ID face,ID cell) const;
     real_t cell_to_face_distance(ID face,ID cell) const { return face_center_vector(face,cell).norm(); }
@@ -497,8 +496,8 @@ private:
     ID encode_native_face(RegionFace f) const;
     RegionFace decode_native_face(ID key) const;
     InterfaceFacePolygon interface_polygon(RegionFace f) const;
-    ExactPlanarFacePtr native_face_certificate(RegionFace face) const;
-    void validate_exact_nested_faces(RegionFace coarse, std::span<const RegionFace> fine) const;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> native_face_certificate(RegionFace face) const;
+    void validate_nested_faces(RegionFace coarse, std::span<const RegionFace> fine) const;
     size_t interface_uses(RegionFace f) const;
     bool stitched(RegionFace f) const;
     void validate_pair(RegionFace a, RegionFace b, std::optional<Vec3> translation = {}) const;

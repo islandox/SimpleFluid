@@ -2,10 +2,11 @@
  * @brief Direct passive-tracer bounds and local momentum-ledger checks before projection.
  */
 #include "FVM/AdaptiveVoF.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "solvers/GeneralVoFSolver.hh"
 #include "solvers/details/ConservativeVoFTransport.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -50,11 +51,25 @@ TEST(ConservativeVoFTransportTest, OrdinaryWideMomentumPreservesPhysicalStorageW
     const auto carried = transport.solve(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12,
         64 * 1024 * 1024, uncertainty, {}, uncertainty, {});
     EXPECT_LE(carried.physical_relative_residual, 1e-12);
+    double local_norm[2]{}, global_norm[2]{};
     for (std::size_t c = 0; c < n; ++c)
     {
-        EXPECT_EQ(carried.cell_trace[c], .5);
-        EXPECT_EQ(carried.amount[c], 1);
+        // This diagonal analytic case admits a few rounding steps in distributed
+        // Krylov normalization. Google Test's four-ULP comparison checks that
+        // roundoff without imposing bitwise analytic values on an iterative solve.
+        EXPECT_DOUBLE_EQ(carried.cell_trace[c], .5);
+        EXPECT_DOUBLE_EQ(carried.amount[c], 1);
+        const auto stored = capacity[c] * carried.cell_trace[c];
+        EXPECT_EQ(carried.amount[c], static_cast<double>(stored));
+        const auto residual = stored - old[c] - source[c];
+        local_norm[0] += static_cast<double>(residual * residual);
+        local_norm[1] += static_cast<double>((old[c] + source[c]) * (old[c] + source[c]));
     }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_norm, global_norm);
+    ASSERT_GT(global_norm[1], 0);
+    const double physical_residual = std::sqrt(global_norm[0] / global_norm[1]);
+    EXPECT_LE(physical_residual, 1e-12);
+    EXPECT_DOUBLE_EQ(carried.physical_relative_residual, physical_residual);
     EXPECT_THROW((void) transport.solve(old, source, capacity, outgoing, routes, faces, true, 3000, 1e-12,
                      64 * 1024 * 1024, {}, {}, {}, {}, ArithmeticMode::BoundedCertification),
         std::runtime_error);
@@ -479,6 +494,15 @@ TEST(ConservativeVoFTransportTest, OneWaySubnormalFluxPreservesUnequalDonorTrace
 
 TEST(ConservativeVoFTransportTest, NonincidentDonorRoutesPreserveRawFaceResidualAndRecoverAfterExhaustion)
 {
+    struct StatisticsScope
+    {
+        StatisticsScope()
+        {
+            GeneralVoFSolver::enable_geometry_statistics(true);
+            GeneralVoFSolver::reset_geometry_statistics();
+        }
+        ~StatisticsScope() { GeneralVoFSolver::enable_geometry_statistics(false); }
+    } statistics_scope;
     using GO = DefaultTpetraTypes::global_ordinal_type;
     using Transfer = detail::ConservativeVoFTransport::Transfer;
     using Stream = detail::ConservativeVoFTransport::FaceContribution;
@@ -559,6 +583,12 @@ TEST(ConservativeVoFTransportTest, NonincidentDonorRoutesPreserveRawFaceResidual
                 old, source, capacity, outgoing, incoming, streams, true, 3000, 1e-11));
         }
     }
+    const auto exact = GeneralVoFSolver::geometry_statistics().exact;
+    EXPECT_EQ(exact.measure_values, 0u);
+    EXPECT_EQ(exact.measure_arithmetic, 0u);
+    EXPECT_EQ(exact.volume_evaluations, 0u);
+    EXPECT_EQ(exact.clip_constructions, 0u);
+    EXPECT_EQ(exact.intersection_constructions, 0u);
 }
 } // namespace
 

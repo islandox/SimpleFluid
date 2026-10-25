@@ -159,7 +159,7 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
     const auto constructed=[](const auto& mesh)
     {
         const auto* native=std::get_if<typename mesh_type::MultiRegionPtr>(&mesh.variant());
-        return native && *native && (*native)->has_exact_construction();
+        return native && *native && (*native)->has_construction();
     };
     require_all(*comm,!constructed(*d_source) && !constructed(*d_target),
         "MeshToMeshTransfer does not yet support authoritative constructed geometry.");

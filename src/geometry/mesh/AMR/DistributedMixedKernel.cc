@@ -2,7 +2,7 @@
  * @brief Persistent support rewriting with exact physical remainder preservation.
  */
 #include "geometry/mesh/AMR/DistributedMixedKernel.hh"
-#include "geometry/ExactPolyhedralComplex.hh"
+#include "geometry/PLIC/PolyhedralComplex.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/ExplicitRegionProvider.hh"
 #include <algorithm>
@@ -15,7 +15,7 @@ namespace
 using adaptive_detail::Budget;
 using adaptive_detail::Reader;
 using adaptive_detail::Writer;
-AdaptiveBytes canonical_face(const ExactPlanarFacePtr& face)
+AdaptiveBytes canonical_face(const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& face)
 {
     if (!face)
         throw std::invalid_argument("Join alias lacks original-root geometry.");
@@ -90,7 +90,7 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
         AdaptiveJoinRule rule;
         rule.original_support = r.bytes();
         rule.canonical_support = r.bytes();
-        rule.original_root_selection = ExactPlanarFace::decode(r.bytes());
+        rule.original_root_selection = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
         capsule.rules.push_back(std::move(rule));
     }
     count = r.word();
@@ -100,7 +100,7 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
     {
         AdaptiveBoundaryRule rule;
         rule.original_support = r.bytes();
-        rule.original_root_selection = ExactPlanarFace::decode(r.bytes());
+        rule.original_root_selection = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
         auto name = r.bytes();
         rule.boundary.assign(name.begin(), name.end());
         capsule.boundaries.push_back(std::move(rule));
@@ -111,10 +111,11 @@ AdaptiveJoinCapsule decode_join_capsule(std::span<const char> bytes, std::size_t
 }
 namespace
 {
-ExactPlanarFacePtr native_certificate(const MultiRegionMesh::Region& region, std::uint64_t face)
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> native_certificate(
+    const MultiRegionMesh::Region& region, std::uint64_t face)
 {
     return std::visit(
-        [&](const auto& r) -> ExactPlanarFacePtr
+        [&](const auto& r) -> PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
         {
             if constexpr (requires { r.geometry().certified_face_geometry(face); })
                 if (auto certificate = r.geometry().certified_face_geometry(face))
@@ -122,14 +123,15 @@ ExactPlanarFacePtr native_certificate(const MultiRegionMesh::Region& region, std
             if (r.layout().family == RegionLayout::Family::Cylindrical)
                 throw std::invalid_argument(
                     "Analytic stationary geometry requires whole-model FrozenNative migration.");
-            std::vector<GeometryPoint> vertices;
+            std::vector<PLIC::GeometryPoint> vertices;
             for (auto n : r.topology().face_nodes(face))
             {
                 const auto p = r.geometry().node_coordinates(n);
                 vertices.push_back({p.x, p.y, p.z});
             }
             const auto normal = r.geometry().face_area_vector(face);
-            return ExactPlanarFace::make(vertices)->oriented_like({normal.x, normal.y, normal.z});
+            return PLIC::PlanarFace<ArithmeticMode::Ordinary>::make(vertices)->oriented_like(
+                {normal.x, normal.y, normal.z});
         },
         region);
 }
@@ -194,11 +196,11 @@ MultiRegionMesh::Region selected_native(const MultiRegionMesh::Region& region, s
             if constexpr (requires { r.geometry().construction(); })
             {
                 using Construction = std::remove_cvref_t<decltype(*r.geometry().construction())>;
-                if constexpr (std::is_same_v<Construction, ExactPolyhedralComplex>)
+                if constexpr (std::is_same_v<Construction, PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>>)
                     if (r.geometry().construction())
                     {
-                        auto construction =
-                            ExactPolyhedralComplex::decode(r.geometry().construction()->encode(selected));
+                        auto construction = PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>::decode(
+                            r.geometry().construction()->encode(selected));
                         provider = std::make_shared<const Provider>(r.layout(), std::move(cc), std::move(ff),
                             std::move(nn), std::move(boundaries), std::move(construction));
                     }
@@ -206,12 +208,12 @@ MultiRegionMesh::Region selected_native(const MultiRegionMesh::Region& region, s
             if (!provider)
             {
                 bool exact = false;
-                if constexpr (requires { r.geometry().has_exact_construction(); })
-                    exact = r.geometry().has_exact_construction();
+                if constexpr (requires { r.geometry().has_construction(); })
+                    exact = r.geometry().has_construction();
                 if (exact)
                 {
-                    std::map<std::uint64_t, ConvexGeometryPtr> cell_proofs;
-                    std::map<std::uint64_t, ExactPlanarFacePtr> face_proofs;
+                    std::map<std::uint64_t, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_proofs;
+                    std::map<std::uint64_t, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_proofs;
                     std::map<std::uint64_t, AdaptiveBytes> node_proofs;
                     for (auto c : full)
                     {
@@ -228,8 +230,8 @@ MultiRegionMesh::Region selected_native(const MultiRegionMesh::Region& region, s
                             std::optional<AdaptiveBytes> match;
                             for (const auto& identity : identities)
                             {
-                                const auto display = exact_point_display(identity);
-                                if (display == GeometryPoint{p.x, p.y, p.z})
+                                const auto display = PLIC::point_display<ArithmeticMode::Ordinary>(identity);
+                                if (display == PLIC::GeometryPoint{p.x, p.y, p.z})
                                 {
                                     if (match && *match != identity)
                                         throw std::invalid_argument("Distinct exact stationary vertices have "
@@ -319,12 +321,12 @@ public:
             region);
         return faces;
     }
-    ConvexGeometryPtr geometry(const AdaptiveLeaf& leaf) const override
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
     {
-        std::vector<ExactPlanarFacePtr> faces;
+        std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
         for (const auto& side : surfaces(leaf))
             faces.push_back(side.geometry);
-        auto shape = ExactPlanarFace::cell_shell(faces);
+        auto shape = PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces);
         if (leaf.geometry && !shape->equivalent(*leaf.geometry))
             throw std::invalid_argument("Stationary detached native recipe changed its certified root cell.");
         return shape;
@@ -417,12 +419,13 @@ class MixedKernel final : public AdaptiveProviderKernel
         Budget allocation{budget_};
         for (const auto& source : provider.kernel->surfaces(raw))
         {
-            std::vector<ExactPlanarFacePtr> covered;
-            std::vector<std::pair<AdaptiveBytes, ExactPlanarFacePtr>> joined;
+            std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> covered;
+            std::vector<std::pair<AdaptiveBytes, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> joined;
             for (const auto& alias : capsule.rules)
                 if (alias.original_support == source.key)
                 {
-                    if (exact_planar_support(*source.geometry) != exact_planar_support(*alias.original_root_selection))
+                    if (PLIC::planar_support<ArithmeticMode::Ordinary>(*source.geometry) !=
+                        PLIC::planar_support<ArithmeticMode::Ordinary>(*alias.original_root_selection))
                         throw std::invalid_argument("Original-root alias changed its exact support plane.");
                     auto piece = source.geometry->intersection(*alias.original_root_selection);
                     if (!piece)
@@ -446,13 +449,14 @@ class MixedKernel final : public AdaptiveProviderKernel
                     auto use = source;
                     use.geometry = std::move(piece);
                     use.key = alias.canonical_support;
-                    use.orientation = exact_planar_orientation(*use.geometry);
+                    use.orientation = PLIC::planar_orientation<ArithmeticMode::Ordinary>(*use.geometry);
                     use.exterior = false;
                     use.boundary.clear();
                     result.push_back(std::move(use));
                 }
-            auto remaining = covered.empty() ? std::vector<ExactPlanarFacePtr>{source.geometry}
-                                             : subtract_planar_faces(*source.geometry, covered);
+            auto remaining = covered.empty()
+                                 ? std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>{source.geometry}
+                                 : PLIC::subtract_planar_faces<ArithmeticMode::Ordinary>(*source.geometry, covered);
             for (auto remainder : remaining)
             {
                 if (!source.exterior)
@@ -464,7 +468,7 @@ class MixedKernel final : public AdaptiveProviderKernel
                     result.push_back(std::move(use));
                     continue;
                 }
-                std::vector<ExactPlanarFacePtr> physical;
+                std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> physical;
                 for (const auto& alias : capsule.boundaries)
                     if (alias.original_support == source.key)
                         if (auto piece = remainder->intersection(*alias.original_root_selection))
@@ -537,18 +541,18 @@ public:
         const auto& provider = route(leaf);
         const auto raw = original(leaf);
         provider.kernel->validate(raw);
-        std::vector<ExactPlanarFacePtr> faces;
+        std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
         for (const auto& use : mapped(leaf))
             faces.push_back(use.geometry);
-        if (!ExactPlanarFace::cell_shell(faces)->equivalent(*provider.kernel->geometry(raw)))
+        if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces)->equivalent(*provider.kernel->geometry(raw)))
             throw std::invalid_argument("Mixed join aliases do not preserve the actual cell shell.");
     }
-    ConvexGeometryPtr geometry(const AdaptiveLeaf& leaf) const override
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
     {
-        std::vector<ExactPlanarFacePtr> faces;
+        std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
         for (const auto& use : mapped(leaf))
             faces.push_back(use.geometry);
-        return ExactPlanarFace::cell_shell(faces);
+        return PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces);
     }
     AdaptiveCellMetrics metrics(const AdaptiveLeaf& leaf) const override
     {

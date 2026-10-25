@@ -2,7 +2,7 @@
  * @brief Sparse owned-row verification of raw geometric-donor face coefficients.
  */
 #include "solvers/details/GeneralVoFTransferBinding.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
@@ -62,8 +62,10 @@ void require(const Teuchos::Comm<int>& comm, bool valid, const char* message, st
 std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<const MeshHandle<>>& mesh,
     const std::vector<double>& outgoing, const std::vector<std::map<GO, double>>& incoming,
     const std::vector<ConservativeVoFTransport::FaceContribution>& contributions, std::size_t byte_budget,
-    const std::vector<Meshes::ExactGeometryMeasure>* exact_outgoing,
-    const std::vector<std::map<GO, Meshes::ExactGeometryMeasure>>* exact_incoming, bool exact_only)
+    const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>* exact_outgoing,
+    const std::vector<std::map<GO, SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>>*
+        exact_incoming,
+    bool exact_only)
 {
     const auto map = mesh->owned_cell_map();
     const auto comm = map->getComm();
@@ -182,7 +184,7 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
     struct Coefficient
     {
         CompensatedSum<> value, magnitude;
-        Meshes::ExactGeometryMeasure exact;
+        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> exact;
         std::size_t terms = 0;
     };
     std::vector<std::map<GO, Coefficient>> rows;
@@ -190,7 +192,8 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
     try
     {
         storage.capacity(Domain::Scratch, mesh->num_owned_cells(), sizeof(std::map<GO, Coefficient>));
-        storage.capacity(Domain::Result, mesh->num_owned_cells(), sizeof(GeneralVoFOriginalRow));
+        if (exact_mode)
+            storage.capacity(Domain::Result, mesh->num_owned_cells(), sizeof(GeneralVoFOriginalRow));
         for (const auto* group : {static_cast<const std::vector<OwnerPacket>*>(&packets), &received.packets})
         {
             storage.capacity(Domain::Scratch, group->capacity(), sizeof(OwnerPacket));
@@ -200,7 +203,8 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
         storage.capacity(Domain::Scratch, received.packets.size(),
             4 * sizeof(GO) + 3 * sizeof(int) + sizeof(std::pair<const GO, int>) + sizeof(GO) + 8 * sizeof(void*));
         rows.resize(mesh->num_owned_cells());
-        original.resize(mesh->num_owned_cells());
+        if (exact_mode)
+            original.resize(mesh->num_owned_cells());
     }
     catch (...)
     {
@@ -239,13 +243,25 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
             {
                 storage.capacity(Domain::Scratch, 1, sizeof(std::pair<const GO, Coefficient>) + 4 * sizeof(void*));
                 found = row.emplace(donor, Coefficient{}).first;
-                storage.measure(Domain::Scratch, found->second.exact);
+                if (exact_mode)
+                    storage.measure(Domain::Scratch, found->second.exact);
             }
             auto& coefficient = found->second;
             coefficient.value += amount;
             coefficient.magnitude += std::abs(amount);
             ++coefficient.terms;
-            Meshes::ExactGeometryMeasure measure;
+            face_ids.push_back(face_id);
+            face_senders.push_back(packet.peer);
+            if (!exact_mode)
+            {
+                if (has_exact || packet.bytes.size() != 40)
+                    throw std::runtime_error(
+                        "Finite general VoF coefficient carries an exact payload or trailing bytes.");
+                // Finite verification uses the compensated coefficient and its
+                // counted roundoff gate below. It retains no rational witness.
+                continue;
+            }
+            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> measure;
             if (has_exact == 3)
             {
                 if (packet.peer != comm->getRank() || packet.bytes.size() != 48 ||
@@ -273,14 +289,14 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
             {
                 if (packet.bytes.size() < 48 || word(packet.bytes, 40) != packet.bytes.size() - 48)
                     throw std::runtime_error("Invalid general VoF exact coefficient framing.");
-                measure = Meshes::ExactGeometryMeasure::decode(
+                measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(
                     std::span<const char>(packet.bytes.data() + 48, packet.bytes.size() - 48), storage.remaining() / 8);
             }
             else
             {
                 if (packet.bytes.size() != 40)
                     throw std::runtime_error("Trailing general VoF coefficient bytes.");
-                measure = Meshes::ExactGeometryMeasure::from_value(amount);
+                measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(amount);
             }
             // Pin the pending decoded/signed payload before any face-vector
             // capacity growth can consume its reserved retained-result share.
@@ -301,8 +317,6 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
             storage.release(Domain::Scratch, coefficient.exact);
             coefficient.exact = std::move(aggregate);
             terms.push_back({face_id, donor, measure});
-            face_ids.push_back(face_id);
-            face_senders.push_back(packet.peer);
         }
     }
     catch (...)
@@ -346,7 +360,8 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
                         storage.capacity(
                             Domain::Scratch, 1, sizeof(std::pair<const GO, Coefficient>) + 4 * sizeof(void*));
                         auto inserted = rows[c].emplace(donor, Coefficient{}).first;
-                        storage.measure(Domain::Scratch, inserted->second.exact);
+                        if (exact_mode)
+                            storage.measure(Domain::Scratch, inserted->second.exact);
                     }
                     catch (...)
                     {
@@ -361,24 +376,31 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
                     const auto found = incoming[c].find(donor);
                     expected = donor == self ? outgoing[c] : found == incoming[c].end() ? 0 : -found->second;
                 }
-                try
+                if (exact_mode)
                 {
-                    storage.capacity(Domain::Result, 1,
-                        sizeof(std::pair<const GO, Meshes::ExactGeometryMeasure>) + 4 * sizeof(void*));
-                    storage.measure(Domain::Result, coefficient.exact);
-                    original[c].coefficients.emplace(donor, coefficient.exact);
-                }
-                catch (...)
-                {
-                    valid = false;
+                    try
+                    {
+                        storage.capacity(Domain::Result, 1,
+                            sizeof(std::pair<const GO,
+                                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>) +
+                                4 * sizeof(void*));
+                        storage.measure(Domain::Result, coefficient.exact);
+                        original[c].coefficients.emplace(donor, coefficient.exact);
+                    }
+                    catch (...)
+                    {
+                        valid = false;
+                    }
                 }
                 if (exact_outgoing)
                 {
                     const auto found_exact = (*exact_incoming)[c].find(donor);
-                    const auto expected_exact = donor == self ? (*exact_outgoing)[c]
-                                                : found_exact == (*exact_incoming)[c].end()
-                                                    ? Meshes::ExactGeometryMeasure{}
-                                                    : Meshes::ExactGeometryMeasure{} - found_exact->second;
+                    const auto expected_exact =
+                        donor == self ? (*exact_outgoing)[c]
+                        : found_exact == (*exact_incoming)[c].end()
+                            ? SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>{}
+                            : SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>{} -
+                                  found_exact->second;
                     valid = valid && coefficient.exact.compare(expected_exact) == 0;
                     continue;
                 }
@@ -399,8 +421,8 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
                     }
                     continue;
                 }
-                // Each certified input group has at most two conversions (exact
-                // to metric, then binary64). Neumaier accumulation uses at most
+                // Each input group has at most two upstream metric/publication
+                // conversions. Neumaier accumulation uses at most
                 // five arithmetic operations per term and one final addition;
                 // the remaining conversion/subtraction/envelope operations fit
                 // within k=8*N+16. Use epsilon as a conservative upper bound on
@@ -447,15 +469,16 @@ std::vector<GeneralVoFOriginalRow> verify_general_vof_transfer_binding(const SP<
     return original;
 }
 std::vector<GeneralVoFOriginalRow> verify_general_vof_exact_transfer_binding(const SP<const MeshHandle<>>& mesh,
-    const std::vector<Meshes::ExactGeometryMeasure>& outgoing,
-    const std::vector<std::map<GO, Meshes::ExactGeometryMeasure>>& incoming,
+    const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& outgoing,
+    const std::vector<std::map<GO, SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>>& incoming,
     const std::vector<ConservativeVoFTransport::ExactFaceContribution>& faces, std::size_t budget)
 {
     // The absent scalar view is encoded explicitly (flag2), never used as physics.
     std::vector<ConservativeVoFTransport::FaceContribution> records;
     for (const auto& face : faces)
-        records.push_back(
-            {face.face, face.donor, 0, std::make_shared<const Meshes::ExactGeometryMeasure>(face.amount)});
+        records.push_back({face.face, face.donor, 0,
+            std::make_shared<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>(
+                face.amount)});
     return verify_general_vof_transfer_binding(mesh, {}, {}, records, budget, &outgoing, &incoming, true);
 }
 } // namespace SimpleFluid::detail

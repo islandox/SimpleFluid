@@ -24,8 +24,8 @@ namespace
 using ID = std::uint64_t;
 struct Node
 {
-    ConvexGeometryPtr geometry;
-    std::vector<PolyhedralSurfaceUse> surfaces;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
+    std::vector<PLIC::PolyhedralSurfaceUse> surfaces;
     std::vector<AdaptiveCellKey> children;
     ID material = 0;
 };
@@ -117,7 +117,7 @@ struct PolyhedralAMR::Data
     std::map<AdaptiveCellKey, Node> nodes;
     std::set<AdaptiveCellKey> leaves;
     std::vector<AdaptiveCellKey> keys;
-    std::shared_ptr<const ExactPolyhedralComplex> complex;
+    std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> complex;
     SP<const MultiRegionMesh> geometry;
     std::shared_ptr<const CompositePartition<>> partition;
     std::shared_ptr<const void> root_identity, instance, topology, ownership;
@@ -131,8 +131,8 @@ void build(PolyhedralAMR::Data& data)
     data.keys.assign(data.leaves.begin(), data.leaves.end());
     if (data.keys.empty() || data.keys.size() > data.grid->maximum_cells)
         throw std::invalid_argument("Polyhedral bootstrap cell budget exhausted.");
-    std::vector<PolyhedralComplexCell> cells;
-    std::map<PolyhedralSurfaceKey, std::array<ID, 3>> groups;
+    std::vector<PLIC::PolyhedralComplexCell<ArithmeticMode::Ordinary>> cells;
+    std::map<PLIC::PolyhedralSurfaceKey, std::array<ID, 3>> groups;
     for (ID gid = 0; gid < data.keys.size(); ++gid)
     {
         const auto& key = data.keys[gid];
@@ -150,10 +150,10 @@ void build(PolyhedralAMR::Data& data)
         upper_faces = add(upper_faces, add(counts[2], multiply(counts[0], counts[1])));
     if (upper_faces > data.grid->maximum_face_tiles)
         throw std::invalid_argument("Polyhedral bootstrap face-overlay budget exhausted before expansion.");
-    data.complex = ExactPolyhedralComplex::make(std::move(cells));
+    data.complex = PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>::make(std::move(cells));
     if (data.complex->global_faces() > data.grid->maximum_face_tiles)
         throw std::invalid_argument("Polyhedral bootstrap actual face budget exhausted.");
-    const auto provider = ExplicitRegionProvider::from_exact_complex(data.complex, data.boundaries);
+    const auto provider = ExplicitRegionProvider::from_complex(data.complex, data.boundaries);
     data.geometry = std::make_shared<MultiRegionMesh>(
         std::vector<MultiRegionMesh::Region>{DistributedExplicitRegion("polyhedral", provider, provider)},
         std::vector<MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()), InterfaceTolerance{},
@@ -209,14 +209,14 @@ PolyhedralAMR::PolyhedralAMR(PolyhedralAMRGrid grid)
                 const ID material = data->grid->materials.empty() ? 0 : data->grid->materials[c];
                 const AdaptiveCellKey key{region, ConvexCellAncestry{c, {}}};
                 Node node;
-                node.geometry = ConvexCellGeometry::from_native_cell_atomic(mesh, c);
+                node.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_native_cell_atomic(mesh, c);
                 node.material = material;
                 if (!node.geometry->quality_above(data->grid->minimum_scaled_volume))
                     throw std::invalid_argument("Polyhedral root fails configured exact quality admission.");
                 for (const auto face : mesh.cell_faces(c))
                 {
-                    PolyhedralSurfaceUse use;
-                    use.key = {PolyhedralSurfaceKey::Kind::Root, region, ConvexCellAncestry{face, {}}, 0};
+                    PLIC::PolyhedralSurfaceUse use;
+                    use.key = {PLIC::PolyhedralSurfaceKey::Kind::Root, region, ConvexCellAncestry{face, {}}, 0};
                     use.orientation = mesh.owner_cell(face) == c ? 1 : -1;
                     use.exterior = mesh.is_exterior_face(face);
                     if (use.exterior && mesh.boundary_id(face) != UnstructuredMesh::invalid_boundary_id)
@@ -287,7 +287,7 @@ const std::shared_ptr<const CompositePartition<>>& PolyhedralAMR::native_partiti
 {
     return data_->partition;
 }
-const std::shared_ptr<const ExactPolyhedralComplex>& PolyhedralAMR::complex() const noexcept
+const std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>>& PolyhedralAMR::complex() const noexcept
 {
     return data_->complex;
 }
@@ -304,7 +304,7 @@ std::size_t PolyhedralAMR::cell_fragment(ID cell) const
     (void) data_->keys.at(cell);
     return 0;
 }
-ConvexGeometryPtr PolyhedralAMR::cell_geometry(ID cell) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> PolyhedralAMR::cell_geometry(ID cell) const
 {
     return data_->nodes.at(data_->keys.at(cell)).geometry;
 }
@@ -424,13 +424,13 @@ std::shared_ptr<const PolyhedralAMR> PolyhedralAMR::adapt(
                     child.material = parent.material;
                     for (const auto& origin : piece.face_origins)
                     {
-                        if (origin.kind == ConvexFaceOrigin::Kind::ParentFace)
+                        if (origin.kind == PLIC::ConvexFaceOrigin::Kind::ParentFace)
                             child.surfaces.push_back(parent.surfaces.at(origin.index));
                         else
                         {
-                            PolyhedralSurfaceUse use;
-                            use.key = {PolyhedralSurfaceKey::Kind::Cut, 0, std::get<ConvexCellAncestry>(key.ancestry),
-                                origin.index};
+                            PLIC::PolyhedralSurfaceUse use;
+                            use.key = {PLIC::PolyhedralSurfaceKey::Kind::Cut, 0,
+                                std::get<ConvexCellAncestry>(key.ancestry), origin.index};
                             // Physical regions are independent of root IDs; include the
                             // cell region in cut surfaces to avoid creator collisions.
                             use.key.region = key.region;

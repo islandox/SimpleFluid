@@ -254,12 +254,12 @@ MeshStorageReport ExtrudedGeometry::storage_report() const
                         (d_z.capacity() + d_areas.capacity() + d_lengths.capacity()) * sizeof(real_t) +
                         (d_construction ? d_construction->storage_bytes() : 0)};
 }
-ExtrudedGeometry::ExtrudedGeometry(
-    std::shared_ptr<const ExtrudedTopology> topology, std::shared_ptr<const ExactExtrudedConstruction> construction)
+ExtrudedGeometry::ExtrudedGeometry(std::shared_ptr<const ExtrudedTopology> topology,
+    std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> construction)
     : d_topology(std::move(topology)), d_construction(std::move(construction))
 {
     if (!d_construction || !d_construction->matches_topology(d_topology))
-        throw std::invalid_argument("Exact construction belongs to a different extrusion topology.");
+        throw std::invalid_argument("Native construction belongs to a different extrusion topology.");
 }
 const ArrReal& ExtrudedGeometry::z_edges() const
 {
@@ -267,17 +267,20 @@ const ArrReal& ExtrudedGeometry::z_edges() const
         std::call_once(d_z_once, [&] { d_z = d_construction->display_z(); });
     return d_z;
 }
-ConvexGeometryPtr ExtrudedGeometry::certified_cell_geometry(size_t cell) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedGeometry::certified_cell_geometry(size_t cell) const
 {
-    return d_construction ? d_construction->certified_cell_geometry(cell) : ConvexGeometryPtr{};
+    return d_construction ? d_construction->certified_cell_geometry(cell)
+                          : PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>{};
 }
-ConvexGeometryPtr ExtrudedGeometry::atomic_cell_geometry(size_t cell) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedGeometry::atomic_cell_geometry(size_t cell) const
 {
-    return d_construction ? d_construction->atomic_cell_geometry(cell) : ConvexGeometryPtr{};
+    return d_construction ? d_construction->atomic_cell_geometry(cell)
+                          : PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>{};
 }
-ExactPlanarFacePtr ExtrudedGeometry::certified_face_geometry(size_t face) const
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> ExtrudedGeometry::certified_face_geometry(size_t face) const
 {
-    return d_construction ? d_construction->certified_face_geometry(face) : ExactPlanarFacePtr{};
+    return d_construction ? d_construction->certified_face_geometry(face)
+                          : PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>{};
 }
 EntityRange<EntityRange<uint64_t>> ExtrudedGeometry::xy_cell_nodes() const
 {
@@ -289,5 +292,115 @@ ExtrudedRegion extruded_region(
 {
     auto geometry = std::make_shared<const ExtrudedGeometry>(topology, std::move(nodes), std::move(z));
     return {std::move(name), std::move(topology), std::move(geometry)};
+}
+} // namespace SimpleFluid::Meshes
+
+namespace SimpleFluid::Meshes
+{
+namespace
+{
+// Topology packets contain integer incidence and labels, independent of the
+// numerical geometry backend used by an extrusion's construction provider.
+struct WireWriter
+{
+    std::vector<char> bytes;
+    void word(std::uint64_t value)
+    {
+        for (unsigned i = 0; i < 8; ++i)
+            bytes.push_back(static_cast<char>((value >> (8 * i)) & 255));
+    }
+};
+struct WireReader
+{
+    std::span<const char> bytes;
+    std::size_t cursor = 0;
+    std::uint64_t word()
+    {
+        if (bytes.size() - cursor < 8)
+            throw std::invalid_argument("Truncated shared topology packet.");
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < 8; ++i)
+            value |= std::uint64_t(static_cast<unsigned char>(bytes[cursor++])) << (8 * i);
+        return value;
+    }
+    std::size_t count()
+    {
+        const auto value = word();
+        if (value > 65536 || value > bytes.size() - cursor)
+            throw std::invalid_argument("Excessive shared topology packet count.");
+        return static_cast<std::size_t>(value);
+    }
+    void finish() const
+    {
+        if (cursor != bytes.size())
+            throw std::invalid_argument("Trailing shared topology packet bytes.");
+    }
+};
+} // namespace
+
+std::vector<char> ExtrudedTopology::encode_base() const
+{
+    WireWriter w;
+    w.word(0x5346544f50424131ULL);
+    w.word(1);
+    w.word(indexer().num_nodes_per_layer);
+    w.word(indexer().num_cells_per_layer);
+    for (std::size_t c = 0; c < indexer().num_cells_per_layer; ++c)
+    {
+        auto nodes = base_cell_nodes(c);
+        w.word(nodes.size());
+        for (auto n : nodes)
+            w.word(n);
+    }
+    std::vector<SemiStructMeshTopo::BoundaryEdge> boundaries;
+    for (const auto& e : d_topology.side_faces())
+        if (e.neighbor == SemiStructMeshTopo::invalid_ordinal)
+            boundaries.push_back({e.nodes[0], e.nodes[1], d_topology.boundary_batch_name(e.boundary_id)});
+    w.word(boundaries.size());
+    for (const auto& b : boundaries)
+    {
+        w.word(b.node0);
+        w.word(b.node1);
+        w.word(b.batch_name.size());
+        w.bytes.insert(w.bytes.end(), b.batch_name.begin(), b.batch_name.end());
+    }
+    return std::move(w.bytes);
+}
+
+std::shared_ptr<const ExtrudedTopology> ExtrudedTopology::decode_base(std::span<const char> packet, unsigned layers)
+{
+    WireReader r{packet};
+    if (r.word() != 0x5346544f50424131ULL || r.word() != 1)
+        throw std::invalid_argument("Unknown shared base topology packet.");
+    auto nodes = r.word(), cells = r.count();
+    if (nodes > std::numeric_limits<unsigned>::max())
+        throw std::invalid_argument("Shared base node extent overflow.");
+    Arr<Arr<unsigned>> loops;
+    for (std::size_t c = 0; c < cells; ++c)
+    {
+        Arr<unsigned> loop;
+        auto n = r.count();
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            auto id = r.word();
+            if (id >= nodes)
+                throw std::invalid_argument("Invalid shared base node ordinal.");
+            loop.push_back(id);
+        }
+        loops.push_back(std::move(loop));
+    }
+    Arr<SemiStructMeshTopo::BoundaryEdge> boundaries;
+    auto n = r.count();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        auto a = r.word(), b = r.word(), length = r.word();
+        if (a >= nodes || b >= nodes || length > r.bytes.size() - r.cursor)
+            throw std::invalid_argument("Invalid shared base boundary record.");
+        std::string name(r.bytes.begin() + r.cursor, r.bytes.begin() + r.cursor + length);
+        r.cursor += length;
+        boundaries.push_back({static_cast<unsigned>(a), static_cast<unsigned>(b), std::move(name)});
+    }
+    r.finish();
+    return std::make_shared<const ExtrudedTopology>(nodes, loops, layers, boundaries);
 }
 } // namespace SimpleFluid::Meshes

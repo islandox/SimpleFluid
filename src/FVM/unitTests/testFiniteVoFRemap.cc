@@ -19,17 +19,17 @@ using namespace SimpleFluid;
 using namespace SimpleFluid::VoF;
 using namespace SimpleFluid::Meshes;
 using namespace SimpleFluid::Meshes::AMR;
-using Measure = ExactGeometryMeasure;
-using Value = BoundedGeometryValue;
+using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
+using Value = SimpleFluid::PLIC::DynamicGeometryValue;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 struct Input
 {
     std::shared_ptr<const GeneralVoF> state;
-    GeometryHalfspace plane;
+    SimpleFluid::PLIC::GeometryHalfspace plane;
 };
-Input input(double scale = 1, GeometryPoint origin = {}, bool reverse = false, bool pure_carrier = false,
-    unsigned char domain = 1, double intercept = 6)
+Input input(double scale = 1, SimpleFluid::PLIC::GeometryPoint origin = {}, bool reverse = false,
+    bool pure_carrier = false, unsigned char domain = 1, double intercept = 6)
 {
     const auto comm = Tpetra::getDefaultComm();
     AMRGrid grid;
@@ -44,7 +44,7 @@ Input input(double scale = 1, GeometryPoint origin = {}, bool reverse = false, b
     auto detached = mesh.detach_owned(owned, {'f', 'p', 'r', static_cast<char>(domain)});
     auto hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
         std::move(detached.owned), std::move(detached.families), detached.kernel, comm);
-    GeometryHalfspace plane{{1, 2, 3}, origin, intercept * scale};
+    SimpleFluid::PLIC::GeometryHalfspace plane{{1, 2, 3}, origin, intercept * scale};
     if (reverse)
     {
         for (auto& n : plane.normal)
@@ -240,7 +240,7 @@ void channel_balance(std::span<const GeneralVoFFiniteOwnedChannels> before,
         EXPECT_LE(absolute(exact_global_sum(next) - exact_global_sum(old)).compare(exact_global_sum(errors)), 0);
     }
 }
-void plane_oracle(const GeneralVoF& state, GeometryHalfspace plane)
+void plane_oracle(const GeneralVoF& state, SimpleFluid::PLIC::GeometryHalfspace plane)
 {
     bool local_nonbinary = false;
     for (std::size_t i = 0; i < state.owned_order().size(); ++i)
@@ -348,7 +348,8 @@ TEST(FiniteVoFRemap, ObliqueIndependentPhasesSurviveRefineCoarsenAndUnitChanges)
     for (const bool shifted : {false, true})
     {
         const double scale = shifted ? 8 : 1;
-        const GeometryPoint origin = shifted ? GeometryPoint{64, -32, 16} : GeometryPoint{};
+        const SimpleFluid::PLIC::GeometryPoint origin =
+            shifted ? SimpleFluid::PLIC::GeometryPoint{64, -32, 16} : SimpleFluid::PLIC::GeometryPoint{};
         // Keep the ordinary success case away from exact grid tangencies.
         // The tangent fixture has its separate strict arithmetic rejection test.
         const auto initial = input(scale, origin, shifted, false, 1, 6.137);

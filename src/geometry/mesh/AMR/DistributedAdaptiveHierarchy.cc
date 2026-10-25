@@ -606,7 +606,7 @@ std::uint64_t DistributedAdaptiveHierarchy::global_cells() const noexcept
 {
     return data_->global_cells;
 }
-ConvexGeometryPtr DistributedAdaptiveHierarchy::geometry(const AdaptiveLeaf& leaf) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> DistributedAdaptiveHierarchy::geometry(const AdaptiveLeaf& leaf) const
 {
     if (!geometry_unchanged())
         throw std::invalid_argument("Distributed resident geometry moved.");
@@ -1886,20 +1886,21 @@ AdaptiveNativeDraft DistributedAdaptiveHierarchy::native_draft() const
     collective(*data_->comm,
         [&]
         {
-            std::map<AdaptiveCellKey, std::vector<ExactPlanarFacePtr>> incidence;
+            std::map<AdaptiveCellKey, std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> incidence;
             for (const auto& tile : result.tiles)
             {
                 incidence[tile.first].push_back(tile.geometry);
                 if (tile.second)
-                    incidence[*tile.second].push_back(
-                        tile.exact_second_image.empty()
-                            ? tile.geometry->reversed()
-                            : tile.geometry->reversed()->translated_exact(
-                                  exact_displacement_difference({}, tile.exact_second_image)));
+                    incidence[*tile.second].push_back(tile.second_image_identity.empty()
+                                                          ? tile.geometry->reversed()
+                                                          : tile.geometry->reversed()->translated_packet(
+                                                                PLIC::displacement_difference<ArithmeticMode::Ordinary>(
+                                                                    {}, tile.second_image_identity)));
             }
             for (const auto& leaf : result.owned)
             {
-                if (!ExactPlanarFace::cell_shell(incidence.at(leaf.key))->equivalent(*leaf.geometry))
+                if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(incidence.at(leaf.key))
+                        ->equivalent(*leaf.geometry))
                     throw std::invalid_argument("Authority tiles do not form complete exact local shell.");
             }
         });
