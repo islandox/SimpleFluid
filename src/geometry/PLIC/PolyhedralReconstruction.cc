@@ -1,55 +1,26 @@
 #include "geometry/PLIC/details/FinitePolyhedralReconstruction.tcc"
 namespace SimpleFluid::VoF
 {
-void PolyhedralReconstruction::validate(
-    const FinitePolyhedralPhaseSample& sample, PolyhedralReconstructionOptions options)
-{
-    if (sample.geometry && sample.geometry->arithmetic_mode() == ArithmeticMode::Ordinary)
-        return validate_finite<ArithmeticMode::Ordinary>(sample, options);
-    return validate_finite<ArithmeticMode::BoundedCertification>(sample, options);
-}
-PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution(const FinitePolyhedralPhaseSample& sample,
-    std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions options)
-{
-    if (sample.geometry && sample.geometry->arithmetic_mode() == ArithmeticMode::Ordinary)
-        return assess_resolution_finite<ArithmeticMode::Ordinary>(sample, stencil, options);
-    return assess_resolution_finite<ArithmeticMode::BoundedCertification>(sample, stencil, options);
-}
-PolyhedralInterface PolyhedralReconstruction::solve_offset(const FinitePolyhedralPhaseSample& sample,
-    SimpleFluid::PLIC::GeometryPoint normal, PolyhedralReconstructionOptions options)
-{
-    if (sample.geometry && sample.geometry->arithmetic_mode() == ArithmeticMode::Ordinary)
-        return solve_offset_finite<ArithmeticMode::Ordinary>(sample, normal, options);
-    return solve_offset_finite<ArithmeticMode::BoundedCertification>(sample, normal, options);
-}
-PolyhedralInterface PolyhedralReconstruction::reconstruct(const FinitePolyhedralPhaseSample& sample,
-    std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions options)
-{
-    if (sample.geometry && sample.geometry->arithmetic_mode() == ArithmeticMode::Ordinary)
-        return reconstruct_finite<ArithmeticMode::Ordinary>(sample, stencil, options);
-    return reconstruct_finite<ArithmeticMode::BoundedCertification>(sample, stencil, options);
-}
 template void PolyhedralReconstruction::validate_finite<ArithmeticMode::Ordinary>(
-    const FinitePolyhedralPhaseSample& sample, PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary>&, PolyhedralReconstructionOptions);
 template void PolyhedralReconstruction::validate_finite<ArithmeticMode::BoundedCertification>(
-    const FinitePolyhedralPhaseSample& sample, PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>&, PolyhedralReconstructionOptions);
 template PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finite<ArithmeticMode::Ordinary>(
-    const FinitePolyhedralPhaseSample& sample, std::span<const FinitePolyhedralPhaseSample> stencil,
-    PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary>&,
+    std::span<const PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary>>, PolyhedralReconstructionOptions);
 template PolyhedralResolutionAssessment
 PolyhedralReconstruction::assess_resolution_finite<ArithmeticMode::BoundedCertification>(
-    const FinitePolyhedralPhaseSample& sample, std::span<const FinitePolyhedralPhaseSample> stencil,
-    PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>&,
+    std::span<const PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>>, PolyhedralReconstructionOptions);
 template PolyhedralInterface PolyhedralReconstruction::solve_offset_finite<ArithmeticMode::Ordinary>(
-    const FinitePolyhedralPhaseSample& sample, SimpleFluid::PLIC::GeometryPoint normal,
-    PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary>&, PLIC::GeometryPoint, PolyhedralReconstructionOptions);
 template PolyhedralInterface PolyhedralReconstruction::solve_offset_finite<ArithmeticMode::BoundedCertification>(
-    const FinitePolyhedralPhaseSample& sample, SimpleFluid::PLIC::GeometryPoint normal,
-    PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>&, PLIC::GeometryPoint,
+    PolyhedralReconstructionOptions);
 template PolyhedralInterface PolyhedralReconstruction::reconstruct_finite<ArithmeticMode::Ordinary>(
-    const FinitePolyhedralPhaseSample& sample, std::span<const FinitePolyhedralPhaseSample> stencil,
-    PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary>&,
+    std::span<const PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary>>, PolyhedralReconstructionOptions);
 template PolyhedralInterface PolyhedralReconstruction::reconstruct_finite<ArithmeticMode::BoundedCertification>(
-    const FinitePolyhedralPhaseSample& sample, std::span<const FinitePolyhedralPhaseSample> stencil,
-    PolyhedralReconstructionOptions options);
+    const PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>&,
+    std::span<const PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>>, PolyhedralReconstructionOptions);
 } // namespace SimpleFluid::VoF

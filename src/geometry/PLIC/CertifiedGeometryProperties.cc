@@ -1,5 +1,5 @@
 #include "geometry/PLIC/CertifiedGeometryProperties.hh"
-#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -17,7 +17,7 @@ long double narrowing_error(long double value, long double error, double rounded
 
 double CertifiedGeometryValue<ArithmeticMode::Ordinary>::as_double() const
 {
-    return DynamicGeometryValue{value, 0, arithmetic_mode}.as_double();
+    return details::ordinary_kernel::ValueKernel<arithmetic_mode>({value, 0, arithmetic_mode}).as_double();
 }
 
 long double CertifiedGeometryValue<ArithmeticMode::Ordinary>::binary64_absolute_error() const
@@ -27,23 +27,27 @@ long double CertifiedGeometryValue<ArithmeticMode::Ordinary>::binary64_absolute_
 
 long double CertifiedGeometryValue<ArithmeticMode::BoundedCertification>::lower() const
 {
-    return DynamicGeometryValue{value, absolute_error, arithmetic_mode}.lower();
+    return details::certification_kernel::ValueKernel<arithmetic_mode>({value, absolute_error, arithmetic_mode})
+        .lower();
 }
 
 long double CertifiedGeometryValue<ArithmeticMode::BoundedCertification>::upper() const
 {
-    return DynamicGeometryValue{value, absolute_error, arithmetic_mode}.upper();
+    return details::certification_kernel::ValueKernel<arithmetic_mode>({value, absolute_error, arithmetic_mode})
+        .upper();
 }
 
 double CertifiedGeometryValue<ArithmeticMode::BoundedCertification>::as_double() const
 {
-    return DynamicGeometryValue{value, absolute_error, arithmetic_mode}.as_double();
+    return details::certification_kernel::ValueKernel<arithmetic_mode>({value, absolute_error, arithmetic_mode})
+        .as_double();
 }
 
 bool CertifiedGeometryValue<ArithmeticMode::BoundedCertification>::relative_error_at_most(
     long double target, double tolerance) const
 {
-    return DynamicGeometryValue{value, absolute_error, arithmetic_mode}.relative_error_at_most(target, tolerance);
+    return details::certification_kernel::ValueKernel<arithmetic_mode>({value, absolute_error, arithmetic_mode})
+        .relative_error_at_most(target, tolerance);
 }
 
 long double CertifiedGeometryValue<ArithmeticMode::BoundedCertification>::binary64_absolute_error() const

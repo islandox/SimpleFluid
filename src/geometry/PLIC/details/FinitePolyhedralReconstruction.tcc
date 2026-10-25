@@ -16,7 +16,7 @@ namespace SimpleFluid::VoF
 namespace
 {
 using Point = SimpleFluid::PLIC::GeometryPoint;
-using Value = PLIC::DynamicGeometryValue;
+template<ArithmeticMode Mode> using Value = PLIC::GeometryValue<Mode>;
 constexpr long double infinity = std::numeric_limits<long double>::infinity();
 
 double dot(Point a, Point b)
@@ -44,7 +44,8 @@ long double certified_upward(long double x)
         throw std::invalid_argument("Finite PLIC arithmetic bound is unrepresentable.");
     return x == 0 ? 0 : std::nextafter(x, infinity);
 }
-Value certified_difference(Value a, long double b)
+Value<ArithmeticMode::BoundedCertification> certified_difference(
+    Value<ArithmeticMode::BoundedCertification> a, long double b)
 {
     const auto value = a.value - b;
     // Error-free TwoSum for the represented subtraction; original geometry
@@ -53,7 +54,7 @@ Value certified_difference(Value a, long double b)
     const auto residual = (a.value - (value - z)) + (-b - z);
     return {value, certified_upward(a.absolute_error + std::abs(residual))};
 }
-long double certified_fit_error(Value residual)
+long double certified_fit_error(Value<ArithmeticMode::BoundedCertification> residual)
 {
     return certified_upward(std::abs(residual.value) + residual.absolute_error);
 }
@@ -62,9 +63,10 @@ long double certified_fit_allowance(long double requested, double tolerance)
     using Math = finite_detail::Arithmetic<ArithmeticMode::BoundedCertification>;
     return Math::lower(Math::multiply({requested, 0}, {tolerance, 0}));
 }
-Value ordinary_difference(Value a, long double b)
+Value<ArithmeticMode::Ordinary> ordinary_difference(Value<ArithmeticMode::Ordinary> a, long double b)
 {
-    return finite_detail::Arithmetic<ArithmeticMode::Ordinary>::make_value(a.value - b);
+    const auto result = finite_detail::Arithmetic<ArithmeticMode::Ordinary>::make_value(a.value - b);
+    return {result.value};
 }
 long double ordinary_fit_allowance(long double requested, double tolerance)
 {
@@ -73,27 +75,51 @@ long double ordinary_fit_allowance(long double requested, double tolerance)
         throw std::invalid_argument("Ordinary PLIC target tolerance is unrepresentable.");
     return result;
 }
-template<ArithmeticMode Mode> Value difference(Value a, long double b)
+template<ArithmeticMode Mode> Value<Mode> difference(Value<Mode> a, long double b)
 {
     if constexpr (Mode == ArithmeticMode::Ordinary)
         return ordinary_difference(a, b);
     else
         return certified_difference(a, b);
 }
-template<ArithmeticMode Mode> long double fit_error(Value residual)
+template<ArithmeticMode Mode> long double fit_error(Value<Mode> residual)
 {
     if constexpr (Mode == ArithmeticMode::Ordinary)
         return std::abs(residual.value);
     else
         return certified_fit_error(residual);
 }
-template<ArithmeticMode Mode> long double fit_allowance(ArithmeticMode mode, long double requested, double tolerance)
+template<ArithmeticMode Mode> long double fit_allowance(long double requested, double tolerance)
 {
-    (void) mode;
     if constexpr (Mode == ArithmeticMode::Ordinary)
         return ordinary_fit_allowance(requested, tolerance);
     else
         return certified_fit_allowance(requested, tolerance);
+}
+template<ArithmeticMode Mode> long double lower(Value<Mode> value)
+{
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return value.value;
+    else
+        return value.lower();
+}
+template<ArithmeticMode Mode> long double upper(Value<Mode> value)
+{
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return value.value;
+    else
+        return value.upper();
+}
+template<ArithmeticMode Mode> long double radius(Value<Mode> value)
+{
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return 0;
+    else
+        return value.absolute_error;
+}
+template<ArithmeticMode Mode> PLIC::DynamicGeometryValue published_difference(Value<Mode> value)
+{
+    return {value.value, radius<Mode>(value), Mode};
 }
 double outward(long double x, bool upper)
 {
@@ -106,11 +132,9 @@ double outward(long double x, bool upper)
     return result;
 }
 template<ArithmeticMode Mode>
-void validate_sample(const FinitePolyhedralPhaseSample& sample, const PolyhedralReconstructionOptions& options)
+void validate_sample(const PolyhedralPhaseSampleFor<Mode>& sample, const PolyhedralReconstructionOptions& options)
 {
-    using Math = finite_detail::Arithmetic<Mode>;
-    if (sample.geometry && sample.geometry->arithmetic_mode() == ArithmeticMode::BoundedCertification &&
-        !PLIC::certification_environment())
+    if (Mode == ArithmeticMode::BoundedCertification && !PLIC::certification_environment())
         throw std::invalid_argument("Finite PLIC arithmetic environment is unsupported.");
     if (!sample.geometry || !std::isfinite(sample.gas_volume) || !std::isfinite(sample.carrier_volume) ||
         sample.gas_volume < 0 || sample.carrier_volume < 0 || !options.maximum_offset_iterations ||
@@ -124,11 +148,11 @@ void validate_sample(const FinitePolyhedralPhaseSample& sample, const Polyhedral
         !(options.minimum_phase_support_fraction > 0 && options.minimum_phase_support_fraction <= .5))
         throw std::invalid_argument("Invalid finite polyhedral PLIC sample/options.");
     const auto volume = sample.geometry->volume();
-    if (!(Math::lower(volume) > 0))
+    if (!(lower<Mode>(volume) > 0))
         throw std::invalid_argument("Finite PLIC cell volume is not established positive.");
     const auto total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
     const auto residual = difference<Mode>(volume, total);
-    const auto allowance = volume.absolute_error + 8 * std::numeric_limits<double>::epsilon() * std::abs(volume.value);
+    const auto allowance = radius<Mode>(volume) + 8 * std::numeric_limits<double>::epsilon() * std::abs(volume.value);
     const auto bound = [&]
     {
         if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -199,13 +223,12 @@ Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condit
     return result;
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface offset_fit(const FinitePolyhedralPhaseSample& sample, Point normal,
+PolyhedralInterface offset_fit(const PolyhedralPhaseSampleFor<Mode>& sample, Point normal,
     PolyhedralReconstructionOptions options, std::size_t& evaluations)
 {
-    using Math = finite_detail::Arithmetic<Mode>;
     PolyhedralInterface result;
     result.finite_geometry = true;
-    result.finite_target_volume_difference = Math::make_value(sample.geometry->arithmetic_mode(), 0);
+    result.finite_target_volume_difference = published_difference<Mode>({});
     result.pure_gas = sample.carrier_volume == 0;
     result.pure_carrier = sample.gas_volume == 0;
     result.gas.normal = unit(normal);
@@ -238,8 +261,8 @@ PolyhedralInterface offset_fit(const FinitePolyhedralPhaseSample& sample, Point 
     // enclosed support query below still proves a signed bracket, including
     // nonbinary support behind the displayed anchor. Never assume a zero bound.
     const auto support = sample.geometry->support(result.gas.normal, result.gas.anchor);
-    double lo = outward(Math::lower(support.lower), false);
-    double hi = outward(Math::upper(support.upper), true);
+    double lo = outward(lower<Mode>(support.lower), false);
+    double hi = outward(upper<Mode>(support.upper), true);
     if (result.pure_gas || result.pure_carrier)
     {
         result.gas.offset = result.pure_gas ? hi : lo;
@@ -248,8 +271,7 @@ PolyhedralInterface offset_fit(const FinitePolyhedralPhaseSample& sample, Point 
     if (!(hi > lo))
         throw std::invalid_argument("Finite PLIC support bracket is unresolved.");
     const long double requested = gas ? sample.gas_volume : sample.carrier_volume;
-    const long double allowed =
-        fit_allowance<Mode>(sample.geometry->arithmetic_mode(), requested, options.volume_tolerance);
+    const long double allowed = fit_allowance<Mode>(requested, options.volume_tolerance);
     const auto bulk = sample.geometry->volume();
     const double fraction = static_cast<double>(requested / bulk.value);
     double offset = gas ? lo + (hi - lo) * std::cbrt(fraction) : hi - (hi - lo) * std::cbrt(fraction);
@@ -272,21 +294,21 @@ PolyhedralInterface offset_fit(const FinitePolyhedralPhaseSample& sample, Point 
             have_best = true;
             best_bound = error;
             result.gas = plane;
-            result.finite_target_volume_difference = residual;
+            result.finite_target_volume_difference = published_difference<Mode>(residual);
             result.target_volume_residual = static_cast<double>(residual.value);
         }
         if (best_bound <= allowed)
             return result;
         // Update only when the whole enclosure determines the monotone side.
         // An unresolved comparison cannot be converted to an exact volume.
-        if (Math::lower(residual) > 0)
+        if (lower<Mode>(residual) > 0)
         {
             if (gas)
                 hi = offset;
             else
                 lo = offset;
         }
-        else if (Math::upper(residual) < 0)
+        else if (upper<Mode>(residual) < 0)
         {
             if (gas)
                 lo = offset;
@@ -320,28 +342,24 @@ PolyhedralResolutionRequired::PolyhedralResolutionRequired(PolyhedralResolutionA
 
 template<ArithmeticMode Mode>
 void PolyhedralReconstruction::validate_finite(
-    const FinitePolyhedralPhaseSample& sample, PolyhedralReconstructionOptions options)
+    const PolyhedralPhaseSampleFor<Mode>& sample, PolyhedralReconstructionOptions options)
 {
     validate_sample<Mode>(sample, options);
 }
 template<ArithmeticMode Mode>
 PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finite(
-    const FinitePolyhedralPhaseSample& target, std::span<const FinitePolyhedralPhaseSample> stencil,
+    const PolyhedralPhaseSampleFor<Mode>& target, std::span<const PolyhedralPhaseSampleFor<Mode>> stencil,
     PolyhedralReconstructionOptions options)
 {
-    using Math = finite_detail::Arithmetic<Mode>;
     validate_sample<Mode>(target, options);
-    for (const auto& sample : stencil)
-        if (sample.geometry && sample.geometry->arithmetic_mode() != target.geometry->arithmetic_mode())
-            throw std::invalid_argument("Finite PLIC stencil arithmetic modes differ.");
     if (stencil.size() > options.maximum_stencil_cells)
         throw std::invalid_argument("Finite PLIC physical stencil budget exhausted.");
     PolyhedralResolutionAssessment result;
     result.stencil_cells = stencil.size();
     for (const auto& span : target.geometry->axis_spans())
-        result.local_cell_span = std::max(result.local_cell_span, outward(Math::upper(span), true));
+        result.local_cell_span = std::max(result.local_cell_span, outward(upper<Mode>(span), true));
     result.requested_cell_span = result.local_cell_span * .5;
-    const auto examine = [&](const FinitePolyhedralPhaseSample& sample)
+    const auto examine = [&](const PolyhedralPhaseSampleFor<Mode>& sample)
     {
         validate_sample<Mode>(sample, options);
         const long double total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
@@ -367,7 +385,7 @@ PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finit
     if (result.admitted())
     {
         const auto center = target.geometry->centroid();
-        const auto volume = Math::as_double(target.geometry->volume());
+        const auto volume = target.geometry->volume().as_double();
         const double alpha = target.gas_volume / volume;
         std::array<Point, 3> matrix{};
         Point rhs{};
@@ -378,7 +396,7 @@ PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finit
             if (d2 == 0 || !std::isfinite(d2))
                 throw std::invalid_argument(
                     "Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
-            const double delta = sample.gas_volume / Math::as_double(sample.geometry->volume()) - alpha;
+            const double delta = sample.gas_volume / sample.geometry->volume().as_double() - alpha;
             for (unsigned i = 0; i < 3; ++i)
             {
                 rhs[i] -= d[i] * delta / d2;
@@ -400,17 +418,16 @@ PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finit
 }
 template<ArithmeticMode Mode>
 PolyhedralInterface PolyhedralReconstruction::solve_offset_finite(
-    const FinitePolyhedralPhaseSample& sample, Point normal, PolyhedralReconstructionOptions options)
+    const PolyhedralPhaseSampleFor<Mode>& sample, Point normal, PolyhedralReconstructionOptions options)
 {
     validate_sample<Mode>(sample, options);
     std::size_t evaluations = 0;
     return offset_fit<Mode>(sample, normal, options, evaluations);
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const FinitePolyhedralPhaseSample& target,
-    std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions options)
+PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const PolyhedralPhaseSampleFor<Mode>& target,
+    std::span<const PolyhedralPhaseSampleFor<Mode>> stencil, PolyhedralReconstructionOptions options)
 {
-    using Math = finite_detail::Arithmetic<Mode>;
     auto resolution = assess_resolution_finite<Mode>(target, stencil, options);
     if (!resolution.admitted())
         throw PolyhedralResolutionRequired(resolution);
@@ -421,7 +438,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const FinitePol
         return result;
     }
     const auto center = target.geometry->centroid();
-    const double volume = Math::as_double(target.geometry->volume());
+    const double volume = target.geometry->volume().as_double();
     const double alpha = target.gas_volume / volume;
     std::array<Point, 3> matrix{};
     Point rhs{};
@@ -433,7 +450,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const FinitePol
         const double d2 = dot(d, d);
         if (d2 == 0 || !std::isfinite(d2))
             throw std::invalid_argument("Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
-        const double v = Math::as_double(sample.geometry->volume());
+        const double v = sample.geometry->volume().as_double();
         volumes.push_back(v);
         const double delta = sample.gas_volume / v - alpha;
         for (unsigned i = 0; i < 3; ++i)

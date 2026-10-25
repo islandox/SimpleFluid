@@ -103,8 +103,8 @@ struct GeneralVoFSolver::Impl
         require(phases->hierarchy()->geometry_unchanged(), "General VoF source geometry is stale.");
         const auto geometry = phases->owned_geometry();
         const auto bounded_geometry = arithmetic_mode_ != ArithmeticMode::Exact
-                                          ? phases->owned_finite_geometry()
-                                          : std::vector<PLIC::DynamicConvexGeometryPtr>{};
+                                          ? phases->owned_finite_geometry<Mode>()
+                                          : std::vector<PLIC::ConvexGeometryPtr<Mode>>{};
         volume.resize(mesh->num_owned_cells());
         thickness.resize(volume.size());
         collective(
@@ -122,12 +122,13 @@ struct GeneralVoFSolver::Impl
                         {
                             auto normal = A::point({});
                             for (std::size_t i = 1; i + 1 < face.size(); ++i)
-                                normal = A::add(normal, A::cross(A::subtract(p[face[i]], p[face[0]]),
-                                                            A::subtract(p[face[i + 1]], p[face[0]])));
+                                normal =
+                                    A::add(normal, A::cross(A::subtract(p[face[i]].dynamic(), p[face[0]].dynamic()),
+                                                       A::subtract(p[face[i + 1]].dynamic(), p[face[0]].dynamic())));
                             const auto square = A::dot(normal, normal);
                             area += std::sqrt(square.value) / 2;
                         }
-                        const auto v = bounded_geometry[c]->volume();
+                        const auto v = VoF::finite_detail::runtime_value<Mode>(bounded_geometry[c]->volume());
                         volume[c] = A::as_double(v);
                         thickness[c] = static_cast<double>(2 * v.value / area);
                         if (!std::isfinite(thickness[c]) || !(thickness[c] > 0))
@@ -163,6 +164,14 @@ struct GeneralVoFSolver::Impl
     }
     void surface_curvature(State& state) const
     {
+        if (arithmetic_mode_ == ArithmeticMode::Exact)
+            return surface_curvature_mode<ArithmeticMode::Exact>(state);
+        if (arithmetic_mode_ == ArithmeticMode::Ordinary)
+            return surface_curvature_mode<ArithmeticMode::Ordinary>(state);
+        return surface_curvature_mode<ArithmeticMode::BoundedCertification>(state);
+    }
+    template<ArithmeticMode Mode> void surface_curvature_mode(State& state) const
+    {
         state.curvature.assign(volume.size(), 0);
         if (material.surface_tension == 0)
             return;
@@ -197,10 +206,15 @@ struct GeneralVoFSolver::Impl
             {
                 for (const auto& patch : patches)
                 {
-                    const auto sample =
-                        finite(state)
-                            ? detail::GeneralVoFCurvature::patch(patch.cell, *patch.finite_geometry, patch.interface)
-                            : detail::Exact::GeneralVoFCurvature::patch(patch.cell, *patch.geometry, patch.interface);
+                    const auto sample = [&]
+                    {
+                        if constexpr (Mode == ArithmeticMode::Exact)
+                            return detail::Exact::GeneralVoFCurvature::patch(
+                                patch.cell, *patch.geometry, patch.interface);
+                        else
+                            return detail::GeneralVoFCurvature::patch<Mode>(patch.cell,
+                                *PLIC::ConvexCellGeometry<Mode>::from_dynamic(patch.finite_geometry), patch.interface);
+                    }();
                     if (sample)
                         surface.push_back(*sample);
                 }
@@ -640,8 +654,8 @@ struct GeneralVoFSolver::Impl
         if (!finite(state))
             return Exact::GeneralVoFSolver(*this).stable_timestep(state, bound, speed, global_thickness);
         namespace fp = VoF::finite_detail;
-        const auto rates = finite_rates(state);
-        const auto geometry = state.phases->owned_finite_geometry();
+        const auto rates = finite_rates_mode<Mode>(state);
+        const auto geometry = state.phases->owned_finite_geometry<Mode>();
         double local_rate = std::numeric_limits<double>::infinity();
         collective(
             [&]
@@ -657,7 +671,10 @@ struct GeneralVoFSolver::Impl
                     if (upper_rate > 0)
                     {
                         const auto lower_volume =
-                            geometry[c]->volume().value - (bounded_mode ? geometry[c]->volume().absolute_error : 0);
+                            VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()).value -
+                            (bounded_mode
+                                    ? VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()).absolute_error
+                                    : 0);
                         const auto time = lower_volume * options.flow.max_courant / upper_rate;
                         double value = static_cast<double>(time);
                         if (static_cast<long double>(value) > time)
@@ -673,6 +690,13 @@ struct GeneralVoFSolver::Impl
         return std::min(rate, speed > 0 ? std::min(bound, options.flow.max_courant * global_thickness / speed) : bound);
     }
     void initialize(const std::vector<Vector>& owned_velocity, const std::vector<double>& face_velocity)
+    {
+        if (arithmetic_mode_ == ArithmeticMode::BoundedCertification)
+            return initialize_mode<ArithmeticMode::BoundedCertification>(owned_velocity, face_velocity);
+        return initialize_mode<ArithmeticMode::Ordinary>(owned_velocity, face_velocity);
+    }
+    template<ArithmeticMode Mode>
+    void initialize_mode(const std::vector<Vector>& owned_velocity, const std::vector<double>& face_velocity)
     {
         require(accepted->phases->arithmetic_mode() == arithmetic_mode_,
             "General VoF initialization changed arithmetic mode.");
@@ -712,8 +736,11 @@ struct GeneralVoFSolver::Impl
             for (double value : velocity)
                 valid = valid && std::isfinite(value);
         require(valid, "General VoF initialization requires finite owned cell velocities.");
-        phase_storage(*next);
-        surface_curvature(*next);
+        phase_storage_mode<Mode>(*next);
+        if (finite(*next))
+            surface_curvature_mode<Mode>(*next);
+        else
+            surface_curvature_mode<ArithmeticMode::Exact>(*next);
         next->face_velocity = supplied_faces ? flow.faces(face_velocity) : flow.interpolate(next->velocity);
         next->projection_arithmetic.byte_budget = options.byte_budget;
         if (finite(*next))
@@ -736,7 +763,7 @@ struct GeneralVoFSolver::Impl
                     next->physical_mass),
                 &closure_topology);
         }
-        budget(*next);
+        budget_mode<Mode>(*next);
         accepted = std::move(next);
     }
     template<class Topology = detail::Exact::GeneralVoFProjectionClosureTopology>
@@ -788,7 +815,7 @@ struct GeneralVoFSolver::Impl
         }
         namespace fp = VoF::finite_detail;
         const auto& phases = state.phases->phase_volumes();
-        const auto geometry = state.phases->owned_finite_geometry();
+        const auto geometry = state.phases->owned_finite_geometry<Mode>();
         const auto fraction = state.phases->geometric_gas_fractions();
         collective(
             [&]
@@ -805,7 +832,8 @@ struct GeneralVoFSolver::Impl
                     const auto mass = A::add(
                         A::multiply(A::make_value(phases[c].gas, 0), A::make_value(material.gas_density, 0)),
                         A::multiply(A::make_value(phases[c].carrier, 0), A::make_value(material.liquid_density, 0)));
-                    const auto density = A::divide(mass, geometry[c]->volume());
+                    const auto density =
+                        A::divide(mass, VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()));
                     state.finite_mass[c] = mass.value;
                     state.finite_mass_error[c] = mass.absolute_error;
                     state.density[c] = A::as_double(density);
@@ -814,12 +842,6 @@ struct GeneralVoFSolver::Impl
                         throw std::runtime_error("Finite VoF physical mixture storage is unresolved.");
                 }
             });
-    }
-    std::vector<PLIC::DynamicGeometryValue> finite_rates(const State& state) const
-    {
-        if (arithmetic_mode_ == ArithmeticMode::BoundedCertification)
-            return finite_rates_mode<ArithmeticMode::BoundedCertification>(state);
-        return finite_rates_mode<ArithmeticMode::Ordinary>(state);
     }
     template<ArithmeticMode Mode> std::vector<PLIC::DynamicGeometryValue> finite_rates_mode(const State& state) const
     {
@@ -876,17 +898,11 @@ struct GeneralVoFSolver::Impl
             });
         return result;
     }
-    std::vector<VoF::GeneralVoFFaceVolume> finite_face_volumes(const State& state, double dt) const
-    {
-        if (arithmetic_mode_ == ArithmeticMode::BoundedCertification)
-            return finite_face_volumes_mode<ArithmeticMode::BoundedCertification>(state, dt);
-        return finite_face_volumes_mode<ArithmeticMode::Ordinary>(state, dt);
-    }
     template<ArithmeticMode Mode>
     std::vector<VoF::GeneralVoFFaceVolume> finite_face_volumes_mode(const State& state, double dt) const
     {
         using A = VoF::finite_detail::Arithmetic<Mode>;
-        const auto rates = finite_rates(state);
+        const auto rates = finite_rates_mode<Mode>(state);
         std::vector<VoF::GeneralVoFFaceVolume> result;
         collective(
             [&]
@@ -904,12 +920,6 @@ struct GeneralVoFSolver::Impl
                 }
             });
         return result;
-    }
-    void verify_phase_publication(const VoF::GeneralVoF::Trial& trial, const VoF::GeneralVoF& candidate) const
-    {
-        if (arithmetic_mode_ == ArithmeticMode::BoundedCertification)
-            return verify_phase_publication_mode<ArithmeticMode::BoundedCertification>(trial, candidate);
-        return verify_phase_publication_mode<ArithmeticMode::Ordinary>(trial, candidate);
     }
     template<ArithmeticMode Mode>
     void verify_phase_publication_mode(const VoF::GeneralVoF::Trial& trial, const VoF::GeneralVoF& candidate) const
@@ -1064,8 +1074,9 @@ struct GeneralVoFSolver::Impl
         require(minimum == maximum_dt, "Finite VoF timestep differs across ranks.");
         const auto& old = *accepted;
         const auto nodes = node_velocity(old);
-        require(dt <= stable_timestep(old, nodes), "Finite VoF timestep exceeds physical geometry/trajectory CFL.");
-        const auto trial = old.phases->plan_transport(nodes, finite_face_volumes(old, dt), dt);
+        require(dt <= stable_timestep_mode<Mode>(old, nodes),
+            "Finite VoF timestep exceeds physical geometry/trajectory CFL.");
+        const auto trial = old.phases->plan_transport(nodes, finite_face_volumes_mode<Mode>(old, dt), dt);
         double local_h = std::numeric_limits<double>::infinity(), global_h = 0;
         for (auto h : thickness)
             local_h = std::min(local_h, h);
@@ -1089,8 +1100,8 @@ struct GeneralVoFSolver::Impl
         auto next = std::make_shared<State>();
         next->phases = trial.candidate();
         require(next->phases->mesh().get() == mesh.get(), "Finite VoF transport changed its immutable native mesh.");
-        verify_phase_publication(trial, *next->phases);
-        phase_storage(*next);
+        verify_phase_publication_mode<Mode>(trial, *next->phases);
+        phase_storage_mode<Mode>(*next);
         std::vector<long double> outgoing(volume.size()), outgoing_error(volume.size()), source(volume.size());
         std::vector<detail::ConservativeVoFTransport::FiniteTransfer> incoming;
         std::vector<detail::ConservativeVoFTransport::FiniteFaceContribution> face_contributions;
@@ -1154,13 +1165,14 @@ struct GeneralVoFSolver::Impl
             [&]
             {
                 const auto& phases = old.phases->phase_volumes();
-                const auto geometry = old.phases->owned_finite_geometry();
+                const auto geometry = old.phases->owned_finite_geometry<Mode>();
                 for (std::size_t c = 0; c < volume.size(); ++c)
                 {
                     const auto weighted = A::add(
                         A::multiply(A::make_value(phases[c].gas, 0), A::make_value(material.gas_viscosity, 0)),
                         A::multiply(A::make_value(phases[c].carrier, 0), A::make_value(material.liquid_viscosity, 0)));
-                    viscosity[c] = A::as_double(A::divide(weighted, geometry[c]->volume()));
+                    viscosity[c] = A::as_double(
+                        A::divide(weighted, VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume())));
                 }
             });
         const auto viscous = flow.viscous_force(old.velocity, viscosity);
@@ -1185,7 +1197,7 @@ struct GeneralVoFSolver::Impl
         const auto face_change = flow.interpolate(change);
         for (std::size_t f = 0; f < next->face_velocity.size(); ++f)
             next->face_velocity[f] += face_change[f];
-        surface_curvature(*next);
+        surface_curvature_mode<Mode>(*next);
         next->finite_projection.byte_budget = options.byte_budget;
         const auto closure_topology =
             projection_topology<detail::GeneralVoFFiniteProjectionClosureTopology>(*next->phases);
@@ -1196,17 +1208,10 @@ struct GeneralVoFSolver::Impl
         next->diagnostics.time = old.diagnostics.time + dt;
         require(std::isfinite(next->diagnostics.time) && next->diagnostics.time > old.diagnostics.time,
             "Finite VoF timestep did not advance the accepted clock.");
-        budget(*next);
+        budget_mode<Mode>(*next);
         next->phases = old.phases->apply(trial);
         accepted = std::move(next);
         return accepted->diagnostics;
-    }
-    double handoff_finite_adapted_faces(
-        const State& old, Impl& target, State& state, const VoF::GeneralVoF::FiniteRemapTrial& trial) const
-    {
-        if (arithmetic_mode_ == ArithmeticMode::BoundedCertification)
-            return handoff_finite_adapted_faces_mode<ArithmeticMode::BoundedCertification>(old, target, state, trial);
-        return handoff_finite_adapted_faces_mode<ArithmeticMode::Ordinary>(old, target, state, trial);
     }
     template<ArithmeticMode Mode>
     double handoff_finite_adapted_faces_mode(
@@ -1217,13 +1222,28 @@ struct GeneralVoFSolver::Impl
         require(target.arithmetic_mode_ == arithmetic_mode_ && state.phases->arithmetic_mode() == arithmetic_mode_,
             "General VoF adapted handoff changed arithmetic mode.");
         namespace fp = VoF::finite_detail;
-        using Point = PLIC::DynamicPoint;
+        using Point = PLIC::Point<Mode>;
+        using PA = fp::PointArithmetic<Mode>;
         using Value = PLIC::DynamicGeometryValue;
         using Key = VoF::GeneralVoF::Key;
         using Loop = std::vector<Point>;
         using Support = PLIC::PlaneAuthority;
         const auto comm = mesh->owned_cell_map()->getComm();
         const auto& common = trial.source_common_cells();
+        std::vector<PLIC::ConvexGeometryPtr<Mode>> common_geometry;
+        std::size_t common_geometry_bytes = 0;
+        collective(
+            [&]
+            {
+                constexpr auto per_cell =
+                    sizeof(PLIC::ConvexGeometryPtr<Mode>) + sizeof(PLIC::ConvexCellGeometry<Mode>);
+                if (common.size() > options.byte_budget / per_cell)
+                    throw std::runtime_error("Finite common-cell typed geometry storage cap exhausted.");
+                common_geometry_bytes = common.size() * per_cell;
+                common_geometry.reserve(common.size());
+                for (const auto& cell : common)
+                    common_geometry.push_back(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.geometry));
+            });
         std::vector<Key> requested;
         std::map<Key, std::vector<std::size_t>> columns;
         for (std::size_t i = 0; i < common.size(); ++i)
@@ -1258,8 +1278,7 @@ struct GeneralVoFSolver::Impl
                     std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> cells;
                     for (const auto& key : fan->second)
                         cells.push_back(native_sources.at(key));
-                    native_points.emplace(
-                        node.gid, PLIC::dynamic_source_point(cells, node.coordinate_identity, arithmetic_mode_));
+                    native_points.emplace(node.gid, PLIC::source_point<Mode>(cells, node.coordinate_identity));
                 }
             });
         std::map<std::uint64_t, Loop> target_loops;
@@ -1278,7 +1297,7 @@ struct GeneralVoFSolver::Impl
                         target_faces[tile.first].push_back(&tile);
                     }
             });
-        const auto rates = finite_rates(old);
+        const auto rates = finite_rates_mode<Mode>(old);
         std::map<Key, std::vector<const Meshes::AMR::AdaptiveTile*>> source_faces;
         std::map<std::uint64_t, Loop> source_loops;
         collective(
@@ -1290,13 +1309,13 @@ struct GeneralVoFSolver::Impl
                         source_faces[tile.first].push_back(&tile);
                     if (tile.second && columns.contains(*tile.second))
                         source_faces[*tile.second].push_back(&tile);
-                    source_loops.emplace(tile.face_gid, old.phases->finite_face_points(tile.face_gid));
+                    source_loops.emplace(tile.face_gid, old.phases->finite_face_points<Mode>(tile.face_gid));
                 }
             });
         PLIC::GeometryLimits geometry_limits;
         geometry_limits.byte_budget = options.byte_budget / 2;
         geometry_limits.arithmetic_mode = arithmetic_mode_;
-        std::size_t pairs = 0, patches = 0, retained_bytes = 0;
+        std::size_t pairs = 0, patches = 0, retained_bytes = common_geometry_bytes;
         const auto charge = [&](std::size_t bytes)
         {
             if (bytes > options.byte_budget - std::min(retained_bytes, options.byte_budget))
@@ -1305,7 +1324,7 @@ struct GeneralVoFSolver::Impl
         };
         const auto shared_support = [](const Loop& first, const Loop& second) -> std::optional<Support>
         {
-            const auto a = PLIC::dynamic_common_supports(first), b = PLIC::dynamic_common_supports(second);
+            const auto a = PLIC::common_supports<Mode>(first), b = PLIC::common_supports<Mode>(second);
             for (const auto& key : a)
                 if (std::find(b.begin(), b.end(), key) != b.end())
                     return key;
@@ -1317,23 +1336,25 @@ struct GeneralVoFSolver::Impl
                 throw std::runtime_error("Finite common-face pair cap exhausted.");
             const auto support = shared_support(first, second);
             if (!support)
-                return PLIC::DynamicPlanarFaceOverlap{};
-            auto result = PLIC::dynamic_planar_face_overlap(first, second, *support, geometry_limits);
+                return PLIC::PlanarFaceOverlap<Mode>{};
+            auto result = PLIC::planar_face_overlap<Mode>(first, second, *support, geometry_limits);
             if (!result.overlap_vertices.empty())
             {
                 if (++patches > VoF::ExactFaceTransferOptions{}.maximum_patches)
                     throw std::runtime_error("Finite common-face patch cap exhausted.");
                 charge(sizeof(result) + result.overlap_vertices.capacity() * sizeof(Point));
                 for (const auto& point : result.overlap_vertices)
-                    charge(PLIC::dynamic_point_storage_bytes(point) - sizeof(Point));
+                    charge(PLIC::point_storage_bytes<Mode>(point) - sizeof(Point));
             }
             return result;
         };
-        const auto nonempty = [](const PLIC::DynamicPlanarFaceOverlap& value)
+        const auto nonempty = [](const PLIC::PlanarFaceOverlap<Mode>& value)
         {
-            if (value.overlap_projected_area.value == 0 && value.overlap_projected_area.absolute_error == 0)
+            if (value.overlap_projected_area.value == 0 &&
+                fp::runtime_value<Mode>(value.overlap_projected_area).absolute_error == 0)
                 return false;
-            if (!(value.overlap_projected_area.value > value.overlap_projected_area.absolute_error))
+            if (!(value.overlap_projected_area.value >
+                    fp::runtime_value<Mode>(value.overlap_projected_area).absolute_error))
                 throw std::runtime_error("Finite common-face overlap positivity is unresolved.");
             return true;
         };
@@ -1345,12 +1366,13 @@ struct GeneralVoFSolver::Impl
                 const auto part = overlap(whole, pieces[i]);
                 if (!nonempty(part))
                     throw std::runtime_error("Finite common-face cover contains empty piece.");
-                fraction.add(part.orientation > 0 ? part.overlap_over_first : A::negate(part.overlap_over_first));
+                fraction.add(part.orientation > 0 ? fp::runtime_value<Mode>(part.overlap_over_first)
+                                                  : A::negate(fp::runtime_value<Mode>(part.overlap_over_first)));
                 for (std::size_t j = 0; j < i; ++j)
                 {
                     const auto collision = overlap(pieces[i], pieces[j]);
                     if (collision.overlap_projected_area.value != 0 ||
-                        collision.overlap_projected_area.absolute_error != 0)
+                        fp::runtime_value<Mode>(collision.overlap_projected_area).absolute_error != 0)
                         throw std::runtime_error("Finite common-face cover has overlapping or unresolved interiors.");
                 }
             }
@@ -1407,12 +1429,13 @@ struct GeneralVoFSolver::Impl
                     std::map<std::uint64_t, std::vector<Loop>> old_cover;
                     for (std::size_t c = 0; c < indices.size(); ++c)
                     {
-                        const auto& geometry = *common[indices[c]].geometry;
+                        const auto& geometry = *common_geometry[indices[c]];
+                        const auto points = geometry.points();
                         for (const auto& face : geometry.faces())
                         {
                             Facet facet{c, {}, {}};
                             for (auto vertex : face)
-                                facet.loop.push_back(geometry.points()[vertex]);
+                                facet.loop.push_back(points[vertex]);
                             for (const auto* tile : source_faces.at(source_key))
                             {
                                 const auto part = overlap(facet.loop, source_loops.at(tile->face_gid));
@@ -1421,7 +1444,8 @@ struct GeneralVoFSolver::Impl
                                 const auto local = mesh->overlap_face_map()->getLocalElement(GO(tile->face_gid));
                                 if (local < 0)
                                     throw std::runtime_error("Finite source face rate is absent.");
-                                const auto rate = A::multiply(rates[local], part.overlap_over_second);
+                                const auto rate =
+                                    A::multiply(rates[local], fp::runtime_value<Mode>(part.overlap_over_second));
                                 facet.parts.push_back({part.overlap_vertices, rate, {}, 1});
                                 old_cover[tile->face_gid].push_back(part.overlap_vertices);
                             }
@@ -1461,12 +1485,12 @@ struct GeneralVoFSolver::Impl
                                 continue;
                             if (piece.orientation != -1)
                                 throw std::runtime_error("Finite interior common faces have equal orientation.");
-                            auto area = A::point({});
+                            Point area;
                             const auto& loop = piece.overlap_vertices;
                             for (std::size_t i = 1; i + 1 < loop.size(); ++i)
-                                area = A::add(
-                                    area, A::cross(A::subtract(loop[i], loop[0]), A::subtract(loop[i + 1], loop[0])));
-                            const auto rate = A::divide(A::dot(area, A::point(velocity)), A::make_value(2, 0));
+                                area = PA::add(area,
+                                    PA::cross(PA::subtract(loop[i], loop[0]), PA::subtract(loop[i + 1], loop[0])));
+                            const auto rate = A::divide(PA::dot(area, Point(A::point(velocity))), A::make_value(2, 0));
                             const auto index = internal.size();
                             internal.push_back({facets[f].cell, facets[g].cell, rate});
                             facets[f].parts.push_back({loop, A::make_value(0), index, 1});
@@ -1534,7 +1558,7 @@ struct GeneralVoFSolver::Impl
                         const auto allowed = bounded_mode
                                                  ? residual.absolute_error
                                                  : static_cast<long double>(options.flow.divergence_tolerance) *
-                                                       common[indices[cell]].geometry->volume().value;
+                                                       common_geometry[indices[cell]]->volume().value;
                         if (std::abs(residual.value) > allowed)
                             throw std::runtime_error("Finite new common-face extension fails source-free closure.");
                     }
@@ -1555,8 +1579,9 @@ struct GeneralVoFSolver::Impl
                                     throw std::runtime_error("Finite target boundary has inconsistent orientation.");
                                 outputs.push_back({source_key, cell.target_key,
                                     old.phases->hierarchy()->owned().at(source_key).revision, tile->face_gid, proof++,
-                                    tile->first_owner, A::multiply(rate, piece.overlap_over_first),
-                                    piece.overlap_over_second});
+                                    tile->first_owner,
+                                    A::multiply(rate, fp::runtime_value<Mode>(piece.overlap_over_first)),
+                                    fp::runtime_value<Mode>(piece.overlap_over_second)});
                             }
                         }
                 }
@@ -1722,7 +1747,7 @@ struct GeneralVoFSolver::Impl
                         throw std::runtime_error("Finite adapted face velocity diagnostic overflows.");
                 }
             });
-        const auto final_rates = target.finite_rates(state);
+        const auto final_rates = target.finite_rates_mode<Mode>(state);
         double local_divergence = 0;
         target.collective(
             [&]
@@ -1752,12 +1777,6 @@ struct GeneralVoFSolver::Impl
         state.face_velocity = target.flow.faces(state.face_velocity);
         trial.validate_observations();
         return divergence;
-    }
-    double handoff_finite_owned_faces(const State& old, Impl& target, State& state) const
-    {
-        if (arithmetic_mode_ == ArithmeticMode::BoundedCertification)
-            return handoff_finite_owned_faces_mode<ArithmeticMode::BoundedCertification>(old, target, state);
-        return handoff_finite_owned_faces_mode<ArithmeticMode::Ordinary>(old, target, state);
     }
     template<ArithmeticMode Mode>
     double handoff_finite_owned_faces_mode(const State& old, Impl& target, State& state) const
@@ -1973,7 +1992,7 @@ struct GeneralVoFSolver::Impl
                 if (seen.size() != target.mesh->num_owned_faces())
                     throw std::runtime_error("Finite ownership handoff lacks target face coverage.");
             });
-        const auto rates = target.finite_rates(state);
+        const auto rates = target.finite_rates_mode<Mode>(state);
         double local_divergence = 0;
         target.collective(
             [&]
@@ -2051,7 +2070,7 @@ struct GeneralVoFSolver::Impl
         collective(
             [&]
             {
-                const auto geometry = old.phases->owned_finite_geometry();
+                const auto geometry = old.phases->owned_finite_geometry<Mode>();
                 for (std::size_t c = 0; c < old.velocity.size(); ++c)
                 {
                     VoF::GeneralVoFFiniteOwnedChannels item;
@@ -2059,7 +2078,8 @@ struct GeneralVoFSolver::Impl
                     for (unsigned a = 0; a < 3; ++a)
                         item.amounts.push_back(A::multiply(A::make_value(old.finite_mass[c], old.finite_mass_error[c]),
                             A::make_value(old.velocity[c][a], 0)));
-                    item.amounts.push_back(A::multiply(geometry[c]->volume(), A::make_value(old.pressure[c], 0)));
+                    item.amounts.push_back(A::multiply(VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()),
+                        A::make_value(old.pressure[c], 0)));
                     channels.push_back(std::move(item));
                 }
             });
@@ -2070,7 +2090,7 @@ struct GeneralVoFSolver::Impl
         auto candidate = std::make_unique<Impl>(phases, material, options);
         auto state = std::make_shared<State>();
         state->phases = phases;
-        candidate->phase_storage(*state);
+        candidate->phase_storage_mode<Mode>(*state);
         state->velocity.resize(candidate->volume.size());
         state->pressure.resize(candidate->volume.size());
         std::map<VoF::GeneralVoF::Key, const VoF::GeneralVoFFiniteOwnedChannels*> result;
@@ -2079,7 +2099,7 @@ struct GeneralVoFSolver::Impl
         candidate->collective(
             [&]
             {
-                const auto geometry = phases->owned_finite_geometry();
+                const auto geometry = phases->owned_finite_geometry<Mode>();
                 for (std::size_t c = 0; c < candidate->volume.size(); ++c)
                 {
                     const auto& item = *result.at(phases->owned_order()[c]);
@@ -2088,18 +2108,19 @@ struct GeneralVoFSolver::Impl
                     for (unsigned a = 0; a < 3; ++a)
                         state->velocity[c][a] = A::as_double(A::divide(
                             item.amounts[a], A::make_value(state->finite_mass[c], state->finite_mass_error[c])));
-                    state->pressure[c] = A::as_double(A::divide(item.amounts[3], geometry[c]->volume()));
+                    state->pressure[c] = A::as_double(
+                        A::divide(item.amounts[3], VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume())));
                 }
             });
-        candidate->surface_curvature(*state);
+        candidate->surface_curvature_mode<Mode>(*state);
         const auto handoff_divergence = trial.ownership_only()
-                                            ? handoff_finite_owned_faces(old, *candidate, *state)
-                                            : handoff_finite_adapted_faces(old, *candidate, *state, trial);
+                                            ? handoff_finite_owned_faces_mode<Mode>(old, *candidate, *state)
+                                            : handoff_finite_adapted_faces_mode<Mode>(old, *candidate, *state, trial);
         state->diagnostics = old.diagnostics;
         state->diagnostics.time = old.diagnostics.time;
         state->momentum_transport = old.momentum_transport;
         state->diagnostics.maximum_divergence = handoff_divergence;
-        candidate->budget(*state);
+        candidate->budget_mode<Mode>(*state);
         // Recovering a finite velocity must preserve the original physical
         // phase-mass-weighted momentum gate independently of channel transfer.
         for (unsigned a = 0; a < 3; ++a)

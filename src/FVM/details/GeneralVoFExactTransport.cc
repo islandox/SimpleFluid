@@ -1123,7 +1123,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                         metric.binary64_absolute_error() + 8 * std::numeric_limits<double>::epsilon() * metric.value)
                         cell.declaration = GeneralVoFPhaseGeometry::Infer;
                 }
-                validate_cell(cell, data.options);
+                validate_cell<ArithmeticMode::Exact>(cell, data.options);
                 candidate->gas.push_back(cell.phase.gas_volume);
                 candidate->carrier.push_back(cell.phase.carrier_volume);
             }
@@ -1217,8 +1217,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport(const State& self, std::span<const 
                     throw std::invalid_argument("Finite General VoF phase conservation exceeds its publication bound.");
             }
         });
-    import_phases(*candidate);
-    wire::collective(*comm, [&] { retained_budget(*candidate); });
+    import_phases<ArithmeticMode::Exact>(*candidate);
+    wire::collective(*comm, [&] { retained_budget<ArithmeticMode::Exact>(*candidate); });
     trial.candidate_ = std::move(candidate);
     return trial;
 }

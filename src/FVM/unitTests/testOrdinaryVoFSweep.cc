@@ -12,12 +12,13 @@ namespace
 {
 using SimpleFluid::ArithmeticMode;
 namespace fp = SimpleFluid::VoF::finite_detail;
+using Point = SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>;
 
 struct StationarySquare
 {
     static constexpr long double height = 1e12L;
     const std::array<std::uint64_t, 4> nodes{0, 1, 2, 3};
-    std::map<std::uint64_t, std::pair<fp::Point, fp::Point>> traces;
+    std::map<std::uint64_t, std::pair<Point, Point>> traces;
 
     StationarySquare()
     {
@@ -25,7 +26,7 @@ struct StationarySquare
             {{0, 0, height}, {1, 0, height}, {1, 1, height}, {0, 1, height}}};
         for (std::size_t i = 0; i < nodes.size(); ++i)
         {
-            const fp::Point point(points[i], {}, ArithmeticMode::Ordinary);
+            const Point point(points[i]);
             traces.emplace(nodes[i], std::pair{point, point});
         }
     }

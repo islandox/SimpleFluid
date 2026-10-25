@@ -105,7 +105,7 @@ public:
     std::shared_ptr<const Impl> impl_;
     using DynamicConvexGeometry::origin;
     using DynamicConvexGeometry::points;
-    using DynamicConvexGeometry::storage_bytes;
+    std::size_t storage_bytes() const { return DynamicConvexGeometry::storage_bytes<Mode>(); }
     static std::vector<DynamicConvexGeometryPtr> validate_donors(
         std::span<const DynamicConvexGeometryPtr> donors, GeometryLimits limits);
     static DynamicPoint backtrace(const DynamicPoint& source, GeometryPoint velocity, double timestep,
@@ -164,7 +164,10 @@ template<ArithmeticMode Mode> class PartitionKernel
     const GeometryLimits& limits_;
 
 public:
-    explicit PartitionKernel(const DynamicConvexPartition& source) : donors_(source.donors_), limits_(source.limits_) {}
+    PartitionKernel(const std::vector<DynamicConvexGeometryPtr>& donors, const GeometryLimits& limits)
+        : donors_(donors), limits_(limits)
+    {
+    }
     std::vector<DynamicPartitionPiece> partition(const DynamicConvexGeometry& parent, std::size_t maximum_pieces) const;
 };
 template<ArithmeticMode Mode> Scalar scalar_value(DynamicGeometryValue a);
@@ -359,7 +362,7 @@ public:
     std::shared_ptr<const Impl> impl_;
     using DynamicConvexGeometry::origin;
     using DynamicConvexGeometry::points;
-    using DynamicConvexGeometry::storage_bytes;
+    std::size_t storage_bytes() const { return DynamicConvexGeometry::storage_bytes<Mode>(); }
     static std::vector<DynamicConvexGeometryPtr> validate_donors(
         std::span<const DynamicConvexGeometryPtr> donors, GeometryLimits limits);
     static DynamicPoint backtrace(const DynamicPoint& source, GeometryPoint velocity, double timestep,
@@ -418,7 +421,10 @@ template<ArithmeticMode Mode> class PartitionKernel
     const GeometryLimits& limits_;
 
 public:
-    explicit PartitionKernel(const DynamicConvexPartition& source) : donors_(source.donors_), limits_(source.limits_) {}
+    PartitionKernel(const std::vector<DynamicConvexGeometryPtr>& donors, const GeometryLimits& limits)
+        : donors_(donors), limits_(limits)
+    {
+    }
     std::vector<DynamicPartitionPiece> partition(const DynamicConvexGeometry& parent, std::size_t maximum_pieces) const;
 };
 template<ArithmeticMode Mode> long double directed_add(long double a, long double b, bool up);

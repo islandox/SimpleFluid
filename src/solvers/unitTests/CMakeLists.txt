@@ -698,6 +698,13 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   # Fixed-width finite arithmetic has independent capacity/empty-owner coverage.
   foreach(_finite_projection_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(
+    NAME GeneralVoFFixedGeometry_${_finite_projection_procs}procs
+    TARGET testGeneralVoFSolver
+    PROCS ${_finite_projection_procs}
+    ARGS "--gtest_filter=GeneralVoFSolverTest.FiniteSolverKeepsSelectedGeometryThroughStepAndRegrid"
+    LABELS "mpi;vof;finite;geometry;collective"
+    TIMEOUT 180)
+  simplefluid_add_mpi_test(
       NAME GeneralVoFOrdinaryMomentum_${_finite_projection_procs}procs
       TARGET testConservativeVoFTransport
       PROCS ${_finite_projection_procs}

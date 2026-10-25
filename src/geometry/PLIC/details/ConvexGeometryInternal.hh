@@ -251,26 +251,15 @@ namespace SimpleFluid::PLIC
 {
 
 std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint> points);
-DynamicPoint dynamic_point_average(std::span<const DynamicPoint> vertices);
-DynamicPoint dynamic_point_interpolate(const DynamicPoint& a, const DynamicPoint& b, long double fraction);
 bool certification_environment();
 GeometryStatistics geometry_statistics();
 void reset_geometry_statistics();
 void record_ledger_operations(std::uint64_t count);
 std::size_t dynamic_point_storage_bytes(const DynamicPoint& p);
-bool dynamic_points_identical(const DynamicPoint& a, const DynamicPoint& b);
-DynamicGeometryValue dynamic_orientation(const std::array<DynamicPoint, 4>& vertices);
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
 
-DynamicPoint dynamic_source_point(
-    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, std::span<const char> identity, ArithmeticMode mode);
-DynamicPoint dynamic_source_point(std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> sources,
-    std::span<const char> identity, ArithmeticMode mode);
-DynamicPoint dynamic_point_displaced(const DynamicPoint& source, const DynamicPoint& displacement);
-DynamicPoint dynamic_backtrace_constrained(const DynamicPoint& source, GeometryPoint velocity, double timestep,
-    std::span<const DynamicFaceConstraint> walls, GeometryLimits limits);
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
@@ -302,6 +291,4 @@ template<ArithmeticMode Mode> struct StoredPlanarLine
 namespace SimpleFluid::PLIC
 {
 
-DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoint> first,
-    std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits);
 }

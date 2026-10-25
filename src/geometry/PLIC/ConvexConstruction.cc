@@ -121,20 +121,6 @@ const std::vector<Face>& DynamicConvexGeometry::faces() const
 
 namespace SimpleFluid::PLIC
 {
-DynamicPoint dynamic_point_average(std::span<const DynamicPoint> vertices)
-{
-    if ((vertices.empty() ? ArithmeticMode::BoundedCertification : vertices.front().arithmetic_mode) ==
-        ArithmeticMode::Ordinary)
-        return ordinary_kernel::dynamic_point_average<ArithmeticMode::Ordinary>(vertices);
-    return certification_kernel::dynamic_point_average<ArithmeticMode::BoundedCertification>(vertices);
-}
-
-DynamicPoint dynamic_point_interpolate(const DynamicPoint& a, const DynamicPoint& b, long double fraction)
-{
-    if ((a.arithmetic_mode) == ArithmeticMode::Ordinary)
-        return ordinary_kernel::dynamic_point_interpolate<ArithmeticMode::Ordinary>(a, b, fraction);
-    return certification_kernel::dynamic_point_interpolate<ArithmeticMode::BoundedCertification>(a, b, fraction);
-}
 
 template<ArithmeticMode Mode> long double DynamicGeometryValue::lower() const
 {
@@ -175,6 +161,7 @@ template double DynamicGeometryValue::as_double<ArithmeticMode::BoundedCertifica
 
 long double DynamicGeometryValue::lower() const
 {
+    ++statistics.runtime_dispatches;
     if (arithmetic_mode == ArithmeticMode::Ordinary)
         return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).lower();
     return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).lower();
@@ -182,6 +169,7 @@ long double DynamicGeometryValue::lower() const
 
 long double DynamicGeometryValue::upper() const
 {
+    ++statistics.runtime_dispatches;
     if (arithmetic_mode == ArithmeticMode::Ordinary)
         return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).upper();
     return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).upper();
@@ -189,6 +177,7 @@ long double DynamicGeometryValue::upper() const
 
 double DynamicGeometryValue::as_double() const
 {
+    ++statistics.runtime_dispatches;
     if (arithmetic_mode == ArithmeticMode::Ordinary)
         return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).as_double();
     return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).as_double();
@@ -196,125 +185,13 @@ double DynamicGeometryValue::as_double() const
 
 bool DynamicGeometryValue::relative_error_at_most(long double target, double tolerance) const
 {
+    ++statistics.runtime_dispatches;
     if (arithmetic_mode == ArithmeticMode::Ordinary)
         return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).relative_error_at_most(target, tolerance);
     return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).relative_error_at_most(
         target, tolerance);
 }
 
-bool dynamic_points_identical(const DynamicPoint& a, const DynamicPoint& b)
-{
-    if ((a.arithmetic_mode) == ArithmeticMode::Ordinary)
-        return ordinary_kernel::dynamic_points_identical<ArithmeticMode::Ordinary>(a, b);
-    return certification_kernel::dynamic_points_identical<ArithmeticMode::BoundedCertification>(a, b);
-}
-
-DynamicGeometryValue dynamic_orientation(const std::array<DynamicPoint, 4>& vertices)
-{
-    if ((vertices.front().arithmetic_mode) == ArithmeticMode::Ordinary)
-        return ordinary_kernel::dynamic_orientation<ArithmeticMode::Ordinary>(vertices);
-    return certification_kernel::dynamic_orientation<ArithmeticMode::BoundedCertification>(vertices);
-}
-
-DynamicConvexGeometryPtr DynamicConvexGeometry::make(
-    std::span<const GeometryPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits)
-{
-    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::make(vertices, faces, limits);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::make(vertices, faces, limits);
-}
-
-DynamicConvexGeometryPtr DynamicConvexGeometry::make_bounded(
-    std::span<const DynamicPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits)
-{
-    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::make_bounded(vertices, faces, limits);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::make_bounded(
-        vertices, faces, limits);
-}
-
-DynamicConvexGeometryPtr DynamicConvexGeometry::make_bounded_local(
-    GeometryPoint origin, std::span<const DynamicPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits)
-{
-    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::make_bounded_local(
-            origin, vertices, faces, limits);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::make_bounded_local(
-        origin, vertices, faces, limits);
-}
-
-DynamicConvexGeometryPtr DynamicConvexGeometry::from_geometry(
-    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, GeometryLimits limits)
-{
-    const auto snapshot = details::prepare_source_geometry(source, limits);
-    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::from_snapshot(snapshot, limits);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::from_snapshot(snapshot, limits);
-}
-
-DynamicConvexGeometryPtr DynamicConvexGeometry::box(GeometryPoint lower, GeometryPoint upper, GeometryLimits limits)
-{
-    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::box(lower, upper, limits);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::box(lower, upper, limits);
-}
-
-DynamicConvexGeometryPtr DynamicConvexGeometry::tetrahedron(
-    const std::array<DynamicPoint, 4>& vertices, GeometryLimits limits)
-{
-    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::tetrahedron(vertices, limits);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::tetrahedron(vertices, limits);
-}
-
-DynamicGeometryValue DynamicConvexGeometry::volume() const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).volume();
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).volume();
-}
-
-DynamicGeometryMoments DynamicConvexGeometry::moments() const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).moments();
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).moments();
-}
-
-DynamicGeometryMoments DynamicConvexGeometry::moments(GeometryPoint origin) const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).moments(origin);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).moments(origin);
-}
-
-GeometryPoint DynamicConvexGeometry::centroid() const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).centroid();
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).centroid();
-}
-
-std::vector<DynamicPoint> DynamicConvexGeometry::local_points() const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).local_points();
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).local_points();
-}
-
-std::array<DynamicGeometryValue, 3> DynamicConvexGeometry::axis_spans() const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).axis_spans();
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).axis_spans();
-}
-
-DynamicSupport DynamicConvexGeometry::support(GeometryPoint normal, GeometryPoint anchor) const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).support(normal, anchor);
-    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).support(normal, anchor);
-}
 } // namespace SimpleFluid::PLIC
 
 #include "geometry/PLIC/details/FiniteGeometry.tcc"

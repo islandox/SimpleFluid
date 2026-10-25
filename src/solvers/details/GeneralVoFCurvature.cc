@@ -115,16 +115,23 @@ std::optional<GeneralVoFCurvaturePatch> Exact::GeneralVoFCurvature::patch(std::u
         "General VoF curvature has no positive physical cell scale.");
     return result;
 }
+template<ArithmeticMode Mode>
 std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
-    std::uint64_t cell, const PLIC::DynamicConvexGeometry& geometry, const VoF::PolyhedralInterface& plane)
+    std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>& geometry, const VoF::PolyhedralInterface& plane)
 {
     if (plane.pure_gas || plane.pure_carrier)
         return {};
     const auto section = geometry.clip(plane.gas).section;
     require(section.vertices.size() >= 3, "A mixed general VoF cell has no physical PLIC polygon.");
     const auto basis = frame(plane.gas.normal);
-    require(section.area.value > section.area.absolute_error,
-        "Finite general VoF PLIC polygon area has unresolved positivity.");
+    const auto area_error = [&]
+    {
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            return 0.L;
+        else
+            return section.area.absolute_error;
+    }();
+    require(section.area.value > area_error, "Finite general VoF PLIC polygon area has unresolved positivity.");
     GeneralVoFCurvaturePatch result;
     result.cell = cell;
     result.area = section.area.as_double();
@@ -156,6 +163,12 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
         "General VoF curvature has no positive physical cell scale.");
     return result;
 }
+template std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::Ordinary>(
+    std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&, const VoF::PolyhedralInterface&);
+template std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::BoundedCertification>(
+    std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>&,
+    const VoF::PolyhedralInterface&);
+
 GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatch& target,
     std::span<const GeneralVoFCurvaturePatch> support, GeneralVoFCurvatureOptions options)
 {

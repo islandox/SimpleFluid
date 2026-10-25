@@ -260,7 +260,7 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
             vertex.coordinates = transform<Mode>(vertex.coordinates, impl_->frame, rebased->frame);
         rebased->bounds = transform<Mode>(impl_->bounds, impl_->frame, rebased->frame);
         ++statistics.constructions;
-        return DynamicConvexGeometry(std::move(rebased)).clip(input, measure_section);
+        return GeometryKernel<Mode>(std::move(rebased)).clip(input, measure_section);
     }
     auto plane = std::make_shared<Plane>();
     plane->frame = impl_->frame;
@@ -604,8 +604,8 @@ template<ArithmeticMode Mode> DynamicPhaseMeasures GeometryKernel<Mode>::phases(
     static_assert(Mode == kernel_mode);
     Operation scope(impl_->limits);
     const auto split = clip(gas, false);
-    return {volume(), split.inside ? split.inside->volume() : bounded<Mode>(Scalar{}),
-        split.outside ? split.outside->volume() : bounded<Mode>(Scalar{})};
+    return {volume(), split.inside ? GeometryKernel<Mode>(split.inside->impl_).volume() : bounded<Mode>(Scalar{}),
+        split.outside ? GeometryKernel<Mode>(split.outside->impl_).volume() : bounded<Mode>(Scalar{})};
 }
 
 template<ArithmeticMode Mode>
@@ -723,7 +723,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::intersect(const DynamicConvexGeom
             return {};
         // Intersection consumes only the inside. Certifying an unused thin
         // outside measure can reject an otherwise resolved intersection.
-        result = result->clip_impl(other.impl_, face, false, false).inside;
+        result = GeometryKernel<Mode>(result->impl_).clip_impl(other.impl_, face, false, false).inside;
     }
     return result;
 }

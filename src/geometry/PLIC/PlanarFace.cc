@@ -5,18 +5,6 @@
 
 namespace SimpleFluid::PLIC
 {
-DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoint> first,
-    std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits limits)
-{
-    if ((limits.arithmetic_mode) == ArithmeticMode::Ordinary)
-        return ordinary_kernel::dynamic_planar_face_overlap<ArithmeticMode::Ordinary>(first, second, support, limits);
-    return certification_kernel::dynamic_planar_face_overlap<ArithmeticMode::BoundedCertification>(
-        first, second, support, limits);
-}
-} // namespace SimpleFluid::PLIC
-
-namespace SimpleFluid::PLIC
-{
 template<ArithmeticMode Mode>
 PlanarFaceOverlap<Mode> planar_face_overlap(std::span<const Point<Mode>> first, std::span<const Point<Mode>> second,
     const PlaneAuthority& support, GeometryLimits limits)
@@ -36,7 +24,13 @@ PlanarFaceOverlap<Mode> planar_face_overlap(std::span<const Point<Mode>> first, 
         a.push_back(point.dynamic());
     for (const auto& point : second)
         b.push_back(point.dynamic());
-    const auto source = dynamic_planar_face_overlap(a, b, support, limits);
+    const auto source = [&]
+    {
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            return details::ordinary_kernel::dynamic_planar_face_overlap<Mode>(a, b, support, limits);
+        else
+            return details::certification_kernel::dynamic_planar_face_overlap<Mode>(a, b, support, limits);
+    }();
     const auto value = [](const DynamicGeometryValue& input) -> GeometryValue<Mode>
     {
         details::require_mode(input.arithmetic_mode, Mode);

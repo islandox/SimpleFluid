@@ -2,14 +2,6 @@
 
 namespace SimpleFluid::PLIC
 {
-std::size_t DynamicConvexPartition::storage_bytes() const noexcept
-{
-    return sizeof(*this) + donors_.capacity() * sizeof(DynamicConvexGeometryPtr);
-}
-} // namespace SimpleFluid::PLIC
-
-namespace SimpleFluid::PLIC
-{
 namespace
 {
 template<ArithmeticMode Mode>
@@ -61,45 +53,13 @@ std::size_t geometry_storage_bytes(const std::shared_ptr<const DynamicConvexGeom
 }
 } // namespace
 
-std::size_t DynamicConvexGeometry::storage_bytes() const
+template<ArithmeticMode Mode> std::size_t DynamicConvexGeometry::storage_bytes() const
 {
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        return geometry_storage_bytes<ArithmeticMode::Ordinary>(impl_);
-    return geometry_storage_bytes<ArithmeticMode::BoundedCertification>(impl_);
+    return geometry_storage_bytes<Mode>(impl_);
 }
-
+template std::size_t DynamicConvexGeometry::storage_bytes<ArithmeticMode::Ordinary>() const;
+template std::size_t DynamicConvexGeometry::storage_bytes<ArithmeticMode::BoundedCertification>() const;
 } // namespace SimpleFluid::PLIC
 
 #include "geometry/PLIC/details/bounded/ConvexPartitions.tcc"
 #include "geometry/PLIC/details/ordinary/ConvexPartitions.tcc"
-
-namespace SimpleFluid::PLIC
-{
-void DynamicConvexGeometry::certify_partition(
-    std::span<const DynamicConvexGeometryPtr> pieces, double relative_budget) const
-{
-    if (arithmetic_mode() == ArithmeticMode::Ordinary)
-        ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).certify_partition(pieces, relative_budget);
-    else
-        certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).certify_partition(
-            pieces, relative_budget);
-}
-
-DynamicConvexPartition::DynamicConvexPartition(std::span<const DynamicConvexGeometryPtr> donors, GeometryLimits limits)
-    : limits_(limits)
-{
-    donors_ = limits.arithmetic_mode == ArithmeticMode::Ordinary
-                  ? ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::validate_donors(donors, limits)
-                  : certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::validate_donors(
-                        donors, limits);
-}
-
-std::vector<DynamicPartitionPiece> DynamicConvexPartition::partition(
-    const DynamicConvexGeometry& parent, std::size_t maximum_pieces) const
-{
-    if (limits_.arithmetic_mode == ArithmeticMode::Ordinary)
-        return ordinary_kernel::PartitionKernel<ArithmeticMode::Ordinary>(*this).partition(parent, maximum_pieces);
-    return certification_kernel::PartitionKernel<ArithmeticMode::BoundedCertification>(*this).partition(
-        parent, maximum_pieces);
-}
-} // namespace SimpleFluid::PLIC

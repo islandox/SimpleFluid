@@ -19,6 +19,68 @@ TEST(GeneralVoFSolverTest, ClosedTwoByTwoSingleLayerConstantCarrierAdvancesAndRe
     EXPECT_EQ(after.maximum_divergence, 0);
     EXPECT_EQ(solver.time(), .01);
 }
+TEST(GeneralVoFSolverTest, FiniteSolverKeepsSelectedGeometryThroughStepAndRegrid)
+{
+    const auto source = phases(0, false, true);
+    const auto comm = Tpetra::getDefaultComm();
+    const auto reset = []
+    {
+        PLIC::reset_geometry_statistics();
+        VoF::GeneralVoF::reset_geometry_statistics();
+        GeneralVoFSolver::reset_geometry_statistics();
+    };
+    const auto selected = [&](const char* stage)
+    {
+        SCOPED_TRACE(stage);
+        const auto fvm = VoF::GeneralVoF::geometry_statistics().bounded;
+        const auto solver = GeneralVoFSolver::geometry_statistics().bounded;
+        EXPECT_EQ(fvm.runtime_dispatches, 0u);
+        EXPECT_EQ(solver.runtime_dispatches, 0u);
+        // Empty owners participate in all operations. Establish actual selected
+        // geometry/arithmetic work while checking dispatch on every rank.
+        const double local = double(
+            fvm.volume_evaluations + solver.volume_evaluations + fvm.ledger_operations + solver.ledger_operations);
+        double global = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local, &global);
+        EXPECT_GT(global, 0);
+    };
+    reset();
+    GeneralVoFSolver solver(source, inviscid());
+    const int local_owners = solver.mesh()->num_owned_cells() != 0;
+    const int local_empty = !local_owners;
+    int owners = 0, empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_owners, &owners);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+    EXPECT_EQ(owners, std::min(2, comm->getSize()));
+    EXPECT_EQ(empty, comm->getSize() - std::min(2, comm->getSize()));
+    selected("construction");
+    const auto initial = solver.diagnostics();
+    const auto accepted = solver.phases();
+    reset();
+    EXPECT_THROW((void) solver.step(-1), std::runtime_error);
+    EXPECT_EQ(solver.phases(), accepted);
+    const auto advanced = solver.step(.01);
+    selected("step and rejection recovery");
+    EXPECT_EQ(advanced.gas_mass, 0);
+    EXPECT_EQ(advanced.liquid_mass, initial.liquid_mass);
+    EXPECT_EQ(advanced.maximum_velocity, 0);
+
+    std::vector<AMR::AdaptiveMark> refine;
+    for (const auto& key : solver.phases()->owned_order())
+        refine.push_back({key, AMR::AdaptiveSplit::Isotropic});
+    reset();
+    solver.regrid(refine);
+    selected("regrid");
+    EXPECT_EQ(solver.time(), .01);
+    EXPECT_EQ(solver.diagnostics().gas_mass, 0);
+    EXPECT_EQ(solver.diagnostics().liquid_mass, initial.liquid_mass);
+    EXPECT_EQ(solver.diagnostics().maximum_velocity, 0);
+    const double local_cells = double(solver.mesh()->num_owned_cells());
+    double global_cells = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_cells, &global_cells);
+    EXPECT_EQ(global_cells, 32);
+}
+
 TEST(GeneralVoFSolverTest, NativeSourceFreeStationaryAdvanceAndRejectedStepRetainAcceptedPublication)
 {
     GeneralVoFSolver solver(phases(0), inviscid());

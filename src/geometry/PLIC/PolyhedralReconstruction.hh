@@ -16,10 +16,12 @@ struct PolyhedralPhaseSample
     SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
     double gas_volume = 0, carrier_volume = 0;
 };
-/** Independent finite inventories on geometry carrying explicit uncertainty. */
-struct FinitePolyhedralPhaseSample
+/** Fixed-mode reconstruction input. Select the mode before entering a cell or
+ * stencil loop; all geometry operations retain that mode through the fit. */
+template<ArithmeticMode Mode> struct PolyhedralPhaseSampleFor
 {
-    PLIC::DynamicConvexGeometryPtr geometry;
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    PLIC::ConvexGeometryPtr<Mode> geometry;
     double gas_volume = 0, carrier_volume = 0;
 };
 /** A necessary interface-support screen, separate from arithmetic acceptance and
@@ -88,32 +90,23 @@ struct PolyhedralInterface
 class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction
 {
 public:
-    static void validate(const FinitePolyhedralPhaseSample&, PolyhedralReconstructionOptions = {});
-    /** Read-only preflight. Missing/dilute support requests refinement, never
-     * increased exact precision. The angular model gate remains independent. */
-    [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution(const FinitePolyhedralPhaseSample&,
-        std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
-    /** Numerical offset utility for a supplied normal. Physical interface
-     * admission belongs to reconstruct()/assess_resolution(). */
-    [[nodiscard]] static PolyhedralInterface solve_offset(const FinitePolyhedralPhaseSample&,
-        SimpleFluid::PLIC::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
-    [[nodiscard]] static PolyhedralInterface reconstruct(const FinitePolyhedralPhaseSample&,
-        std::span<const FinitePolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
-
-private:
+    /** Compiled fixed-mode entries for callers that already selected their
+     * arithmetic policy. No runtime adapter is entered during the fit. */
     template<ArithmeticMode Mode>
-    SIMPLEFLUID_FVM_LOCAL static void validate_finite(
-        const FinitePolyhedralPhaseSample&, PolyhedralReconstructionOptions);
+    static void validate_finite(const PolyhedralPhaseSampleFor<Mode>&, PolyhedralReconstructionOptions = {});
+    /** Read-only preflight. Missing/dilute support requests refinement; the
+     * angular model gate remains independent of arithmetic admission. */
     template<ArithmeticMode Mode>
-    SIMPLEFLUID_FVM_LOCAL static PolyhedralResolutionAssessment assess_resolution_finite(
-        const FinitePolyhedralPhaseSample&, std::span<const FinitePolyhedralPhaseSample>,
-        PolyhedralReconstructionOptions);
+    [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution_finite(const PolyhedralPhaseSampleFor<Mode>&,
+        std::span<const PolyhedralPhaseSampleFor<Mode>>, PolyhedralReconstructionOptions = {});
+    /** Offset utility for a supplied normal. Physical interface admission
+     * belongs to reconstruct_finite()/assess_resolution_finite(). */
     template<ArithmeticMode Mode>
-    SIMPLEFLUID_FVM_LOCAL static PolyhedralInterface solve_offset_finite(
-        const FinitePolyhedralPhaseSample&, SimpleFluid::PLIC::GeometryPoint, PolyhedralReconstructionOptions);
+    [[nodiscard]] static PolyhedralInterface solve_offset_finite(
+        const PolyhedralPhaseSampleFor<Mode>&, SimpleFluid::PLIC::GeometryPoint, PolyhedralReconstructionOptions = {});
     template<ArithmeticMode Mode>
-    SIMPLEFLUID_FVM_LOCAL static PolyhedralInterface reconstruct_finite(const FinitePolyhedralPhaseSample&,
-        std::span<const FinitePolyhedralPhaseSample>, PolyhedralReconstructionOptions);
+    [[nodiscard]] static PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSampleFor<Mode>&,
+        std::span<const PolyhedralPhaseSampleFor<Mode>>, PolyhedralReconstructionOptions = {});
 };
 namespace Exact
 {
