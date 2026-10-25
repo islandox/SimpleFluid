@@ -1318,7 +1318,7 @@ endforeach()
 # headroom around this measured range for configuration differences.
 # These counts do not qualify other toolchains or build configurations.
 # Private-family exclusions and exact API anchors above remain authoritative.
-set(simplefluid_api_symbol_lower_bound 1250)
+set(simplefluid_api_symbol_lower_bound 1450)
 # Vented cavity, typed ALE thermal transactions and compiled traversal plans
 # extend the public surface. After hiding traversal implementation helpers,
 # GCC Release/LTO has 1414 API exports and LLVM Debug has 1426 (2026-10-14).
