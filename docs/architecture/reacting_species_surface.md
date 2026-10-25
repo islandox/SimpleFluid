@@ -28,6 +28,11 @@ and inventories; the nonce allocator never rewinds, so model-only restore and
 re-advance cannot impersonate an interval already consumed by the controller.
 
 Gas inventory includes Dissolved, Resolved and every named Dispersed population.
+Stationary Resolved gas and all named Dispersed populations also contribute to
+submerged volume. Candidate surface/headspace pressure queries evaluate Resolved
+gas with its mixture EOS at that pressure, and Dispersed gas with its existing
+Laplace/EOS radius closure; zero dispersed populations do not remove Resolved
+occupancy. Dissolved gas remains part of the liquid EOS volume.
 Solution mass includes Liquid and Dissolved. These overlapping subsets have
 independent signed source packets. Raw accepted keyed chemical changes,
 individual reservoir transfers and paired interphase events feed these packets
@@ -56,6 +61,14 @@ The subtractive `material_volume_source()` diagnostic is also finite-checked but
 does not drive the ALE target or its nonlinear source gate. The independent
 level, exact material-volume packet, continuity and conservation gates remain
 mandatory.
+
+The mirrored `S_alpha_total` is `(alpha_g_final - alpha_g_step_start)/dt` over the
+whole accepted interval, including transport, accepted sources, temperature and
+headspace-pressure refreshes. Intermediate mirrors serve material coupling and do
+not replace that baseline. Both fixed-grid source schedules retain this contract;
+constrained ALE retains its before-temperature schedule and accepted-state replay.
+This diagnostic is not a separate physical material source or a substitute for
+exact material-volume transport receipts.
 
 ## Supplied headspace
 

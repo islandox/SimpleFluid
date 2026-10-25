@@ -238,6 +238,153 @@ TEST(ReactingSpeciesModelTest, SpeciesSpecificFugacityTransferGrowsOneGasAndDiss
     }
 }
 
+TEST(ReactingSpeciesModelTest, CelataFilmMatchesEquivalentPrescribedSlipAtEachSourceStage)
+{
+    for (const bool addGas : {false, true})
+    {
+        SCOPED_TRACE(addGas);
+        auto selected = options();
+        selected.rise_velocity_mode = S::BubbleRiseVelocityMode::Celata2007;
+        selected.surface_tension = .072;
+        selected.mass_transfer_mode = S::BubbleMassTransferMode::Hughmark;
+        selected.species_properties[0].diffusivity = 1e-8;
+        selected.species_properties[0].equilibrium_concentration = [](const auto&, const auto&) { return 0.; };
+        if (addGas)
+            selected.species_source = [](const R::ReactionContext& context, double)
+            {
+                R::ReactionSourceInput source;
+                const double incoming = .01 * context.environment.bulkVolume;
+                source.externalTransfers.push_back({"source-stage radius oracle", gasOne, R::SpeciesPhase::Dispersed,
+                    incoming, .002 * incoming, 0., {}, "micro"});
+                return source;
+            };
+        // Deliberately distinguish the configured carrier transport properties from the liquid EOS.
+        constexpr double carrierDensity = 950., carrierViscosity = .002;
+        const double one = addGas ? .02 : .01, two = .03;
+        const auto bubble = B::solve_bubble_radius((one + two) / 1e6, 100000., selected.surface_tension, gasConstant,
+            300., selected.min_radius, selected.max_radius);
+        ASSERT_TRUE(bubble.converged);
+        const double radius = bubble.radius;
+        const double gasVolume = 4 * std::numbers::pi * radius * radius * radius * 1e6 / 3;
+        const double gasDensity = (.002 * one + .004 * two) / gasVolume;
+        const auto terminal = B::celata2007_bubble_rise_velocity(radius, carrierDensity, gasDensity, carrierViscosity,
+            selected.surface_tension, selected.bubble_gravity, selected.max_rise_velocity_iterations,
+            selected.rise_velocity_tolerance);
+        ASSERT_TRUE(terminal.converged);
+        ASSERT_GT(terminal.velocity, 0.);
+        auto prescribed = selected;
+        prescribed.rise_velocity_mode = S::BubbleRiseVelocityMode::ConstantSlip;
+        prescribed.constant_slip_velocity = terminal.velocity;
+        Fixture celata(selected, 1), constant(prescribed, 1);
+        auto initial = celata.initial(.01, .03, true);
+        for (auto& state : initial)
+            state.set_amount(selected.reaction_mechanism->catalog(), gasOne, R::SpeciesPhase::Dissolved, .1);
+        celata.initialize(initial, true);
+        constant.initialize(initial, true);
+        for (auto* fixture : {&celata, &constant})
+        {
+            fixture->material.density.put_scalar(carrierDensity);
+            fixture->material.dynamic_viscosity.put_scalar(carrierViscosity);
+        }
+        constexpr double dt = 1e-5;
+        celata.advance(dt);
+        constant.advance(dt);
+        // The closed single cell removes drift transport, so the independent film amount tests
+        // the selected speed and, when addGas is true, the post-chemistry population radius.
+        const double liquidVolume =
+            initial.empty()
+                ? 0.
+                : (initial[0].amount(selected.reaction_mechanism->catalog(), donor, R::SpeciesPhase::Liquid) * .010 +
+                      .1 * .002) /
+                      1000.;
+        const auto law =
+            B::bubble_mass_transfer(selected.mass_transfer_mode, 1e-8, radius, 1000., .001, terminal.velocity);
+        const double transfer =
+            initial.empty() ? 0.
+                            : dt * law.coefficient * 4 * std::numbers::pi * radius * radius * 1e6 * .1 / liquidVolume;
+        for (std::size_t owned = 0; owned < initial.size(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            EXPECT_NEAR(celata.model.species_field(gasOne, R::SpeciesPhase::Dispersed, "micro").value(cell),
+                one + transfer, 1e-13);
+            EXPECT_NEAR(celata.model.species_field(gasOne, R::SpeciesPhase::Dispersed, "micro").value(cell),
+                constant.model.species_field(gasOne, R::SpeciesPhase::Dispersed, "micro").value(cell), 1e-13);
+            EXPECT_NEAR(
+                celata.model.species_field(gasOne, R::SpeciesPhase::Dissolved).value(cell), .1 - transfer, 1e-13);
+        }
+    }
+}
+
+TEST(ReactingSpeciesModelTest, PopulationTransportEOSWorkGrowsLinearlyAndPreservesFrozenState)
+{
+    std::vector<std::size_t> evaluations, radiusEvaluations;
+    for (const std::size_t count : {1u, 2u, 4u})
+    {
+        auto selected = options();
+        selected.population_ids.clear();
+        selected.surface_tension = .072; // Positive Laplace pressure identifies bubble-radius EOS queries.
+        for (std::size_t p = 0; p < count; ++p)
+            selected.population_ids.push_back("bin_" + std::to_string(p));
+        auto calls = std::make_shared<std::size_t>(0);
+        auto radiusCalls = std::make_shared<std::size_t>(0);
+        const auto gas = selected.gas_thermodynamics;
+        selected.gas_thermodynamics = std::make_shared<const R::MixtureThermodynamics>(
+            schema(), gas->bounds(), R::EOSKind::Gas, gas->enthalpy_pressure_dependence(),
+            [gas, calls, radiusCalls](double t, double p, std::span<const double> x)
+            {
+                ++*calls;
+                if (p > 100000.)
+                    ++*radiusCalls;
+                return gas->evaluate(t, p, x);
+            },
+            gas->energy_convention());
+        Fixture fixture(selected, 1);
+        std::vector<R::CellSpeciesState> states;
+        std::vector<std::vector<double>> numbers;
+        const auto& catalog = selected.reaction_mechanism->catalog();
+        for (std::size_t owned = 0; owned < fixture.grid->num_owned_cells(); ++owned)
+        {
+            R::CellSpeciesState state(catalog);
+            state.set_amount(catalog, donor, R::SpeciesPhase::Liquid, 90000.);
+            for (const auto& id : selected.population_ids)
+            {
+                state.dispersedPopulations.push_back({id, std::vector<double>(catalog.species().size())});
+                state.set_amount(catalog, gasOne, R::SpeciesPhase::Dispersed, .01, id);
+            }
+            states.push_back(std::move(state));
+            numbers.push_back(std::vector<double>(count, 1e6));
+        }
+        fixture.model.initialize_species(states, numbers);
+        fixture.model.initialize_state(0., fixture.temperature, fixture.pressure, fixture.velocity, fixture.material);
+        *calls = *radiusCalls = 0;
+        fixture.advance();
+        // The provider includes every EOS evaluation made by representative-radius closures.
+        // Identical independent bins must add a constant amount of work, not an all-bin reconstruction per bin.
+        evaluations.push_back(*calls);
+        radiusEvaluations.push_back(*radiusCalls);
+        testing::Test::RecordProperty(
+            "population_" + std::to_string(count) + "_eos_evaluations", std::to_string(*calls));
+        testing::Test::RecordProperty("population_" + std::to_string(count) + "_radius_eos_evaluations",
+            std::to_string(*radiusCalls));
+        for (std::size_t owned = 0; owned < states.size(); ++owned)
+        {
+            const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+            for (const auto& id : selected.population_ids)
+            {
+                EXPECT_DOUBLE_EQ(fixture.model.population_number_field(id).value(cell), 1e6);
+                EXPECT_DOUBLE_EQ(fixture.model.species_field(gasOne, R::SpeciesPhase::Dispersed, id).value(cell), .01);
+            }
+        }
+    }
+    EXPECT_EQ(evaluations[2] - evaluations[1], 2 * (evaluations[1] - evaluations[0]));
+    EXPECT_EQ(radiusEvaluations[2] - radiusEvaluations[1], 2 * (radiusEvaluations[1] - radiusEvaluations[0]));
+    if (evaluations[0] != 0) // Empty MPI owners do no local EOS work.
+    {
+        EXPECT_GT(evaluations[1], evaluations[0]);
+        EXPECT_GT(radiusEvaluations[1], radiusEvaluations[0]);
+    }
+}
+
 TEST(ReactingSpeciesModelTest, ActualMixedSpeciesSlipEscapeCarriesIndependentMolarAndEnergyBudgets)
 {
     auto selected = options();

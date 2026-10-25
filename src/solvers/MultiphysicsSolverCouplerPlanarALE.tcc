@@ -74,7 +74,7 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     std::optional<SafeguardedAitken> target_aitken;
     std::vector<real_t> accepted_cell_volumes;
     scalar_type accepted_mesh_volume{}, old_energy{}, time_step{};
-    std::vector<scalar_type> old_material_volume;
+    std::vector<scalar_type> old_material_volume, accepted_alpha;
     free_surface_diagnostics_type accepted_surface;
     SP<const typename thermal_participant_type::State> accepted_thermal, substep_thermal;
     SP<const typename temperature_equation_type::boundary_cache_type> accepted_thermal_flux;
@@ -193,6 +193,15 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
     /** @brief Freeze old geometry, storage coefficients, and extensive energy. */
     void capture_geometry_and_energy()
     {
+        if (coupler.species_surface_enabled())
+            collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE accepted void diagnostic baseline",
+                [&]
+                {
+                    accepted_alpha.resize(d_solver.d_mesh->num_owned_cells());
+                    for (std::size_t owned = 0; owned < accepted_alpha.size(); ++owned)
+                        accepted_alpha[owned] = coupler.d_scalar_void_fraction_model->alpha_g().value(
+                            static_cast<local_ordinal_type>(owned));
+                });
         accepted_cell_volumes.resize(d_solver.d_mesh->num_local_cells());
         for (size_t local = 0; local < accepted_cell_volumes.size(); ++local)
         {
@@ -1140,6 +1149,24 @@ template<TpetraTypePack Pack> struct MultiphysicsSolverCoupler<Pack>::PlanarALES
         const auto phase_timing = d_solver.d_solver_timings.scope(SolverPhase::ALECommit);
         if (coupler.d_thermal_participant)
             coupler.d_thermal_participant->validate_commit();
+        if (coupler.species_surface_enabled())
+        {
+            // Every corrector reuses one accepted baseline. Publish the final temperature/
+            // headspace-pressure state before closing the rollback-owned transaction.
+            auto& mirror = *coupler.d_scalar_void_fraction_model;
+            mirror.mirror(coupler.d_reacting_gas_model->alpha_g(), time_step);
+            collective_detail::collective_local_validation(*d_solver.d_mesh, "ALE whole-step void diagnostic",
+                [&]
+                {
+                    for (std::size_t owned = 0; owned < accepted_alpha.size(); ++owned)
+                    {
+                        const auto cell = static_cast<local_ordinal_type>(owned);
+                        mirror.d_source_alpha_total.set_owned_value(
+                            cell, (mirror.alpha_g().value(cell) - accepted_alpha[owned]) / time_step);
+                    }
+                });
+            mirror.d_source_alpha_total.sync_ghosts();
+        }
         const auto motion_diagnostics = coupler.d_ale_motion->diagnostics();
         for (size_t owned = 0; owned < d_solver.d_mesh->num_owned_cells(); ++owned)
         {

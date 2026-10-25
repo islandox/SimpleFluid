@@ -720,9 +720,31 @@ auto ReactingGasModel<Pack, MeshType>::global_species_moles(Reacting::SpeciesId 
 }
 
 template<TpetraTypePack Pack, class MeshType>
+double ReactingGasModel<Pack, MeshType>::population_slip_speed(const BubbleGasPhysics::PopulationCondition& condition,
+    const Reacting::ReactionEnvironment& environment, double liquid_density, double liquid_viscosity) const
+{
+    if (condition.number == 0.0)
+        return 0.0;
+    if (d_options.rise_velocity_mode == BubbleRiseVelocityMode::ConstantSlip)
+        return d_options.constant_slip_velocity;
+    if (d_options.rise_velocity_mode == BubbleRiseVelocityMode::Celata2007)
+    {
+        const double sigma = d_options.surface_tension_mode == SurfaceTensionMode::External
+                                 ? d_options.surface_tension_correlation(environment.temperature)
+                                 : d_options.surface_tension;
+        const auto result = BubbleGasPhysics::celata2007_bubble_rise_velocity(condition.radius, liquid_density,
+            condition.properties.density, liquid_viscosity, sigma, d_options.bubble_gravity,
+            d_options.max_rise_velocity_iterations, d_options.rise_velocity_tolerance);
+        reacting_species_detail::require(result.converged, "Mixture bubble terminal velocity did not converge.");
+        return result.velocity;
+    }
+    return 0.0;
+}
+
+template<TpetraTypePack Pack, class MeshType>
 BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>::population_packet(
     const Reacting::ReactionContext& chemistry, const std::vector<BubbleGasPhysics::PopulationCondition>& populations,
-    double duration) const
+    double duration, double liquid_density, double liquid_viscosity) const
 {
     using P = Reacting::SpeciesPhase;
     using reacting_species_detail::require;
@@ -807,8 +829,7 @@ BubbleGasPhysics::MultispeciesPopulationPacket ReactingGasModel<Pack, MeshType>:
             require(std::isfinite(equilibrium) && equilibrium >= 0.0, "Supplied equilibrium concentration is invalid.");
             const auto law = BubbleGasPhysics::bubble_mass_transfer(d_options.mass_transfer_mode, diffusivity,
                 population.radius, liquidPoint.density, liquidPoint.dynamic_viscosity,
-                d_options.rise_velocity_mode == BubbleRiseVelocityMode::ConstantSlip ? d_options.constant_slip_velocity
-                                                                                     : 0.0);
+                population_slip_speed(population, chemistry.environment, liquid_density, liquid_viscosity));
             const double concentration = chemistry.state.amount(chemistry.catalog, property.species, P::Dissolved) /
                                          chemistry.environment.liquidVolume;
             const double amount = duration * law.coefficient * 4 * std::numbers::pi * population.radius *
@@ -1100,42 +1121,26 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                 global_number_escape.resize(d_options.population_ids.size());
                 number_escape.events.resize(d_options.population_ids.size());
             });
+        // Build every population's drift from the same frozen transport predecessor.
+        // Reconstructing all conditions inside a per-population loop repeats EOS/radius work quadratically.
+        collective_detail::collective_local_validation(*d_mesh, "Reacting mixture population slip",
+            [&]
+            {
+                for (std::size_t owned = 0; owned < volumes.size(); ++owned)
+                {
+                    const auto cell = static_cast<local_ordinal_type>(owned);
+                    const auto environment = species_environment(
+                        cell, time - dt, temperature.value(cell), ale ? oldVolumes[owned] : volumes[owned]);
+                    const auto conditions = population_conditions(before[owned], beforeNumbers[owned], environment);
+                    for (std::size_t p = 0; p < conditions.size(); ++p)
+                        d_population_slip_fields[p]->owned_write_view()(owned, 0) = population_slip_speed(conditions[p],
+                            environment, material.density.value(cell), material.dynamic_viscosity.value(cell));
+                }
+            });
         for (std::size_t p = 0; p < d_options.population_ids.size(); ++p)
         {
             const auto& id = d_options.population_ids[p];
             auto& slip = *d_population_slip_fields[p];
-            collective_detail::collective_local_validation(*d_mesh, "Reacting mixture population slip",
-                [&]
-                {
-                    for (std::size_t owned = 0; owned < volumes.size(); ++owned)
-                    {
-                        const auto cell = static_cast<local_ordinal_type>(owned);
-                        const auto environment = species_environment(
-                            cell, time - dt, temperature.value(cell), ale ? oldVolumes[owned] : volumes[owned]);
-                        // Every bin sees one accepted-old material/count predecessor,
-                        // even after an earlier bin has published transported counts.
-                        const auto conditions = population_conditions(before[owned], beforeNumbers[owned], environment);
-                        const auto& condition = conditions[p];
-                        double speed = 0.0;
-                        if (condition.number > 0.0 &&
-                            d_options.rise_velocity_mode == BubbleRiseVelocityMode::ConstantSlip)
-                            speed = d_options.constant_slip_velocity;
-                        if (condition.number > 0.0 &&
-                            d_options.rise_velocity_mode == BubbleRiseVelocityMode::Celata2007)
-                        {
-                            const double sigma = d_options.surface_tension_mode == SurfaceTensionMode::External
-                                                     ? d_options.surface_tension_correlation(environment.temperature)
-                                                     : d_options.surface_tension;
-                            const auto result = BubbleGasPhysics::celata2007_bubble_rise_velocity(condition.radius,
-                                material.density.value(cell), condition.properties.density,
-                                material.dynamic_viscosity.value(cell), sigma, d_options.bubble_gravity,
-                                d_options.max_rise_velocity_iterations, d_options.rise_velocity_tolerance);
-                            require(result.converged, "Mixture bubble terminal velocity did not converge.");
-                            speed = result.velocity;
-                        }
-                        slip.owned_write_view()(owned, 0) = speed;
-                    }
-                });
             slip.sync_ghosts();
             workspace.operator_ready[1] = false;
             transport_one(
@@ -1535,7 +1540,10 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                                         : 0.0;
                                 const auto conditions = population_conditions(state, numbers, stageEnvironment);
                                 const Reacting::ReactionContext stageContext{catalog, state, stageEnvironment};
-                                const auto packet = population_packet(stageContext, conditions, step);
+                                // Recompute drift from this source stage's bubble state, using the same
+                                // configured carrier properties as transport rather than a frozen old slip.
+                                const auto packet = population_packet(stageContext, conditions, step,
+                                    material.density.value(cell), material.dynamic_viscosity.value(cell));
                                 if (d_options.bouss_reference && d_options.bouss_sources->vapor)
                                     for (const auto& transfer : packet.transfers)
                                     {
@@ -1851,7 +1859,8 @@ auto ReactingGasModel<Pack, MeshType>::evaluate_species_bubble_volume(
     scalar_type candidate_absolute_pressure_offset) const -> scalar_type
 {
     validate_species_pressure_metadata(candidate_absolute_pressure_offset);
-    scalar_type local = 0.0;
+    detail::CompensatedSum<long double> local;
+    scalar_type local_volume{};
     collective_detail::collective_local_validation(*d_mesh, "Reacting candidate mixture bubble volume",
         [&]
         {
@@ -1865,7 +1874,20 @@ auto ReactingGasModel<Pack, MeshType>::evaluate_species_bubble_volume(
                 const double volume = d_mesh->cell_volume(cell);
                 const auto state = cell_species_state(cell, volume);
                 auto environment = species_environment(cell, 0.0, d_previous_temperature.value(cell), volume);
-                environment.absolutePressure += candidate_absolute_pressure_offset - d_absolute_pressure_offset;
+                environment.absolutePressure = reacting_species_detail::narrow(
+                    static_cast<long double>(environment.absolutePressure) +
+                    candidate_absolute_pressure_offset - d_absolute_pressure_offset);
+                // Resolved inventory is stationary in this backend, but occupies
+                // EOS volume just as it does in alpha_g and pressure validation.
+                std::vector<double> resolved(catalog.species().size());
+                for (std::size_t s = 0; s < resolved.size(); ++s)
+                    resolved[s] = state.amount(catalog, catalog.species()[s].id, Reacting::SpeciesPhase::Resolved);
+                if (reacting_species_detail::total(resolved) > 0)
+                    local += reacting_species_detail::mass(catalog, resolved) /
+                             d_options.gas_thermodynamics
+                                 ->evaluate(environment.temperature, environment.absolutePressure,
+                                     reacting_species_detail::composition(resolved))
+                                 .density;
                 const auto conditions =
                     population_conditions(state, cell_population_numbers(cell, volume), environment);
                 for (std::size_t p = 0; p < conditions.size(); ++p)
@@ -1873,8 +1895,9 @@ auto ReactingGasModel<Pack, MeshType>::evaluate_species_bubble_volume(
                         local += reacting_species_detail::mass(catalog, state.dispersedPopulations[p].amounts) /
                                  conditions[p].properties.density;
             }
+            local_volume = reacting_species_detail::narrow(local.value());
         });
-    return global_sum(local);
+    return global_sum(local_volume);
 }
 
 template<TpetraTypePack Pack, class MeshType>

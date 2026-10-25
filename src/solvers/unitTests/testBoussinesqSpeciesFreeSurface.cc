@@ -55,7 +55,8 @@ struct Fixture
     std::unique_ptr<Coupler> coupling;
     Model* gas = nullptr;
     double pressure;
-    explicit Fixture(bool bubbles = true, double reference_pressure = 100000) : pressure(reference_pressure)
+    explicit Fixture(bool bubbles = true, double reference_pressure = 100000, double resolved_fraction = 0)
+        : pressure(reference_pressure)
     {
         Grid::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
@@ -85,6 +86,9 @@ struct Fixture
         seed.product_concentration = .2;
         if (bubbles)
             seed.populations = {{"micro", 1e4, 1e-9, .25}, {"large", 2e3, 2e-9, .6}};
+        seed.resolved_volume_fraction = resolved_fraction;
+        if (resolved_fraction > 0)
+            seed.populations.clear();
         auto options = M::field_options(chemistry, seed);
         options.reference_pressure = pressure;
         options.species_properties = {
@@ -99,6 +103,8 @@ struct Fixture
             input.integratedExtents = {{M::conversion, -1e-4 * dt * context.environment.bulkVolume}};
             return input;
         };
+        if (resolved_fraction > 0)
+            options.species_source = [](const R::ReactionContext&, double) { return R::ReactionSourceInput{}; };
         gas = &coupling->configure_reacting_gas(options);
         coupling->initialize_heated_box(300, 300);
     }
@@ -139,6 +145,65 @@ struct Fixture
             coupling->configure_free_surface(options);
     }
 };
+
+/** Stationary resolved gas has no population count, but must displace liquid
+ * and headspace using its supplied EOS at every candidate pressure. */
+void expect_resolved_gas_surface_volume(bool closed_headspace)
+{
+    constexpr double pressure = 100000, alpha = .15;
+    Fixture f(false, pressure, alpha);
+    ASSERT_TRUE(f.gas->options().population_ids.empty());
+    const double resolved_moles = alpha / (M::gas_constant * 300 / pressure + .0024);
+    const auto gas_volume = [resolved_moles](double p)
+    { return resolved_moles * (M::gas_constant * 300 / p + .0024); };
+    const M::SavedReactingState<Model> saved(*f.gas);
+    EXPECT_NEAR(f.gas->global_submerged_bubble_volume(), alpha, 2e-15);
+    EXPECT_NEAR(f.gas->evaluate_submerged_bubble_volume(pressure), alpha, 2e-15);
+    EXPECT_NEAR(f.gas->evaluate_submerged_bubble_volume(2 * pressure), gas_volume(2 * pressure), 2e-15);
+    saved.expect_restored(*f.gas); // Candidate EOS queries must not publish state.
+
+    auto options = f.surface_options(closed_headspace);
+    const double headspace_moles = pressure / (M::gas_constant * 300 + .002 * pressure);
+    if (closed_headspace)
+    {
+        // Independent initial pool volume is 0.85 liquid + 0.15 resolved gas.
+        options.headspace.initial_moles = {{"gas_one", .5 * headspace_moles}, {"gas_two", .5 * headspace_moles}};
+        options.headspace.temperature_mode = HeadspaceTemperatureMode::Prescribed;
+        options.headspace.prescribed_temperature_times = {0, .001};
+        options.headspace.prescribed_temperature_values = {300, 330};
+    }
+    f.configure_surface(options);
+    const auto initial = f.coupling->free_surface_diagnostics();
+    EXPECT_NEAR(initial.submerged_bubble_volume, alpha, 2e-10);
+    EXPECT_NEAR(initial.pool_volume, 1, 2e-10);
+    EXPECT_NEAR(initial.headspace.pressure, pressure, 2e-5);
+    f.coupling->step();
+    const auto after = f.coupling->free_surface_diagnostics();
+    const double p = after.headspace.pressure;
+    const double expected_liquid = (1 - alpha) * (1 - 5e-9 * (p - pressure));
+    EXPECT_NEAR(after.submerged_bubble_volume, gas_volume(p), 2e-10);
+    EXPECT_NEAR(f.gas->global_submerged_bubble_volume(), gas_volume(p), 2e-10);
+    EXPECT_NEAR(after.liquid_volume, expected_liquid, 2e-10);
+    EXPECT_NEAR(after.pool_volume, expected_liquid + gas_volume(p), 2e-10);
+    EXPECT_TRUE(after.submerged_population_gas_moles.empty());
+    if (closed_headspace)
+    {
+        EXPECT_GT(p, pressure);
+        const double headspace_volume = headspace_moles * (M::gas_constant * 330 / p + .002);
+        EXPECT_NEAR(expected_liquid + gas_volume(p) + headspace_volume, 2, 2e-9);
+    }
+    else
+        EXPECT_DOUBLE_EQ(p, pressure);
+}
+TEST(BoussinesqSpeciesFreeSurfaceTest, StationaryResolvedGasOccupiesVentedPoolWithoutPopulations)
+{
+    expect_resolved_gas_surface_volume(false);
+}
+TEST(BoussinesqSpeciesFreeSurfaceTest, StationaryResolvedGasCouplesClosedHeadspaceWithoutPopulations)
+{
+    expect_resolved_gas_surface_volume(true);
+}
+
 TEST(BoussinesqSpeciesFreeSurfaceTest, ConsumesBothActualGasSpeciesAndFollowsLiquidWithoutSecondTransport)
 {
     Fixture f(false);

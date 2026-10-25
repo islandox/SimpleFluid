@@ -3105,8 +3105,8 @@ void MultiphysicsSolverCoupler<Pack>::advance_post_temperature_models(
     {
         d_reacting_gas_model->refresh_species_thermodynamics(d_solver->d_time + time_step, d_solver->temperature(),
             d_solver->pressure(), d_solver->velocity(), d_solver->stored_material_properties());
-        // Fixed reference molar volumes cannot change in this refresh. Mirroring
-        // twice would erase the accepted whole-step scalar void source diagnostic.
+        // Only the supplied EOS can change void in this thermal refresh.
+        // step() publishes the complete interval rate after all final refreshes.
         if (!d_reacting_gas_model->options().bouss_reference)
             update_void_fraction_models(time_step);
     }
@@ -3566,6 +3566,20 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
             refresh_physical_models();
         }
         initialize_free_surface_if_needed(true, d_solver->d_physical_model_enabled, transactional_physics);
+        // Intermediate mirrors supply current void to thermal/material models.
+        // Retain the interval's starting value independently of those refreshes.
+        const bool mirror_species = d_reacting_gas_model && d_reacting_gas_model->enabled() &&
+                                    d_reacting_gas_model->species_enabled() && d_scalar_void_fraction_model;
+        std::vector<scalar_type> step_start_alpha;
+        if (mirror_species)
+            collective_detail::collective_local_validation(*d_solver->d_mesh, "Step-start species void",
+                [&]
+                {
+                    step_start_alpha.resize(d_solver->d_mesh->num_owned_cells());
+                    for (std::size_t owned = 0; owned < step_start_alpha.size(); ++owned)
+                        step_start_alpha[owned] =
+                            d_scalar_void_fraction_model->alpha_g().value(static_cast<local_ordinal_type>(owned));
+                });
         if (auto* turbulence = d_solver->find_turbulence_model())
         {
             turbulence->refresh_effective_properties(
@@ -3579,6 +3593,19 @@ template<TpetraTypePack Pack> void MultiphysicsSolverCoupler<Pack>::step()
         const auto species_after_temperature = advance_pre_temperature_models(time_step);
         advance_temperature_transport(time_step);
         advance_post_temperature_models(time_step, species_after_temperature);
+        if (mirror_species)
+        {
+            // Include the final temperature and headspace-pressure EOS refresh.
+            d_scalar_void_fraction_model->mirror(d_reacting_gas_model->alpha_g(), time_step);
+            auto& source = d_scalar_void_fraction_model->d_source_alpha_total;
+            for (std::size_t owned = 0; owned < step_start_alpha.size(); ++owned)
+            {
+                const auto cell = static_cast<local_ordinal_type>(owned);
+                source.set_owned_value(cell,
+                    (d_scalar_void_fraction_model->alpha_g().value(cell) - step_start_alpha[owned]) / time_step);
+            }
+            source.sync_ghosts();
+        }
 
         if (d_solver->uses_legacy_backend())
         {

@@ -45,12 +45,16 @@ The native low-Mach controller has a separate supplied finite face-source contra
 see [its ownership and support limits](architecture/low_mach_reacting_flow.md).
 Turbulent or numerical diffusion is never inserted into interfacial `Sc`.
 
-The shared evaluator accepts an explicit bubble-liquid relative speed. The current
-default Species film stage supplies `constant_slip_velocity` for `ConstantSlip`
-and zero otherwise. In particular, selecting Celata for population transport does
-not automatically feed that computed velocity into the film evaluator. A supplied
-population law must own any additional consistent slip/transfer coupling. Comparing
-selectors requires the same declared relative speed and physical properties.
+The shared evaluator accepts an explicit bubble-liquid relative speed. The default
+Species film stage and population transport share the configured slip calculation:
+zero for no slip, the prescribed speed for `ConstantSlip`, or Celata using the
+configured carrier material density/viscosity and current bubble conditions.
+Transport freezes these conditions at its accepted starting state, reconstructing
+all populations once per cell. Film transfer recomputes radius, gas density and
+surface tension at the current source-stage state, including preceding chemistry;
+it does not reuse a stale transport slip. Comparing Celata and a prescribed speed
+requires identical state and material inputs. A supplied population law remains
+responsible for its own transfer closures.
 The selector changes `k_L` only; it does not independently change drag, velocity,
 mixture equilibrium, finite stocks, counts or the supplied event schedule.
 

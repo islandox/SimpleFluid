@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include <utility>
+
 namespace
 {
 namespace S = SimpleFluid;
@@ -92,6 +94,80 @@ TEST(ReactingBoussinesqCouplingTest, ChemicalAndIndependentSignedHeatEnterOnceWi
             EXPECT_NEAR(gas.thermal_source().value(cell), heatPerStep / .1, 1e-10);
         }
     }
+}
+
+TEST(ReactingBoussinesqCouplingTest, TotalVoidSourceSpansProductionAndHeatingForBothSchedules)
+{
+    using P = R::SpeciesPhase;
+    for (const auto schedule :
+        {S::ReactingSourceSchedule::BeforeTemperature, S::ReactingSourceSchedule::PrescribedCarrierAfterTemperature})
+        for (const auto changes : {std::pair{true, false}, std::pair{false, true}, std::pair{true, true}})
+        {
+            const auto [production, heating] = changes;
+            SCOPED_TRACE(static_cast<int>(schedule));
+            SCOPED_TRACE(production);
+            SCOPED_TRACE(heating);
+            auto flow = solver();
+            S::MultiphysicsSolverCoupler<Pack> coupling(flow);
+            auto selected = reacting_options();
+            selected.source_schedule = schedule;
+            const auto schema = selected.reaction_mechanism;
+            selected.initial_species_state = [schema](const R::ReactionEnvironment& context, std::int64_t)
+            {
+                R::CellSpeciesState state(schema->catalog());
+                state.dispersedPopulations = {{"micro", std::vector<double>(4)}, {"large", std::vector<double>(4)}};
+                state.set_amount(schema->catalog(), 41, P::Dispersed, .1 * context.bulkVolume, "micro");
+                return state;
+            };
+            selected.initial_population_numbers = [](const R::ReactionContext& context)
+            { return std::vector<double>{1e5 * context.environment.bulkVolume, 0.}; };
+            selected.species_source = [production](const R::ReactionContext& context, double dt)
+            {
+                R::ReactionSourceInput source;
+                if (production)
+                {
+                    const double amount = .001 * dt * context.environment.bulkVolume;
+                    source.externalTransfers.push_back(
+                        {"whole-step gas source", 41, P::Dispersed, amount, .002 * amount, 0., {}, "micro"});
+                }
+                return source;
+            };
+            selected.population_process = [production](
+                                              const S::BubbleGasPhysics::MultispeciesPopulationContext& c, double dt)
+            {
+                S::BubbleGasPhysics::MultispeciesPopulationPacket packet;
+                if (production)
+                    packet.numberEvents.push_back({"micro", 1000. * dt * c.chemistry.environment.bulkVolume, 0.});
+                return packet;
+            };
+            // The temperature owner supplies heat independently in both schedules; the gas-only
+            // reference has no finite-liquid energy storage or post-temperature source heat.
+            if (heating)
+                coupling.add_prescribed_heat_source().initialize_constant(42000000.);
+            auto& gas = coupling.configure_reacting_gas(selected);
+            coupling.initialize_heated_box(300., 300.);
+            const auto* scalar = coupling.find_scalar_void_fraction_model();
+            ASSERT_NE(scalar, nullptr);
+            std::vector<double> previous;
+            for (std::size_t owned = 0; owned < flow->temperature().mesh().num_owned_cells(); ++owned)
+                previous.push_back(scalar->alpha_g().value(static_cast<Pack::local_ordinal_type>(owned)));
+            for (int step = 1; step <= 2; ++step)
+            {
+                coupling.step();
+                EXPECT_NEAR(gas.global_species_moles(41), .1 + (production ? .0001 * step : 0.), 1e-13);
+                for (std::size_t owned = 0; owned < previous.size(); ++owned)
+                {
+                    const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+                    const double alpha = scalar->alpha_g().value(cell);
+                    const double expected = (.1 + (production ? .0001 * step : 0.)) * 8.31446261815324 *
+                                            flow->temperature().value(cell) / 100000.;
+                    EXPECT_NEAR(alpha, expected, 1e-13);
+                    EXPECT_GT(alpha, previous[owned]);
+                    EXPECT_NEAR(scalar->source_alpha_total().value(cell), (alpha - previous[owned]) / .1, 1e-13);
+                    previous[owned] = alpha;
+                }
+            }
+        }
 }
 
 TEST(ReactingBoussinesqCouplingTest, FormationEnergyStorageIsCollectivelyRejectedByTheSensibleTemperatureSolver)

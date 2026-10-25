@@ -3462,11 +3462,29 @@ TEST(BoussinesqSpeciesPlanarALETest, MixedPopulationEscapeAndIntervalReplayCommi
     auto& gas = *coupling.find_reacting_gas_model();
     auto checkpoint = coupling.create_coupling_checkpoint();
     const auto accepted_receipt = gas.species_event_receipt();
+    const auto* scalar = coupling.find_scalar_void_fraction_model();
+    ASSERT_NE(scalar, nullptr);
+    std::vector<double> accepted_alpha, accepted_source;
+    for (std::size_t owned = 0; owned < configured.mesh->num_owned_cells(); ++owned)
+        accepted_alpha.push_back(scalar->alpha_g().value(static_cast<Pack::local_ordinal_type>(owned)));
     coupling.step();
     const auto accepted_surface = coupling.free_surface_diagnostics();
     const auto accepted_events = gas.physical_escape_events();
     const auto accepted_step = gas.species_event_receipt();
     const auto accepted_mass = coupling.liquid_mass_inventory().totalMass();
+    double local_change = 0., global_change = 0.;
+    for (std::size_t owned = 0; owned < accepted_alpha.size(); ++owned)
+    {
+        const auto cell = static_cast<Pack::local_ordinal_type>(owned);
+        const double change = scalar->alpha_g().value(cell) - accepted_alpha[owned];
+        local_change = std::max(local_change, std::abs(change));
+        EXPECT_DOUBLE_EQ(scalar->alpha_g().value(cell), gas.alpha_g().value(cell));
+        EXPECT_NEAR(scalar->source_alpha_total().value(cell), change / accepted_step.time_step, 1e-13);
+        accepted_source.push_back(scalar->source_alpha_total().value(cell));
+    }
+    Teuchos::reduceAll(
+        *configured.mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_change, &global_change);
+    EXPECT_GT(global_change, 0.); // The full-step assertion must see actual population transport/escape.
     SimpleFluid::GasMolesBySpecies expected;
     for (const auto& event : accepted_events)
         if (event.phase == SimpleFluid::Reacting::SpeciesPhase::Dispersed ||
@@ -3491,6 +3509,9 @@ TEST(BoussinesqSpeciesPlanarALETest, MixedPopulationEscapeAndIntervalReplayCommi
     EXPECT_EQ(gas.physical_escape_events(), accepted_events);
     EXPECT_EQ(coupling.free_surface_diagnostics().vented_gas_moles, accepted_surface.vented_gas_moles);
     EXPECT_DOUBLE_EQ(coupling.liquid_mass_inventory().totalMass(), accepted_mass);
+    for (std::size_t owned = 0; owned < accepted_source.size(); ++owned)
+        EXPECT_DOUBLE_EQ(
+            scalar->source_alpha_total().value(static_cast<Pack::local_ordinal_type>(owned)), accepted_source[owned]);
     coupling.accept_coupling_checkpoint(checkpoint);
 }
 TEST(BoussinesqSpeciesPlanarALETest, RankLocalSourceFailureAfterMotionRestoresGeometryReceiptAndRetries)

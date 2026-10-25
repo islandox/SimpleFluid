@@ -372,22 +372,25 @@ public:
     void refresh_geometry(typename FVM::TransportGeometryCache<mesh_type>::shared_geometry_type geometry);
 
     /**
-     * @brief Current EOS-derived submerged bubble volume before alpha bounds.
+     * @brief Current EOS-derived submerged Resolved and Dispersed gas volume before alpha bounds.
      *
-     * This is the volume integral of `alpha_g_raw`, not the bounded
-     * hydrodynamic void fraction.
+     * Species reconstruction validates the total EOS occupancy before publication;
+     * this integrates `alpha_g`, including stationary Resolved gas. The population
+     * transport diagnostic `alpha_g_raw` contains only Dispersed gas.
      */
     scalar_type global_submerged_bubble_volume() const;
     /** @brief Raw bubble volume hidden by the configured upper alpha bound. */
     scalar_type global_unrepresented_bubble_volume() const;
     /**
-     * @brief Re-evaluate raw bubble volume at an absolute-pressure offset.
+     * @brief Re-evaluate raw submerged Resolved and Dispersed gas volume at a pressure offset.
      *
      * The candidate replaces the uniform thermodynamic pressure offset while
      * retaining the accepted reconstructed gauge-pressure variation.  Current
      * temperatures, population number densities, gas moles, the configured
      * surface-tension correlation, and the existing Laplace/EOS radius solve
-     * are reused.  The accepted model fields are not modified.
+     * are reused for Dispersed populations. Stationary Resolved gas uses its
+     * mixture EOS at the candidate pressure without a bubble Laplace correction.
+     * The accepted model fields are not modified.
      */
     scalar_type evaluate_submerged_bubble_volume(scalar_type candidate_absolute_pressure_offset) const;
 
@@ -533,9 +536,12 @@ private:
     SIMPLEFLUID_EQUATIONS_LOCAL std::vector<BubbleGasPhysics::PopulationCondition> population_conditions(
         const Reacting::CellSpeciesState& state, const std::vector<BubbleGasPhysics::PopulationNumberState>& numbers,
         const Reacting::ReactionEnvironment& environment) const;
+    SIMPLEFLUID_EQUATIONS_LOCAL double population_slip_speed(const BubbleGasPhysics::PopulationCondition& condition,
+        const Reacting::ReactionEnvironment& environment, double liquid_density, double liquid_viscosity) const;
     SIMPLEFLUID_EQUATIONS_LOCAL BubbleGasPhysics::MultispeciesPopulationPacket population_packet(
         const Reacting::ReactionContext& chemistry,
-        const std::vector<BubbleGasPhysics::PopulationCondition>& populations, double duration) const;
+        const std::vector<BubbleGasPhysics::PopulationCondition>& populations, double duration, double liquid_density,
+        double liquid_viscosity) const;
     SIMPLEFLUID_EQUATIONS_LOCAL void append_species_fields(std::vector<field_type*>& fields);
     SIMPLEFLUID_EQUATIONS_LOCAL void append_species_fields(std::vector<const field_type*>& fields) const;
     // Scratch storage is not accepted physical state. Numeric operators are

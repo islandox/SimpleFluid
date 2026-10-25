@@ -276,7 +276,9 @@ auto ReactingGasModel<Pack, MeshType>::global_integral(
 template<TpetraTypePack Pack, class MeshType>
 auto ReactingGasModel<Pack, MeshType>::global_submerged_bubble_volume() const -> scalar_type
 {
-    return global_integral(d_alpha_g_raw);
+    // Species reconstruction validates total Resolved + Dispersed occupancy.
+    // The raw population field remains specific to the dispersed transport ledger.
+    return global_integral(d_alpha_g);
 }
 
 template<TpetraTypePack Pack, class MeshType>
