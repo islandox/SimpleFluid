@@ -2,6 +2,8 @@
  * Directed interval arithmetic and retained certificates remain confined to this
  * provider; Mode templates retain the compiled implementation boundary.
  */
+#include "geometry/PLIC/GeometryError.hh"
+
 namespace SimpleFluid::PLIC::details
 {
 namespace certification_kernel SIMPLEFLUID_LOCAL
@@ -129,7 +131,9 @@ template<ArithmeticMode Mode> int sign(Interval a)
         return -1;
     if (a.zero())
         return 0;
-    reject("support/topology sign unresolved from original coordinate enclosures.");
+    ++statistics.rejections;
+    throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+        "Bounded FP geometry: support/topology sign unresolved from original coordinate enclosures.");
 }
 
 template<ArithmeticMode Mode> Point transform(const Point& p, const Frame& from, const Frame& to)

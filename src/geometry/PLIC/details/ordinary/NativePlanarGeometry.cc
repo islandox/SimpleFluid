@@ -1,7 +1,9 @@
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <map>
 #include <set>
@@ -25,6 +27,7 @@ struct EdgePointIndex<ArithmeticMode::Ordinary>::Impl
 namespace
 {
 using Polygon = std::vector<on::WidePoint>;
+namespace predicates = details::ordinary_predicates;
 constexpr std::size_t vertex_cap = 4096;
 long double norm(const on::WidePoint& p)
 {
@@ -40,44 +43,88 @@ std::size_t axis_of(const on::WidePoint& n)
             axis = i;
     return axis;
 }
+struct DefiningPlane
+{
+    std::array<std::size_t, 3> vertices;
+    unsigned projection;
+    int winding;
+};
+DefiningPlane defining_plane(const Polygon& p)
+{
+    bool unresolved = false;
+    for (std::size_t i = 1; i + 1 < p.size(); ++i)
+    {
+        unsigned projection = 0;
+        predicates::Result best;
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            const auto area = predicates::projected_orientation(p[0], p[i], p[i + 1], a);
+            unresolved = unresolved || area.sign == predicates::Sign::Unresolved;
+            if ((area.sign == predicates::Sign::Positive || area.sign == predicates::Sign::Negative) &&
+                std::abs(area.value) > std::abs(best.value))
+            {
+                projection = a;
+                best = area;
+            }
+        }
+        if (best.sign == predicates::Sign::Positive || best.sign == predicates::Sign::Negative)
+            return {{0, i, i + 1}, projection, predicates::require_sign(best)};
+    }
+    throw GeometryError(unresolved ? GeometryErrorCode::UnresolvedArithmetic : GeometryErrorCode::InvalidTopology,
+        "Ordinary native face has no resolved noncollinear defining triangle.");
+}
+bool on_plane(const Polygon& p, const DefiningPlane& plane, const on::WidePoint& v)
+{
+    // Incidence of the defining triangle is structural, independent of the
+    // rounding in a separately computed normal. No proximity test is used.
+    for (const auto index : plane.vertices)
+        if (v == p[index])
+            return true;
+    const auto& t = plane.vertices;
+    return predicates::require_sign(predicates::orientation({p[t[0]], p[t[1]], p[t[2]], v})) == 0;
+}
 void validate(const Polygon& p)
 {
-    if (p.size() < 3 || p.size() > vertex_cap)
-        on::reject("invalid native planar polygon size.");
+    if (p.size() > vertex_cap)
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary native planar vertex cap exhausted.");
+    if (p.size() < 3)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary native planar polygon has too few vertices.");
     std::set<on::WidePoint> seen;
-    const auto n = on::polygon_vector(p);
-    if (!(norm(n) > 0))
-        on::reject("degenerate native planar polygon.");
     for (const auto& v : p)
     {
         for (auto x : v)
             on::finite(x);
         if (!seen.insert(v).second)
-            on::reject("repeated native planar vertex.");
-        if (on::dot(n, on::sub(v, p[0])) != 0)
-            on::reject("native face coplanarity unresolved.");
+            throw GeometryError(GeometryErrorCode::InvalidTopology, "Ordinary native planar vertex is repeated.");
     }
+    const auto plane = defining_plane(p);
+    if (!(norm(on::polygon_vector(p)) > 0))
+        throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, "Ordinary native face area is unresolved.");
+    for (const auto& v : p)
+        if (!on_plane(p, plane, v))
+            throw GeometryError(GeometryErrorCode::InvalidTopology, "Ordinary native face is nonplanar.");
     for (std::size_t e = 0; e < p.size(); ++e)
     {
-        const auto d = on::sub(p[(e + 1) % p.size()], p[e]);
         for (const auto& v : p)
-            if (on::dot(n, on::cross(d, on::sub(v, p[e]))) < 0)
-                on::reject("nonconvex native planar polygon.");
+            if (plane.winding * predicates::require_sign(predicates::projected_orientation(
+                                    p[e], p[(e + 1) % p.size()], v, plane.projection)) <
+                0)
+                throw GeometryError(GeometryErrorCode::InvalidTopology, "Ordinary native face is nonconvex.");
     }
 }
 bool coplanar(const Polygon& a, const Polygon& b)
 {
-    const auto n = on::polygon_vector(a);
-    return std::all_of(b.begin(), b.end(), [&](const auto& p) { return on::dot(n, on::sub(p, a[0])) == 0; });
+    const auto plane = defining_plane(a);
+    return std::all_of(b.begin(), b.end(), [&](const auto& p) { return on_plane(a, plane, p); });
 }
 bool point_inside(const Polygon& poly, const on::WidePoint& p, bool check_plane = true)
 {
-    const auto n = on::polygon_vector(poly);
-    if (check_plane && on::dot(n, on::sub(p, poly[0])) != 0)
+    const auto plane = defining_plane(poly);
+    if (check_plane && !on_plane(poly, plane, p))
         return false;
     for (std::size_t i = 0; i < poly.size(); ++i)
-        if (on::cross(on::sub(poly[(i + 1) % poly.size()], poly[i]), on::sub(p, poly[i]))[axis_of(n)] *
-                (n[axis_of(n)] < 0 ? -1.L : 1.L) <
+        if (plane.winding * predicates::require_sign(predicates::projected_orientation(
+                                poly[i], poly[(i + 1) % poly.size()], p, plane.projection)) <
             0)
             return false;
     return true;
@@ -174,7 +221,7 @@ std::vector<char> line_packet(on::WidePoint a, on::WidePoint b)
 OrdinaryFacePtr OrdinaryFace::make(std::span<const GeometryPoint> vertices)
 {
     if (vertices.size() > vertex_cap)
-        on::reject("native planar vertex cap exhausted.");
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary native planar vertex cap exhausted.");
     Polygon points;
     points.reserve(vertices.size());
     for (const auto& p : vertices)
@@ -184,7 +231,7 @@ OrdinaryFacePtr OrdinaryFace::make(std::span<const GeometryPoint> vertices)
 OrdinaryFacePtr OrdinaryFace::make_wide(std::span<const WidePoint> vertices)
 {
     if (vertices.size() > vertex_cap)
-        on::reject("native planar vertex cap exhausted.");
+        throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary native planar vertex cap exhausted.");
     auto impl = std::make_shared<Impl>();
     impl->polygon.assign(vertices.begin(), vertices.end());
     validate(impl->polygon);
@@ -279,7 +326,7 @@ GeometryMeasure<ArithmeticMode::Ordinary> OrdinaryFace::coplanar_area_ratio(
 {
     if (storage_bytes() > budget || denominator.storage_bytes() > budget - storage_bytes())
         on::reject("native face measure byte cap exhausted.");
-    if (!coplanar(impl_->polygon, denominator.impl_->polygon))
+    if (impl_->support != denominator.impl_->support && !coplanar(impl_->polygon, denominator.impl_->polygon))
         on::reject("native face area ratio has distinct supports.");
     const auto a = on::polygon_vector(impl_->polygon), b = on::polygon_vector(denominator.impl_->polygon);
     const auto axis = axis_of(b);

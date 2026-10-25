@@ -377,6 +377,13 @@ template<ArithmeticMode Mode> void retained_budget(const GeneralVoF::Data& data)
         budget.add(sizeof(node) + node.identity.capacity() + node.coordinate_identity.capacity());
     for (const auto& [id, point] : data.topology->finite_nodes)
         budget.add(sizeof(id) + 4 * sizeof(void*) + PLIC::dynamic_point_storage_bytes(point));
+    for (const auto& [id, identity] : data.topology->construction_nodes)
+        budget.add(sizeof(id) + sizeof(identity) + 4 * sizeof(void*) + identity.capacity());
+    for (const auto& [id, face] : data.topology->construction_faces)
+        budget.add(sizeof(id) + sizeof(face) + 4 * sizeof(void*) + face.domain.capacity() + face.surface.capacity() +
+                   face.identity.capacity() + face.node_gids.capacity() * sizeof(std::uint64_t) +
+                   AMR::encode_adaptive_key(face.first).size() +
+                   (face.second ? AMR::encode_adaptive_key(*face.second).size() : 0));
     for (const auto& tile : data.topology->tiles)
     {
         budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t));

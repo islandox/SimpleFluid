@@ -89,12 +89,12 @@ template<ArithmeticMode Mode> bool incident(const Vertex& v, const PlanePtr& pla
         if (same_source_plane(*retained, *plane))
             return true;
     }
-    return false;
+    return construction_edge_incident<Mode>(v, plane);
 }
 
 bool recover_source_identity(Vertex& vertex, const Frame& frame)
 {
-    if (vertex.source_identity || vertex.incident.size() < 3 || !certification_environment())
+    if (vertex.numerical_only || vertex.source_identity || vertex.incident.size() < 3 || !certification_environment())
         return false;
     for (const auto& plane : vertex.incident)
     {
@@ -255,6 +255,12 @@ DynamicClipResult GeometryKernel<Mode>::clip(const GeometryHalfspace& input, boo
         active_work->charge(storage_bytes(), 1);
         auto rebased = std::make_shared<Impl>(*impl_);
         rebased->frame.origin = input.anchor;
+        active_work->charge(1, sizeof(GeometryConstruction));
+        auto recipe = std::make_shared<GeometryConstruction>();
+        recipe->kind = GeometryConstruction::Kind::Rebase;
+        recipe->parent = construction_source<Mode>(impl_);
+        recipe->rebase_input = input;
+        rebased->construction = std::move(recipe);
         rebased->moment_cache = std::make_shared<MomentCache>();
         for (auto& vertex : rebased->vertices)
             vertex.coordinates = transform<Mode>(vertex.coordinates, impl_->frame, rebased->frame);
@@ -289,7 +295,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_by_face(
 
 template<ArithmeticMode Mode>
 DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const DynamicConvexGeometry::Impl>& source_base,
-    std::size_t plane_id, bool measure_section, bool construct_outside, bool partition_proof) const
+    std::size_t plane_id, bool measure_section, bool construct_outside, bool partition_proof, int orientation_override) const
 {
     static_assert(Mode == kernel_mode);
     const auto source = checked_geometry_storage<Mode>(source_base);
@@ -297,7 +303,13 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     if ((impl_->partition_proof_only && !partition_proof) ||
         (partition_proof && (measure_section || !construct_outside)))
         reject("invalid private partition witness clip mode.");
-    const auto support = source->surfaces.at(plane_id);
+    auto support = source->surfaces.at(plane_id);
+    if (orientation_override)
+    {
+        if (orientation_override != 1 && orientation_override != -1)
+            reject("invalid construction replay orientation.");
+        support.orientation = orientation_override;
+    }
     const auto& plane = support.plane;
     std::vector<Scalar> distances;
     std::vector<int> signs;
@@ -406,6 +418,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         if (!((distances[a].value > 0 && distances[b].value < 0) || (distances[b].value > 0 && distances[a].value < 0)))
             reject("edge intersection lacks certified opposite endpoint signs.");
         Vertex vertex;
+        vertex.numerical_only = impl_->numerical_only || source->numerical_only;
         const auto denominator = distances[a] - distances[b];
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
@@ -419,7 +432,7 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         for (const auto& p : vertices[a].incident)
             if (incident<Mode>(vertices[b], p))
                 vertex.incident.push_back(p);
-        if (!incident<Mode>(vertex, plane))
+        if (std::find(vertex.incident.begin(), vertex.incident.end(), plane) == vertex.incident.end())
             vertex.incident.push_back(plane);
         for (const auto& key : vertices[a].authorities)
             if (std::find(vertices[b].authorities.begin(), vertices[b].authorities.end(), key) !=
@@ -429,6 +442,8 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
             if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) == vertex.authorities.end())
                 vertex.authorities.push_back(key);
         recover_source_identity(vertex, impl_->frame);
+        preserve_crossing_incidence<Mode>(vertex, vertices[a], vertices[b], impl_->frame,
+            impl_->numerical_only || source->numerical_only);
         if (vertices.size() >= impl_->limits.maximum_vertices)
             reject("intersection vertex cap exhausted.");
         const auto index = vertices.size();
@@ -564,6 +579,19 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
     split->parent = impl_->ancestry;
     if (impl_->ancestry->depth == std::numeric_limits<std::size_t>::max())
         reject("construction ancestry depth overflows.");
+    active_work->charge(1, sizeof(GeometryClipConstruction));
+    auto construction = std::make_shared<GeometryClipConstruction>();
+    construction->parent = construction_source<Mode>(impl_);
+    construction->plane = plane;
+    construction->mode = Mode;
+    construction->orientation = support.orientation;
+    construction->measure_section = measure_section;
+    construction->construct_outside = construct_outside;
+    construction->partition_proof = partition_proof;
+    active_work->charge(plane->source_vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
+    for (const auto& weak : plane->source_vertices)
+        if (const auto point = weak.lock())
+            construction->retained_points.push_back(point);
     const auto child = [&](unsigned outside)
     {
         active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
@@ -571,6 +599,13 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         poly->frame = impl_->frame;
         poly->reference_origin = impl_->reference_origin;
         poly->limits = impl_->limits;
+        poly->numerical_only = impl_->numerical_only || source->numerical_only;
+        active_work->charge(1, sizeof(GeometryConstruction));
+        auto recipe = std::make_shared<GeometryConstruction>();
+        recipe->kind = GeometryConstruction::Kind::Clip;
+        recipe->clip = construction;
+        recipe->outside = outside != 0;
+        poly->construction = std::move(recipe);
         poly->ancestry =
             std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
         std::set<std::size_t> used;
@@ -741,6 +776,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::translated(GeometryPoint displace
     // Both vertex and support anchors carry the same displacement.
     result->ancestry = std::make_shared<Ancestry>();
     result->partition_certificate.reset();
+    result->construction.reset();
     std::map<PlanePtr, PlanePtr> planes;
     for (auto& vertex : result->vertices)
         for (auto& plane : vertex.incident)
@@ -782,7 +818,7 @@ template DynamicClipResult GeometryKernel<kernel_mode>::clip_by_face(
     const DynamicConvexGeometry& source, std::size_t face, bool measure_section) const;
 template DynamicClipResult GeometryKernel<kernel_mode>::clip_impl(
     const std::shared_ptr<const DynamicConvexGeometry::Impl>& source, std::size_t plane_id, bool measure_section,
-    bool construct_outside, bool partition_proof) const;
+    bool construct_outside, bool partition_proof, int orientation_override) const;
 template DynamicPhaseMeasures GeometryKernel<kernel_mode>::phases(const GeometryHalfspace& gas) const;
 template bool construction_contains<kernel_mode>(
     const std::shared_ptr<const Ancestry>& parent, std::shared_ptr<const Ancestry> child);

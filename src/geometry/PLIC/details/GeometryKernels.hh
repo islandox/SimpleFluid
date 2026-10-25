@@ -133,7 +133,7 @@ public:
     DynamicClipResult clip(const GeometryHalfspace& input, bool measure_section) const;
     DynamicClipResult clip_by_face(const DynamicConvexGeometry& source, std::size_t face, bool measure_section) const;
     DynamicClipResult clip_impl(const std::shared_ptr<const DynamicConvexGeometry::Impl>& source, std::size_t plane_id,
-        bool measure_section, bool construct_outside = true, bool partition_proof = false) const;
+        bool measure_section, bool construct_outside = true, bool partition_proof = false, int orientation_override = 0) const;
     DynamicPhaseMeasures phases(const GeometryHalfspace& gas) const;
     bool bounds_prove_disjoint_interiors(const DynamicConvexGeometry& other) const;
     DynamicConvexGeometryPtr intersect(const DynamicConvexGeometry& other) const;
@@ -390,7 +390,7 @@ public:
     DynamicClipResult clip(const GeometryHalfspace& input, bool measure_section) const;
     DynamicClipResult clip_by_face(const DynamicConvexGeometry& source, std::size_t face, bool measure_section) const;
     DynamicClipResult clip_impl(const std::shared_ptr<const DynamicConvexGeometry::Impl>& source, std::size_t plane_id,
-        bool measure_section, bool construct_outside = true, bool partition_proof = false) const;
+        bool measure_section, bool construct_outside = true, bool partition_proof = false, int orientation_override = 0) const;
     DynamicPhaseMeasures phases(const GeometryHalfspace& gas) const;
     bool bounds_prove_disjoint_interiors(const DynamicConvexGeometry& other) const;
     DynamicConvexGeometryPtr intersect(const DynamicConvexGeometry& other) const;

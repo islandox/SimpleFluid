@@ -70,6 +70,17 @@ struct Cell
 using namespace general_vof_detail;
 struct GeneralVoF::Data
 {
+    /** Immutable identity metadata from the already admitted native draft.
+     * This catalog authorizes dependency lookups; it does not enlarge the
+     * caller-visible owned-incident face or node controls. */
+    struct FaceAuthority
+    {
+        AMR::AdaptiveBytes domain, surface, identity;
+        std::vector<std::uint64_t> node_gids;
+        Key first;
+        std::optional<Key> second;
+        bool exterior = false;
+    };
     struct Wall
     {
         AMR::AdaptiveBytes identity;
@@ -84,6 +95,8 @@ struct GeneralVoF::Data
         std::vector<AMR::AdaptiveTile> tiles;
         std::vector<AMR::AdaptiveNode> nodes;
         std::map<std::uint64_t, PLIC::DynamicPoint> finite_nodes;
+        std::map<std::uint64_t, FaceAuthority> construction_faces;
+        std::map<std::uint64_t, AMR::AdaptiveBytes> construction_nodes;
         std::map<std::uint64_t, Key> by_gid;
         std::map<Key, std::set<Key>> adjacency;
         std::map<std::uint64_t, std::set<Key>> node_fans;
