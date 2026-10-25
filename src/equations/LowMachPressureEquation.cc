@@ -9,6 +9,8 @@
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <sstream>
 #include <stdexcept>
 
 namespace SimpleFluid::Reacting
@@ -292,13 +294,31 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_SUM, 1, &local_scale, &scale);
     if (!std::isfinite(scale) || !std::isfinite(result.global_compatibility_residual))
         throw std::invalid_argument("Global pressure compatibility operands overflow.");
-    if (std::abs(result.global_compatibility_residual) > tolerance * std::max(1.0, scale))
-        throw std::runtime_error("Closed low-Mach source target fails global pressure compatibility.");
+    const double continuity_limit = tolerance * std::max(1.0, scale);
+    if (!std::isfinite(continuity_limit))
+        throw std::invalid_argument("Low-Mach physical continuity limit is not finitely representable.");
+    if (std::abs(result.global_compatibility_residual) > continuity_limit)
+    {
+        std::ostringstream message;
+        message.precision(17);
+        message << "Closed low-Mach source target fails global pressure compatibility: residual="
+                << result.global_compatibility_residual << " m3/s, original limit=" << continuity_limit
+                << " m3/s, dt=" << dt << " s. EOS-minus-advected-volume cancellation must resolve this physical gate.";
+        throw std::runtime_error(message.str());
+    }
     result.continuity_scale = scale;
     matrix->fillComplete();
     d->correction.owned_data().putScalar(0);
     d->solver.notify_operator_values_changed();
-    result.linear = d->solver.solve_with_statistics(matrix, *rhs, d->correction.owned_data(), options);
+    // The RHS vanishes as physical correctors converge. Its norm alone can
+    // demand sub-roundoff absolute accuracy even after physical continuity is
+    // resolved. An L2 residual allowance of gate/8 also bounds every cell;
+    // the independently recomputed physical and linearized gates below still
+    // use the original limit. Saturation only makes this allowance stricter.
+    result.linear_rhs_norm_floor = std::min(std::numeric_limits<double>::max(),
+        (continuity_limit / 8) / options.tolerance);
+    result.linear = d->solver.solve_with_statistics(matrix, *rhs, d->correction.owned_data(), options,
+        LinearResidualScaling{result.linear_rhs_norm_floor});
     if (!result.linear.converged)
         throw std::runtime_error("Low-Mach pressure failed its true residual gate.");
     d->correction.sync_ghosts();
@@ -360,9 +380,9 @@ LowMachPressureEquation::Result LowMachPressureEquation::project_impl(const Scal
     Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 1, &local_maximum, &result.maximum_continuity_residual);
     Teuchos::reduceAll(*map->getComm(), Teuchos::REDUCE_MAX, 1, &local_linearized_maximum,
         &result.maximum_linearized_continuity_residual);
-    if (result.maximum_linearized_continuity_residual > tolerance * std::max(1.0, scale))
+    if (result.maximum_linearized_continuity_residual > continuity_limit)
         throw std::runtime_error("Low-Mach pressure correction fails its linearized continuity residual gate.");
-    if (!reactive && result.maximum_continuity_residual > tolerance * std::max(1.0, scale))
+    if (!reactive && result.maximum_continuity_residual > continuity_limit)
         throw std::runtime_error("Low-Mach pressure correction fails physical continuity residual gate.");
     FVM::cell_gradient(
         d->correction, BoundaryConditionMap{}, d->gradient, d->gradient_cache, FVM::CellGradientScheme::LeastSquares);

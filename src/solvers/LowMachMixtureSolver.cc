@@ -1742,6 +1742,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                           d->options.linear, d->options.continuity_tolerance);
             trial.thermodynamic_pressure += projected.thermodynamic_pressure_increment;
             check(std::isfinite(trial.thermodynamic_pressure), "Uniform pressure gauge increment overflow.");
+            result.pressure_linear = projected.linear;
+            result.pressure_linear_rhs_norm_floor = projected.linear_rhs_norm_floor;
             result.maximum_continuity_residual = projected.maximum_continuity_residual;
             result.maximum_occupancy_error = d->maximum(occupancy);
             double flux_change = 0, smallest_volume = std::numeric_limits<double>::infinity();

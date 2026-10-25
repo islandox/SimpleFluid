@@ -1,17 +1,20 @@
 /** @file testLowMachMixtureSolver.cc
  * @brief Native low-Mach physical budgets, pressure projection and immutable transaction regressions.
  */
+#include "FVM/CellOperators.hh"
 #include "geometry/PlanarALEMeshMotion.hh"
 #include "geometry/mesh/OrthogonalCartesian3D.hh"
 #include "geometry/mesh/SemiStructuredXY_Z.hh"
 #include "solvers/LowMachMixtureSolver.hh"
 #include "utils/testing_environment.hh"
+#include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <sstream>
 
 namespace
 {
@@ -194,6 +197,219 @@ TEST(LowMachMixtureSolverTest, NonuniformHeatingDrivesNativeConservativeFlowWith
     EXPECT_NEAR(result.mass_error, 0, 1e-12);
     EXPECT_GT(result.correctors, 1);
 }
+TEST(LowMachMixtureSolverTest, OrdinaryThermodynamicStateRetainsPhysicalGatesAtSmallTimeSteps)
+{
+    // The heat rate and ordinary 300 K/1 bar state stay fixed as dt decreases.
+    // Requiring a fixed RHS-relative Krylov tolerance, or sub-ulp global volume
+    // cancellation, must not prevent a physically resolved step.
+    for (const double dt : {1e-4, 1e-6, 1e-8})
+    {
+        SCOPED_TRACE(dt);
+        Solver::Mesh::DistributionOptions distribution;
+        distribution.allow_empty_partitions = true;
+        auto grid = std::make_shared<Solver::Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+            Vec3D<ArrReal>{ArrReal{0., .01}, ArrReal{0., .01}, ArrReal{0., .005, .01}}), distribution);
+        const auto gas = ideal(catalog());
+        const auto controls = options();
+        Solver solver(grid, {gas}, controls);
+        solver.initialize(state(*grid, gas, true));
+        const auto initial = solver.state();
+        std::vector<Solver::CellSources> sources(grid->num_owned_cells());
+        for (size_t c = 0; c < sources.size(); ++c)
+            sources[c].internal_energy = {grid->cell_centroid(static_cast<LO>(c)).z < .005 ? dt : 0.};
+        Solver::Diagnostics result;
+        ASSERT_NO_THROW(result = solver.advance(dt, sources));
+        EXPECT_EQ(solver.state().revision, initial.revision + 1);
+        EXPECT_DOUBLE_EQ(solver.state().time, dt);
+        EXPECT_LE(result.maximum_occupancy_error, controls.volume_relative_tolerance);
+        EXPECT_LE(result.maximum_continuity_residual, controls.continuity_tolerance);
+        EXPECT_LE(std::abs(result.internal_energy_error),
+            controls.conservation_relative_tolerance * result.caloric_energy_scale +
+                result.internal_energy_roundoff_bound);
+        EXPECT_NEAR(result.mass_error, 0., 1e-12);
+        for (const double error : result.species_errors)
+            EXPECT_NEAR(error, 0., 1e-12);
+    }
+}
+
+TEST(LowMachMixtureSolverTest, UnresolvedLargeVolumeContinuityTargetRejectsWithoutPublishing)
+{
+    // At O(1 m3), binary64 EOS-minus-transported volume differences divided
+    // by a tiny dt can exceed the original 1e-10 m3/s physical gate. The inner
+    // pressure normalization must never turn that unresolved target into a pass.
+    int rejections = 0;
+    for (const double dt : {1e-4, 1e-6, 1e-8})
+    {
+        SCOPED_TRACE(dt);
+        auto grid = mesh();
+        const auto gas = ideal(catalog());
+        Solver solver(grid, {gas}, options());
+        solver.initialize(state(*grid, gas, true));
+        const auto initial = solver.state();
+        std::vector<Solver::CellSources> sources(initial.cells.size());
+        for (size_t c = 0; c < sources.size(); ++c)
+            sources[c].internal_energy = {grid->cell_centroid(static_cast<LO>(c)).z < .5 ? dt : 0.};
+        try
+        {
+            const auto trial = solver.preview(dt, sources);
+            EXPECT_LE(trial.diagnostics().maximum_occupancy_error, options().volume_relative_tolerance);
+            EXPECT_LE(trial.diagnostics().maximum_continuity_residual, options().continuity_tolerance);
+        }
+        catch (const std::exception& error)
+        {
+            ++rejections;
+            const std::string message = error.what();
+            EXPECT_NE(message.find("global pressure compatibility: residual="), std::string::npos) << message;
+            EXPECT_NE(message.find("original limit="), std::string::npos) << message;
+            EXPECT_NE(message.find("dt="), std::string::npos) << message;
+        }
+        EXPECT_EQ(solver.state().revision, initial.revision);
+        EXPECT_DOUBLE_EQ(solver.state().time, initial.time);
+        EXPECT_DOUBLE_EQ(solver.state().thermodynamic_pressure, initial.thermodynamic_pressure);
+        for (size_t c = 0; c < initial.cells.size(); ++c)
+        {
+            EXPECT_EQ(solver.state().cells[c].phases[0].moles, initial.cells[c].phases[0].moles);
+            EXPECT_DOUBLE_EQ(solver.state().cells[c].phases[0].internal_energy,
+                initial.cells[c].phases[0].internal_energy);
+            EXPECT_DOUBLE_EQ(solver.velocity().value(static_cast<LO>(c)).z, 0.);
+        }
+        for (const auto face : solver.volume_flux().owned_face_ids())
+            EXPECT_DOUBLE_EQ(solver.volume_flux().value(face), 0.);
+    }
+    EXPECT_GT(rejections, 0);
+}
+
+void ordinary_liquid_gas_contrast(int iteration_budget)
+{
+    const auto species = catalog();
+    const auto gas = ideal(species);
+    double maximum_rhs_relative_pressure_residual = 0, maximum_absolute_pressure_residual = 0;
+    int maximum_pressure_iterations = 0;
+    const auto run_case = [&](double compressibility, double dt)
+    {
+        SCOPED_TRACE(compressibility);
+        SCOPED_TRACE(dt);
+        Solver::Mesh::DistributionOptions distribution;
+        distribution.allow_empty_partitions = true;
+        auto grid = std::make_shared<Solver::Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+            Vec3D<ArrReal>{ArrReal{0., .01}, ArrReal{0., .01},
+                ArrReal{0., .00125, .0025, .00375, .005, .00625, .0075, .00875, .01}}), distribution);
+        const auto liquid = R::make_linear_compressible_mixture_liquid(species, {250, 600, 10000, 2000000},
+            [compressibility](std::span<const double>)
+            { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4000, 0, compressibility, 0, 0, 0}; });
+        auto controls = options();
+        if (iteration_budget > 0)
+            controls.linear.max_iterations = iteration_budget;
+        Solver solver(grid, {liquid, gas}, controls);
+        Solver::State initial;
+        initial.thermodynamic_pressure = 100000;
+        initial.cells.resize(grid->num_owned_cells());
+        std::vector<Solver::CellSources> sources(initial.cells.size());
+        constexpr double gas_fractions[] = {1e-8, 1e-10, 1e-6, .01, .2, .8, .2, .01};
+        for (size_t c = 0; c < initial.cells.size(); ++c)
+        {
+            const auto cell = static_cast<LO>(c);
+            const size_t index = std::min(size_t(grid->cell_centroid(cell).z / .00125), size_t(7));
+            const double volume = grid->cell_volume(cell), alpha = gas_fractions[index];
+            const double liquid_mass = 1000 * (1 - alpha) * volume;
+            const double gas_moles = 100000 * alpha * volume / (gas_constant * 300);
+            initial.cells[c].phases = {{liquid, {liquid_mass / .018, 0.}, 100000, 0., 300},
+                {gas, {0., gas_moles}, 100000, 6000 * gas_moles, gas_moles > 0 ? 300. : 0.}};
+            sources[c].internal_energy = {(1 + double(index)) * dt, 0.};
+        }
+        solver.initialize(initial);
+        std::optional<Solver::Trial> staged;
+        ASSERT_NO_THROW(staged.emplace(solver.preview(dt, sources)));
+        const auto& trial = *staged;
+        const auto& result = trial.diagnostics();
+        EXPECT_TRUE(result.pressure_linear.converged);
+        EXPECT_LE(result.pressure_linear.iterations, controls.linear.max_iterations);
+        EXPECT_LE(result.pressure_linear.achieved_tolerance, controls.linear.tolerance);
+        const double absolute_residual = result.pressure_linear.achieved_tolerance *
+                                         std::max(result.pressure_linear.rhs_norm,
+                                             result.pressure_linear_rhs_norm_floor);
+        maximum_absolute_pressure_residual = std::max(maximum_absolute_pressure_residual, absolute_residual);
+        if (result.pressure_linear.rhs_norm > 0)
+            maximum_rhs_relative_pressure_residual =
+                std::max(maximum_rhs_relative_pressure_residual, absolute_residual / result.pressure_linear.rhs_norm);
+        maximum_pressure_iterations = std::max(maximum_pressure_iterations, result.pressure_linear.iterations);
+        EXPECT_LE(controls.linear.tolerance * result.pressure_linear_rhs_norm_floor,
+            controls.continuity_tolerance / 8 * (1 + 8 * std::numeric_limits<double>::epsilon()));
+        // Rebuild final physical material continuity from public EOS/source
+        // receipts and final carrier flux, independently of the Krylov metric.
+        Solver::Traits::scalar_face_type material_flux(grid, 0., "independent_material_continuity");
+        for (size_t f = 0; f < grid->num_owned_faces(); ++f)
+        {
+            const auto& receipt = trial.owned_phase_transport()[f];
+            const double theta =
+                std::accumulate(receipt.material_fraction.begin(), receipt.material_fraction.end(), 0.);
+            material_flux.set_owned_value(static_cast<LO>(f), theta * trial.owned_volume_flux()[f]);
+        }
+        material_flux.sync_ghosts();
+        for (size_t c = 0; c < trial.state().cells.size(); ++c)
+        {
+            double eos_volume = 0, advected_volume = 0;
+            for (size_t a = 0; a < 2; ++a)
+            {
+                const auto& phase = trial.state().cells[c].phases[a];
+                const double amount = std::accumulate(phase.moles.begin(), phase.moles.end(), 0.);
+                auto fractions = phase.moles;
+                double mass = 0;
+                for (size_t species_index = 0; species_index < fractions.size(); ++species_index)
+                {
+                    mass += phase.moles[species_index] * species->species()[species_index].molarMass;
+                    fractions[species_index] /= amount;
+                }
+                eos_volume += mass / phase.thermodynamics
+                                         ->evaluate(phase.temperature, phase.absolute_pressure, fractions)
+                                         .density;
+                advected_volume += trial.transport_snapshot().cells[c].phases[a].advected_material_volume;
+            }
+            const auto cell = static_cast<LO>(c);
+            EXPECT_LE(std::abs(eos_volume - grid->cell_volume(cell)) / grid->cell_volume(cell),
+                controls.volume_relative_tolerance);
+            EXPECT_LE(std::abs(FVM::cell_flux_balance(*grid, material_flux, cell) -
+                               (eos_volume - advected_volume) / dt), controls.continuity_tolerance);
+        }
+        EXPECT_EQ(solver.state().revision, 0U);
+        EXPECT_NO_THROW(solver.commit(trial));
+        EXPECT_LE(result.maximum_occupancy_error, controls.volume_relative_tolerance);
+        EXPECT_LE(result.maximum_continuity_residual, controls.continuity_tolerance);
+        EXPECT_LE(std::abs(result.internal_energy_error),
+            controls.conservation_relative_tolerance * result.caloric_energy_scale +
+                result.internal_energy_roundoff_bound);
+        for (const double error : result.species_errors)
+            EXPECT_NEAR(error, 0., 1e-12);
+    };
+    for (const double compressibility : {4.5e-10, 0.})
+        for (const double dt : {1e-2, 1e-4, 1e-6, 1e-8})
+            run_case(compressibility, dt);
+    const auto format = [](double value)
+    {
+        std::ostringstream text;
+        text.precision(17);
+        text << value;
+        return text.str();
+    };
+    testing::Test::RecordProperty(
+        "maximum_pressure_rhs_relative_residual", format(maximum_rhs_relative_pressure_residual));
+    testing::Test::RecordProperty("maximum_pressure_absolute_residual", format(maximum_absolute_pressure_residual));
+    testing::Test::RecordProperty("maximum_pressure_iterations", maximum_pressure_iterations);
+}
+
+TEST(LowMachMixtureSolverTest, OrdinaryLiquidGasSusceptibilityContrastRetainsPhysicalGatesAtSmallTimeSteps)
+{
+    ordinary_liquid_gas_contrast(0);
+}
+
+TEST(LowMachMixtureSolverTest, PhysicalPressureAccuracyRespectsAnEightIterationBudgetAtSmallTimeSteps)
+{
+    // Eight unknowns permit a full Krylov space; the unchanged total iteration
+    // cap must not be spent chasing a tiny RHS-relative roundoff remainder
+    // after the original physical continuity/occupancy gates are resolved.
+    ordinary_liquid_gas_contrast(8);
+}
+
 TEST(LowMachMixtureSolverTest, IndependentNonidealMixtureEOSClosesUniformHeatingWithoutIdealVolumeSubstitution)
 {
     auto grid = mesh();

@@ -31,6 +31,39 @@ the mechanical gauge transfers the same uniform pressure into thermodynamic
 pressure, preserving absolute phase pressures. Zero susceptibility recovers the
 original conservative projection.
 
+Pressure Krylov accuracy uses the physical units of its cell-integrated volume
+balance. Let `G = continuity_tolerance * max(1, continuity_scale)` be the
+original physical gate in m3/s, `tau` the caller-selected linear tolerance, and
+`b` the pressure RHS. Its recomputed true residual is normalized by
+`max(norm2(b), G/(8*tau))`. Thus the additional absolute inner allowance is at
+most one eighth of `G` when the RHS becomes tiny. The requested linear tolerance,
+backend and total iteration budget remain unchanged. The pressure result and
+solver diagnostics expose the actual RHS norm and normalization floor; multiplying
+the reported achieved tolerance by that denominator recovers the absolute true
+residual. The original RHS-relative residual can be much larger than `tau` while
+the absolute residual remains physically negligible.
+
+This normalization applies only to pressure. It does not relax the independently
+recomputed linearized continuity, nonlinear physical material continuity, EOS
+occupancy, caloric, mass, species, momentum or pressure-bracket gates. An
+inaccurate inner solution still rejects before publication. Full-solver regressions
+use ordinary 1 bar/300 K liquid/gas states, realistic liquid density and heat
+capacity, spatially varying gas fractions/heating, and small time steps. An
+eight-cell case retains an eight-iteration pressure budget: an available full
+Krylov space must not be spent resolving a tiny RHS-relative roundoff remainder
+after the original physical gates are satisfied. This is a bounded numerical
+accuracy check, not physical validation of a liquid/gas closure.
+
+Physical target resolution remains a separate limitation. The EOS and retained
+advected-volume packets are binary64 values; subtracting them and dividing by
+`dt` can leave a volume-rate resolution of order `epsilon * volume / dt`.
+For example, an O(1 m3) domain at a sufficiently small time step can fail the
+original absolute continuity gate even though the same thermodynamic state on a
+centimetric domain resolves it. No volume/inventory normalization, target
+redistribution or acceptance tolerance increase hides that defect. Global
+compatibility rejection reports its actual residual, original limit and time
+step, and leaves accepted state and fields unchanged.
+
 `volume_flux()` and `Trial::owned_volume_flux()` are absolute carrier fluxes.
 Physical continuity uses the sum of the phase material fluxes: each phase's
 carrier-plus-slip flux is multiplied by the same upwind EOS fraction used for

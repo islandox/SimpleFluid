@@ -24,6 +24,7 @@ public:
     struct Result
     {
         LinearSolveStatistics linear;
+        double linear_rhs_norm_floor = 0; ///< True-residual normalization floor, integrated m3/s.
         double maximum_continuity_residual =
             0; ///< Cell-integrated m3/s; material flux for project_material_with_eos().
         double global_compatibility_residual = 0;
@@ -38,7 +39,9 @@ public:
     /** Fixed geometry and closed physical boundaries; predictor must carry exactly zero physical boundary flux.
      * Geometry changes after construction reject before using the retained gradient cache.
      * All faces use dt*harmonic(1/rho)*A/d with canonical owner signs. The nullspace is gauged globally.
-     * Inputs must share this native mesh. All ranks participate, including empty owners.
+     * The pressure true-residual scale has an absolute allowance of one eighth of the original continuity gate;
+     * all explicit linearized/physical continuity checks retain that original gate. The caller linear tolerance
+     * and iteration budget are unchanged. Inputs must share this native mesh, including empty owners.
      */
     Result project(const ScalarField& density, double time_step, std::span<const double> integrated_volume_target,
         const FaceField& predictor_flux, FaceField& corrected_flux, ScalarField& mechanical_pressure,

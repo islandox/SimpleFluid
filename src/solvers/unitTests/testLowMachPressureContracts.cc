@@ -290,6 +290,36 @@ TEST(LowMachPressureContractsTest, ZeroThetaAndAnyUnanchoredCellRejectAtomically
     fixture.zero_theta_oracle(fixture.project(fixture.linear()));
 }
 
+TEST(LowMachPressureContractsTest, SmallRightHandSideUsesOnlyABoundedPhysicalResidualAllowance)
+{
+    Fixture fixture;
+    fixture.configure(.5, 0., 0.);
+    for (auto& value : fixture.target)
+        value *= 1e-18;
+    const auto controls = fixture.linear();
+    const auto result = fixture.project(controls);
+    EXPECT_TRUE(result.linear.converged);
+    EXPECT_GT(result.linear_rhs_norm_floor, result.linear.rhs_norm);
+    EXPECT_NEAR(controls.tolerance * result.linear_rhs_norm_floor, 1e-11 / 8, 1e-26);
+    EXPECT_LE(result.maximum_linearized_continuity_residual, 1e-11);
+    EXPECT_LE(result.maximum_continuity_residual, 1e-11);
+}
+
+TEST(LowMachPressureContractsTest, LooseInnerSolveCannotBypassPhysicalContinuityOrPublishFields)
+{
+    Fixture fixture;
+    fixture.reset_outputs(true);
+    const auto saved = fixture.snapshot();
+    auto controls = fixture.linear();
+    // A valid tolerance above the initial relative residual permits an
+    // inaccurate linear answer; the independent physical gate must reject it.
+    controls.tolerance = 2.;
+    EXPECT_THROW((void) fixture.project(controls), std::exception);
+    fixture.unchanged(saved);
+    fixture.reset_outputs();
+    fixture.nonunit_oracle(fixture.project(fixture.linear()), .5);
+}
+
 TEST(LowMachPressureContractsTest, OneRankMalformedLinearPoliciesPreserveAllFieldsAndAllowValidReplay)
 {
     Fixture fixture;

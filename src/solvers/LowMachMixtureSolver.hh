@@ -182,6 +182,8 @@ public:
         double maximum_population_transport_residual =
             0; ///< Local count balance normalized by its physical relative gate.
         LinearSolveSummary transport_linear, momentum_linear;
+        LinearSolveStatistics pressure_linear; ///< Final corrector, including its actual global RHS norm.
+        double pressure_linear_rhs_norm_floor = 0; ///< Pressure-only true-residual normalization, m3/s.
     };
     class Checkpoint
     {
