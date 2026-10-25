@@ -140,3 +140,18 @@ target_compile_definitions(region_partition_benchmark PRIVATE
     SIMPLEFLUID_BUILD_TYPE="$<CONFIG>"
     SIMPLEFLUID_COMPILER="${CMAKE_CXX_COMPILER_ID}-${CMAKE_CXX_COMPILER_VERSION}")
 simplefluid_exclude_from_pgo_sources(region_partition_benchmark.cc)
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    # Opt-in VoF geometry benchmark. Run identical arguments before and after changes.
+    add_executable(adaptive_vof_geometry_benchmark EXCLUDE_FROM_ALL adaptive_vof_geometry_benchmark.cc)
+    target_link_libraries(adaptive_vof_geometry_benchmark PRIVATE SimpleFluid::BenchmarkSupport)
+
+    # Full low-Mach timing with populations and physical acceptance enabled.
+    add_executable(adaptive_vof_transport_benchmark EXCLUDE_FROM_ALL adaptive_vof_transport_benchmark.cc)
+    target_link_libraries(adaptive_vof_transport_benchmark PRIVATE SimpleFluid::BenchmarkSupport)
+    simplefluid_exclude_from_pgo_sources(adaptive_vof_transport_benchmark.cc)
+    add_executable(adaptive_vof_refinement_benchmark EXCLUDE_FROM_ALL adaptive_vof_refinement_benchmark.cc)
+    target_link_libraries(adaptive_vof_refinement_benchmark PRIVATE SimpleFluid::BenchmarkSupport)
+
+    simplefluid_exclude_from_pgo_sources(adaptive_vof_geometry_benchmark.cc adaptive_vof_refinement_benchmark.cc)
+endif()

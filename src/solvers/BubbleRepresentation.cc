@@ -482,7 +482,7 @@ std::map<ID, double> sphere(const SimpleFluid::Meshes::AMR::CartesianAMR& hierar
 } // namespace
 
 BubbleRepresentationEngine::BubbleRepresentationEngine(BubbleRepresentationOptions options,
-    RadiolyticGasPhysics::MolarPivotGrid pivots, std::vector<std::string> populations)
+    BubbleGasPhysics::MolarPivotGrid pivots, std::vector<std::string> populations)
     : options_(options), pivots_(std::move(pivots)), populations_(std::move(populations)),
       state_(std::make_shared<const Snapshot>())
 {

@@ -224,7 +224,7 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::MeshHandle<.*>[ ]*::(legacy_mesh|is_stk)[(]"
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::require_finite[(]"
     # Removed source-specific APIs have no compatibility/export aliases.
-    "^SimpleFluid::(FissionPowerSource|RadiolyticGasModel|RadiolyticBubbleKinetics|DelayedNeutronPrecursorModel)(<|::)"
+    "^SimpleFluid::(FissionPowerSource|RadiolyticGasModel|RadiolyticVoFCoupler|RadiolyticBubbleKinetics|DelayedNeutronPrecursorModel)(<|::)"
     "^SimpleFluid::BubbleGasPhysics::(nucleation_radius|hydrogen_diffusivity|ideal_gas_alpha_source)[(]"
     "^SimpleFluid::ReactingGasModel<.*>[ ]*::(synchronize_void_fraction|set_skip_zero_auxiliary_transport|enable_donor_hydrogen_deficit_tracking|dissolved_hydrogen|donor_hydrogen_deficit|bubble_slip_volume_flux|cumulative_hydrogen_produced|dissolved_hydrogen_inventory|global_dissolved_hydrogen_moles|global_submerged_hydrogen_moles|global_microbubble_hydrogen_moles|global_large_bubble_hydrogen_moles|cumulative_dissolved_hydrogen_outflow|global_submerged_bubble_hydrogen_moles|donor_hydrogen_deficit_tracking_enabled|cumulative_submerged_bubble_hydrogen_escaped)[(]"
     "^SimpleFluid::NOXNonlinearSolver::Impl::"
@@ -243,6 +243,9 @@ set(simplefluid_forbidden_api_patterns
     "^SimpleFluid::PlanarFreeSurfaceModel::(install_collective_guards|local_stage|replicated_update|replicated_headspace|checked_callback_volume)[(]"
     "^SimpleFluid::ReactingGasModel<.*>[ ]*::(species_compartment_index|publish_species_history|validate_species_pressure_metadata|validate_species_candidate_pressure|set_species_absolute_pressure_offset)[(]"
     "^SimpleFluid::Reacting::LowMachMixtureSolver::ControllerLease::ControllerLease[(]SimpleFluid::Reacting::LowMachMixtureSolver[*], (unsigned long|unsigned long long)[)]$"
+    "SimpleFluid::VoFSolver::Impl::"
+    "SimpleFluid::AdaptiveVoFSolver::Impl::"
+    "SimpleFluid::ReactingVoFCoupler::Impl::"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::MultiphysicsSolverCoupler[(].*BoussinesqSolver<.*>&[)]$"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::PlanarALEStep::"
     "SimpleFluid::MultiphysicsSolverCoupler<.*>[ ]*::BoussWallTrial::"
@@ -278,6 +281,11 @@ set(simplefluid_forbidden_api_patterns
     "SimpleFluid::TurbulenceWallTreatment<.*>[ ]*::(initialize|validate_velocity_cache)[(]"
     "SimpleFluid::AdaptiveSteadyStateController::adapted_time_step[(]"
     "SimpleFluid::SteadyStateFieldMonitor<.*>[ ]*::(require_mesh|require_field_mesh|capture_current_state)[(]")
+if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    list(APPEND simplefluid_forbidden_api_patterns
+        "^SimpleFluid::(VoFSolver|AdaptiveVoFSolver|GeneralVoFSolver|ReactingVoFCoupler)::"
+        "^SimpleFluid::VoF::")
+endif()
 
 set(simplefluid_forbidden_api_symbols)
 foreach(simplefluid_demangled_symbol IN LISTS simplefluid_demangled_symbols)
@@ -376,8 +384,44 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
+# VoF configuration currently rejects ON. Disabled builds
 # must contain no solver/controller/caloric exports from that path; reusable FVM
 # geometry and transport kernels are audited separately in their owning library.
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    list(APPEND simplefluid_required_api_patterns
+    "^SimpleFluid::VoFSolver::VoFSolver[(]"
+    "^SimpleFluid::VoFSolver::initialize[(]"
+    "^SimpleFluid::VoFSolver::step[(]double[)]$"
+    "^SimpleFluid::VoFSolver::stable_timestep[(][)] const$"
+    "^SimpleFluid::VoFSolver::fraction_field[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::AdaptiveVoFSolver[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::step[(]double[)]$"
+    "^SimpleFluid::AdaptiveVoFSolver::regrid[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::checkpoint[(][)]$"
+    "^SimpleFluid::AdaptiveVoFSolver::fraction_field[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::initialize_low_mach[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::preview_low_mach_step[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::commit_low_mach_trial[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::state[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::preview_representation_change[(]"
+    "^SimpleFluid::AdaptiveVoFSolver::state_revision[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::pending_representation_relaxation[(][)] const$"
+    "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::representation_diagnostics[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::ReactingVoFCoupler[(]"
+    "^SimpleFluid::ReactingVoFCoupler::preview[(]"
+    "^SimpleFluid::ReactingVoFCoupler::commit[(]"
+    "^SimpleFluid::ReactingVoFCoupler::checkpoint[(][)]$"
+    "^SimpleFluid::ReactingVoFCoupler::Trial::state[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::request_births[(]"
+    "^SimpleFluid::ReactingVoFCoupler::birth_registry[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::conversion_history[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::inspect_representation[(][)] const$"
+    "^SimpleFluid::ReactingVoFCoupler::preview_representation[(][)]$"
+    "^SimpleFluid::ReactingVoFCoupler::Trial::representation[(][)] const$"
+    "^SimpleFluid::VoF::LiquidThermodynamics::evaluate[(]double, double[)] const$"
+    "^SimpleFluid::VoF::make_linear_compressible_liquid[(]"
+)
+endif()
 
 # The standalone reacting schema adds exactly 21 reviewed definitions across
 # 18 signatures: SpeciesCatalog (7), ReactionMechanism (6), CellSpeciesState
@@ -1279,6 +1323,11 @@ endforeach()
 set(simplefluid_pre_retirement_api_symbol_lower_bound 1250)
 set(simplefluid_final_species_cleanup_symbol_delta -35)
 set(simplefluid_preexisting_api_symbol_upper_bound 1408)
+# The feature adds 142 reviewed solver/controller/caloric definitions when enabled.
+set(simplefluid_experimental_vof_symbol_budget 0)
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    set(simplefluid_experimental_vof_symbol_budget 142)
+endif()
 # The compiled DIC preconditioner retains nine reviewed definitions: two
 # constructors, apply, getDomainMap/getRangeMap, RTTI and its vtable/VTT.
 # The six former Mesh-only steady-solve exports retired with that mesh class.
@@ -1294,9 +1343,9 @@ set(simplefluid_retired_mesh_exact_symbol_budget 61)
 math(EXPR simplefluid_retired_mesh_total_symbol_budget
     "19 + 4 + 4 + 1 + 4 + ${simplefluid_retired_mesh_exact_symbol_budget} + 6")
 math(EXPR simplefluid_api_symbol_lower_bound
-    "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget}")
+    "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget} + ${simplefluid_experimental_vof_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget} + ${simplefluid_experimental_vof_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

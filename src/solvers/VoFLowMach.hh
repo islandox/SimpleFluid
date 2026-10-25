@@ -206,7 +206,7 @@ struct LowMachSources
     std::vector<double> donor_hydrogen_change;
     std::vector<PopulationSource> dispersed;
     std::vector<double> net_thermal_energy;  ///< J; chemical-energy convention belongs to the caller.
-    std::vector<double> radiolysis_energy;   ///< J used for chemistry diagnostics; NEVER added as heat again.
+    std::vector<double> reacting_gas_energy;   ///< J used for chemistry diagnostics; NEVER added as heat again.
     std::vector<double> enthalpy_transfer;   ///< Signed internal intercell transfer, J.
     std::vector<Vector> momentum_transfer;   ///< Signed internal transfer, kg m/s.
     std::vector<double> vent_hydrogen_moles; ///< Nonnegative withdrawal from designated resolved gas.
@@ -254,7 +254,7 @@ struct LowMachDiagnostics
     double escaped_inert = 0;
     double escaped_enthalpy = 0;
     double net_thermal_energy = 0;
-    double radiolysis_energy = 0;
+    double reacting_gas_energy = 0;
     double raw_compatibility_residual = 0;        ///< Sum of raw phase-volume increments, m3.
     double compatibility_roundoff_correction = 0; ///< Reported numerical zero-mode correction, m3.
 };

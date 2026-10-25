@@ -1,6 +1,6 @@
 # Uniform-mesh volume of fluid
 
-`VoFSolver` is the Stage 1 flow core of the resolved/dispersed reacting-bubble
+`VoFSolver` is the Stage 1 flow core of the resolved/dispersed reacting-gas-bubble
 roadmap in [TODO.md](../../TODO.md). It advances two incompressible, isothermal
 phases on a fixed uniform Cartesian grid. Gas volume fraction `f=1` denotes gas;
 `f=0` denotes liquid. Density differences enter momentum storage, transport, and
@@ -12,7 +12,7 @@ a nonperiodic one-cell direction can represent a two-dimensional verification
 case. The solver rejects multi-rank construction before creating distributed
 mesh or field state. The separate [adaptive Cartesian backend](adaptive_vof.md)
 provides distributed AMR while retaining native fields. Gas compressibility,
-temperature, reaction kinetics, dispersed populations, contact angles, and phase
+temperature, reaction sources, dispersed populations, contact angles, and phase
 change have separate roadmap acceptance gates.
 
 ## State and units
@@ -177,7 +177,7 @@ surface](https://pmc.ncbi.nlm.nih.gov/articles/PMC11821838/).
 
 Use the focused numerical results to qualify this baseline. They do not by
 themselves establish centimetric-bubble rise/wake accuracy, realistic gas
-transfer, unresolved-film coalescence, or coupled reactor performance. Those
+transfer, unresolved-film coalescence, or coupled reacting-flow performance. Those
 remain explicit later-stage studies in the roadmap.
 
 The tracked [VoF verification contracts](../verification/vof_solver_contracts.md)

@@ -3,7 +3,7 @@
  */
 #include "solvers/AdaptiveVoFSolver.hh"
 
-#include "equations/RadiolyticGasProperties.hh"
+#include "equations/ReactingGasProperties.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "solvers/details/ConservativeVoFTransport.hh"
 #include "solvers/details/VoFProjectionWorkspace.hh"

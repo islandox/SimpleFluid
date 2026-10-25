@@ -1,4 +1,43 @@
-# Reacting resolved and dispersed gas coupling
+# Reacting gas: resolved and dispersed coupling
+
+**VoF disabled by default:** VoF solvers are unqualified and excluded from the
+supported general multispecies refactor. `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON`
+opts into the unqualified pre-refactor VoF implementation, including its tests
+and applications. The deferred multispecies VoF migration is not enabled by this
+option. Reusable lower-level FVM and geometry mathematics remain available.
+
+The [general reacting-gas design](reacting_gas_sources.md) separates supplied
+reaction rates, species stoichiometry, finite reactants, and net reaction
+heat from gas transport and representation. Reactions add or remove species;
+dissolution, capture, promotion, and demotion transfer existing material.
+Every transfer must move its species, mass, momentum, and energy together.
+
+The neutral `Reacting*`, `PrescribedHeat*`, and `BubblePopulationKinetics`
+interfaces replace the retired application-specific names without aliases.
+The runtime two-population selector is `twoPopulation`. Existing H2 fields
+and the energy-yield source closure remain transitional; this migration does
+not establish arbitrary-species transport or a general chemistry interface.
+See the [migration table](reacting_gas_sources.md) for exact API and key changes.
+
+## General extension contract
+
+The planned reaction boundary supplies integrated species changes from a
+declared reaction extent and stoichiometry, including each consumed solution
+species and each generated gas species. Rate volume bases and the destination
+of new material must be explicit. Finite reactants are budgeted jointly across
+all reactions, and a trial that exhausts a reactant is rejected or recomputed
+at a smaller physical timestep. External feed is separately accounted for.
+
+Heat input is already net under a common chemical/caloric reference. The same
+reaction event cannot contribute both a separate reaction heat and duplicate
+heat deposition. Composition-aware EOS and interfacial laws must recover
+phase volumes and partial pressures from conserved species. Source integration
+then participates in the existing local volume, global pressure, energy,
+transport, and transaction acceptance gates. None of these extensions permits
+inventory clipping or weaker tolerances. The detailed contracts below describe
+the H2 implementation from which those general interfaces must be developed.
+
+## Current single-gas implementation: scope and ownership
 
 The opt-in low-Mach mode of `AdaptiveVoFSolver` transports liquid mass,
 resolved H2 and inert gas, dissolved H2, chemically bound donor stock,
@@ -15,7 +54,7 @@ or automatic headspace detection. Explicitly enabled
 and complete-component demotion; their birth localization remains supplied
 by the application.
 
-## State, pressure, and volume
+## Current single-gas implementation: state, pressure, and volume
 
 All conservative arrays use extensive amounts per owned cell. In a cell of
 volume `V`, resolved gas occupies `f V`, dispersed gas occupies `alpha_d V`,
@@ -96,11 +135,11 @@ their conservative phase-volume equations. A positive carrier smaller than
 one ulp of the cell volume can then retain its material inventory even when
 the stored resolved fraction rounds to one.
 
-## Mass, momentum, and thermal accounting
+## Current single-gas implementation: mass, momentum, and thermal accounting
 
 The donor field is finite chemically bound H2-equivalent stock within the
-liquid mass. Reacting production consumes this stock. For internal chemical
-or interfacial exchange,
+liquid mass. The implemented H2 production consumes this stock. For internal
+chemical or interfacial exchange,
 
 ```
 Delta m_l = W_H2 (Delta n_donor + Delta n_dissolved).
@@ -145,7 +184,7 @@ liquid with constant properties this converges to the backward-Euler discrete
 heat equation; a numerical starting guess cannot select a different thermal
 time level. The timestep still obeys the thermal iteration stability bound.
 `net_thermal_energy` is the caller's already net heat deposition.
-`absorbed_radiation_energy` supplies
+`reaction_driver_energy` supplies
 the chemical yield and is never added to heat a second time. All caloric
 references must be consistent. The caller owns chemical formation-energy and
 closure heat conventions. The thermal ledger is not a claim of conservation
@@ -157,17 +196,19 @@ Prescribed slip also needs an external relative-kinetic-energy/drag-heating
 closure if that energy conversion matters; momentum conservation alone does
 not supply the missing heat.
 
-## Reactions without duplicate transport
+## Current single-gas implementation: source substeps without duplicate transport
 
 `BubblePopulationKinetics` exposes pure cell kernels. The legacy
 `ReactingGasModel` delegates its microbubble source, decay, and conversion
 substep to that seam while keeping its existing transport and upper-population
-behavior. The new controller never calls the legacy full `advance` method.
+behavior. The VoF controller never calls the legacy full `advance` method.
 
-For absorbed energy `E_abs` per cell and yield `G` in mol/J, production is
-`eta G E_abs`. The input is already energy absorbed by the liquid: no second
-liquid-volume fraction is applied. The hybrid path uses explicit source
-substeps, including the existing microbubble production-before-decay ordering.
+The current energy-yield closure produces `eta G E_abs` moles of H2 from
+absorbed energy `E_abs` per cell and yield `G` in mol/J. This is a retained
+specialization, not the general reaction-rate contract. Its input is already
+energy absorbed by the liquid: no second liquid-volume fraction is applied.
+The hybrid path uses explicit source substeps, including the existing
+microbubble production-before-decay ordering.
 Active micro kinetics use `LegacySubcycled`, with
 `nsub=max(1,ceil(dt/(0.2 tau_micro)))`; exceeding `max_subcycles` rejects.
 Bulk dissolved diffusion runs once, kinetics/film/capture run in each source
@@ -221,7 +262,7 @@ rejects outside its experimental domain. A broad micro/upper spectrum is not
 automatically qualified by that shared selection; the low-Mach core itself
 accepts independently supplied drift fields for each population.
 
-## Resolved H2 transfer and the prescribed film
+## Current single-gas implementation: resolved H2 transfer and the prescribed film
 
 Unique interface patches include mixed-cell PLIC polygons and exactly aligned
 pure-gas/pure-carrier faces, including coarse/fine and periodic faces. Sparse
@@ -263,7 +304,7 @@ Qualification here is limited to the declared profile and supplied physical
 film law. High-Peclet centimetric-bubble transfer still requires application
 data, mesh/time refinement, and an appropriate boundary-layer model.
 
-## Capture, coalescence, and headspace
+## Current single-gas implementation: capture, coalescence, and headspace
 
 Let the patch normal point from resolved gas into carrier, and let `j_H2` be
 the signed molecular H2 mass flux into resolved gas per area. The point-bubble
@@ -296,7 +337,7 @@ chosen common caloric reference. This fixed-domain reservoir law is
 not a resolved open-boundary nozzle model. A planar-ALE free surface remains
 a separately qualified extension.
 
-## Transactions and remaining qualification
+## Current single-gas implementation: transactions and remaining qualification
 
 `preview` computes a candidate without publishing fields or cumulative
 ledgers. `commit` accepts only a current trial belonging to this controller;
@@ -320,7 +361,7 @@ keeps the accepted topology. It does not normalize the physical inventories.
 The unit and distributed tests use synthetic declared materials and closure
 laws with independent solutions. Calibrated aqueous rates, predictive film
 thickness, centimetric-bubble rise/shape/wake and transfer convergence,
-resolved coalescence sensitivity, and coupled-reactor qualification remain
+resolved coalescence sensitivity, and coupled-application qualification remain
 application gates. The separate [representation guide](bubble_representation.md)
 describes bidirectional conversion, its checkpointed registry, retained
 pressure histories, and additional eligibility limits.

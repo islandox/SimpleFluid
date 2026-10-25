@@ -130,7 +130,7 @@ amounts use the nonnegative contract. A nonzero inventory with no donor carrier
 is rejected. Every amount and gas volume must pass a global extensive
 conservation check independent of the flow pressure tolerance. The carrier must
 match the physical storage definition; naming a scalar "energy" does not add a
-temperature equation, EOS, heat transfer, or reacting kinetics.
+temperature equation, EOS, heat transfer, or reaction kinetics.
 
 ## Refinement and coarsening policy
 
@@ -206,7 +206,7 @@ One explicit checkpoint can retain the accepted snapshot for replay. Topology
 changes are forbidden until that checkpoint is released. Restoring it restores
 the flow and passive inventories together and permits another trial. Coupled
 controllers should regrid only at accepted coupling boundaries, then acquire
-their next checkpoint. The opt-in [reacting low-Mach controller](reacting_vof.md)
+their next checkpoint. The opt-in [legacy reacting-gas low-Mach controller](reacting_vof.md)
 includes its physical inventories and cumulative ledgers in that transaction.
 An accepted representation conversion retains phase-pressure histories until
 the next physical step; regridding waits until that relaxation succeeds.
@@ -226,7 +226,7 @@ support through the hierarchy seam.
 [Bidirectional representation trials](bubble_representation.md) have separate
 birth, resolution, component and thermodynamic-history guards.
 Physical gas growth and dissolved transfer use
-the separate [reacting low-Mach mode](reacting_vof.md); the source-free path
+the separate [legacy reacting-gas low-Mach mode](reacting_vof.md); the source-free path
 and its passive inventories do not enable those processes.
 
 Focused verification covers hierarchy coverage, conservative transfer,

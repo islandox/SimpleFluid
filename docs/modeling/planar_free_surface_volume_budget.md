@@ -47,9 +47,9 @@ The parameter-reader keys are `free_surface_ale_aitken`,
 `free_surface_ale_relaxation`, `free_surface_ale_initial_relaxation`,
 `free_surface_ale_minimum_relaxation` and `free_surface_ale_maximum_relaxation`.
 
-An external host must map its configuration to these parameter-reader keys.
-Outer coupling acceleration and inner radiation acceleration remain independent
-of the free-surface ALE corrector's history and acceptance gates.
+external host exposes these settings as `Coupling/ALEAitken`, `ALERelaxation`,
+`ALEInitialRelaxation`, `ALEMinimumRelaxation` and `ALEMaximumRelaxation`.
+Its outer `Coupling/Aitken` and inner radiation acceleration are independent.
 
 ## Applicability and State Ownership
 
@@ -1292,7 +1292,7 @@ conservation does not satisfy that requirement.
 
 VoF, its bounded floating-point geometry and exact-rational geometry routes,
 and general AMR/regridding are deferred outside this refactor. The
-VoF notes on the separate `refactor/vof` branch are not an enabled reacting backend or an
+[retained VoF notes](vof.md) are not an enabled reacting backend or an
 extension of this ALE support matrix. Same-topology geometry/mapping utilities
 retain their own lower-level contracts; they do not supply this coupled
 species/energy feedback transaction. The present checks establish a flat-boundary

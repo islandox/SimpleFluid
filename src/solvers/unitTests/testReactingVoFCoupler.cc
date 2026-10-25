@@ -1,5 +1,5 @@
 /** @file testReactingVoFCoupler.cc
- * @brief Independent planar transfer, capture, radiolysis and vent conservation oracles.
+ * @brief Independent planar transfer, capture, reacting_gas and vent conservation oracles.
  */
 #include "solvers/ReactingVoFCoupler.hh"
 #include "utils/testing_environment.hh"
@@ -101,12 +101,12 @@ SP<Solver> make_flow(bool refine = false, VoF::Vector gravity = {})
 ReactingVoFOptions disabled_options()
 {
     ReactingVoFOptions options;
-    options.radiolysis.mode = ReactingGasMode::Disabled;
-    options.radiolysis.surface_tension = 0.0;
-    options.radiolysis.henry_coefficient = henry;
-    options.radiolysis.hydrogen_diffusivity = diffusivity;
-    options.radiolysis.nucleation_radius = 1e-5;
-    options.radiolysis.micro_to_large_conversion_coefficient = 0.0;
+    options.reacting_gas.mode = ReactingGasMode::Disabled;
+    options.reacting_gas.surface_tension = 0.0;
+    options.reacting_gas.henry_coefficient = henry;
+    options.reacting_gas.hydrogen_diffusivity = diffusivity;
+    options.reacting_gas.nucleation_radius = 1e-5;
+    options.reacting_gas.micro_to_large_conversion_coefficient = 0.0;
     options.dissolved_diffusion = false;
     return options;
 }
@@ -228,7 +228,7 @@ TEST(ReactingVoFCouplerTest, DisabledProcessesPreserveTheAcceptedStateAndProduce
     expect_budgets(before, coupler);
 }
 
-TEST(ReactingVoFCouplerTest, BulkRadiolysisDebitsFiniteDonorOnceAndReplayDoesNotDoubleProduce)
+TEST(ReactingVoFCouplerTest, BulkReactingGasDebitsFiniteDonorOnceAndReplayDoesNotDoubleProduce)
 {
     auto flow = make_flow();
     auto initial = planar_state(*flow, 0.0);
@@ -243,17 +243,17 @@ TEST(ReactingVoFCouplerTest, BulkRadiolysisDebitsFiniteDonorOnceAndReplayDoesNot
     {
         const double volume = flow->mesh()->cell_volume(static_cast<LO>(c));
         initial.donor_hydrogen_moles.push_back(0.01 * volume);
-        input.absorbed_radiation_energy.push_back(100.0 * volume);
+        input.reaction_driver_energy.push_back(100.0 * volume);
     }
     flow->initialize_low_mach(thermodynamics(), initial);
     const auto before = flow->low_mach_state();
     auto options = disabled_options();
-    options.radiolysis.mode = ReactingGasMode::Sheng2024TwoPopulation;
-    options.radiolysis.hydrogen_yield_mol_per_j = 2e-7;
-    options.radiolysis.gas_release_efficiency = 0.5;
-    options.radiolysis.microbubble_lifetime = 1e100;
+    options.reacting_gas.mode = ReactingGasMode::TwoPopulation;
+    options.reacting_gas.hydrogen_yield_mol_per_j = 2e-7;
+    options.reacting_gas.gas_release_efficiency = 0.5;
+    options.reacting_gas.microbubble_lifetime = 1e100;
     ReactingVoFCoupler coupler(flow, options);
-    const double expected = 1e-7 * total(input.absorbed_radiation_energy);
+    const double expected = 1e-7 * total(input.reaction_driver_energy);
     const auto checkpoint = coupler.checkpoint();
     const auto trial = coupler.preview(1e-4, input);
     expect_primary_equal(flow->low_mach_state(), before);
@@ -276,7 +276,7 @@ TEST(ReactingVoFCouplerTest, BulkRadiolysisDebitsFiniteDonorOnceAndReplayDoesNot
     coupler.release_checkpoint(checkpoint);
     EXPECT_NEAR(coupler.statistics().cumulative_produced, expected, 2e-13 * expected);
     auto exhausted = input;
-    for (double& energy : exhausted.absorbed_radiation_energy)
+    for (double& energy : exhausted.reaction_driver_energy)
         energy *= 1e5;
     const auto retained = flow->low_mach_state();
     EXPECT_THROW((void) coupler.preview(1e-4, exhausted), std::exception);
@@ -350,8 +350,8 @@ TEST(ReactingVoFCouplerTest, CaptureEfficiencyAndCommonTranslationPreserveTheInc
             thermodynamics(), planar_state(*flow, 0.0, 1.0, density, {-speed, 0.0, 0.0}, translation));
         const auto before = flow->low_mach_state();
         auto options = disabled_options();
-        options.radiolysis.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
-        options.radiolysis.constant_slip_velocity = speed;
+        options.reacting_gas.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+        options.reacting_gas.constant_slip_velocity = speed;
         options.capture.enabled = true;
         options.capture.model_name = "prescribed capture efficiency verification";
         options.capture.validity_description =
@@ -560,8 +560,8 @@ TEST(ReactingVoFCouplerTest, CoarseFineDiffusionUsesDistanceWeightedAqueousMater
     const auto before = flow->low_mach_state();
     auto options = disabled_options();
     options.dissolved_diffusion = true;
-    options.radiolysis.diffusivity_mode = HydrogenDiffusivityMode::External;
-    options.radiolysis.hydrogen_diffusivity_correlation = [](double T) { return T < 300.0 ? 1e-5 : 4e-5; };
+    options.reacting_gas.diffusivity_mode = HydrogenDiffusivityMode::External;
+    options.reacting_gas.hydrogen_diffusivity_correlation = [](double T) { return T < 300.0 ? 1e-5 : 4e-5; };
     ReactingVoFCoupler coupler(flow, options);
     constexpr double dt = 0.001;
     (void) coupler.step(dt, {});
@@ -682,8 +682,8 @@ TEST(ReactingVoFCouplerTest, NormalGalileanTranslationLeavesTheIncidentCaptureRa
         flow->initialize_low_mach(thermo, init);
         const auto before = flow->low_mach_state();
         auto options = disabled_options();
-        options.radiolysis.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
-        options.radiolysis.constant_slip_velocity = speed;
+        options.reacting_gas.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+        options.reacting_gas.constant_slip_velocity = speed;
         options.capture.enabled = true;
         options.capture.model_name = "normal Galilean capture verification";
         options.capture.validity_description =
@@ -721,14 +721,14 @@ TEST(ReactingVoFCouplerTest, ReinitializationRebindsRequiredPopulationNames)
     {
         const double volume = flow->mesh()->cell_volume(static_cast<LO>(c));
         initial.donor_hydrogen_moles.push_back(0.01 * volume);
-        input.absorbed_radiation_energy.push_back(100 * volume);
+        input.reaction_driver_energy.push_back(100 * volume);
     }
     flow->initialize_low_mach(thermodynamics(), initial);
     auto options = disabled_options();
-    options.radiolysis.mode = ReactingGasMode::Sheng2024TwoPopulation;
-    options.radiolysis.hydrogen_yield_mol_per_j = 2e-7;
-    options.radiolysis.gas_release_efficiency = 0.5;
-    options.radiolysis.microbubble_lifetime = 1e100;
+    options.reacting_gas.mode = ReactingGasMode::TwoPopulation;
+    options.reacting_gas.hydrogen_yield_mol_per_j = 2e-7;
+    options.reacting_gas.gas_release_efficiency = 0.5;
+    options.reacting_gas.microbubble_lifetime = 1e100;
     ReactingVoFCoupler coupler(flow, options);
     const auto old_trial = coupler.preview(1e-4, input);
     initial.dispersed = {spectator, micro};
@@ -736,7 +736,7 @@ TEST(ReactingVoFCouplerTest, ReinitializationRebindsRequiredPopulationNames)
     EXPECT_THROW(coupler.commit(old_trial), std::exception);
     const auto before = flow->low_mach_state();
     const auto trial = coupler.preview(1e-4, input);
-    const double expected = 1e-7 * total(input.absorbed_radiation_energy);
+    const double expected = 1e-7 * total(input.reaction_driver_energy);
     EXPECT_EQ(trial.state().dispersed[0].name, "spectator");
     EXPECT_DOUBLE_EQ(total(trial.state().dispersed[0].hydrogen_moles), 0);
     EXPECT_NEAR(total(trial.state().dispersed[1].hydrogen_moles), expected, 2e-9 * expected);
@@ -763,8 +763,8 @@ TEST(ReactingVoFCouplerTest, ConstantSlipHasNoClosureOutsideTheLiquidCarrier)
     initial.dispersed = {population};
     flow->initialize_low_mach(thermodynamics(), initial);
     auto options = disabled_options();
-    options.radiolysis.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
-    options.radiolysis.constant_slip_velocity = 0.02;
+    options.reacting_gas.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+    options.reacting_gas.constant_slip_velocity = 0.02;
     ReactingVoFCoupler coupler(flow, options);
     const auto trial = coupler.preview(0.01, {});
     for (std::size_t c = 0; c < initial.temperature.size(); ++c)
@@ -848,8 +848,8 @@ TEST(ReactingVoFCouplerTest, ConstantSlipExtendsThroughEmptyLiquidAndReplay)
     initial.dispersed = {population};
     flow->initialize_low_mach(thermo, initial);
     auto options = disabled_options();
-    options.radiolysis.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
-    options.radiolysis.constant_slip_velocity = 0.02;
+    options.reacting_gas.rise_velocity_mode = BubbleRiseVelocityMode::ConstantSlip;
+    options.reacting_gas.constant_slip_velocity = 0.02;
     ReactingVoFCoupler coupler(flow, options);
     const auto checkpoint = coupler.checkpoint();
     const auto before = flow->low_mach_state();
