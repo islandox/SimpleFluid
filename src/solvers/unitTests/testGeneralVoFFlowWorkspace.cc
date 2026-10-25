@@ -1,8 +1,182 @@
 /** @file testGeneralVoFFlowWorkspace.cc */
 #include "general_vof_flow_test_helpers.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
 namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+SP<const MeshHandle<>> axial_slab_native(unsigned normal_axis)
+{
+    using U = Meshes::UnstructuredMesh;
+    Arr<MeshUtils::Vec3> nodes;
+    for (unsigned z = 0; z < 2; ++z)
+        for (unsigned y = 0; y < 3; ++y)
+            for (unsigned x = 0; x < 3; ++x)
+            {
+                const std::array<double, 3> original{double(x), double(y), double(z)};
+                std::array<double, 3> rotated{};
+                for (unsigned a = 0; a < 3; ++a)
+                    rotated[(a + normal_axis + 1) % 3] = original[a];
+                nodes.push_back({rotated[0], rotated[1], rotated[2]});
+            }
+    Arr<U::CellDefinition> cells;
+    for (unsigned y = 0; y < 2; ++y)
+        for (unsigned x = 0; x < 2; ++x)
+        {
+            U::CellDefinition cell;
+            cell.type = MeshUtils::CellType::HEXAHEDRON;
+            const auto lo = U::NodeID(y * 3 + x);
+            cell.node_ids = {lo, lo + 1, lo + 4, lo + 3, lo + 9, lo + 10, lo + 13, lo + 12};
+            cells.push_back(std::move(cell));
+        }
+    const U untagged(nodes, cells);
+    Arr<U::BoundaryFaceDefinition> boundaries;
+    for (std::size_t f = 0; f < untagged.num_faces(); ++f)
+        if (untagged.is_exterior_face(f))
+            boundaries.push_back({untagged.face_nodes(f), 0, "wall"});
+    const auto native = std::make_shared<Meshes::MultiRegionMesh>(
+        std::vector<Meshes::MultiRegionMesh::Region>{
+            Meshes::native_region("slab", std::make_shared<U>(nodes, cells, boundaries))},
+        std::vector<Meshes::MultiRegionMesh::Interface>{}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
+    AMR::PolyhedralAMR source(test::polyhedral_grid(native));
+    std::vector<std::uint64_t> owned;
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        owned = {0, 1, 2, 3};
+    auto bootstrap = source.detach_owned(owned, {'s', 'l', 'a', 'b'});
+    const auto schema = bootstrap.kernel->descriptor();
+    const AMR::DistributedAdaptiveHierarchy hierarchy(
+        std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, Tpetra::getDefaultComm());
+    return AMR::assemble_adaptive_native(hierarchy, schema).mesh;
+}
+
+template<ArithmeticMode Mode> void missing_axis_wall_pressure_contract()
+{
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        constexpr auto mode = Mode;
+        SCOPED_TRACE(::testing::Message() << axis << ',' << int(mode));
+        const auto mesh = axial_slab_native(axis);
+        detail::GeneralVoFFlowWorkspace flow(mesh, mode);
+        const auto n = mesh->num_owned_cells();
+        std::vector<VoF::Vector> velocity(n);
+        for (auto& value : velocity)
+            value[axis] = .125;
+        std::vector<double> faces(mesh->num_faces()), density(n, 3), fraction(n), curvature(n), pressure;
+        std::vector<long double> mass(n);
+        for (std::size_t c = 0; c < n; ++c)
+            mass[c] = 7.L * mesh->cell_volume(LO(c));
+        VoFSolverOptions options;
+        VoFStepDiagnostics diagnostics;
+        detail::GeneralVoFFiniteProjectionProvenance evidence;
+        flow.project(faces, velocity, pressure, density, fraction, curvature, .125, 0, options, diagnostics, &evidence,
+            std::span<const long double>(mass));
+        ASSERT_EQ(evidence.wall_pressure_offset.size(), mesh->num_owned_faces());
+        for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
+        {
+            const auto face = LO(f);
+            const auto normal = mesh->face_normal(face);
+            const std::array<double, 3> components{normal.x, normal.y, normal.z};
+            const auto displacement = mesh->face_center_vector(face, mesh->owner_cell(face));
+            const std::array<double, 3> offset{displacement.x, displacement.y, displacement.z};
+            const auto expected = mesh->is_geometry_exterior_face(face) && components[axis] != 0 ? 7 * offset[axis] : 0;
+            EXPECT_NEAR(evidence.wall_pressure_offset[f], expected, 1e-12);
+            EXPECT_EQ(faces[f], 0);
+        }
+        for (const auto& value : velocity)
+            for (const auto component : value)
+                EXPECT_NEAR(component, 0, 1e-12);
+        EXPECT_LE(evidence.maximum_wall_normal_residual, options.divergence_tolerance);
+        EXPECT_EQ(diagnostics.maximum_divergence, 0);
+        const int local_empty = n == 0;
+        int empty = 0;
+        const auto comm = mesh->owned_cell_map()->getComm();
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+        EXPECT_EQ(empty, comm->getSize() - 1);
+    }
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, OrdinaryMissingAxisWallPressureBalancesPhysicalMassAndInitialNormalMotion)
+{
+    missing_axis_wall_pressure_contract<ArithmeticMode::Ordinary>();
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CertifiedMissingAxisWallPressureBalancesPhysicalMassAndInitialNormalMotion)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const int local_supported = PLIC::certification_environment();
+    int supported = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_supported, &supported);
+    if (!supported)
+        GTEST_SKIP() << "Bounded certification requires its supported FP environment on every rank.";
+    missing_axis_wall_pressure_contract<ArithmeticMode::BoundedCertification>();
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, SingleLayerPressureReactionPreservesResolvedTangentialProjection)
+{
+    const auto mesh = skew_native(1);
+    const auto n = mesh->num_owned_cells();
+    detail::GeneralVoFFlowWorkspace baseline(mesh), with_normal(mesh);
+    std::vector<VoF::Vector> tangent(n), velocity;
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        const auto center = mesh->cell_centroid(LO(c));
+        tangent[c] = {.01 * (center.y - 1.5), -.01 * (center.x - 1.95), 0};
+    }
+    velocity = tangent;
+    for (auto& value : velocity)
+        value[2] = .125;
+    auto base_face = baseline.interpolate(tangent), face = base_face;
+    std::vector<double> rho(n, 1), fraction(n), curvature(n), base_pressure, pressure;
+    VoFSolverOptions options;
+    VoFStepDiagnostics base_diagnostics, diagnostics;
+    detail::GeneralVoFFiniteProjectionProvenance evidence;
+    baseline.project(base_face, tangent, base_pressure, rho, fraction, curvature, .125, 0, options, base_diagnostics);
+    with_normal.project(face, velocity, pressure, rho, fraction, curvature, .125, 0, options, diagnostics, &evidence);
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        EXPECT_NEAR(velocity[c][0], tangent[c][0], 1e-12);
+        EXPECT_NEAR(velocity[c][1], tangent[c][1], 1e-12);
+        EXPECT_NEAR(velocity[c][2], 0, 1e-12);
+        EXPECT_NEAR(pressure[c], base_pressure[c], 1e-12);
+    }
+    EXPECT_EQ(face, base_face);
+    EXPECT_LE(evidence.maximum_wall_normal_residual, options.divergence_tolerance);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, SampledThreeDimensionalProjectionHasNoAffineWallLift)
+{
+    const auto mesh = skew_native();
+    const auto n = mesh->num_owned_cells();
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<VoF::Vector> velocity(n, {0, 0, .125});
+    auto face = flow.interpolate(velocity);
+    std::vector<double> rho(n, 1), fraction(n), curvature(n), pressure;
+    VoFSolverOptions options;
+    VoFStepDiagnostics diagnostics;
+    detail::GeneralVoFFiniteProjectionProvenance evidence;
+    flow.project(face, velocity, pressure, rho, fraction, curvature, .125, 0, options, diagnostics, &evidence);
+    EXPECT_TRUE(evidence.wall_pressure_offset.empty());
+    EXPECT_EQ(evidence.maximum_wall_normal_residual, 0);
+    EXPECT_LE(diagnostics.maximum_divergence, options.divergence_tolerance);
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, UnsupportedUnsampledNormalMotionRejectsWithoutChangingCandidates)
+{
+    const auto mesh = boundary_polyhedron(false);
+    const auto n = mesh->num_owned_cells();
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    std::vector<VoF::Vector> velocity(n, {.125, 0, 0});
+    std::vector<double> face(mesh->num_faces()), rho(n, 1), fraction(n), curvature(n), pressure(n, 17);
+    const auto old_velocity = velocity;
+    const auto old_face = face, old_pressure = pressure;
+    VoFSolverOptions options;
+    VoFStepDiagnostics diagnostics;
+    EXPECT_THROW(flow.project(face, velocity, pressure, rho, fraction, curvature, .125, 0, options, diagnostics),
+        std::runtime_error);
+    EXPECT_EQ(velocity, old_velocity);
+    EXPECT_EQ(face, old_face);
+    EXPECT_EQ(pressure, old_pressure);
+}
+
 TEST(GeneralVoFFlowWorkspaceTest, OrdinaryProjectionKeepsPhysicalThresholdWithoutIntervalAdmission)
 {
     const auto mesh = skew_native();

@@ -37,6 +37,11 @@ struct GeneralVoFFiniteProjectionProvenance
     std::size_t byte_budget = 64 * 1024 * 1024;
     std::vector<long double> face_rate, face_radius, cell_radius;
     std::vector<std::array<long double, 3>> velocity_error;
+    /** Nominal wall-minus-cell pressure [Pa] from the affine pressure mode in
+     * globally unsampled slab directions, in owned canonical face order.
+     * Empty when all coordinate directions are sampled. */
+    std::vector<long double> wall_pressure_offset;
+    double maximum_wall_normal_residual = 0; ///< Normal speed / physical span [1/s].
     std::size_t closure_storage_bytes = 0;
 };
 class SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFlowWorkspace
@@ -63,6 +68,11 @@ public:
      * input leaves. Only BoundedCertification propagates operation-derived
      * bounds through coefficient narrowing and requests certified Phi repair.
      * Discretization/Krylov errors keep the independent original physical gates.
+     * A globally unsampled coordinate direction on a straight closed slab has
+     * an affine subcell pressure mode. Its cap pressure traction balances the
+     * supplied predictor's normal motion using physical mass/volume; it does
+     * not apply a body force during initialization or reset cell velocities.
+     * Nonzero unsampled motion on other geometries rejects collectively.
      * No rational construction, measure or ledger fallback. */
     void project(std::vector<double>& face_velocity, std::vector<Vector>& velocity, std::vector<double>& pressure,
         const std::vector<double>& density, const std::vector<double>& fraction, const std::vector<double>& curvature,
@@ -123,6 +133,7 @@ private:
     };
     std::vector<GradientStencil> gradient_stencils_;
     std::array<bool, 3> absent_gradient_axis_{};
+    std::array<bool, 3> wall_reaction_axis_{};
     std::uint64_t geometry_epoch_ = 0;
     MeshHandle<>::MultiRegionPtr native_owner_;
     void prepare_gradient_geometry();
