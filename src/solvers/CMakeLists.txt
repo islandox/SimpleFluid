@@ -1,20 +1,20 @@
 set(SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES
     details/GeneralVoF/Resources.cc
-    details/GeneralVoF/Initialization.cc
-    details/GeneralVoF/Advance.cc
-    details/GeneralVoF/Remap.cc
+    explicit_instantiation/GeneralVoF/Initialization.cc
+    explicit_instantiation/GeneralVoF/Advance.cc
+    explicit_instantiation/GeneralVoF/Remap.cc
     details/GeneralVoF/exact/FaceRates.cc
     details/GeneralVoF/exact/Advance.cc
     details/GeneralVoF/exact/Remap.cc
-    details/GeneralVoF/AdaptedFaceTransfer.cc
-    details/GeneralVoF/Curvature.cc
-    details/GeneralVoF/Diagnostics.cc
+    explicit_instantiation/GeneralVoF/AdaptedFaceTransfer.cc
+    explicit_instantiation/GeneralVoF/Curvature.cc
+    explicit_instantiation/GeneralVoF/Diagnostics.cc
     details/GeneralVoF/Execution.cc
-    details/GeneralVoF/FaceRates.cc
+    explicit_instantiation/GeneralVoF/FaceRates.cc
     details/GeneralVoF/FaceTransfer.cc
     details/GeneralVoF/NodeVelocity.cc
-    details/GeneralVoF/OwnedFaceTransfer.cc
-    details/GeneralVoF/PhaseStorage.cc
+    explicit_instantiation/GeneralVoF/OwnedFaceTransfer.cc
+    explicit_instantiation/GeneralVoF/PhaseStorage.cc
     details/GeneralVoF/exact/Diagnostics.cc
     details/GeneralVoF/exact/PhaseStorage.cc
     details/GeneralVoF/exact/Reduction.cc

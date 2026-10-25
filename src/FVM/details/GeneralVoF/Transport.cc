@@ -1,7 +1,7 @@
 /** @file Transport.cc
- * @brief Operation entry and supported compiled arithmetic modes.
+ * @brief Operation dispatch and trial publication validation.
  */
-#include "FVM/details/GeneralVoF/Transport.tcc"
+#include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF
 {
 GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVelocity> velocity,
@@ -13,8 +13,4 @@ GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVeloc
         return plan_transport_finite<ArithmeticMode::Ordinary>(velocity, volumes, timestep);
     return plan_transport_finite<ArithmeticMode::BoundedCertification>(velocity, volumes, timestep);
 }
-template GeneralVoF::Trial GeneralVoF::plan_transport_finite<ArithmeticMode::Ordinary>(
-    std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
-template GeneralVoF::Trial GeneralVoF::plan_transport_finite<ArithmeticMode::BoundedCertification>(
-    std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
 } // namespace SimpleFluid::VoF

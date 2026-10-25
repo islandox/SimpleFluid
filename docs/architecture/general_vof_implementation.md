@@ -90,8 +90,13 @@ numerical backend or broaden their support matrices.
 ## Compilation and resource contracts
 
 Private `.hh` files declare interfaces and retain simple one-line members.
-Heavy templates live in `.tcc` providers included from owning `.cc` files, which
-instantiate the supported modes. Declaration and provider includes precede
+Heavy templates live in `.tcc` providers under `details/GeneralVoF/`. Their
+supported modes are instantiated by `.cc` units under each owning component's
+`explicit_instantiation/GeneralVoF/` directory. FVM transport/remap dispatch and
+trial methods remain in ordinary `details/GeneralVoF/*.cc` sources. Exact
+specialization method definitions remain in `details/GeneralVoF/exact/`; they
+are ordinary compiled implementations, not explicit-instantiation statements.
+Declaration and provider includes precede
 code; only `.ipp` definitions may be included at the end of a header. Public
 headers never include compiled providers.
 
