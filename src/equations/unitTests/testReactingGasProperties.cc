@@ -326,7 +326,7 @@ TEST(ReactingGasPropertiesTest, FengEndpointsAcceptWinterReferenceBeyondLegacySc
     constexpr double density = 1546.23563;
     constexpr double viscosity = 0.00243878721;
     constexpr double radius = 1.0e-4;
-    // Hydra-TF separately tests the actual Winter2022 provider at 298.85 K.
+    // The external host separately tests the Winter2022 provider at 298.85 K.
     constexpr double winter_diffusivity = 5.18858348242618e-9;
     constexpr double slip = 100.0 * winter_diffusivity / radius;
     EXPECT_THROW(Physics::bubble_mass_transfer(SimpleFluid::BubbleMassTransferMode::Hughmark, winter_diffusivity,

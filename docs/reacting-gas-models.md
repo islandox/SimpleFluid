@@ -180,9 +180,9 @@ explicit dispersed roles with extensive counts. Prescribed planar ALE uses live
 motion authority, accepted-old/new CV storage and relative phase transport.
 Preview restores accepted geometry; commit and restore do not call source or
 EOS laws. The moving path retains its inviscid/slip-wall, topology and
-nonperiodic restrictions. Upstream complete depletion with missing pre-transfer state
-work, nonlocal pressure-conditioned transfer, evolving slip momentum, capillary
-energy and general moving interfaces are outside this support boundary.
+nonperiodic restrictions. Upstream complete depletion without owned pre-transfer
+state and work accounting, nonlocal pressure-conditioned transfer, evolving slip
+momentum, capillary energy and general moving interfaces are outside this support boundary.
 
 ## Configuration, output and accepted receipts
 
@@ -190,8 +190,8 @@ Flat database parsing cannot construct a catalog, EOS or pure source provider.
 The parser therefore rejects `reacting_species_model=species` or
 `enable_reacting_gas=true`; construct enabled options explicitly in C++.
 Disabled flat configuration remains available.
-Old `idealGasSource`, `twoPopulation`, fixed-H2/yield/property/scalar source-decay keys and
-aliases are retired. `solution_transport_mode` replaces the specialized
+Old `idealGasSource`, `twoPopulation`, fixed-species/yield/property/source-decay
+keys and aliases are retired. `solution_transport_mode` replaces the specialized
 dissolved-transport key. Application reference property files may still contain
 explicitly named physical yield/correlation inputs; those are application laws,
 not solver defaults.

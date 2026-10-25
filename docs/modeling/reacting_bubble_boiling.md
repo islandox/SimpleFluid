@@ -141,9 +141,9 @@ This backend uses closed orthogonal meshes, common phase pressure and zero
 surface tension. Prescribed native planar ALE retains accepted-old/new storage,
 relative phase flux and explicit live motion authority. It is not the
 Boussinesq free-surface/vapor adapter. Upstream complete depletion without owned
-scalar source-decay work, pressure-conditioned transfer across faces, evolving slip
-momentum, capillary energy and general interface dynamics remain outside its
-support boundary.
+pre-transfer state and work accounting, pressure-conditioned transfer across
+faces, evolving slip momentum, capillary energy and general interface dynamics
+remain outside its support boundary.
 
 ## Standalone scalar controls
 

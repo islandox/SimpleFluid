@@ -2855,7 +2855,7 @@ TEST(BoussinesqCouplingIntervalTest, UnequalSubcyclesReplayTheSameEnergyAndHydro
 
 TEST(BoussinesqCouplingIntervalTest, ConsecutiveSmallAnnularIntervalsReplayEnergyAndHydrogen)
 {
-    // Match the physical scales and solver configuration of the Hydra-TF
+    // Match the physical scales and solver configuration of the external host's
     // annular consumer: the thermal increment is tiny relative to M*cp*T.
     constexpr double inner_radius = 0.04;
     constexpr double outer_radius = 0.25;

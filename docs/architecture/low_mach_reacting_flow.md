@@ -532,7 +532,8 @@ ordered face adapter described above. Configured local interphase heat and
 material stages use [pressure-conditioned thermal ownership](reacting_interphase_thermal.md)
 with frozen amounts, supplied partial-molar enthalpies and the same physical work
 and acceptance gates. Upstream complete depletion and nonlocal pressure-conditioned
-face transfer need their own pre-transfer state/Jacobian contracts and remain rejected.
+face transfer need their own pre-transfer state, work-accounting and Jacobian
+contracts and remain rejected.
 VoF solvers
 remain disabled by default and excluded from the supported reacting-flow scope
 while their qualification remains incomplete.

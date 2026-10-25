@@ -94,6 +94,6 @@ also own the same typed solvent/vapor latent inventory. Supplied-EOS surface/
 headspace and native low-Mach thermal stages retain their own contracts; this
 adapter is not evidence for those combinations.
 
-VoF remains outside this reacting-flow support matrix.
+VoF is maintained on the separate `refactor/vof` branch.
 Bounded-FP and exact-rational VoF/general-AMR paths remain deferred; lower-level
 geometry behavior is unchanged. Focused serial and actual2/4-rank qualification remains required.

@@ -1,5 +1,8 @@
 # TODO: SimpleFluid Multiphysics Roadmap
 
+**Branch scope:** supplied reacting species, Boussinesq and native low-Mach flow.
+VoF, AMR and their geometry/remap work are maintained separately on `refactor/vof`.
+
 **Documentation review date:** October 24, 2026
 
 This refresh reconciles the current source, public APIs, and checked-in test
@@ -19,8 +22,8 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 
 ### Current priorities
 
-VoF, AMR and their geometry/remap qualification are outside this
-reacting-flow support matrix.
+VoF, AMR and their geometry/remap qualification are maintained on the separate
+`refactor/vof` branch. This roadmap covers the reacting-flow workstream.
 
 1. Qualify supplied reaction/property laws and physical cases against the
    implemented Phases 12/14.1 species, donor, phase and thermal contracts.
@@ -389,7 +392,7 @@ Keep this phase independent of the new physics so solver performance changes can
 - [ ] Revisit scoped geometry execution in
       `PlanarALEMeshMotion::compute_trial_state` only with stronger
       application-level performance evidence. The October 11, 2026 review of
-      external host candidate C2 reverted the trial-read lease and its two added
+      external-host candidate C2 reverted the trial-read lease and its two added
       tests because the measured benefit did not clear the predeclared
       performance gate, not because of a correctness failure. On the
       267,652-cell, six-rank, 0–0.1 s startup fixture, warmed ABBAAB runs passed
@@ -404,7 +407,7 @@ Keep this phase independent of the new physics so solver performance changes can
       by a competing build were excluded. Preserve arithmetic, traversal order,
       collective failure handling, and physical gates in any requalification;
       do not treat the inclusive phase reduction as an established wall-time
-      speedup. The patch and evidence remain in the local, untracked external host
+      speedup. The patch and evidence remain in the external host's local, untracked
       directory `build/next-optimization-20261010/`: `C2.patch`,
       `C2-comparison.json`, `C2-decision.json`, and `report.json`.
 
@@ -888,9 +891,9 @@ key/default/unit/validity reference remains open.
       limitations of the existing numerical foundation.
 - [x] Separate weak RANS-plus-bubble coupling from phase-aware turbulent
       Euler–Euler flow and distinguish proposed design from current APIs.
-- [ ] Complete the [external host companion migration](docs/architecture/external_host_reacting_flow.md),
-      including finite species/isotope feedback and a supported bulk Winter-diffusion
-      owner before claiming parity with the removed reacting APIs.
+- [ ] Complete the [external-host integration](docs/architecture/external_host_reacting_flow.md),
+      including finite species/composition feedback and a supported bulk dissolved-
+      diffusion owner before claiming coupled-application transport parity.
 - [ ] Document every supported configuration key with default, SI unit,
       validity range and migration mapping; retired source keys must reject.
 - [x] Document supplied rate/stoichiometry/property interfaces, finite donor

@@ -91,9 +91,9 @@ Jacobian. A strong heat input can be infeasible for the declared ordered anchors
 without proving that every possible coupled physical interface model is infeasible.
 
 If earlier chemistry or face transport has already emptied a phase while leaving
-nonzero advected work volume or unallocated energy, this path rejects it. A proper
-pre-transfer state/work trace is required. General pressure-conditioned transfer across
-faces additionally needs a constitutive halo and pressure-Jacobian owner; source
+nonzero advected work volume or unallocated energy, this path rejects it. A trace
+of the pre-transfer state and associated work is required. General pressure-conditioned
+transfer across faces additionally needs a constitutive halo and pressure-Jacobian owner; source
 callbacks must not be rerun inside pressure roots to approximate that ownership.
 
 The separate Boussinesq finite-vapor adapter owns its reference-density `cp*T`

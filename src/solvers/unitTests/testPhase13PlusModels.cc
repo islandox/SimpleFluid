@@ -2414,7 +2414,7 @@ TEST(Phase13PlusSolverOutputTest, PublishesConfiguredFields)
 }
 
 
-TEST(ScalarSourceDecayTransportTest, RejectsRetiredPrecursorControls)
+TEST(ScalarSourceDecayTransportTest, RejectsRetiredSourceControls)
 {
     for (const auto* key : {
              "precursor_group_count", "precursor_decay_constants", "precursor_initial_concentrations",

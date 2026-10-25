@@ -33,26 +33,27 @@ VoF and reacting-VoF integration are disabled; bounded floating-point and
 exact-rational VoF/general-AMR paths are deferred from this refactor. Shared
 lower-level geometry and finite-volume utilities remain available.
 
-This migration deliberately breaks old source/configuration interfaces. Update
-includes, types, setup code, field readers and executable paths, then rebuild.
+## Current interfaces
+
+Use the typed interfaces below with matching headers and rebuilt libraries.
 There are no compatibility aliases or enabled single-species fallbacks.
 
-| Retired interface or assumption | Replacement |
+| Responsibility | Interface and contract |
 | --- | --- |
-| `PrescribedHeatSource`, its options/profile, and `prescribed_heat_*` setup | Independent `PrescribedHeatSource`, `PrescribedHeatSourceOptions`, `PrescribedHeatProfile` and `prescribed_heat_*` setup |
-| `ReactingGasModel`, `ReactingGasOptions`, `reacting_*` setup | `ReactingGasModel` and explicit typed `ReactingGasOptions` |
-| Specialized `idealGasSource` / `twoPopulation` selectors and energy-yield source | `ReactingGasMode::Species`, a supplied schema/mechanism and declared material/source laws |
-| H2 aggregate fields, reduced donor deficit and cumulative-counter escape inference | `species_field(id, phase, population)`, finite reactants, typed histories and accepted event receipts |
-| `reaction_driver_energy` as general chemistry input | Supplied reaction extents/rates or named external material packets, with independent heat ownership |
-| Resolved/dispersed interface coupling | Deferred; no supported implementation is included in this snapshot |
-| `reacting_solution_tank_demo` / `heated_solution_tank_sst` | `reacting_solution_tank_demo` / `heated_solution_tank_sst` |
+| Independent thermal source | `PrescribedHeatSource`, `PrescribedHeatSourceOptions`, `PrescribedHeatProfile` and `prescribed_heat_*` setup |
+| Reacting field adapter | `ReactingGasModel`, explicit typed `ReactingGasOptions` and `ReactingGasMode::Species`, with a supplied schema/mechanism and declared material/source laws |
+| Material state and accepted accounting | `species_field(id, phase, population)`, finite reactants, typed histories and accepted event receipts |
+| Chemical and external source input | Supplied reaction extents/rates or named external material packets, with independent heat ownership |
+| Standalone scalar source/decay | `ScalarSourceDecayTransport` with independent scalar source terms, decay constants and conservative transport |
+| Reacting-VoF integration | Deferred; no supported generic VoF integration is enabled |
+| Application examples | `reacting_solution_tank_demo` and `heated_solution_tank_sst`, with explicit application inputs |
 
 Explicit retired keys reject even when the model is disabled. A flat database
 cannot manufacture a species catalog or infer material physics; enabled setup
-requires the typed C++ provider seam. The delayed-external-source model and its coupler,
-output and checkpoint hooks are removed. `ScalarSourceDecayTransport` retains
-standalone analytic source/decay and conservative scalar transport, with no
-external-source or heat-yield coupling.
+requires the typed C++ provider seam. `ScalarSourceDecayTransport` retains
+standalone analytic source/decay and conservative scalar transport. Its sources
+are supplied independently; it owns neither a reaction mechanism nor heat-yield
+coupling.
 
 Hydrogen and IF97 data remain explicit application choices in the matched
 reference cases. Their provenance and H2 result labels describe those chosen
