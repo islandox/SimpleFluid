@@ -2,7 +2,7 @@
  * @brief Owner-local native dispatch routes with procedural interior geometry.
  */
 #pragma once
-#include "geometry/ConvexCellGeometry.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include <map>
 #include <variant>
@@ -18,29 +18,29 @@ struct SparseNativeCell
     std::uint64_t native_cell = 0;
     bool full = false;
     double volume = 0;
-    GeometryPoint centroid{};
+    PLIC::GeometryPoint centroid{};
 };
 struct SparseNativeFace
 {
     std::uint64_t gid = 0, first = 0, second = MultiRegionMesh::invalid_cell_id();
     RegionFace native;
     std::optional<RegionFace> second_native;
-    GeometryPoint second_image{};                ///< Checked neighbor-to-first displacement for numeric FVM distances.
-    std::vector<char> exact_second_image;        ///< Exact neighbor-to-first displacement certificate.
+    PLIC::GeometryPoint second_image{};          ///< Checked neighbor-to-first displacement for numeric FVM distances.
+    std::vector<char> second_image_identity;     ///< Finite neighbor-to-first displacement certificate.
     std::vector<std::uint64_t> second_node_gids; ///< First loop order, in the second physical image.
     bool native_is_second = false;               ///< Primary native address represents the second incident image.
     bool cut_incidence = true; ///< Derived by the factory; a physical image override alone is not a cut.
     int boundary = MultiRegionMesh::invalid_boundary_id;
     /** Retained for cut incidence or a periodic first image with only the
      * second native provider resident. Ordinary uncut interiors remain native. */
-    ExactPlanarFacePtr override_geometry;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> override_geometry;
     std::vector<std::uint64_t> override_nodes;
 };
 struct SparseNativeNode
 {
     std::uint64_t gid = 0;
     std::optional<std::pair<std::size_t, std::uint64_t>> native;
-    GeometryPoint introduced_coordinate{};
+    PLIC::GeometryPoint introduced_coordinate{};
 };
 struct SparseNativeMeshInput
 {
@@ -58,13 +58,15 @@ struct SparseNativeMeshInput
     std::vector<char> root_schema; ///< Compact original-root/kernel provenance, never active leaves.
     std::size_t byte_budget = 64 * 1024 * 1024;
 };
-struct ExactSparseNativeProof {};
+struct NativeSparseProof
+{
+};
 struct FrozenSourceCopyProof {std::shared_ptr<const void> accepted_source;};
 /** Private implementation detail exposed here for compiled sparse dispatch.
  * Maps hold routes, never expanded procedural face geometry or cell-face CSR. */
 struct SparseNativeIndex
 {
-    std::variant<ExactSparseNativeProof,FrozenSourceCopyProof> provenance;
+    std::variant<NativeSparseProof, FrozenSourceCopyProof> provenance;
     std::map<std::uint64_t, SparseNativeCell> cells;
     std::map<std::uint64_t, SparseNativeFace> faces;
     std::map<std::uint64_t, SparseNativeNode> nodes;

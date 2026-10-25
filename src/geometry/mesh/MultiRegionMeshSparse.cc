@@ -11,7 +11,7 @@ namespace SimpleFluid::Meshes
 {
 namespace
 {
-MeshUtils::Vec3 vector(GeometryPoint p)
+MeshUtils::Vec3 vector(PLIC::GeometryPoint p)
 {
     return {p[0], p[1], p[2]};
 }
@@ -27,10 +27,10 @@ bool second_occurrence(const SparseNativeFace& face, RegionFace address, std::ui
         return !face.native_is_second;
     throw std::invalid_argument("Periodic self incidence lacks a native image address.");
 }
-ExactPlanarFacePtr physical_incidence(const SparseNativeFace& face, bool second)
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> physical_incidence(const SparseNativeFace& face, bool second)
 {
-    return second ? face.override_geometry->reversed()->translated_exact(
-                        exact_displacement_difference({}, face.exact_second_image))
+    return second ? face.override_geometry->reversed()->translated_packet(
+                        PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, face.second_image_identity))
                   : face.override_geometry;
 }
 template<class Map> std::size_t map_bytes(const Map& map)
@@ -48,7 +48,7 @@ std::size_t SparseNativeIndex::storage_bytes() const
     for (const auto& [gid, face] : faces)
     {
         total += (face.override_nodes.capacity() + face.second_node_gids.capacity()) * sizeof(std::uint64_t) +
-                 face.exact_second_image.capacity();
+                 face.second_image_identity.capacity();
         if (face.override_geometry)
             total += face.override_geometry->encode_incidence().capacity();
     }
@@ -113,7 +113,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
             {
                 budget.add(sizeof(face) + 16 * sizeof(void*) +
                            (face.override_nodes.size() + face.second_node_gids.size()) * sizeof(ID) +
-                           face.exact_second_image.size());
+                           face.second_image_identity.size());
                 if (face.override_geometry)
                     budget.add(face.override_geometry->encode_incidence().size());
             }
@@ -179,7 +179,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
             for (auto& node : input.nodes)
             {
                 const auto& proof = input.node_certificates.at(node.gid);
-                const auto display = exact_point_display(proof);
+                const auto display = PLIC::point_display<ArithmeticMode::Ordinary>(proof);
                 if (node.native)
                 {
                     const auto [r, n] = *node.native;
@@ -217,9 +217,10 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                     (face.second != invalid_cell_id() && face.boundary != invalid_boundary_id) ||
                     (face.boundary != invalid_boundary_id && !index->boundaries.contains(face.boundary)))
                     throw std::invalid_argument("Incomplete sparse native canonical face proof.");
-                if (face.second_image != exact_displacement_display(face.exact_second_image) ||
-                    (!face.exact_second_image.empty() && face.second == invalid_cell_id()) ||
-                    (face.first == face.second && face.exact_second_image.empty()))
+                if (face.second_image !=
+                        PLIC::displacement_display<ArithmeticMode::Ordinary>(face.second_image_identity) ||
+                    (!face.second_image_identity.empty() && face.second == invalid_cell_id()) ||
+                    (face.first == face.second && face.second_image_identity.empty()))
                     throw std::invalid_argument(
                         "Sparse periodic face has inconsistent exact/display image provenance.");
                 const auto vertices = face.override_geometry->vertex_identities();
@@ -243,7 +244,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                 }
                 if (!ordered)
                     throw std::invalid_argument("Sparse face node routes differ from exact ordered incidence.");
-                if (!face.exact_second_image.empty() && face.second_node_gids.size() != vertices.size())
+                if (!face.second_image_identity.empty() && face.second_node_gids.size() != vertices.size())
                     throw std::invalid_argument("Sparse periodic face lacks second physical node incidence.");
                 if (!face.second_node_gids.empty())
                 {
@@ -254,8 +255,10 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                         auto node = face.second_node_gids[i];
                         if (!index->nodes.contains(node) ||
                             input.node_certificates.at(node) !=
-                                exact_point_translated(vertices[(i + node_shift) % vertices.size()],
-                                    exact_displacement_difference({}, face.exact_second_image)))
+                                PLIC::point_translated<ArithmeticMode::Ordinary>(
+                                    vertices[(i + node_shift) % vertices.size()],
+                                    PLIC::displacement_difference<ArithmeticMode::Ordinary>(
+                                        {}, face.second_image_identity)))
                             throw std::invalid_argument(
                                 "Sparse second physical node proof disagrees with exact image.");
                     }
@@ -273,7 +276,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                         if (gid != invalid_cell_id())
                         {
                             const auto& cell = index->cells.at(gid);
-                            const bool role_matches = face.exact_second_image.empty() || face.first == face.second ||
+                            const bool role_matches = face.second_image_identity.empty() || face.first == face.second ||
                                                       ((gid == face.second) == address_is_second);
                             incident = incident || (role_matches && cell.full && cell.region == address.region &&
                                                        (cell.native_cell == owner || cell.native_cell == neighbor));
@@ -287,19 +290,20 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                             const auto& cell = index->cells.at(gid);
                             if (!cell.full || cell.region != address.region ||
                                 (cell.native_cell != owner && cell.native_cell != neighbor) ||
-                                (!face.exact_second_image.empty() && ((gid == face.second) != address_is_second) &&
+                                (!face.second_image_identity.empty() && ((gid == face.second) != address_is_second) &&
                                     face.first != face.second))
                                 continue;
                             const auto outward = cell.native_cell == owner ? certificate : certificate->reversed();
                             const auto tile = physical_incidence(
-                                face, !face.exact_second_image.empty() ? address_is_second : gid == face.second);
+                                face, !face.second_image_identity.empty() ? address_is_second : gid == face.second);
                             if (!outward->contains(*tile) || outward->oppositely_oriented(*tile))
                                 throw std::invalid_argument(
                                     "Sparse canonical face orientation disagrees with its incident cell.");
                         }
                     const auto in_address = address_is_second
-                                                ? face.override_geometry->translated_exact(
-                                                      exact_displacement_difference({}, face.exact_second_image))
+                                                ? face.override_geometry->translated_packet(
+                                                      PLIC::displacement_difference<ArithmeticMode::Ordinary>(
+                                                          {}, face.second_image_identity))
                                                 : face.override_geometry;
                     const int sign = certificate->oppositely_oriented(*in_address) ? -1 : 1;
                     index->logical_faces[address].push_back(face.gid);
@@ -319,7 +323,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
             for (const auto& [gid, cell] : index->cells)
                 if (cell.full)
                 {
-                    std::vector<ExactPlanarFacePtr> canonical_shell, native_shell;
+                    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> canonical_shell, native_shell;
                     for (auto native :
                         mesh->topology(cell.region, [&](const auto& t) { return t.cell_faces(cell.native_cell); }))
                     {
@@ -332,7 +336,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                             mesh->topology(cell.region, [&](const auto& t) { return t.owner_cell(native); });
                         const auto outward = cell.native_cell == native_owner ? certificate : certificate->reversed();
                         native_shell.push_back(outward);
-                        std::vector<ExactPlanarFacePtr> tiles;
+                        std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> tiles;
                         for (auto face_id : found->second)
                         {
                             const auto& face = index->faces.at(face_id);
@@ -349,7 +353,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                             mesh->topology(cell.region, [&](const auto& t) { return t.face_nodes(native); });
                         for (const auto& point : certificate->vertex_identities())
                         {
-                            const auto display = exact_point_display(point);
+                            const auto display = PLIC::point_display<ArithmeticMode::Ordinary>(point);
                             std::optional<ID> matching;
                             for (auto node : native_nodes)
                             {
@@ -373,8 +377,8 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                             authenticated_aliases.insert(alias);
                         }
                     }
-                    if (!ExactPlanarFace::cell_shell(canonical_shell)
-                            ->equivalent(*ExactPlanarFace::cell_shell(native_shell)))
+                    if (!PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(canonical_shell)
+                            ->equivalent(*PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(native_shell)))
                         throw std::invalid_argument(
                             "Sparse canonical outward shell differs from native cell geometry.");
                 }
@@ -390,16 +394,17 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                 const auto native = mesh->native_face_certificate(face.native);
                 const auto sign = index->flux_signs.at({face.native, gid});
                 const auto oriented = sign == 1 ? native : native->reversed();
-                const auto actual_in_native = face.native_is_second
-                                                  ? face.override_geometry->translated_exact(
-                                                        exact_displacement_difference({}, face.exact_second_image))
-                                                  : face.override_geometry;
+                const auto actual_in_native =
+                    face.native_is_second
+                        ? face.override_geometry->translated_packet(
+                              PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, face.second_image_identity))
+                        : face.override_geometry;
                 auto native_vertices = oriented->vertex_identities(),
                      actual_vertices = actual_in_native->vertex_identities();
                 std::sort(native_vertices.begin(), native_vertices.end());
                 std::sort(actual_vertices.begin(), actual_vertices.end());
                 face.cut_incidence = !(oriented->equivalent(*actual_in_native) && native_vertices == actual_vertices);
-                if (!face.cut_incidence && (!face.native_is_second || face.exact_second_image.empty()))
+                if (!face.cut_incidence && (!face.native_is_second || face.second_image_identity.empty()))
                 {
                     const auto nodes = mesh->topology(
                         face.native.region, [&](const auto& t) { return t.face_nodes(face.native.face); });
@@ -411,7 +416,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::from_sparse_native(
                     face.override_geometry.reset();
                     face.override_nodes.clear();
                     face.override_nodes.shrink_to_fit();
-                    if (face.exact_second_image.empty())
+                    if (face.second_image_identity.empty())
                     {
                         face.second_node_gids.clear();
                         face.second_node_gids.shrink_to_fit();
@@ -428,7 +433,7 @@ int MultiRegionMesh::sparse_cell_owner(ID cell) const
         throw std::invalid_argument("Sparse ownership requires a sparse native shard.");
     return d_sparse_native->cells.at(cell).owner;
 }
-ExactPlanarFacePtr MultiRegionMesh::certified_sparse_face_geometry(ID face) const
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> MultiRegionMesh::certified_sparse_face_geometry(ID face) const
 {
     check_face_id(face);
     if(frozen_native())throw std::invalid_argument("Frozen native accepted-copy geometry has no exact adaptation certificate.");
@@ -438,14 +443,15 @@ ExactPlanarFacePtr MultiRegionMesh::certified_sparse_face_geometry(ID face) cons
     auto certificate = native_face_certificate(route.native);
     return native_flux_orientation(route.native, face) == 1 ? certificate : certificate->reversed();
 }
-std::shared_ptr<const ConvexCellGeometry> MultiRegionMesh::certified_sparse_cell_geometry(ID cell) const
+std::shared_ptr<const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>>
+MultiRegionMesh::certified_sparse_cell_geometry(ID cell) const
 {
     check_cell_id(cell);
     if(frozen_native())throw std::invalid_argument("Frozen native accepted-copy geometry has no exact adaptation certificate.");
     const auto& route = d_sparse_native->cells.at(cell);
     if (!route.full)
         throw std::invalid_argument("Metric-only sparse neighbor has no cell certificate.");
-    std::vector<ExactPlanarFacePtr> faces;
+    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
     for (auto native : topology(route.region, [&](const auto& t) { return t.cell_faces(route.native_cell); }))
     {
         const RegionFace address{route.region, native};
@@ -454,12 +460,12 @@ std::shared_ptr<const ConvexCellGeometry> MultiRegionMesh::certified_sparse_cell
             const auto& incidence = d_sparse_native->faces.at(face);
             auto geometry = certified_sparse_face_geometry(face);
             if (second_occurrence(incidence, address, cell))
-                geometry = geometry->reversed()->translated_exact(
-                    exact_displacement_difference({}, incidence.exact_second_image));
+                geometry = geometry->reversed()->translated_packet(
+                    PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, incidence.second_image_identity));
             faces.push_back(std::move(geometry));
         }
     }
-    return ExactPlanarFace::cell_shell(faces);
+    return PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces);
 }
 MultiRegionMesh::ResolvedFace MultiRegionMesh::resolve_sparse_face(ID face) const
 {

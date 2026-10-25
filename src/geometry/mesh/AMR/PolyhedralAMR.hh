@@ -2,7 +2,7 @@
  * @brief Immutable bounded-bootstrap convex refinement with canonical atomic faces.
  */
 #pragma once
-#include "geometry/ExactPolyhedralComplex.hh"
+#include "geometry/PLIC/PolyhedralComplex.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "geometry/mesh/AMR/AdaptiveProviderKernel.hh"
 #include "parallel/CompositePartition.hh"
@@ -39,8 +39,9 @@ public:
     [[nodiscard]] AdaptiveCellKey cell_key(std::uint64_t cell) const override;
     [[nodiscard]] std::uint64_t cell_material(std::uint64_t cell) const override;
     [[nodiscard]] std::size_t cell_fragment(std::uint64_t cell) const override;
-    [[nodiscard]] ConvexGeometryPtr cell_geometry(std::uint64_t cell) const;
-    [[nodiscard]] const std::shared_ptr<const ExactPolyhedralComplex>& complex() const noexcept;
+    [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> cell_geometry(std::uint64_t cell) const;
+    [[nodiscard]] const std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>>&
+    complex() const noexcept;
 
     [[nodiscard]] AdaptiveBootstrap detach_owned(
         std::span<const std::uint64_t> owned_cells, AdaptiveBytes domain) const;

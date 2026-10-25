@@ -134,12 +134,12 @@ struct ExtrudedAMR::Data
     std::map<BaseEdgeKey, EdgeNode> edges;
     std::map<AxialIntervalKey, ZNode> axial;
     std::set<AxialIntervalKey> intervals;
-    std::vector<ExactPointRecipe> points;
-    std::vector<ExactScalarRecipe> z;
+    std::vector<PLIC::PointRecipe> points;
+    std::vector<PLIC::ScalarRecipe> z;
     std::vector<BaseCellKey> base_keys;
     std::vector<AxialIntervalKey> interval_keys;
     std::shared_ptr<const ExtrudedTopology> topology;
-    std::shared_ptr<const ExactExtrudedConstruction> construction;
+    std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> construction;
     SP<const MultiRegionMesh> geometry;
     std::shared_ptr<const CompositePartition<>> partition;
     ID topology_generation = 0, partition_generation = 0, collective_id = 0;
@@ -150,12 +150,12 @@ struct ExtrudedAMR::Data
 namespace
 {
 using Data = ExtrudedAMR::Data;
-GeometryPoint displayed(const Data& data, std::size_t point)
+PLIC::GeometryPoint displayed(const Data& data, std::size_t point)
 {
     const auto& recipe = data.points.at(point);
     if (recipe.parents.empty())
         return recipe.root;
-    GeometryPoint result{};
+    PLIC::GeometryPoint result{};
     for (auto parent : recipe.parents)
     {
         auto p = displayed(data, parent);
@@ -393,7 +393,7 @@ void compact(Data& data)
         visit(edge.b);
     }
     std::map<std::size_t, std::size_t> remap;
-    std::vector<ExactPointRecipe> points;
+    std::vector<PLIC::PointRecipe> points;
     for (auto id : used)
     {
         auto recipe = data.points[id];
@@ -424,7 +424,7 @@ void compact(Data& data)
         zvisit(node.upper);
     }
     remap.clear();
-    std::vector<ExactScalarRecipe> z;
+    std::vector<PLIC::ScalarRecipe> z;
     for (auto id : used)
     {
         auto recipe = data.z[id];
@@ -479,7 +479,8 @@ void prepare_geometry(Data& data)
         throw std::overflow_error("Extruded AMR native ordinal extent overflow.");
     data.topology = std::make_shared<const ExtrudedTopology>(
         active.size(), cells, data.interval_keys.size(), boundaries, data.grid->boundary_aliases);
-    data.construction = ExactExtrudedConstruction::make(data.topology, data.points, active, data.z, zactive);
+    data.construction =
+        PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::make(data.topology, data.points, active, data.z, zactive);
     auto geometry = std::make_shared<const ExtrudedGeometry>(data.topology, data.construction);
     for (std::size_t c = 0; c < cells.size(); ++c)
         if (!data.construction->base_quality_above(c, data.grid->minimum_scaled_area))
@@ -656,7 +657,7 @@ std::size_t ExtrudedAMR::cell_fragment(ID cell) const
     (void) cell_key(cell);
     return 0;
 }
-ConvexGeometryPtr ExtrudedAMR::cell_geometry(ID cell) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> ExtrudedAMR::cell_geometry(ID cell) const
 {
     (void) cell_key(cell);
     if (!geometry_unchanged())
@@ -705,12 +706,12 @@ MeshStorageReport ExtrudedAMR::storage_report() const
         bytes += basekey(k);
     for (const auto& k : data_->interval_keys)
         bytes += zkey(k);
-    bytes += data_->points.capacity() * sizeof(ExactPointRecipe) + data_->z.capacity() * sizeof(ExactScalarRecipe);
+    bytes += data_->points.capacity() * sizeof(PLIC::PointRecipe) + data_->z.capacity() * sizeof(PLIC::ScalarRecipe);
     for (const auto& p : data_->points)
         bytes += p.parents.capacity() * sizeof(std::size_t);
     for (const auto& z : data_->z)
         bytes += z.parents.capacity() * sizeof(std::size_t);
-    bytes += data_->grid->xy_nodes.capacity() * sizeof(GeometryPoint) +
+    bytes += data_->grid->xy_nodes.capacity() * sizeof(PLIC::GeometryPoint) +
              data_->grid->base_cells.capacity() * sizeof(std::vector<unsigned>) +
              data_->grid->z_edges.capacity() * sizeof(double) +
              data_->grid->boundaries.capacity() * sizeof(SemiStructMeshTopo::BoundaryEdge) +
@@ -1064,7 +1065,7 @@ void intern_columns(LocalData& state)
 struct BaseTemplate
 {
     std::shared_ptr<const ExtrudedTopology> topology;
-    std::shared_ptr<const ExactExtrudedConstruction> construction;
+    std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> construction;
     std::shared_ptr<const std::vector<BaseCellKey>> keys;
     std::vector<std::pair<BaseEdgeKey, std::string>> sides;
 };
@@ -1116,14 +1117,15 @@ void build_local_runs(LocalData& state, const std::shared_ptr<const LocalData>& 
         zvalues.push_back(value);
     }
     std::sort(global_axis.begin(), global_axis.end(), [&](auto a, auto b) { return zvalues[a] < zvalues[b]; });
-    std::shared_ptr<const ExactExtrudedConstruction> coordinates;
-    std::map<std::vector<std::size_t>, std::shared_ptr<const ExactExtrudedConstruction>> axes;
+    std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> coordinates;
+    std::map<std::vector<std::size_t>, std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>>>
+        axes;
     struct Planned
     {
         BaseTemplate base;
         std::shared_ptr<const ZKeys> zkeys;
         std::size_t first, count, axis_first;
-        std::shared_ptr<const ExactExtrudedConstruction> axis;
+        std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> axis;
     };
     std::vector<Planned> plans;
     for (const auto& [zkeys, basekeys] : groups)
@@ -1208,8 +1210,8 @@ void build_local_runs(LocalData& state, const std::shared_ptr<const LocalData>& 
                             for (auto v : patch.base.at(k).vertices)
                                 used.insert(v);
                         active.assign(used.begin(), used.end());
-                        coordinates =
-                            ExactExtrudedConstruction::make(all_topology, patch.points, active, pool.z, global_axis);
+                        coordinates = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::make(
+                            all_topology, patch.points, active, pool.z, global_axis);
                         if (previous)
                             for (const auto& run : previous->runs)
                                 if (run.region.geometry().construction()->encode_axis_values() ==
@@ -1251,7 +1253,7 @@ void build_local_runs(LocalData& state, const std::shared_ptr<const LocalData>& 
                     for (auto v : one.base.at(k).vertices)
                         used.insert(v);
                 std::vector<std::size_t> active(used.begin(), used.end());
-                coordinates = ExactExtrudedConstruction::make(
+                coordinates = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::make(
                     one.topology->with_layers(global_axis.size() - 1), one.points, active, pool.z, global_axis);
                 if (previous)
                     for (const auto& run : previous->runs)
@@ -1267,8 +1269,8 @@ void build_local_runs(LocalData& state, const std::shared_ptr<const LocalData>& 
             if (axis == axes.end())
             {
                 auto topology = base.topology->with_layers(points.size() - 1);
-                auto construction =
-                    ExactExtrudedConstruction::shared_axis_selection(topology, base.construction, coordinates, points);
+                auto construction = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::shared_axis_selection(
+                    topology, base.construction, coordinates, points);
                 if (previous)
                     for (const auto& run : previous->runs)
                     {
@@ -1320,7 +1322,7 @@ void build_local_runs(LocalData& state, const std::shared_ptr<const LocalData>& 
         std::map<std::string, std::string> aliases{{"zmin", physical_low ? physical_name("zmin") : cap_name(low)},
             {"zmax", physical_high ? physical_name("zmax") : cap_name(high)}};
         auto topology = plan.base.topology->with_layers(plan.count, std::move(aliases));
-        auto construction = ExactExtrudedConstruction::shared_view(
+        auto construction = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::shared_view(
             topology, plan.base.construction, plan.axis, plan.axis_first, plan.count);
         auto geometry = std::make_shared<const ExtrudedGeometry>(topology, std::move(construction));
         LocalProductRun run{
@@ -1427,7 +1429,8 @@ AdaptiveCellKey LocalProductAMR::cell_key(std::size_t run_id, std::uint64_t cell
     return {data_->pool.grid->region_id,
         ProductCellAncestry{run.base_keys[cell % run.base_keys.size()], run.intervals[cell / run.base_keys.size()]}};
 }
-ConvexGeometryPtr LocalProductAMR::cell_geometry(std::size_t run, std::uint64_t cell) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> LocalProductAMR::cell_geometry(
+    std::size_t run, std::uint64_t cell) const
 {
     (void) cell_key(run, cell);
     return data_->runs.at(run).region.geometry().certified_cell_geometry(cell);
@@ -1817,10 +1820,10 @@ MeshStorageReport LocalProductAMR::storage_report() const
     // Retained factor ancestry and construction recipes are separate from the
     // shared native templates; this capacity estimate includes their payload.
     const auto& p = data_->pool;
-    report.objects += sizeof(ExtrudedAMRGrid) + p.grid->xy_nodes.capacity() * sizeof(GeometryPoint) +
+    report.objects += sizeof(ExtrudedAMRGrid) + p.grid->xy_nodes.capacity() * sizeof(PLIC::GeometryPoint) +
                       p.grid->base_cells.capacity() * sizeof(std::vector<unsigned>) +
-                      p.grid->z_edges.capacity() * sizeof(double) + p.points.capacity() * sizeof(ExactPointRecipe) +
-                      p.z.capacity() * sizeof(ExactScalarRecipe);
+                      p.grid->z_edges.capacity() * sizeof(double) + p.points.capacity() * sizeof(PLIC::PointRecipe) +
+                      p.z.capacity() * sizeof(PLIC::ScalarRecipe);
     for (const auto& c : p.grid->base_cells)
         report.objects += c.capacity() * sizeof(unsigned);
     for (const auto& q : p.points)
@@ -2023,7 +2026,7 @@ void read_base(Pool& pool, std::span<const char> packet)
     auto n = count(r);
     for (std::size_t i = 0; i < n; ++i)
     {
-        ExactPointRecipe recipe;
+        PLIC::PointRecipe recipe;
         for (auto& q : recipe.root)
         {
             q = std::bit_cast<double>(r.word());
@@ -2121,7 +2124,7 @@ void read_axis(Pool& pool, std::span<const char> packet)
     auto n = count(r);
     for (std::size_t i = 0; i < n; ++i)
     {
-        ExactScalarRecipe recipe;
+        PLIC::ScalarRecipe recipe;
         recipe.root = std::bit_cast<double>(r.word());
         if (!std::isfinite(recipe.root))
             throw std::invalid_argument("Nonfinite product root Z.");
@@ -2442,7 +2445,7 @@ public:
         }
         return families;
     }
-    ConvexGeometryPtr geometry(const AdaptiveLeaf& leaf) const override
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
     {
         if (!leaf.native_recipe)
             throw std::invalid_argument("Missing native product descriptor.");
@@ -2469,7 +2472,7 @@ public:
         const auto& base_node = state.pool.base.at(key.base);
         std::vector<AdaptiveSurface> result;
         const auto shape = geometry(leaf);
-        // Exact construction emits side faces in base-loop order, followed by
+        // Native construction emits side faces in base-loop order, followed by
         // lower and upper caps; authoritative native atomic shape is checked.
         for (std::size_t i = 0; i < base_node.edges.size(); ++i)
         {
@@ -2532,7 +2535,7 @@ public:
                     break;
                 }
             if (result[f].native_face == std::numeric_limits<std::uint64_t>::max())
-                throw std::invalid_argument("Exact product surface lacks native face binding.");
+                throw std::invalid_argument("Native product surface lacks native face binding.");
         }
         return result;
     }

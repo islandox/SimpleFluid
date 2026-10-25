@@ -67,7 +67,7 @@ std::vector<AdaptiveHistoryFrame> frames(const ::SimpleFluid::Meshes::AMR::Distr
         {
             const auto& leaf = h.owned().at(key);
             auto geometry = h.geometry(leaf);
-            GeometryHalfspace plane{{1, .25, .125}, {0, 0, 0}, history ? .45 : .6};
+            SimpleFluid::PLIC::GeometryHalfspace plane{{1, .25, .125}, {0, 0, 0}, history ? .45 : .6};
             auto cut = geometry->clip(plane);
             const double v = h.metrics(leaf).volume;
             const double g = history == 2 ? (subnormal ? std::numeric_limits<double>::denorm_min() : 1e-200)

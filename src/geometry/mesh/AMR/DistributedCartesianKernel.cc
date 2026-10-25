@@ -62,9 +62,9 @@ AMRBlock block(const AMRGrid& grid, const CartesianCellAncestry& cell)
         result.index[a] = cell.index[a] / grid.block_cells[a];
     return result;
 }
-std::pair<GeometryPoint, GeometryPoint> root_bounds(const AMRGrid& grid)
+std::pair<PLIC::GeometryPoint, PLIC::GeometryPoint> root_bounds(const AMRGrid& grid)
 {
-    GeometryPoint lower = grid.origin, upper{};
+    PLIC::GeometryPoint lower = grid.origin, upper{};
     for (std::size_t a = 0; a < 3; ++a)
         upper[a] = coordinate(grid, a, mul(grid.root_blocks[a], grid.block_cells[a]), 0);
     return {lower, upper};
@@ -159,7 +159,7 @@ public:
     {
         (void) ancestry(grid_, leaf.key);
         const auto [lower, upper] = root_bounds(grid_);
-        return exact_periodic_point(point, lower, upper, grid_.periodic);
+        return PLIC::periodic_point<ArithmeticMode::Ordinary>(point, lower, upper, grid_.periodic);
     }
     std::vector<AdaptiveCellKey> matching_partners(const AdaptiveLeaf& leaf) const override
     {
@@ -187,16 +187,16 @@ public:
         auto center = region.geometry().cell_centroid(leaf.native_cell);
         return {region.geometry().cell_volume(leaf.native_cell), {center.x, center.y, center.z}};
     }
-    ConvexGeometryPtr geometry(const AdaptiveLeaf& leaf) const override
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf& leaf) const override
     {
         const auto& cell = ancestry(grid_, leaf.key);
-        GeometryPoint lower{}, upper{};
+        PLIC::GeometryPoint lower{}, upper{};
         for (std::size_t a = 0; a < 3; ++a)
         {
             lower[a] = coordinate(grid_, a, cell.index[a], cell.level);
             upper[a] = coordinate(grid_, a, cell.index[a] + 1, cell.level);
         }
-        return ConvexCellGeometry::box(lower, upper);
+        return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(lower, upper);
     }
     std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf& leaf) const override
     {
@@ -234,7 +234,7 @@ public:
                 const auto [lower, root_upper] = root_bounds(grid_);
                 auto from = lower;
                 from[axis] = root_upper[axis];
-                surface.authority_image = exact_displacement(from, lower);
+                surface.authority_image = PLIC::displacement<ArithmeticMode::Ordinary>(from, lower);
             }
             unsigned level = cell.level;
             while (level && plane % 2 == 0)

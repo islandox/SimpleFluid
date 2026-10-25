@@ -3,11 +3,11 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
-#include "geometry/ExactSweptGeometry.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 namespace SimpleFluid::detail::vof_exact
 {
-using Measure = Meshes::ExactGeometryMeasure;
+using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 /** Addition/scaling admit bounded retained exact scalar growth, never a
  * floating substitute. Division/squaring use the core bit-growth preflight.
  */
@@ -26,7 +26,8 @@ using Measure = Meshes::ExactGeometryMeasure;
 /** Explicit binary64 inner view plus outward conversion enclosure. A rounded
  * zero keeps exact_nonzero; the exact physical operator remains authoritative.
  */
-[[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL double view(const Measure&, Meshes::CertifiedGeometryValue& enclosure);
+[[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL double view(
+    const Measure&, SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>& enclosure);
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL Measure maximum_absolute(
     const std::vector<Measure>&, const DefaultTpetraTypes::map_type&, std::size_t budget);
 /** Leased pressure reduction: caller reserves16*K operation storage and a

@@ -22,7 +22,7 @@ namespace AMR = Meshes::AMR;
 namespace wire = AMR::adaptive_detail;
 using H = AMR::DistributedAdaptiveHierarchy;
 using Key = AMR::AdaptiveCellKey;
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 M abs(const M& value)
 {
     return value.sign() < 0 ? value.scaled(-1) : value;
@@ -49,7 +49,7 @@ struct WorkingCapsule
     Key key;
     std::uint64_t revision = 0;
     PhaseInventoryPolicy policy = PhaseInventoryPolicy::Finite;
-    Meshes::ExactPhaseMeasures phases;
+    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases;
     PolyhedralInterface geometry;
     bool geometry_ready = false;
     WorkingError error;
@@ -851,9 +851,10 @@ struct ColumnRecord
     Key source, target;
     std::uint64_t source_gid = 0, target_gid = 0, target_revision = 0;
     int owner = -1;
-    Meshes::ConvexGeometryPtr geometry;
+    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
 };
-Meshes::ExactPhaseMeasures raw_phases(const WorkingCapsule& c, const Meshes::ExactConvexFragment& fragment)
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> raw_phases(
+    const WorkingCapsule& c, const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment)
 {
     if (!c.phases.gas.sign() || c.geometry.pure_carrier)
         return {fragment.volume(), {}, fragment.volume()};
@@ -975,7 +976,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     M::volume(*source.hierarchy->geometry(source.hierarchy->owned().at(finite_original.key))));
                 const auto& records = grouped.at(original.key);
                 const auto donor_geometry = source.hierarchy->geometry(source.hierarchy->owned().at(original.key));
-                std::vector<Meshes::ConvexGeometryPtr> cover;
+                std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> cover;
                 for (auto r : records)
                     cover.push_back(r->geometry);
                 donor_geometry->certify_partition(cover);
@@ -987,19 +988,21 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     throw std::invalid_argument("Exact phase source has no positive dominant geometric capacity.");
                 M raw_minor, raw_major;
                 std::optional<detail::ExactPhaseLabelMap> label_map;
-                std::vector<Meshes::ExactPhaseMeasures> raw;
+                std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> raw;
                 if (!whole)
                 {
                     for (auto r : records)
                     {
-                        auto phase = raw_phases(original, *Meshes::ExactConvexFragment::from_geometry(*r->geometry));
+                        auto phase = raw_phases(original,
+                            *SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                                *r->geometry));
                         raw_minor = raw_minor + (gas ? phase.gas : phase.carrier);
                         raw_major = raw_major + (gas ? phase.carrier : phase.gas);
                         raw.push_back(std::move(phase));
                     }
                     if ((raw_minor + raw_major).compare(original.phases.bulk))
                         throw std::invalid_argument("Raw exact overlap phase column does not fill actual source.");
-                    Meshes::ExactPhaseMeasures full{
+                    SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> full{
                         original.phases.bulk, gas ? raw_minor : raw_major, gas ? raw_major : raw_minor};
                     label_map =
                         detail::ExactPhaseLabelMap::create(full, gas, physical_minor, original.error.fit_bound, limit);

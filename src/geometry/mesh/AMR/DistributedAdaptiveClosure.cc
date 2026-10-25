@@ -19,7 +19,7 @@ struct Contact
 {
     AdaptiveCellKey key;
     AdaptiveBytes domain, physical_point;
-    ConvexGeometryPtr geometry;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
     std::array<std::uint64_t, 3> factors{};
     std::vector<AdaptiveTraceFace> traces;
     int owner = -1;
@@ -43,7 +43,7 @@ AdaptiveBytes encode_contact(const AdaptiveLeaf& leaf, const AdaptiveProviderKer
     Writer w;
     w.bytes(encode_adaptive_key(leaf.key));
     w.bytes(leaf.domain);
-    w.bytes(shape->encode_exact_certificate());
+    w.bytes(shape->encode_certificate());
     for (std::size_t a = 0; a < 3; ++a)
         w.word(leaf.provider == AdaptiveProviderKind::Static ? 3 : std::uint64_t(kernel.closure_split(leaf, a)));
     w.word(trace.faces.size());
@@ -74,7 +74,7 @@ Contact decode_contact(std::span<const char> bytes)
     contact.domain = r.bytes();
     if (contact.domain.empty())
         throw std::invalid_argument("Closure contact requires connected-domain provenance.");
-    contact.geometry = ConvexCellGeometry::decode_exact_certificate(r.bytes());
+    contact.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(r.bytes());
     for (auto& factor : contact.factors)
     {
         factor = r.word();
@@ -95,7 +95,7 @@ Contact decode_contact(std::span<const char> bytes)
         face.split = AdaptiveSplit(split);
         face.terminal = terminal;
         if (geometry)
-            face.face = ExactPlanarFace::decode(r.bytes());
+            face.face = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
         contact.traces.push_back(std::move(face));
     }
     r.done();
@@ -165,7 +165,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
             std::map<AdaptiveCellKey, std::set<AdaptiveBytes>> points;
             for (const auto& tile : tiles)
             {
-                auto record_points = [&](const AdaptiveCellKey& cell, const ExactPlanarFacePtr& face)
+                auto record_points =
+                    [&](const AdaptiveCellKey& cell, const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& face)
                 {
                     for (const auto& point : face->vertex_identities())
                     {
@@ -177,7 +178,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                     record_points(tile.first, tile.geometry);
                 if (tile.second_owner == comm->getRank())
                     record_points(*tile.second,
-                        tile.geometry->translated_exact(exact_displacement_difference({}, tile.exact_second_image)));
+                        tile.geometry->translated_packet(
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity)));
             }
             // Provider queries consume retained provider records, not the
             // canonical authority copies above. A Mixed retained polyhedron
@@ -271,8 +273,8 @@ std::vector<AdaptiveMark> required_adaptive_refinements(std::span<const Adaptive
                             for (const auto& second : b.traces)
                             {
                                 if (first.stem != second.stem || (!first.terminal && !second.terminal) ||
-                                    (first.face && !first.face->contains_exact_point(a.physical_point)) ||
-                                    (second.face && !second.face->contains_exact_point(b.physical_point)))
+                                    (first.face && !first.face->contains_point(a.physical_point)) ||
+                                    (second.face && !second.face->contains_point(b.physical_point)))
                                     continue;
                                 if (first.depth < second.depth &&
                                     second.depth - first.depth > options.maximum_trace_jump)

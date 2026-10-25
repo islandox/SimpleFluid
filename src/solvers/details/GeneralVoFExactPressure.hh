@@ -2,19 +2,22 @@
  * @brief Bounded exact CG on caller-certified orthogonal positive face graphs.
  */
 #pragma once
-#include "geometry/ExactSweptGeometry.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 namespace SimpleFluid::detail
 {
 struct GeneralVoFExactPressureFace
 {
     DefaultTpetraTypes::global_ordinal_type face = 0, first = 0, second = 0;
-    Meshes::ExactGeometryMeasure mobility; ///< Exact k=dt*beta*A/d, strictly positive.
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>
+        mobility; ///< Exact k=dt*beta*A/d, strictly positive.
 };
 struct GeneralVoFExactPressureResult
 {
-    std::vector<Meshes::ExactGeometryMeasure> owned_pressure, overlap_pressure;
-    std::vector<Meshes::ExactGeometryMeasure> face_rate_increment; ///< Input face order; k*(pFirst-pSecond).
+    std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> owned_pressure,
+        overlap_pressure;
+    std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>
+        face_rate_increment; ///< Input face order; k*(pFirst-pSecond).
     int iterations = 0;
     std::size_t operator_applications = 0;
     std::size_t admitted_storage_bytes = 0, storage_bytes = 0;
@@ -33,5 +36,6 @@ struct GeneralVoFExactPressureResult
  */
 [[nodiscard]] SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFExactPressureResult solve_general_vof_exact_pressure(
     const SP<const MeshHandle<>>&, std::span<const GeneralVoFExactPressureFace>,
-    std::span<const Meshes::ExactGeometryMeasure> owned_rhs, int remaining_iterations, std::size_t byte_budget);
+    std::span<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> owned_rhs,
+    int remaining_iterations, std::size_t byte_budget);
 } // namespace SimpleFluid::detail

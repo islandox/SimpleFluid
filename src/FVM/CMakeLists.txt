@@ -1,3 +1,5 @@
+# PLIC reconstruction and phase arithmetic live with geometry, while their
+# established shared-library symbols remain owned/exported by SimpleFluidFVM.
 add_library(SimpleFluidFVM SHARED
     GeneralVoF.cc
     details/GeneralVoFState.cc
@@ -7,9 +9,9 @@ add_library(SimpleFluidFVM SHARED
     details/GeneralVoFExactTransfer.cc
     ExactPhaseTransfer.cc
     ExactFaceTransfer.cc
-    PolyhedralReconstruction.cc
-    FinitePolyhedralReconstruction.cc
-    FinitePolyhedralReconstruction.tcc
+    ../geometry/PLIC/details/exact/PolyhedralReconstruction.cc
+    ../geometry/PLIC/PolyhedralReconstruction.cc
+    ../geometry/PLIC/details/FinitePolyhedralReconstruction.tcc
     GeometricVoF.cc
     AdaptiveVoF.cc
     ConservativeAMRRemap.cc
@@ -19,9 +21,9 @@ add_library(SimpleFluidFVM SHARED
     details/ExactLiveStorage.cc
     details/ExactPhaseAccumulator.cc
     details/PhaseArithmetic.cc
-    details/BoundedPhaseArithmetic.cc
-    details/BoundedVoFTransport.cc
-    details/BoundedVoFTransport.tcc
+    ../geometry/PLIC/details/PhaseArithmetic.cc
+    details/FiniteVoFTransport.cc
+    details/FiniteVoFTransport.tcc
     details/ExperimentalPhaseBackend.cc
     # Assembly-only providers; iterative solves live in SimpleFluidSolvers.
     explicit_instantiation/ALEControlVolumeState.cc
@@ -69,8 +71,8 @@ set_property(TARGET SimpleFluidFVM PROPERTY JOB_POOL_COMPILE simplefluid_fvm_com
 # Forward-error bounds require the same strict arithmetic used by the numerical
 # geometry kernel. Do not import relaxed arithmetic through LTO.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(FinitePolyhedralReconstruction.cc details/BoundedPhaseArithmetic.cc
-        details/BoundedVoFTransport.cc PROPERTIES
+    set_source_files_properties(../geometry/PLIC/PolyhedralReconstruction.cc ../geometry/PLIC/details/PhaseArithmetic.cc
+        details/FiniteVoFTransport.cc PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE
@@ -78,8 +80,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # The independent VoF workstream is outside the existing Shiri PGO workload.
-simplefluid_exclude_from_pgo_sources(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoFFiniteTransport.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc PolyhedralReconstruction.cc FinitePolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc details/BoundedPhaseArithmetic.cc
-    details/BoundedVoFTransport.cc details/ExperimentalPhaseBackend.cc)
+simplefluid_exclude_from_pgo_sources(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoFFiniteTransport.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc ../geometry/PLIC/details/exact/PolyhedralReconstruction.cc ../geometry/PLIC/PolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc ../geometry/PLIC/details/PhaseArithmetic.cc
+    details/FiniteVoFTransport.cc details/ExperimentalPhaseBackend.cc)
 
 # Error-free transforms and directed residual bounds require strict arithmetic in
 # every caller translation unit; a strictly compiled geometry callee alone does

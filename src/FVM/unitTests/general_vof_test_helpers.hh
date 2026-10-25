@@ -1,7 +1,7 @@
 /** Shared test-local native fixtures; no test cases or environment registration. */
 #pragma once
 #include "FVM/GeneralVoF.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/CompensatedSum.hh"
@@ -89,7 +89,7 @@ Fixture skew_setup(unsigned ownership_shift = 0)
                 AdaptiveLeaf leaf;
                 leaf.key = {7, ConvexCellAncestry{id, {}}};
                 leaf.domain = {'s', 'k', 'e', 'w'};
-                std::vector<GeometryPoint> points;
+                std::vector<SimpleFluid::PLIC::GeometryPoint> points;
                 for (unsigned z = 0; z < 2; ++z)
                     for (unsigned y = 0; y < 2; ++y)
                         for (unsigned x = 0; x < 2; ++x)
@@ -97,7 +97,7 @@ Fixture skew_setup(unsigned ownership_shift = 0)
                             const double u = i + x, v = j + y, w = k + z;
                             points.push_back({u + .25 * v - w, v, u + .25 * v + w});
                         }
-                leaf.geometry = ConvexCellGeometry::make(
+                leaf.geometry = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::make(
                     points, {{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}});
                 for (unsigned f = 0; f < 6; ++f)
                 {

@@ -3,8 +3,8 @@
  */
 #pragma once
 
-#include "geometry/ConvexCellGeometry.hh"
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/MeshRegion.hh"
 #include "geometry/mesh/UnstructuredMesh.hh"
 #include <cmath>
@@ -13,7 +13,6 @@
 
 namespace SimpleFluid::Meshes
 {
-class ExactPolyhedralComplex;
 /**
  * The layout describes the global region, while records contain only visible
  * entities. Face adjacency always contains native global cell IDs, including
@@ -139,32 +138,37 @@ public:
     }
 
     /** Authoritative exact overload; legacy records/constructor remain unchanged.
-     * Exact state contains only these resident cells, faces/nodes and metric
+     * Native state contains only these resident cells, faces/nodes and metric
      * neighbors. Legacy native record range checks remain admission limits.
      */
-    ExplicitRegionProvider(RegionLayout layout, std::vector<Cell> cells,
-        std::vector<Face> faces, std::vector<Node> nodes, std::map<int, std::string> boundaries,
-        std::shared_ptr<const ExactPolyhedralComplex> construction);
+    ExplicitRegionProvider(RegionLayout layout, std::vector<Cell> cells, std::vector<Face> faces,
+        std::vector<Node> nodes, std::map<int, std::string> boundaries,
+        std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> construction);
     /** Derive the boundary schema only from a fully resident global complex. */
-    [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_exact_complex(
-        std::shared_ptr<const ExactPolyhedralComplex> construction);
+    [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_complex(
+        std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> construction);
     /** Sparse factories require an explicit global schema, which may be empty. */
-    [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_exact_complex(
-        std::shared_ptr<const ExactPolyhedralComplex> construction,
+    [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_complex(
+        std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> construction,
         std::map<int, std::string> boundaries);
     /** Authority-certified local explicit fragment. Native ordinals are local
      * to the fragment; MultiRegion sparse routes provide global entity IDs.
      * This preserves explicit polyhedra without expanding procedural families. */
     [[nodiscard]] static std::shared_ptr<const ExplicitRegionProvider> from_certified_records(RegionLayout layout,
         std::vector<Cell> cells, std::vector<Face> faces, std::vector<Node> nodes,
-        std::map<int, std::string> boundaries, std::map<ID, ConvexGeometryPtr> cell_certificates,
-        std::map<ID, ExactPlanarFacePtr> face_certificates, const std::map<ID, std::vector<char>>& node_certificates);
-    bool has_exact_construction() const noexcept { return bool(d_construction) || !d_cell_certificates.empty(); }
+        std::map<int, std::string> boundaries,
+        std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_certificates,
+        std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_certificates,
+        const std::map<ID, std::vector<char>>& node_certificates);
+    bool has_construction() const noexcept { return bool(d_construction) || !d_cell_certificates.empty(); }
     bool has_local_certificates() const noexcept { return !d_cell_certificates.empty(); }
-    const std::shared_ptr<const ExactPolyhedralComplex>& construction() const noexcept { return d_construction; }
-    [[nodiscard]] ConvexGeometryPtr certified_cell_geometry(std::size_t cell) const;
-    [[nodiscard]] ConvexGeometryPtr atomic_cell_geometry(std::size_t cell) const;
-    [[nodiscard]] ExactPlanarFacePtr certified_face_geometry(std::size_t face) const;
+    const std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>>& construction() const noexcept
+    {
+        return d_construction;
+    }
+    [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> certified_cell_geometry(std::size_t cell) const;
+    [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> atomic_cell_geometry(std::size_t cell) const;
+    [[nodiscard]] PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> certified_face_geometry(std::size_t face) const;
 
     RegionLayout layout() const { return d_layout; }
     const void* storage_identity() const { return this; }
@@ -219,7 +223,7 @@ public:
         // Ordered-map node overhead is an estimate, like existing index maps.
         report.indexing_estimate = (d_cells.size() + d_faces.size() + d_nodes.size()) * 3 * sizeof(void*);
         for (const auto& [id, name] : d_boundaries) report.boundaries += sizeof(id) + name.capacity();
-        report.geometry += exact_storage_bytes();
+        report.geometry += construction_storage_bytes();
         return report;
     }
 private:
@@ -235,10 +239,10 @@ private:
         return {&values, 0, values.size(), [](const void* p, size_t, size_t i)
         { return (*static_cast<const std::vector<ID>*>(p))[i]; }};
     }
-    [[nodiscard]] std::size_t exact_storage_bytes() const;
-    std::shared_ptr<const ExactPolyhedralComplex> d_construction;
-    std::map<ID,ConvexGeometryPtr> d_cell_certificates;
-    std::map<ID,ExactPlanarFacePtr> d_face_certificates;
+    [[nodiscard]] std::size_t construction_storage_bytes() const;
+    std::shared_ptr<const PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>> d_construction;
+    std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> d_cell_certificates;
+    std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> d_face_certificates;
     RegionLayout d_layout;
     std::map<ID, Cell> d_cells;
     std::map<ID, Face> d_faces;

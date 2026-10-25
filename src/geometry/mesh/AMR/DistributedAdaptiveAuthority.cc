@@ -32,9 +32,9 @@ struct Occurrence
     AdaptiveBytes domain, image;
     std::uint64_t native_face;
     bool exterior, native_whole = false;
-    ExactPlanarFacePtr whole_geometry;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> whole_geometry;
     std::string boundary;
-    ExactPlanarFacePtr face;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face;
 };
 AdaptiveBytes encode_tile(const AdaptiveTile& tile)
 {
@@ -44,7 +44,7 @@ AdaptiveBytes encode_tile(const AdaptiveTile& tile)
     w.bytes(tile.domain);
     w.bytes(tile.identity);
     w.bytes(tile.geometry->encode_incidence());
-    w.bytes(tile.exact_second_image);
+    w.bytes(tile.second_image_identity);
     w.bytes(encode_adaptive_key(tile.first));
     w.word(tile.second.has_value());
     if (tile.second)
@@ -71,9 +71,9 @@ AdaptiveTile decode_tile(std::span<const char> bytes)
     tile.surface = r.bytes();
     tile.domain = r.bytes();
     tile.identity = r.bytes();
-    tile.geometry = ExactPlanarFace::decode(r.bytes());
-    tile.exact_second_image = r.bytes();
-    tile.second_image = exact_displacement_display(tile.exact_second_image);
+    tile.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
+    tile.second_image_identity = r.bytes();
+    tile.second_image = PLIC::displacement_display<ArithmeticMode::Ordinary>(tile.second_image_identity);
     tile.first = decode_adaptive_key(r.bytes());
     auto second = r.word();
     if (second > 1)
@@ -128,7 +128,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         throw std::invalid_argument("Incomplete support authority input.");
                     if (!surface.authority_image.empty() &&
                         (leaf.provider != AdaptiveProviderKind::Cartesian || surface.exterior ||
-                            exact_displacement_difference(surface.authority_image, {}) != surface.authority_image))
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>(surface.authority_image, {}) !=
+                                surface.authority_image))
                         throw std::invalid_argument(
                             "Periodic authority images require canonical Cartesian interior provenance.");
                     auto face = surface.geometry->encode_incidence();
@@ -186,7 +187,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 entry.native_whole = nesting;
                 auto whole = r.bytes();
                 if (!whole.empty())
-                    entry.whole_geometry = ExactPlanarFace::decode(whole)->translated_exact(entry.image);
+                    entry.whole_geometry =
+                        PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(whole)->translated_packet(entry.image);
                 if (entry.native_whole && !entry.whole_geometry)
                     throw std::invalid_argument("Missing native whole-face authority proof.");
                 entry.rank = packet.peer;
@@ -197,7 +199,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 entry.exterior = exterior;
                 auto name = r.bytes();
                 entry.boundary.assign(name.begin(), name.end());
-                entry.face = ExactPlanarFace::decode(r.bytes())->translated_exact(entry.image);
+                entry.face =
+                    PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes())->translated_packet(entry.image);
                 if (entry.whole_geometry && !entry.whole_geometry->contains(*entry.face))
                     throw std::invalid_argument("Rewritten join lies outside its actual native face.");
                 r.done();
@@ -210,12 +213,13 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     continue;
                 const bool exterior = entries[0].exterior;
                 const auto boundary = entries[0].boundary;
-                allocation.add(entries.size() * sizeof(std::vector<ExactPlanarFacePtr>));
+                allocation.add(entries.size() * sizeof(std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>));
                 // Charge the maximum retained overlap table before quadratic pair work.
-                if (entries.size() && entries.size() > budget / entries.size() / sizeof(ExactPlanarFacePtr))
+                if (entries.size() &&
+                    entries.size() > budget / entries.size() / sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>))
                     throw std::invalid_argument("Authority overlap budget exhausted.");
-                allocation.add(entries.size() * entries.size() * sizeof(ExactPlanarFacePtr));
-                std::vector<std::vector<ExactPlanarFacePtr>> coverage(entries.size());
+                allocation.add(entries.size() * entries.size() * sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>));
+                std::vector<std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> coverage(entries.size());
                 std::set<AdaptiveCellKey> unique;
                 for (std::size_t i = 0; i < entries.size(); ++i)
                 {
@@ -227,7 +231,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         if (a.orientation == entries[j].orientation && a.face->intersection(*entries[j].face))
                             throw std::invalid_argument("Same-side support overlap.");
                 }
-                auto emit = [&](std::size_t i, std::optional<std::size_t> j, ExactPlanarFacePtr face)
+                auto emit =
+                    [&](std::size_t i, std::optional<std::size_t> j, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face)
                 {
                     if (tiles >= tile_budget)
                         throw std::invalid_argument("Authority tile budget exhausted.");
@@ -268,10 +273,13 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         throw std::invalid_argument("Duplicate canonical authority face identity.");
                     if (j)
                     {
-                        tile.exact_second_image = exact_displacement_difference(second_shift, first_shift);
-                        tile.second_image = exact_displacement_display(tile.exact_second_image);
+                        tile.second_image_identity =
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>(second_shift, first_shift);
+                        tile.second_image =
+                            PLIC::displacement_display<ArithmeticMode::Ordinary>(tile.second_image_identity);
                     }
-                    tile.geometry = tile.geometry->translated_exact(exact_displacement_difference({}, first_shift));
+                    tile.geometry = tile.geometry->translated_packet(
+                        PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, first_shift));
                     auto bytes = encode_tile(tile);
                     allocation.packet(bytes.size());
                     replies.push_back({tile.first_owner, bytes});
@@ -369,7 +377,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
         [&]
         {
             Budget allocation{budget};
-            std::map<std::pair<AdaptiveCellKey, AdaptiveBytes>, std::vector<ExactPlanarFacePtr>> coverage;
+            std::map<std::pair<AdaptiveCellKey, AdaptiveBytes>,
+                std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>>
+                coverage;
             std::set<AdaptiveBytes> identities;
             std::map<AdaptiveCellKey, const AdaptiveLeaf*> local;
             for (const auto& leaf : owned)
@@ -383,13 +393,15 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 allocation.add(tile.identity.size() + sizeof(AdaptiveBytes));
                 if (tile.domain.empty() || !identities.insert(tile.identity).second)
                     throw std::invalid_argument("Duplicate resident authority tile.");
-                auto register_incident = [&](const AdaptiveCellKey& cell, ExactPlanarFacePtr face)
+                auto register_incident =
+                    [&](const AdaptiveCellKey& cell, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face)
                 {
                     const auto found = local.find(cell);
                     const AdaptiveLeaf* leaf = found == local.end() ? nullptr : found->second;
                     if (!leaf || leaf->domain != tile.domain)
                         throw std::invalid_argument("Authority tile has foreign incidence.");
-                    allocation.add(sizeof(ExactPlanarFacePtr) + sizeof(AdaptiveCellKey) + tile.surface.size());
+                    allocation.add(sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>) + sizeof(AdaptiveCellKey) +
+                                   tile.surface.size());
                     coverage[{cell, tile.surface}].push_back(std::move(face));
                 };
                 if (tile.first_owner == comm->getRank())
@@ -398,8 +410,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 {
                     if (!tile.second)
                         throw std::invalid_argument("Missing second authority incidence.");
-                    register_incident(*tile.second, tile.geometry->reversed()->translated_exact(
-                                                        exact_displacement_difference({}, tile.exact_second_image)));
+                    register_incident(*tile.second,
+                        tile.geometry->reversed()->translated_packet(
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity)));
                 }
             }
             for (const auto& leaf : owned)
@@ -429,7 +442,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
     };
     int local_periodic = 0, periodic = 0;
     for (const auto& tile : result)
-        local_periodic |= !tile.exact_second_image.empty();
+        local_periodic |= !tile.second_image_identity.empty();
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_periodic, &periodic);
     for (unsigned propagation = 0; propagation < 64; ++propagation)
     {
@@ -442,7 +455,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 Budget allocation{budget};
                 for (std::size_t t = 0; t < result.size(); ++t)
                 {
-                    auto subscribe = [&](const ExactPlanarFacePtr& geometry, const AdaptiveBytes& image)
+                    auto subscribe =
+                        [&](const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& geometry, const AdaptiveBytes& image)
                     {
                         auto lines = geometry->edge_support_identities();
                         auto points = geometry->vertex_identities();
@@ -468,10 +482,11 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         }
                     };
                     subscribe(result[t].geometry, {});
-                    if (!result[t].exact_second_image.empty())
-                        subscribe(result[t].geometry->translated_exact(
-                                      exact_displacement_difference({}, result[t].exact_second_image)),
-                            result[t].exact_second_image);
+                    if (!result[t].second_image_identity.empty())
+                        subscribe(result[t].geometry->translated_packet(
+                                      PLIC::displacement_difference<ArithmeticMode::Ordinary>(
+                                          {}, result[t].second_image_identity)),
+                            result[t].second_image_identity);
                 }
             });
         if (statistics)
@@ -517,7 +532,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 {
                     for (const auto& point : line.points)
                         allocation.add(4 * point.size() + 256);
-                    ExactEdgePointIndex index(line.points);
+                    PLIC::EdgePointIndex<ArithmeticMode::Ordinary> index(line.points);
                     for (const auto& subscriber : line.subscribers)
                     {
                         auto points = index.closed_segment(subscriber.first, subscriber.last);
@@ -567,7 +582,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         auto point = r.bytes();
                         allocation.add(point.size() + sizeof(AdaptiveBytes));
                         points[edge.tile].push_back(
-                            edge.image.empty() ? std::move(point) : exact_point_translated(point, edge.image));
+                            edge.image.empty() ? std::move(point)
+                                               : PLIC::point_translated<ArithmeticMode::Ordinary>(point, edge.image));
                     }
                     r.done();
                 }
@@ -609,7 +625,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             std::map<AdaptiveBytes, std::uint64_t> indices;
             for (auto& tile : result)
             {
-                auto assign = [&](const ExactPlanarFacePtr& geometry, std::vector<std::uint64_t>& gids)
+                auto assign =
+                    [&](const PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>& geometry, std::vector<std::uint64_t>& gids)
                 {
                     auto points = geometry->vertex_identities();
                     allocation.add(points.size() * sizeof(std::uint64_t));
@@ -640,14 +657,15 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 };
                 assign(tile.geometry, tile.node_gids);
                 if (tile.second)
-                    assign(tile.geometry->translated_exact(exact_displacement_difference({}, tile.exact_second_image)),
+                    assign(tile.geometry->translated_packet(
+                               PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity)),
                         tile.second_node_gids);
             }
         });
     incoming = exchange_owner_packets(requests, comm, budget);
     struct NodeAuthority
     {
-        GeometryPoint coordinate;
+        PLIC::GeometryPoint coordinate;
         std::vector<std::pair<int, std::uint64_t>> subscribers;
     };
     std::map<AdaptiveBytes, NodeAuthority> nodes;
@@ -671,7 +689,10 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     throw std::invalid_argument("Invalid canonical node request.");
                 auto found = nodes.find(key);
                 if (found == nodes.end())
-                    found = nodes.emplace(std::move(key), NodeAuthority{exact_point_display(point), {}}).first;
+                    found = nodes
+                                .emplace(std::move(key),
+                                    NodeAuthority{PLIC::point_display<ArithmeticMode::Ordinary>(point), {}})
+                                .first;
                 found->second.subscribers.emplace_back(packet.peer, ordinal);
             }
         });
@@ -714,13 +735,13 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 auto ordinal = r.word();
                 auto key = r.bytes();
                 auto gid = r.word();
-                GeometryPoint coordinate;
+                PLIC::GeometryPoint coordinate;
                 for (auto& value : coordinate)
                     value = std::bit_cast<double>(r.word());
                 r.done();
                 if (ordinal >= needed.size() || seen[ordinal] || key != needed[ordinal].key ||
                     packet.peer != authority(key, comm->getSize()) || gid >= global_nodes ||
-                    coordinate != exact_point_display(needed[ordinal].point))
+                    coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(needed[ordinal].point))
                     throw std::invalid_argument("Foreign, duplicate or malformed canonical node reply.");
                 seen[ordinal] = true;
                 catalog[ordinal] = {gid, std::move(key), coordinate, needed[ordinal].point};

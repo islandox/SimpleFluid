@@ -2,7 +2,7 @@
  * @brief Certified sparse overlaps selected by explicit cell ancestry.
  */
 #pragma once
-#include "geometry/ConvexCellGeometry.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/mesh/AMR/AdaptiveHierarchy.hh"
 
 namespace SimpleFluid::Meshes::AMR
@@ -11,7 +11,7 @@ struct AdaptiveCellBinding
 {
     AdaptiveCellKey key;
     std::uint64_t gid = 0, material = 0;
-    ConvexGeometryPtr geometry;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
 };
 
 struct AdaptiveAncestryRelation
@@ -32,8 +32,8 @@ struct AdaptiveOverlapRecord
     AdaptiveCellKey source_key, target_key;
     std::uint64_t source_gid = 0, target_gid = 0;
     AdaptiveAncestryRelation::Kind relation = AdaptiveAncestryRelation::Kind::Unchanged;
-    ConvexGeometryPtr intersection;
-    GeometryMoments moments;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> intersection;
+    PLIC::GeometryMoments<ArithmeticMode::Ordinary> moments;
 };
 
 /** Geometry-only local certificate. Inputs are caller-supplied compact catalogs

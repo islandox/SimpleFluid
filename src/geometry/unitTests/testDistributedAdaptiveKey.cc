@@ -35,7 +35,8 @@ TEST(DistributedAdaptiveKey, PolyhedralKernelRejectsNonOctantOrTooDeepActualAnce
     ::SimpleFluid::Meshes::AMR::AdaptiveLeaf leaf;
     leaf.key = {0, ::SimpleFluid::Meshes::AMR::ConvexCellAncestry{0, {}}};
     leaf.domain = {'d'};
-    leaf.geometry = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    leaf.geometry =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
     for (std::size_t f = 0; f < leaf.geometry->num_faces(); ++f)
         leaf.surfaces.push_back(
             {::SimpleFluid::Meshes::AMR::AdaptiveBytes{char(f + 1)}, leaf.geometry->face_geometry(f), 1, true, {}});

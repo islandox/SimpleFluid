@@ -92,7 +92,7 @@ void validate(const AdaptiveLeaf& leaf)
         (!leaf.geometry && (!leaf.surfaces.empty() || !leaf.native_recipe)))
         throw std::invalid_argument("Incomplete adaptive batch leaf.");
     (void) leaf.work.total();
-    std::vector<ExactPlanarFacePtr> faces;
+    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
     for (const auto& s : leaf.surfaces)
     {
         if (s.key.empty() || !s.geometry || (s.orientation != 1 && s.orientation != -1) ||
@@ -102,7 +102,7 @@ void validate(const AdaptiveLeaf& leaf)
             throw std::invalid_argument("Missing native whole-face certificate.");
         faces.push_back(s.geometry);
     }
-    if (leaf.geometry && !ExactPlanarFace::cell_shell(faces)->equivalent(*leaf.geometry))
+    if (leaf.geometry && !PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces)->equivalent(*leaf.geometry))
         throw std::invalid_argument("Adaptive batch surface shell differs from cell.");
     if (leaf.native_recipe && std::uint64_t(leaf.native_recipe->kind) > 2)
         throw std::invalid_argument("Invalid native batch recipe kind.");
@@ -115,7 +115,7 @@ void write_leaf(Writer& w, const AdaptiveLeaf& leaf, const Dictionary& dict)
     w.word(leaf.material);
     w.word(leaf.revision);
     w.word(std::uint64_t(leaf.provider));
-    w.bytes(leaf.geometry ? leaf.geometry->encode_exact_certificate() : AdaptiveBytes{});
+    w.bytes(leaf.geometry ? leaf.geometry->encode_certificate() : AdaptiveBytes{});
     w.word(leaf.surfaces.size());
     for (const auto& s : leaf.surfaces)
     {
@@ -172,7 +172,7 @@ struct Decoder
         leaf.provider = AdaptiveProviderKind(provider);
         auto geometry = r.bytes();
         if (!geometry.empty())
-            leaf.geometry = ConvexCellGeometry::decode_exact_certificate(geometry);
+            leaf.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(geometry);
         const auto count = r.word();
         if (count != (leaf.geometry ? leaf.geometry->num_faces() : 0) || count > (r.data.size() - r.offset) / 32)
             throw std::invalid_argument("Invalid adaptive batch surface count.");
@@ -181,7 +181,7 @@ struct Decoder
         {
             AdaptiveSurface s;
             s.key = r.bytes();
-            s.geometry = ExactPlanarFace::decode(r.bytes());
+            s.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
             s.authority_image = r.bytes();
             const auto native_whole = r.word();
             if (native_whole > 1)
@@ -189,7 +189,7 @@ struct Decoder
             s.require_native_whole_tile = native_whole;
             auto whole_geometry = r.bytes();
             if (!whole_geometry.empty())
-                s.native_whole_geometry = ExactPlanarFace::decode(whole_geometry);
+                s.native_whole_geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(whole_geometry);
             if (s.require_native_whole_tile && !s.native_whole_geometry)
                 throw std::invalid_argument("Missing native whole-face certificate.");
             s.native_face = r.word();

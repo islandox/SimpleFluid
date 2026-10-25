@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <array>
 #include <initializer_list>
@@ -19,7 +19,7 @@ namespace SimpleFluid::VoF::detail
 class SIMPLEFLUID_FVM_EXPORT ExactLiveStorage
 {
 public:
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using Budget = Meshes::AMR::adaptive_detail::Budget;
     class Lease
     {
@@ -56,7 +56,7 @@ public:
     void track(M&);
     void untrack(M&) noexcept;
     void retain(const M&);
-    void retain(const Meshes::ExactPhaseMeasures&);
+    void retain(const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>&);
     void replace(M&, const M&);
     void add(M&, const M&);
     void subtract(M&, const M&);

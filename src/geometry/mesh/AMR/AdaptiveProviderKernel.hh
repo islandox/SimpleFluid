@@ -27,7 +27,7 @@ struct AdaptiveTraceFace
     AdaptiveBytes stem;
     unsigned depth = 0;
     AdaptiveSplit split = AdaptiveSplit::Isotropic;
-    ExactPlanarFacePtr face;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face;
     bool terminal = true; ///< At least one matching trace must be its actual terminal cap.
 };
 struct AdaptiveTrace
@@ -38,7 +38,7 @@ struct AdaptiveTrace
 struct AdaptiveCellMetrics
 {
     double volume = 0;
-    GeometryPoint centroid{};
+    PLIC::GeometryPoint centroid{};
 };
 class AdaptiveProviderKernel
 {
@@ -50,7 +50,7 @@ public:
      * and actual exact shape before publication or owner migration. */
     virtual void validate(const AdaptiveLeaf&) const;
     [[nodiscard]] virtual AdaptiveCellMetrics metrics(const AdaptiveLeaf&) const;
-    [[nodiscard]] virtual ConvexGeometryPtr geometry(const AdaptiveLeaf&) const = 0;
+    [[nodiscard]] virtual PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry(const AdaptiveLeaf&) const = 0;
     [[nodiscard]] virtual std::vector<AdaptiveSurface> surfaces(const AdaptiveLeaf&) const = 0;
     [[nodiscard]] virtual AdaptiveBytes contact_point(const AdaptiveLeaf&, std::span<const char>) const;
     [[nodiscard]] virtual std::vector<AdaptiveCellKey> matching_partners(const AdaptiveLeaf&) const;

@@ -1,7 +1,7 @@
 /** @file testLocalProductAMR.cc
  * @brief Local factor ancestry, shared native views and exact face certificates.
  */
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/LocalProductAMR.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
@@ -31,10 +31,13 @@ testing::Environment* const environment = testing::AddGlobalTestEnvironment(new 
 {
     return {{base, 1, {}}, {interval, {}}};
 }
-std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey, ConvexGeometryPtr> cells(
-    const ::SimpleFluid::Meshes::AMR::LocalProductAMR& h)
+std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey,
+    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
+cells(const ::SimpleFluid::Meshes::AMR::LocalProductAMR& h)
 {
-    std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey, ConvexGeometryPtr> result;
+    std::map<::SimpleFluid::Meshes::AMR::AdaptiveCellKey,
+        SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
+        result;
     for (std::size_t r = 0; r < h.runs().size(); ++r)
         for (std::uint64_t c = 0; c < h.runs()[r].region.layout().cells; ++c)
             EXPECT_TRUE(result.emplace(h.cell_key(r, c), h.cell_geometry(r, c)).second);
@@ -58,7 +61,7 @@ void covers(const ::SimpleFluid::Meshes::AMR::LocalProductAMR& source,
     const auto old = cells(source), next = cells(target);
     for (const auto& [key, geometry] : old)
     {
-        std::vector<ConvexGeometryPtr> pieces;
+        std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> pieces;
         for (const auto& [other, candidate] : next)
             if (auto overlap = geometry->intersect(*candidate))
                 pieces.push_back(std::move(overlap));
@@ -187,7 +190,7 @@ TEST(LocalProductAMRTest, DiscardedCyclesReleaseTemplatesAndMergeAdjacentRuns)
     for (unsigned cycle = 0; cycle < 4; ++cycle)
     {
         auto fine = current->adapt({mark()});
-        std::weak_ptr<const ExactExtrudedConstruction> retired;
+        std::weak_ptr<const SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>> retired;
         for (const auto& run : fine->runs())
             if (!run.base_keys.front().path.empty())
                 retired = run.region.geometry().construction();
@@ -209,7 +212,9 @@ TEST(LocalProductAMRTest, SharedCodecBindsPartsAndPreservesRunOffsetWithoutDispl
     ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     auto local = source.adapt({mark()});
     std::map<const void*, std::shared_ptr<const ExtrudedTopology>> topology;
-    std::map<const void*, std::shared_ptr<const ExactExtrudedConstruction>> bases, values;
+    std::map<const void*,
+        std::shared_ptr<const SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>>>
+        bases, values;
     bool changed_selection = false, nonzero_offset = false;
     for (const auto& run : local->runs())
     {
@@ -223,8 +228,9 @@ TEST(LocalProductAMRTest, SharedCodecBindsPartsAndPreservesRunOffsetWithoutDispl
         changed_selection = changed_selection ||
                             (retained_values && retained_values->encode_axis_selection() != c->encode_axis_selection());
         nonzero_offset = nonzero_offset || c->first_layer() != 0;
-        auto decoded = ExactExtrudedConstruction::decode_shared(target, c->encode_base(), c->encode_axis(),
-            c->encode_view(), bases[c->base_storage_identity()], values[c->axis_values_storage_identity()]);
+        auto decoded = SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::decode_shared(
+            target, c->encode_base(), c->encode_axis(), c->encode_view(), bases[c->base_storage_identity()],
+            values[c->axis_values_storage_identity()]);
         if (bases[c->base_storage_identity()])
             EXPECT_EQ(decoded->base_storage_identity(), bases[c->base_storage_identity()]->base_storage_identity());
         else
@@ -246,28 +252,30 @@ TEST(LocalProductAMRTest, SharedCodecBindsPartsAndPreservesRunOffsetWithoutDispl
 }
 TEST(LocalProductAMRTest, ExactNestedFaceCertificatesRejectGapsCrossedTilesAndWrongOrientation)
 {
-    const std::array<GeometryPoint, 4> full{{{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}};
-    const std::array<GeometryPoint, 4> bottom{{{0, 0, 0}, {0, 1, 0}, {0, 1, .5}, {0, 0, .5}}};
-    const std::array<GeometryPoint, 4> top{{{0, 0, .5}, {0, 1, .5}, {0, 1, 1}, {0, 0, 1}}};
-    auto coarse = ExactPlanarFace::make(full), low = ExactPlanarFace::make(bottom),
-         high = ExactPlanarFace::make(top)->reversed();
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 4> full{{{0, 0, 0}, {0, 1, 0}, {0, 1, 1}, {0, 0, 1}}};
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 4> bottom{{{0, 0, 0}, {0, 1, 0}, {0, 1, .5}, {0, 0, .5}}};
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 4> top{{{0, 0, .5}, {0, 1, .5}, {0, 1, 1}, {0, 0, 1}}};
+    auto coarse = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(full),
+         low = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(bottom),
+         high = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(top)->reversed();
     const std::array tiles{low, high};
     EXPECT_NO_THROW(coarse->certify_partition(tiles));
     EXPECT_TRUE(low->oppositely_oriented(*high));
-    auto roundtrip = ExactPlanarFace::decode(high->encode());
+    auto roundtrip = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::decode(high->encode());
     EXPECT_TRUE(roundtrip->equivalent(*high));
     EXPECT_FALSE(roundtrip->oppositely_oriented(*high));
     auto gap = top;
     gap[0][2] = gap[1][2] = std::nextafter(.5, 1.);
-    const std::array missing{low, ExactPlanarFace::make(gap)};
+    const std::array missing{low, SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(gap)};
     EXPECT_THROW(coarse->certify_partition(missing), std::invalid_argument);
     auto half = full;
     half[1][1] = half[2][1] = .5;
-    auto strip = ExactPlanarFace::make(half);
+    auto strip = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(half);
     EXPECT_FALSE(strip->contains(*low));
     EXPECT_THROW(strip->certify_partition(tiles), std::invalid_argument);
-    const std::array<GeometryPoint, 4> tiny{{{0, 0, 0}, {0, 1e-160, 0}, {0, 1e-160, 1e-160}, {0, 0, 1e-160}}};
-    auto microscopic = ExactPlanarFace::make(tiny);
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 4> tiny{
+        {{0, 0, 0}, {0, 1e-160, 0}, {0, 1e-160, 1e-160}, {0, 0, 1e-160}}};
+    auto microscopic = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(tiny);
     auto opposite = microscopic->oriented_like({-1e-320, 0, 0});
     EXPECT_TRUE(microscopic->oppositely_oriented(*opposite));
     EXPECT_GT(opposite->area().as_double(), 0);
@@ -279,18 +287,24 @@ TEST(LocalProductAMRTest, RawSharedAxisSelectionChecksPairedMetricRepresentabili
     auto topology = std::make_shared<const ExtrudedTopology>(4, Arr<Arr<unsigned>>{{0, 1, 2, 3}}, 1);
     auto points = [](double width)
     {
-        return std::vector<ExactPointRecipe>{
+        return std::vector<SimpleFluid::PLIC::PointRecipe>{
             {{0, 0, 0}, {}}, {{width, 0, 0}, {}}, {{width, width, 0}, {}}, {{0, width, 0}, {}}};
     };
     const std::vector<std::size_t> active{0, 1, 2, 3}, axial{0, 1};
-    auto tiny_base = ExactExtrudedConstruction::make(topology, points(1e-100), active, {{0, {}}, {1, {}}}, axial);
-    auto thin_axis = ExactExtrudedConstruction::make(topology, points(1), active, {{0, {}}, {1e-200, {}}}, axial);
+    auto tiny_base = SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::make(
+        topology, points(1e-100), active, {{0, {}}, {1, {}}}, axial);
+    auto thin_axis = SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::make(
+        topology, points(1), active, {{0, {}}, {1e-200, {}}}, axial);
     EXPECT_NE(tiny_base->base_storage_identity(), thin_axis->base_storage_identity());
     EXPECT_GT(tiny_base->cell_volume(0), 0);
     EXPECT_GT(thin_axis->cell_volume(0), 0);
-    EXPECT_THROW((void) ExactExtrudedConstruction::shared_axis_selection(topology, tiny_base, thin_axis, axial),
+    EXPECT_THROW(
+        (void) SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::shared_axis_selection(
+            topology, tiny_base, thin_axis, axial),
         std::runtime_error);
-    EXPECT_NO_THROW((void) ExactExtrudedConstruction::shared_axis_selection(topology, tiny_base, tiny_base, axial));
+    EXPECT_NO_THROW(
+        (void) SimpleFluid::PLIC::ExtrudedConstruction<SimpleFluid::ArithmeticMode::Ordinary>::shared_axis_selection(
+            topology, tiny_base, tiny_base, axial));
 }
 TEST(LocalProductAMRTest, LocalFailuresAreAtomicAndRankDivergenceRejectsCollectively)
 {
@@ -396,7 +410,8 @@ TEST(LocalProductAMRTest, DyadicEdgeEndpointsRetainTraceDepthWithLoosePhysicalRa
     const auto catalog = cells(*fourth);
     const auto fine_geometry = catalog.at({g.region_id, fine});
     const auto coarse_geometry = catalog.at({g.region_id, coarse});
-    auto bounds = [](const ConvexGeometryPtr& geometry, unsigned axis)
+    auto bounds =
+        [](const SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>& geometry, unsigned axis)
     {
         const auto moments = geometry->moments();
         const auto center = moments.origin[axis] + moments.first_moment[axis].value / moments.volume.value;
@@ -421,8 +436,8 @@ TEST(LocalProductAMRTest, ExactFaceBoundsRetainClosedTranslatedTinyContact)
 {
     ::SimpleFluid::Meshes::AMR::LocalProductAMR source(grid());
     auto cell = source.cell_geometry(0, 0);
-    const std::vector<GeometryPoint> on = {{0, 0, 0}, {0, 1, 0}, {0, 1, .25}, {0, 0, .25}};
-    auto face = ExactPlanarFace::make(on);
+    const std::vector<SimpleFluid::PLIC::GeometryPoint> on = {{0, 0, 0}, {0, 1, 0}, {0, 1, .25}, {0, 0, .25}};
+    auto face = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::make(on);
     EXPECT_TRUE(face->cell_bounds_overlap(*cell));
     EXPECT_FALSE(face->translated({-1e-200, 0, 0})->cell_bounds_overlap(*cell));
     auto shifted_grid = grid();

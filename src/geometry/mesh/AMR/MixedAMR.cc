@@ -1,5 +1,5 @@
 #include "geometry/mesh/AMR/MixedAMR.hh"
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/DistributedCartesianKernel.hh"
@@ -10,7 +10,6 @@
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <atomic>
-#include <boost/multiprecision/cpp_int.hpp>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -95,7 +94,7 @@ struct Patch
     size_t region;
     int boundary;
     std::vector<ID> faces;
-    std::vector<ExactPlanarFacePtr> certificates;
+    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> certificates;
 };
 std::vector<MultiRegionMesh::Interface> close_patches(std::vector<Patch> patches)
 {
@@ -122,7 +121,7 @@ std::vector<MultiRegionMesh::Interface> close_patches(std::vector<Patch> patches
             descriptor.coarse_boundary = coarse.boundary;
             descriptor.coarse_face_count = coarse.faces.size();
             std::vector<std::vector<RegionFace>> tiles(coarse.faces.size());
-            std::vector<std::vector<ExactPlanarFacePtr>> certs(coarse.faces.size());
+            std::vector<std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>>> certs(coarse.faces.size());
             std::vector<size_t> participants;
             for (auto j : order)
                 if (j != i && !used[j] && patches[j].region != coarse.region)
@@ -257,24 +256,24 @@ MultiRegionMesh::Interface shifted(MultiRegionMesh::Interface interface, size_t 
         interface);
     return interface;
 }
-ExactPlanarFacePtr certificate(const MultiRegionMesh::Region& region, ID face)
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> certificate(const MultiRegionMesh::Region& region, ID face)
 {
     return std::visit(
-        [&](const auto& r) -> ExactPlanarFacePtr
+        [&](const auto& r) -> PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
         {
             if constexpr (requires { r.geometry().certified_face_geometry(face); })
                 if (auto c = r.geometry().certified_face_geometry(face))
                     return c;
             if (r.layout().family == RegionLayout::Family::Cylindrical)
                 throw std::invalid_argument("Analytic curved participants cannot use an exact planar join.");
-            std::vector<GeometryPoint> points;
+            std::vector<PLIC::GeometryPoint> points;
             for (auto n : r.topology().face_nodes(face))
             {
                 auto p = r.geometry().node_coordinates(n);
                 points.push_back({p.x, p.y, p.z});
             }
             auto area = r.geometry().face_area_vector(face);
-            return ExactPlanarFace::make(points)->oriented_like({area.x, area.y, area.z});
+            return PLIC::PlanarFace<ArithmeticMode::Ordinary>::make(points)->oriented_like({area.x, area.y, area.z});
         },
         region);
 }
@@ -719,27 +718,27 @@ void validate_native_contact_envelopes(
     {
         const auto p = participant(c);
         if (p < adaptive)
-            return ConvexCellGeometry::from_native_cell(*data.geometry, c);
+            return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_native_cell(*data.geometry, c);
         const auto [region, local] = data.geometry->native_cell(c);
         const auto& native = data.geometry->regions()[region];
         const bool exact = std::visit(
             [](const auto& r)
             {
-                if constexpr (requires { r.geometry().has_exact_construction(); })
-                    return r.geometry().has_exact_construction();
+                if constexpr (requires { r.geometry().has_construction(); })
+                    return r.geometry().has_construction();
                 else
                     return false;
             },
             native);
         if (exact)
-            return ConvexCellGeometry::from_native_cell(*data.geometry, c);
+            return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_native_cell(*data.geometry, c);
         if (data.geometry->region_layout(region).family == RegionLayout::Family::Cylindrical)
             throw std::invalid_argument("Mixed curved static contact has no qualified exact span proof.");
-        GeometryPoint lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
+        PLIC::GeometryPoint lo{INFINITY, INFINITY, INFINITY}, hi{-INFINITY, -INFINITY, -INFINITY};
         for (auto node : data.geometry->cell_nodes(c))
         {
             const auto v = data.geometry->node_coordinates(node);
-            const GeometryPoint point{v.x, v.y, v.z};
+            const PLIC::GeometryPoint point{v.x, v.y, v.z};
             for (size_t a = 0; a < 3; ++a)
             {
                 lo[a] = std::min(lo[a], point[a]);
@@ -748,7 +747,7 @@ void validate_native_contact_envelopes(
         }
         // A represented static cell's AABB is only a physical-span proof. It is
         // never exported as an actual-cell/PLIC/remap certificate.
-        return ConvexCellGeometry::box(lo, hi);
+        return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(lo, hi);
     };
     std::map<ID, std::vector<ID>> nodes;
     for (size_t p = product_count(data.grid); p < adaptive; ++p)
@@ -777,7 +776,7 @@ void validate_native_contact_envelopes(
             }
     struct Envelope
     {
-        std::array<ConvexGeometryPtr, 3> minimum, maximum;
+        std::array<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>, 3> minimum, maximum;
     };
     // Closed AABB overlap with each real canonical join face is a conservative
     // seam-local contact proof. Unrelated interior cells are not enrolled, and
@@ -785,7 +784,7 @@ void validate_native_contact_envelopes(
     for (const auto& [face, a, b] : joined)
     {
         spend();
-        const auto surface = ExactPlanarFace::from_native_face(*data.geometry, face);
+        const auto surface = PLIC::PlanarFace<ArithmeticMode::Ordinary>::from_native_face(*data.geometry, face);
         std::array<Envelope, 2> envelopes;
         size_t side = 0;
         for (auto p : {a, b})
@@ -852,13 +851,15 @@ std::shared_ptr<MixedAMR::Data> build(MixedAMRGrid grid)
                             throw std::length_error("Mixed contact face budget exhausted.");
                         joined.emplace_back(f, pa, pb);
                     }
-                    const auto ca = pa < product_count(d->grid) + d->grid.adaptive.size()
-                                        ? ConvexCellGeometry::from_native_cell(*d->geometry, a)
-                                        : ConvexGeometryPtr{};
-                    const auto cb = pb < product_count(d->grid) + d->grid.adaptive.size()
-                                        ? ConvexCellGeometry::from_native_cell(*d->geometry, b)
-                                        : ConvexGeometryPtr{};
-                    auto static_span = [&](ID c, size_t axis) -> boost::multiprecision::cpp_rational
+                    const auto ca =
+                        pa < product_count(d->grid) + d->grid.adaptive.size()
+                            ? PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_native_cell(*d->geometry, a)
+                            : PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>{};
+                    const auto cb =
+                        pb < product_count(d->grid) + d->grid.adaptive.size()
+                            ? PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_native_cell(*d->geometry, b)
+                            : PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>{};
+                    auto static_span = [&](ID c, size_t axis) -> long double
                     {
                         double lower = std::numeric_limits<double>::infinity(), upper = -lower;
                         for (auto node : d->geometry->cell_nodes(c))
@@ -868,7 +869,10 @@ std::shared_ptr<MixedAMR::Data> build(MixedAMRGrid grid)
                             lower = std::min(lower, value);
                             upper = std::max(upper, value);
                         }
-                        return boost::multiprecision::cpp_rational(upper) - boost::multiprecision::cpp_rational(lower);
+                        const auto span = static_cast<long double>(upper) - lower;
+                        if (!std::isfinite(span) || !(span > 0))
+                            throw std::invalid_argument("Mixed static provider has an invalid physical span.");
+                        return span;
                     };
                     for (size_t axis = 0; axis < 3; ++axis)
                     {
@@ -889,7 +893,7 @@ std::shared_ptr<MixedAMR::Data> build(MixedAMRGrid grid)
                             // Static represented planar providers retain their native shape;
                             // bounds are a closure metric, never a convex remap certificate.
                             const auto aw = static_span(a, axis), bw = static_span(b, axis);
-                            const boost::multiprecision::cpp_rational ratio(d->grid.maximum_span_ratio);
+                            const long double ratio = d->grid.maximum_span_ratio;
                             if (aw > ratio * bw)
                                 requests[pa].insert(key(a, pa));
                             if (bw > ratio * aw)
@@ -970,11 +974,11 @@ ID MixedAMR::cell_material(ID gid) const
         return data_->grid.adaptive[a]->cell_material(gid - data_->participant_cells[p]);
     return data_->grid.stationary.at(a - data_->grid.adaptive.size()).material;
 }
-ConvexGeometryPtr MixedAMR::cell_geometry(ID gid) const
+PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> MixedAMR::cell_geometry(ID gid) const
 {
     if (!geometry_unchanged())
         throw std::invalid_argument("Mixed source observations are stale.");
-    return ConvexCellGeometry::from_native_cell(*data_->geometry, gid);
+    return PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_native_cell(*data_->geometry, gid);
 }
 std::shared_ptr<const MixedAMR> MixedAMR::with_partition(std::shared_ptr<const CompositePartition<>> p) const
 {
@@ -1754,8 +1758,8 @@ AdaptiveBootstrap MixedAMR::detach_owned(
             struct RuleGroup
             {
                 AdaptiveBytes original, canonical;
-                ExactPlanarFacePtr common;
-                std::vector<ExactPlanarFacePtr> selected;
+                PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> common;
+                std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> selected;
             };
             std::map<Root, std::map<AdaptiveBytes, RuleGroup>> groups;
             for (ID face = 0; face < data_->geometry->num_faces(); ++face)
@@ -1770,7 +1774,8 @@ AdaptiveBootstrap MixedAMR::detach_owned(
                     right{q, root_key(data_key(*data_, neighbor, q))};
                 if (!needed.contains(left) && !needed.contains(right))
                     continue;
-                auto selected_face = ExactPlanarFace::from_native_face(*data_->geometry, face);
+                auto selected_face =
+                    PLIC::PlanarFace<ArithmeticMode::Ordinary>::from_native_face(*data_->geometry, face);
                 auto& a = prototype(p, owner);
                 auto& b = prototype(q, neighbor);
                 auto support = [&](Prototype& root) -> const AdaptiveSurface&
@@ -1823,7 +1828,8 @@ AdaptiveBootstrap MixedAMR::detach_owned(
                         return;
                     auto [it, inserted] = groups[root].try_emplace(id, RuleGroup{source.key, id, common, {}});
                     (void) inserted;
-                    allocation.add(selected_face->storage_bytes() + sizeof(ExactPlanarFacePtr));
+                    allocation.add(
+                        selected_face->storage_bytes() + sizeof(PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>));
                     it->second.selected.push_back(selected_face);
                 };
                 add(left, af);
@@ -1842,7 +1848,7 @@ AdaptiveBootstrap MixedAMR::detach_owned(
                 const Root root{p, root_key(data_key(*data_, owner, p))};
                 if (!needed.contains(root))
                     continue;
-                auto shape = ExactPlanarFace::from_native_face(*data_->geometry, face);
+                auto shape = PLIC::PlanarFace<ArithmeticMode::Ordinary>::from_native_face(*data_->geometry, face);
                 auto& original = prototype(p, owner);
                 const AdaptiveSurface* support = nullptr;
                 for (const auto& candidate : original.faces)
@@ -1869,7 +1875,7 @@ AdaptiveBootstrap MixedAMR::detach_owned(
                 capsule.route = root.first;
                 for (auto& [id, group] : groups[root])
                 {
-                    std::vector<ExactPlanarFacePtr> unique;
+                    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> unique;
                     for (const auto& face : group.selected)
                     {
                         bool duplicate = false;
@@ -1917,7 +1923,7 @@ AdaptiveBootstrap MixedAMR::detach_owned(
                         original.begin(), original.end(), [&](const auto& face) { return face.key == support; });
                     if (original_face == original.end())
                         throw std::logic_error("Lost original physical support.");
-                    std::vector<ExactPlanarFacePtr> coverage;
+                    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> coverage;
                     for (const auto& rule : rules)
                         coverage.push_back(rule.original_root_selection);
                     for (const auto& rule : capsule.rules)

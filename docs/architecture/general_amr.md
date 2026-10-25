@@ -2,8 +2,9 @@
 
 AMR hierarchy, ancestry, overlap and adaptation modules live in
 `src/geometry/mesh/AMR` and namespace `SimpleFluid::Meshes::AMR`.
-Generic exact geometry and native mesh providers remain in `SimpleFluid::Meshes`;
-FVM transport and solver consumers remain in their own modules.
+Mode-selected geometry lives in `SimpleFluid::PLIC`; native mesh providers remain
+in `SimpleFluid::Meshes`. FVM transport and solver consumers use the public PLIC
+headers, with backend implementations confined to PLIC's private directories.
 
 **Status: Stages 1–6 are implemented with bounded numerical verification;
 Stage 7 is implemented with focused flow verification and incomplete overall
@@ -170,38 +171,45 @@ Provider layout and revision checks retain the existing
 
 ## Implemented certified geometry and sparse remap
 
-[`ConvexCellGeometry`](../../src/geometry/ConvexCellGeometry.hh) retains an
-immutable exact convex shell from represented binary64 inputs. It certifies
-outward planar faces, convexity and closed manifold topology before clipping.
+[`ConvexCellGeometry<Ordinary>`](../../src/geometry/PLIC/ConvexGeometry.hh) is the
+native AMR cell representation. It retains a floating-point convex shell and
+source incidence, validates outward faces, convexity and closed manifold
+topology, and uses the ordinary clipping provider. Rational source preparation
+is not required. The explicit Exact specialization remains available behind
+the public PLIC interface for optional exact algorithms.
 `GeometryHalfspace` means `normal dot (x-anchor) <= offset`; a local anchor and
 separate finite offset retain translated microscopic cuts that a rounded point
-on the plane cannot encode. Clips retain both exact sides, section geometry,
-per-parent-face apertures and local volume/first moments. Positive pieces never
-vanish through a geometric tolerance; invalid or unrepresentable geometry rejects.
+on the plane cannot encode. Clips retain both sides, section geometry and local
+volume/first moments. No positive represented piece is removed to satisfy a
+tolerance or resource cap; invalid, unresolved or unrepresentable geometry rejects.
 Bulk product overlap factors into actual XY polygon area times Z overlap; tilted
 phase cuts retain the full three-dimensional intersection.
 
-`CertifiedGeometryValue` gives a finite converted value and outward error bound.
-Positive volume must remain representable. A nonzero first moment below the output
-range may have a zero-straddling outward interval with `exact_nonzero` retained;
-the exact internal moment remains available for further geometry. Checked narrowing
-rejects disappearance of a known nonzero value. Binary64-format moment queries
-exercise this contract even when the host's `long double` has a wider range.
+`GeometryValue<Mode>` follows its selected arithmetic contract. Ordinary values
+carry a scalar and report additional binary64 narrowing error, without claiming
+a tracked construction enclosure. Bounded values retain enclosures. Exact
+published values retain conversion uncertainty and a separate nonzero marker;
+their underlying rational storage stays private to the optional backend.
+Checked narrowing rejects disappearance of a known nonzero value.
 
 [`AdaptiveOverlapPlan`](../../src/geometry/mesh/AMR/AdaptiveOverlap.hh) takes explicit
 source/target bindings and unchanged/refine/coarsen relations. It certifies actual
-intersection geometry, per-cell disjointness and complete coverage exactly.
+intersection geometry, per-cell disjointness and complete coverage using retained
+boundary identities and finite volume/moment gates.
 Catalogs may contain only the complete ancestry families needed locally. This is
 not a global key directory or distributed refinement planner.
 
 [`ConservativeAMRRemap`](../../src/FVM/ConservativeAMRRemap.hh) binds the exact
 native endpoint identities, maps, epochs and plan observations. Sparse owner
 exchange authenticates every supplied source and target certificate cell,
-including inactive remote siblings: actual native shell geometry must agree
-exactly, and region/material/typed ancestry metadata must match its owner's binding
-by lossless bytes. Native shell extraction uses certified outward orientation and
-exact edge-vertex propagation. Analytic curved providers and translated periodic
+including inactive remote siblings: represented native shell geometry must agree,
+and region/material/typed ancestry metadata must match its owner's binding by
+lossless bytes. Native shell extraction retains outward orientation and admitted
+edge-vertex incidence. Analytic curved providers and translated periodic
 joins reject instead of being approximated by a planar node hull.
+Sparse and constructed providers expose retained cell geometry; raw display-node
+shell export rejects for those providers, so wider coordinates and construction
+ancestry cannot silently be replaced by a rounded display hull.
 
 The caller supplies physical gas and carrier volumes independently, plus accepted
 geometry declarations. `Plic` requires a valid mixed-cell plane; `PureGas` and
@@ -249,23 +257,22 @@ coarsen_z)` and the plan/apply pair construct immutable candidates collectively.
 `BaseEdgeKey::Kind` separates `Root` edges from `TemplateInterior` edges, so
 identical creator/ordinal values cannot alias a boundary edge and an interior
 refinement seam. Child paths retain that namespace through further refinement.
-`cell_geometry(gid)` queries an authoritative exact cell on demand. Root embedding,
+`cell_geometry(gid)` queries retained ordinary cell geometry on demand. Root embedding,
 conformity, complete immediate sibling families and stale source observations are
 checked before publication. Failed candidates preserve the source hierarchy.
 
 The existing `ExtrudedGeometry` now optionally retains
-[`ExactExtrudedConstruction`](../../src/geometry/mesh/ExactExtrudedConstruction.hh).
-Represented roots and exact affine mean recipes define base points and common Z
-coordinates. Native cell/face volumes, areas and centroids derive from that exact
-construction. Display/VTU nodes may round independently and never define overlap
-geometry or change the parent domain. Admission still requires a valid distinct
-display layout, exact and displayed strict convexity, and representable signed
-native center-to-face/axial metric differences. These checks are explicit
-construction-provider requirements; the exact constructor does not delegate its
-geometry definition to the ordinary display-polygon constructor. Ordinary
-binary64 providers keep their existing path.
+[`ExtrudedConstruction<Ordinary>`](../../src/geometry/PLIC/ExtrudedConstruction.hh).
+Represented roots and immutable affine mean recipes define base points and common
+Z coordinates, evaluated in ordinary wider floating point. Native cell/face
+volumes, areas and centroids derive from that retained construction. Display/VTU
+nodes may round independently and never define overlap geometry or change the
+parent domain. Admission requires a valid distinct display layout, convex cells,
+and representable signed native center-to-face/axial metric differences. Root
+edge recipes retain side-support identity through refinement and shared views.
+The construction provider does not replace retained geometry with display polygons.
 
-`has_exact_construction()` identifies this capability, and
+`has_construction()` identifies this capability, and
 `certified_cell_geometry()` returns a retained actual cell on demand.
 `ConvexCellGeometry::from_native_cell()` dispatches to that authoritative provider;
 `native_cell_shell()` rejects constructed geometry rather than exporting its
@@ -277,7 +284,7 @@ retained topology. The raw `make()`/`decode()` contract certifies the DAG, layou
 individual convex cells, metric viability and packet framing; it assumes an
 already valid, certified embedded base. It does not establish global embedding
 of arbitrary raw provider input. `ExtrudedAMR` certifies root embedding explicitly
-and preserves it through exact templates and conformity closure. Native packet
+and preserves it through recipe ancestry and conformity closure. Native packet
 decode preserves that descriptor rather than independently admitting an arbitrary
 mesh. These are direct provider contracts, separate from refinement.
 
@@ -287,17 +294,17 @@ resident geometry. Fields, traversal and remap use that resident handle; manuall
 substituting a canonical geometry observation does not authenticate a partition.
 This is a construction binding, not live accepted-state migration.
 
-Owner authentication now tags represented native shells separately from exact
-constructed certificates. `encode_exact_certificate()` and
-`decode_exact_certificate()` losslessly carry retained rational shells without
-public Boost types or display-node conversion. Product keys encode both factors
+Owner authentication tags represented native shells separately from retained
+constructed geometry. `encode_certificate()` and `decode_certificate()` retain
+wider scalar coordinates, source supports and topology without rational
+construction or display-node substitution. Product keys encode both factors
 by exact bytes. Every supplied source/target certificate and inactive sibling
 still authenticates against its owner's geometry and ancestry/material binding.
 `MeshToMeshTransfer` and planar ALE reject constructed providers until their
 node-hull/geometry-transform paths gain an authoritative construction contract.
 
 The compact claim concerns provider, hierarchy and partition descriptor storage:
-base/edge/point recipes plus common axial data, with exact cell certificates
+base/edge/point recipes plus common axial data, with retained cell geometry
 created only on demand. `storage_counts()` and `storage_report()` separate those
 retained allocations from maps and temporary certificates. The Stage 3 remap
 bootstrap may explicitly assemble bounded complete-family catalogs for a query;
@@ -413,8 +420,8 @@ root/planning geometry is still replicated, under the explicit budgets above.
 Closed-volume halfspace clipping is the relevant geometric primitive; the
 [CGAL clipping contract](https://doc.cgal.org/6.1.1/Polygon_mesh_processing/group__PMP__corefinement__grp.html)
 distinguishes clipping a bounded volume from merely splitting its surface.
-The implemented cutter uses the repository's exact rational predicates and
-constructions. That reference is algorithm background, not a new dependency or
+The native cutter uses the ordinary PLIC provider, retained incidence and finite
+volume/moment acceptance gates. That reference is algorithm background, not a new dependency or
 qualification claim.
 
 Construct one canonical subdivision of every parent face from both incident
@@ -430,8 +437,8 @@ Certify positive finite child measures, planar simple faces, oriented closed
 manifolds, containment, pairwise interior disjointness, parent volume and first
 moment recovery, and complete parent-shell coverage. Discard only proven empty
 intersections. A positive sliver that violates quality or representability
-rejects the candidate; its volume cannot disappear. Exact rational midpoint
-planes need not be binary64 display coordinates. Native display/metric viability
+rejects the candidate; its volume cannot disappear. Retained midpoint
+constructions need not coincide with independently rounded display coordinates. Native display/metric viability
 remains an explicit admission limit; no unspecified retry changes the split.
 
 Coarsening restores the saved parent geometry after its complete recorded
@@ -441,13 +448,13 @@ recover a parent through a convex hull. This geometry hierarchy has no solver
 refinement policy. A future solver integration must separately protect mixed
 interfaces, reconstruction neighborhoods, motion forecasts, wakes and promotions.
 
-[`ExactPolyhedralComplex`](../../src/geometry/ExactPolyhedralComplex.hh) groups
+[`PolyhedralComplex<Ordinary>`](../../src/geometry/PLIC/PolyhedralComplex.hh) groups
 faces by stable `Root` or `Cut` surface ancestry, with canonical orientation and
 physical patch declarations. A cut surface is identified by its creator parent
 and axis, not a rounded plane or coordinate tolerance. Opposite incident patterns
-contribute to one exact atomic overlay; same-side overlap, missing coverage or
+contribute to one canonical atomic overlay; same-side overlap, missing coverage or
 inconsistent surface/patch declarations reject. Canonical tile identities ignore
-loop start and redundant exact collinear edge segmentation. Every exact edge vertex
+loop start and redundant admitted collinear edge segmentation. Every retained edge vertex
 is propagated to incident loops, and the reconstructed atomic cell shell must
 match its immutable canonical geometry. Coarsening therefore restores the saved
 parent shape while retaining covering tiles required by a surviving fine neighbor.
@@ -457,24 +464,24 @@ in native traversal order, including constructed cells. It does not assume that 
 canonical domain certificate's face count/order equals its tiled native topology.
 The ordinary domain certificate remains the geometry used by conservative remap.
 
-The optional exact `ExplicitRegionProvider` overload keeps the legacy constructor
-and record representation available. Exact cells use `POLYHEDRON` connectivity
+The constructed `ExplicitRegionProvider` overload keeps the raw record constructor
+and record representation available. Constructed cells use `POLYHEDRON` connectivity
 when atomic tiling changes face counts. The compiled adapter authenticates native
-records against the exact complex; native face area comes from the authoritative
+records against the retained ordinary complex; native face area comes from the retained
 area conversion, not the norm of already rounded area-vector components. Legacy
 record range checks remain explicit admission requirements.
 
 Versioned native packets retain requested cells plus incident-owner geometric
 support, their faces/nodes, and only metric records for remaining outer neighbors.
-This geometric support closure does not enlarge field halos. Exact certificates are available only
+This geometric support closure does not enlarge field halos. Retained cells are available only
 for fully resident cells. Empty/sparse providers keep the global catalog and
 boundary schema independently of residency; their public factory requires the
 complete schema explicitly, even when the global schema is empty. Unnamed
 exteriors retain invalid boundary IDs and empty names; topological exterior
-status is independent of labelling. Omitting a sparse factory schema rejects. Exact descriptor bytes participate in configuration
+status is independent of labelling. Omitting a sparse factory schema rejects. Complete descriptor bytes participate in configuration
 identity. All supplied source/target remap catalog cells, including inactive
 siblings, still authenticate against their actual native owners without coverage
-normalization. Exact-shard distributed reassembly is explicitly rejected until
+normalization. Constructed-shard distributed reassembly is explicitly rejected until
 Stage 6 can preserve its authoritative semantics; ordinary legacy shard merge
 continues through its existing path.
 
@@ -878,8 +885,8 @@ identity/epoch/map invalidation; candidate fields and ledgers stay private.
 Application-storage caps retain their configured scope, and do not bound backend,
 allocator, Krylov or whole-process RSS.
 
-The current native authority import is described in
-[ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary).
+Native source preparation uses ordinary PLIC cells and source supports. Optional
+exact conversion is described in [ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary).
 Explicit rational reconstruction/inventory and transport contracts have separate
 owners: [ExactVoF](exact_vof.md) and [ExactTransport](exact_transport.md).
 
@@ -1320,9 +1327,10 @@ its qualified IEEE environment and error-free residual assumptions; unresolved
 certification rejects. Ordinary mode checks finite scalar results and physical
 residuals without interval-width admission.
 
-The existing native source importer remains an explicit bootstrap boundary;
-[ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary)
-owns its authority/export contract. Numerical FP work, source import and any
+The native source importer consumes ordinary represented geometry and source
+incidence. Optional rational imports are described separately in
+[ExactGeometry](exact_geometry.md#native-authority-and-the-fp-import-boundary).
+Numerical FP work, source import and any
 selected reference oracle require separate attribution. Discrete entity keys,
 owner identity, incidence signs and exactly-once routing retain their ordinary
 identity guarantees independently of numerical coordinates.
@@ -1564,7 +1572,7 @@ values, error evidence and distinct provenance. Explicit `VoF::Exact` APIs and
 `ExperimentalExact` retain rational authority. The finite path publishes
 independent binary64 phase amounts once; it retains transported error history
 separately from the current-step receipt gate. Wrapping a rounded FP value
-in `ExactGeometryMeasure` makes it exact only for that rounded value, not for the
+in `GeometryMeasure<Exact>` makes it exact only for that rounded value, not for the
 original construction, and cannot manufacture a coverage or owner certificate.
 Keep rational measure/construction objects out of finite-path caches and MPI
 payloads; exchange canonical FP values, their error evidence and discrete identity.

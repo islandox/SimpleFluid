@@ -43,7 +43,8 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::DistributedAdaptiveHierarchy> 
 TEST(DistributedAdaptiveBalance, RecorderUsesActualClippingFaceAndPopulationOperations)
 {
     ::SimpleFluid::Meshes::AMR::AdaptiveWorkRecorder recorder(::SimpleFluid::Meshes::AMR::AdaptiveWorkUnit::Operations);
-    auto shape = ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1});
+    auto shape =
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
     double clipping = 0, faces = 0, population = 0;
     for (int i = 0; i < 3; ++i)
     {
@@ -63,7 +64,7 @@ TEST(DistributedAdaptiveBalance, RecorderUsesActualClippingFaceAndPopulationOper
         ++population;
     }
     recorder.observe(key(0), 11, clipping, faces, population);
-    const auto bytes = shape->encode_exact_certificate();
+    const auto bytes = shape->encode_certificate();
     recorder.record_payload(key(0), 11, bytes.size());
     auto measured = recorder.snapshot(key(0), 11);
     EXPECT_EQ(measured.reconstruction, 3);
@@ -89,7 +90,7 @@ TEST(DistributedAdaptiveBalance, MeasuredOperationsDrivePinnedHierarchyMigration
     {
         auto shape = kernel->geometry(leaf);
         auto moments = shape->moments();
-        GeometryPoint center = moments.origin;
+        SimpleFluid::PLIC::GeometryPoint center = moments.origin;
         const auto volume = moments.volume.as_double();
         for (std::size_t a = 0; a < 3; ++a)
             center[a] += moments.first_moment[a].as_double() / volume;

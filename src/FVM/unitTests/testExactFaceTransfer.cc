@@ -21,7 +21,7 @@ using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 using namespace SimpleFluid::Meshes::AMR;
 using namespace SimpleFluid::VoF;
-using M = ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 using H = DistributedAdaptiveHierarchy;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 std::shared_ptr<const GeneralVoF> setup(Teuchos::RCP<const Teuchos::Comm<int>> comm = Teuchos::null, bool cubic = false)
@@ -186,7 +186,8 @@ TEST(ExactFaceTransfer, CrossedBaseRefinementAxialCoarseningPreservesConstantStr
             std::get<ProductCellAncestry>(parent.ancestry).axial.path.pop_back();
             coarsen.push_back(adaptive_family_key(parent, AdaptiveSplit::Axial));
         }
-        seed.push_back({key, p.base.root == 1 ? GeometryPoint{1, 0, 0} : GeometryPoint{0, 0, 0}});
+        seed.push_back({key,
+            p.base.root == 1 ? SimpleFluid::PLIC::GeometryPoint{1, 0, 0} : SimpleFluid::PLIC::GeometryPoint{0, 0, 0}});
     }
     const auto coarsening = source->hierarchy()->plan_adaptation({}, coarsen);
     const auto intermediate = bind(*source->hierarchy(), coarsening);
@@ -266,7 +267,8 @@ TEST(ExactFaceTransfer, CrossedBaseRefinementAxialCoarseningPreservesConstantStr
             std::get<ProductCellAncestry>(parent.ancestry).base.path.pop_back();
             reverse_coarsen.push_back(adaptive_family_key(parent, AdaptiveSplit::Base));
         }
-        reverse_seed.push_back({key, p.base.root == 1 ? GeometryPoint{1, 0, 0} : GeometryPoint{0, 0, 0}});
+        reverse_seed.push_back({key,
+            p.base.root == 1 ? SimpleFluid::PLIC::GeometryPoint{1, 0, 0} : SimpleFluid::PLIC::GeometryPoint{0, 0, 0}});
     }
     const auto inverse_base = target->hierarchy()->plan_adaptation({}, reverse_coarsen);
     const auto inverse_mid = bind(*target->hierarchy(), inverse_base);

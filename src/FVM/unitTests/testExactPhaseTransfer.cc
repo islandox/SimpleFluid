@@ -20,7 +20,7 @@ using namespace SimpleFluid;
 using namespace SimpleFluid::Meshes;
 using namespace SimpleFluid::Meshes::AMR;
 using namespace SimpleFluid::VoF;
-using M = ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 using H = DistributedAdaptiveHierarchy;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 std::shared_ptr<const H> bootstrap(const CartesianAMR& root, std::uint64_t count)

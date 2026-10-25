@@ -4,9 +4,9 @@
 #pragma once
 #include "FVM/GeneralVoF.hh"
 #include "FVM/details/ExactLiveStorage.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
-#include "FVM/details/BoundedVoFTransport.hh"
+#include "FVM/details/FiniteVoFTransport.hh"
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/ExperimentalPhaseBackend.hh"
@@ -46,19 +46,19 @@ namespace general_vof_detail
 namespace AMR = Meshes::AMR;
 namespace wire = AMR::adaptive_detail;
 using Key = AMR::AdaptiveCellKey;
-using Measure = Meshes::ExactGeometryMeasure;
+using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 namespace fp = finite_detail;
 struct Cell
 {
     Key key;
     std::uint64_t gid = 0, revision = 0;
     int owner = -1;
-    Meshes::GeometryPoint centroid{};
+    SimpleFluid::PLIC::GeometryPoint centroid{};
     double native_volume = 0;
     std::size_t canonical_face_count = 0;
     long double ordinary_quota_scale = 0;
     PolyhedralPhaseSample phase;
-    Meshes::BoundedConvexGeometryPtr finite_geometry;
+    PLIC::DynamicConvexGeometryPtr finite_geometry;
     PhaseError occupancy;
     PhaseRoundoff roundoff, finite_history;
     std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
@@ -73,9 +73,9 @@ struct GeneralVoF::Data
     struct Wall
     {
         AMR::AdaptiveBytes identity;
-        Meshes::ExactPlanarFacePtr geometry;
-        Meshes::BoundedPoint finite_normal;
-        Meshes::BoundedFaceConstraint finite_constraint;
+        SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
+        PLIC::DynamicPoint finite_normal;
+        PLIC::DynamicFaceConstraint finite_constraint;
     };
     struct Topology
     {
@@ -83,7 +83,7 @@ struct GeneralVoF::Data
         AMR::AdaptiveNativeDraft draft;
         std::vector<AMR::AdaptiveTile> tiles;
         std::vector<AMR::AdaptiveNode> nodes;
-        std::map<std::uint64_t, Meshes::BoundedPoint> finite_nodes;
+        std::map<std::uint64_t, PLIC::DynamicPoint> finite_nodes;
         std::map<std::uint64_t, Key> by_gid;
         std::map<Key, std::set<Key>> adjacency;
         std::map<std::uint64_t, std::set<Key>> node_fans;
@@ -106,14 +106,16 @@ struct GeneralVoF::Data
     std::vector<PhaseVolumes> phases;
     std::vector<PhaseRoundoff> roundoff, phase_history;
     std::vector<PhaseError> occupancy;
-    std::shared_ptr<const std::vector<Meshes::ExactPhaseMeasures>> experimental_catalog;
+    std::shared_ptr<const std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>>>
+        experimental_catalog;
 };
 namespace general_vof_detail
 {
 SIMPLEFLUID_FVM_LOCAL PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode);
-SIMPLEFLUID_FVM_LOCAL Meshes::BoundedGeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes = 64 * 1024 * 1024);
-SIMPLEFLUID_FVM_LOCAL long double phase_allowance(Meshes::BoundedGeometryValue source, double relative);
-SIMPLEFLUID_FVM_LOCAL Meshes::ExactPhaseMeasures phase_measures(const Cell& cell);
+SIMPLEFLUID_FVM_LOCAL PLIC::GeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes = 64 * 1024 * 1024);
+SIMPLEFLUID_FVM_LOCAL long double phase_allowance(PLIC::DynamicGeometryValue source, double relative);
+SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phase_measures(
+    const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL Measure finite_bound(double value);
 SIMPLEFLUID_FVM_LOCAL void occupancy(Cell& cell);
 SIMPLEFLUID_FVM_LOCAL void validate_cell(const Cell& cell, const GeneralVoFOptions& options);
@@ -121,14 +123,19 @@ SIMPLEFLUID_FVM_LOCAL void real(wire::Writer& w, double value);
 SIMPLEFLUID_FVM_LOCAL double real(wire::Reader& r);
 SIMPLEFLUID_FVM_LOCAL void finite_real(wire::Writer& w, long double value);
 SIMPLEFLUID_FVM_LOCAL long double finite_real(wire::Reader& r);
-SIMPLEFLUID_FVM_LOCAL void finite_value(wire::Writer& w, Meshes::BoundedGeometryValue v);
-SIMPLEFLUID_FVM_LOCAL Meshes::BoundedGeometryValue finite_value(wire::Reader& r, std::optional<ArithmeticMode> expected = {});
+SIMPLEFLUID_FVM_LOCAL void finite_value(wire::Writer& w, PLIC::DynamicGeometryValue v);
+SIMPLEFLUID_FVM_LOCAL PLIC::DynamicGeometryValue finite_value(
+    wire::Reader& r, std::optional<ArithmeticMode> expected = {});
 SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PolyhedralInterface& p);
 SIMPLEFLUID_FVM_LOCAL PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
-SIMPLEFLUID_FVM_LOCAL Meshes::ExactPhaseMeasures phases(const Meshes::ExactConvexFragment& fragment, const PolyhedralInterface& p);
-SIMPLEFLUID_FVM_LOCAL GeneralVoFPhaseEnclosure diagnostic(const Meshes::ExactPhaseMeasures& measures);
+SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
+    const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
+    const PolyhedralInterface& p);
+SIMPLEFLUID_FVM_LOCAL GeneralVoFPhaseEnclosure diagnostic(
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& measures);
 SIMPLEFLUID_FVM_LOCAL double output(const Measure& measure);
-SIMPLEFLUID_FVM_LOCAL Meshes::ExactPhaseMeasures geometric_labels(const Cell& cell);
+SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> geometric_labels(
+    const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL PolyhedralPhaseSample geometric_sample(const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL void refresh_experimental_catalog(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL void current(const GeneralVoF::Data& data);

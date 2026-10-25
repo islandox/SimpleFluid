@@ -2,7 +2,7 @@
  * @brief Conditioned physical surface fits from actual reconstructed PLIC sections.
  */
 #pragma once
-#include "FVM/PolyhedralReconstruction.hh"
+#include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "SimpleFluidExport.hh"
 #include <optional>
 #include <span>
@@ -12,9 +12,10 @@ namespace SimpleFluid::detail
 struct GeneralVoFCurvaturePatch
 {
     std::uint64_t cell = 0;
-    Meshes::GeometryPoint centroid{}, normal{};
+    SimpleFluid::PLIC::GeometryPoint centroid{}, normal{};
     double area = 0, cell_scale = 0;
-    Meshes::GeometryPoint physical_spans{}; ///< Actual AABB spans; zero only for manufactured compatibility samples.
+    SimpleFluid::PLIC::GeometryPoint
+        physical_spans{}; ///< Actual AABB spans; zero only for manufactured compatibility samples.
 };
 struct GeneralVoFCurvatureOptions
 {
@@ -38,7 +39,7 @@ public:
      * section; centroid integrates its convex polygon in physical coordinates.
      */
     [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(
-        std::uint64_t cell, const Meshes::BoundedConvexGeometry&, const VoF::PolyhedralInterface&);
+        std::uint64_t cell, const PLIC::DynamicConvexGeometry&, const VoF::PolyhedralInterface&);
     /** Fit a quadratic Monge surface in the target normal's tangential frame.
      * Curvature is div(n) [1/m], positive for convex gas with outward normals.
      */
@@ -49,8 +50,9 @@ namespace Exact
 {
 struct SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFCurvature
 {
-    [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(
-        std::uint64_t cell, const Meshes::ConvexCellGeometry&, const VoF::PolyhedralInterface&);
+    [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(std::uint64_t cell,
+        const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>&,
+        const VoF::PolyhedralInterface&);
 };
 } // namespace Exact
 } // namespace SimpleFluid::detail

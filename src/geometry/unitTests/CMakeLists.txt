@@ -9,6 +9,11 @@ add_library(SimpleFluidLegacyMeshTestFixture STATIC
 simplefluid_configure_component(SimpleFluidLegacyMeshTestFixture)
 target_link_libraries(SimpleFluidLegacyMeshTestFixture PUBLIC SimpleFluid::Mesh)
 
+add_test(NAME simplefluid_plic_backend_boundary
+    COMMAND "${CMAKE_COMMAND}" "-DSIMPLEFLUID_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+        -P "${PROJECT_SOURCE_DIR}/cmake/testing/CheckPLICBackendBoundary.cmake")
+set_tests_properties(simplefluid_plic_backend_boundary PROPERTIES LABELS "geometry;architecture")
+
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testOrthogonalDiffusionProfile\\.cc$")

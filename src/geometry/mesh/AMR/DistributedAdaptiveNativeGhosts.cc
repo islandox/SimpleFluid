@@ -17,7 +17,7 @@ void node_write(Writer& w, const AdaptiveNode& node)
 {
     w.word(node.gid);
     w.bytes(node.identity);
-    w.bytes(node.exact_identity);
+    w.bytes(node.coordinate_identity);
     for (auto coordinate : node.coordinate)
         w.word(std::bit_cast<std::uint64_t>(coordinate));
 }
@@ -26,10 +26,10 @@ AdaptiveNode node_read(Reader& r)
     AdaptiveNode node;
     node.gid = r.word();
     node.identity = r.bytes();
-    node.exact_identity = r.bytes();
+    node.coordinate_identity = r.bytes();
     for (auto& coordinate : node.coordinate)
         coordinate = std::bit_cast<double>(r.word());
-    if (node.coordinate != exact_point_display(node.exact_identity))
+    if (node.coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(node.coordinate_identity))
         throw std::invalid_argument("Invalid exact native ghost node display.");
     return node;
 }
@@ -129,7 +129,7 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 for (auto gid : needed)
                 {
                     const auto& node = *local_nodes.at(gid);
-                    budget.add(sizeof(node) + node.identity.size() + node.exact_identity.size());
+                    budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.size());
                     node_write(w, node);
                 }
                 budget.packet(w.data.size());
@@ -184,12 +184,12 @@ AdaptiveNativeDraft fetch_adaptive_native_draft(
                 for (std::uint64_t i = 0; i < node_count; ++i)
                 {
                     auto node = node_read(r);
-                    budget.add(sizeof(node) + node.identity.size() + node.exact_identity.size());
+                    budget.add(sizeof(node) + node.identity.size() + node.coordinate_identity.size());
                     auto found = nodes.find(node.gid);
                     if (found != nodes.end())
                     {
                         if (found->second.identity != node.identity ||
-                            found->second.exact_identity != node.exact_identity ||
+                            found->second.coordinate_identity != node.coordinate_identity ||
                             found->second.coordinate != node.coordinate)
                             throw std::invalid_argument("Native ghost canonical node replicas disagree.");
                     }

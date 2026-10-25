@@ -8,14 +8,14 @@ PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode)
 {
     return mode == ArithmeticMode::Exact ? PhaseInventoryPolicy::ExperimentalExact : PhaseInventoryPolicy::Finite;
 }
-Meshes::BoundedGeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes)
+PLIC::GeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes)
 {
-    Meshes::BoundedGeometryLimits limits;
+    PLIC::GeometryLimits limits;
     limits.arithmetic_mode = mode;
     limits.byte_budget = bytes;
     return limits;
 }
-long double phase_allowance(Meshes::BoundedGeometryValue source, double relative)
+long double phase_allowance(PLIC::DynamicGeometryValue source, double relative)
 {
     const auto evaluate = [&]<ArithmeticMode Mode>()
     {
@@ -26,11 +26,13 @@ long double phase_allowance(Meshes::BoundedGeometryValue source, double relative
         return evaluate.template operator()<ArithmeticMode::Ordinary>();
     return evaluate.template operator()<ArithmeticMode::BoundedCertification>();
 }
-Meshes::ExactPhaseMeasures phase_measures(const Cell& cell)
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phase_measures(const Cell& cell)
 {
+    if (cell.finite_geometry)
+        throw std::logic_error("Exact phase measures require an explicitly selected exact cell state.");
     if (cell.experimental_exact)
         return cell.experimental_exact->phases;
-    // Default policy: one-step lift only, no rational accepted history.
+    // The selected exact route lifts finite accepted inventories for this trial.
     return {Measure::volume(*cell.phase.geometry), Measure::from_value(cell.phase.gas_volume),
         Measure::from_value(cell.phase.carrier_volume)};
 }
@@ -40,8 +42,8 @@ Measure finite_bound(double value)
 }
 namespace
 {
-template<ArithmeticMode Mode> Meshes::BoundedGeometryValue finite_cell_defect(const Cell& cell,
-    Meshes::BoundedGeometryValue actual)
+template<ArithmeticMode Mode>
+PLIC::DynamicGeometryValue finite_cell_defect(const Cell& cell, PLIC::DynamicGeometryValue actual)
 {
     using Math = fp::Arithmetic<Mode>;
     fp::SumFor<Mode> defect_sum(actual.arithmetic_mode);
@@ -50,13 +52,13 @@ template<ArithmeticMode Mode> Meshes::BoundedGeometryValue finite_cell_defect(co
     defect_sum.add(Math::negate(actual));
     return defect_sum.value();
 }
-Meshes::BoundedGeometryValue finite_cell_defect(const Cell& cell, Meshes::BoundedGeometryValue actual)
+PLIC::DynamicGeometryValue finite_cell_defect(const Cell& cell, PLIC::DynamicGeometryValue actual)
 {
     if (actual.arithmetic_mode == ArithmeticMode::Ordinary)
         return finite_cell_defect<ArithmeticMode::Ordinary>(cell, actual);
     return finite_cell_defect<ArithmeticMode::BoundedCertification>(cell, actual);
 }
-Meshes::BoundedGeometryValue finite_native_conversion(const Cell& cell, Meshes::BoundedGeometryValue actual)
+PLIC::DynamicGeometryValue finite_native_conversion(const Cell& cell, PLIC::DynamicGeometryValue actual)
 {
     const auto evaluate = [&]<ArithmeticMode Mode>()
     {
@@ -151,8 +153,9 @@ void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
         return;
     }
     // Explicit exact-policy diagnostic views retain their exact provenance.
-    const Meshes::ExactPhaseMeasures lifted{Measure::volume(*cell.phase.geometry),
-        Measure::from_value(cell.phase.gas_volume), Measure::from_value(cell.phase.carrier_volume)};
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> lifted{
+        Measure::volume(*cell.phase.geometry), Measure::from_value(cell.phase.gas_volume),
+        Measure::from_value(cell.phase.carrier_volume)};
     const auto defect = lifted.gas + lifted.carrier - lifted.bulk;
     const auto absolute = defect.sign() < 0 ? defect.scaled(-1) : defect;
     const auto& e = cell.occupancy;
@@ -227,19 +230,19 @@ long double finite_real(wire::Reader& r)
         throw std::invalid_argument("Finite VoF wire scalar exceeds qualified range.");
     return result;
 }
-void finite_value(wire::Writer& w, Meshes::BoundedGeometryValue v)
+void finite_value(wire::Writer& w, PLIC::DynamicGeometryValue v)
 {
     finite_detail::validate(v);
     w.word(std::uint64_t(v.arithmetic_mode));
     finite_real(w, v.value);
     finite_real(w, v.absolute_error);
 }
-Meshes::BoundedGeometryValue finite_value(wire::Reader& r, std::optional<ArithmeticMode> expected)
+PLIC::DynamicGeometryValue finite_value(wire::Reader& r, std::optional<ArithmeticMode> expected)
 {
     const auto mode = r.word();
     if (mode > std::uint64_t(ArithmeticMode::BoundedCertification))
         throw std::invalid_argument("Finite VoF wire arithmetic mode is invalid.");
-    Meshes::BoundedGeometryValue v{finite_real(r), finite_real(r), ArithmeticMode(mode)};
+    PLIC::DynamicGeometryValue v{finite_real(r), finite_real(r), ArithmeticMode(mode)};
     finite_detail::validate(v);
     if ((v.arithmetic_mode == ArithmeticMode::Ordinary && v.absolute_error != 0) ||
         (expected && v.arithmetic_mode != *expected))
@@ -284,7 +287,8 @@ PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode)
         p.finite_target_volume_difference = finite_value(r, mode);
     return p;
 }
-Meshes::ExactPhaseMeasures phases(const Meshes::ExactConvexFragment& fragment, const PolyhedralInterface& p)
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
+    const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment, const PolyhedralInterface& p)
 {
     if (p.pure_gas)
         return {fragment.volume(), fragment.volume(), {}};
@@ -292,7 +296,8 @@ Meshes::ExactPhaseMeasures phases(const Meshes::ExactConvexFragment& fragment, c
         return {fragment.volume(), {}, fragment.volume()};
     return fragment.phases(p.gas);
 }
-GeneralVoFPhaseEnclosure diagnostic(const Meshes::ExactPhaseMeasures& measures)
+GeneralVoFPhaseEnclosure diagnostic(
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& measures)
 {
     return {measures.bulk.enclosure(), measures.gas.enclosure(), measures.carrier.enclosure()};
 }
@@ -302,7 +307,7 @@ double output(const Measure& measure)
         throw std::invalid_argument("General VoF phase measure is negative.");
     return measure.sign() ? measure.certified().as_double() : 0;
 }
-Meshes::ExactPhaseMeasures geometric_labels(const Cell& cell)
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> geometric_labels(const Cell& cell)
 {
     const bool gas = phase_measures(cell).gas.compare(phase_measures(cell).carrier) <= 0;
     const auto minority = gas ? phase_measures(cell).gas : phase_measures(cell).carrier;
@@ -327,10 +332,13 @@ void refresh_experimental_catalog(GeneralVoF::Data& data)
         return;
     }
     wire::Budget budget{data.options.byte_budget};
-    if (data.topology->order.size() > budget.limit / sizeof(Meshes::ExactPhaseMeasures))
+    if (data.topology->order.size() >
+        budget.limit / sizeof(SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>))
         throw std::invalid_argument("Experimental owned inventory catalog exceeds budget.");
-    budget.add(data.topology->order.size() * sizeof(Meshes::ExactPhaseMeasures));
-    auto catalog = std::make_shared<std::vector<Meshes::ExactPhaseMeasures>>();
+    budget.add(
+        data.topology->order.size() * sizeof(SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>));
+    auto catalog =
+        std::make_shared<std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>>>();
     catalog->reserve(data.topology->order.size());
     for (const auto& key : data.topology->order)
     {
@@ -358,14 +366,15 @@ void retained_budget(const GeneralVoF::Data& data)
                (data.roundoff.capacity() + data.phase_history.capacity()) * sizeof(PhaseRoundoff) +
                data.occupancy.capacity() * sizeof(PhaseError));
     std::set<const void*> exact_payloads;
-    const auto charge_exact = [&](const Meshes::ExactGeometryMeasure& value)
+    const auto charge_exact = [&](const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& value)
     {
         if (exact_payloads.insert(value.storage_identity()).second)
             budget.add(value.storage_bytes());
     };
     if (data.experimental_catalog)
         budget.add(sizeof(*data.experimental_catalog) +
-                   data.experimental_catalog->capacity() * sizeof(Meshes::ExactPhaseMeasures));
+                   data.experimental_catalog->capacity() *
+                       sizeof(SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>));
     for (const auto& [key, cell] : data.cells)
     {
         budget.add(sizeof(Cell) + sizeof(Key) + 8 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
@@ -385,9 +394,9 @@ void retained_budget(const GeneralVoF::Data& data)
         }
     }
     for (const auto& node : data.topology->nodes)
-        budget.add(sizeof(node) + node.identity.capacity() + node.exact_identity.capacity());
+        budget.add(sizeof(node) + node.identity.capacity() + node.coordinate_identity.capacity());
     for (const auto& [id, point] : data.topology->finite_nodes)
-        budget.add(sizeof(id) + 4 * sizeof(void*) + Meshes::bounded_point_storage_bytes(point));
+        budget.add(sizeof(id) + 4 * sizeof(void*) + PLIC::dynamic_point_storage_bytes(point));
     for (const auto& tile : data.topology->tiles)
     {
         budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t));
@@ -992,7 +1001,9 @@ std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
                 {
                     const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                     const auto measures =
-                        Meshes::ExactConvexFragment::from_geometry(*cell.phase.geometry)->phases(fitted.gas);
+                        SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                            *cell.phase.geometry)
+                            ->phases(fitted.gas);
                     const auto residual = (gas ? measures.gas : measures.carrier) -
                                           Measure::from_value(gas ? cell.phase.gas_volume : cell.phase.carrier_volume);
                     fitted.target_volume_difference = residual.enclosure();

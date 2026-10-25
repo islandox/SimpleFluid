@@ -2,8 +2,8 @@
  * @brief Lossless, rank-local contracts for distributed immutable adaptation.
  */
 #pragma once
-#include "geometry/ConvexCellGeometry.hh"
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/AdaptiveHierarchy.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
 #include <limits>
@@ -29,14 +29,15 @@ struct AdaptiveWork
 struct AdaptiveSurface
 {
     AdaptiveBytes key;
-    ExactPlanarFacePtr geometry; ///< Already cell-outward; never multiply by orientation.
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> geometry; ///< Already cell-outward; never multiply by orientation.
     int orientation = 1;         ///< Sign relative to persistent support orientation.
     bool exterior = false;
     std::string boundary;
     std::uint64_t native_face = std::numeric_limits<std::uint64_t>::max();
     AdaptiveBytes authority_image;
     bool require_native_whole_tile = false;
-    ExactPlanarFacePtr native_whole_geometry; ///< Exact physical-to-canonical periodic displacement.
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
+        native_whole_geometry; ///< Finite physical-to-canonical periodic displacement.
 };
 enum class AdaptiveProviderKind : std::uint64_t
 {
@@ -68,7 +69,7 @@ struct AdaptiveLeaf
     AdaptiveBytes domain; ///< Connected-domain/join provenance, independent of material/region.
     std::uint64_t material = 0, revision = 0;
     AdaptiveProviderKind provider = AdaptiveProviderKind::Polyhedral;
-    ConvexGeometryPtr geometry;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
     std::vector<AdaptiveSurface> surfaces;
     std::shared_ptr<const NativeFragmentDescriptor> native_recipe;
     std::uint64_t native_cell = 0;
@@ -90,7 +91,7 @@ struct AdaptiveTileIncident
 {
     AdaptiveCellKey cell;
     int owner = -1, orientation = 1;
-    ExactPlanarFacePtr face;
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> face;
 };
 struct AdaptiveTile
 {
@@ -98,9 +99,9 @@ struct AdaptiveTile
     std::uint64_t face_gid = std::numeric_limits<std::uint64_t>::max();
     std::vector<std::uint64_t> node_gids;
     std::vector<std::uint64_t> second_node_gids; ///< Same loop order, in the second cell physical image.
-    AdaptiveBytes exact_second_image;            ///< Exact neighbor-physical to first-physical displacement.
-    GeometryPoint second_image{};                ///< Checked display of exact_second_image for FVM geometry.
-    ExactPlanarFacePtr geometry;
+    AdaptiveBytes second_image_identity;         ///< Finite neighbor-physical to first-physical displacement.
+    PLIC::GeometryPoint second_image{};          ///< Checked display of second_image_identity for FVM geometry.
+    PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> geometry;
     AdaptiveCellKey first;
     std::optional<AdaptiveCellKey> second;
     int first_owner = -1, second_owner = -1;
@@ -122,15 +123,15 @@ struct AdaptiveNativeCellBinding
     AdaptiveProviderKind provider = AdaptiveProviderKind::Polyhedral;
     bool full = false;
     double volume = 0;
-    GeometryPoint centroid{};
+    PLIC::GeometryPoint centroid{};
     std::shared_ptr<const NativeFragmentDescriptor> native_recipe;
 };
 struct AdaptiveNode
 {
     std::uint64_t gid = 0;
     AdaptiveBytes identity;
-    GeometryPoint coordinate{};
-    AdaptiveBytes exact_identity; ///< Raw exact physical point certificate, independent of image aliases.
+    PLIC::GeometryPoint coordinate{};
+    AdaptiveBytes coordinate_identity; ///< Finite physical coordinate identity, independent of image aliases.
 };
 /** Complete authority-certified boundary tiles; full owned cells, reconstruction
  * ghosts and metric-only neighbors are separate. Remote cuts remain interior. */

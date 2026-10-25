@@ -26,19 +26,19 @@ double real(Reader& r)
 {
     return std::bit_cast<double>(r.word());
 }
-void point(Writer& w, GeometryPoint p)
+void point(Writer& w, PLIC::GeometryPoint p)
 {
     for (auto x : p)
         real(w, x);
 }
-GeometryPoint point(Reader& r)
+PLIC::GeometryPoint point(Reader& r)
 {
-    GeometryPoint p;
+    PLIC::GeometryPoint p;
     for (auto& x : p)
         x = real(r);
     return p;
 }
-GeometryPoint point(MeshUtils::Vec3 p)
+PLIC::GeometryPoint point(MeshUtils::Vec3 p)
 {
     return {p.x, p.y, p.z};
 }
@@ -549,7 +549,7 @@ const MultiRegionMesh::Region& frozen_provider(
     return cache.providers.emplace(part.get(), DistributedExplicitRegion("frozen_evaluation", provider, provider))
         .first->second;
 }
-GeometryPoint frozen_transform(const FrozenNativeRoot::Data& root, MeshUtils::Vec3 p)
+PLIC::GeometryPoint frozen_transform(const FrozenNativeRoot::Data& root, MeshUtils::Vec3 p)
 {
     const auto scale = (root.frame[1] - root.frame[0]) / (root.frame[1] - root.frame[0]);
     p.z = root.frame[0] + (p.z - root.frame[0]) * scale;

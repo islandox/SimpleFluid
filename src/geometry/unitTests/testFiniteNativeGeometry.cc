@@ -1,0 +1,204 @@
+/** @file testFiniteNativeGeometry.cc
+ * @brief Ordinary native topology and geometry without rational source preparation.
+ */
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryInstrumentation.hh"
+#include "geometry/PLIC/GeometryMeasure.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
+#include <cmath>
+#include <gtest/gtest.h>
+#include <set>
+
+namespace
+{
+using SimpleFluid::ArithmeticMode;
+namespace PLIC = SimpleFluid::PLIC;
+constexpr auto ordinary = ArithmeticMode::Ordinary;
+using Cell = PLIC::ConvexCellGeometry<ordinary>;
+using Face = PLIC::PlanarFace<ordinary>;
+
+TEST(FiniteNativeGeometryTest, NativeShellAndCellPacketUseOrdinaryGeometry)
+{
+    const std::array<PLIC::GeometryPoint, 8> vertices{
+        {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}, {1, 1, 1}}};
+    const std::vector<std::vector<std::size_t>> faces{
+        {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}};
+    const auto cell = Cell::from_native_shell(vertices, faces);
+    EXPECT_EQ(cell->arithmetic_mode(), ordinary);
+    EXPECT_DOUBLE_EQ(cell->volume().as_double(), 1);
+    EXPECT_EQ(cell->num_faces(), 6u);
+    const auto source = cell->numerical_shell();
+    EXPECT_EQ(source.relative_vertices.size(), 8u);
+    EXPECT_EQ(source.face_support_identities.size(), 6u);
+    const auto restored = Cell::decode_certificate(cell->encode_certificate());
+    EXPECT_TRUE(cell->equivalent(*restored));
+    EXPECT_DOUBLE_EQ(restored->volume().as_double(), 1);
+}
+TEST(FiniteNativeGeometryTest, MidpointSplitRetainsVolumeAndFaceAncestry)
+{
+    const auto cell = Cell::box({0, 0, 0}, {1, 1, 1});
+    const auto pieces = cell->split_aabb_midpoints();
+    ASSERT_EQ(pieces.size(), 8u);
+    long double sum = 0;
+    std::vector<PLIC::ConvexGeometryPtr<ordinary>> children;
+    for (const auto& piece : pieces)
+    {
+        ASSERT_TRUE(piece.geometry);
+        EXPECT_EQ(piece.geometry->num_faces(), piece.face_origins.size());
+        EXPECT_DOUBLE_EQ(piece.geometry->volume().as_double(), .125);
+        EXPECT_TRUE(piece.geometry->quality_above(.01));
+        sum += piece.geometry->volume().value;
+        children.push_back(piece.geometry);
+        const auto restored = Cell::decode_certificate(piece.geometry->encode_certificate());
+        EXPECT_TRUE(piece.geometry->equivalent(*restored));
+    }
+    EXPECT_EQ(sum, 1);
+    EXPECT_NO_THROW(cell->certify_partition(children));
+}
+TEST(FiniteNativeGeometryTest, PlanarOverlayAndPartitionPreserveAnalyticArea)
+{
+    const std::array<PLIC::GeometryPoint, 4> root{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
+    const std::array<PLIC::GeometryPoint, 4> left{{{0, 0, 0}, {.5, 0, 0}, {.5, 1, 0}, {0, 1, 0}}};
+    const std::array<PLIC::GeometryPoint, 4> right{{{.5, 0, 0}, {1, 0, 0}, {1, 1, 0}, {.5, 1, 0}}};
+    const auto a = Face::make(root), b = Face::make(left), c = Face::make(right);
+    EXPECT_DOUBLE_EQ(a->area().as_double(), 1);
+    EXPECT_DOUBLE_EQ(b->area().as_double(), .5);
+    EXPECT_FALSE(b->intersection(*c));
+    EXPECT_TRUE(a->contains(*b));
+    EXPECT_TRUE(a->intersection(*b)->equivalent(*b));
+    const std::array parts{b, c};
+    EXPECT_NO_THROW(a->certify_partition(parts));
+    const std::array removed{b};
+    const auto remainder = PLIC::subtract_planar_faces<ordinary>(*a, removed);
+    ASSERT_EQ(remainder.size(), 1u);
+    EXPECT_TRUE(remainder.front()->equivalent(*c));
+    EXPECT_EQ(PLIC::planar_support<ordinary>(*a), PLIC::planar_support<ordinary>(*b));
+    EXPECT_TRUE(Face::decode(a->encode())->equivalent(*a));
+}
+TEST(FiniteNativeGeometryTest, PointIdentityAndEdgePropagationRetainFiniteCoordinates)
+{
+    const std::array<PLIC::GeometryPoint, 4> root{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
+    const auto face = Face::make(root);
+    const std::array<PLIC::GeometryPoint, 4> half{{{0, 0, 0}, {.5, 0, 0}, {.5, 1, 0}, {0, 1, 0}}};
+    const auto points = Face::make(half)->vertex_identities();
+    const auto propagated = face->with_edge_vertices(points);
+    EXPECT_EQ(propagated->points().size(), 6u);
+    EXPECT_TRUE(propagated->equivalent(*face));
+    EXPECT_EQ(Face::decode(propagated->encode_incidence())->points().size(), 6u);
+    EXPECT_EQ(propagated->encode(), face->encode());
+    const auto translated = face->translated({0, 0, 1});
+    EXPECT_FALSE(translated->equivalent(*face));
+    EXPECT_NE(PLIC::planar_support<ordinary>(*translated), PLIC::planar_support<ordinary>(*face));
+    for (const auto& identity : points)
+    {
+        EXPECT_TRUE(face->contains_point(identity));
+        const auto shifted =
+            PLIC::point_translated<ordinary>(identity, PLIC::displacement<ordinary>({0, 0, 0}, {1, 0, 0}));
+        const auto p = PLIC::point_display<ordinary>(identity), q = PLIC::point_display<ordinary>(shifted);
+        EXPECT_EQ(q[0], p[0] + 1);
+        EXPECT_EQ(q[1], p[1]);
+        EXPECT_EQ(q[2], p[2]);
+    }
+    PLIC::EdgePointIndex<ordinary> index(propagated->vertex_identities());
+    const auto ids = face->vertex_identities();
+    EXPECT_EQ(index.closed_segment(ids[0], ids[1]).size(), 3u);
+}
+
+TEST(FiniteNativeGeometryTest, PartitionRejectsRealGapAndOverlapBelowMetricBudget)
+{
+    const auto square = [](double lo, double hi)
+    {
+        const std::array<PLIC::GeometryPoint, 4> p{{{lo, 0, 0}, {hi, 0, 0}, {hi, 1, 0}, {lo, 1, 0}}};
+        return Face::make(p);
+    };
+    const auto source = square(0, 1), left = square(0, .5);
+    const double gap = std::nextafter(.5, 1.);
+    const std::array gap_tiles{left, square(gap, 1)};
+    ASSERT_LT(gap - .5, 8e-15);
+    EXPECT_THROW(source->certify_partition(gap_tiles), std::invalid_argument);
+    const std::array overlapping{square(0, gap), square(.5, 1)};
+    EXPECT_THROW(source->certify_partition(overlapping), std::invalid_argument);
+    const std::array valid{left, square(.5, 1)};
+    EXPECT_NO_THROW(source->certify_partition(valid));
+}
+
+TEST(FiniteNativeGeometryTest, PartitionFirstMomentsUseCommonLocalReferenceAndRetainCaps)
+{
+    const auto rectangle = [](double lo, double hi)
+    {
+        const std::array<PLIC::GeometryPoint, 4> p{
+            {{lo, -2e9, 3e9}, {hi, -2e9, 3e9}, {hi, -2e9 + 8, 3e9}, {lo, -2e9 + 8, 3e9}}};
+        return Face::make(p);
+    };
+    const auto source = rectangle(1e9, 1e9 + 8);
+    const std::array tiles{rectangle(1e9, 1e9 + 3)->reversed(), rectangle(1e9 + 3, 1e9 + 8)};
+    EXPECT_NO_THROW(source->certify_partition(tiles));
+    // Equal total area does not authorize a shifted first moment or missing region.
+    const std::array shifted{rectangle(1e9, 1e9 + 3), rectangle(1e9 + 2, 1e9 + 7)};
+    EXPECT_THROW(source->certify_partition(shifted), std::invalid_argument);
+    const std::vector<PLIC::PlanarFacePtr<ordinary>> excessive(65537, tiles.front());
+    EXPECT_THROW(source->certify_partition(excessive), std::invalid_argument);
+}
+
+TEST(FiniteNativeGeometryTest, OrdinarySourcePreparationDoesNotInvokeExactBackend)
+{
+    struct Sampling
+    {
+        Sampling()
+        {
+            PLIC::enable_backend_statistics<ArithmeticMode::Exact>(true);
+            PLIC::reset_backend_statistics<ArithmeticMode::Exact>();
+        }
+        ~Sampling() { PLIC::enable_backend_statistics<ArithmeticMode::Exact>(false); }
+    } sampling;
+    const auto cube = Cell::box({0, 0, 0}, {1, 1, 1});
+    const auto source = cube->numerical_shell();
+    const auto imported = PLIC::DynamicConvexGeometry::from_geometry(*cube,
+        []
+        {
+            PLIC::GeometryLimits limits;
+            limits.arithmetic_mode = ordinary;
+            return limits;
+        }());
+    EXPECT_EQ(imported->volume().value, 1);
+    EXPECT_EQ(source.face_support_identities.size(), 6u);
+    EXPECT_EQ(cube->split_aabb_midpoints().size(), 8u);
+    const auto cut = cube->clip({{1, 0, 0}, {}, .25});
+    ASSERT_TRUE(cut.inside);
+    const auto restored = Cell::decode_certificate(cut.inside->encode_certificate());
+    EXPECT_EQ(restored->volume().value, .25);
+    const auto face = cube->face_geometry(0);
+    EXPECT_TRUE(Face::decode(face->encode())->equivalent(*face));
+    const auto stats = PLIC::backend_statistics<ArithmeticMode::Exact>();
+    EXPECT_EQ(stats.source_coordinate_exports, 0u);
+    EXPECT_EQ(stats.source_support_exports, 0u);
+    EXPECT_EQ(stats.source_membership_predicates, 0u);
+    EXPECT_EQ(stats.volume_evaluations, 0u);
+    EXPECT_EQ(stats.moment_evaluations, 0u);
+    EXPECT_EQ(stats.clip_constructions, 0u);
+    EXPECT_EQ(stats.intersection_constructions, 0u);
+    EXPECT_EQ(stats.face_measure_evaluations, 0u);
+    EXPECT_EQ(stats.measure_values, 0u);
+    EXPECT_EQ(stats.measure_arithmetic, 0u);
+    EXPECT_EQ(stats.cover_certifications, 0u);
+}
+
+TEST(FiniteNativeGeometryTest, OrdinaryRetainedSupportDoesNotCertifyRoundedBoundedPlanarity)
+{
+    if (!PLIC::certification_environment())
+        GTEST_SKIP() << "Bounded floating-point environment unavailable.";
+    using BoundedCell = PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>;
+    const auto cube = Cell::box({0, 0, 0}, {1, 1, 1});
+    const auto bounded_cube = BoundedCell::from_geometry(*cube);
+    EXPECT_LE(bounded_cube->volume().lower(), 1);
+    EXPECT_GE(bounded_cube->volume().upper(), 1);
+    const auto clipped = cube->clip({{1, 1, 1e-8}, {}, 1 + 1e-8}).inside;
+    ASSERT_TRUE(clipped);
+    // The cap keeps its original support for ordinary topology. Its rounded
+    // coordinates do not thereby acquire a certified coplanarity proof.
+    EXPECT_THROW((void) BoundedCell::from_geometry(*clipped), std::invalid_argument);
+    const auto point_id = cube->face_geometry(0)->vertex_identities().front();
+    const auto point = PLIC::source_point<ArithmeticMode::BoundedCertification>(*cube, point_id);
+    EXPECT_TRUE(point.supports().empty());
+}
+} // namespace

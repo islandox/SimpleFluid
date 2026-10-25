@@ -12,7 +12,7 @@ namespace SimpleFluid::detail
 {
 namespace
 {
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 M product(const M& a, const M& b, std::size_t budget)
 {
     if (!a.sign() || !b.sign())

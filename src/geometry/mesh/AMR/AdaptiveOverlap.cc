@@ -153,7 +153,8 @@ std::shared_ptr<const AdaptiveOverlapPlan> AdaptiveOverlapPlan::build(HierarchyO
     plan->source_cells_ = std::move(source_cells);
     plan->target_cells_ = std::move(target_cells);
     const auto sources = index(plan->source_cells_), targets = index(plan->target_cells_);
-    std::map<std::uint64_t, std::vector<ConvexGeometryPtr>> source_pieces, target_pieces;
+    std::map<std::uint64_t, std::vector<PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>>> source_pieces,
+        target_pieces;
     std::set<std::pair<std::uint64_t, std::uint64_t>> pairs;
     for (const auto& relation : relations)
     {
@@ -170,7 +171,25 @@ std::shared_ptr<const AdaptiveOverlapPlan> AdaptiveOverlapPlan::build(HierarchyO
                                      crossed_products(s.key, t.key);
         if (!valid || s.material != t.material)
             throw std::invalid_argument("Adaptive overlap relation violates ancestry or material membership.");
-        auto intersection = s.geometry->intersect(*t.geometry);
+        // Refinement/coarsening already supplies the candidate overlap as an
+        // immutable child. Reclipping that child against independently rounded
+        // parent planes can manufacture slivers and discard its support ancestry.
+        // Ancestry selects a candidate only: both complete geometric partition
+        // proofs below remain mandatory, including for unchanged cells.
+        PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> intersection;
+        switch (relation.kind)
+        {
+            case AdaptiveAncestryRelation::Kind::Unchanged:
+            case AdaptiveAncestryRelation::Kind::Coarsening:
+                intersection = s.geometry;
+                break;
+            case AdaptiveAncestryRelation::Kind::Refinement:
+                intersection = t.geometry;
+                break;
+            case AdaptiveAncestryRelation::Kind::ProductIntersection:
+                intersection = s.geometry->intersect(*t.geometry);
+                break;
+        }
         if (!intersection)
             throw std::invalid_argument("Declared ancestry overlap has no positive represented volume.");
         plan->records_.push_back({s.key, t.key, s.gid, t.gid, relation.kind, intersection, intersection->moments()});

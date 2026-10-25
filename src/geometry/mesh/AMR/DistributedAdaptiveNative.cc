@@ -11,7 +11,7 @@ namespace SimpleFluid::Meshes::AMR
 namespace
 {
 using ID = std::uint64_t;
-MeshUtils::Vec3 vector(GeometryPoint p)
+MeshUtils::Vec3 vector(PLIC::GeometryPoint p)
 {
     return {p[0], p[1], p[2]};
 }
@@ -75,10 +75,10 @@ std::map<int, std::string> physical_schema(
         result.emplace(next++, name);
     return result;
 }
-ExactPlanarFacePtr native_face(const MultiRegionMesh::Region& region, ID face)
+PLIC::PlanarFacePtr<ArithmeticMode::Ordinary> native_face(const MultiRegionMesh::Region& region, ID face)
 {
     return std::visit(
-        [&](const auto& provider) -> ExactPlanarFacePtr
+        [&](const auto& provider) -> PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>
         {
             const auto& geometry = provider.geometry();
             if constexpr (requires { geometry.certified_face_geometry(face); })
@@ -86,14 +86,14 @@ ExactPlanarFacePtr native_face(const MultiRegionMesh::Region& region, ID face)
                     return exact;
             if (provider.layout().family == RegionLayout::Family::Cylindrical)
                 throw std::invalid_argument("Analytic native geometry lacks a planar adaptive certificate.");
-            std::vector<GeometryPoint> points;
+            std::vector<PLIC::GeometryPoint> points;
             for (auto node : provider.topology().face_nodes(face))
             {
                 const auto point = geometry.node_coordinates(node);
                 points.push_back({point.x, point.y, point.z});
             }
             const auto area = geometry.face_area_vector(face);
-            return ExactPlanarFace::make(points)->oriented_like({area.x, area.y, area.z});
+            return PLIC::PlanarFace<ArithmeticMode::Ordinary>::make(points)->oriented_like({area.x, area.y, area.z});
         },
         region);
 }
@@ -144,12 +144,14 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                     throw std::invalid_argument("Duplicate adaptive native full ghost.");
             for (const auto& node : draft.nodes)
             {
-                allocation.add(sizeof(node) + node.identity.size() + node.exact_identity.size() + 8 * sizeof(void*));
-                if (node.exact_identity.empty() || node.coordinate != exact_point_display(node.exact_identity) ||
+                allocation.add(
+                    sizeof(node) + node.identity.size() + node.coordinate_identity.size() + 8 * sizeof(void*));
+                if (node.coordinate_identity.empty() ||
+                    node.coordinate != PLIC::point_display<ArithmeticMode::Ordinary>(node.coordinate_identity) ||
                     !nodes.emplace(node.gid, &node).second)
                     throw std::invalid_argument("Adaptive native node lacks its exact physical point proof.");
                 input.nodes.push_back({node.gid, {}, node.coordinate});
-                input.node_certificates.emplace(node.gid, node.exact_identity);
+                input.node_certificates.emplace(node.gid, node.coordinate_identity);
             }
             // Native procedural descriptors remain factor-shared; the cache interns
             // parts/views across owned and full ghost records for this publication.
@@ -191,7 +193,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                 for (const auto& tile : draft.tiles)
                     if (poly_full.contains(tile.first) || (tile.second && poly_full.contains(*tile.second)))
                     {
-                        if (!tile.exact_second_image.empty())
+                        if (!tile.second_image_identity.empty())
                             throw std::invalid_argument(
                                 "Periodic explicit polyhedral native fragments are not qualified.");
                         poly_faces.emplace(tile.face_gid, poly_faces.size());
@@ -205,8 +207,8 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                 std::vector<ExplicitRegionProvider::Cell> cells;
                 std::vector<ExplicitRegionProvider::Face> faces;
                 std::vector<ExplicitRegionProvider::Node> points;
-                std::map<ID, ConvexGeometryPtr> cell_proofs;
-                std::map<ID, ExactPlanarFacePtr> face_proofs;
+                std::map<ID, PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary>> cell_proofs;
+                std::map<ID, PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> face_proofs;
                 std::map<ID, std::vector<char>> point_proofs;
                 for (const auto& [key, id] : poly_cells)
                 {
@@ -249,7 +251,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                 for (const auto& [gid, id] : poly_nodes)
                 {
                     points.push_back({id, vector(nodes.at(gid)->coordinate)});
-                    point_proofs.emplace(id, nodes.at(gid)->exact_identity);
+                    point_proofs.emplace(id, nodes.at(gid)->coordinate_identity);
                 }
                 RegionLayout layout{};
                 layout.family = RegionLayout::Family::Explicit;
@@ -287,7 +289,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                             const auto certificate = native_face(region, face);
                             for (const auto& point : certificate->vertex_identities())
                             {
-                                const auto display = exact_point_display(point);
+                                const auto display = PLIC::point_display<ArithmeticMode::Ordinary>(point);
                                 std::optional<ID> native;
                                 for (auto node : r.topology().face_nodes(face))
                                 {
@@ -339,8 +341,8 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                     const auto& binding = *bindings.at(key);
                     auto physical = tile.geometry;
                     if (second)
-                        physical = physical->reversed()->translated_exact(
-                            exact_displacement_difference({}, tile.exact_second_image));
+                        physical = physical->reversed()->translated_packet(
+                            PLIC::displacement_difference<ArithmeticMode::Ordinary>({}, tile.second_image_identity));
                     // Support identity belongs to physical ancestry. Native face
                     // ordinals in tile transport belong to the owner's recipe,
                     // which may differ from this fetched/pruned local recipe.
@@ -391,7 +393,7 @@ AdaptiveNativePublication assemble_adaptive_native(AdaptiveNativeDraft draft, st
                 face.override_geometry = tile.geometry;
                 face.override_nodes = tile.node_gids;
                 face.second_image = tile.second_image;
-                face.exact_second_image = tile.exact_second_image;
+                face.second_image_identity = tile.second_image_identity;
                 face.second_node_gids = tile.second_node_gids;
                 face.native_is_second = !first_full;
                 input.faces.push_back(std::move(face));

@@ -216,7 +216,8 @@ TEST(DistributedNativeOperators, RepresentableMicroscopicPolyGeometryPublishesNa
         leaf.material = 23;
         leaf.domain = {'t', 'i', 'n', 'y'};
         leaf.provider = ::SimpleFluid::Meshes::AMR::AdaptiveProviderKind::Polyhedral;
-        leaf.geometry = ConvexCellGeometry::box({0, 0, 0}, {side, side, side});
+        leaf.geometry = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box(
+            {0, 0, 0}, {side, side, side});
         for (std::size_t face = 0; face < leaf.geometry->num_faces(); ++face)
         {
             ::SimpleFluid::Meshes::AMR::AdaptiveSurface surface;

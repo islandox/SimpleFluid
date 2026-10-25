@@ -10,16 +10,17 @@ template<class Context> struct GeneralVoFSolver
     using State = typename Impl::State;
     Context& self;
     explicit GeneralVoFSolver(Context& context) : self(context) {}
-    using FaceMeasures = std::map<GO, std::pair<Meshes::ExactGeometryMeasure, Meshes::ExactGeometryMeasure>>;
+    using FaceMeasures = std::map<GO, std::pair<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>,
+                                          SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>>;
     void phase_storage(State& state) const
     {
         const auto& gas = state.phases->gas_volumes();
         const auto& carrier = state.phases->carrier_volumes();
         const auto geometric_fraction = state.phases->geometric_gas_fractions();
-        std::vector<Meshes::ExactPhaseMeasures> authority;
+        std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> authority;
         self.require(gas.size() == self.volume.size() && carrier.size() == self.volume.size(),
             "General VoF phase/native storage dimensions differ.");
-        std::vector<Meshes::ConvexGeometryPtr> geometry;
+        std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> geometry;
         self.collective(
             [&]
             {
@@ -37,8 +38,9 @@ template<class Context> struct GeneralVoFSolver
                     state.fraction[c] = geometric_fraction[c];
                     state.physical_mass[c] = phase_mass_measure(authority[c]);
                     const auto& mass = state.physical_mass[c];
-                    const auto density =
-                        mass.divided_by(Meshes::ExactGeometryMeasure::volume(*geometry[c]), self.options.byte_budget);
+                    const auto density = mass.divided_by(
+                        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*geometry[c]),
+                        self.options.byte_budget);
                     state.density[c] = density.sign() ? density.certified().as_double() : 0;
                     if (mass.sign() <= 0 || !std::isfinite(state.density[c]) || !(state.density[c] > 0) ||
                         !std::isfinite(state.fraction[c]) || state.fraction[c] < 0 || state.fraction[c] > 1)
@@ -49,8 +51,8 @@ template<class Context> struct GeneralVoFSolver
 
     void budget(State& state) const
     {
-        std::array<Meshes::ExactGeometryMeasure, 7> local;
-        std::vector<Meshes::ExactPhaseMeasures> authority;
+        std::array<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>, 7> local;
+        std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> authority;
         bool valid = true;
         self.collective(
             [&]
@@ -120,11 +122,12 @@ template<class Context> struct GeneralVoFSolver
             [&]
             {
                 const auto scalar_budget = self.options.byte_budget / 32;
-                Meshes::ExactTrajectoryLimits limits;
+                SimpleFluid::PLIC::TrajectoryLimits limits;
                 limits.byte_budget = scalar_budget;
-                const auto displacement_limit = Meshes::ExactGeometryMeasure::from_value(global_h)
-                                                    .scaled(self.options.flow.max_courant)
-                                                    .squared(scalar_budget);
+                const auto displacement_limit =
+                    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(global_h)
+                        .scaled(self.options.flow.max_courant)
+                        .squared(scalar_budget);
                 if (trial.node_trajectories().size() != nodes.size())
                     throw std::runtime_error("Incomplete exact node trajectory CFL certificate.");
                 for (const auto& node : trial.node_trajectories())
@@ -137,8 +140,9 @@ template<class Context> struct GeneralVoFSolver
             next->phases->mesh().get() == self.mesh.get(), "General VoF transport changed its immutable native mesh.");
         verify_phase_publication(trial, *next->phases);
         phase_storage(*next);
-        std::vector<Meshes::ExactGeometryMeasure> outgoing(self.volume.size()), source(self.volume.size()),
-            capacity(self.volume.size());
+        std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> outgoing(
+            self.volume.size()),
+            source(self.volume.size()), capacity(self.volume.size());
         std::vector<detail::ConservativeVoFTransport::ExactTransfer> incoming;
         std::vector<detail::ConservativeVoFTransport::ExactFaceContribution> face_contributions;
         self.collective(
@@ -170,7 +174,8 @@ template<class Context> struct GeneralVoFSolver
         next->velocity.resize(self.volume.size());
         for (unsigned a = 0; a < 3; ++a)
         {
-            std::vector<Meshes::ExactGeometryMeasure> momentum(self.volume.size());
+            std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> momentum(
+                self.volume.size());
             self.collective(
                 [&]
                 {
@@ -189,7 +194,7 @@ template<class Context> struct GeneralVoFSolver
         }
         std::vector<double> viscosity(self.volume.size());
         const auto physical_geometry = old.phases->owned_geometry();
-        std::vector<Meshes::ExactPhaseMeasures> old_inventory;
+        std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> old_inventory;
         self.collective(
             [&]
             {
@@ -199,7 +204,9 @@ template<class Context> struct GeneralVoFSolver
                     const auto weighted = old_inventory[c].gas.scaled(self.material.gas_viscosity) +
                                           old_inventory[c].carrier.scaled(self.material.liquid_viscosity);
                     const auto coefficient = weighted.divided_by(
-                        Meshes::ExactGeometryMeasure::volume(*physical_geometry[c]), self.options.byte_budget);
+                        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(
+                            *physical_geometry[c]),
+                        self.options.byte_budget);
                     viscosity[c] = coefficient.sign() ? coefficient.certified().as_double() : 0;
                 }
             });
@@ -212,12 +219,17 @@ template<class Context> struct GeneralVoFSolver
                     for (unsigned a = 0; a < 3; ++a)
                     {
                         const auto mass = next->physical_mass[c];
-                        const auto viscous_change = Meshes::ExactGeometryMeasure::from_value(viscous[c][a])
-                                                        .scaled(dt)
-                                                        .divided_by(mass, self.options.byte_budget);
+                        const auto viscous_change =
+                            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                                viscous[c][a])
+                                .scaled(dt)
+                                .divided_by(mass, self.options.byte_budget);
                         const auto updated =
-                            Meshes::ExactGeometryMeasure::from_value(next->velocity[c][a]) +
-                            Meshes::ExactGeometryMeasure::from_value(self.options.flow.gravity[a]).scaled(dt) +
+                            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                                next->velocity[c][a]) +
+                            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                                self.options.flow.gravity[a])
+                                .scaled(dt) +
                             viscous_change;
                         next->velocity[c][a] = updated.sign() ? updated.certified().as_double() : 0;
                         change[c][a] = next->velocity[c][a] - old.velocity[c][a];
@@ -233,7 +245,9 @@ template<class Context> struct GeneralVoFSolver
         detail::Exact::GeneralVoFFlowWorkspace::project(self.flow, next->face_velocity, next->velocity, next->pressure,
             next->density, next->fraction, next->curvature, dt, self.material.surface_tension, self.options.flow,
             next->diagnostics, &next->projection_arithmetic,
-            std::span<const Meshes::ExactGeometryMeasure>(next->physical_mass), &closure_topology);
+            std::span<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>(
+                next->physical_mass),
+            &closure_topology);
         next->diagnostics.time = old.diagnostics.time + dt;
         self.require(std::isfinite(next->diagnostics.time) && next->diagnostics.time > old.diagnostics.time,
             "General VoF timestep did not advance its finite clock.");
@@ -248,7 +262,7 @@ template<class Context> struct GeneralVoFSolver
     std::unique_ptr<Impl> remap(bool migration, std::span<const int> destinations,
         std::span<const Meshes::AMR::AdaptiveMark> refine, std::span<const Meshes::AMR::AdaptiveBytes> coarsen) const
     {
-        using M = Meshes::ExactGeometryMeasure;
+        using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
         const auto& old = *self.accepted;
         const auto hierarchy = old.phases->hierarchy();
         auto source = old.phases->export_transfer_source(!migration);
@@ -258,7 +272,7 @@ template<class Context> struct GeneralVoFSolver
             {"pressure_volume", VoF::ExactTransferCarrier::BulkVolume, false}};
         std::vector<VoF::ExactTransferOwnedChannels> channels;
         const auto source_geometry = old.phases->owned_geometry();
-        std::vector<Meshes::ExactPhaseMeasures> source_inventory;
+        std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> source_inventory;
         self.collective(
             [&]
             {
@@ -511,14 +525,15 @@ template<class Context> struct GeneralVoFSolver
                     throw std::runtime_error("Missing exact rate for timestep admission.");
                 for (std::size_t f = 0; f < self.mesh->num_owned_faces(); ++f)
                     owned.emplace(self.mesh->face_global_id(LO(f)),
-                        std::pair{state.projection_arithmetic.face_rate[f], Meshes::ExactGeometryMeasure{}});
+                        std::pair{state.projection_arithmetic.face_rate[f],
+                            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>{}});
             });
         const auto rates = exchange_face_measures(state, owned, self.options.byte_budget / 2);
         double local_rate_bound = std::numeric_limits<double>::infinity();
         self.collective(
             [&]
             {
-                using M = Meshes::ExactGeometryMeasure;
+                using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
                 const auto geometry = state.phases->owned_geometry();
                 const auto slots = geometry.size() + 32;
                 const auto scalar_budget = self.options.byte_budget / 2 / slots;
@@ -562,12 +577,14 @@ template<class Context> struct GeneralVoFSolver
             rate_bound, speed > 0 ? std::min(bound, self.options.flow.max_courant * global_thickness / speed) : bound);
     }
 
-    Meshes::ExactGeometryMeasure phase_mass_measure(const Meshes::ExactPhaseMeasures& phase) const
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> phase_mass_measure(
+        const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& phase) const
     {
         return phase.gas.scaled(self.material.gas_density) + phase.carrier.scaled(self.material.liquid_density);
     }
 
-    std::vector<Meshes::ExactPhaseMeasures> current_inventory(const VoF::GeneralVoF& phases) const
+    std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> current_inventory(
+        const VoF::GeneralVoF& phases) const
     {
         // The immutable FVM source selects the policy. Finite is the default;
         // experimental exact authority is explicit and remains unqualified.
@@ -579,7 +596,7 @@ template<class Context> struct GeneralVoFSolver
         self.collective(
             [&]
             {
-                using M = Meshes::ExactGeometryMeasure;
+                using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
                 using Domain = detail::GeneralVoFStorageDomain;
                 detail::GeneralVoFExactStorage storage(self.options.byte_budget);
                 // Only finite centers/bounds enter these small interval sums.
@@ -757,7 +774,7 @@ template<class Context> struct GeneralVoFSolver
                     if (!authority.contains(face) || authority.at(face) != p.peer)
                         throw std::runtime_error("Wrong Phi certificate authority.");
                     std::size_t offset = 8;
-                    std::array<Meshes::ExactGeometryMeasure, 2> value;
+                    std::array<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>, 2> value;
                     for (auto& item : value)
                     {
                         if (offset > p.bytes.size() || p.bytes.size() - offset < 8)
@@ -766,7 +783,7 @@ template<class Context> struct GeneralVoFSolver
                         offset += 8;
                         if (count > p.bytes.size() - offset)
                             throw std::runtime_error("Invalid Phi certificate length.");
-                        item = Meshes::ExactGeometryMeasure::decode(
+                        item = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(
                             std::span<const char>(p.bytes.data() + offset, std::size_t(count)), scalar_budget);
                         offset += count;
                     }
@@ -791,7 +808,8 @@ template<class Context> struct GeneralVoFSolver
                 const auto& rate = state.projection_arithmetic.face_rate;
                 if (rate.size() != nf)
                     throw std::runtime_error("Missing accepted divergence-free face-rate ledger.");
-                storage.capacity(Domain::Input, rate.capacity(), sizeof(Meshes::ExactGeometryMeasure));
+                storage.capacity(Domain::Input, rate.capacity(),
+                    sizeof(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>));
                 for (const auto& value : rate)
                     storage.measure(Domain::Input, value);
                 storage.capacity(Domain::Scratch, nf, sizeof(FaceMeasures::value_type) + 4 * sizeof(void*));
@@ -815,7 +833,7 @@ template<class Context> struct GeneralVoFSolver
                 for (std::size_t f = 0; f < self.mesh->num_owned_faces(); ++f)
                     owned.emplace(self.mesh->face_global_id(LO(f)),
                         std::pair{detail::vof_exact::scale(state.projection_arithmetic.face_rate[f], dt, scalar_budget),
-                            Meshes::ExactGeometryMeasure{}});
+                            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>{}});
             });
         const auto controls = exchange_face_measures(state, owned, publication_budget);
         std::vector<VoF::GeneralVoFFaceVolume> result;
@@ -835,9 +853,10 @@ template<class Context> struct GeneralVoFSolver
         return result;
     }
 
-    Meshes::ExactGeometryMeasure global_sum(const std::vector<Meshes::ExactGeometryMeasure>& values) const
+    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> global_sum(
+        const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& values) const
     {
-        Meshes::ExactGeometryMeasure local;
+        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> local;
         std::vector<OwnerPacket> packets;
         self.collective(
             [&]
@@ -848,7 +867,7 @@ template<class Context> struct GeneralVoFSolver
             });
         const auto received =
             exchange_owner_packets(packets, self.mesh->owned_cell_map()->getComm(), self.options.byte_budget);
-        Meshes::ExactGeometryMeasure sum;
+        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> sum;
         self.collective(
             [&]
             {
@@ -860,7 +879,8 @@ template<class Context> struct GeneralVoFSolver
                         if (!senders.insert(p.peer).second)
                             throw std::runtime_error("Duplicate exact global inventory sender.");
                         sum = detail::vof_exact::add(sum,
-                            Meshes::ExactGeometryMeasure::decode(p.bytes, self.options.byte_budget),
+                            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(
+                                p.bytes, self.options.byte_budget),
                             self.options.byte_budget);
                     }
                     if (senders.size() != std::size_t(self.mesh->owned_cell_map()->getComm()->getSize()))
@@ -884,7 +904,12 @@ template<class Context> struct GeneralVoFSolver
                 encoded.resize(std::size_t(count));
             });
         Teuchos::broadcast(*self.mesh->owned_cell_map()->getComm(), 0, int(count), encoded.data());
-        self.collective([&] { sum = Meshes::ExactGeometryMeasure::decode(encoded, self.options.byte_budget); });
+        self.collective(
+            [&]
+            {
+                sum = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::decode(
+                    encoded, self.options.byte_budget);
+            });
         return sum;
     }
 };

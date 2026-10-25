@@ -12,7 +12,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
 {
     namespace fp = VoF::finite_detail;
     using A = fp::Arithmetic<Mode>;
-    using Value = Meshes::BoundedGeometryValue;
+    using Value = PLIC::DynamicGeometryValue;
     const auto map = mesh_->owned_cell_map();
     const auto comm = map->getComm();
     const auto n = mesh_->num_owned_cells();

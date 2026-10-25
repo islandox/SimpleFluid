@@ -51,7 +51,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 cell.phase = {hierarchy->geometry(leaf), gas[i], carrier[i]};
                 cell.native_volume = hierarchy->metrics(leaf).volume;
                 if (options.arithmetic_mode != ArithmeticMode::Exact)
-                    cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(
+                    cell.finite_geometry = PLIC::DynamicConvexGeometry::from_geometry(
                         *cell.phase.geometry, geometry_limits(options.arithmetic_mode, options.byte_budget));
                 if (capsules)
                 {
@@ -196,7 +196,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                         cell.revision = leaf.revision;
                         cell.phase.geometry = retained_geometry;
                         if (options.arithmetic_mode != ArithmeticMode::Exact)
-                            cell.finite_geometry = Meshes::BoundedConvexGeometry::from_geometry(
+                            cell.finite_geometry = PLIC::DynamicConvexGeometry::from_geometry(
                                 *retained_geometry, geometry_limits(options.arithmetic_mode, options.byte_budget));
                         budget.add(cell.phase.geometry->storage_bytes());
                         found = data->cells.emplace(binding.key, std::move(cell)).first;
@@ -209,7 +209,7 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 }
             for (const auto& tile : topology->draft.tiles)
             {
-                if (!tile.exact_second_image.empty())
+                if (!tile.second_image_identity.empty())
                     throw std::invalid_argument("General VoF periodic image sweeps are not qualified.");
                 if (tile.second)
                 {
@@ -289,7 +289,8 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 for (const auto& node : topology->draft.nodes)
                 {
                     const auto fan = topology->node_fans.find(node.gid);
-                    std::vector<Meshes::ConvexGeometryPtr> incident_sources;
+                    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
+                        incident_sources;
                     if (fan != topology->node_fans.end() && !fan->second.empty())
                         for (const auto& key : fan->second)
                             incident_sources.push_back(data->cells.at(key).phase.geometry);
@@ -299,10 +300,12 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                     if (incident_sources.empty())
                         throw std::invalid_argument("Finite VoF canonical node lacks an authenticated source fan.");
                     auto p =
-                        Meshes::bounded_source_point(incident_sources, node.exact_identity, options.arithmetic_mode);
+                        PLIC::dynamic_source_point(incident_sources, node.coordinate_identity, options.arithmetic_mode);
                     topology->finite_nodes.emplace(node.gid, std::move(p));
                 }
-            std::map<std::uint64_t, std::map<AMR::AdaptiveBytes, Meshes::ExactPlanarFacePtr>> walls;
+            std::map<std::uint64_t,
+                std::map<AMR::AdaptiveBytes, SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Ordinary>>>
+                walls;
             std::map<std::uint64_t, std::set<Key>> incident;
             for (const auto& tile : topology->draft.tiles)
                 for (auto node : tile.node_gids)
@@ -338,9 +341,9 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
                 auto& retained = topology->node_walls[node.gid];
                 for (const auto& [identity, geometry] : walls[node.gid])
                 {
-                    Meshes::BoundedPoint normal;
+                    PLIC::DynamicPoint normal;
                     normal.arithmetic_mode = options.arithmetic_mode;
-                    Meshes::BoundedFaceConstraint constraint;
+                    PLIC::DynamicFaceConstraint constraint;
                     if (options.arithmetic_mode != ArithmeticMode::Exact)
                     {
                         const auto found_face = wall_tiles.find(identity);
@@ -481,14 +484,15 @@ std::vector<GeneralVoFPhaseGeometry> GeneralVoF::phase_geometry_declarations() c
         declarations.push_back(data_->cells.at(key).declaration);
     return declarations;
 }
-std::vector<Meshes::ExactPhaseMeasures> GeneralVoF::inventory_measures() const
+std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> GeneralVoF::inventory_measures() const
 {
     if (arithmetic_mode() != ArithmeticMode::Exact)
         throw std::invalid_argument(
             "Exact inventory view requires explicit Exact mode; use phase_volumes for finite storage.");
     return experimental_phases();
 }
-const std::vector<Meshes::ExactPhaseMeasures>& GeneralVoF::experimental_phases() const
+const std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>>&
+GeneralVoF::experimental_phases() const
 {
     if (inventory_policy() != PhaseInventoryPolicy::ExperimentalExact || !data_->experimental_catalog)
         throw std::invalid_argument("Exact inventory access requires explicit ExperimentalExact policy.");
@@ -502,12 +506,12 @@ const std::vector<PhaseRoundoff>& GeneralVoF::accumulated_phase_errors() const n
 {
     return data_->phase_history;
 }
-std::vector<Meshes::ExactPhaseMeasures> GeneralVoF::geometric_phases() const
+std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> GeneralVoF::geometric_phases() const
 {
     if (arithmetic_mode() != ArithmeticMode::Exact)
         throw std::invalid_argument("Exact geometric phase view requires explicit Exact arithmetic mode.");
     agree_transaction(data_->hierarchy->communicator(), data_->control);
-    std::vector<Meshes::ExactPhaseMeasures> result;
+    std::vector<SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>> result;
     wire::collective(*data_->hierarchy->communicator(),
         [&]
         {
@@ -639,14 +643,15 @@ const std::vector<std::size_t>& GeneralVoF::node_tiles(std::uint64_t node) const
 {
     return data_->topology->node_tiles.at(node);
 }
-std::vector<Meshes::ConvexGeometryPtr> GeneralVoF::owned_geometry() const
+std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
+GeneralVoF::owned_geometry() const
 {
-    std::vector<Meshes::ConvexGeometryPtr> result;
+    std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> result;
     for (const auto& key : data_->topology->order)
         result.push_back(data_->cells.at(key).phase.geometry);
     return result;
 }
-std::vector<Meshes::BoundedPoint> GeneralVoF::finite_face_points(std::uint64_t face) const
+std::vector<PLIC::DynamicPoint> GeneralVoF::finite_face_points(std::uint64_t face) const
 {
     current(*data_);
     if (inventory_policy() != PhaseInventoryPolicy::Finite)
@@ -655,16 +660,16 @@ std::vector<Meshes::BoundedPoint> GeneralVoF::finite_face_points(std::uint64_t f
         [&](const auto& tile) { return tile.face_gid == face; });
     if (tile == data_->topology->tiles.end())
         throw std::invalid_argument("Finite canonical face identity is not retained.");
-    std::vector<Meshes::BoundedPoint> points;
+    std::vector<PLIC::DynamicPoint> points;
     for (auto node : tile->node_gids)
         points.push_back(data_->topology->finite_nodes.at(node));
     return points;
 }
-std::vector<Meshes::BoundedConvexGeometryPtr> GeneralVoF::owned_finite_geometry() const
+std::vector<PLIC::DynamicConvexGeometryPtr> GeneralVoF::owned_finite_geometry() const
 {
     if (inventory_policy() != PhaseInventoryPolicy::Finite)
         throw std::invalid_argument("Finite geometry access requires Finite inventory policy.");
-    std::vector<Meshes::BoundedConvexGeometryPtr> result;
+    std::vector<PLIC::DynamicConvexGeometryPtr> result;
     for (const auto& key : data_->topology->order)
         result.push_back(data_->cells.at(key).finite_geometry);
     return result;
@@ -815,18 +820,19 @@ std::shared_ptr<const GeneralVoF> GeneralVoF::apply(const Trial& trial) const
 
 namespace SimpleFluid::VoF
 {
-void GeneralVoF::enable_exact_geometry_statistics(bool enabled)
+void GeneralVoF::enable_geometry_statistics(bool enabled)
 {
-    Meshes::enable_exact_geometry_statistics(enabled);
+    SimpleFluid::PLIC::enable_backend_statistics<SimpleFluid::ArithmeticMode::Exact>(enabled);
 }
 void GeneralVoF::reset_geometry_statistics()
 {
-    Meshes::reset_exact_geometry_statistics();
-    Meshes::reset_bounded_geometry_statistics();
+    SimpleFluid::PLIC::reset_backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
+    PLIC::reset_geometry_statistics();
 }
 Meshes::GeometryStatisticsSnapshot GeneralVoF::geometry_statistics()
 {
-    return {Meshes::exact_geometry_statistics_domain(), Meshes::bounded_geometry_statistics_domain(),
-        Meshes::exact_geometry_statistics(), Meshes::bounded_geometry_statistics()};
+    return {SimpleFluid::PLIC::backend_statistics_domain<SimpleFluid::ArithmeticMode::Exact>(),
+        PLIC::geometry_statistics_domain(), SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>(),
+        PLIC::geometry_statistics()};
 }
 }

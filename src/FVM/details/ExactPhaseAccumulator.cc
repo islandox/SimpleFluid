@@ -10,7 +10,8 @@ ExactPhaseAccumulator::ExactPhaseAccumulator(ExactLiveStorage& live)
     : live_(live), scope_(live, {&raw_.bulk, &raw_.gas, &raw_.carrier})
 {
 }
-void ExactPhaseAccumulator::add(const Meshes::ExactPhaseMeasures& input, int sign)
+void ExactPhaseAccumulator::add(
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& input, int sign)
 {
     if ((sign != 1 && sign != -1) || count_ == std::numeric_limits<std::size_t>::max())
         throw std::invalid_argument("Invalid exact raw phase group sign/count.");
@@ -35,7 +36,8 @@ void ExactPhaseAccumulator::add(const Meshes::ExactPhaseMeasures& input, int sig
     }
     ++count_;
 }
-Meshes::ExactPhaseMeasures ExactPhaseAccumulator::apply(const ExactPhaseLabelMap& map) const
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> ExactPhaseAccumulator::apply(
+    const ExactPhaseLabelMap& map) const
 {
     return map.apply(raw_, live_.operation_bytes());
 }

@@ -14,7 +14,7 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
     const auto n = volumes_.size(), nf = mesh_->num_owned_faces();
     const auto budget = provenance ? provenance->byte_budget : 64 * 1024 * 1024;
     constexpr bool bounded = Mode == ArithmeticMode::BoundedCertification;
-    bool valid = arithmetic_mode_ != ArithmeticMode::Exact && (!bounded || Meshes::bounded_geometry_environment()) &&
+    bool valid = arithmetic_mode_ != ArithmeticMode::Exact && (!bounded || PLIC::certification_environment()) &&
                  (!provenance || !provenance->arithmetic_mode || *provenance->arithmetic_mode == arithmetic_mode_) &&
                  current_geometry() && velocity.size() == n && density.size() == n && fraction.size() == n &&
                  kappa.size() == n && face_velocity.size() == geometry_.size() &&

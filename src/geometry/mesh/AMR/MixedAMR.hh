@@ -65,7 +65,7 @@ public:
     AdaptiveCellKey cell_key(std::uint64_t) const override;
     std::uint64_t cell_material(std::uint64_t) const override;
     std::size_t cell_fragment(std::uint64_t) const override;
-    ConvexGeometryPtr cell_geometry(std::uint64_t) const;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> cell_geometry(std::uint64_t) const;
     const std::shared_ptr<const CompositePartition<>>& native_partition() const noexcept;
     std::shared_ptr<const MixedAMR> with_partition(std::shared_ptr<const CompositePartition<>>) const;
     /** Convenience factor transaction on the optional first product. Stable

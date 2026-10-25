@@ -1,11 +1,7 @@
 /** Shared test-local native fixtures; no test cases or environment registration. */
 #pragma once
-#include <sstream>
-#include <iomanip>
-#include <chrono>
-#include <cstdlib>
-#include "geometry/BoundedConvexGeometry.hh"
-#include "geometry/ExactGeometryInstrumentation.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryInstrumentation.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
@@ -16,12 +12,16 @@
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <gtest/gtest.h>
+#include <iomanip>
 #include <limits>
 #include <map>
-#include <set>
 #include <numbers>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 namespace
 {
@@ -198,7 +198,7 @@ std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(unsigned nx, unsign
 }
 std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
 {
-    Meshes::BoundedGeometryLimits limits;
+    PLIC::GeometryLimits limits;
     limits.arithmetic_mode = ArithmeticMode::Ordinary;
     AMR::ExtrudedAMRGrid grid;
     for (unsigned y = 0; y < 3; ++y)
@@ -236,15 +236,14 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
     {
         order.push_back(key);
         zero.push_back(0);
-        full.push_back(
-            Meshes::BoundedConvexGeometry::from_geometry(*raw->geometry(leaf), limits)->volume().as_double());
+        full.push_back(PLIC::DynamicConvexGeometry::from_geometry(*raw->geometry(leaf), limits)->volume().as_double());
     }
     auto bound = std::make_shared<const VoF::GeneralVoF>(raw, order, zero, full);
     std::vector<AMR::AdaptiveMark> marks;
     for (const auto& [key, leaf] : bound->hierarchy()->owned())
     {
         const auto center =
-            Meshes::BoundedConvexGeometry::from_geometry(*bound->hierarchy()->geometry(leaf), limits)->centroid();
+            PLIC::DynamicConvexGeometry::from_geometry(*bound->hierarchy()->geometry(leaf), limits)->centroid();
         const double xi = center[0] - .2 * center[1];
         if (xi > .5 && xi < .75)
             marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
@@ -257,7 +256,7 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
     {
         // Initialize both phases with ordinary FP geometry. Native authority
         // import supplies supports only; no rational reference clip or measure.
-        const auto shell = Meshes::BoundedConvexGeometry::from_geometry(*refined->geometry(leaf), limits);
+        const auto shell = PLIC::DynamicConvexGeometry::from_geometry(*refined->geometry(leaf), limits);
         const auto amounts = shell->phases({{1, .17, .11}, {0, 0, 0}, .65});
         order.push_back(key);
         gas.push_back(amounts.gas.as_double());
@@ -273,24 +272,26 @@ VoFMaterial inviscid()
 }
 void enable_observed_exact_geometry_statistics(bool enabled)
 {
-    Meshes::enable_exact_geometry_statistics(enabled);
-    VoF::GeneralVoF::enable_exact_geometry_statistics(enabled);
-    GeneralVoFSolver::enable_exact_geometry_statistics(enabled);
+    SimpleFluid::PLIC::enable_backend_statistics<SimpleFluid::ArithmeticMode::Exact>(enabled);
+    VoF::GeneralVoF::enable_geometry_statistics(enabled);
+    GeneralVoFSolver::enable_geometry_statistics(enabled);
 }
 
 void reset_observed_geometry_statistics()
 {
-    Meshes::reset_exact_geometry_statistics();
-    Meshes::reset_bounded_geometry_statistics();
+    SimpleFluid::PLIC::reset_backend_statistics<SimpleFluid::ArithmeticMode::Exact>();
+    PLIC::reset_geometry_statistics();
     VoF::GeneralVoF::reset_geometry_statistics();
     GeneralVoFSolver::reset_geometry_statistics();
 }
 
 std::array<Meshes::GeometryStatisticsSnapshot, 3> geometry_image_snapshots()
 {
-    return {{{Meshes::exact_geometry_statistics_domain(), Meshes::bounded_geometry_statistics_domain(),
-                 Meshes::exact_geometry_statistics(), Meshes::bounded_geometry_statistics()},
-        VoF::GeneralVoF::geometry_statistics(), GeneralVoFSolver::geometry_statistics()}};
+    return {
+        {{SimpleFluid::PLIC::backend_statistics_domain<SimpleFluid::ArithmeticMode::Exact>(),
+             PLIC::geometry_statistics_domain(),
+             SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>(), PLIC::geometry_statistics()},
+            VoF::GeneralVoF::geometry_statistics(), GeneralVoFSolver::geometry_statistics()}};
 }
 
 Meshes::GeometryStatisticsSnapshot observed_geometry_statistics()

@@ -49,12 +49,12 @@ TEST(ExactGeneralVoF, ExplicitExactRoundtripKeepsHistoryAndRebuildsFiniteGeometr
         EXPECT_EQ(adopted->accumulated_phase_errors()[i].gas, capsule.accumulated_roundoff.gas);
         EXPECT_EQ(adopted->accumulated_phase_errors()[i].carrier, capsule.accumulated_roundoff.carrier);
     }
-    GeneralVoF::enable_exact_geometry_statistics(true);
+    GeneralVoF::enable_geometry_statistics(true);
     GeneralVoF::reset_geometry_statistics();
     const auto rebuilt = adopted->reconstruct();
     for (const auto& interface : rebuilt) EXPECT_TRUE(interface.finite_geometry);
     const auto observed = GeneralVoF::geometry_statistics();
-    GeneralVoF::enable_exact_geometry_statistics(false);
+    GeneralVoF::enable_geometry_statistics(false);
     EXPECT_EQ(observed.exact.volume_evaluations, 0);
     EXPECT_EQ(observed.exact.moment_evaluations, 0);
     EXPECT_EQ(observed.exact.clip_constructions, 0);

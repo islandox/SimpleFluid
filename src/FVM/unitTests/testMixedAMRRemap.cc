@@ -47,7 +47,7 @@ std::shared_ptr<const ::SimpleFluid::Meshes::AMR::AdaptiveOverlapPlan> plan(cons
 AMRRemapPhases phases(const Bound& b)
 {
     AMRRemapPhases result;
-    const GeometryHalfspace plane{{1, 0, 1}, {0, 0, 0}, 1.25};
+    const SimpleFluid::PLIC::GeometryHalfspace plane{{1, 0, 1}, {0, 0, 0}, 1.25};
     for (size_t c = 0; c < b.mesh->num_owned_cells(); ++c)
     {
         auto gid = b.mesh->cell_global_id(LO(c));
@@ -114,7 +114,7 @@ TEST(MixedAMRRemapTest, ProductPolyhedralTiltedPhaseAmountsAndReverseHaveActualE
         if (out.inventories[2].amount[c] > 0)
             EXPECT_NEAR(out.inventories[1].amount[c] / out.inventories[2].amount[c], 11. / 3, 2e-14);
     AMRRemapPhases next{out.gas_volume, out.carrier_volume,
-        std::vector<GeometryHalfspace>(out.gas_volume.size(), {{1, 0, 1}, {0, 0, 0}, 1.25})};
+        std::vector<SimpleFluid::PLIC::GeometryHalfspace>(out.gas_volume.size(), {{1, 0, 1}, {0, 0, 0}, 1.25})};
     EXPECT_NO_THROW((void) reverse.apply(next, out.inventories, restored, 1000, 2));
     for (size_t c = 0; c < physical.gas_volume.size(); ++c)
     {

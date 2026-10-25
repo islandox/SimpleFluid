@@ -2,8 +2,8 @@
  * @brief Image-local geometry instrumentation identities and POD snapshots.
  */
 #pragma once
-#include "geometry/BoundedConvexGeometry.hh"
-#include "geometry/ExactGeometryInstrumentation.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryInstrumentation.hh"
 namespace SimpleFluid::Meshes
 {
 /** Each static Mesh archive image may own separate thread-local counters.
@@ -15,7 +15,7 @@ struct GeometryStatisticsSnapshot
 {
     const void* exact_domain = nullptr;
     const void* bounded_domain = nullptr;
-    ExactGeometryStatistics exact;
-    BoundedGeometryStatistics bounded;
+    SimpleFluid::PLIC::BackendStatistics<SimpleFluid::ArithmeticMode::Exact> exact;
+    SimpleFluid::PLIC::GeometryStatistics bounded;
 };
 }

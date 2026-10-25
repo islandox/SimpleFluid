@@ -2,7 +2,7 @@
  * @brief Direct passive-tracer bounds and local momentum-ledger checks before projection.
  */
 #include "FVM/AdaptiveVoF.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
@@ -53,7 +53,7 @@ SP<const MeshHandle<>> preparation_pair_mesh()
 TEST(ExactConservativeVoFTransportTest, ExactOppositeGroupsRetainMicroscopicNetBeforeImplicitTrace)
 {
     using GO = DefaultTpetraTypes::global_ordinal_type;
-    using Measure = SimpleFluid::Meshes::ExactGeometryMeasure;
+    using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using Transfer = detail::ConservativeVoFTransport::Transfer;
     using Stream = detail::ConservativeVoFTransport::FaceContribution;
     SimpleFluid::Meshes::AMR::AMRGrid grid;
@@ -137,7 +137,7 @@ TEST(ExactConservativeVoFTransportTest, ExactOppositeGroupsRetainMicroscopicNetB
 TEST(ExactConservativeVoFTransportTest, ExactInputNormalizesBeforeNarrowingAndRecoversFromRangeFailure)
 {
     using GO = DefaultTpetraTypes::global_ordinal_type;
-    using M = SimpleFluid::Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using Transport = detail::ConservativeVoFTransport;
     SimpleFluid::Meshes::AMR::AMRGrid grid;
     grid.root_blocks = {2, 1, 1};
@@ -251,7 +251,7 @@ TEST(ExactConservativeVoFTransportTest, ExactInputNormalizesBeforeNarrowingAndRe
 TEST(ExactConservativeVoFTransportTest, ExactStorageDeduplicatesSharedPayloadAndSeparatesDomains)
 {
     using Domain = detail::GeneralVoFStorageDomain;
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     const auto value = M::from_value(1e-310).squared();
     detail::GeneralVoFExactStorage audit(16384);
     audit.capacity(Domain::Input, 10, sizeof(M));
@@ -274,7 +274,7 @@ TEST(ExactConservativeVoFTransportTest, ExactStorageDeduplicatesSharedPayloadAnd
 TEST(ExactConservativeVoFTransportTest, DistinctExactPayloadsExhaustCumulativeBudgetWhileSharedValuesFit)
 {
     using Domain = detail::GeneralVoFStorageDomain;
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     std::vector<M> distinct, shared;
     distinct.reserve(128);
     shared.reserve(128);
@@ -311,7 +311,7 @@ TEST(ExactConservativeVoFTransportTest, DistinctExactPayloadsExhaustCumulativeBu
 
 TEST(ExactConservativeVoFTransportTest, ExactRawBindingReusesOnlyAuthenticatedLocalCoefficients)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using GO = DefaultTpetraTypes::global_ordinal_type;
     using Transport = detail::ConservativeVoFTransport;
     namespace AMR = Meshes::AMR;
@@ -390,7 +390,7 @@ TEST(ExactConservativeVoFTransportTest, ExactRawBindingReusesOnlyAuthenticatedLo
 
 TEST(ExactConservativeVoFTransportTest, ExactBindingSharesRemainingCapacityBetweenOperationAndRetainedResult)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using GO = DefaultTpetraTypes::global_ordinal_type;
     using Transport = detail::ConservativeVoFTransport;
     namespace AMR = Meshes::AMR;
@@ -458,7 +458,7 @@ TEST(ExactConservativeVoFTransportTest, ExactBindingSharesRemainingCapacityBetwe
 
 TEST(ExactConservativeVoFTransportTest, LeasedPhysicalNormSeparatesAggregateOperationAndCommunicationStorage)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     namespace E = detail::vof_exact;
     const auto comm = Tpetra::getDefaultComm();
     DefaultTpetraTypes::map_type map(3, 0, comm);
@@ -495,7 +495,7 @@ TEST(ExactConservativeVoFTransportTest, LeasedPhysicalNormSeparatesAggregateOper
 
 TEST(ExactConservativeVoFTransportTest, ExactPreparationRequiresSharedProvenanceAndRetainsEveryRejectionGate)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using Transport = detail::ConservativeVoFTransport;
     const auto mesh = preparation_pair_mesh();
     const auto n = mesh->num_owned_cells();
@@ -544,7 +544,7 @@ TEST(ExactConservativeVoFTransportTest, ExactPreparationRequiresSharedProvenance
 
 TEST(ExactConservativeVoFTransportTest, ExactPreparationReusesAuthenticatedNonzeroRoutesAcrossThreeComponents)
 {
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     using GO = DefaultTpetraTypes::global_ordinal_type;
     using Transport = detail::ConservativeVoFTransport;
     const auto mesh = preparation_pair_mesh();

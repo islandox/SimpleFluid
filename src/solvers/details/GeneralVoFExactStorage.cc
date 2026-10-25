@@ -40,7 +40,8 @@ void GeneralVoFExactStorage::capacity(GeneralVoFStorageDomain domain, std::size_
     capacity_[i] = sum(capacity_[i], amount, budget_);
     used_ = next;
 }
-void GeneralVoFExactStorage::measure(GeneralVoFStorageDomain domain, const Meshes::ExactGeometryMeasure& value)
+void GeneralVoFExactStorage::measure(
+    GeneralVoFStorageDomain domain, const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& value)
 {
     const auto i = index(domain);
     const auto identity = value.storage_identity();
@@ -63,7 +64,8 @@ void GeneralVoFExactStorage::measure(GeneralVoFStorageDomain domain, const Meshe
         ++found->second.references[i];
     }
 }
-void GeneralVoFExactStorage::release(GeneralVoFStorageDomain domain, const Meshes::ExactGeometryMeasure& value)
+void GeneralVoFExactStorage::release(
+    GeneralVoFStorageDomain domain, const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& value)
 {
     const auto i = index(domain);
     const auto found = records_.find(value.storage_identity());

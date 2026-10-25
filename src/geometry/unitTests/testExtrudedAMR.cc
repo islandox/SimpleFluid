@@ -95,6 +95,75 @@ TEST(ExtrudedAMRTest, DecimalQuadFactorOrderAndExactInversePreservePatches)
     for (const auto& side : {"south", "east", "north", "west"})
         EXPECT_TRUE(std::any_of(patches.begin(), patches.end(), [&](const auto& p) { return p.ends_with(side); }));
 }
+TEST(ExtrudedAMRTest, AncestryReuseStillProvesActualSourceAndTargetGeometry)
+{
+    namespace AMR = SimpleFluid::Meshes::AMR;
+    AMR::ExtrudedAMR parent(quad());
+    const auto fine = parent.adapt({0});
+    std::vector<AMR::AdaptiveCellBinding> source, target;
+    for (std::uint64_t c = 0; c < parent.geometry()->num_cells(); ++c)
+        source.push_back({parent.cell_key(c), c, parent.cell_material(c), parent.cell_geometry(c)});
+    for (std::uint64_t c = 0; c < fine->geometry()->num_cells(); ++c)
+        target.push_back({fine->cell_key(c), c, fine->cell_material(c), fine->cell_geometry(c)});
+    const auto relations = parent.overlap_relations(*fine);
+    const auto plan =
+        AMR::AdaptiveOverlapPlan::build(parent.observation(), fine->observation(), source, target, relations);
+    for (const auto& record : plan->records())
+        EXPECT_EQ(record.intersection.get(), target.at(record.target_gid).geometry.get());
+
+    auto invalid_relations = relations;
+    invalid_relations.front().kind = AMR::AdaptiveAncestryRelation::Kind::Unchanged;
+    EXPECT_THROW((void) AMR::AdaptiveOverlapPlan::build(
+                     parent.observation(), fine->observation(), source, target, invalid_relations),
+        std::invalid_argument);
+
+    auto foreign = target;
+    foreign.front().geometry = foreign.front().geometry->translated({1, 0, 0});
+    EXPECT_THROW(
+        (void) AMR::AdaptiveOverlapPlan::build(parent.observation(), fine->observation(), source, foreign, relations),
+        std::invalid_argument);
+    const auto coarsening = fine->overlap_relations(parent);
+    EXPECT_THROW(
+        (void) AMR::AdaptiveOverlapPlan::build(fine->observation(), parent.observation(), foreign, source, coarsening),
+        std::invalid_argument);
+
+    auto moved = source;
+    moved.front().geometry = moved.front().geometry->translated({1, 0, 0});
+    const std::array unchanged{AMR::AdaptiveAncestryRelation{
+        AMR::AdaptiveAncestryRelation::Kind::Unchanged, source.front().gid, moved.front().gid}};
+    EXPECT_THROW(
+        (void) AMR::AdaptiveOverlapPlan::build(parent.observation(), parent.observation(), source, moved, unchanged),
+        std::invalid_argument);
+}
+
+TEST(ExtrudedAMRTest, OrdinarySharedPacketsRoundTripAndRejectOldVersions)
+{
+    using Construction = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>;
+    const AMR::ExtrudedAMR source(quad());
+    const auto& region = std::get<ExtrudedRegion>(source.geometry()->regions().front());
+    const auto topology = std::shared_ptr<const ExtrudedTopology>(source.geometry(), &region.topology());
+    const auto construction = region.geometry().construction();
+    using Cell = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+    EXPECT_THROW((void) Cell::native_cell_shell(*source.geometry(), 0), std::invalid_argument);
+    EXPECT_TRUE(Cell::from_native_cell(*source.geometry(), 0)->equivalent(*construction->certified_cell_geometry(0)));
+    const auto base = construction->encode_base();
+    const auto axis = construction->encode_axis();
+    const auto view = construction->encode_view();
+    const auto decoded = Construction::decode_shared(topology, base, axis, view);
+    EXPECT_EQ(decoded->encode_base(), base);
+    EXPECT_EQ(decoded->encode_axis(), axis);
+    EXPECT_EQ(decoded->encode_view(), view);
+    EXPECT_DOUBLE_EQ(decoded->cell_volume(0), construction->cell_volume(0));
+    for (unsigned part = 0; part < 3; ++part)
+    {
+        auto bad_base = base, bad_axis = axis, bad_view = view;
+        auto& bad = part == 0 ? bad_base : part == 1 ? bad_axis : bad_view;
+        ASSERT_GE(bad.size(), 16u);
+        std::fill(bad.begin() + 8, bad.begin() + 16, 0);
+        bad[8] = 1;
+        EXPECT_THROW((void) Construction::decode_shared(topology, bad_base, bad_axis, bad_view), std::invalid_argument);
+    }
+}
 TEST(ExtrudedAMRTest, TriangleNVBClosureAndCompleteFactorFamilies)
 {
     ::SimpleFluid::Meshes::AMR::ExtrudedAMR parent(triangles());

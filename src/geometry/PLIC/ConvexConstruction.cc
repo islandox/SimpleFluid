@@ -1,0 +1,361 @@
+#include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
+#include "geometry/mesh/MultiRegionMesh.hh"
+
+namespace SimpleFluid::PLIC
+{
+std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint> points)
+{
+    for (const auto& p : points)
+        require_mode(p.arithmetic_mode, points.front().arithmetic_mode);
+    if (points.empty())
+        return {};
+    std::vector<PlaneAuthority> result;
+    for (const auto& key : points.front().supports())
+        if (!key.key.empty() &&
+            std::all_of(points.begin() + 1, points.end(), [&](const auto& p)
+                { return std::find(p.supports().begin(), p.supports().end(), key) != p.supports().end(); }))
+            result.push_back(key);
+    std::sort(result.begin(), result.end());
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+bool certification_environment()
+{
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__) && defined(__SSE2__) &&                           \
+    !defined(__FAST_MATH__) && (!defined(__FINITE_MATH_ONLY__) || __FINITE_MATH_ONLY__ == 0)
+    if constexpr (!std::numeric_limits<long double>::is_iec559 || std::numeric_limits<long double>::radix != 2 ||
+                  std::numeric_limits<long double>::digits < 64 ||
+                  std::numeric_limits<long double>::max_exponent < 16384 || FLT_EVAL_METHOD != 0)
+        return false;
+    const unsigned csr = _mm_getcsr();
+    unsigned short control;
+    __asm__ __volatile__("fnstcw %0" : "=m"(control));
+    return std::fegetround() == FE_TONEAREST && (csr & ((1u << 15) | (1u << 6) | (3u << 13))) == 0 &&
+           (csr & (0x3fu << 7)) == (0x3fu << 7) && (control & 0x3fu) == 0x3fu && (control & (3u << 8)) == (3u << 8) &&
+           (control & (3u << 10)) == 0;
+#else
+    return false;
+#endif
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+GeometryStatistics geometry_statistics()
+{
+    return statistics;
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+void reset_geometry_statistics()
+{
+    statistics = {};
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+void record_ledger_operations(std::uint64_t count)
+{
+    if (count > std::numeric_limits<std::uint64_t>::max() - statistics.ledger_operations)
+        reject("ledger instrumentation counter overflow.");
+    statistics.ledger_operations += count;
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+std::size_t dynamic_point_storage_bytes(const DynamicPoint& p)
+{
+    return DynamicGeometryAccess::storage_bytes(p);
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+DynamicConvexGeometry::DynamicConvexGeometry(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+ArithmeticMode DynamicConvexGeometry::arithmetic_mode() const noexcept
+{
+    return impl_->limits.arithmetic_mode;
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+GeometryPoint DynamicConvexGeometry::origin() const
+{
+    return impl_->reference_origin;
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+const std::vector<DynamicPoint>& DynamicConvexGeometry::points() const
+{
+    return impl_->displayed;
+}
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::PLIC
+{
+const std::vector<Face>& DynamicConvexGeometry::faces() const
+{
+    return impl_->faces;
+}
+} // namespace SimpleFluid::PLIC
+
+#include "geometry/PLIC/details/bounded/ConvexConstruction.tcc"
+#include "geometry/PLIC/details/ordinary/ConvexConstruction.tcc"
+
+namespace SimpleFluid::PLIC
+{
+DynamicPoint dynamic_point_average(std::span<const DynamicPoint> vertices)
+{
+    if ((vertices.empty() ? ArithmeticMode::BoundedCertification : vertices.front().arithmetic_mode) ==
+        ArithmeticMode::Ordinary)
+        return ordinary_kernel::dynamic_point_average<ArithmeticMode::Ordinary>(vertices);
+    return certification_kernel::dynamic_point_average<ArithmeticMode::BoundedCertification>(vertices);
+}
+
+DynamicPoint dynamic_point_interpolate(const DynamicPoint& a, const DynamicPoint& b, long double fraction)
+{
+    if ((a.arithmetic_mode) == ArithmeticMode::Ordinary)
+        return ordinary_kernel::dynamic_point_interpolate<ArithmeticMode::Ordinary>(a, b, fraction);
+    return certification_kernel::dynamic_point_interpolate<ArithmeticMode::BoundedCertification>(a, b, fraction);
+}
+
+template<ArithmeticMode Mode> long double DynamicGeometryValue::lower() const
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    require_mode(arithmetic_mode, Mode);
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::ValueKernel<Mode>(*this).lower();
+    else
+        return certification_kernel::ValueKernel<Mode>(*this).lower();
+}
+
+template<ArithmeticMode Mode> long double DynamicGeometryValue::upper() const
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    require_mode(arithmetic_mode, Mode);
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::ValueKernel<Mode>(*this).upper();
+    else
+        return certification_kernel::ValueKernel<Mode>(*this).upper();
+}
+
+template<ArithmeticMode Mode> double DynamicGeometryValue::as_double() const
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+    require_mode(arithmetic_mode, Mode);
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::ValueKernel<Mode>(*this).as_double();
+    else
+        return certification_kernel::ValueKernel<Mode>(*this).as_double();
+}
+
+template long double DynamicGeometryValue::lower<ArithmeticMode::Ordinary>() const;
+template long double DynamicGeometryValue::lower<ArithmeticMode::BoundedCertification>() const;
+template long double DynamicGeometryValue::upper<ArithmeticMode::Ordinary>() const;
+template long double DynamicGeometryValue::upper<ArithmeticMode::BoundedCertification>() const;
+template double DynamicGeometryValue::as_double<ArithmeticMode::Ordinary>() const;
+template double DynamicGeometryValue::as_double<ArithmeticMode::BoundedCertification>() const;
+
+long double DynamicGeometryValue::lower() const
+{
+    if (arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).lower();
+    return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).lower();
+}
+
+long double DynamicGeometryValue::upper() const
+{
+    if (arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).upper();
+    return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).upper();
+}
+
+double DynamicGeometryValue::as_double() const
+{
+    if (arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).as_double();
+    return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).as_double();
+}
+
+bool DynamicGeometryValue::relative_error_at_most(long double target, double tolerance) const
+{
+    if (arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::ValueKernel<ArithmeticMode::Ordinary>(*this).relative_error_at_most(target, tolerance);
+    return certification_kernel::ValueKernel<ArithmeticMode::BoundedCertification>(*this).relative_error_at_most(
+        target, tolerance);
+}
+
+bool dynamic_points_identical(const DynamicPoint& a, const DynamicPoint& b)
+{
+    if ((a.arithmetic_mode) == ArithmeticMode::Ordinary)
+        return ordinary_kernel::dynamic_points_identical<ArithmeticMode::Ordinary>(a, b);
+    return certification_kernel::dynamic_points_identical<ArithmeticMode::BoundedCertification>(a, b);
+}
+
+DynamicGeometryValue dynamic_orientation(const std::array<DynamicPoint, 4>& vertices)
+{
+    if ((vertices.front().arithmetic_mode) == ArithmeticMode::Ordinary)
+        return ordinary_kernel::dynamic_orientation<ArithmeticMode::Ordinary>(vertices);
+    return certification_kernel::dynamic_orientation<ArithmeticMode::BoundedCertification>(vertices);
+}
+
+DynamicConvexGeometryPtr DynamicConvexGeometry::make(
+    std::span<const GeometryPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits)
+{
+    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::make(vertices, faces, limits);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::make(vertices, faces, limits);
+}
+
+DynamicConvexGeometryPtr DynamicConvexGeometry::make_bounded(
+    std::span<const DynamicPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits)
+{
+    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::make_bounded(vertices, faces, limits);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::make_bounded(
+        vertices, faces, limits);
+}
+
+DynamicConvexGeometryPtr DynamicConvexGeometry::make_bounded_local(
+    GeometryPoint origin, std::span<const DynamicPoint> vertices, const std::vector<Face>& faces, GeometryLimits limits)
+{
+    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::make_bounded_local(
+            origin, vertices, faces, limits);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::make_bounded_local(
+        origin, vertices, faces, limits);
+}
+
+DynamicConvexGeometryPtr DynamicConvexGeometry::from_geometry(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, GeometryLimits limits)
+{
+    const auto snapshot = details::prepare_source_geometry(source, limits);
+    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::from_snapshot(snapshot, limits);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::from_snapshot(snapshot, limits);
+}
+
+DynamicConvexGeometryPtr DynamicConvexGeometry::box(GeometryPoint lower, GeometryPoint upper, GeometryLimits limits)
+{
+    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::box(lower, upper, limits);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::box(lower, upper, limits);
+}
+
+DynamicConvexGeometryPtr DynamicConvexGeometry::tetrahedron(
+    const std::array<DynamicPoint, 4>& vertices, GeometryLimits limits)
+{
+    if (limits.arithmetic_mode == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>::tetrahedron(vertices, limits);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>::tetrahedron(vertices, limits);
+}
+
+DynamicGeometryValue DynamicConvexGeometry::volume() const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).volume();
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).volume();
+}
+
+DynamicGeometryMoments DynamicConvexGeometry::moments() const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).moments();
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).moments();
+}
+
+DynamicGeometryMoments DynamicConvexGeometry::moments(GeometryPoint origin) const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).moments(origin);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).moments(origin);
+}
+
+GeometryPoint DynamicConvexGeometry::centroid() const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).centroid();
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).centroid();
+}
+
+std::vector<DynamicPoint> DynamicConvexGeometry::local_points() const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).local_points();
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).local_points();
+}
+
+std::array<DynamicGeometryValue, 3> DynamicConvexGeometry::axis_spans() const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).axis_spans();
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).axis_spans();
+}
+
+DynamicSupport DynamicConvexGeometry::support(GeometryPoint normal, GeometryPoint anchor) const
+{
+    if (arithmetic_mode() == ArithmeticMode::Ordinary)
+        return ordinary_kernel::GeometryKernel<ArithmeticMode::Ordinary>(impl_).support(normal, anchor);
+    return certification_kernel::GeometryKernel<ArithmeticMode::BoundedCertification>(impl_).support(normal, anchor);
+}
+} // namespace SimpleFluid::PLIC
+
+#include "geometry/PLIC/details/FiniteGeometry.tcc"
+
+namespace SimpleFluid::PLIC::details
+{
+GeometrySourceSnapshot prepare_source_geometry(
+    const ConvexCellGeometry<ArithmeticMode::Ordinary>& source, GeometryLimits limits)
+{
+    limits.arithmetic_mode = ArithmeticMode::Ordinary;
+    Operation preparation(limits);
+    if (source.storage_bytes() > limits.byte_budget)
+        reject("source authority exceeds bootstrap storage cap.");
+    const auto bytes = active_work->bytes, operations = active_work->operations, pairs = active_work->pairs;
+    GeometrySourceSnapshot snapshot;
+    snapshot.shell = source.numerical_shell();
+    active_work->charge(snapshot.shell.relative_vertices.capacity(), sizeof(snapshot.shell.relative_vertices.front()));
+    active_work->charge(snapshot.shell.outward_faces.capacity(), sizeof(std::vector<std::size_t>));
+    active_work->charge(snapshot.shell.face_support_identities.capacity(), sizeof(std::vector<char>));
+    for (const auto& face : snapshot.shell.outward_faces)
+        active_work->charge(face.capacity(), sizeof(std::size_t));
+    for (const auto& support : snapshot.shell.face_support_identities)
+        active_work->charge(support.capacity(), 1);
+    snapshot.preparation_bytes = active_work->bytes - bytes;
+    snapshot.preparation_operations = active_work->operations - operations;
+    snapshot.preparation_pairs = active_work->pairs - pairs;
+    snapshot.charged_work = preparation.previous ? active_work : nullptr;
+    return snapshot;
+}
+void charge_source_preparation(const GeometrySourceSnapshot& source)
+{
+    if (source.charged_work == active_work)
+        return;
+    active_work->charge(source.preparation_bytes, 1);
+    if (source.preparation_operations >
+        active_work->operation_limit - std::min(active_work->operations, active_work->operation_limit))
+        reject("source preparation exhausts the geometry operation cap.");
+    if (source.preparation_pairs >
+        active_work->limits.maximum_pair_tests - std::min(active_work->pairs, active_work->limits.maximum_pair_tests))
+        reject("source preparation exhausts the geometry pair-test cap.");
+    active_work->operations += source.preparation_operations;
+    active_work->pairs += source.preparation_pairs;
+}
+} // namespace SimpleFluid::PLIC::details

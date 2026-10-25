@@ -15,7 +15,7 @@
 namespace
 {
 using namespace SimpleFluid;
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 namespace AMR = Meshes::AMR;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);

@@ -113,6 +113,9 @@ foreach(index RANGE ${last_symbol})
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::(FVM::)?detail::")
         message(FATAL_ERROR "Private implementation exported: ${name}")
     endif()
+    if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::PLIC::")
+        message(FATAL_ERROR "Mesh-owned PLIC symbol exported by FVM: ${name}")
+    endif()
 endforeach()
 
 # A source-level alias cannot justify retaining a retired class in any dynamic

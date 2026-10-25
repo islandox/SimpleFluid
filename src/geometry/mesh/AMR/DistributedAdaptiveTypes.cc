@@ -226,7 +226,7 @@ AdaptiveBytes encode_adaptive_leaf(const AdaptiveLeaf& leaf)
     w.word(leaf.material);
     w.word(leaf.revision);
     w.word(std::uint64_t(leaf.provider));
-    w.bytes(leaf.geometry ? leaf.geometry->encode_exact_certificate() : AdaptiveBytes{});
+    w.bytes(leaf.geometry ? leaf.geometry->encode_certificate() : AdaptiveBytes{});
     w.word(leaf.surfaces.size());
     for (const auto& s : leaf.surfaces)
     {
@@ -272,7 +272,7 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
     leaf.provider = AdaptiveProviderKind(kind);
     auto geometry = r.bytes();
     if (!geometry.empty())
-        leaf.geometry = ConvexCellGeometry::decode_exact_certificate(geometry);
+        leaf.geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::decode_certificate(geometry);
     auto n = r.word();
     if (n != (leaf.geometry ? leaf.geometry->num_faces() : 0) || n > (packet.size() - r.position) / 32)
         throw std::invalid_argument("Invalid adaptive surface count.");
@@ -280,7 +280,7 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
     {
         AdaptiveSurface s;
         s.key = r.bytes();
-        s.geometry = ExactPlanarFace::decode(r.bytes());
+        s.geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
         auto orientation = r.word(), exterior = r.word();
         if (orientation > 1 || exterior > 1)
             throw std::invalid_argument("Invalid adaptive incidence.");
@@ -295,7 +295,7 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
             throw std::invalid_argument("Invalid native face nesting proof flags.");
         s.require_native_whole_tile = whole;
         if (proof)
-            s.native_whole_geometry = ExactPlanarFace::decode(r.bytes());
+            s.native_whole_geometry = PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes());
         if (whole && !s.native_whole_geometry)
             throw std::invalid_argument("Missing original native face nesting proof.");
         leaf.surfaces.push_back(std::move(s));
@@ -326,10 +326,10 @@ AdaptiveLeaf decode_adaptive_leaf(std::span<const char> packet)
     auto canonical = encode_adaptive_leaf(leaf);
     if (canonical != AdaptiveBytes(packet.begin(), packet.end()))
         throw std::invalid_argument("Noncanonical adaptive leaf.");
-    std::vector<ExactPlanarFacePtr> faces;
+    std::vector<PLIC::PlanarFacePtr<ArithmeticMode::Ordinary>> faces;
     for (const auto& s : leaf.surfaces)
         faces.push_back(s.geometry);
-    if (leaf.geometry && !ExactPlanarFace::cell_shell(faces)->equivalent(*leaf.geometry))
+    if (leaf.geometry && !PLIC::PlanarFace<ArithmeticMode::Ordinary>::cell_shell(faces)->equivalent(*leaf.geometry))
         throw std::invalid_argument("Adaptive surface shell differs from leaf certificate.");
     return leaf;
 }

@@ -93,7 +93,7 @@ TEST(DistributedProductKernel, IndependentFactorParentsSurviveNewOtherFactorAndE
         EXPECT_TRUE(leaf.surfaces.empty());
         ASSERT_TRUE(leaf.native_recipe);
         ASSERT_TRUE(leaf.factor_recipe);
-        EXPECT_EQ(leaf.native_recipe->kind, NativeFragmentDescriptor::Kind::ExactProduct);
+        EXPECT_EQ(leaf.native_recipe->kind, NativeFragmentDescriptor::Kind::ConstructedProduct);
         ::SimpleFluid::Meshes::AMR::product_adaptive_kernel()->validate(leaf);
     }
     auto zfirst = root->apply(

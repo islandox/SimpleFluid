@@ -2,7 +2,7 @@
  * @brief Physical Cartesian periodic images, exact sparse certificates and native node routes.
  */
 #include "fields/FieldStored.hh"
-#include "geometry/ExactPlanarFace.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
@@ -23,7 +23,7 @@ struct PeriodicInput
 {
     SparseNativeMeshInput input;
     std::vector<std::uint64_t> owned, ghosts;
-    std::map<std::uint64_t, ConvexGeometryPtr> physical;
+    std::map<std::uint64_t, SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>> physical;
 };
 PeriodicInput periodic_input(bool empty_owners = false)
 {
@@ -77,16 +77,18 @@ PeriodicInput periodic_input(bool empty_owners = false)
         {
             (owner(cell) == comm->getRank() ? result.owned : result.ghosts).push_back(cell);
             auto box = source.cell_box(cell);
-            result.physical.emplace(cell, ConvexCellGeometry::box(box.lower, box.upper));
+            result.physical.emplace(
+                cell, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box(
+                          box.lower, box.upper));
             for (auto node : region.topology().cell_nodes(cell))
                 result.input.native_nodes.emplace(std::pair<std::size_t, std::uint64_t>{0, node}, node);
         }
     }
-    std::map<GeometryPoint, std::uint64_t> point_nodes;
+    std::map<SimpleFluid::PLIC::GeometryPoint, std::uint64_t> point_nodes;
     for (std::uint64_t node = 0; node < mesh->num_nodes(); ++node)
     {
         auto p = mesh->node_coordinates(node);
-        point_nodes.emplace(GeometryPoint{p.x, p.y, p.z}, node);
+        point_nodes.emplace(SimpleFluid::PLIC::GeometryPoint{p.x, p.y, p.z}, node);
     }
     const auto address = [&](std::uint64_t cell, std::uint64_t logical)
     {
@@ -111,23 +113,28 @@ PeriodicInput periodic_input(bool empty_owners = false)
         route.native = route.native_is_second ? *second : first;
         if (second && *second != first && full.contains(route.first) && full.contains(route.second))
             route.second_native = *second;
-        route.override_geometry = ExactPlanarFace::from_native_face(*mesh, face);
+        route.override_geometry =
+            SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Ordinary>::from_native_face(*mesh, face);
         if (second)
         {
             auto a = region.geometry().face_centroid(first.face), b = region.geometry().face_centroid(second->face);
-            route.exact_second_image = exact_displacement({b.x, b.y, b.z}, {a.x, a.y, a.z});
-            route.second_image = exact_displacement_display(route.exact_second_image);
+            route.second_image_identity = SimpleFluid::PLIC::displacement<SimpleFluid::ArithmeticMode::Ordinary>(
+                {b.x, b.y, b.z}, {a.x, a.y, a.z});
+            route.second_image = SimpleFluid::PLIC::displacement_display<SimpleFluid::ArithmeticMode::Ordinary>(
+                route.second_image_identity);
         }
         for (const auto& point : route.override_geometry->vertex_identities())
         {
-            auto gid = point_nodes.at(exact_point_display(point));
+            auto gid = point_nodes.at(SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(point));
             route.override_nodes.push_back(gid);
             result.input.node_certificates.emplace(gid, point);
             if (second)
             {
-                auto physical =
-                    exact_point_translated(point, exact_displacement_difference({}, route.exact_second_image));
-                auto second_gid = point_nodes.at(exact_point_display(physical));
+                auto physical = SimpleFluid::PLIC::point_translated<SimpleFluid::ArithmeticMode::Ordinary>(
+                    point, SimpleFluid::PLIC::displacement_difference<SimpleFluid::ArithmeticMode::Ordinary>(
+                               {}, route.second_image_identity));
+                auto second_gid =
+                    point_nodes.at(SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(physical));
                 route.second_node_gids.push_back(second_gid);
                 result.input.node_certificates.emplace(second_gid, std::move(physical));
             }
@@ -141,7 +148,8 @@ PeriodicInput periodic_input(bool empty_owners = false)
         if (result.input.native_nodes.contains({0, node}))
             route.native = std::pair<std::size_t, std::uint64_t>{0, node};
         else
-            route.introduced_coordinate = exact_point_display(proof);
+            route.introduced_coordinate =
+                SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Ordinary>(proof);
         result.input.nodes.push_back(std::move(route));
     }
     return result;
@@ -234,7 +242,7 @@ TEST(SparseNativePeriodic, HierarchyRefineMigrationCoarsenPublishesNativeImagesA
             auto metric = kernel->metrics(leaf);
             auto center = geometry->cell_centroid(gid);
             EXPECT_EQ(geometry->cell_volume(gid), metric.volume);
-            EXPECT_EQ((GeometryPoint{center.x, center.y, center.z}), metric.centroid);
+            EXPECT_EQ((SimpleFluid::PLIC::GeometryPoint{center.x, center.y, center.z}), metric.centroid);
         }
         ScalarCellFieldStored<> field(publication.mesh, "periodic_native_key");
         using LO = DefaultTpetraTypes::local_ordinal_type;
@@ -307,7 +315,7 @@ TEST(SparseNativePeriodic, InconsistentDisplayImageRejectsCollectively)
     if (comm->getRank() == 0)
     {
         auto found = std::find_if(fixture.input.faces.begin(), fixture.input.faces.end(),
-            [](const auto& face) { return !face.exact_second_image.empty(); });
+            [](const auto& face) { return !face.second_image_identity.empty(); });
         ASSERT_NE(found, fixture.input.faces.end());
         found->second_image[0] += .125;
     }
@@ -329,7 +337,7 @@ TEST(SparseNativePeriodic, WrongSecondPhysicalNodeRejectsCollectively)
     if (comm->getRank() == 0)
     {
         auto found = std::find_if(fixture.input.faces.begin(), fixture.input.faces.end(),
-            [](const auto& face) { return !face.exact_second_image.empty(); });
+            [](const auto& face) { return !face.second_image_identity.empty(); });
         ASSERT_NE(found, fixture.input.faces.end());
         found->second_node_gids = found->override_nodes;
     }

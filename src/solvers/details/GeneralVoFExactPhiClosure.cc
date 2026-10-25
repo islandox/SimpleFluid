@@ -2,7 +2,7 @@
  * @brief Sparse persistent-identity forest closure with bounded floating-point arithmetic.
  */
 #include "solvers/details/GeneralVoFPhiClosure.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
@@ -24,7 +24,7 @@ namespace Exact
 {
 namespace
 {
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 struct ExactCodec : Codec
 {
     using Codec::Codec;

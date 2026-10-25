@@ -88,7 +88,8 @@ public:
     explicit LocalProductAMR(ExtrudedAMRGrid grid);
     [[nodiscard]] const std::vector<LocalProductRun>& runs() const noexcept;
     [[nodiscard]] AdaptiveCellKey cell_key(std::size_t run, std::uint64_t local_cell) const;
-    [[nodiscard]] ConvexGeometryPtr cell_geometry(std::size_t run, std::uint64_t local_cell) const;
+    [[nodiscard]] PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> cell_geometry(
+        std::size_t run, std::uint64_t local_cell) const;
     [[nodiscard]] std::uint64_t material_id() const noexcept;
     [[nodiscard]] const std::shared_ptr<const void>& identity() const noexcept;
     [[nodiscard]] std::uint64_t generation() const noexcept;

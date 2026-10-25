@@ -27,7 +27,7 @@ enum class AMRPhaseGeometry
 struct AMRRemapPhases
 {
     std::vector<double> gas_volume, carrier_volume;
-    std::vector<Meshes::GeometryHalfspace> gas_halfspace;
+    std::vector<SimpleFluid::PLIC::GeometryHalfspace> gas_halfspace;
     std::vector<AMRPhaseGeometry> geometry_declaration;
 };
 

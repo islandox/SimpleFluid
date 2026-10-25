@@ -17,7 +17,7 @@ namespace SimpleFluid::detail
 {
 namespace
 {
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 using GO = DefaultTpetraTypes::global_ordinal_type;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 using Comm = Teuchos::Comm<int>;

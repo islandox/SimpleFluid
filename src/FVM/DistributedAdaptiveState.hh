@@ -30,7 +30,7 @@ struct AdaptiveHistoryFrame
 struct AdaptiveHistoryReconstruction
 {
     std::string name;
-    std::vector<Meshes::GeometryHalfspace> gas_halfspace;
+    std::vector<SimpleFluid::PLIC::GeometryHalfspace> gas_halfspace;
     std::vector<AMRPhaseGeometry> geometry_declaration;
 };
 /** Per-rank application payload limit, independent of planner/transport limits.

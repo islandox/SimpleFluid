@@ -1,7 +1,7 @@
 /** @file testOrdinaryVoFSweep.cc
  * @brief Ordinary signed sweep defects use independent physical cell budgets.
  */
-#include "FVM/details/BoundedVoFTransport.hh"
+#include "FVM/details/FiniteVoFTransport.hh"
 #include <array>
 #include <cmath>
 #include <gtest/gtest.h>

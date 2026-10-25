@@ -5,7 +5,7 @@
 #include <stdexcept>
 namespace SimpleFluid::VoF::detail
 {
-using M = Meshes::ExactGeometryMeasure;
+using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 M exact_phase_product(const M& a, const M& b, std::size_t limit)
 {
     if (!a.sign() || !b.sign())
@@ -18,7 +18,8 @@ ExactPhaseLabelMap::ExactPhaseLabelMap(bool gas, M a, M b, M discrepancy, M boun
 {
 }
 ExactPhaseLabelMap ExactPhaseLabelMap::create(
-    const Meshes::ExactPhaseMeasures& full, bool gas, const M& target, const M& bound, std::size_t limit)
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& full, bool gas, const M& target,
+    const M& bound, std::size_t limit)
 {
     if (!limit || full.bulk.sign() <= 0 || full.gas.sign() < 0 || full.carrier.sign() < 0 ||
         (full.gas + full.carrier).compare(full.bulk) || target.sign() < 0 || target.compare(full.bulk) > 0 ||
@@ -49,7 +50,8 @@ ExactPhaseLabelMap ExactPhaseLabelMap::create(
         throw std::invalid_argument("Exact phase correction has no nonnegative complementary coefficients.");
     return ExactPhaseLabelMap(gas, std::move(a), std::move(b), difference, bound, limit);
 }
-Meshes::ExactPhaseMeasures ExactPhaseLabelMap::apply(const Meshes::ExactPhaseMeasures& raw) const
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> ExactPhaseLabelMap::apply(
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& raw) const
 {
     if ((raw.gas + raw.carrier).compare(raw.bulk))
         throw std::invalid_argument("Exact phase correction requires a complementary geometric partition.");
@@ -62,8 +64,8 @@ Meshes::ExactPhaseMeasures ExactPhaseLabelMap::apply(const Meshes::ExactPhaseMea
         throw std::invalid_argument("Exact phase correction violated positive atom capacity.");
     return {raw.bulk, gas_ ? minority : dominant, gas_ ? dominant : minority};
 }
-Meshes::ExactPhaseMeasures ExactPhaseLabelMap::apply(
-    const Meshes::ExactPhaseMeasures& raw, std::size_t operation_limit) const
+SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> ExactPhaseLabelMap::apply(
+    const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& raw, std::size_t operation_limit) const
 {
     if (!operation_limit || operation_limit > limit_)
         throw std::invalid_argument("Exact phase operation cap must be positive and within its captured limit.");

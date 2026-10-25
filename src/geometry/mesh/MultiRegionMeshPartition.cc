@@ -1,13 +1,13 @@
 /** @file MultiRegionMeshPartition.cc
  * @brief Versioned native region transfer and sparse explicit region residency.
  */
+#include "geometry/PLIC/PolyhedralComplex.hh"
+#include "geometry/mesh/ExplicitRegionProvider.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 #include "geometry/mesh/NativeFragmentRecipe.hh"
-#include "geometry/mesh/ExplicitRegionProvider.hh"
-#include "geometry/ExactPolyhedralComplex.hh"
 #include <cstring>
-#include <set>
 #include <numeric>
+#include <set>
 #include <type_traits>
 
 namespace SimpleFluid::Meshes
@@ -168,7 +168,7 @@ DistributedExplicitRegion read_explicit(Reader& r, std::string name, RegionLayou
     std::shared_ptr<const Provider> provider;
     if (exact)
     {
-        const auto construction=ExactPolyhedralComplex::decode(r.array<char>());
+        const auto construction = PLIC::PolyhedralComplex<ArithmeticMode::Ordinary>::decode(r.array<char>());
         provider=std::make_shared<const Provider>(layout,std::move(cells),std::move(faces),std::move(nodes),
             std::move(boundaries),construction);
     }
@@ -180,7 +180,7 @@ template<class Region>
 void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<ID>& visible)
 {
     if constexpr (std::same_as<Region, ExtrudedRegion>)
-        if (region.geometry().has_exact_construction())
+        if (region.geometry().has_construction())
         {
             const auto& topology = region.topology();
             const auto& construction = *region.geometry().construction();
@@ -202,8 +202,9 @@ void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<
             w.array(construction.encode_view());
             return;
         }
-    if constexpr(requires{region.geometry().has_exact_construction();})
-        if(region.geometry().has_exact_construction())tag=region.layout().family==RegionLayout::Family::Explicit ? 9 : 8;
+    if constexpr (requires { region.geometry().has_construction(); })
+        if (region.geometry().has_construction())
+            tag = region.layout().family == RegionLayout::Family::Explicit ? 9 : 8;
     w.value(tag); w.string(region.name()); write_layout(w, region.layout());
     const auto& t = region.topology(); const auto& g = region.geometry();
     if constexpr (std::same_as<Region, NativeIsoRegion<UnstructuredMesh>>
@@ -211,7 +212,7 @@ void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<
     {
         write_explicit(w,t,g,visible);
         if constexpr (std::same_as<Region,DistributedExplicitRegion>)
-            if (g.has_exact_construction())
+            if (g.has_construction())
             {
                 if(!g.construction())throw std::invalid_argument("Certified local explicit fragments require sparse route serialization.");
                 const std::vector<ID> selected(visible.begin(),visible.end());
@@ -265,8 +266,9 @@ void write_region(Writer& w, const Region& region, uint32_t tag, const std::set<
             const auto ids = topo.boundary_batch_ids();
             w.value(uint64_t(ids.size()));
             for (auto b : ids) { w.string(topo.boundary_batch_name(b)); w.string(t.boundary_batch_name(b)); }
-            if constexpr(requires{native.has_exact_construction();})
-                if(native.has_exact_construction())w.array(native.construction()->encode());
+            if constexpr (requires { native.has_construction(); })
+                if (native.has_construction())
+                    w.array(native.construction()->encode());
         }
     }
 }
@@ -274,14 +276,14 @@ struct TopologyCache
 {
     std::map<std::vector<char>, std::shared_ptr<const RectilinearTopology>> cartesian;
     std::map<std::vector<char>, std::shared_ptr<const ExtrudedTopology>> extruded;
-    struct ExactEntry
+    struct ConstructionEntry
     {
         std::vector<char> packet;
-        std::shared_ptr<const ExactExtrudedConstruction> anchor;
+        std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>> anchor;
         size_t values_id = std::numeric_limits<size_t>::max();
     };
     std::vector<std::shared_ptr<const ExtrudedTopology>> shared_topology;
-    std::vector<ExactEntry> shared_base, shared_axis, shared_axis_values;
+    std::vector<ConstructionEntry> shared_base, shared_axis, shared_axis_values;
 };
 
 MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
@@ -342,9 +344,10 @@ MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
         if (axis.values_id != std::numeric_limits<size_t>::max() && axis.values_id != values_id)
             throw std::invalid_argument("Shared axis selection changed coordinate table.");
         axis.values_id = values_id;
-        const auto axis_packet = ExactExtrudedConstruction::combine_axis_parts(values.packet, axis.packet);
+        const auto axis_packet =
+            PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::combine_axis_parts(values.packet, axis.packet);
         const auto view = r.array<char>();
-        const auto construction = ExactExtrudedConstruction::decode_shared(
+        const auto construction = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::decode_shared(
             topology, base.packet, axis_packet, view, base.anchor, axis.anchor ? axis.anchor : values.anchor);
         if (!base.anchor)
             base.anchor = construction;
@@ -431,8 +434,10 @@ MultiRegionMesh::Region read_region(Reader& r, TopologyCache* cache = nullptr)
     }
     if(tag==8)
     {
-        const auto packet=r.array<char>();auto construction=ExactExtrudedConstruction::decode(topology,packet);
-        if(construction->display_points()!=base || construction->display_z()!=layers)throw std::invalid_argument("Exact extrusion display descriptor mismatch.");
+        const auto packet = r.array<char>();
+        auto construction = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::decode(topology, packet);
+        if (construction->display_points() != base || construction->display_z() != layers)
+            throw std::invalid_argument("Native extrusion display descriptor mismatch.");
         return checked(ExtrudedRegion(std::move(name),topology,std::make_shared<const ExtrudedGeometry>(topology,std::move(construction))));
     }
     if (tag == 5) return checked(ExtrudedRegion(std::move(name), topology,
@@ -589,7 +594,7 @@ struct NativeFragmentCache::Impl
     std::map<Bytes, std::shared_ptr<const MultiRegionMesh::Region>> regions;
     std::map<Bytes, std::shared_ptr<const ExtrudedTopology>> topology;
     std::map<Bytes, std::shared_ptr<const RectilinearTopology>> cartesian_topology;
-    std::map<Bytes, std::shared_ptr<const ExactExtrudedConstruction>> bases, axes, values;
+    std::map<Bytes, std::shared_ptr<const PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>>> bases, axes, values;
     std::shared_ptr<const Bytes> intern(Bytes bytes)
     {
         std::uint64_t hash = 1469598103934665603ULL;
@@ -672,9 +677,9 @@ std::shared_ptr<const NativeFragmentDescriptor> extract_native_fragment(
         }
     }
     else if (const auto* product = std::get_if<ExtrudedRegion>(&region);
-        product && product->geometry().has_exact_construction())
+        product && product->geometry().has_construction())
     {
-        d.kind = NativeFragmentDescriptor::Kind::ExactProduct;
+        d.kind = NativeFragmentDescriptor::Kind::ConstructedProduct;
         const auto& construction = *product->geometry().construction();
         d.parts = {cache.impl_->intern(product->topology().encode_base()),
             cache.impl_->intern(construction.encode_base()), cache.impl_->intern(construction.encode_axis_values()),
@@ -780,10 +785,10 @@ MultiRegionMesh::Region materialize_native_fragment(const NativeFragmentDescript
         auto geometry = std::make_shared<const RectilinearGeometry>(std::move(axes));
         result = CartesianRegion(name, std::move(topology), std::move(geometry));
     }
-    else if (d->kind == NativeFragmentDescriptor::Kind::ExactProduct)
+    else if (d->kind == NativeFragmentDescriptor::Kind::ConstructedProduct)
     {
         if (d->parts.size() != 4)
-            throw std::invalid_argument("Exact product fragment needs four shared parts.");
+            throw std::invalid_argument("Native product fragment needs four shared parts.");
         auto& top = cache.impl_->topology[*d->parts[0]];
         if (!top)
             top = ExtrudedTopology::decode_base(*d->parts[0]);
@@ -799,11 +804,12 @@ MultiRegionMesh::Region materialize_native_fragment(const NativeFragmentDescript
         }
         auto topology = top->with_layers(static_cast<unsigned>(layers), aliases);
         auto& base = cache.impl_->bases[*d->parts[1]];
-        const auto axis_bytes = ExactExtrudedConstruction::combine_axis_parts(*d->parts[2], *d->parts[3]);
+        const auto axis_bytes =
+            PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::combine_axis_parts(*d->parts[2], *d->parts[3]);
         auto& axis = cache.impl_->axes[axis_bytes];
         auto& values = cache.impl_->values[*d->parts[2]];
         const auto run = view.array<char>();
-        auto construction = ExactExtrudedConstruction::decode_shared(
+        auto construction = PLIC::ExtrudedConstruction<ArithmeticMode::Ordinary>::decode_shared(
             topology, *d->parts[1], axis_bytes, run, base, axis ? axis : values);
         if (!base)
             base = construction;
@@ -951,7 +957,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
     mesh->d_reference_axial_edges = r.array<real_t>();
     mesh->d_axial_edges = r.array<real_t>();
     mesh->d_geometry_state.epoch = r.value<uint64_t>();
-    if (mesh->has_exact_construction() && mesh->d_reference_axial_edges != mesh->d_axial_edges)
+    if (mesh->has_construction() && mesh->d_reference_axial_edges != mesh->d_axial_edges)
         throw std::invalid_argument(
             "Constructed extrusion partition packets require the identity composite affine transform.");
     if (!r.data.empty())
@@ -1206,7 +1212,7 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::deserialize_partition(
                 }
                 if (available({first, mapping.coarse_face}) &&
                     std::all_of(mapping.fine_faces.begin(), mapping.fine_faces.end(), available))
-                    mesh->validate_exact_nested_faces({first, mapping.coarse_face}, mapping.fine_faces);
+                    mesh->validate_nested_faces({first, mapping.coarse_face}, mapping.fine_faces);
             }
             for (const auto& [region, patch] : participants)
                 if (counts[region] != expected_counts.at(region))
@@ -1372,12 +1378,12 @@ std::shared_ptr<MultiRegionMesh> MultiRegionMesh::merge_partitions(
         std::map<ID, Provider::Face> faces;
         std::map<ID, Vec3> nodes;
         const auto& first = std::get<DistributedExplicitRegion>(reference.d_regions[region]).topology();
-        if (first.has_exact_construction())
+        if (first.has_construction())
             throw std::invalid_argument("Distributed reassembly of exact explicit shards remains a Stage 6 migration gate.");
         for (const auto& shard : shards)
         {
             const auto& provider = std::get<DistributedExplicitRegion>(shard->d_regions[region]).topology();
-            if (provider.has_exact_construction())
+            if (provider.has_construction())
                 throw std::invalid_argument("Cannot mix exact explicit and legacy shards during native assembly.");
             for (const auto& [id, record] : provider.cell_records())
             {

@@ -25,7 +25,7 @@ struct FrozenFace
     std::shared_ptr<const FrozenPart> part;
     AdaptiveCellKey first;
     std::optional<AdaptiveCellKey> second;
-    GeometryPoint second_image{};
+    PLIC::GeometryPoint second_image{};
     int boundary = -1;
 };
 struct FrozenRow
@@ -44,7 +44,7 @@ struct FrozenNativeRoot::Data
 struct FrozenMetric
 {
     double volume = 0;
-    GeometryPoint center{};
+    PLIC::GeometryPoint center{};
 };
 struct FrozenNativeBundle::Data
 {
@@ -86,6 +86,6 @@ struct FrozenEvaluationCache
     std::map<const FrozenPart*, MultiRegionMesh::Region> providers;
 };
 const MultiRegionMesh::Region& frozen_provider(const std::shared_ptr<const FrozenPart>&, FrozenEvaluationCache&);
-GeometryPoint frozen_transform(const FrozenNativeRoot::Data&, MeshUtils::Vec3);
+PLIC::GeometryPoint frozen_transform(const FrozenNativeRoot::Data&, MeshUtils::Vec3);
 FrozenMetric frozen_metric(const FrozenNativeBundle::Data&, const FrozenNativeRoot::Data&, FrozenEvaluationCache&);
 } // namespace SimpleFluid::Meshes::AMR

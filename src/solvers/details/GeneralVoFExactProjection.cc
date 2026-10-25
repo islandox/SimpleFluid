@@ -1,13 +1,13 @@
 /** @file GeneralVoFFlowWorkspace.cc
  * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
-#include "solvers/details/GeneralVoFFlowWorkspace.hh"
-#include "geometry/BoundedConvexGeometry.hh"
-#include "geometry/ConvexCellGeometry.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactPressure.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
+#include "solvers/details/GeneralVoFFlowSupport.hh"
+#include "solvers/details/GeneralVoFFlowWorkspace.hh"
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -19,7 +19,6 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
-#include "solvers/details/GeneralVoFFlowSupport.hh"
 namespace SimpleFluid::detail
 {
 using namespace flow_support;
@@ -30,7 +29,8 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
     std::vector<Vector>& velocity, std::vector<double>& pressure, const std::vector<double>& density,
     const std::vector<double>& fraction, const std::vector<double>& kappa, double dt, double sigma,
     const VoFSolverOptions& options, VoFStepDiagnostics& diagnostics, GeneralVoFProjectionProvenance* provenance,
-    std::optional<std::span<const Meshes::ExactGeometryMeasure>> physical_mass,
+    std::optional<std::span<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>>
+        physical_mass,
     const GeneralVoFProjectionClosureTopology* closure_topology)
 {
     self.require(self.arithmetic_mode_ == ArithmeticMode::Exact,
@@ -97,12 +97,14 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
             storage.capacity(Domain::Input, self.geometry_.capacity(), sizeof(Face));
             storage.capacity(Domain::Input, self.volumes_.capacity(), sizeof(double));
             storage.capacity(Domain::Input, self.spans_.capacity(), sizeof(Vector));
-            storage.capacity(Domain::Input, self.exact_volumes_.capacity(), sizeof(Meshes::ExactGeometryMeasure));
+            storage.capacity(Domain::Input, self.exact_volumes_.capacity(),
+                sizeof(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>));
             for (const auto& value : self.exact_volumes_)
                 storage.measure(Domain::Input, value);
             if (physical_mass)
             {
-                storage.capacity(Domain::Input, physical_mass->size(), sizeof(Meshes::ExactGeometryMeasure));
+                storage.capacity(Domain::Input, physical_mass->size(),
+                    sizeof(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>));
                 for (const auto& value : *physical_mass)
                     storage.measure(Domain::Input, value);
             }
@@ -123,7 +125,8 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                     storage.capacity(Domain::Scratch, cell.identity.capacity(), 2);
                 for (const auto& face : closure_topology->faces)
                     storage.capacity(Domain::Scratch, face.identity.capacity(), 2);
-                storage.capacity(Domain::Result, owned_faces, sizeof(Meshes::ExactGeometryMeasure));
+                storage.capacity(Domain::Result, owned_faces,
+                    sizeof(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>));
             }
             const auto helper_pool = provenance ? storage.remaining() / 2 : 0;
             storage.capacity(Domain::Scratch, helper_pool, 1);
@@ -137,7 +140,8 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
             // physical-impulse normalization and scalar publication temporaries.
             // Sixteen additional slots form a separate synchronous operation
             // workspace, never borrowed from pending corner/intermediate slots.
-            storage.capacity(Domain::Scratch, 2 * owned_faces + 6 * n, sizeof(Meshes::ExactGeometryMeasure));
+            storage.capacity(Domain::Scratch, 2 * owned_faces + 6 * n,
+                sizeof(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>));
             storage.capacity(Domain::Scratch, owned_faces, sizeof(GeneralVoFExactPressureFace));
             const auto result_slots = (closure_topology ? 3 : 2) * owned_faces;
             const auto temporary_slots = std::size_t(48) + 3 * owned_faces + 6 * n;
@@ -170,7 +174,7 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                 for (std::size_t face = 0; face < rounded.size(); ++face)
                     rounded[face] = arithmetic.leaf(face_velocity[face]);
         });
-    using M = Meshes::ExactGeometryMeasure;
+    using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     const auto exact_product = [&](const M& a, const M& b) -> M
     {
         if (!a.sign() || !b.sign())
@@ -853,20 +857,25 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                 const auto lease = self.mesh_->acquire_execution_view();
                 for (std::size_t c = 0; c < self.volumes_.size(); ++c)
                 {
-                    Meshes::ExactGeometryMeasure rate;
+                    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> rate;
                     for (auto fid : self.mesh_->faces(LO(c)))
                     {
                         const auto& g = self.geometry_[fid];
                         const auto contribution = vof_exact::leased_scale(
                             vof_exact::leased_scale(
-                                Meshes::ExactGeometryMeasure::from_value(face_velocity[fid]), g.area, scalar_budget),
+                                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                                    face_velocity[fid]),
+                                g.area, scalar_budget),
                             g.owner == LO(c) ? 1 : -1, scalar_budget);
                         rate = vof_exact::leased_add(rate, contribution, scalar_budget);
                     }
                     const auto exact =
-                        provenance ? exact_divergence[c]
-                                   : vof_exact::leased_divide(rate,
-                                         Meshes::ExactGeometryMeasure::from_value(self.volumes_[c]), scalar_budget);
+                        provenance
+                            ? exact_divergence[c]
+                            : vof_exact::leased_divide(rate,
+                                  SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                                      self.volumes_[c]),
+                                  scalar_budget);
                     local_exact_divergence = std::max(local_exact_divergence, std::abs(exact.enclosure().value));
                     local_erased += exact.sign() != 0 && div[c] == 0;
                 }
@@ -907,14 +916,19 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                         continue;
                     // Normalize before narrowing: a represented density and volume
                     // may have a nonzero product below binary64 carrier range.
-                    const auto mass = physical_mass ? (*physical_mass)[c]
-                                                    : vof_exact::leased_scale(
-                                                          Meshes::ExactGeometryMeasure::from_value(self.volumes_[c]),
-                                                          density[c], scalar_budget);
+                    const auto mass =
+                        physical_mass
+                            ? (*physical_mass)[c]
+                            : vof_exact::leased_scale(
+                                  SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                                      self.volumes_[c]),
+                                  density[c], scalar_budget);
                     const auto impulse = vof_exact::leased_divide(
                         vof_exact::leased_scale(physical_force, dt, scalar_budget), mass, scalar_budget);
                     const auto updated = vof_exact::leased_add(
-                        Meshes::ExactGeometryMeasure::from_value(velocity[c][a]), impulse, scalar_budget);
+                        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
+                            velocity[c][a]),
+                        impulse, scalar_budget);
                     velocity[c][a] = updated.sign() ? updated.certified().as_double() : 0;
                 }
         });

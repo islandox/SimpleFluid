@@ -16,12 +16,15 @@ struct ExperimentalPhaseView
     PhaseRoundoff roundoff;
 };
 [[nodiscard]] SIMPLEFLUID_FVM_EXPORT std::shared_ptr<const ExperimentalPhaseInventory> experimental_initial(
-    const Meshes::ConvexCellGeometry&, double native_volume, double gas, double carrier, std::size_t byte_budget);
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>&, double native_volume,
+    double gas, double carrier, std::size_t byte_budget);
 [[nodiscard]] SIMPLEFLUID_FVM_EXPORT std::shared_ptr<const ExperimentalPhaseInventory> experimental_advance(
-    const ExperimentalPhaseInventory&, Meshes::ExactPhaseMeasures, const Meshes::ConvexCellGeometry&,
-    double native_volume, std::size_t byte_budget);
-SIMPLEFLUID_FVM_EXPORT void validate_experimental(const ExperimentalPhaseInventory&, const Meshes::ConvexCellGeometry&,
-    double native_volume, std::size_t byte_budget);
+    const ExperimentalPhaseInventory&, SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>,
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>&, double native_volume,
+    std::size_t byte_budget);
+SIMPLEFLUID_FVM_EXPORT void validate_experimental(const ExperimentalPhaseInventory&,
+    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>&, double native_volume,
+    std::size_t byte_budget);
 [[nodiscard]] SIMPLEFLUID_FVM_EXPORT std::vector<char> encode_experimental(
     const ExperimentalPhaseInventory&, std::size_t byte_budget);
 [[nodiscard]] SIMPLEFLUID_FVM_EXPORT std::shared_ptr<const ExperimentalPhaseInventory> decode_experimental(

@@ -3,7 +3,7 @@
  * @brief Sparse persistent-identity forest closure with bounded floating-point arithmetic.
  */
 #include "solvers/details/GeneralVoFPhiClosure.hh"
-#include "FVM/details/BoundedPhaseArithmetic.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
@@ -639,7 +639,7 @@ GeneralVoFFiniteRateClosure close_general_vof_finite_rate(const SP<const MeshHan
         {
             if (rate.size() != mesh->num_owned_faces() || face_radius.size() != rate.size() ||
                 cell_radius.size() != mesh->num_owned_cells() || std::numeric_limits<long double>::digits > 106 ||
-                !std::numeric_limits<long double>::is_iec559 || !Meshes::bounded_geometry_environment())
+                !std::numeric_limits<long double>::is_iec559 || !PLIC::certification_environment())
                 throw std::runtime_error("Finite Phi shapes or FP environment are unsupported.");
             const auto identity = [](GO gid)
             {

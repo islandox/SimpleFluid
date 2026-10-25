@@ -1,5 +1,5 @@
 /** @file testExactExplicitProvider.cc
- * @brief Sparse exact explicit packets, metric-only neighbors and legacy compatibility.
+ * @brief Ordinary native explicit packets, metric-only neighbors and record compatibility.
  */
 #include "geometry/unitTests/polyhedral_amr_helpers.hh"
 #include "utils/testing_environment.hh"
@@ -24,7 +24,7 @@ TEST(ExactExplicitProviderTest, SparsePacketRetainsOnlyVisibleCertificatesAndMet
     const auto packet = fine->geometry()->serialize_partition(visible);
     const auto restored = MultiRegionMesh::deserialize_partition(packet, Tpetra::getDefaultComm());
     const auto& provider = std::get<DistributedExplicitRegion>(restored->regions().front()).topology();
-    ASSERT_TRUE(provider.has_exact_construction());
+    ASSERT_TRUE(provider.has_construction());
     // Native packet support includes owners incident to requested outer faces;
     // this is geometric support closure, not an expanded field halo. The coarse
     // left parent touches the four low-X octants of the right root (0,2,4,6).
@@ -64,10 +64,8 @@ TEST(ExactExplicitProviderTest, SparsePacketRetainsOnlyVisibleCertificatesAndMet
     EXPECT_TRUE(empty_provider.construction()->resident_cell_ids().empty());
     EXPECT_EQ(empty_provider.layout().cells, provider.layout().cells);
     EXPECT_EQ(empty_provider.boundary_names(), provider.boundary_names());
-    EXPECT_THROW(
-        (void) ExplicitRegionProvider::from_exact_complex(empty_provider.construction()), std::invalid_argument);
-    const auto factory =
-        ExplicitRegionProvider::from_exact_complex(empty_provider.construction(), provider.boundary_names());
+    EXPECT_THROW((void) ExplicitRegionProvider::from_complex(empty_provider.construction()), std::invalid_argument);
+    const auto factory = ExplicitRegionProvider::from_complex(empty_provider.construction(), provider.boundary_names());
     EXPECT_EQ(factory->boundary_names(), provider.boundary_names());
     EXPECT_TRUE(factory->cell_records().empty());
 }
@@ -109,7 +107,7 @@ TEST(ExactExplicitProviderTest, ExactReassemblyRejectsAndLegacySparseMergeStillW
     const auto legacy =
         MultiRegionMesh::deserialize_partition(legacy_source->serialize_partition(all), Tpetra::getDefaultComm());
     const auto merged = MultiRegionMesh::merge_partitions({legacy}, Teuchos::rcp(new Teuchos::SerialComm<int>()));
-    EXPECT_FALSE(merged->has_exact_construction());
+    EXPECT_FALSE(merged->has_construction());
     EXPECT_EQ(merged->num_cells(), 2u);
     auto old = hierarchy.geometry()->serialize_partition(all);
     const std::uint64_t old_magic = 0x5346524547490004ULL;
@@ -132,7 +130,8 @@ TEST(ExactExplicitProviderTest, UnlabelledExteriorRetainsAnExplicitEmptyGlobalSc
             EXPECT_EQ(provider.boundary_id(face), UnstructuredMesh::invalid_boundary_id);
             EXPECT_TRUE(provider.construction()->face_surface(face).boundary.empty());
         }
-    const auto empty = ExactPolyhedralComplex::decode(fine->complex()->encode(std::span<const std::uint64_t>{}));
-    EXPECT_THROW((void) ExplicitRegionProvider::from_exact_complex(empty), std::invalid_argument);
-    EXPECT_NO_THROW((void) ExplicitRegionProvider::from_exact_complex(empty, std::map<int, std::string>{}));
+    const auto empty = SimpleFluid::PLIC::PolyhedralComplex<SimpleFluid::ArithmeticMode::Ordinary>::decode(
+        fine->complex()->encode(std::span<const std::uint64_t>{}));
+    EXPECT_THROW((void) ExplicitRegionProvider::from_complex(empty), std::invalid_argument);
+    EXPECT_NO_THROW((void) ExplicitRegionProvider::from_complex(empty, std::map<int, std::string>{}));
 }

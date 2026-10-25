@@ -26,7 +26,8 @@ struct GeneralVoFProjectionProvenance
 {
     std::size_t byte_budget = 64 * 1024 * 1024;
     std::vector<GeneralVoFRoundedValue> face_velocity;   ///< Owned canonical order.
-    std::vector<Meshes::ExactGeometryMeasure> face_rate; ///< Certified zero-divergence rate, when topology supplied.
+    std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>
+        face_rate; ///< Certified zero-divergence rate, when topology supplied.
 };
 /** Finite operation evidence in owned canonical face order. Error radii
  * describe arithmetic only and never replace physical pressure thresholds. */
@@ -104,7 +105,7 @@ private:
     std::vector<Face> geometry_;
     ArithmeticMode arithmetic_mode_ = ArithmeticMode::Ordinary;
     std::vector<double> volumes_;
-    std::vector<Meshes::ExactGeometryMeasure> exact_volumes_;
+    std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> exact_volumes_;
     std::vector<Vector> spans_;
     struct GradientSample
     {
@@ -148,7 +149,8 @@ struct SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFlowWorkspace
         const std::vector<double>& fraction, const std::vector<double>& curvature, double dt, double surface_tension,
         const VoFSolverOptions& options, VoFStepDiagnostics& diagnostics,
         GeneralVoFProjectionProvenance* arithmetic = nullptr,
-        std::optional<std::span<const Meshes::ExactGeometryMeasure>> physical_mass = std::nullopt,
+        std::optional<std::span<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>>
+            physical_mass = std::nullopt,
         const Exact::GeneralVoFProjectionClosureTopology* closure_topology = nullptr);
 };
 } // namespace Exact

@@ -4,8 +4,8 @@
 #pragma once
 
 #include "FVM/GeometricVoF.hh"
-#include "geometry/ExactSweptGeometry.hh"
 #include "geometry/MeshHandle.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/ArithmeticMode.hh"
 #include <memory>
@@ -16,7 +16,7 @@ namespace SimpleFluid::detail
 namespace Exact
 {
 struct ConservativeVoFTransport;
-struct TransportPreparation;
+struct SIMPLEFLUID_SOLVERS_LOCAL TransportPreparation;
 } // namespace Exact
 /** Private native-grid transport boundary shared by VoF momentum and species.
  *
@@ -42,10 +42,10 @@ public:
          * OWNED canonical face order and must not be confused with scalar views.
          */
         bool exact_input = false;
-        std::vector<Meshes::CertifiedGeometryValue> inner_conversion_enclosures;
+        std::vector<SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>> inner_conversion_enclosures;
         std::vector<double> cell_trace;
-        std::vector<Meshes::ExactGeometryMeasure> exact_flux;
-        std::vector<Meshes::CertifiedGeometryValue> flux_enclosure;
+        std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> exact_flux;
+        std::vector<SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>> flux_enclosure;
     };
     explicit ConservativeVoFTransport(SP<const MeshHandle<>> mesh);
     /** Successful published exact preparations and successful reuses. */
@@ -92,7 +92,7 @@ public:
          * the implicit donor trace before exact face aggregation/narrowing.
          * The double amount remains its coefficient-view conversion for A.
          */
-        std::shared_ptr<const Meshes::ExactGeometryMeasure> exact_amount;
+        std::shared_ptr<const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>> exact_amount;
     };
     /** Certified closed-cell pullback assembly. The caller supplies independently
      * certified donor outgoing amounts and positive recipient-owned transfers;
@@ -133,13 +133,14 @@ public:
     struct ExactTransfer
     {
         DefaultTpetraTypes::global_ordinal_type donor = 0, recipient = 0;
-        Meshes::ExactGeometryMeasure amount;
+        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> amount;
     };
     struct ExactFaceContribution
     {
         DefaultTpetraTypes::local_ordinal_type face = 0;
         DefaultTpetraTypes::global_ordinal_type donor = 0;
-        Meshes::ExactGeometryMeasure amount; ///< Signed canonical carrier measure.
+        SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>
+            amount; ///< Signed canonical carrier measure.
     };
 
 private:
@@ -188,11 +189,12 @@ struct SIMPLEFLUID_SOLVERS_LOCAL ConservativeVoFTransport
      * publication; internal exact face fluxes have typed diagnostic enclosures.
      */
     [[nodiscard]] static Result solve(detail::ConservativeVoFTransport& self,
-        const std::vector<Meshes::ExactGeometryMeasure>& old, const std::vector<Meshes::ExactGeometryMeasure>& source,
-        const std::vector<Meshes::ExactGeometryMeasure>& capacity,
-        const std::vector<Meshes::ExactGeometryMeasure>& outgoing, const std::vector<ExactTransfer>& incoming,
-        const std::vector<ExactFaceContribution>& contributions, bool nonnegative, int maximum_iterations,
-        double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024);
+        const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& old,
+        const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& source,
+        const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& capacity,
+        const std::vector<SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>>& outgoing,
+        const std::vector<ExactTransfer>& incoming, const std::vector<ExactFaceContribution>& contributions,
+        bool nonnegative, int maximum_iterations, double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024);
 };
 } // namespace Exact
 } // namespace SimpleFluid::detail

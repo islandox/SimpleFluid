@@ -2,13 +2,12 @@
 /** @file GeneralVoFFlowWorkspace.cc
  * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
-#include "solvers/details/GeneralVoFFlowWorkspace.hh"
-#include "geometry/BoundedConvexGeometry.hh"
-#include "geometry/ConvexCellGeometry.hh"
+#include "geometry/PLIC/ConvexGeometry.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactPressure.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
+#include "solvers/details/GeneralVoFFlowWorkspace.hh"
 #include "solvers/details/GeneralVoFPhiClosure.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -120,8 +119,10 @@ GeneralVoFFlowWorkspace::GeneralVoFFlowWorkspace(
                 continue;
             }
             const auto exact_cell =
-                Meshes::ConvexCellGeometry::from_native_cell(**native, mesh_->cell_geometry_global_id(cell));
-            exact_volumes_[c] = Meshes::ExactGeometryMeasure::volume(*exact_cell);
+                SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::from_native_cell(
+                    **native, mesh_->cell_geometry_global_id(cell));
+            exact_volumes_[c] =
+                SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*exact_cell);
             const auto exact_spans = exact_cell->axis_spans();
             for (unsigned a = 0; a < 3; ++a)
             {

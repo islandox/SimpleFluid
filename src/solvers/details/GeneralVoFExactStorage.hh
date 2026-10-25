@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
-#include "geometry/ExactSweptGeometry.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include <array>
 #include <map>
 namespace SimpleFluid::detail
@@ -30,8 +30,10 @@ class SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFExactStorage
 public:
     explicit GeneralVoFExactStorage(std::size_t byte_budget) : budget_(byte_budget) {}
     void capacity(GeneralVoFStorageDomain, std::size_t count, std::size_t item_bytes);
-    void measure(GeneralVoFStorageDomain, const Meshes::ExactGeometryMeasure&);
-    void release(GeneralVoFStorageDomain, const Meshes::ExactGeometryMeasure&);
+    void measure(
+        GeneralVoFStorageDomain, const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>&);
+    void release(
+        GeneralVoFStorageDomain, const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>&);
     [[nodiscard]] std::size_t remaining() const noexcept { return budget_ - used_; }
     [[nodiscard]] GeneralVoFExactStorageReport finish() const;
 

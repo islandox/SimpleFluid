@@ -24,11 +24,12 @@ using Handle = MeshHandle<>;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
-ConvexGeometryPtr prism(double low, double high)
+SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> prism(double low, double high)
 {
-    const std::vector<GeometryPoint> points{
+    const std::vector<SimpleFluid::PLIC::GeometryPoint> points{
         {0, 0, low}, {1, 0, low}, {0, 1, low}, {0, 0, high}, {1, 0, high}, {0, 1, high}};
-    return ConvexCellGeometry::make(points, {{2, 1, 0}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
+    return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::make(
+        points, {{2, 1, 0}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
 }
 SP<Handle> native_prism(const ArrReal& levels)
 {
@@ -78,7 +79,7 @@ struct Fixture
     {
         const auto& mesh = refined ? children : parent;
         AMRRemapPhases result;
-        const GeometryHalfspace plane{{1, 0, 1}, {0.75, 0, 0}};
+        const SimpleFluid::PLIC::GeometryHalfspace plane{{1, 0, 1}, {0.75, 0, 0}};
         for (std::size_t c = 0; c < mesh->num_owned_cells(); ++c)
         {
             const auto gid = mesh->cell_global_id(static_cast<LO>(c));
@@ -142,7 +143,7 @@ TEST(ConservativeAMRRemapTest, TiltedPrismSplitAndReverseCoarseningPreservePhysi
         EXPECT_NEAR(result.inventories[1].amount[c] / result.inventories[2].amount[c], 11.0 / 3.0, 1e-14);
     }
     AMRRemapPhases fine{result.gas_volume, result.carrier_volume,
-        std::vector<GeometryHalfspace>(result.gas_volume.size(), {{1, 0, 1}, {0.75, 0, 0}})};
+        std::vector<SimpleFluid::PLIC::GeometryHalfspace>(result.gas_volume.size(), {{1, 0, 1}, {0.75, 0, 0}})};
     AMRRemapOutput restored;
     const auto reverse_report = coarsen.apply(fine, result.inventories, restored, 1000, 2);
     for (std::size_t c = 0; c < restored.gas_volume.size(); ++c)
@@ -205,7 +206,8 @@ TEST(ConservativeAMRRemapTest, RoundedPureMicroscopicAndSubnormalPhasesRetainSha
             const auto accepted = result;
             auto undeclared = phases;
             undeclared.geometry_declaration.clear();
-            undeclared.gas_halfspace.assign(owned, GeometryHalfspace{{0, 0, gas ? 1.0 : -1.0}, {0, 0, 0}});
+            undeclared.gas_halfspace.assign(
+                owned, SimpleFluid::PLIC::GeometryHalfspace{{0, 0, gas ? 1.0 : -1.0}, {0, 0, 0}});
             EXPECT_THROW((void) remap.apply(undeclared, paired, result), std::invalid_argument);
             expect_equal(result, accepted);
         }
@@ -221,7 +223,8 @@ TEST(ConservativeAMRRemapTest, ResolvedTinyPhaseKeepsItsActualGeometricLocation)
         const auto owned = f.parent->num_owned_cells();
         phases.gas_volume.assign(owned, gas ? 0.5e-200 : 0.5);
         phases.carrier_volume.assign(owned, gas ? 0.5 : 0.5e-200);
-        phases.gas_halfspace.assign(owned, GeometryHalfspace{{0, 0, gas ? 1.0 : -1.0}, {0, 0, 1e-200}});
+        phases.gas_halfspace.assign(
+            owned, SimpleFluid::PLIC::GeometryHalfspace{{0, 0, gas ? 1.0 : -1.0}, {0, 0, 1e-200}});
         const auto kind = gas ? InventoryCarrier::GasVolume : InventoryCarrier::LiquidVolume;
         const std::vector<ConservedQuantity> quantities{
             {"retained_species", kind, std::vector<double>(owned, 3.0), true}};
@@ -243,9 +246,10 @@ TEST(ConservativeAMRRemapTest, EqualVolumeShiftedCatalogCannotMasqueradeAsNative
     auto coarse = f.coarse, fine = f.fine;
     auto shifted = [](double lower, double upper)
     {
-        const std::vector<GeometryPoint> points{
+        const std::vector<SimpleFluid::PLIC::GeometryPoint> points{
             {2, 0, lower}, {3, 0, lower}, {2, 1, lower}, {2, 0, upper}, {3, 0, upper}, {2, 1, upper}};
-        return ConvexCellGeometry::make(points, {{2, 1, 0}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
+        return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::make(
+            points, {{2, 1, 0}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
     };
     coarse[0].geometry = shifted(0, 1);
     fine[0].geometry = shifted(0, 0.5);
@@ -366,7 +370,7 @@ TEST(ConservativeAMRRemapTest, LocalCompleteAncestryFamiliesDoNotRequireGlobalGe
     ConservativeAMRRemap remap(source, target, plan);
     AMRRemapPhases phases{std::vector<double>(source->num_owned_cells(), 0),
         std::vector<double>(source->num_owned_cells(), 0.25),
-        std::vector<GeometryHalfspace>(source->num_owned_cells())};
+        std::vector<SimpleFluid::PLIC::GeometryHalfspace>(source->num_owned_cells())};
     std::vector<ConservedQuantity> quantities{{"tracer", InventoryCarrier::BulkVolume, {}, true}};
     for (std::size_t c = 0; c < source->num_owned_cells(); ++c)
         quantities[0].amount.push_back(1 + source->cell_global_id(static_cast<LO>(c)));
@@ -470,7 +474,7 @@ TEST(ConservativeAMRRemapTest, FictitiousRemoteTargetCannotCloseATrueNativeGap)
         MeshPartitioner<DefaultTpetraTypes>::partition(CompositeMeshSource(box), options, comm));
     auto triangle_geometry = [&](std::size_t index, bool fill)
     {
-        std::vector<GeometryPoint> vertices;
+        std::vector<SimpleFluid::PLIC::GeometryPoint> vertices;
         for (const auto z : {0.0, 1.0})
             for (const auto node : triangles[index])
             {
@@ -488,7 +492,8 @@ TEST(ConservativeAMRRemapTest, FictitiousRemoteTargetCannotCloseATrueNativeGap)
                 }
                 vertices.push_back({x, y, z});
             }
-        return ConvexCellGeometry::make(vertices, {{2, 1, 0}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
+        return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::make(
+            vertices, {{2, 1, 0}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}});
     };
     const auto owned = target->owned_cell_map();
     const auto lower = !owned->isNodeGlobalElement(3) ? 3u : 8u;
@@ -497,8 +502,8 @@ TEST(ConservativeAMRRemapTest, FictitiousRemoteTargetCannotCloseATrueNativeGap)
     int all_remote = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &remote_candidates, &all_remote);
     ASSERT_EQ(all_remote, 1);
-    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> coarse{
-        {key({}), 0, 3, ConvexCellGeometry::box({0, 0, 0}, {1, 1, 1})}};
+    const std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> coarse{{key({}), 0, 3,
+        SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1})}};
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveCellBinding> fine;
     std::vector<::SimpleFluid::Meshes::AMR::AdaptiveAncestryRelation> relations;
     for (std::uint64_t index = 0; index < triangles.size(); ++index)
@@ -587,7 +592,8 @@ TEST(ConservativeAMRRemapTest, SparsePlaneOffsetPreservesTranslatedMicroscopicPh
     ConservativeAMRRemap remap(source, target, plan);
     const auto owned = source->num_owned_cells();
     AMRRemapPhases phases{std::vector<double>(owned, 0.5e-200), std::vector<double>(owned, 0.5),
-        std::vector<GeometryHalfspace>(owned, GeometryHalfspace{{0, 0, 1}, {0, 0, origin}, 1e-200})};
+        std::vector<SimpleFluid::PLIC::GeometryHalfspace>(
+            owned, SimpleFluid::PLIC::GeometryHalfspace{{0, 0, 1}, {0, 0, origin}, 1e-200})};
     const std::vector<ConservedQuantity> quantities{
         {"microscopic_species", InventoryCarrier::GasVolume, std::vector<double>(owned, 7.0), true}};
     AMRRemapOutput result;
