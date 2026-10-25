@@ -8,6 +8,7 @@
 #include "solvers/LowMachMixtureSolver.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
@@ -395,6 +396,338 @@ void ordinary_liquid_gas_contrast(int iteration_budget)
         "maximum_pressure_rhs_relative_residual", format(maximum_rhs_relative_pressure_residual));
     testing::Test::RecordProperty("maximum_pressure_absolute_residual", format(maximum_absolute_pressure_residual));
     testing::Test::RecordProperty("maximum_pressure_iterations", maximum_pressure_iterations);
+}
+
+struct EmptyGasTransportFixture
+{
+    SP<Solver::Mesh> grid;
+    std::shared_ptr<const R::MixtureThermodynamics> liquid, gas;
+    Solver::Options controls = options();
+    Solver::State initial;
+    std::vector<Solver::CellSources> sources;
+    double dt = 1e-8, gas_reference = 6000.;
+
+    explicit EmptyGasTransportFixture(bool captured_case, bool entirely_empty = false, double reference = 6000.)
+        : gas_reference(reference)
+    {
+        Solver::Mesh::DistributionOptions distribution;
+        distribution.allow_empty_partitions = true;
+        ArrReal z = captured_case ? ArrReal{0., .00125, .0025, .00375, .005, .00625, .0075, .00875, .01}
+                                  : ArrReal{0., .01 / 3, .02 / 3, .01};
+        grid = std::make_shared<Solver::Mesh>(std::make_shared<Meshes::OrthogonalCartesian3D>(
+                                                  Vec3D<ArrReal>{ArrReal{0., .01}, ArrReal{0., .01}, std::move(z)}),
+            distribution);
+        const auto species = catalog();
+        liquid =
+            R::make_linear_compressible_mixture_liquid(species, {250, 600, 10000, 2000000}, [](std::span<const double>)
+                { return R::LinearCompressibleMixtureLiquid{300, 100000, 1000, 4000, 0, 4.5e-10, 0, 0, 0}; });
+        gas = R::make_ideal_gas_mixture(
+            species, {{20, 300, reference}, {20, 300, reference}}, {250, 600, 10000, 2000000});
+        initial.thermodynamic_pressure = 100000;
+        initial.cells.resize(grid->num_owned_cells());
+        sources.resize(initial.cells.size());
+        constexpr double contrast[] = {0., 1e-10, 1e-6, .01, .2, .8, .2, .01};
+        for (std::size_t c = 0; c < initial.cells.size(); ++c)
+        {
+            const LO cell = static_cast<LO>(c);
+            const std::size_t index =
+                std::min(std::size_t(grid->cell_centroid(cell).z / (captured_case ? .00125 : .01 / 3)),
+                    captured_case ? std::size_t(7) : std::size_t(2));
+            const double alpha = entirely_empty ? 0. : captured_case ? contrast[index] : index == 0 ? 0. : 1e-10;
+            const double volume = grid->cell_volume(cell), mass = 1000 * (1 - alpha) * volume;
+            const double n = 100000 * alpha * volume / (gas_constant * 300);
+            initial.cells[c].phases = {{liquid, {mass / .018, 0.}, 100000, 0., 300},
+                {gas, {captured_case ? 0. : .25 * n, captured_case ? n : .75 * n}, 100000, reference * n,
+                    n > 0 ? 300. : 0.}};
+            if (!captured_case)
+                // Closed ALE walls require zero normal slip in their adjacent cells.
+                // Interior drift still sends a tiny physical gas packet into the empty bottom cell.
+                initial.cells[c].drift_velocity = {Solver::Vector{}, Solver::Vector{0., 0., index == 1 ? -1e-7 : 0.}};
+            sources[c].internal_energy = {(1 + double(index)) * dt, 0.};
+        }
+    }
+};
+
+double independent_phase_volume(const R::PhaseThermalState& phase)
+{
+    const double n = std::accumulate(phase.moles.begin(), phase.moles.end(), 0.);
+    if (n == 0.)
+        return 0.;
+    double mass = 0.;
+    auto x = phase.moles;
+    for (std::size_t s = 0; s < x.size(); ++s)
+    {
+        mass += x[s] * phase.thermodynamics->catalog().species()[s].molarMass;
+        x[s] /= n;
+    }
+    return mass / phase.thermodynamics->evaluate(phase.temperature, phase.absolute_pressure, x).density;
+}
+
+/** Rebuild stage-used implicit upwind fluxes from public snapshots. No final
+ * pressure-corrected flux, EOS donor-volume denominator, or absolute stock floor enters this oracle. */
+void expect_transport_face_balances(const EmptyGasTransportFixture& f, const Solver::Trial& trial)
+{
+    using CellField = Solver::Traits::scalar_cell_type;
+    using FaceField = Solver::Traits::scalar_face_type;
+    const auto& packet = trial.transport_snapshot();
+    std::array<double, 3> local_maximum{}, maximum{};
+    for (std::size_t a = 0; a < 2; ++a)
+        for (std::size_t channel = 0; channel < 4; ++channel)
+        {
+            CellField concentration(f.grid, 0., "independent_transport_concentration");
+            FaceField face_flux(f.grid, 0., "independent_transport_face_flux");
+            const auto amount = [channel](const Solver::TransportPhaseInventory& phase)
+            {
+                return channel < 2    ? phase.moles[channel]
+                       : channel == 2 ? phase.internal_energy
+                                      : phase.advected_material_volume;
+            };
+            for (std::size_t c = 0; c < packet.cells.size(); ++c)
+                concentration.set_owned_value(
+                    static_cast<LO>(c), amount(packet.cells[c].phases[a]) / packet.new_control_volumes[c]);
+            concentration.sync_ghosts();
+            for (std::size_t i = 0; i < f.grid->num_owned_faces(); ++i)
+            {
+                const LO face = static_cast<LO>(i);
+                const auto& receipt = trial.owned_phase_transport()[i];
+                const double phi = receipt.relative_phase_volume_flux[a];
+                if (f.grid->is_geometry_exterior_face(face))
+                {
+                    EXPECT_DOUBLE_EQ(phi, 0.);
+                    continue;
+                }
+                const LO owner = f.grid->owner_cell(face);
+                const LO donor = phi >= 0 ? owner : f.grid->opposite_or_periodic_neighbor_cell(face, owner);
+                face_flux.set_owned_value(
+                    face, phi * (channel == 3 ? receipt.material_fraction[a] : concentration.local_value(donor)));
+            }
+            face_flux.sync_ghosts();
+            for (std::size_t c = 0; c < packet.cells.size(); ++c)
+            {
+                const LO cell = static_cast<LO>(c);
+                const auto& old = f.initial.cells[c].phases[a];
+                const double before = channel < 2    ? old.moles[channel]
+                                      : channel == 2 ? old.internal_energy
+                                                     : independent_phase_volume(old);
+                const double after = amount(packet.cells[c].phases[a]);
+                long double integrated = 0., magnitude = 0.;
+                for (std::size_t i = 0; i < f.grid->num_faces(); ++i)
+                {
+                    const LO face = static_cast<LO>(i);
+                    const int sign = f.grid->owner_cell(face) == cell ? 1
+                                     : !f.grid->is_geometry_exterior_face(face) && f.grid->neighbor_cell(face) == cell
+                                         ? -1
+                                         : 0;
+                    if (sign)
+                    {
+                        const long double contribution =
+                            static_cast<long double>(packet.time_step) * face_flux.local_value(face);
+                        integrated += sign * contribution;
+                        magnitude += std::abs(contribution);
+                    }
+                }
+                const long double residual = static_cast<long double>(after) - before + integrated;
+                const long double scale = std::abs(static_cast<long double>(before)) + std::abs(after) + magnitude;
+                if (scale == 0.)
+                    EXPECT_EQ(residual, 0.);
+                else
+                {
+                    const double relative = static_cast<double>(std::abs(residual) / scale);
+                    EXPECT_LE(relative, f.controls.conservation_relative_tolerance);
+                    auto& channel_maximum = local_maximum[channel < 2 ? 0 : channel - 1];
+                    channel_maximum = std::max(channel_maximum, relative);
+                }
+            }
+        }
+    Teuchos::reduceAll(*f.grid->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, static_cast<int>(maximum.size()),
+        local_maximum.data(), maximum.data());
+    constexpr const char* names[] = {
+        "maximum_species_face_balance", "maximum_energy_face_balance", "maximum_material_volume_face_balance"};
+    for (std::size_t channel = 0; channel < maximum.size(); ++channel)
+    {
+        std::ostringstream value;
+        value.precision(17);
+        value << maximum[channel];
+        testing::Test::RecordProperty(names[channel], value.str());
+    }
+}
+
+TEST(LowMachMixtureSolverTest, EmptyGasFrontRetainsTinyPhysicalFaceArrivalAtOrdinaryWaterConditions)
+{
+    EmptyGasTransportFixture f(true);
+    Solver solver(f.grid, {f.liquid, f.gas}, f.controls);
+    solver.initialize(f.initial);
+    std::optional<Solver::Trial> staged;
+    ASSERT_NO_THROW(staged.emplace(solver.preview(f.dt, f.sources)));
+    const auto& trial = *staged;
+    expect_transport_face_balances(f, trial);
+    EXPECT_GT(trial.diagnostics().maximum_initial_transport_residual, 1.);
+    EXPECT_GT(trial.diagnostics().transport_consistency_refinements, 0);
+    EXPECT_LE(trial.diagnostics().maximum_species_transport_residual, 1.);
+    EXPECT_LE(trial.diagnostics().maximum_energy_transport_residual, 1.);
+    testing::Test::RecordProperty(
+        "transport_consistency_refinements", std::to_string(trial.diagnostics().transport_consistency_refinements));
+    testing::Test::RecordProperty(
+        "maximum_initial_transport_residual", std::to_string(trial.diagnostics().maximum_initial_transport_residual));
+    std::array<double, 3> arrival{}, global_arrival{};
+    for (std::size_t c = 0; c < f.initial.cells.size(); ++c)
+        if (f.grid->cell_centroid(static_cast<LO>(c)).z < .00125)
+        {
+            const auto& gas = trial.transport_snapshot().cells[c].phases[1];
+            arrival = {gas.moles[0] + gas.moles[1], gas.internal_energy, gas.advected_material_volume};
+            EXPECT_GT(arrival[0], 0.);
+            EXPECT_GT(gas.internal_energy, 0.);
+            EXPECT_GT(gas.advected_material_volume, 0.);
+            EXPECT_EQ(trial.state().cells[c].phases[1].moles, gas.moles);
+            EXPECT_GT(trial.state().cells[c].phases[1].temperature, 0.);
+        }
+    Teuchos::reduceAll(*f.grid->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, static_cast<int>(arrival.size()),
+        arrival.data(), global_arrival.data());
+    constexpr const char* names[] = {
+        "empty_front_arriving_moles", "empty_front_arriving_internal_energy", "empty_front_advected_material_volume"};
+    for (std::size_t channel = 0; channel < global_arrival.size(); ++channel)
+    {
+        EXPECT_GT(global_arrival[channel], 0.);
+        std::ostringstream value;
+        value.precision(17);
+        value << global_arrival[channel];
+        testing::Test::RecordProperty(names[channel], value.str());
+    }
+    EXPECT_NO_THROW(solver.commit(trial));
+}
+
+TEST(LowMachMixtureSolverTest, EmptyGasFrontAdvectsSignedCaloricReferencesInFixedAndALESteps)
+{
+    for (const bool moving : {false, true})
+        for (const double reference : {-6000., 0., 6000.})
+        {
+            SCOPED_TRACE(moving);
+            SCOPED_TRACE(reference);
+            EmptyGasTransportFixture f(false, false, reference);
+            Solver solver(f.grid, {f.liquid, f.gas}, f.controls);
+            solver.initialize(f.initial);
+            Solver::PlanarMotion motion(f.grid);
+            std::optional<Solver::Trial> staged;
+            ASSERT_NO_THROW(staged.emplace(moving ? solver.preview_ale(f.dt, motion, .01 * (1 + 1e-12), f.sources)
+                                                  : solver.preview(f.dt, f.sources)));
+            const auto& trial = *staged;
+            EXPECT_FALSE(motion.has_active_trial());
+            expect_transport_face_balances(f, trial);
+            for (std::size_t c = 0; c < f.initial.cells.size(); ++c)
+            {
+                const auto& gas = trial.transport_snapshot().cells[c].phases[1];
+                const double n = gas.moles[0] + gas.moles[1];
+                EXPECT_EQ(trial.state().cells[c].phases[1].moles, gas.moles);
+                if (n > 0.)
+                    EXPECT_GT(trial.state().cells[c].phases[1].temperature, 0.);
+                const double expected = reference * n;
+                const double scale = std::abs(expected) + std::abs(gas.internal_energy);
+                if (reference == 0.)
+                    EXPECT_DOUBLE_EQ(gas.internal_energy, 0.);
+                else
+                    EXPECT_LE(
+                        std::abs(gas.internal_energy - expected), f.controls.conservation_relative_tolerance * scale);
+                if (f.grid->cell_centroid(static_cast<LO>(c)).z < .01 / 3)
+                {
+                    EXPECT_GT(n, 0.);
+                    EXPECT_GT(gas.advected_material_volume, 0.);
+                }
+                // Phase energy after caloric closure includes pressure work and equilibrium heat sharing.
+                // Proportionality above intentionally checks the pre-source transported U, not that final U.
+            }
+            if (moving)
+                EXPECT_NO_THROW(solver.commit_ale(trial, motion));
+            else
+                EXPECT_NO_THROW(solver.commit(trial));
+            EXPECT_EQ(solver.state().revision, 1U);
+            int local_empty = f.grid->num_owned_cells() == 0, empty = 0;
+            Teuchos::reduceAll(*f.grid->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+            EXPECT_EQ(empty, std::max(0, f.grid->owned_cell_map()->getComm()->getSize() - 3));
+        }
+}
+
+TEST(LowMachMixtureSolverTest, AbsentGasRemainsExactlyAbsentWithNoFictitiousEnergyOrVolume)
+{
+    for (const bool moving : {false, true})
+    {
+        EmptyGasTransportFixture f(false, true);
+        Solver solver(f.grid, {f.liquid, f.gas}, f.controls);
+        solver.initialize(f.initial);
+        Solver::PlanarMotion motion(f.grid);
+        const auto trial =
+            moving ? solver.preview_ale(f.dt, motion, .01 * (1 + 1e-12), f.sources) : solver.preview(f.dt, f.sources);
+        expect_transport_face_balances(f, trial);
+        for (std::size_t c = 0; c < f.initial.cells.size(); ++c)
+        {
+            const auto& transported = trial.transport_snapshot().cells[c].phases[1];
+            EXPECT_EQ(transported.moles, std::vector<double>({0., 0.}));
+            EXPECT_DOUBLE_EQ(transported.internal_energy, 0.);
+            EXPECT_DOUBLE_EQ(transported.advected_material_volume, 0.);
+            const auto& accepted = trial.state().cells[c].phases[1];
+            EXPECT_EQ(accepted.moles, transported.moles);
+            EXPECT_DOUBLE_EQ(accepted.internal_energy, 0.);
+            EXPECT_DOUBLE_EQ(accepted.temperature, 0.);
+        }
+        if (moving)
+            solver.commit_ale(trial, motion);
+        else
+            solver.commit(trial);
+    }
+}
+
+TEST(LowMachMixtureSolverTest, InsufficientTransportAccuracyBudgetRejectsWithoutPublishing)
+{
+    for (const bool loose_krylov : {false, true})
+    {
+        SCOPED_TRACE(loose_krylov);
+        EmptyGasTransportFixture f(true);
+        f.controls.linear.max_iterations = 1;
+        if (loose_krylov)
+            f.controls.linear.tolerance = 2.;
+        for (auto& cell : f.initial.cells)
+            cell.drift_velocity = {Solver::Vector{}, Solver::Vector{0., 0., -1.}};
+        Solver solver(f.grid, {f.liquid, f.gas}, f.controls);
+        solver.initialize(f.initial);
+        const auto initial = solver.state();
+        const auto initial_flux = solver.volume_flux().owned_data().getLocalViewHost(Tpetra::Access::ReadOnly);
+        std::vector<double> flux;
+        for (std::size_t i = 0; i < f.grid->num_owned_faces(); ++i)
+            flux.push_back(initial_flux(i, 0));
+        std::string failure;
+        try
+        {
+            // At CFL=0.8, a deliberately loose Krylov stop passes its own metric.
+            // One remaining balance sweep cannot satisfy the original local physical gate.
+            (void) solver.preview(.001);
+        }
+        catch (const std::exception& error)
+        {
+            failure = error.what();
+        }
+        EXPECT_FALSE(failure.empty());
+        if (loose_krylov)
+            EXPECT_NE(failure.find("Low-Mach local transport exhausted the original scalar iteration budget:"),
+                std::string::npos)
+                << failure;
+        else
+            EXPECT_TRUE(
+                failure.find("Low-Mach phase transport failed true linear residual gate.") != std::string::npos ||
+                failure.find("Low-Mach local transport exhausted the original scalar iteration budget:") !=
+                    std::string::npos)
+                << failure;
+        EXPECT_EQ(solver.state().revision, initial.revision);
+        EXPECT_DOUBLE_EQ(solver.state().time, initial.time);
+        EXPECT_DOUBLE_EQ(solver.state().thermodynamic_pressure, initial.thermodynamic_pressure);
+        for (std::size_t c = 0; c < initial.cells.size(); ++c)
+            for (std::size_t a = 0; a < 2; ++a)
+            {
+                EXPECT_EQ(solver.state().cells[c].phases[a].moles, initial.cells[c].phases[a].moles);
+                EXPECT_DOUBLE_EQ(
+                    solver.state().cells[c].phases[a].internal_energy, initial.cells[c].phases[a].internal_energy);
+            }
+        for (std::size_t i = 0; i < f.grid->num_owned_faces(); ++i)
+            EXPECT_DOUBLE_EQ(solver.volume_flux().local_value(static_cast<LO>(i)), flux[i]);
+    }
 }
 
 TEST(LowMachMixtureSolverTest, OrdinaryLiquidGasSusceptibilityContrastRetainsPhysicalGatesAtSmallTimeSteps)

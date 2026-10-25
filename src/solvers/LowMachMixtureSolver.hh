@@ -181,7 +181,14 @@ public:
         std::vector<double> population_number_errors; ///< Per-phase global deltaN-sourceN, zero for bulk roles.
         double maximum_population_transport_residual =
             0; ///< Local count balance normalized by its physical relative gate.
+        double maximum_initial_transport_residual = 0; ///< Before componentwise repair, normalized local gate.
+        double maximum_species_transport_residual = 0, maximum_energy_transport_residual = 0;
+        ///< Final componentwise stock/face residuals; each must be <=1 independently of global Krylov convergence.
+        int transport_consistency_refinements = 0; ///< Sum of local balance sweeps over scalar calls, final corrector.
+        ///< Every sweep spends the corresponding scalar solve remaining iteration budget. No extra work is hidden.
         LinearSolveSummary transport_linear, momentum_linear;
+        ///< transport_linear counts Krylov iterations only; final residuals describe the actually returned fields.
+        ///< The separate consistency-refinement count completes the work accounting.
         LinearSolveStatistics pressure_linear; ///< Final corrector, including its actual global RHS norm.
         double pressure_linear_rhs_norm_floor = 0; ///< Pressure-only true-residual normalization, m3/s.
     };

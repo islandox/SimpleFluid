@@ -9,6 +9,7 @@
 #include "equations/VariableDensityMomentumEquation.hh"
 #include "solvers/details/LowMachConditionedThermal.hh"
 #include "solvers/details/LowMachSourceStage.hh"
+#include "solvers/details/LowMachTransportConsistency.hh"
 #include "utils/CompensatedSum.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -436,11 +437,23 @@ struct LowMachMixtureSolver::Implementation
         }
     }
     void transport(std::span<const double> old_amount, const FaceField& phase_flux, double dt,
-        std::vector<double>& new_amount, Diagnostics& statistics, const FVM::ALEControlVolumeState* ale = nullptr)
+        std::vector<double>& new_amount, Diagnostics& statistics, transport_consistency_detail::Quantity quantity,
+        const FVM::ALEControlVolumeState* ale = nullptr)
     {
-        for (size_t c = 0; c < old_amount.size(); ++c)
-            old_scalar.set_owned_value(static_cast<LO>(c),
-                old_amount[c] / (ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(static_cast<LO>(c))));
+        collective_detail::collective_local_validation(*mesh, "Accepted low-Mach transport concentration",
+            [&]
+            {
+                for (size_t c = 0; c < old_amount.size(); ++c)
+                {
+                    const double value = old_amount[c] /
+                                         (ale ? ale->old_cell_volumes()[c] : mesh->cell_volume(static_cast<LO>(c)));
+                    check(std::isfinite(old_amount[c]) && std::isfinite(value) &&
+                              (old_amount[c] == 0 || value != 0) &&
+                              (quantity == transport_consistency_detail::Quantity::Energy || old_amount[c] >= 0),
+                        "Accepted phase transport inventory/concentration is invalid or unrepresentable.");
+                    old_scalar.set_owned_value(static_cast<LO>(c), value);
+                }
+            });
         old_scalar.sync_ghosts();
         scalar.owned_data().update(1.0, old_scalar.owned_data(), 0.0);
         auto system = FVM::weighted_scalar_transport_system<Pack>(
@@ -454,17 +467,31 @@ struct LowMachMixtureSolver::Implementation
                 .boundary_value = [](int, size_t) { return 0.0; },
                 .source = [](LO) { return 0.0; },
                 .treatment = FVM::NonOrthogonalTreatment::Implicit,
+                .discretization = {.time = FVM::ScalarTimeScheme::BackwardEuler,
+                    .convection = FVM::ScalarConvectionScheme::Upwind},
                 .geometry_cache = &geometry,
                 .ale = ale});
         transport_solver.notify_operator_values_changed();
         const auto result =
             transport_solver.solve_with_statistics(system.matrix, *system.rhs, scalar.owned_data(), options.linear);
-        statistics.transport_linear.add(result);
         if (!result.converged)
             throw std::runtime_error("Low-Mach phase transport failed true linear residual gate.");
-        new_amount.resize(old_amount.size());
-        for (size_t c = 0; c < old_amount.size(); ++c)
-            new_amount[c] = scalar.value(static_cast<LO>(c)) * mesh->cell_volume(static_cast<LO>(c));
+        const auto consistent = transport_consistency_detail::enforce(mesh, old_amount, phase_flux, dt,
+            scalar, new_amount, *system.matrix, *system.rhs, result, options.linear,
+            options.conservation_relative_tolerance, quantity, ale);
+        statistics.transport_linear.add(consistent.linear);
+        statistics.transport_consistency_refinements += consistent.refinements;
+        statistics.maximum_initial_transport_residual =
+            std::max(statistics.maximum_initial_transport_residual, consistent.initial_residual);
+        if (quantity == transport_consistency_detail::Quantity::Species)
+            statistics.maximum_species_transport_residual =
+                std::max(statistics.maximum_species_transport_residual, consistent.final_residual);
+        else if (quantity == transport_consistency_detail::Quantity::Energy)
+            statistics.maximum_energy_transport_residual =
+                std::max(statistics.maximum_energy_transport_residual, consistent.final_residual);
+        else
+            statistics.maximum_population_transport_residual =
+                std::max(statistics.maximum_population_transport_residual, consistent.final_residual);
     }
 };
 LowMachMixtureSolver::LowMachMixtureSolver(
@@ -885,7 +912,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                                     "Population number concentration is not representable.");
                             }
                         });
-                    d->transport(before, *phase_flux[a], dt, after, result, ale);
+                    d->transport(before, *phase_flux[a], dt, after, result,
+                        transport_consistency_detail::Quantity::Population, ale);
 
                     ScalarField number_concentration(d->mesh, 0.0, "transported_population_number");
                     FaceField number_flux(d->mesh, 0.0, "conservative_population_number_flux");
@@ -966,7 +994,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 {
                     for (size_t c = 0; c < nc; ++c)
                         before[c] = accepted.cells[c].phases[a].moles[s];
-                    d->transport(before, *phase_flux[a], dt, after, result, ale);
+                    d->transport(before, *phase_flux[a], dt, after, result,
+                        transport_consistency_detail::Quantity::Species, ale);
                     auto field = std::make_unique<ScalarField>(d->mesh, "transported_species_concentration");
                     for (size_t c = 0; c < nc; ++c)
                     {
@@ -978,7 +1007,8 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                 }
                 for (size_t c = 0; c < nc; ++c)
                     before[c] = accepted.cells[c].phases[a].internal_energy;
-                d->transport(before, *phase_flux[a], dt, after, result, ale);
+                d->transport(before, *phase_flux[a], dt, after, result,
+                    transport_consistency_detail::Quantity::Energy, ale);
                 for (size_t c = 0; c < nc; ++c)
                     trial.cells[c].phases[a].internal_energy = after[c];
                 ScalarField transported_energy_density(d->mesh, "transported_energy_operand");
@@ -1079,9 +1109,20 @@ LowMachMixtureSolver::Trial LowMachMixtureSolver::preview_impl(double dt, const 
                     });
                 material_face_fraction[a]->sync_ghosts();
                 material_volume_flux.sync_ghosts();
-                for (size_t c = 0; c < nc; ++c)
-                    adv_volumes[c][a] =
-                        old_volumes[c][a] - dt * FVM::cell_flux_balance(mesh, material_volume_flux, static_cast<LO>(c));
+                collective_detail::collective_local_validation(mesh, "Phase transport stock/material-volume support",
+                    [&]
+                    {
+                        for (size_t c = 0; c < nc; ++c)
+                        {
+                            adv_volumes[c][a] = old_volumes[c][a] -
+                                               dt * FVM::cell_flux_balance(
+                                                        mesh, material_volume_flux, static_cast<LO>(c));
+                            const auto& transported = trial.cells[c].phases[a];
+                            check(phase_mass(transported) > 0 ||
+                                      (transported.internal_energy == 0 && adv_volumes[c][a] == 0),
+                                "Locally empty phase has inconsistent canonical transport energy/volume packets.");
+                        }
+                    });
             }
             caloric_transport_magnitude = d->sum(local_caloric_transport);
             energy_transport_operand_magnitude = d->sum(local_energy_transport);
