@@ -18,12 +18,12 @@ std::vector<Patch> paraboloid(double bending, bool permute)
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x)
         {
-            VoF::PolyhedralInterface interface;
+            PLIC::PolyhedralInterface interface;
             interface.gas.normal = {bending * x, bending * y, 1};
             interface.gas.anchor = {double(x), double(y), -.5 * bending * (x * x + y * y)};
             auto cell = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
                 {x - .5, y - .5, -2}, {x + .5, y + .5, 2});
-            auto patch = detail::Exact::GeneralVoFCurvature::patch(patches.size(), *cell, interface);
+            auto patch = detail::GeneralVoFCurvature::patch<ArithmeticMode::Exact>(patches.size(), *cell, interface);
             EXPECT_TRUE(patch.has_value());
             if (permute)
             {

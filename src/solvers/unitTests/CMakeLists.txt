@@ -761,6 +761,11 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
       TARGET testExactConservativeVoFTransport PROCS 2
       LABELS "vof;exact;conservation;collective")
   simplefluid_add_mpi_test(
+      NAME ExactConservativeVoFNorm_4procs
+      TARGET testExactConservativeVoFTransport PROCS 4
+      ARGS "--gtest_filter=ExactConservativeVoFTransportTest.LazyZeroNormSupportsEmptyOwnersAndBudgetRecovery:ExactConservativeVoFTransportTest.LeasedPhysicalNormSeparatesAggregateOperationAndCommunicationStorage"
+      LABELS "vof;exact;conservation;collective;empty_rank" TIMEOUT 120)
+  simplefluid_add_mpi_test(
       NAME ExactConservativeVoFTransport_EmptyRank_33procs
       TARGET testExactConservativeVoFTransport PROCS 33
       LABELS "vof;exact;conservation;collective;empty_rank" TIMEOUT 120)

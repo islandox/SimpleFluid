@@ -36,7 +36,7 @@ struct GeneralVoFOptions
      * agree collectively, including on empty owners. */
     std::size_t byte_budget = 64 * 1024 * 1024, maximum_stencil_cells = 128, maximum_halo_cells = 65536;
     unsigned support_rings = 2;
-    PolyhedralReconstructionOptions reconstruction;
+    PLIC::PolyhedralReconstructionOptions reconstruction;
     SimpleFluid::PLIC::SweepLimits sweep;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
 };
@@ -204,14 +204,14 @@ struct GeneralVoFResolutionRequest
 {
     std::uint64_t cell = 0;
     Meshes::AMR::AdaptiveCellKey key;
-    PolyhedralResolutionAssessment assessment;
+    PLIC::PolyhedralResolutionAssessment assessment;
 };
 struct GeneralVoFReconstructionPatch
 {
     std::uint64_t cell = 0;
     int owner = -1;
     SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
-    PolyhedralInterface interface;
+    PLIC::PolyhedralInterface interface;
     PLIC::DynamicConvexGeometryPtr finite_geometry;
 };
 class SIMPLEFLUID_FVM_EXPORT GeneralVoF
@@ -276,7 +276,7 @@ public:
      * locally owned; an external controller may refine/reinitialize and recheck.
      * plan_transport rejects atomically when requests remain unavailable. */
     [[nodiscard]] std::vector<GeneralVoFResolutionRequest> resolution_requests() const;
-    [[nodiscard]] std::vector<PolyhedralInterface> reconstruct() const;
+    [[nodiscard]] std::vector<PLIC::PolyhedralInterface> reconstruct() const;
     [[nodiscard]] std::vector<GeneralVoFReconstructionPatch> reconstruction_patches() const;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveNode>& nodes() const noexcept;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveTile>& tiles() const noexcept;

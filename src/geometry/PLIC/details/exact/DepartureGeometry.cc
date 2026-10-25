@@ -132,14 +132,14 @@ void departure_authenticate_cones(const SweptFace<ArithmeticMode::Exact>& face, 
     {
         if (!piece.geometry || (piece.sign != 1 && piece.sign != -1))
             throw std::invalid_argument("Original face sweep has a null/invalid signed simplex.");
-        const auto& poly = ExactSweepAccess::poly(*piece.geometry);
+        const auto& poly = SweepAccess<ArithmeticMode::Exact>::poly(*piece.geometry);
         if (poly.vertices.size() != 4 || poly.faces.size() != 4)
             throw std::invalid_argument("Original signed simplex is not its authenticated tetrahedron.");
         insert(observed, {&poly.vertices[0], &poly.vertices[1], &poly.vertices[2], &poly.vertices[3]}, piece.sign);
         observed_volume += piece.sign * exact_moments(poly, center).volume;
         departure_charge_q(observed_volume, budget);
     }
-    if (observed_volume != ExactSweepAccess::value(face.volume()))
+    if (observed_volume != SweepAccess<ArithmeticMode::Exact>::value(face.volume()))
         throw std::invalid_argument("Original signed sweep volume differs from its prescribed exact control.");
     if (expected != observed)
         throw std::invalid_argument("Original signed sweep differs from its exact closed-boundary cones.");
@@ -188,7 +188,7 @@ void departure_authenticate_recipient_sweeps(const SweepRecipient<ArithmeticMode
     for (const auto& incidence : target.outward_faces)
     {
         const auto& face = *incidence.face;
-        const auto& current = ExactSweepAccess::polygon(*face.origin_face());
+        const auto& current = SweepAccess<ArithmeticMode::Exact>::polygon(*face.origin_face());
         std::map<P, P> mapped;
         for (const auto& trace : face.trajectories())
         {
@@ -233,14 +233,14 @@ void departure_authenticate_recipient_sweeps(const SweepRecipient<ArithmeticMode
 std::optional<DepartureFanCandidate> departure_fan_candidate(
     const SweepRecipient<ArithmeticMode::Exact>& target, std::size_t recipient, SweepBudget& budget)
 {
-    const auto& native = ExactSweepAccess::poly(*target.geometry);
+    const auto& native = SweepAccess<ArithmeticMode::Exact>::poly(*target.geometry);
     const auto native_moments = exact_moments(native, native.vertices[0]);
     if (!(native_moments.volume > 0))
         throw std::invalid_argument("Original recipient native volume is not positive.");
     const P kernel = add(native.vertices[0], mul(native_moments.first, Q(1) / native_moments.volume));
     departure_charge_point(kernel, budget);
     const auto native_about_kernel = exact_moments(native, kernel);
-    ExactMoments original = native_about_kernel;
+    Moments original = native_about_kernel;
     departure_charge_q(original.volume, budget);
     departure_charge_point(original.first, budget);
     DepartureTriangleChain boundary_identity;
@@ -250,7 +250,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
     std::size_t point_bound = target.outward_faces.size(), triangle_bound = 0;
     for (const auto& incidence : target.outward_faces)
     {
-        const auto n = ExactSweepAccess::polygon(*incidence.face->origin_face()).size();
+        const auto n = SweepAccess<ArithmeticMode::Exact>::polygon(*incidence.face->origin_face()).size();
         if (n > std::numeric_limits<std::size_t>::max() - triangle_bound)
             throw std::invalid_argument("Departure triangle count overflow.");
         triangle_bound += n;
@@ -279,7 +279,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
     for (const auto& incidence : target.outward_faces)
     {
         const auto& face = *incidence.face;
-        const auto& current = ExactSweepAccess::polygon(*face.origin_face());
+        const auto& current = SweepAccess<ArithmeticMode::Exact>::polygon(*face.origin_face());
         std::map<P, P> trajectories;
         for (const auto& trace : face.trajectories())
         {
@@ -345,7 +345,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
             departure_triangle(boundary_identity, t, -incidence.outward_sign, budget);
         for (const auto& piece : face.simplices())
         {
-            const auto m = exact_moments(ExactSweepAccess::poly(*piece.geometry), kernel);
+            const auto m = exact_moments(SweepAccess<ArithmeticMode::Exact>::poly(*piece.geometry), kernel);
             original.volume -= incidence.outward_sign * piece.sign * m.volume;
             original.first = sub(original.first, mul(m.first, Q(incidence.outward_sign * piece.sign)));
             departure_charge_q(original.volume, budget);
@@ -460,7 +460,7 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
     candidate.recipient = recipient;
     budget.array(triangles.size(), sizeof(ConvexFragmentPtr<ArithmeticMode::Exact>));
     candidate.tetrahedra.reserve(triangles.size());
-    ExactMoments fan{};
+    Moments fan{};
     for (const auto& t : triangles)
     {
         budget.test();
@@ -489,8 +489,8 @@ std::optional<DepartureFanCandidate> departure_fan_candidate(
         auto tetra = swept_tetra(kernel, points[t[0]], points[t[1]], points[t[2]]);
         if (!tetra || tetra->sign != 1)
             throw std::logic_error("Positive departure tetra construction disagrees.");
-        budget.poly(ExactSweepAccess::poly(*tetra->geometry));
-        const auto m = exact_moments(ExactSweepAccess::poly(*tetra->geometry), kernel);
+        budget.poly(SweepAccess<ArithmeticMode::Exact>::poly(*tetra->geometry));
+        const auto m = exact_moments(SweepAccess<ArithmeticMode::Exact>::poly(*tetra->geometry), kernel);
         fan.volume += m.volume;
         fan.first = add(fan.first, m.first);
         departure_charge_q(fan.volume, budget);
@@ -538,8 +538,9 @@ std::optional<std::vector<TransportAtom<ArithmeticMode::Exact>>> optional_depart
                 for (std::size_t u = 0; u < fans[s].tetrahedra.size() && (s < r || u < t); ++u)
                 {
                     budget.test();
-                    if (ExactSweepAccess::intersect(ExactSweepAccess::certified(*fans[r].tetrahedra[t]),
-                            ExactSweepAccess::certified(*fans[s].tetrahedra[u]), budget))
+                    if (SweepAccess<ArithmeticMode::Exact>::intersect(
+                            SweepAccess<ArithmeticMode::Exact>::certified(*fans[r].tetrahedra[t]),
+                            SweepAccess<ArithmeticMode::Exact>::certified(*fans[s].tetrahedra[u]), budget))
                         return {};
                 }
     std::vector<TransportAtom<ArithmeticMode::Exact>> atoms;
@@ -554,12 +555,13 @@ std::optional<std::vector<TransportAtom<ArithmeticMode::Exact>>> optional_depart
             for (const auto& donor : donors)
             {
                 budget.test();
-                auto intersection = ExactSweepAccess::intersect(
-                    ExactSweepAccess::certified(*tetra), ExactSweepAccess::certified(*donor.geometry), budget);
+                auto intersection =
+                    SweepAccess<ArithmeticMode::Exact>::intersect(SweepAccess<ArithmeticMode::Exact>::certified(*tetra),
+                        SweepAccess<ArithmeticMode::Exact>::certified(*donor.geometry), budget);
                 if (!intersection)
                     continue;
                 budget.poly(intersection->get());
-                auto fragment = ExactSweepAccess::fragment(std::move(*intersection));
+                auto fragment = SweepAccess<ArithmeticMode::Exact>::fragment(std::move(*intersection));
                 coverage.push_back(fragment);
                 budget.atom(atoms.size());
                 budget.add(sizeof(TransportAtom<ArithmeticMode::Exact>));
@@ -571,7 +573,7 @@ std::optional<std::vector<TransportAtom<ArithmeticMode::Exact>>> optional_depart
             }
             // Complete, contained and pairwise interior-disjoint per tetra.
             // Original donor-cover failures are errors, not optional fallbacks.
-            certify_sweep_partition(ExactSweepAccess::certified(*tetra), coverage, budget);
+            certify_sweep_partition(SweepAccess<ArithmeticMode::Exact>::certified(*tetra), coverage, budget);
         }
     for (std::size_t r = 0; r < recipients.size(); ++r)
         if (received[r] != sweep_volume(*recipients[r].geometry))
@@ -615,11 +617,12 @@ TransportPartition<ArithmeticMode::Exact> TransportPartition<ArithmeticMode::Exa
                     for (const auto& donor : donors)
                     {
                         budget.test();
-                        if (auto p = ExactSweepAccess::intersect(ExactSweepAccess::certified(*piece.geometry),
-                                ExactSweepAccess::certified(*donor.geometry), budget))
+                        if (auto p = SweepAccess<ArithmeticMode::Exact>::intersect(
+                                SweepAccess<ArithmeticMode::Exact>::certified(*piece.geometry),
+                                SweepAccess<ArithmeticMode::Exact>::certified(*donor.geometry), budget))
                         {
                             budget.poly(p->get());
-                            coverage.push_back(ExactSweepAccess::fragment(std::move(*p)));
+                            coverage.push_back(SweepAccess<ArithmeticMode::Exact>::fragment(std::move(*p)));
                         }
                     }
                     for (std::size_t i = 0; i < coverage.size(); ++i)
@@ -627,7 +630,8 @@ TransportPartition<ArithmeticMode::Exact> TransportPartition<ArithmeticMode::Exa
                             budget.test();
                     try
                     {
-                        certify_sweep_partition(ExactSweepAccess::certified(*piece.geometry), coverage, budget);
+                        certify_sweep_partition(
+                            SweepAccess<ArithmeticMode::Exact>::certified(*piece.geometry), coverage, budget);
                     }
                     catch (const std::invalid_argument& error)
                     {
@@ -653,7 +657,7 @@ TransportPartition<ArithmeticMode::Exact> TransportPartition<ArithmeticMode::Exa
         std::vector<int> initial(recipients.size());
         for (std::size_t r = 0; r < recipients.size(); ++r)
             initial[r] = recipients[r].id == donor.id ? 1 : 0;
-        budget.poly(ExactSweepAccess::poly(*donor.geometry));
+        budget.poly(SweepAccess<ArithmeticMode::Exact>::poly(*donor.geometry));
         std::vector<SweepAtom> atoms{
             {ConvexFragment<ArithmeticMode::Exact>::from_geometry(*donor.geometry), std::move(initial)}};
         for (std::size_t r = 0; r < recipients.size(); ++r)
@@ -709,7 +713,7 @@ void TransportPartition<ArithmeticMode::Exact>::certify_donor_cover(const SweepD
     for (std::size_t i = 0; i < pieces.size(); ++i)
         for (std::size_t j = 0; j < i; ++j)
             budget.test();
-    certify_sweep_partition(ExactSweepAccess::certified(*donor.geometry), pieces, budget);
+    certify_sweep_partition(SweepAccess<ArithmeticMode::Exact>::certified(*donor.geometry), pieces, budget);
 }
 
 TransportPartition<ArithmeticMode::Exact> TransportPartition<ArithmeticMode::Exact>::make(

@@ -1,9 +1,12 @@
-#pragma once
-#include "SimpleFluidExport.hh"
-#include "utils/ExactRational.hh"
-/** @file ConvexCellGeometryInternal.hh
+/**
+ * @file ConvexCellGeometryInternal.hh
  * @brief Exact represented-input convex clipping and moment certificates.
  */
+
+#pragma once
+
+#include "SimpleFluidExport.hh"
+#include "utils/ExactRational.hh"
 #include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/ExtrudedConstruction.hh"
@@ -39,7 +42,7 @@ namespace exact_geometry_detail
 {
 }
 using namespace exact_geometry_detail;
-class ExactSweepAccess;
+template<> class SweepAccess<ArithmeticMode::Exact>;
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
 {
@@ -106,12 +109,12 @@ GeometryValue<ArithmeticMode::Exact> measured(const Q& value, bool allow_underfl
 GeometryValue<ArithmeticMode::Exact> square_root(const Q& squared);
 P area_vector(const Poly& poly, const Face& face);
 
-struct ExactMoments
+struct Moments
 {
     Q volume;
     P first;
 };
-ExactMoments exact_moments(const Poly& poly, const P& origin);
+Moments exact_moments(const Poly& poly, const P& origin);
 Q exact_volume(const Poly& poly, const P& origin);
 std::vector<Plane> planes(const Poly& poly);
 // Native/public convex outputs retain numeric admission. Only opaque exact
@@ -212,7 +215,7 @@ public:
 
 private:
     friend class CertifiedPoly;
-    friend class ::SimpleFluid::PLIC::ExactSweepAccess;
+    friend class ::SimpleFluid::PLIC::SweepAccess<ArithmeticMode::Exact>;
     explicit CertifiedPolyRef(const Poly& poly) : poly_(&poly) {}
     const Poly* poly_;
 };
@@ -243,7 +246,7 @@ public:
     const Poly& get() const noexcept { return poly_; }
 
 private:
-    friend class ::SimpleFluid::PLIC::ExactSweepAccess;
+    friend class ::SimpleFluid::PLIC::SweepAccess<ArithmeticMode::Exact>;
     friend std::optional<CertifiedPoly> certified_clip(CertifiedPolyRef, const Plane&, ClipScratch&);
     friend std::optional<CertifiedPoly> certified_clip_uncached(CertifiedPolyRef, const Plane&);
     friend std::optional<CertifiedPoly> certified_intersection(CertifiedPolyRef, CertifiedPolyRef, ClipScratch&);
@@ -401,7 +404,7 @@ std::optional<CertifiedPoly> certified_intersection(
 std::optional<Poly> intersection(const Poly& a, const Poly& b, bool measure_outputs = true);
 bool contained(const Poly& a, const Poly& b);
 std::optional<Product> product_description(const Poly& poly);
-ExactMoments product_moments(const Product& product, const P& origin);
+Moments product_moments(const Product& product, const P& origin);
 Poly product_poly(const Product& product);
 std::optional<Product> product_intersection(const Product& a, const Product& b);
 
@@ -443,7 +446,9 @@ struct SIMPLEFLUID_LOCAL ConvexCellGeometry<ArithmeticMode::Exact>::Impl
     std::optional<Product> product;
 };
 
-struct SIMPLEFLUID_LOCAL ExactExtrudedBaseData
+namespace exact_geometry_detail
+{
+struct SIMPLEFLUID_LOCAL ExtrudedBaseData
 {
     std::vector<PointRecipe> recipes;
     std::vector<std::size_t> active;
@@ -453,24 +458,26 @@ struct SIMPLEFLUID_LOCAL ExactExtrudedBaseData
     std::vector<char> topology;
 };
 
-struct SIMPLEFLUID_LOCAL ExactExtrudedAxisValues
+struct SIMPLEFLUID_LOCAL ExtrudedAxisValues
 {
     std::vector<ScalarRecipe> zrecipes;
     std::vector<Q> z;
 };
 
-struct SIMPLEFLUID_LOCAL ExactExtrudedAxisData
+struct SIMPLEFLUID_LOCAL ExtrudedAxisData
 {
-    std::shared_ptr<ExactExtrudedAxisValues> values = std::make_shared<ExactExtrudedAxisValues>();
+    std::shared_ptr<ExtrudedAxisValues> values = std::make_shared<ExtrudedAxisValues>();
     std::vector<std::size_t> zactive;
     std::vector<double> display;
 };
 
+} // namespace exact_geometry_detail
+
 struct SIMPLEFLUID_LOCAL ExtrudedConstruction<ArithmeticMode::Exact>::Impl
 {
     std::shared_ptr<const ExtrudedTopology> topology;
-    std::shared_ptr<ExactExtrudedBaseData> base = std::make_shared<ExactExtrudedBaseData>();
-    std::shared_ptr<ExactExtrudedAxisData> axis = std::make_shared<ExactExtrudedAxisData>();
+    std::shared_ptr<ExtrudedBaseData> base = std::make_shared<ExtrudedBaseData>();
+    std::shared_ptr<ExtrudedAxisData> axis = std::make_shared<ExtrudedAxisData>();
     std::size_t begin = 0, layers = 0;
 };
 } // namespace SimpleFluid::PLIC
@@ -546,7 +553,7 @@ namespace SimpleFluid::PLIC
 namespace exact_geometry_detail SIMPLEFLUID_LOCAL
 {
 void complex_validate(PolyhedralComplex<ArithmeticMode::Exact>::Impl& impl);
-void write_point_recipes(WireWriter& w, const ExactExtrudedBaseData& base);
+void write_point_recipes(WireWriter& w, const ExtrudedBaseData& base);
 void read_point_recipes(WireReader& r, std::vector<PointRecipe>& points, std::vector<std::size_t>& active);
 void read_axis_parts(std::span<const char> packet, std::vector<ScalarRecipe>& roots, std::vector<std::size_t>& active);
 } // namespace exact_geometry_detail SIMPLEFLUID_LOCAL
@@ -629,7 +636,7 @@ struct SIMPLEFLUID_LOCAL DonorExport<ArithmeticMode::Exact>::Impl
     std::vector<ConvexFragmentPtr<ArithmeticMode::Exact>> exported, retained;
 };
 
-class SIMPLEFLUID_LOCAL ExactSweepAccess
+template<> class SIMPLEFLUID_LOCAL SweepAccess<ArithmeticMode::Exact>
 {
 public:
     static const Poly& poly(const ConvexCellGeometry<ArithmeticMode::Exact>& geometry) { return geometry.impl_->poly; }
@@ -774,7 +781,7 @@ void certify_sweep_partition(CertifiedPolyRef expected_certificate,
 
 template<class Geometry> Q sweep_volume(const Geometry& cell)
 {
-    const auto& p = ExactSweepAccess::poly(cell);
+    const auto& p = SweepAccess<ArithmeticMode::Exact>::poly(cell);
     return exact_volume(p, p.vertices[0]);
 }
 std::optional<SignedSweepSimplex<ArithmeticMode::Exact>> swept_tetra(

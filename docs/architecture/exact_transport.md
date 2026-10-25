@@ -136,8 +136,10 @@ freed operation arena is not permanently charged again as retained payload.
 The exact original physical-norm reduction divides the caller's remaining
 capacity into pending scalar, operation/compaction and communication arenas.
 Codec temporaries die before exchange; exported packets, receive buffers and
-sender authentication fit the communication arena concurrently. The exact
-squared residual and original zero-RHS reference determine acceptance before
+sender authentication fit the communication arena concurrently. A lazy zero
+still has a nonempty wire certificate: encoding uses the admitted codec arena,
+not the scalar's smaller retained footprint, including on empty owners. Encoded
+buffer capacities remain checked separately. The exact squared residual and original zero-RHS reference determine acceptance before
 any diagnostic square-root view, including when a tiny positive defect rounds
 away in that view. Legacy unleased calls keep their existing contracts. A failed
 operation, communication or retained-result admission rejects collectively;

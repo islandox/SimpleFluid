@@ -53,7 +53,7 @@ std::string sweep_cover_context(const SweptFace<ArithmeticMode::Exact>& face,
     const SignedSweepSimplex<ArithmeticMode::Exact>& piece, std::span<const SweepDonor<ArithmeticMode::Exact>> donors,
     std::size_t simplex)
 {
-    const auto& poly = ExactSweepAccess::poly(*piece.geometry);
+    const auto& poly = SweepAccess<ArithmeticMode::Exact>::poly(*piece.geometry);
     std::uint64_t face_hash = 1469598103934665603ULL;
     for (unsigned char byte : face.origin_face()->encode())
         face_hash = (face_hash ^ byte) * 1099511628211ULL;
@@ -71,7 +71,7 @@ std::string sweep_cover_context(const SweptFace<ArithmeticMode::Exact>& face,
         for (const auto& donor : donors)
         {
             bool inside = true;
-            for (const auto& plane : planes(ExactSweepAccess::poly(*donor.geometry)))
+            for (const auto& plane : planes(SweepAccess<ArithmeticMode::Exact>::poly(*donor.geometry)))
                 if (distance(plane, poly.vertices[i]) > 0)
                 {
                     inside = false;
@@ -269,7 +269,7 @@ bool certified_cover_contained(std::span<const ConvexFragmentPtr<ArithmeticMode:
             throw std::logic_error("Certified convex face lost its containment plane.");
         const Plane plane{std::move(normal), anchor};
         for (const auto& piece : pieces)
-            for (const auto& vertex : ExactSweepAccess::certified(*piece).get().vertices)
+            for (const auto& vertex : SweepAccess<ArithmeticMode::Exact>::certified(*piece).get().vertices)
                 if (distance(plane, vertex) > 0)
                     return false;
     }
@@ -284,7 +284,7 @@ void certify_sweep_partition(CertifiedPolyRef expected_certificate,
     const auto& expected = expected_certificate.get();
     const auto origin = expected.vertices[0];
     const auto whole = exact_moments(expected, origin);
-    ExactMoments sum{};
+    Moments sum{};
     if (!certified_cover_contained(pieces, expected_certificate))
         throw std::invalid_argument("Exact signed fragment lies outside its actual donor.");
     ClipScratch support_scratch{budget.limits.byte_budget - budget.bytes};
@@ -310,16 +310,17 @@ void certify_sweep_partition(CertifiedPolyRef expected_certificate,
     }
     for (std::size_t i = 0; i < pieces.size(); ++i)
     {
-        const auto part = exact_moments(ExactSweepAccess::poly(*pieces[i]), origin);
+        const auto part = exact_moments(SweepAccess<ArithmeticMode::Exact>::poly(*pieces[i]), origin);
         sum.volume += part.volume;
         sum.first = add(sum.first, part.first);
         for (std::size_t j = 0; j < i; ++j)
         {
             budget.test();
-            const auto a = ExactSweepAccess::certified(*pieces[i]);
-            const auto b = ExactSweepAccess::certified(*pieces[j]);
-            const bool intersects = support_cache ? cached_pair_intersects(a, i, b, j, *support_cache, support_scratch)
-                                                  : ExactSweepAccess::intersect(a, b, budget).has_value();
+            const auto a = SweepAccess<ArithmeticMode::Exact>::certified(*pieces[i]);
+            const auto b = SweepAccess<ArithmeticMode::Exact>::certified(*pieces[j]);
+            const bool intersects = support_cache
+                                        ? cached_pair_intersects(a, i, b, j, *support_cache, support_scratch)
+                                        : SweepAccess<ArithmeticMode::Exact>::intersect(a, b, budget).has_value();
             if (intersects)
             {
                 const bool cache_active = support_cache.has_value();
@@ -367,7 +368,7 @@ std::optional<SignedSweepSimplex<ArithmeticMode::Exact>> swept_tetra(
     if (sign < 0)
         for (auto& face : p.faces)
             std::reverse(face.begin(), face.end());
-    return SignedSweepSimplex<ArithmeticMode::Exact>{sign, ExactSweepAccess::fragment(std::move(p))};
+    return SignedSweepSimplex<ArithmeticMode::Exact>{sign, SweepAccess<ArithmeticMode::Exact>::fragment(std::move(p))};
 }
 
 std::vector<SweptTriangle> swept_boundary(const Polygon& current, const Polygon& previous, const P& center,
@@ -416,8 +417,9 @@ void sweep_donors(std::span<const SweepDonor<ArithmeticMode::Exact>> donors, Swe
         for (std::size_t j = 0; j < i; ++j)
         {
             budget.test();
-            if (ExactSweepAccess::intersect(ExactSweepAccess::certified(*donors[i].geometry),
-                    ExactSweepAccess::certified(*donors[j].geometry), budget))
+            if (SweepAccess<ArithmeticMode::Exact>::intersect(
+                    SweepAccess<ArithmeticMode::Exact>::certified(*donors[i].geometry),
+                    SweepAccess<ArithmeticMode::Exact>::certified(*donors[j].geometry), budget))
                 throw std::invalid_argument("Exact sweep donor interiors overlap.");
         }
     }
@@ -430,10 +432,11 @@ std::vector<SweepAtom> overlay_sweep(std::vector<SweepAtom> atoms,
     for (auto& atom : atoms)
     {
         budget.test();
-        const auto& a = ExactSweepAccess::poly(*atom.geometry);
-        const auto& b = ExactSweepAccess::poly(*piece.geometry);
-        if (!ExactSweepAccess::intersect(
-                ExactSweepAccess::certified(*atom.geometry), ExactSweepAccess::certified(*piece.geometry), budget))
+        const auto& a = SweepAccess<ArithmeticMode::Exact>::poly(*atom.geometry);
+        const auto& b = SweepAccess<ArithmeticMode::Exact>::poly(*piece.geometry);
+        if (!SweepAccess<ArithmeticMode::Exact>::intersect(
+                SweepAccess<ArithmeticMode::Exact>::certified(*atom.geometry),
+                SweepAccess<ArithmeticMode::Exact>::certified(*piece.geometry), budget))
         {
             budget.atom(next.size());
             next.push_back(std::move(atom));
@@ -446,21 +449,22 @@ std::vector<SweepAtom> overlay_sweep(std::vector<SweepAtom> atoms,
             next.push_back(std::move(atom));
             continue;
         }
-        std::optional<CertifiedPoly> remaining = ExactSweepAccess::copy(ExactSweepAccess::certified(*atom.geometry));
+        std::optional<CertifiedPoly> remaining =
+            SweepAccess<ArithmeticMode::Exact>::copy(SweepAccess<ArithmeticMode::Exact>::certified(*atom.geometry));
         for (const auto& plane : planes(b))
         {
             Plane other = plane;
             other.normal = mul(other.normal, Q(-1));
             other.offset = -other.offset;
-            auto outside = ExactSweepAccess::clip(remaining->ref(), other, budget);
+            auto outside = SweepAccess<ArithmeticMode::Exact>::clip(remaining->ref(), other, budget);
             if (outside)
             {
                 budget.atom(next.size());
                 budget.poly(outside->get());
                 budget.add(atom.coefficient.size() * sizeof(int) + sizeof(SweepAtom));
-                next.push_back({ExactSweepAccess::fragment(std::move(*outside)), atom.coefficient});
+                next.push_back({SweepAccess<ArithmeticMode::Exact>::fragment(std::move(*outside)), atom.coefficient});
             }
-            remaining = ExactSweepAccess::clip(remaining->ref(), plane, budget);
+            remaining = SweepAccess<ArithmeticMode::Exact>::clip(remaining->ref(), plane, budget);
             if (!remaining)
                 break;
         }
@@ -471,7 +475,8 @@ std::vector<SweepAtom> overlay_sweep(std::vector<SweepAtom> atoms,
             auto coefficient = atom.coefficient;
             coefficient.at(column) += sign * piece.sign;
             budget.add(coefficient.size() * sizeof(int) + sizeof(SweepAtom));
-            next.push_back({ExactSweepAccess::fragment(std::move(*remaining)), std::move(coefficient)});
+            next.push_back(
+                {SweepAccess<ArithmeticMode::Exact>::fragment(std::move(*remaining)), std::move(coefficient)});
         }
     }
     return next;
@@ -490,11 +495,12 @@ PhaseMeasures<ArithmeticMode::Exact> sweep_phases(
     for (const auto& atom : atoms)
     {
         result.bulk = result.bulk + atom->volume();
-        if (auto cut = certified_clip_uncached(ExactSweepAccess::certified(*atom), plane))
-            result.gas = result.gas + ExactSweepAccess::measure(exact_volume(cut->get(), cut->get().vertices[0]));
-        if (auto cut = certified_clip_uncached(ExactSweepAccess::certified(*atom), outside))
-            result.carrier =
-                result.carrier + ExactSweepAccess::measure(exact_volume(cut->get(), cut->get().vertices[0]));
+        if (auto cut = certified_clip_uncached(SweepAccess<ArithmeticMode::Exact>::certified(*atom), plane))
+            result.gas = result.gas +
+                         SweepAccess<ArithmeticMode::Exact>::measure(exact_volume(cut->get(), cut->get().vertices[0]));
+        if (auto cut = certified_clip_uncached(SweepAccess<ArithmeticMode::Exact>::certified(*atom), outside))
+            result.carrier = result.carrier + SweepAccess<ArithmeticMode::Exact>::measure(
+                                                  exact_volume(cut->get(), cut->get().vertices[0]));
     }
     if ((result.gas + result.carrier).compare(result.bulk) != 0)
         throw std::logic_error("Exact independent phase clips lost complementarity.");
@@ -509,12 +515,12 @@ ConvexFragment<ArithmeticMode::Exact>::ConvexFragment(std::shared_ptr<const Impl
 ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::from_geometry(
     const ConvexCellGeometry<ArithmeticMode::Exact>& cell)
 {
-    return ExactSweepAccess::fragment(ExactSweepAccess::certified(cell));
+    return SweepAccess<ArithmeticMode::Exact>::fragment(SweepAccess<ArithmeticMode::Exact>::certified(cell));
 }
 
 GeometryMeasure<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::volume() const
 {
-    return ExactSweepAccess::measure(sweep_volume(*this));
+    return SweepAccess<ArithmeticMode::Exact>::measure(sweep_volume(*this));
 }
 
 PhaseMeasures<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::phases(const GeometryHalfspace& plane) const
@@ -531,12 +537,12 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
     const auto shift = displacement_point(displacement);
     for (auto& p : poly.vertices)
         p = add(p, shift);
-    return ExactSweepAccess::fragment(std::move(poly));
+    return SweepAccess<ArithmeticMode::Exact>::fragment(std::move(poly));
 }
 
 ConvexGeometryPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::as_geometry() const
 {
-    return ExactSweepAccess::geometry(impl_->poly.get());
+    return SweepAccess<ArithmeticMode::Exact>::geometry(impl_->poly.get());
 }
 
 std::vector<char> ConvexFragment<ArithmeticMode::Exact>::encode(std::size_t byte_budget) const
@@ -612,37 +618,38 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
         poly.faces.push_back(std::move(face));
     }
     r.finish();
-    return ExactSweepAccess::fragment(std::move(poly));
+    return SweepAccess<ArithmeticMode::Exact>::fragment(std::move(poly));
 }
 
 GeometryMeasure<ArithmeticMode::Exact>::GeometryMeasure(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::from_value(double value)
 {
-    return ExactSweepAccess::measure(exact(value));
+    return SweepAccess<ArithmeticMode::Exact>::measure(exact(value));
 }
 
 template<>
 GeometryMeasure<ArithmeticMode::Exact> point_projection<ArithmeticMode::Exact>(
     std::span<const char> identity, GeometryPoint normal, GeometryPoint anchor)
 {
-    return ExactSweepAccess::measure(dot(point(normal), sub(authority_point(identity), point(anchor))));
+    return SweepAccess<ArithmeticMode::Exact>::measure(
+        dot(point(normal), sub(authority_point(identity), point(anchor))));
 }
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::volume(
     const ConvexCellGeometry<ArithmeticMode::Exact>& cell)
 {
-    return ExactSweepAccess::measure(sweep_volume(cell));
+    return SweepAccess<ArithmeticMode::Exact>::measure(sweep_volume(cell));
 }
 
 GeometryValue<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::certified() const
 {
-    return measured(ExactSweepAccess::value(*this));
+    return measured(SweepAccess<ArithmeticMode::Exact>::value(*this));
 }
 
 GeometryValue<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::enclosure() const
 {
-    return measured(ExactSweepAccess::value(*this), true);
+    return measured(SweepAccess<ArithmeticMode::Exact>::value(*this), true);
 }
 
 bool GeometryMeasure<ArithmeticMode::Exact>::relative_error_at_most(
@@ -651,10 +658,11 @@ bool GeometryMeasure<ArithmeticMode::Exact>::relative_error_at_most(
     const auto factor = exact(tolerance);
     if (factor < 0)
         throw std::invalid_argument("Relative measure tolerance must be nonnegative.");
-    Q difference = ExactSweepAccess::value(*this) - ExactSweepAccess::value(reference);
+    Q difference =
+        SweepAccess<ArithmeticMode::Exact>::value(*this) - SweepAccess<ArithmeticMode::Exact>::value(reference);
     if (difference < 0)
         difference = -difference;
-    Q scale = ExactSweepAccess::value(reference);
+    Q scale = SweepAccess<ArithmeticMode::Exact>::value(reference);
     if (scale < 0)
         scale = -scale;
     return difference <= factor * scale;
@@ -663,9 +671,11 @@ bool GeometryMeasure<ArithmeticMode::Exact>::relative_error_at_most(
 double GeometryMeasure<ArithmeticMode::Exact>::log_ratio(
     const GeometryMeasure<ArithmeticMode::Exact>& denominator) const
 {
-    if (ExactSweepAccess::value(*this) <= 0 || ExactSweepAccess::value(denominator) <= 0)
+    if (SweepAccess<ArithmeticMode::Exact>::value(*this) <= 0 ||
+        SweepAccess<ArithmeticMode::Exact>::value(denominator) <= 0)
         throw std::invalid_argument("Logarithmic measure ratio requires positive operands.");
-    const Q ratio = ExactSweepAccess::value(*this) / ExactSweepAccess::value(denominator);
+    const Q ratio =
+        SweepAccess<ArithmeticMode::Exact>::value(*this) / SweepAccess<ArithmeticMode::Exact>::value(denominator);
     const auto numerator = boost::multiprecision::numerator(ratio), divisor = boost::multiprecision::denominator(ratio);
     const std::int64_t exponent = static_cast<std::int64_t>(boost::multiprecision::msb(numerator)) -
                                   static_cast<std::int64_t>(boost::multiprecision::msb(divisor));
@@ -679,7 +689,7 @@ double GeometryMeasure<ArithmeticMode::Exact>::log_ratio(
 
 std::vector<char> GeometryMeasure<ArithmeticMode::Exact>::encode(std::size_t byte_budget) const
 {
-    const auto& q = ExactSweepAccess::value(*this);
+    const auto& q = SweepAccess<ArithmeticMode::Exact>::value(*this);
     const auto limbs = q.backend().num().capacity() + q.backend().denom().capacity();
     if (byte_budget < 56 || limbs > (byte_budget - 56) / sizeof(boost::multiprecision::limb_type))
         throw std::invalid_argument("Exact measure certificate exceeds byte budget.");
@@ -702,19 +712,21 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::d
         throw std::invalid_argument("Unknown exact measure tag/version.");
     auto value = r.rational();
     r.finish();
-    return ExactSweepAccess::measure(std::move(value));
+    return SweepAccess<ArithmeticMode::Exact>::measure(std::move(value));
 }
 
 int GeometryMeasure<ArithmeticMode::Exact>::sign() const
 {
-    return ExactSweepAccess::value(*this) > 0 ? 1 : ExactSweepAccess::value(*this) < 0 ? -1 : 0;
+    return SweepAccess<ArithmeticMode::Exact>::value(*this) > 0   ? 1
+           : SweepAccess<ArithmeticMode::Exact>::value(*this) < 0 ? -1
+                                                                  : 0;
 }
 
 int GeometryMeasure<ArithmeticMode::Exact>::compare(const GeometryMeasure<ArithmeticMode::Exact>& other) const
 {
-    return ExactSweepAccess::value(*this) > ExactSweepAccess::value(other)   ? 1
-           : ExactSweepAccess::value(*this) < ExactSweepAccess::value(other) ? -1
-                                                                             : 0;
+    return SweepAccess<ArithmeticMode::Exact>::value(*this) > SweepAccess<ArithmeticMode::Exact>::value(other)   ? 1
+           : SweepAccess<ArithmeticMode::Exact>::value(*this) < SweepAccess<ArithmeticMode::Exact>::value(other) ? -1
+                                                                                                                 : 0;
 }
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::operator+(
@@ -722,7 +734,8 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::o
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    return ExactSweepAccess::measure(ExactSweepAccess::value(*this) + ExactSweepAccess::value(other));
+    return SweepAccess<ArithmeticMode::Exact>::measure(
+        SweepAccess<ArithmeticMode::Exact>::value(*this) + SweepAccess<ArithmeticMode::Exact>::value(other));
 }
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::operator-(
@@ -730,14 +743,16 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::o
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    return ExactSweepAccess::measure(ExactSweepAccess::value(*this) - ExactSweepAccess::value(other));
+    return SweepAccess<ArithmeticMode::Exact>::measure(
+        SweepAccess<ArithmeticMode::Exact>::value(*this) - SweepAccess<ArithmeticMode::Exact>::value(other));
 }
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::scaled(double factor) const
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    return ExactSweepAccess::measure(ExactSweepAccess::value(*this) * exact(factor));
+    return SweepAccess<ArithmeticMode::Exact>::measure(
+        SweepAccess<ArithmeticMode::Exact>::value(*this) * exact(factor));
 }
 } // namespace SimpleFluid::PLIC
 namespace SimpleFluid::PLIC
@@ -794,11 +809,12 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::d
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    if (ExactSweepAccess::value(denominator) == 0)
+    if (SweepAccess<ArithmeticMode::Exact>::value(denominator) == 0)
         throw std::invalid_argument("Exact measure division by zero.");
-    exact_measure_arithmetic_preflight(
-        ExactSweepAccess::value(*this), ExactSweepAccess::value(denominator), true, byte_budget);
-    auto result = ExactSweepAccess::measure(ExactSweepAccess::value(*this) / ExactSweepAccess::value(denominator));
+    exact_measure_arithmetic_preflight(SweepAccess<ArithmeticMode::Exact>::value(*this),
+        SweepAccess<ArithmeticMode::Exact>::value(denominator), true, byte_budget);
+    auto result = SweepAccess<ArithmeticMode::Exact>::measure(
+        SweepAccess<ArithmeticMode::Exact>::value(*this) / SweepAccess<ArithmeticMode::Exact>::value(denominator));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact measure quotient capacity exceeds byte budget.");
     return result;
@@ -808,9 +824,10 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::s
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    exact_measure_arithmetic_preflight(
-        ExactSweepAccess::value(*this), ExactSweepAccess::value(*this), false, byte_budget);
-    auto result = ExactSweepAccess::measure(ExactSweepAccess::value(*this) * ExactSweepAccess::value(*this));
+    exact_measure_arithmetic_preflight(SweepAccess<ArithmeticMode::Exact>::value(*this),
+        SweepAccess<ArithmeticMode::Exact>::value(*this), false, byte_budget);
+    auto result = SweepAccess<ArithmeticMode::Exact>::measure(
+        SweepAccess<ArithmeticMode::Exact>::value(*this) * SweepAccess<ArithmeticMode::Exact>::value(*this));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact measure squared capacity exceeds byte budget.");
     return result;
@@ -821,7 +838,7 @@ std::size_t GeometryMeasure<ArithmeticMode::Exact>::storage_bytes() const
     if (!impl_)
         return sizeof(*this);
     std::size_t bytes = sizeof(*this) + sizeof(Impl);
-    exact_scalar_storage(bytes, ExactSweepAccess::value(*this));
+    exact_scalar_storage(bytes, SweepAccess<ArithmeticMode::Exact>::value(*this));
     return bytes;
 }
 
@@ -842,17 +859,17 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::c
     };
     {
         const Q fresh;
-        charge(ExactSweepAccess::value(*this).backend().num(), fresh.backend().num());
-        charge(ExactSweepAccess::value(*this).backend().denom(), fresh.backend().denom());
+        charge(SweepAccess<ArithmeticMode::Exact>::value(*this).backend().num(), fresh.backend().num());
+        charge(SweepAccess<ArithmeticMode::Exact>::value(*this).backend().denom(), fresh.backend().denom());
     }
     const auto source_bytes = storage_bytes();
     if (source_bytes > operation_byte_budget || copied > operation_byte_budget - source_bytes)
         throw std::invalid_argument("Exact measure compact copy exceeds its simultaneous storage budget.");
     auto compact = std::make_shared<Impl>();
-    compact->value = ExactSweepAccess::value(*this);
+    compact->value = SweepAccess<ArithmeticMode::Exact>::value(*this);
     GeometryMeasure<ArithmeticMode::Exact> result(std::move(compact));
-    if (ExactSweepAccess::value(result) != ExactSweepAccess::value(*this) || result.storage_bytes() > copied ||
-        result.storage_bytes() > operation_byte_budget - source_bytes)
+    if (SweepAccess<ArithmeticMode::Exact>::value(result) != SweepAccess<ArithmeticMode::Exact>::value(*this) ||
+        result.storage_bytes() > copied || result.storage_bytes() > operation_byte_budget - source_bytes)
         throw std::invalid_argument("Exact measure compact copy failed its exact value or capacity certificate.");
     return result;
 }
@@ -873,11 +890,11 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::r
         throw std::length_error("Exact dyadic representation exceeds its operation lease.");
     if (!sign())
         return from_value(0);
-    I numerator = boost::multiprecision::numerator(ExactSweepAccess::value(*this));
+    I numerator = boost::multiprecision::numerator(SweepAccess<ArithmeticMode::Exact>::value(*this));
     const bool negative = numerator < 0;
     if (negative)
         numerator = -numerator;
-    I denominator = boost::multiprecision::denominator(ExactSweepAccess::value(*this));
+    I denominator = boost::multiprecision::denominator(SweepAccess<ArithmeticMode::Exact>::value(*this));
     const auto numerator_bits = exact_integer_bits(numerator), denominator_bits = exact_integer_bits(denominator);
     if (numerator_bits > std::size_t(std::numeric_limits<std::int64_t>::max()) ||
         denominator_bits > std::size_t(std::numeric_limits<std::int64_t>::max()))
@@ -898,7 +915,7 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::r
         rounded = Q(significand, I{1} << std::size_t(shift));
     else
         rounded = Q(significand << std::size_t(-shift));
-    auto result = ExactSweepAccess::measure(std::move(rounded));
+    auto result = SweepAccess<ArithmeticMode::Exact>::measure(std::move(rounded));
     if (result.sign() != sign())
         throw std::logic_error("Exact dyadic representation failed its nonzero sign certificate.");
     if (result.storage_bytes() > operation_byte_budget / 16)
@@ -978,7 +995,7 @@ GeometryMeasure<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::coplan
         ratio = arithmetic.binary(Q(0), ratio, 1);
     if (ratio == 0)
         throw std::invalid_argument("Exact face area numerator is degenerate.");
-    auto result = ExactSweepAccess::measure(std::move(ratio));
+    auto result = SweepAccess<ArithmeticMode::Exact>::measure(std::move(ratio));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact face area ratio result exceeds byte budget.");
     return result;
@@ -995,7 +1012,7 @@ GeometryMeasure<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::area_v
     const P represented{arithmetic.retain(exact(velocity[0])), arithmetic.retain(exact(velocity[1])),
         arithmetic.retain(exact(velocity[2]))};
     const auto area = bounded_polygon_vector(impl_->polygon, arithmetic);
-    auto result = ExactSweepAccess::measure(arithmetic.inner(area, represented));
+    auto result = SweepAccess<ArithmeticMode::Exact>::measure(arithmetic.inner(area, represented));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact face area flux result exceeds byte budget.");
     return result;
@@ -1024,7 +1041,7 @@ NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::bac
     {
         if (!wall)
             throw std::invalid_argument("Null exact wall constraint.");
-        const auto& polygon = ExactSweepAccess::polygon(*wall);
+        const auto& polygon = SweepAccess<ArithmeticMode::Exact>::polygon(*wall);
         P normal{};
         for (std::size_t i = 1; i + 1 < polygon.size() && trajectory_zero(normal); ++i)
             normal = arithmetic.cross_product(
@@ -1092,7 +1109,7 @@ GeometryMeasure<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::di
     arithmetic.charge(point.size());
     arithmetic.charge(departure.size());
     const auto displacement = arithmetic.subtract(authority_point(point), authority_point(departure));
-    return ExactSweepAccess::measure(arithmetic.inner(displacement, displacement));
+    return SweepAccess<ArithmeticMode::Exact>::measure(arithmetic.inner(displacement, displacement));
 }
 
 SweptFace<ArithmeticMode::Exact>::SweptFace(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
@@ -1109,7 +1126,7 @@ std::shared_ptr<const SweptFace<ArithmeticMode::Exact>> SweptFace<ArithmeticMode
     const GeometryMeasure<ArithmeticMode::Exact>& volume, SweepLimits limits)
 {
     SweepBudget budget(limits);
-    const auto& current = ExactSweepAccess::polygon(face);
+    const auto& current = SweepAccess<ArithmeticMode::Exact>::polygon(face);
     if (current.size() > limits.maximum_simplices / 4)
         throw std::invalid_argument("Exact sweep simplex budget exhausted before construction.");
     if (traces.size() != current.size())
@@ -1136,7 +1153,7 @@ std::shared_ptr<const SweptFace<ArithmeticMode::Exact>> SweptFace<ArithmeticMode
     backcenter = mul(backcenter, Q(1) / current.size());
     const auto original_triangles = swept_boundary(current, previous, center, backcenter, nullptr);
     const auto original = signed_boundary_volume(center, original_triangles);
-    const auto requested = ExactSweepAccess::value(volume);
+    const auto requested = SweepAccess<ArithmeticMode::Exact>::value(volume);
     const auto normal = polygon_vector(current);
     const Q coefficient =
         signed_boundary_volume(center, swept_boundary(current, previous, center, add(backcenter, normal), nullptr)) -
@@ -1151,14 +1168,14 @@ std::shared_ptr<const SweptFace<ArithmeticMode::Exact>> SweptFace<ArithmeticMode
     result->volume = requested;
     result->original = original;
     result->center = backcenter;
-    result->native = ExactSweepAccess::retain(face);
+    result->native = SweepAccess<ArithmeticMode::Exact>::retain(face);
     result->traces.assign(traces.begin(), traces.end());
     auto triangles = swept_boundary(current, previous, center, backcenter, &result->edges);
     Q check = 0;
     for (const auto& triangle : triangles)
         if (auto piece = swept_tetra(center, triangle[0], triangle[1], triangle[2]))
         {
-            budget.poly(ExactSweepAccess::poly(*piece->geometry));
+            budget.poly(SweepAccess<ArithmeticMode::Exact>::poly(*piece->geometry));
             check += piece->sign * sweep_volume(*piece->geometry);
             result->pieces.push_back(std::move(*piece));
         }
@@ -1187,12 +1204,12 @@ SweptFace<ArithmeticMode::Exact>::trajectories() const noexcept
 
 GeometryMeasure<ArithmeticMode::Exact> SweptFace<ArithmeticMode::Exact>::volume() const
 {
-    return ExactSweepAccess::measure(impl_->volume);
+    return SweepAccess<ArithmeticMode::Exact>::measure(impl_->volume);
 }
 
 GeometryMeasure<ArithmeticMode::Exact> SweptFace<ArithmeticMode::Exact>::uncorrected_volume() const
 {
-    return ExactSweepAccess::measure(impl_->original);
+    return SweepAccess<ArithmeticMode::Exact>::measure(impl_->original);
 }
 
 std::vector<char> SweptFace<ArithmeticMode::Exact>::corrected_departure_center() const
@@ -1219,19 +1236,20 @@ std::vector<SweepIntersection<ArithmeticMode::Exact>> SweptFace<ArithmeticMode::
         for (const auto& donor : donors)
         {
             budget.test();
-            if (auto poly = ExactSweepAccess::intersect(
-                    ExactSweepAccess::certified(*piece.geometry), ExactSweepAccess::certified(*donor.geometry), budget))
+            if (auto poly = SweepAccess<ArithmeticMode::Exact>::intersect(
+                    SweepAccess<ArithmeticMode::Exact>::certified(*piece.geometry),
+                    SweepAccess<ArithmeticMode::Exact>::certified(*donor.geometry), budget))
             {
                 budget.atom(result.size());
                 budget.poly(poly->get());
-                auto geometry = ExactSweepAccess::fragment(std::move(*poly));
+                auto geometry = SweepAccess<ArithmeticMode::Exact>::fragment(std::move(*poly));
                 coverage.push_back(geometry);
                 result.push_back({donor.id, piece.sign, std::move(geometry)});
             }
         }
         try
         {
-            certify_sweep_partition(ExactSweepAccess::certified(*piece.geometry), coverage, budget);
+            certify_sweep_partition(SweepAccess<ArithmeticMode::Exact>::certified(*piece.geometry), coverage, budget);
         }
         catch (const std::invalid_argument& error)
         {
@@ -1266,7 +1284,7 @@ DonorExport<ArithmeticMode::Exact> DonorExport<ArithmeticMode::Exact>::make(
     std::span<const OrientedFaceSweep<ArithmeticMode::Exact>> faces, SweepLimits limits)
 {
     SweepBudget budget(limits);
-    budget.poly(ExactSweepAccess::poly(donor));
+    budget.poly(SweepAccess<ArithmeticMode::Exact>::poly(donor));
     std::vector<SweepAtom> atoms{{ConvexFragment<ArithmeticMode::Exact>::from_geometry(donor), {0}}};
     for (const auto& face : faces)
     {
@@ -1284,7 +1302,7 @@ DonorExport<ArithmeticMode::Exact> DonorExport<ArithmeticMode::Exact>::make(
         coverage.push_back(atom.geometry);
         (atom.coefficient[0] ? result->exported : result->retained).push_back(std::move(atom.geometry));
     }
-    certify_sweep_partition(ExactSweepAccess::certified(donor), coverage, budget);
+    certify_sweep_partition(SweepAccess<ArithmeticMode::Exact>::certified(donor), coverage, budget);
     return DonorExport<ArithmeticMode::Exact>(std::move(result));
 }
 
@@ -1404,7 +1422,7 @@ SupportPlaneCache::SupportPlaneCache(
     std::size_t face_count = 0;
     for (const auto& piece : pieces)
     {
-        const auto piece_faces = ExactSweepAccess::poly(*piece).faces.size();
+        const auto piece_faces = SweepAccess<ArithmeticMode::Exact>::poly(*piece).faces.size();
         if (piece_faces > plane_capacity - face_count)
             throw ClipCacheExhausted("Optional support-plane face count exceeds its live capacity lease.");
         face_count += piece_faces;
@@ -1413,7 +1431,7 @@ SupportPlaneCache::SupportPlaneCache(
     reserve_support_planes(planes_, face_count, scratch_, "support-plane array");
     for (const auto& piece : pieces)
     {
-        const auto& poly = ExactSweepAccess::poly(*piece);
+        const auto& poly = SweepAccess<ArithmeticMode::Exact>::poly(*piece);
         const auto begin = planes_.size();
         for (const auto& face : poly.faces)
         {
@@ -1533,18 +1551,19 @@ P TrajectoryArithmetic::cross_product(const P& a, const P& b)
 
 namespace SimpleFluid::PLIC
 {
-CertifiedPolyRef ExactSweepAccess::certified(const ConvexCellGeometry<ArithmeticMode::Exact>& geometry)
+CertifiedPolyRef SweepAccess<ArithmeticMode::Exact>::certified(
+    const ConvexCellGeometry<ArithmeticMode::Exact>& geometry)
 {
     return CertifiedPolyRef(geometry.impl_->poly);
 }
 
-ConvexFragmentPtr<ArithmeticMode::Exact> ExactSweepAccess::fragment(CertifiedPoly poly)
+ConvexFragmentPtr<ArithmeticMode::Exact> SweepAccess<ArithmeticMode::Exact>::fragment(CertifiedPoly poly)
 {
     auto impl = std::make_shared<ConvexFragment<ArithmeticMode::Exact>::Impl>(std::move(poly));
     return ConvexFragmentPtr<ArithmeticMode::Exact>(new ConvexFragment<ArithmeticMode::Exact>(std::move(impl)));
 }
 
-GeometryMeasure<ArithmeticMode::Exact> ExactSweepAccess::measure(Q value)
+GeometryMeasure<ArithmeticMode::Exact> SweepAccess<ArithmeticMode::Exact>::measure(Q value)
 {
     sample_exact_measure_result(value);
     auto p = std::make_shared<GeometryMeasure<ArithmeticMode::Exact>::Impl>();
@@ -1552,7 +1571,7 @@ GeometryMeasure<ArithmeticMode::Exact> ExactSweepAccess::measure(Q value)
     return GeometryMeasure<ArithmeticMode::Exact>(std::move(p));
 }
 
-ConvexGeometryPtr<ArithmeticMode::Exact> ExactSweepAccess::geometry(Poly poly)
+ConvexGeometryPtr<ArithmeticMode::Exact> SweepAccess<ArithmeticMode::Exact>::geometry(Poly poly)
 {
     validate(poly);
     auto impl = std::make_shared<ConvexCellGeometry<ArithmeticMode::Exact>::Impl>();
@@ -1566,12 +1585,14 @@ ConvexGeometryPtr<ArithmeticMode::Exact> ExactSweepAccess::geometry(Poly poly)
     return ConvexGeometryPtr<ArithmeticMode::Exact>(new ConvexCellGeometry<ArithmeticMode::Exact>(std::move(impl)));
 }
 
-PlanarFacePtr<ArithmeticMode::Exact> ExactSweepAccess::retain(const PlanarFace<ArithmeticMode::Exact>& face)
+PlanarFacePtr<ArithmeticMode::Exact> SweepAccess<ArithmeticMode::Exact>::retain(
+    const PlanarFace<ArithmeticMode::Exact>& face)
 {
     return PlanarFacePtr<ArithmeticMode::Exact>(new PlanarFace<ArithmeticMode::Exact>(face.impl_));
 }
 
-ConvexGeometryPtr<ArithmeticMode::Exact> ExactSweepAccess::retain(const ConvexCellGeometry<ArithmeticMode::Exact>& cell)
+ConvexGeometryPtr<ArithmeticMode::Exact> SweepAccess<ArithmeticMode::Exact>::retain(
+    const ConvexCellGeometry<ArithmeticMode::Exact>& cell)
 {
     return ConvexGeometryPtr<ArithmeticMode::Exact>(new ConvexCellGeometry<ArithmeticMode::Exact>(cell.impl_));
 }

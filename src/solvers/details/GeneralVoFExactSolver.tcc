@@ -1,8 +1,8 @@
 /** @file GeneralVoFExactSolver.tcc
  * @brief Optional rational backend in the Exact namespace.
- * Included only by GeneralVoFSolver.cc inside SimpleFluid.
+ * Included only by GeneralVoFSolver.cc after its shared support provider.
  */
-namespace Exact
+namespace SimpleFluid::Exact
 {
 template<class Context> struct GeneralVoFSolver
 {
@@ -913,4 +913,4 @@ template<class Context> struct GeneralVoFSolver
         return sum;
     }
 };
-} // namespace Exact
+} // namespace SimpleFluid::Exact

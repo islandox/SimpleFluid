@@ -108,7 +108,11 @@ foreach(index RANGE ${last_symbol})
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::(FVM::)?detail::")
         message(FATAL_ERROR "Private implementation exported: ${name}")
     endif()
-    if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::PLIC::")
+    # Reconstruction and its public admission exception are compiled by FVM;
+    # the remaining PLIC geometry implementations belong to Mesh.
+    if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::PLIC::"
+       AND NOT name MATCHES "^SimpleFluid::PLIC::PolyhedralReconstruction<"
+       AND NOT name MATCHES "^SimpleFluid::PLIC::PolyhedralResolutionRequired::")
         message(FATAL_ERROR "Mesh-owned PLIC symbol exported by FVM: ${name}")
     endif()
 endforeach()

@@ -1,4 +1,5 @@
 #pragma once
+#include "geometry/PLIC/SweptGeometryTypes.hh"
 namespace SimpleFluid::PLIC
 {
 /** Selecting this specialization explicitly imports a represented finite source
@@ -54,7 +55,7 @@ public:
     [[nodiscard]] const void* storage_identity() const noexcept { return impl_.get(); }
 
 private:
-    friend class ExactSweepAccess;
+    friend class SweepAccess<ArithmeticMode::Exact>;
     explicit ConvexFragment(std::shared_ptr<const Impl>);
     std::shared_ptr<const Impl> impl_;
 };

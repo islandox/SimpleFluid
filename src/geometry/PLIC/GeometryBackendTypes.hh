@@ -9,12 +9,14 @@
 
 namespace SimpleFluid::PLIC
 {
+template<ArithmeticMode Mode> class ConvexCellGeometry;
 template<ArithmeticMode Mode> class PlanarFace;
 template<ArithmeticMode Mode> class EdgePointIndex;
 template<ArithmeticMode Mode> class GeometryMeasure;
 template<ArithmeticMode Mode> class ConvexFragment;
 template<ArithmeticMode Mode> class NodeTrajectory;
 template<ArithmeticMode Mode> class SweptFace;
+template<ArithmeticMode Mode> class SweepAccess;
 template<ArithmeticMode Mode> class DonorExport;
 template<ArithmeticMode Mode> class TransportPartition;
 template<ArithmeticMode Mode> class PolyhedralComplex;

@@ -1,4 +1,5 @@
 #pragma once
+#include "geometry/PLIC/ExtrudedConstructionTypes.hh"
 namespace SimpleFluid::PLIC
 {
 template<> class ExtrudedConstruction<ArithmeticMode::Ordinary>

@@ -4,7 +4,7 @@ namespace SimpleFluid::PLIC
 {
 namespace exact_geometry_detail
 {
-void write_point_recipes(WireWriter& w, const ExactExtrudedBaseData& base)
+void write_point_recipes(WireWriter& w, const ExtrudedBaseData& base)
 {
     w.word(base.recipes.size());
     for (const auto& p : base.recipes)
@@ -188,7 +188,7 @@ ExtrudedConstruction<ArithmeticMode::Exact>::shared_axis_selection(std::shared_p
     auto impl = std::make_shared<Impl>();
     impl->topology = std::move(topology);
     impl->base = base->impl_->base;
-    impl->axis = std::make_shared<ExactExtrudedAxisData>();
+    impl->axis = std::make_shared<ExtrudedAxisData>();
     impl->axis->values = coordinate_anchor->impl_->axis->values;
     impl->axis->zactive = std::move(active);
     impl->layers = impl->axis->zactive.size() - 1;
@@ -357,7 +357,7 @@ std::size_t ExtrudedConstruction<ArithmeticMode::Exact>::axis_values_storage_byt
 
 std::size_t ExtrudedConstruction<ArithmeticMode::Exact>::axis_storage_bytes() const
 {
-    return sizeof(ExactExtrudedAxisData) + impl_->axis->zactive.capacity() * sizeof(std::size_t) +
+    return sizeof(ExtrudedAxisData) + impl_->axis->zactive.capacity() * sizeof(std::size_t) +
            impl_->axis->display.capacity() * sizeof(double) + axis_values_storage_bytes();
 }
 } // namespace SimpleFluid::PLIC

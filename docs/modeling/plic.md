@@ -1,7 +1,7 @@
 # Piecewise-linear interface reconstruction (PLIC)
 
 PLIC represents the gas/liquid interface inside a cell by a plane. This guide
-describes the finite `VoF::PolyhedralReconstruction` used by `GeneralVoF` on
+describes the finite `PLIC::PolyhedralReconstruction<Mode>` used by `GeneralVoF` on
 actual convex native cells. It covers the geometric model, normal and offset
 fits, and their acceptance checks. The [uniform Cartesian](vof.md) and
 [adaptive Cartesian](adaptive_vof.md) backends retain specialized reconstruction
@@ -38,7 +38,7 @@ volume, and agreement between their sum and the cell volume within the
 implemented input/geometry allowance.
 
 `GeneralVoF` retains independent physical gas and carrier inventories. Its
-`finite_sample` adapter preserves the smaller physical amount and forms the
+`reconstruction_sample<Mode>` adapter preserves the smaller physical amount and forms the
 dominant **geometric fitting amount** as represented cell volume minus that
 minority amount. This sample is a geometric view; it does not overwrite either
 physical inventory. Occupancy differences and fit/transfer accounting remain
@@ -216,7 +216,7 @@ angular search uses nominal squared residuals for improvement. Certification
 failure does not switch arithmetic policy or relax physical tolerances.
 
 The caller selects a mode at the VoF operation boundary and supplies
-`PolyhedralPhaseSampleFor<Mode>` to the compiled `*_finite<Mode>` entries.
+`PolyhedralPhaseSample<Mode>` to the compiled `PolyhedralReconstruction<Mode>` entries.
 Target and stencil geometry retain that type throughout offset and normal
 fitting. The former runtime sample and reconstruction overloads are removed;
 geometry operations cannot re-enter runtime selection during a fit.
@@ -273,7 +273,7 @@ separate qualification tasks.
 
 - [Public samples, options and results](../../src/geometry/PLIC/PolyhedralReconstruction.hh)
   define the fixed-mode reconstruction interfaces.
-- [Finite reconstruction kernels](../../src/geometry/PLIC/details/FinitePolyhedralReconstruction.tcc)
+- [Finite reconstruction kernels](../../src/geometry/PLIC/details/PolyhedralReconstruction.tcc)
   implement support admission, offset fitting and angular optimization.
 - [GeneralVoF state integration](../../src/FVM/details/GeneralVoFState.cc)
   owns geometric fitting samples, stencil assembly, retained interfaces and

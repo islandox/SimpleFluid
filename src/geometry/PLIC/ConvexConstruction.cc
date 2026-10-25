@@ -3,6 +3,13 @@
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
 
+#include "geometry/PLIC/details/bounded/ConvexConstruction.tcc"
+#include "geometry/PLIC/details/ordinary/ConvexConstruction.tcc"
+
+// Native definitions consume the common typed helpers before explicit instantiation.
+#include "geometry/PLIC/details/ConvexGeometry.tcc"
+#include "geometry/PLIC/details/ordinary/NativeCellGeometry.tcc"
+
 namespace SimpleFluid::PLIC
 {
 std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint> points)
@@ -116,9 +123,6 @@ const std::vector<Face>& DynamicConvexGeometry::faces() const
 }
 } // namespace SimpleFluid::PLIC
 
-#include "geometry/PLIC/details/bounded/ConvexConstruction.tcc"
-#include "geometry/PLIC/details/ordinary/ConvexConstruction.tcc"
-
 namespace SimpleFluid::PLIC
 {
 
@@ -194,8 +198,6 @@ bool DynamicGeometryValue::relative_error_at_most(long double target, double tol
 
 } // namespace SimpleFluid::PLIC
 
-#include "geometry/PLIC/details/FiniteGeometry.tcc"
-
 namespace SimpleFluid::PLIC::details
 {
 GeometrySourceSnapshot prepare_source_geometry(
@@ -236,3 +238,28 @@ void charge_source_preparation(const GeometrySourceSnapshot& source)
     active_work->pairs += source.preparation_pairs;
 }
 } // namespace SimpleFluid::PLIC::details
+
+namespace SimpleFluid::PLIC
+{
+template class Point<ArithmeticMode::Ordinary>;
+template class Point<ArithmeticMode::BoundedCertification>;
+template class ConvexCellGeometry<ArithmeticMode::Ordinary>;
+template class ConvexCellGeometry<ArithmeticMode::BoundedCertification>;
+template class ConvexPartition<ArithmeticMode::Ordinary>;
+template class ConvexPartition<ArithmeticMode::BoundedCertification>;
+#define SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(mode)                                                                     \
+    template std::vector<PlaneAuthority> common_supports(std::span<const Point<mode>>);                                \
+    template Point<mode> point_average(std::span<const Point<mode>>);                                                  \
+    template Point<mode> point_interpolate(const Point<mode>&, const Point<mode>&, long double);                       \
+    template GeometryValue<mode> orientation(const std::array<Point<mode>, 4>&);                                       \
+    template bool points_identical(const Point<mode>&, const Point<mode>&);                                            \
+    template Point<mode> point_displaced(const Point<mode>&, const Point<mode>&);                                      \
+    template Point<mode> source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>&, std::span<const char>);     \
+    template Point<mode> source_point(                                                                                 \
+        std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, std::span<const char>);                          \
+    template Point<mode> backtrace_constrained(                                                                        \
+        const Point<mode>&, GeometryPoint, double, std::span<const FaceConstraint<mode>>, GeometryLimits);
+SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(ArithmeticMode::Ordinary)
+SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(ArithmeticMode::BoundedCertification)
+#undef SIMPLEFLUID_INSTANTIATE_TYPED_POINTS
+} // namespace SimpleFluid::PLIC

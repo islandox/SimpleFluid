@@ -40,20 +40,14 @@ public:
      */
     template<ArithmeticMode Mode>
     [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(
-        std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>&, const VoF::PolyhedralInterface&);
+        std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>&, const PLIC::PolyhedralInterface&);
     /** Fit a quadratic Monge surface in the target normal's tangential frame.
      * Curvature is div(n) [1/m], positive for convex gas with outward normals.
      */
     [[nodiscard]] static GeneralVoFCurvatureResult fit(const GeneralVoFCurvaturePatch& target,
         std::span<const GeneralVoFCurvaturePatch> support, GeneralVoFCurvatureOptions = {});
 };
-namespace Exact
-{
-struct SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFCurvature
-{
-    [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(std::uint64_t cell,
-        const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>&,
-        const VoF::PolyhedralInterface&);
-};
-} // namespace Exact
+template<>
+[[nodiscard]] std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::Exact>(
+    std::uint64_t cell, const PLIC::ConvexCellGeometry<ArithmeticMode::Exact>&, const PLIC::PolyhedralInterface&);
 } // namespace SimpleFluid::detail

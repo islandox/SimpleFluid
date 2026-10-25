@@ -1,7 +1,9 @@
 /** @file NativeCellGeometry.tcc
  * @brief Native finite cell import, refinement, and source-coordinate packets.
- * Included in the compiled typed finite provider inside namespace PLIC.
+ * Included after the common typed definitions by the compiled construction provider.
  */
+namespace SimpleFluid::PLIC
+{
 namespace native_cell_detail
 {
 namespace on = details::ordinary_native;
@@ -447,3 +449,4 @@ std::vector<ConvexOctantPiece<Mode>> ConvexCellGeometry<Mode>::split_aabb_midpoi
     certify_partition(pieces);
     return output;
 }
+} // namespace SimpleFluid::PLIC

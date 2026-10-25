@@ -119,8 +119,8 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
         {
             current(*self.data_);
             wire::Budget budget{self.data_->options.byte_budget};
-            const auto interfaces =
-                prepare_geometry ? reconstruct_exact_local(*self.data_) : std::map<Key, PolyhedralInterface>{};
+            const auto interfaces = prepare_geometry ? reconstruct_local<ArithmeticMode::Exact>(*self.data_)
+                                                     : std::map<Key, PLIC::PolyhedralInterface>{};
             for (const auto& key : self.data_->topology->order)
             {
                 budget.add(sizeof(ExactPhaseTransferCapsule) + AMR::encode_adaptive_key(key).size());
@@ -181,8 +181,9 @@ ExactPhaseTransferSource GeneralVoF::export_transfer_source(const State& self, b
                             capsule.geometry);
                     const auto fit_diagnostic = detail::round_phase_residual(target - (gas ? raw.gas : raw.carrier));
                     capsule.error.fit_residual = fit_diagnostic.value;
-                    const auto view = Measure::from_value(
-                        gas ? geometric_sample(cell).gas_volume : geometric_sample(cell).carrier_volume);
+                    const auto view =
+                        Measure::from_value(gas ? reconstruction_sample<ArithmeticMode::Exact>(cell).gas_volume
+                                                : reconstruction_sample<ArithmeticMode::Exact>(cell).carrier_volume);
                     const auto conversion = target - view;
                     auto fit_bound = view.scaled(self.data_->options.reconstruction.volume_tolerance) +
                                      (conversion.sign() < 0 ? conversion.scaled(-1) : conversion);

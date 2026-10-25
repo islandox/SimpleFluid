@@ -7,21 +7,15 @@
 #include <span>
 #include <stdexcept>
 
-namespace SimpleFluid::VoF
+namespace SimpleFluid::PLIC
 {
 /** Both represented extensive phases are authoritative, including minority tails.
- * Geometry is the actual physical cell, never a bounding-box replacement. */
-struct PolyhedralPhaseSample
+ * Geometry retains the selected arithmetic mode through every fit operation.
+ * Exact callers explicitly lift represented native geometry at their selected
+ * backend entry; that lift does not recover earlier ordinary construction history. */
+template<ArithmeticMode Mode> struct PolyhedralPhaseSample
 {
-    SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
-    double gas_volume = 0, carrier_volume = 0;
-};
-/** Fixed-mode reconstruction input. Select the mode before entering a cell or
- * stencil loop; all geometry operations retain that mode through the fit. */
-template<ArithmeticMode Mode> struct PolyhedralPhaseSampleFor
-{
-    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
-    PLIC::ConvexGeometryPtr<Mode> geometry;
+    ConvexGeometryPtr<Mode> geometry;
     double gas_volume = 0, carrier_volume = 0;
 };
 /** A necessary interface-support screen, separate from arithmetic acceptance and
@@ -68,11 +62,10 @@ struct PolyhedralReconstructionOptions
 };
 struct PolyhedralInterface
 {
-    SimpleFluid::PLIC::GeometryHalfspace gas;
+    GeometryHalfspace gas;
     double target_volume_residual = 0, stencil_volume_residual = 0;
-    SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>
-        target_volume_difference;                               ///< Exact-mode signed minority residual.
-    PLIC::DynamicGeometryValue finite_target_volume_difference; ///< Finite construction/arithmetic enclosure.
+    GeometryValue<ArithmeticMode::Exact> target_volume_difference; ///< Exact-mode signed minority residual.
+    DynamicGeometryValue finite_target_volume_difference;          ///< Finite construction/arithmetic enclosure.
     bool finite_geometry = false; ///< Selects numerical residual evidence; no exact authority is implied.
     PolyhedralResolutionAssessment resolution;
     double stencil_condition = 0, orientation_step = 0;
@@ -87,37 +80,35 @@ struct PolyhedralInterface
  * model-defect bound are distinct from the strict planar-volume oracle.
  * Insufficient or ill-conditioned
  * three-dimensional stencils reject rather than silently selecting an axis. */
-class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction
+template<ArithmeticMode Mode> class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction
 {
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+
 public:
-    /** Compiled fixed-mode entries for callers that already selected their
-     * arithmetic policy. No runtime adapter is entered during the fit. */
-    template<ArithmeticMode Mode>
-    static void validate_finite(const PolyhedralPhaseSampleFor<Mode>&, PolyhedralReconstructionOptions = {});
+    static void validate(const PolyhedralPhaseSample<Mode>&, PolyhedralReconstructionOptions = {});
     /** Read-only preflight. Missing/dilute support requests refinement; the
      * angular model gate remains independent of arithmetic admission. */
-    template<ArithmeticMode Mode>
-    [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution_finite(const PolyhedralPhaseSampleFor<Mode>&,
-        std::span<const PolyhedralPhaseSampleFor<Mode>>, PolyhedralReconstructionOptions = {});
+    [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution(const PolyhedralPhaseSample<Mode>&,
+        std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
     /** Offset utility for a supplied normal. Physical interface admission
-     * belongs to reconstruct_finite()/assess_resolution_finite(). */
-    template<ArithmeticMode Mode>
-    [[nodiscard]] static PolyhedralInterface solve_offset_finite(
-        const PolyhedralPhaseSampleFor<Mode>&, SimpleFluid::PLIC::GeometryPoint, PolyhedralReconstructionOptions = {});
-    template<ArithmeticMode Mode>
-    [[nodiscard]] static PolyhedralInterface reconstruct_finite(const PolyhedralPhaseSampleFor<Mode>&,
-        std::span<const PolyhedralPhaseSampleFor<Mode>>, PolyhedralReconstructionOptions = {});
+     * belongs to reconstruct()/assess_resolution(). */
+    [[nodiscard]] static PolyhedralInterface solve_offset(
+        const PolyhedralPhaseSample<Mode>&, GeometryPoint, PolyhedralReconstructionOptions = {});
+    [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<Mode>&,
+        std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
 };
-namespace Exact
-{
-class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction
+/** Explicit optional exact backend. This retains its existing exact arithmetic
+ * and model-fit contracts; the finite spatial-resolution preflight is not an
+ * exact-backend admission gate. */
+template<> class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction<ArithmeticMode::Exact>
 {
 public:
-    static void validate(const PolyhedralPhaseSample&, PolyhedralReconstructionOptions = {});
-    [[nodiscard]] static PolyhedralInterface solve_offset(const PolyhedralPhaseSample&,
-        SimpleFluid::PLIC::GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
-    [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample&,
-        std::span<const PolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions = {});
+    static void validate(const PolyhedralPhaseSample<ArithmeticMode::Exact>&, PolyhedralReconstructionOptions = {});
+    [[nodiscard]] static PolyhedralInterface solve_offset(const PolyhedralPhaseSample<ArithmeticMode::Exact>&,
+        GeometryPoint gas_normal, PolyhedralReconstructionOptions = {});
+    [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<ArithmeticMode::Exact>&,
+        std::span<const PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil, PolyhedralReconstructionOptions = {});
 };
-} // namespace Exact
-} // namespace SimpleFluid::VoF
+extern template class PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+extern template class PolyhedralReconstruction<ArithmeticMode::BoundedCertification>;
+} // namespace SimpleFluid::PLIC

@@ -1,5 +1,5 @@
 /** @file PolyhedralReconstruction.cc
- * @brief Native convex-cell PLIC reconstruction with bounded geometric fitting.
+ * @brief Explicit exact convex-cell PLIC reconstruction with retained rational fitting.
  */
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
@@ -11,22 +11,22 @@
 #include <numeric>
 #include <stdexcept>
 #include <vector>
-namespace SimpleFluid::VoF::Exact
+namespace SimpleFluid::PLIC
 {
 namespace
 {
-using Point = SimpleFluid::PLIC::GeometryPoint;
-double dot(Point a, Point b)
+using Vector = GeometryPoint;
+double dot(Vector a, Vector b)
 {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
-Point minus(Point a, Point b)
+Vector minus(Vector a, Vector b)
 {
     for (unsigned i = 0; i < 3; ++i)
         a[i] -= b[i];
     return a;
 }
-Point unit(Point a)
+Vector unit(Vector a)
 {
     const double norm = std::hypot(a[0], a[1], a[2]);
     if (!std::isfinite(norm) || norm == 0)
@@ -35,7 +35,8 @@ Point unit(Point a)
         x /= norm;
     return a;
 }
-void validate_sample(const PolyhedralPhaseSample& sample, const PolyhedralReconstructionOptions& options)
+void validate_sample(
+    const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, const PolyhedralReconstructionOptions& options)
 {
     if (!sample.geometry || !std::isfinite(sample.gas_volume) || !std::isfinite(sample.carrier_volume) ||
         sample.gas_volume < 0 || sample.carrier_volume < 0 || !options.maximum_offset_iterations ||
@@ -53,15 +54,14 @@ void validate_sample(const PolyhedralPhaseSample& sample, const PolyhedralRecons
     if (std::abs(discrepancy) > bound)
         throw std::invalid_argument("PLIC independent phases do not occupy actual cell.");
 }
-SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> phase(
-    const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
-    const SimpleFluid::PLIC::GeometryHalfspace& plane, bool gas)
+GeometryMeasure<ArithmeticMode::Exact> phase(
+    const ConvexFragment<ArithmeticMode::Exact>& fragment, const GeometryHalfspace& plane, bool gas)
 {
     auto measures = fragment.phases(plane);
     return gas ? measures.gas : measures.carrier;
 }
 // Pivoted elimination also rejects geometrically deficient physical stencils.
-Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condition)
+Vector solve(std::array<Vector, 3> matrix, Vector rhs, double limit, double& condition)
 {
     double largest = 0, smallest = std::numeric_limits<double>::infinity();
     for (unsigned k = 0; k < 3; ++k)
@@ -86,7 +86,7 @@ Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condit
         }
     }
     condition = largest / smallest;
-    Point result{};
+    Vector result{};
     for (int i = 2; i >= 0; --i)
     {
         double x = rhs[i];
@@ -101,22 +101,24 @@ Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condit
 // continue to run every clipping, offset and model-admissibility gate.
 struct ReconstructionGeometry
 {
-    Point center{};
+    Vector center{};
     double volume = 0;
-    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> exact_volume;
+    GeometryMeasure<ArithmeticMode::Exact> exact_volume;
     std::vector<std::vector<char>> vertices;
-    std::shared_ptr<const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>> fragment;
+    std::shared_ptr<const ConvexFragment<ArithmeticMode::Exact>> fragment;
 };
-ReconstructionGeometry prepare_geometry(
-    const PolyhedralPhaseSample& sample, bool vertices, bool fragment, bool metric_volume = false)
+ReconstructionGeometry prepare_geometry(const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, bool vertices,
+    bool fragment, bool metric_volume = false)
 {
     ReconstructionGeometry result;
+    // The selected exact source publishes the centroid and LS normalization.
+    // These may round differently from an Ordinary source's cached moments;
+    // the exact clipped-volume residual and acceptance gates below are unchanged.
     result.center = sample.geometry->centroid();
     if (metric_volume)
         result.volume = sample.geometry->moments().volume.as_double();
     if (vertices && fragment)
-        result.exact_volume =
-            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*sample.geometry);
+        result.exact_volume = GeometryMeasure<ArithmeticMode::Exact>::volume(*sample.geometry);
     if (vertices)
         for (std::size_t f = 0; f < sample.geometry->num_faces(); ++f)
         {
@@ -125,11 +127,10 @@ ReconstructionGeometry prepare_geometry(
                 result.vertices.push_back(std::move(point));
         }
     if (fragment)
-        result.fragment =
-            SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*sample.geometry);
+        result.fragment = ConvexFragment<ArithmeticMode::Exact>::from_geometry(*sample.geometry);
     return result;
 }
-PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal,
+PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, Vector normal,
     PolyhedralReconstructionOptions options, std::size_t& evaluations, const ReconstructionGeometry& geometry)
 {
     PolyhedralInterface result;
@@ -138,41 +139,37 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     result.gas.normal = unit(normal);
     const bool gas = sample.gas_volume <= sample.carrier_volume;
     const auto center = geometry.center;
-    Point support{};
-    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> extremum;
+    Vector support{};
+    GeometryMeasure<ArithmeticMode::Exact> extremum;
     bool have_support = false;
     for (const auto& id : geometry.vertices)
     {
-        const auto projection =
-            SimpleFluid::PLIC::point_projection<SimpleFluid::ArithmeticMode::Exact>(id, result.gas.normal, center);
+        const auto projection = point_projection<ArithmeticMode::Exact>(id, result.gas.normal, center);
         if (!have_support || (gas ? projection.compare(extremum) < 0 : projection.compare(extremum) > 0))
         {
             have_support = true;
             extremum = projection;
-            support = SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Exact>(id);
+            support = point_display<ArithmeticMode::Exact>(id);
         }
     }
     // The scalar offset now resolves a minority cut relative to its supporting
     // extremum, rather than adding a microscopic offset to a cell-scale distance.
     result.gas.anchor = support;
-    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> lower, upper;
+    GeometryMeasure<ArithmeticMode::Exact> lower, upper;
     bool have_bounds = false;
     for (const auto& id : geometry.vertices)
     {
-        const auto projection =
-            SimpleFluid::PLIC::point_projection<SimpleFluid::ArithmeticMode::Exact>(id, result.gas.normal, support);
+        const auto projection = point_projection<ArithmeticMode::Exact>(id, result.gas.normal, support);
         if (!have_bounds || projection.compare(lower) < 0)
             lower = projection;
         if (!have_bounds || projection.compare(upper) > 0)
             upper = projection;
         have_bounds = true;
     }
-    const auto outward =
-        [](const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& value, bool upward)
+    const auto outward = [](const GeometryMeasure<ArithmeticMode::Exact>& value, bool upward)
     {
         double rounded = value.certified().as_double();
-        const auto comparison =
-            SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(rounded).compare(value);
+        const auto comparison = GeometryMeasure<ArithmeticMode::Exact>::from_value(rounded).compare(value);
         if (upward ? comparison < 0 : comparison > 0)
             rounded = std::nextafter(
                 rounded, upward ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity());
@@ -190,10 +187,10 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     const double target = gas ? sample.gas_volume : sample.carrier_volume;
     const auto& volume = geometry.exact_volume;
     const auto& fragment = geometry.fragment;
-    const auto requested = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(target);
+    const auto requested = GeometryMeasure<ArithmeticMode::Exact>::from_value(target);
     const auto tolerance = requested.scaled(options.volume_tolerance);
     auto magnitude = [](const auto& x) { return x.sign() < 0 ? x.scaled(-1) : x; };
-    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> best;
+    GeometryMeasure<ArithmeticMode::Exact> best;
     bool have_best = false;
     // Work in positive distance from the exact supporting extremum. Its signed
     // offset relative to the displayed anchor need not be zero (or positive).
@@ -206,12 +203,11 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     if (!(distance > lo && distance < hi))
         distance = std::midpoint(lo, hi);
     double previous_distance = 0;
-    SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> previous_volume;
+    GeometryMeasure<ArithmeticMode::Exact> previous_volume;
     for (unsigned iteration = 0; iteration < options.maximum_offset_iterations; ++iteration)
     {
         auto plane = result.gas;
-        plane.offset = (base + SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(
-                                   gas ? distance : -distance))
+        plane.offset = (base + GeometryMeasure<ArithmeticMode::Exact>::from_value(gas ? distance : -distance))
                            .certified()
                            .as_double();
         if (evaluations++ >= options.maximum_clip_evaluations)
@@ -266,20 +262,22 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample& sample, Point normal
     return result;
 }
 } // namespace
-void PolyhedralReconstruction::validate(const PolyhedralPhaseSample& sample, PolyhedralReconstructionOptions options)
+void PolyhedralReconstruction<ArithmeticMode::Exact>::validate(
+    const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, PolyhedralReconstructionOptions options)
 {
     validate_sample(sample, options);
 }
-PolyhedralInterface PolyhedralReconstruction::solve_offset(
-    const PolyhedralPhaseSample& sample, Point normal, PolyhedralReconstructionOptions options)
+PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(
+    const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, Vector normal, PolyhedralReconstructionOptions options)
 {
     std::size_t evaluations = 0;
     validate_sample(sample, options);
     const auto geometry = prepare_geometry(sample, true, sample.gas_volume != 0 && sample.carrier_volume != 0);
     return offset_fit(sample, normal, options, evaluations, geometry);
 }
-PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseSample& target,
-    std::span<const PolyhedralPhaseSample> stencil, PolyhedralReconstructionOptions options)
+PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(
+    const PolyhedralPhaseSample<ArithmeticMode::Exact>& target,
+    std::span<const PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil, PolyhedralReconstructionOptions options)
 {
     validate_sample(target, options);
     if (target.gas_volume == 0 || target.carrier_volume == 0)
@@ -294,8 +292,8 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
     std::vector<ReconstructionGeometry> stencil_geometry;
     stencil_geometry.reserve(stencil.size());
     const double alpha = target.gas_volume / volume;
-    std::array<Point, 3> matrix{};
-    Point rhs{};
+    std::array<Vector, 3> matrix{};
+    Vector rhs{};
     for (const auto& sample : stencil)
     {
         validate_sample(sample, options);
@@ -314,7 +312,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
         }
     }
     double condition = 0;
-    Point normal = unit(solve(matrix, rhs, options.maximum_condition, condition));
+    Vector normal = unit(solve(matrix, rhs, options.maximum_condition, condition));
     struct Evaluation
     {
         PolyhedralInterface plane;
@@ -322,7 +320,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
         double objective = 0;
     };
     std::size_t evaluations = 0;
-    const auto evaluate = [&](Point n)
+    const auto evaluate = [&](Vector n)
     {
         Evaluation value;
         value.plane = offset_fit(target, unit(n), options, evaluations, geometry);
@@ -348,13 +346,13 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
     for (unsigned iteration = 0; iteration < options.maximum_fit_iterations; ++iteration)
     {
         iterations = iteration + 1;
-        Point axis = std::abs(normal[0]) < .8 ? Point{1, 0, 0} : Point{0, 1, 0};
-        Point tangent = unit(
+        Vector axis = std::abs(normal[0]) < .8 ? Vector{1, 0, 0} : Vector{0, 1, 0};
+        Vector tangent = unit(
             minus(axis, {normal[0] * dot(axis, normal), normal[1] * dot(axis, normal), normal[2] * dot(axis, normal)}));
-        Point second{normal[1] * tangent[2] - normal[2] * tangent[1], normal[2] * tangent[0] - normal[0] * tangent[2],
+        Vector second{normal[1] * tangent[2] - normal[2] * tangent[1], normal[2] * tangent[0] - normal[0] * tangent[2],
             normal[0] * tangent[1] - normal[1] * tangent[0]};
         constexpr double h = 1e-4;
-        Point a = normal, b = normal, am = normal, bm = normal;
+        Vector a = normal, b = normal, am = normal, bm = normal;
         for (unsigned i = 0; i < 3; ++i)
         {
             a[i] += h * tangent[i];
@@ -392,7 +390,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
         bool accepted = false;
         for (double scale = 1; scale >= 1. / 128; scale *= .5)
         {
-            Point trial = normal;
+            Vector trial = normal;
             for (unsigned i = 0; i < 3; ++i)
                 trial[i] += scale * (da * tangent[i] + db * second[i]);
             trial = unit(trial);
@@ -419,4 +417,4 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct(const PolyhedralPhaseS
         throw std::invalid_argument("PLIC physical plane-model defect exceeds admission bound.");
     return current.plane;
 }
-} // namespace SimpleFluid::VoF::Exact
+} // namespace SimpleFluid::PLIC

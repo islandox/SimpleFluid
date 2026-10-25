@@ -380,6 +380,15 @@ exists. Review all included implementation fragments before changing a
 template interface.
 This avoids incomplete interface edits across deliberately split template definitions.
 
+Keep `*.hh` declaration headers and `*.tcc` compiled-provider includes in the
+opening include block, before namespaces, declarations, and definitions. Do not
+include them in the middle or at the end of code. Only `*.ipp` files may be
+included at the end of a file, after closing its namespace. Extract shared
+declarations or reorder provider dependencies when needed to satisfy this rule;
+do not rename a declaration header or compiled provider to `.ipp` merely to
+retain a late include. Public headers must not include compiled `.tcc` providers.
+Keep simple one-line member functions in the header.
+
 FVM's compiled gradient caches cover `DefaultTpetraTypes` with `Mesh` and
 `MeshHandle`. Consumers using other packs or statically dispatched mesh types
 (including `PartitionedMesh`) include `FVM/CellGradientCache.tcc` or

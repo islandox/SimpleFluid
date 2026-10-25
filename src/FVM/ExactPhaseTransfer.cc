@@ -50,7 +50,7 @@ struct WorkingCapsule
     std::uint64_t revision = 0;
     PhaseInventoryPolicy policy = PhaseInventoryPolicy::Finite;
     SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases;
-    PolyhedralInterface geometry;
+    PLIC::PolyhedralInterface geometry;
     bool geometry_ready = false;
     WorkingError error;
     WorkingMass accumulated_roundoff;
@@ -173,7 +173,7 @@ long double wide(wire::Reader& r)
         throw std::invalid_argument("Nonfinite exact transfer diagnostic.");
     return value;
 }
-void plane(wire::Writer& w, const PolyhedralInterface& p)
+void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
 {
     for (auto x : p.gas.normal)
         real(w, x);
@@ -197,9 +197,9 @@ bool boolean(wire::Reader& r)
         throw std::invalid_argument("Invalid exact transfer boolean.");
     return v;
 }
-PolyhedralInterface plane(wire::Reader& r)
+PLIC::PolyhedralInterface plane(wire::Reader& r)
 {
-    PolyhedralInterface p;
+    PLIC::PolyhedralInterface p;
     for (auto& x : p.gas.normal)
         x = real(r);
     for (auto& x : p.gas.anchor)

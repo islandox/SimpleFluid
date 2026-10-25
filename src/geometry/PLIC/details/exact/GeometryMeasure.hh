@@ -1,4 +1,8 @@
 #pragma once
+#include "geometry/PLIC/CertifiedGeometryProperties.hh"
+#include "geometry/PLIC/GeometryBackendTypes.hh"
+#include <span>
+#include <vector>
 namespace SimpleFluid::PLIC
 {
 /** Exact rational scalar arithmetic retained independently of output rounding.
@@ -58,7 +62,7 @@ public:
     [[nodiscard]] const void* storage_identity() const noexcept { return impl_.get(); }
 
 private:
-    friend class ExactSweepAccess;
+    friend class SweepAccess<ArithmeticMode::Exact>;
     friend class SweptFace<ArithmeticMode::Exact>;
     friend class DonorExport<ArithmeticMode::Exact>;
     explicit GeometryMeasure(std::shared_ptr<const Impl>);

@@ -99,7 +99,7 @@ struct FLabel
         return Math::add(Math::multiply(gas_deviation, Math::subtract(gas_share, bulk_share)),
             Math::multiply(carrier_deviation, Math::subtract(carrier_share, bulk_share)));
     }
-    FPhases apply(const PLIC::ConvexCellGeometry<Mode>& geometry, const PolyhedralInterface& plane,
+    FPhases apply(const PLIC::ConvexCellGeometry<Mode>& geometry, const PLIC::PolyhedralInterface& plane,
         std::array<bool, 2>* geometric_presence = nullptr, FValue* fit_allocation = nullptr) const
     {
         const auto bulk = runtime_value<Mode>(geometry.volume());
@@ -121,7 +121,7 @@ struct FLabel
         return {bulk, Math::multiply(gas_bulk ? bulk : raw.gas, gas_factor),
             Math::multiply(carrier_bulk ? bulk : raw.carrier, carrier_factor)};
     }
-    FPhases history(const PLIC::ConvexCellGeometry<Mode>& geometry, const PolyhedralInterface& plane) const
+    FPhases history(const PLIC::ConvexCellGeometry<Mode>& geometry, const PLIC::PolyhedralInterface& plane) const
     {
         const auto bulk = runtime_value<Mode>(geometry.volume());
         const auto raw =
@@ -135,7 +135,7 @@ struct FLabel
 };
 template<ArithmeticMode Mode>
 FLabel<Mode> finite_label(const Cell& cell, const PLIC::ConvexCellGeometry<Mode>& geometry,
-    const PolyhedralInterface& plane, double tolerance)
+    const PLIC::PolyhedralInterface& plane, double tolerance)
 {
     using Math = fp::Arithmetic<Mode>;
     const auto inventory = finite_inventory<Mode>(cell, geometry);
@@ -1246,7 +1246,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         PhaseError original_error;
         PhaseRoundoff original_roundoff;
         GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
-        std::optional<PolyhedralInterface> retained_interface;
+        std::optional<PLIC::PolyhedralInterface> retained_interface;
     };
     std::vector<Output> outgoing;
     wire::collective(*comm, [&]
@@ -1266,11 +1266,11 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             const bool whole = indices.size() == 1 &&
                 (columns[indices[0]].kind == AMR::AdaptiveAncestryRelation::Kind::Unchanged ||
                  columns[indices[0]].kind == AMR::AdaptiveAncestryRelation::Kind::Coarsening);
-            PolyhedralInterface fitted;
+            PLIC::PolyhedralInterface fitted;
             FLabel<Mode> labels;
             if (!whole)
             {
-                fitted = reconstruct_finite_cell<Mode>(data, key);
+                fitted = reconstruct_cell<Mode>(data, key);
                 labels = finite_label<Mode>(
                     source, *cell_geometry.at(key), fitted, data.options.reconstruction.volume_tolerance);
             }
@@ -1426,7 +1426,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         std::optional<GeneralVoFPhaseGeometry> declaration;
         PhaseError original_error;
         PhaseRoundoff original_roundoff;
-        std::optional<PolyhedralInterface> retained_interface;
+        std::optional<PLIC::PolyhedralInterface> retained_interface;
         std::size_t pieces = 0;
     };
     std::map<Key, Row> rows;
@@ -1620,7 +1620,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
                     fp::upper_double(fp::upward(cell.finite_history.carrier + carrier.second));
             }
             cell.declaration = row.declaration.value_or(GeneralVoFPhaseGeometry::Infer);
-            cell.retained_interface = ownership ? row.retained_interface : std::optional<PolyhedralInterface>{};
+            cell.retained_interface = ownership ? row.retained_interface : std::optional<PLIC::PolyhedralInterface>{};
             cell.inherited = true;
             if (ownership)
                 cell.occupancy = row.original_error;

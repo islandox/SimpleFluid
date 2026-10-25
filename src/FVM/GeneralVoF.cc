@@ -617,8 +617,9 @@ std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
                 if (cell.declaration != GeneralVoFPhaseGeometry::Infer || cell.phase.gas_volume == 0 ||
                     cell.phase.carrier_volume == 0)
                     continue;
-                auto assessment = PolyhedralReconstruction::assess_resolution_finite<Mode>(
-                    finite_sample<Mode>(cell), finite_stencil<Mode>(*data_, key), data_->options.reconstruction);
+                auto assessment =
+                    PLIC::PolyhedralReconstruction<Mode>::assess_resolution(reconstruction_sample<Mode>(cell),
+                        reconstruction_stencil<Mode>(*data_, key), data_->options.reconstruction);
                 if (!assessment.admitted())
                     result.push_back({cell.gid, key, assessment});
             }
@@ -630,9 +631,9 @@ std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
     });
     return result;
 }
-std::vector<PolyhedralInterface> GeneralVoF::reconstruct() const
+std::vector<PLIC::PolyhedralInterface> GeneralVoF::reconstruct() const
 {
-    std::vector<PolyhedralInterface> result;
+    std::vector<PLIC::PolyhedralInterface> result;
     auto comm = data_->hierarchy->communicator();
     wire::collective(*comm,
         [&]

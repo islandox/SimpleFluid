@@ -111,11 +111,11 @@ P area_vector(const Poly& poly, const Face& face)
     return mul(result, Q(1, 2));
 }
 
-ExactMoments exact_moments(const Poly& poly, const P& origin)
+Moments exact_moments(const Poly& poly, const P& origin)
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.moment_evaluations;
-    ExactMoments result{};
+    Moments result{};
     for (const auto& face : poly.faces)
         for (std::size_t i = 1; i + 1 < face.size(); ++i)
         {
@@ -400,11 +400,11 @@ std::optional<Product> product_description(const Poly& poly)
     return Product{std::move(base), lo, hi};
 }
 
-ExactMoments product_moments(const Product& product, const P& origin)
+Moments product_moments(const Product& product, const P& origin)
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.moment_evaluations;
-    ExactMoments result{};
+    Moments result{};
     Q area = 0, first_x = 0, first_y = 0;
     for (std::size_t i = 0; i < product.base.size(); ++i)
     {
@@ -948,7 +948,7 @@ void ConvexCellGeometry<ArithmeticMode::Exact>::certify_partition(
         ++exact_geometry_counts.cover_certifications;
     const P origin = point(impl_->origin);
     const auto expected = exact_moments(impl_->poly, origin);
-    ExactMoments sum{};
+    Moments sum{};
     for (std::size_t i = 0; i < pieces.size(); ++i)
     {
         if (!pieces[i] || !contained(pieces[i]->impl_->poly, impl_->poly))

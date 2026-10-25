@@ -1,6 +1,22 @@
 #pragma once
+#include "geometry/PLIC/ConvexCellTypes.hh"
 namespace SimpleFluid::PLIC
 {
+template<> struct Section<ArithmeticMode::Exact>
+{
+    /** Display vertices only (unordered for supporting contact); exact geometry
+     * remains retained internally for every subsequent operation. */
+    std::vector<std::array<long double, 3>> vertices;
+    CertifiedGeometryValue<ArithmeticMode::Exact> area; ///< m^2; face tangency can have positive area
+};
+template<> struct ClipResult<ArithmeticMode::Exact>
+{
+    ConvexGeometryPtr<ArithmeticMode::Exact> inside, outside; ///< null only when proven zero volume
+    GeometrySection<ArithmeticMode::Exact> section;
+    /** Areas of each input shell face remaining on the corresponding side. */
+    std::vector<CertifiedGeometryValue<ArithmeticMode::Exact>> inside_apertures, outside_apertures;
+};
+
 /** Exact predicates/constructions on represented binary64 input, hidden in .cc.
  * Face loops must be simple, planar, outward, convex and form a closed manifold.
  * Inconclusive or unrepresentable output rejects; positive pieces never vanish.
@@ -70,7 +86,7 @@ public:
     [[nodiscard]] bool equivalent(const ConvexCellGeometry& other) const;
 
 private:
-    friend class ExactSweepAccess;
+    friend class SweepAccess<ArithmeticMode::Exact>;
     friend class ExtrudedConstruction<ArithmeticMode::Exact>;
     friend class PolyhedralComplex<ArithmeticMode::Exact>;
     friend class PlanarFace<ArithmeticMode::Exact>;

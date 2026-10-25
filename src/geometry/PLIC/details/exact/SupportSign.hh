@@ -10,9 +10,13 @@
 #include <stdexcept>
 #include <utility>
 
+namespace SimpleFluid::PLIC::exact_geometry_detail
+{
+using SupportPoint = std::array<boost::multiprecision::cpp_rational, 3>;
+} // namespace SimpleFluid::PLIC::exact_geometry_detail
+
 namespace SimpleFluid::PLIC::detail
 {
-using ExactSupportPoint = std::array<boost::multiprecision::cpp_rational, 3>;
 
 template<unsigned Bits>
 using SupportSignInteger = boost::multiprecision::number<
@@ -43,9 +47,9 @@ inline void require_positive_support_denominator(const boost::multiprecision::cp
 }
 
 template<unsigned Bits>
-BOOST_NOINLINE std::optional<int> integer_support_sign_nontrivial(const ExactSupportPoint& normal,
-    const ExactSupportPoint& anchor, const ExactSupportPoint& point, const std::array<unsigned, 3>& active,
-    unsigned count)
+BOOST_NOINLINE std::optional<int> integer_support_sign_nontrivial(const exact_geometry_detail::SupportPoint& normal,
+    const exact_geometry_detail::SupportPoint& anchor, const exact_geometry_detail::SupportPoint& point,
+    const std::array<unsigned, 3>& active, unsigned count)
 {
     using Integer = SupportSignInteger<Bits>;
     try
@@ -110,8 +114,9 @@ BOOST_NOINLINE std::optional<int> integer_support_sign_nontrivial(const ExactSup
  * The caller releases that lease before evaluating its original Q fallback.
  */
 template<unsigned Bits = 32768, class Reserve>
-std::optional<int> try_integer_support_sign(
-    const ExactSupportPoint& normal, const ExactSupportPoint& anchor, const ExactSupportPoint& point, Reserve&& reserve)
+std::optional<int> try_integer_support_sign(const exact_geometry_detail::SupportPoint& normal,
+    const exact_geometry_detail::SupportPoint& anchor, const exact_geometry_detail::SupportPoint& point,
+    Reserve&& reserve)
 {
     static_assert(Bits >= 128 && Bits <= 32768);
     std::array<unsigned, 3> active{};

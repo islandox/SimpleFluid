@@ -14,8 +14,12 @@ explicit selection and cannot rescue an unresolved FP trial.
 
 ## Reconstruction
 
-`VoF::Exact::PolyhedralReconstruction` fits the normal and offset against actual
-clipped physical-cell volumes. A least-squares gradient supplies an initial normal;
+`PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>` fits the normal and
+offset against actual clipped physical-cell volumes. Its
+`PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>` inputs retain exact geometry.
+Native callers explicitly import their Ordinary source geometry before entering
+this specialization; the fit uses the exact geometry's published centroid and
+volume for initialization and normalization. A least-squares gradient supplies an initial normal;
 every angular evaluation solves the target offset again. Conditioning,
 optimizer convergence, target-volume residual and curved-stencil model defect
 have separate checks. An underresolved or ill-conditioned stencil rejects.
@@ -27,9 +31,9 @@ the displayed anchor, and round search endpoints outward. Acceptance uses the
 original exact minority-volume residual. Rounded pure fractions never authorize
 discarding a positive phase.
 
-Finite reconstruction uses the unsuffixed `VoF::PolyhedralReconstruction`
-and the geometry's ordinary or bounded-certification mode. Exact reconstruction is a separately selected
-reference or client API. Success on an arbitrary tiny phase is not a production
+Finite reconstruction selects the Ordinary or BoundedCertification instance of
+`PLIC::PolyhedralReconstruction<Mode>`, with matching sample geometry. Exact
+reconstruction is a separately selected reference or client API. Success on an arbitrary tiny phase is not a production
 mesh-resolution requirement; accepted inventories still require conservative
 accounting in either policy.
 
@@ -85,8 +89,10 @@ interfaces; separate compiled translation units implement geometry, finite and
 exact transport, projection, and adaptive solver subsystems. Each numerical
 implementation retains its owning target's arithmetic compiler settings.
 
-Explicit rational reconstruction uses `VoF::Exact::PolyhedralReconstruction`;
-the unsuffixed `VoF::PolyhedralReconstruction` accepts bounded geometry.
+Explicit rational reconstruction uses `PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>`;
+the same template exposes Ordinary and BoundedCertification instances with
+matching geometry inputs. Only the finite modes expose `assess_resolution`;
+this refactor does not add their phase-support screen to the Exact algorithm.
 
 ## Verification and historical qualification
 

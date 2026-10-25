@@ -723,7 +723,7 @@ transport. General flow currently admits source-free, closed physical boundaries
 and nonperiodic geometry. Periodic swept images, low-Mach thermodynamics,
 material/species sources and drift need their own qualification in Stage 8.
 
-`VoF::PolyhedralReconstruction` inherits its numerical geometry's mode. A necessary
+`PLIC::PolyhedralReconstruction<Mode>` requires sample geometry in its selected mode. A necessary
 neighborhood support/model screen precedes fitting; insufficient support emits
 a refinement request and rejects atomically. The normal fit uses physical-cell volumes, with enclosures in certification
 mode, and every angular evaluation refits the target offset. A
