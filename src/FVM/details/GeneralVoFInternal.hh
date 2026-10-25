@@ -113,11 +113,13 @@ namespace general_vof_detail
 {
 SIMPLEFLUID_FVM_LOCAL PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode);
 SIMPLEFLUID_FVM_LOCAL PLIC::GeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes = 64 * 1024 * 1024);
+template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL long double phase_allowance(PLIC::DynamicGeometryValue source, double relative);
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phase_measures(
     const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL Measure finite_bound(double value);
-SIMPLEFLUID_FVM_LOCAL void occupancy(Cell& cell);
+template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void occupancy(Cell& cell);
+template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL void validate_cell(const Cell& cell, const GeneralVoFOptions& options);
 SIMPLEFLUID_FVM_LOCAL void real(wire::Writer& w, double value);
 SIMPLEFLUID_FVM_LOCAL double real(wire::Reader& r);
@@ -139,7 +141,7 @@ SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMo
 SIMPLEFLUID_FVM_LOCAL PolyhedralPhaseSample geometric_sample(const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL void refresh_experimental_catalog(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL void current(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL void retained_budget(const GeneralVoF::Data& data);
+template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void retained_budget(const GeneralVoF::Data& data);
 // Every incident owner registers its actual cell once. The node authority
 // authenticates those registrations and returns the complete canonical fan;
 // geometric coincidence and whichever ghost rows happen to be resident play no
@@ -148,13 +150,20 @@ SIMPLEFLUID_FVM_LOCAL void complete_node_fans(GeneralVoF::Data& data, GeneralVoF
 SIMPLEFLUID_FVM_LOCAL std::uint64_t transaction(Teuchos::RCP<const Teuchos::Comm<int>> comm);
 SIMPLEFLUID_FVM_LOCAL void agree_transaction(Teuchos::RCP<const Teuchos::Comm<int>> comm, std::uint64_t id);
 SIMPLEFLUID_FVM_LOCAL void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos::Comm<int>> comm);
-SIMPLEFLUID_FVM_LOCAL void import_phases(GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL FinitePolyhedralPhaseSample finite_sample(const Cell& cell);
-SIMPLEFLUID_FVM_LOCAL std::vector<FinitePolyhedralPhaseSample> finite_stencil(const GeneralVoF::Data& data, const Key& key);
+template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void import_phases(GeneralVoF::Data& data);
+template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL PolyhedralPhaseSampleFor<Mode> finite_sample(const Cell& cell);
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL std::vector<PolyhedralPhaseSampleFor<Mode>> finite_stencil(
+    const GeneralVoF::Data& data, const Key& key);
+template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL PolyhedralInterface reconstruct_finite_cell(const GeneralVoF::Data& data, const Key& key);
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_exact_local(const GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
 } // namespace general_vof_detail
 } // namespace SimpleFluid::VoF

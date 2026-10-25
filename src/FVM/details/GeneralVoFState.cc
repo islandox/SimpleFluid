@@ -1,6 +1,7 @@
 /** @file GeneralVoFState.cc
  * @brief Shared accepted-state validation, codecs, reconstruction and halo support.
  */
+#include "FVM/details/FiniteGeometryAccess.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -15,16 +16,10 @@ PLIC::GeometryLimits geometry_limits(ArithmeticMode mode, std::size_t bytes)
     limits.byte_budget = bytes;
     return limits;
 }
-long double phase_allowance(PLIC::DynamicGeometryValue source, double relative)
+template<ArithmeticMode Mode> long double phase_allowance(PLIC::DynamicGeometryValue source, double relative)
 {
-    const auto evaluate = [&]<ArithmeticMode Mode>()
-    {
-        using Math = fp::Arithmetic<Mode>;
-        return Math::lower(Math::multiply(Math::make_value(Math::lower(source)), Math::make_value(relative)));
-    };
-    if (source.arithmetic_mode == ArithmeticMode::Ordinary)
-        return evaluate.template operator()<ArithmeticMode::Ordinary>();
-    return evaluate.template operator()<ArithmeticMode::BoundedCertification>();
+    using Math = fp::Arithmetic<Mode>;
+    return Math::lower(Math::multiply(Math::make_value(Math::lower(source)), Math::make_value(relative)));
 }
 SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phase_measures(const Cell& cell)
 {
@@ -52,32 +47,17 @@ PLIC::DynamicGeometryValue finite_cell_defect(const Cell& cell, PLIC::DynamicGeo
     defect_sum.add(Math::negate(actual));
     return defect_sum.value();
 }
-PLIC::DynamicGeometryValue finite_cell_defect(const Cell& cell, PLIC::DynamicGeometryValue actual)
-{
-    if (actual.arithmetic_mode == ArithmeticMode::Ordinary)
-        return finite_cell_defect<ArithmeticMode::Ordinary>(cell, actual);
-    return finite_cell_defect<ArithmeticMode::BoundedCertification>(cell, actual);
-}
-PLIC::DynamicGeometryValue finite_native_conversion(const Cell& cell, PLIC::DynamicGeometryValue actual)
-{
-    const auto evaluate = [&]<ArithmeticMode Mode>()
-    {
-        using Math = fp::Arithmetic<Mode>;
-        return Math::subtract(Math::make_value(cell.native_volume), actual);
-    };
-    if (actual.arithmetic_mode == ArithmeticMode::Ordinary)
-        return evaluate.template operator()<ArithmeticMode::Ordinary>();
-    return evaluate.template operator()<ArithmeticMode::BoundedCertification>();
-}
 } // namespace
-void occupancy(Cell& cell)
+template<ArithmeticMode Mode> void occupancy(Cell& cell)
 {
-    if (cell.finite_geometry)
+    if constexpr (Mode != ArithmeticMode::Exact)
     {
         using namespace finite_detail;
-        const auto actual = cell.finite_geometry->volume();
-        const auto conversion = finite_native_conversion(cell, actual);
-        const auto defect = finite_cell_defect(cell, actual);
+        const auto actual =
+            fp::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+        const auto conversion =
+            fp::Arithmetic<Mode>::subtract(fp::Arithmetic<Mode>::make_value(cell.native_volume), actual);
+        const auto defect = finite_cell_defect<Mode>(cell, actual);
         const auto input = static_cast<long double>(cell.native_volume) * 8 * std::numeric_limits<double>::epsilon();
         if (!(cell.native_volume > 0) || !std::isfinite(cell.native_volume) ||
             std::abs(conversion.value) > input + conversion.absolute_error ||
@@ -109,9 +89,11 @@ void occupancy(Cell& cell)
     cell.occupancy.phase_input_bound = detail::phase_upper_bound(input + diagnostic_error);
     cell.occupancy.admitted_bound = detail::phase_upper_bound(absolute(conversion) + input + diagnostic_error);
 }
-void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
+template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
 {
-    const bool experimental = options.arithmetic_mode == ArithmeticMode::Exact;
+    constexpr bool experimental = Mode == ArithmeticMode::Exact;
+    if (options.arithmetic_mode != Mode)
+        throw std::invalid_argument("General VoF state arithmetic mode differs from its selected operation.");
     if (experimental != bool(cell.experimental_exact))
         throw std::invalid_argument("General VoF inventory policy/payload differs.");
     if (experimental)
@@ -122,13 +104,14 @@ void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
         if (view.phases.gas != cell.phase.gas_volume || view.phases.carrier != cell.phase.carrier_volume)
             throw std::invalid_argument("Experimental exact diagnostic phase view differs.");
     }
-    if (!experimental)
+    if constexpr (!experimental)
     {
         using namespace finite_detail;
         if (!cell.finite_geometry || cell.finite_geometry->arithmetic_mode() != options.arithmetic_mode)
             throw std::invalid_argument("Finite General VoF is missing bounded geometry authority.");
-        const auto actual = cell.finite_geometry->volume();
-        const auto defect = finite_cell_defect(cell, actual);
+        const auto actual =
+            fp::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+        const auto defect = finite_cell_defect<Mode>(cell, actual);
         const auto& e = cell.occupancy;
         bool valid = std::isfinite(cell.phase.gas_volume) && cell.phase.gas_volume >= 0 &&
             std::isfinite(cell.phase.carrier_volume) && cell.phase.carrier_volume >= 0 &&
@@ -140,7 +123,7 @@ void validate_cell(const Cell& cell, const GeneralVoFOptions& options)
             valid = valid && std::isfinite(bound) && bound >= 0;
         if (!valid || std::uint64_t(cell.declaration) > 2)
             throw std::invalid_argument("General VoF finite occupancy provenance is invalid.");
-        PolyhedralReconstruction::validate(finite_sample(cell), options.reconstruction);
+        PolyhedralReconstruction::validate_finite<Mode>(finite_sample<Mode>(cell), options.reconstruction);
         if (cell.declaration != GeneralVoFPhaseGeometry::Infer)
         {
             const auto minority = cell.declaration == GeneralVoFPhaseGeometry::PureGas ?
@@ -356,7 +339,7 @@ void current(const GeneralVoF::Data& data)
         data.supplied_hierarchy->observation() != data.supplied_observation)
         throw std::invalid_argument("General VoF source geometry/control is stale.");
 }
-void retained_budget(const GeneralVoF::Data& data)
+template<ArithmeticMode Mode> void retained_budget(const GeneralVoF::Data& data)
 {
     wire::Budget budget{data.options.byte_budget};
     std::set<const void*> geometry;
@@ -380,8 +363,9 @@ void retained_budget(const GeneralVoF::Data& data)
         budget.add(sizeof(Cell) + sizeof(Key) + 8 * sizeof(void*) + AMR::encode_adaptive_key(key).size());
         if (geometry.insert(cell.phase.geometry.get()).second)
             budget.add(cell.phase.geometry->storage_bytes());
-        if (cell.finite_geometry && geometry.insert(cell.finite_geometry.get()).second)
-            budget.add(cell.finite_geometry->storage_bytes());
+        if constexpr (Mode != ArithmeticMode::Exact)
+            if (cell.finite_geometry && geometry.insert(cell.finite_geometry.get()).second)
+                budget.add(cell.finite_geometry->storage_bytes<Mode>());
         if (cell.experimental_exact)
         {
             budget.add(sizeof(ExperimentalPhaseInventory));
@@ -667,7 +651,7 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
             }
         });
 }
-void import_phases(GeneralVoF::Data& data)
+template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
 {
     auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
@@ -776,27 +760,28 @@ void import_phases(GeneralVoF::Data& data)
                 else
                     cell.experimental_exact.reset();
                 r.done();
-                validate_cell(cell, data.options);
+                validate_cell<Mode>(cell, data.options);
             }
             if (seen.size() != requests.size())
                 throw std::invalid_argument("General VoF incomplete phase replies.");
         });
 }
-FinitePolyhedralPhaseSample finite_sample(const Cell& cell)
+template<ArithmeticMode Mode> PolyhedralPhaseSampleFor<Mode> finite_sample(const Cell& cell)
 {
-    const auto bulk = cell.finite_geometry->volume();
+    const auto geometry = PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry);
+    const auto bulk = geometry->volume();
     const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
     const auto minority = gas ? cell.phase.gas_volume : cell.phase.carrier_volume;
     const long double dominant = bulk.value - minority;
     if (dominant < 0)
         throw std::invalid_argument("Finite VoF minority exceeds actual cell geometry.");
-    return {cell.finite_geometry, gas ? minority : static_cast<double>(dominant),
-        gas ? static_cast<double>(dominant) : minority};
+    return {geometry, gas ? minority : static_cast<double>(dominant), gas ? static_cast<double>(dominant) : minority};
 }
-std::vector<FinitePolyhedralPhaseSample> finite_stencil(const GeneralVoF::Data& data, const Key& key)
+template<ArithmeticMode Mode>
+std::vector<PolyhedralPhaseSampleFor<Mode>> finite_stencil(const GeneralVoF::Data& data, const Key& key)
 {
     std::set<Key> visited{key}, front{key};
-    std::vector<FinitePolyhedralPhaseSample> result;
+    std::vector<PolyhedralPhaseSampleFor<Mode>> result;
     for (unsigned ring = 0; ring < data.options.support_rings; ++ring)
     {
         std::set<Key> next;
@@ -810,7 +795,7 @@ std::vector<FinitePolyhedralPhaseSample> finite_stencil(const GeneralVoF::Data& 
                 {
                     if (result.size() == data.options.maximum_stencil_cells)
                         throw std::invalid_argument("Finite VoF reconstruction stencil budget exhausted.");
-                    result.push_back(finite_sample(data.cells.at(neighbor)));
+                    result.push_back(finite_sample<Mode>(data.cells.at(neighbor)));
                     next.insert(neighbor);
                 }
         }
@@ -818,10 +803,10 @@ std::vector<FinitePolyhedralPhaseSample> finite_stencil(const GeneralVoF::Data& 
     }
     return result;
 }
-PolyhedralInterface reconstruct_finite_cell(const GeneralVoF::Data& data, const Key& key)
+template<ArithmeticMode Mode> PolyhedralInterface reconstruct_finite_cell(const GeneralVoF::Data& data, const Key& key)
 {
     const auto& cell = data.cells.at(key);
-    validate_cell(cell, data.options);
+    validate_cell<Mode>(cell, data.options);
     if (cell.retained_interface)
     {
         if (!cell.retained_interface->finite_geometry)
@@ -841,16 +826,16 @@ PolyhedralInterface reconstruct_finite_cell(const GeneralVoF::Data& data, const 
         return result;
     }
     if (cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
-        return PolyhedralReconstruction::solve_offset(
-            finite_sample(cell), {1, 0, 0}, data.options.reconstruction);
-    return PolyhedralReconstruction::reconstruct(
-        finite_sample(cell), finite_stencil(data, key), data.options.reconstruction);
+        return PolyhedralReconstruction::solve_offset_finite<Mode>(
+            finite_sample<Mode>(cell), {1, 0, 0}, data.options.reconstruction);
+    return PolyhedralReconstruction::reconstruct_finite<Mode>(
+        finite_sample<Mode>(cell), finite_stencil<Mode>(data, key), data.options.reconstruction);
 }
-std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data)
+template<ArithmeticMode Mode> std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data)
 {
     std::map<Key, PolyhedralInterface> result;
     for (const auto& key : data.topology->order)
-        result.emplace(key, reconstruct_finite_cell(data, key));
+        result.emplace(key, reconstruct_finite_cell<Mode>(data, key));
     return result;
 }
 std::map<Key, PolyhedralInterface> reconstruct_exact_local(const GeneralVoF::Data& data)
@@ -859,7 +844,7 @@ std::map<Key, PolyhedralInterface> reconstruct_exact_local(const GeneralVoF::Dat
     for (const auto& key : data.topology->order)
     {
         const auto& target = data.cells.at(key);
-        validate_cell(target, data.options);
+        validate_cell<ArithmeticMode::Exact>(target, data.options);
         if (target.retained_interface && !target.retained_interface->finite_geometry)
         {
             result.emplace(key, *target.retained_interface);
@@ -915,7 +900,7 @@ std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& dat
     return data.options.arithmetic_mode != ArithmeticMode::Exact ?
         reconstruct_finite_local(data) : reconstruct_exact_local(data);
 }
-std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
+template<ArithmeticMode Mode> std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
 {
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
@@ -924,7 +909,10 @@ std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
         [&]
         {
             current(data);
-            result = reconstruct_local(data);
+            if constexpr (Mode == ArithmeticMode::Exact)
+                result = reconstruct_exact_local(data);
+            else
+                result = reconstruct_finite_local<Mode>(data);
         });
     std::vector<OwnerPacket> requests;
     wire::collective(*comm,
@@ -982,17 +970,18 @@ std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
                     throw std::invalid_argument("General VoF unauthenticated plane reply.");
                 auto fitted = plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ?
                     std::optional<ArithmeticMode>{} : data.options.arithmetic_mode);
-                if (data.options.arithmetic_mode != ArithmeticMode::Exact)
+                if constexpr (Mode != ArithmeticMode::Exact)
                 {
                     if (!fitted.finite_geometry)
                         throw std::invalid_argument("Finite VoF imported an exact interface authority.");
                     if (!fitted.pure_gas && !fitted.pure_carrier)
                     {
-                        const auto amounts = cell.finite_geometry->phases(fitted.gas);
+                        const auto amounts = fp::runtime_phases<Mode>(
+                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->phases(fitted.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
-                        fitted.finite_target_volume_difference = finite_detail::subtract(
-                            gas ? amounts.gas : amounts.carrier,
-                            {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
+                        fitted.finite_target_volume_difference =
+                            fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
+                                {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
                         fitted.target_volume_residual =
                             static_cast<double>(fitted.finite_target_volume_difference.value);
                     }
@@ -1017,4 +1006,50 @@ std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
         });
     return result;
 }
+
+std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data)
+{
+    if (data.options.arithmetic_mode == ArithmeticMode::Ordinary)
+        return reconstruct_finite_local<ArithmeticMode::Ordinary>(data);
+    return reconstruct_finite_local<ArithmeticMode::BoundedCertification>(data);
+}
+std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
+{
+    if (data.options.arithmetic_mode == ArithmeticMode::Exact)
+        return import_planes<ArithmeticMode::Exact>(data);
+    if (data.options.arithmetic_mode == ArithmeticMode::Ordinary)
+        return import_planes<ArithmeticMode::Ordinary>(data);
+    return import_planes<ArithmeticMode::BoundedCertification>(data);
+}
+template void occupancy<ArithmeticMode::Ordinary>(Cell&);
+template void validate_cell<ArithmeticMode::Ordinary>(const Cell&, const GeneralVoFOptions&);
+template std::map<Key, PolyhedralInterface> import_planes<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
+template PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary> finite_sample<ArithmeticMode::Ordinary>(const Cell&);
+template std::vector<PolyhedralPhaseSampleFor<ArithmeticMode::Ordinary>> finite_stencil<ArithmeticMode::Ordinary>(
+    const GeneralVoF::Data&, const Key&);
+template PolyhedralInterface reconstruct_finite_cell<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, const Key&);
+template std::map<Key, PolyhedralInterface> reconstruct_finite_local<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
+template void occupancy<ArithmeticMode::BoundedCertification>(Cell&);
+template void validate_cell<ArithmeticMode::BoundedCertification>(const Cell&, const GeneralVoFOptions&);
+template std::map<Key, PolyhedralInterface> import_planes<ArithmeticMode::BoundedCertification>(
+    const GeneralVoF::Data&);
+template PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>
+finite_sample<ArithmeticMode::BoundedCertification>(const Cell&);
+template std::vector<PolyhedralPhaseSampleFor<ArithmeticMode::BoundedCertification>>
+finite_stencil<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&, const Key&);
+template PolyhedralInterface reconstruct_finite_cell<ArithmeticMode::BoundedCertification>(
+    const GeneralVoF::Data&, const Key&);
+template std::map<Key, PolyhedralInterface> reconstruct_finite_local<ArithmeticMode::BoundedCertification>(
+    const GeneralVoF::Data&);
+template void occupancy<ArithmeticMode::Exact>(Cell&);
+template void validate_cell<ArithmeticMode::Exact>(const Cell&, const GeneralVoFOptions&);
+template std::map<Key, PolyhedralInterface> import_planes<ArithmeticMode::Exact>(const GeneralVoF::Data&);
+template void import_phases<ArithmeticMode::Ordinary>(GeneralVoF::Data&);
+template long double phase_allowance<ArithmeticMode::Ordinary>(PLIC::DynamicGeometryValue, double);
+template void import_phases<ArithmeticMode::BoundedCertification>(GeneralVoF::Data&);
+template long double phase_allowance<ArithmeticMode::BoundedCertification>(PLIC::DynamicGeometryValue, double);
+template void import_phases<ArithmeticMode::Exact>(GeneralVoF::Data&);
+template void retained_budget<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
+template void retained_budget<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&);
+template void retained_budget<ArithmeticMode::Exact>(const GeneralVoF::Data&);
 }

@@ -24,8 +24,6 @@ struct DynamicPlanarFaceOverlap
  * overlap is exactly zero only when topology or shared line authority proves it.
  * Returned area enclosures have physical area units; the caller applies its
  * unchanged physical accuracy budget and cumulative handoff resource caps. */
-[[nodiscard]] DynamicPlanarFaceOverlap dynamic_planar_face_overlap(std::span<const DynamicPoint> first,
-    std::span<const DynamicPoint> second, const PlaneAuthority& support, GeometryLimits = {});
 /** Mode-typed planar overlap results; ordinary values carry no error field. */
 template<ArithmeticMode Mode> struct PlanarFaceOverlap
 {

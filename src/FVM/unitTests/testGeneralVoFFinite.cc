@@ -4,6 +4,27 @@
 namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+constexpr auto overlay_mode = ArithmeticMode::BoundedCertification;
+using OverlayGeometry = PLIC::ConvexCellGeometry<overlay_mode>;
+void reset_dispatch_statistics()
+{
+    GeneralVoF::reset_geometry_statistics();
+    PLIC::reset_geometry_statistics();
+}
+void expect_static_geometry_work()
+{
+    const auto fvm = GeneralVoF::geometry_statistics().bounded;
+    const auto executable = PLIC::geometry_statistics();
+    EXPECT_EQ(fvm.runtime_dispatches, 0u);
+    EXPECT_EQ(executable.runtime_dispatches, 0u);
+    // Empty owners may legitimately do no work; the collective must exercise
+    // the fixed-mode geometry provider rather than passing vacuously.
+    const std::uint64_t local = fvm.constructions + fvm.volume_evaluations + fvm.partition_checks;
+    std::uint64_t global = 0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local, &global);
+    EXPECT_GT(global, 0u);
+}
+
 void check_budget_diagnostics(const GeneralVoF& state, const GeneralVoF::Trial& trial)
 {
     const auto& faces = trial.finite_face_chain_diagnostics();
@@ -36,7 +57,7 @@ void check_budget_diagnostics(const GeneralVoF& state, const GeneralVoF::Trial& 
     }
     for (const auto& tile : state.tiles()) valid = valid && by_face.contains(tile.face_gid);
     if (!collectively_valid(valid)) return;
-    const auto geometry = state.owned_finite_geometry();
+    const auto geometry = state.owned_finite_geometry<ArithmeticMode::Ordinary>();
     valid = geometry.size() == cells.size();
     EXPECT_EQ(geometry.size(), cells.size());
     for (std::size_t c = 0; c < cells.size(); ++c)
@@ -99,6 +120,36 @@ void check_budget_diagnostics(const GeneralVoF& state, const GeneralVoF::Trial& 
         if (std::isfinite(minimum[i])) EXPECT_EQ(minimum[i], maximum[i]);
 }
 
+TEST(GeneralVoFFinite, SelectedGeometryModeStaysStaticThroughConstructionAndReconstruction)
+{
+    auto input = fixture();
+    for (std::size_t i = 0; i < input.order.size(); ++i)
+    {
+        const auto geometry = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]));
+        const auto phases = geometry->phases({{1, 0, 0}, {}, .75});
+        input.gas[i] = phases.gas.as_double();
+        input.carrier[i] = phases.carrier.as_double();
+    }
+    for (const auto mode : {ArithmeticMode::Ordinary, ArithmeticMode::BoundedCertification})
+    {
+        SCOPED_TRACE(static_cast<int>(mode));
+        GeneralVoFOptions options;
+        options.arithmetic_mode = mode;
+        reset_dispatch_statistics();
+        GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+        expect_static_geometry_work();
+        reset_dispatch_statistics();
+        const auto planes = state.reconstruct();
+        EXPECT_EQ(planes.size(), state.owned_order().size());
+        expect_static_geometry_work();
+        std::uint64_t local_mixed = 0, global_mixed = 0;
+        for (const auto& plane : planes)
+            local_mixed += !plane.pure_gas && !plane.pure_carrier;
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_mixed, &global_mixed);
+        EXPECT_GT(global_mixed, 0u);
+    }
+}
+
 TEST(GeneralVoFFinite, OrdinaryDefaultAndBoundedOptInKeepSeparateAcceptancePolicies)
 {
     const auto input = fixture();
@@ -147,11 +198,9 @@ TEST(GeneralVoFFinite, OrdinaryModeRejectsInvalidPhysicalDataAndImplicitExactVie
 
 TEST(GeneralVoFFinite, SparseOverlayRetainsDisjointAndContactAtomsAndCoefficients)
 {
-    const std::vector<fp::OverlayAtom> atoms{{SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1}), 0},
-        {SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 2}, {1, 1, 3}), 1},
-        {SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 4}, {1, 1, 5}), -1}};
-    const std::array pieces{SimpleFluid::PLIC::DynamicConvexGeometry::box({3, 0, 0}, {4, 1, 5}),
-        SimpleFluid::PLIC::DynamicConvexGeometry::box({1, 0, 0}, {2, 1, 5})};
+    const std::vector<fp::OverlayAtom<overlay_mode>> atoms{{OverlayGeometry::box({0, 0, 0}, {1, 1, 1}), 0},
+        {OverlayGeometry::box({0, 0, 2}, {1, 1, 3}), 1}, {OverlayGeometry::box({0, 0, 4}, {1, 1, 5}), -1}};
+    const std::array pieces{OverlayGeometry::box({3, 0, 0}, {4, 1, 5}), OverlayGeometry::box({1, 0, 0}, {2, 1, 5})};
     for (const auto& geometry : pieces)
         for (const int sign : {-1, 1})
             for (const int incidence : {-1, 1})
@@ -178,11 +227,11 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsDisjointAndContactAtomsAndCoefficient
 
 TEST(GeneralVoFFinite, SparseOverlayRetainsZeroCoefficientAtomsForLaterActivation)
 {
-    const auto root = SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1});
-    const auto far = SimpleFluid::PLIC::DynamicConvexGeometry::box({3, 0, 0}, {4, 1, 1});
-    const auto half = SimpleFluid::PLIC::DynamicConvexGeometry::box({.5, 0, 0}, {1, 1, 1});
+    const auto root = OverlayGeometry::box({0, 0, 0}, {1, 1, 1});
+    const auto far = OverlayGeometry::box({3, 0, 0}, {4, 1, 1});
+    const auto half = OverlayGeometry::box({.5, 0, 0}, {1, 1, 1});
     fp::Work work;
-    auto atoms = fp::overlay({{root, 0}}, {far, -1}, -1, work);
+    auto atoms = fp::overlay<overlay_mode>({{root, 0}}, {far, -1}, -1, work);
     ASSERT_EQ(atoms.size(), 1u);
     EXPECT_EQ(atoms.front().geometry.get(), root.get());
     EXPECT_EQ(atoms.front().coefficient, 0);
@@ -205,9 +254,9 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsZeroCoefficientAtomsForLaterActivatio
 
 TEST(GeneralVoFFinite, SparseOverlayFastPathStillChargesPairAtomAndByteCaps)
 {
-    const auto root = SimpleFluid::PLIC::DynamicConvexGeometry::box({0, 0, 0}, {1, 1, 1});
-    const fp::SignedPiece far{SimpleFluid::PLIC::DynamicConvexGeometry::box({3, 0, 0}, {4, 1, 1}), 1};
-    const std::vector<fp::OverlayAtom> atoms{{root, 0}};
+    const auto root = OverlayGeometry::box({0, 0, 0}, {1, 1, 1});
+    const fp::SignedPiece<overlay_mode> far{OverlayGeometry::box({3, 0, 0}, {4, 1, 1}), 1};
+    const std::vector<fp::OverlayAtom<overlay_mode>> atoms{{root, 0}};
     const auto rejected = [&](fp::Work& work, const char* reason)
     {
         try
@@ -229,16 +278,16 @@ TEST(GeneralVoFFinite, SparseOverlayFastPathStillChargesPairAtomAndByteCaps)
     rejected(atom, "atom buffer capacity");
     EXPECT_EQ(atom.pair_tests, 1u);
     fp::Work bytes;
-    bytes.limits.byte_budget = sizeof(fp::OverlayAtom) - 1;
+    bytes.limits.byte_budget = sizeof(fp::OverlayAtom<overlay_mode>) - 1;
     rejected(bytes, "byte budget");
     EXPECT_EQ(bytes.pair_tests, 1u);
     fp::Work exact;
-    exact.limits.byte_budget = sizeof(fp::OverlayAtom);
+    exact.limits.byte_budget = sizeof(fp::OverlayAtom<overlay_mode>);
     const auto result = fp::overlay(atoms, far, 1, exact);
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result.front().geometry.get(), root.get());
     EXPECT_EQ(result.front().coefficient, 0);
-    EXPECT_EQ(exact.bytes, sizeof(fp::OverlayAtom));
+    EXPECT_EQ(exact.bytes, sizeof(fp::OverlayAtom<overlay_mode>));
     EXPECT_EQ(root->volume().value, 1);
     EXPECT_EQ(root->volume().absolute_error, 0);
 }
@@ -251,6 +300,7 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
         {
             GeneralVoF::enable_geometry_statistics(true);
             GeneralVoF::reset_geometry_statistics();
+            PLIC::reset_geometry_statistics();
             SimpleFluid::PLIC::enable_backend_statistics<ArithmeticMode::Exact>(true);
             SimpleFluid::PLIC::reset_backend_statistics<ArithmeticMode::Exact>();
         }
@@ -263,13 +313,16 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
     const auto input = fixture();
     GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier);
     EXPECT_EQ(state.arithmetic_mode(), ArithmeticMode::Ordinary);
-    for (const auto& geometry : state.owned_finite_geometry())
+    for (const auto& geometry : state.owned_finite_geometry<ArithmeticMode::Ordinary>())
         EXPECT_EQ(geometry->arithmetic_mode(), ArithmeticMode::Ordinary);
     const auto velocities = stationary(state);
     const auto controls = circulation(state);
     const auto prepared = GeneralVoF::geometry_statistics();
+    EXPECT_EQ(prepared.bounded.runtime_dispatches, 0u);
+    EXPECT_EQ(PLIC::geometry_statistics().runtime_dispatches, 0u);
     const auto trial = state.plan_transport(velocities, controls, 1);
     const auto candidate = state.apply(trial);
+    expect_static_geometry_work();
     check_budget_diagnostics(state, trial);
     EXPECT_TRUE(trial.transfers().empty());
     EXPECT_TRUE(trial.donor_budgets().empty());
@@ -484,7 +537,10 @@ TEST(GeneralVoFFinite, FiniteRefineCoarsenPreservesPhasesWeightedChannelsAndSour
             marks.push_back({source->owned_order()[c], AdaptiveSplit::Isotropic});
     const auto plan = source->hierarchy()->plan_adaptation(marks);
     const auto target = bound_candidate(source->hierarchy(), plan);
-    const auto trial = source->plan_remap(plan, target, initial_channels(*source), channel_options());
+    const auto channels = initial_channels(*source);
+    reset_dispatch_statistics();
+    const auto trial = source->plan_remap(plan, target, channels, channel_options());
+    expect_static_geometry_work();
     EXPECT_FALSE(trial.ownership_only());
     // The Cartesian provider refines the complete native block containing
     // the mark: all eight original leaves acquire eight children.
@@ -497,8 +553,10 @@ TEST(GeneralVoFFinite, FiniteRefineCoarsenPreservesPhasesWeightedChannelsAndSour
     for (const auto& [key, family] : refined->hierarchy()->families())
         families.push_back(key);
     const auto coarsen = refined->hierarchy()->plan_adaptation({}, families);
-    const auto restored = refined->plan_remap(
-        coarsen, bound_candidate(refined->hierarchy(), coarsen), trial.owned_channels(), channel_options());
+    const auto coarse_target = bound_candidate(refined->hierarchy(), coarsen);
+    reset_dispatch_statistics();
+    const auto restored = refined->plan_remap(coarsen, coarse_target, trial.owned_channels(), channel_options());
+    expect_static_geometry_work();
     check_remap(restored, 8);
 }
 TEST(GeneralVoFFinite, FiniteMigrationCopiesInventoriesAndRejectsForeignSchemaAtomically)

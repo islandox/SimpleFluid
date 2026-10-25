@@ -1,7 +1,9 @@
 /** @file testPLICGeometry.cc
  * @brief Typed PLIC geometry, arithmetic separation, and checked publication contracts.
  */
+#include "geometry/unitTests/plic_analytic_test_geometry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/PlanarFace.hh"
 #include <cmath>
 #include <concepts>
 #include <gtest/gtest.h>
@@ -212,5 +214,90 @@ TEST(PLICGeometryTest, TypedInputConversionHonorsConstructionCaps)
     EXPECT_THROW((void) OrdinaryGeometry::make_points(vertices, faces, limits), std::invalid_argument);
     EXPECT_EQ(PLIC::geometry_statistics().constructions, 0u);
     EXPECT_NEAR(OrdinaryGeometry::make_points(vertices, faces)->volume().value, 1.L / 6, 1e-15L);
+}
+template<ArithmeticMode Mode> void fixed_mode_operations_do_not_redispatch()
+{
+    using Geometry = PLIC::ConvexCellGeometry<Mode>;
+    using Point = PLIC::Point<Mode>;
+    PLIC::reset_geometry_statistics();
+    const auto source = OrdinaryGeometry::box({0, 0, 0}, {1, 1, 1});
+    const auto imported = Geometry::from_geometry(*source);
+    EXPECT_DOUBLE_EQ(imported->volume().as_double(), 1);
+    if constexpr (Mode == ArithmeticMode::BoundedCertification)
+        for (const auto& point : imported->points())
+            EXPECT_TRUE(point.supports().empty());
+    const auto cube = plic_test::axis_box<Mode>({0, 0, 0}, {1, 1, 1});
+    const PLIC::GeometryHalfspace plane{{1, 0, 0}, {0, 0, 0}, .25};
+    const auto cut = cube->clip(plane);
+    ASSERT_TRUE(cut.inside);
+    ASSERT_TRUE(cut.outside);
+    EXPECT_DOUBLE_EQ(cube->volume().as_double(), 1);
+    EXPECT_NEAR(cube->phases(plane).gas.as_double(), .25, 1e-14);
+    EXPECT_NEAR(cube->moments({0, 0, 0}).first_moment[0].as_double(), .5, 1e-14);
+    EXPECT_NEAR(cube->centroid()[0], .5, 1e-14);
+    EXPECT_GT(cube->storage_bytes(), 0u);
+    EXPECT_GT(cube->axis_spans()[0].value, 0);
+    EXPECT_GT(cube->support({1, 0, 0}, {0, 0, 0}).upper.value, 0);
+    EXPECT_TRUE(cut.inside->bounds_prove_disjoint_interiors(*cut.outside));
+    EXPECT_NEAR(cube->intersect(*cut.inside)->volume().as_double(), .25, 1e-14);
+    EXPECT_NEAR(cut.inside->translated({1, 0, 0})->volume().as_double(), .25, 1e-14);
+    const std::array donors{cut.inside, cut.outside};
+    const PLIC::ConvexPartition<Mode> partition(donors);
+    const auto pieces = partition.partition(*cube);
+    ASSERT_EQ(pieces.size(), 2u);
+    std::vector<PLIC::ConvexGeometryPtr<Mode>> cover;
+    for (const auto& piece : pieces)
+        cover.push_back(piece.geometry);
+    EXPECT_NO_THROW(cube->certify_fragment_partition(cover, 0));
+    cover.pop_back();
+    EXPECT_THROW(cube->certify_fragment_partition(cover, 0), std::invalid_argument);
+    const PLIC::GeometryPacketContext context{{11, 13, 17, 19}};
+    const std::array sources{cube};
+    const auto restored = Geometry::decode(cut.inside->encode(context), context, sources);
+    EXPECT_NEAR(restored->volume().as_double(), .25, 1e-14);
+    const auto points = cube->points();
+    const auto local_points = cube->local_points();
+    EXPECT_EQ(points.size(), local_points.size());
+    std::vector<Point> face;
+    for (auto vertex : cube->faces().front())
+        face.push_back(points[vertex]);
+    const auto supports = PLIC::common_supports<Mode>(face);
+    ASSERT_FALSE(supports.empty());
+    const auto overlap = PLIC::planar_face_overlap<Mode>(face, face, supports.front());
+    EXPECT_NEAR(overlap.overlap_over_first.as_double(), 1, 1e-14);
+    const auto average = PLIC::point_average<Mode>(face);
+    EXPECT_TRUE(PLIC::points_identical<Mode>(average, average));
+    EXPECT_GT(PLIC::point_storage_bytes(average), 0u);
+    const auto interpolated = PLIC::point_interpolate<Mode>(face[0], face[1], .5L);
+    const auto displaced = PLIC::point_displaced<Mode>(interpolated, Point({1, 0, 0}));
+    EXPECT_NEAR(displaced.value[0], interpolated.value[0] + 1, 1e-14L);
+    const auto departure = PLIC::backtrace_constrained<Mode>(average, {0, 0, 0}, .1, {});
+    EXPECT_TRUE(PLIC::points_identical<Mode>(departure, average));
+    const std::array tetrahedron{Point({0, 0, 0}), Point({1, 0, 0}), Point({0, 1, 0}), Point({0, 0, 1})};
+    EXPECT_NEAR(PLIC::orientation<Mode>(tetrahedron).as_double(), 1, 1e-14);
+    EXPECT_NEAR(Geometry::tetrahedron(tetrahedron)->volume().as_double(), 1. / 6, 1e-14);
+    EXPECT_EQ(PLIC::geometry_statistics().runtime_dispatches, 0u);
+}
+
+TEST(PLICGeometryTest, OrdinaryOperationsKeepTheSelectedKernelThroughNestedWork)
+{
+    fixed_mode_operations_do_not_redispatch<ArithmeticMode::Ordinary>();
+}
+
+TEST(PLICGeometryTest, BoundedOperationsKeepTheSelectedKernelThroughNestedWork)
+{
+    if (!PLIC::certification_environment())
+        GTEST_SKIP() << "Bounded wider floating-point environment unavailable.";
+    fixed_mode_operations_do_not_redispatch<ArithmeticMode::BoundedCertification>();
+}
+
+TEST(PLICGeometryTest, RuntimeScalarPublicationSelectionIsCounted)
+{
+    PLIC::reset_geometry_statistics();
+    const auto cube = OrdinaryGeometry::box({0, 0, 0}, {1, 1, 1});
+    EXPECT_EQ(PLIC::geometry_statistics().runtime_dispatches, 0u);
+    const PLIC::DynamicGeometryValue published{cube->volume().value, 0, ArithmeticMode::Ordinary};
+    EXPECT_DOUBLE_EQ(published.as_double(), 1);
+    EXPECT_EQ(PLIC::geometry_statistics().runtime_dispatches, 1u);
 }
 } // namespace

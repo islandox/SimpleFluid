@@ -12,6 +12,35 @@ using Patch = detail::GeneralVoFCurvaturePatch;
 
 namespace
 {
+template<ArithmeticMode Mode> void typed_physical_patch()
+{
+    const auto geometry = PLIC::ConvexCellGeometry<Mode>::box({2, 3, 4}, {4, 6, 8});
+    VoF::PolyhedralInterface plane;
+    plane.finite_geometry = true;
+    plane.gas = {{0, 0, 1}, {2, 3, 4}, 1};
+    PLIC::reset_geometry_statistics();
+    const auto patch = detail::GeneralVoFCurvature::patch<Mode>(17, *geometry, plane);
+    ASSERT_TRUE(patch);
+    EXPECT_EQ(patch->cell, 17u);
+    EXPECT_NEAR(patch->area, 6, 1e-13);
+    EXPECT_NEAR(patch->centroid[0], 3, 1e-13);
+    EXPECT_NEAR(patch->centroid[1], 4.5, 1e-13);
+    EXPECT_NEAR(patch->centroid[2], 5, 1e-13);
+    EXPECT_EQ(patch->normal, (PLIC::GeometryPoint{0, 0, 1}));
+    EXPECT_EQ(patch->physical_spans, (PLIC::GeometryPoint{2, 3, 4}));
+    EXPECT_NEAR(patch->cell_scale, 12. / 13, 1e-13);
+    plane.pure_gas = true;
+    EXPECT_FALSE(detail::GeneralVoFCurvature::patch<Mode>(17, *geometry, plane));
+    EXPECT_GT(PLIC::geometry_statistics().volume_evaluations, 0u);
+    EXPECT_EQ(PLIC::geometry_statistics().runtime_dispatches, 0u);
+}
+
+TEST(GeneralVoFCurvatureTest, TypedOrdinaryAndBoundedSectionsRetainPhysicalPatchGeometry)
+{
+    typed_physical_patch<ArithmeticMode::Ordinary>();
+    typed_physical_patch<ArithmeticMode::BoundedCertification>();
+}
+
 TEST(GeneralVoFCurvatureTest, TangentialPhysicalSpansAdmitAnisotropicQuadraticAndExcludeFarPatches)
 {
     std::vector<Patch> samples;

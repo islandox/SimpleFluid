@@ -285,9 +285,11 @@ public:
     [[nodiscard]] const std::vector<std::size_t>& node_tiles(std::uint64_t node) const;
     [[nodiscard]] std::vector<SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary>>
     owned_geometry() const;
-    [[nodiscard]] std::vector<PLIC::DynamicConvexGeometryPtr> owned_finite_geometry() const;
+    template<ArithmeticMode Mode>
+    [[nodiscard]] std::vector<PLIC::ConvexGeometryPtr<Mode>> owned_finite_geometry() const;
     /** Immutable original node constructions for a retained canonical face. */
-    [[nodiscard]] std::vector<PLIC::DynamicPoint> finite_face_points(std::uint64_t face) const;
+    template<ArithmeticMode Mode>
+    [[nodiscard]] std::vector<PLIC::Point<Mode>> finite_face_points(std::uint64_t face) const;
     [[nodiscard]] std::vector<std::uint64_t> node_cells(std::uint64_t node) const;
     [[nodiscard]] std::vector<std::uint64_t> cell_support(std::uint64_t owned_cell) const;
     [[nodiscard]] std::vector<GeneralVoFSupportCell> support_cells() const;
@@ -410,6 +412,9 @@ private:
         GeneralVoFFiniteRemapOptions) const;
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key>, std::vector<double>, std::vector<double>,
         GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*);
+    template<ArithmeticMode Mode>
+    SIMPLEFLUID_FVM_LOCAL void construct_mode(std::shared_ptr<const Hierarchy>, std::vector<Key>, std::vector<double>,
+        std::vector<double>, GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*);
     explicit GeneralVoF(std::shared_ptr<const Data> data) : data_(std::move(data)) {}
     std::shared_ptr<const Data> data_;
 };

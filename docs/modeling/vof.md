@@ -6,6 +6,11 @@ accounting and acceptance; the [general-native FP policy](../architecture/genera
 owns its separate mesh support and qualification limits. Optional rational
 APIs are documented under [ExactVoF](../architecture/exact_vof.md).
 
+For general native convex cells, the separate [PLIC modeling guide](plic.md)
+describes interface reconstruction, nested normal/offset fitting, resolution
+admission, and failure semantics. Its volume-fit algorithm differs from the
+specialized Cartesian reconstruction described here.
+
 `VoFSolver` is the Stage 1 flow core of the resolved/dispersed reacting-bubble
 roadmap in [TODO.md](../../TODO.md). It advances two incompressible, isothermal
 phases on a fixed uniform Cartesian grid. Gas volume fraction `f=1` denotes gas;

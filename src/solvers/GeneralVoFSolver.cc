@@ -4,6 +4,7 @@
 #include "solvers/GeneralVoFSolver.hh"
 #include "FVM/ExactFaceTransfer.hh"
 #include "FVM/ExactPhaseTransfer.hh"
+#include "FVM/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
@@ -63,16 +64,24 @@ std::shared_ptr<const MeshHandle<>> validated_phase_mesh(const std::shared_ptr<c
         throw std::runtime_error("General VoF source geometry is stale before workspace construction.");
     return mesh;
 }
-std::vector<Vector> finite_spans(const std::shared_ptr<const VoF::GeneralVoF>& phases)
+template<ArithmeticMode Mode>
+std::vector<Vector> finite_spans_mode(const std::shared_ptr<const VoF::GeneralVoF>& phases)
 {
     std::vector<Vector> result;
-    if (phases->arithmetic_mode() != ArithmeticMode::Exact)
-        for (const auto& geometry : phases->owned_finite_geometry())
-        {
-            const auto spans = geometry->axis_spans();
-            result.push_back({spans[0].as_double(), spans[1].as_double(), spans[2].as_double()});
-        }
+    for (const auto& geometry : phases->owned_finite_geometry<Mode>())
+    {
+        const auto spans = geometry->axis_spans();
+        result.push_back({spans[0].as_double(), spans[1].as_double(), spans[2].as_double()});
+    }
     return result;
+}
+std::vector<Vector> finite_spans(const std::shared_ptr<const VoF::GeneralVoF>& phases)
+{
+    if (phases->arithmetic_mode() == ArithmeticMode::Exact)
+        return {};
+    if (phases->arithmetic_mode() == ArithmeticMode::Ordinary)
+        return finite_spans_mode<ArithmeticMode::Ordinary>(phases);
+    return finite_spans_mode<ArithmeticMode::BoundedCertification>(phases);
 }
 } // namespace
 #include "solvers/details/GeneralVoFExactSolver.tcc"

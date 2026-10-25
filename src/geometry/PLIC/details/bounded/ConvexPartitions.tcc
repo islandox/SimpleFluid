@@ -143,7 +143,7 @@ void GeometryKernel<Mode>::certify_partition(
                 active_work->pair();
                 if (construction_disjoint<Mode>(pieces[i]->impl_->ancestry, pieces[j]->impl_->ancestry))
                     continue;
-                if (pieces[i]->intersect(*pieces[j]))
+                if (GeometryKernel<Mode>(pieces[i]->impl_).intersect(*pieces[j]))
                     reject("partition pieces have overlapping interiors.");
             }
     }
@@ -168,7 +168,7 @@ void GeometryKernel<Mode>::certify_partition(
                 for (std::size_t face = 0; fragment && face < piece->impl_->faces.size(); ++face)
                 {
                     active_work->pair();
-                    auto split = fragment->clip_impl(piece->impl_, face, false, true, true);
+                    auto split = GeometryKernel<Mode>(fragment->impl_).clip_impl(piece->impl_, face, false, true, true);
                     if (split.outside)
                     {
                         active_work->charge(1, 2 * sizeof(DynamicConvexGeometryPtr));
@@ -221,7 +221,7 @@ std::vector<DynamicConvexGeometryPtr> GeometryKernel<Mode>::validate_donors(
             active_work->pair();
             if (ordered[j].x.lo >= ordered[i].x.hi)
                 break;
-            if (donors[ordered[i].index]->intersect(*donors[ordered[j].index]))
+            if (GeometryKernel<Mode>(donors[ordered[i].index]->impl_).intersect(*donors[ordered[j].index]))
                 reject("donor partition has overlapping interiors.");
         }
     return {donors.begin(), donors.end()};
@@ -282,7 +282,7 @@ std::vector<DynamicPartitionPiece> PartitionKernel<Mode>::partition(
                     retain(next, std::move(fragment));
                     break;
                 }
-                auto split = fragment->clip_impl(cell->impl_, face, false, true, true);
+                auto split = GeometryKernel<Mode>(fragment->impl_).clip_impl(cell->impl_, face, false, true, true);
                 if (split.outside)
                     retain(next, std::move(split.outside));
                 fragment = std::move(split.inside);
@@ -316,7 +316,7 @@ std::vector<DynamicPartitionPiece> PartitionKernel<Mode>::partition(
             // Earlier subtractions removed only regions in other, validated
             // disjoint donors. Thus this donor's witness union equals parent
             // intersect donor up to shared zero-volume boundaries.
-            auto geometry = parent.intersect(*donors_[donor]);
+            auto geometry = GeometryKernel<Mode>(parent.impl_).intersect(*donors_[donor]);
             if (!geometry)
                 reject("measured donor intersection contradicts its construction certificate.");
             retain(result, DynamicPartitionPiece{donor, std::move(geometry)});
@@ -331,7 +331,7 @@ std::vector<DynamicPartitionPiece> PartitionKernel<Mode>::partition(
         certificate->members.push_back(piece.geometry->impl_->ancestry);
     for (auto& piece : result)
     {
-        active_work->charge(piece.geometry->storage_bytes() + sizeof(DynamicConvexGeometry), 1);
+        active_work->charge(piece.geometry->template storage_bytes<Mode>() + sizeof(DynamicConvexGeometry), 1);
         auto certified = std::make_shared<StoredGeometry>(*checked_geometry_storage<Mode>(piece.geometry->impl_));
         certified->partition_certificate = certificate;
         piece.geometry = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(certified)));

@@ -77,8 +77,6 @@ private:
     std::shared_ptr<const DynamicPointProvenance> provenance_;
 };
 [[nodiscard]] std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint>);
-[[nodiscard]] DynamicPoint dynamic_point_average(std::span<const DynamicPoint>);
-[[nodiscard]] DynamicPoint dynamic_point_interpolate(const DynamicPoint&, const DynamicPoint&, long double fraction);
 struct DynamicSupport
 {
     DynamicGeometryValue lower, upper;
@@ -123,6 +121,8 @@ struct GeometryStatistics
     /** Value arithmetic/accumulation helper events, not hardware FLOPs. */
     std::uint64_t ledger_operations = 0;
     std::uint64_t wider_routes = 0, rejections = 0;
+    /** Runtime backend selections; fixed-mode kernel operations leave this unchanged. */
+    std::uint64_t runtime_dispatches = 0;
     std::uint64_t exact_predicates = 0, rational_constructions = 0, rational_measures = 0, rational_ledgers = 0;
 };
 [[nodiscard]] GeometryStatistics geometry_statistics();
@@ -131,34 +131,16 @@ struct GeometryStatistics
 void reset_geometry_statistics();
 void record_ledger_operations(std::uint64_t count = 1);
 [[nodiscard]] bool certification_environment();
-/** Six times the oriented tetrahedron volume, retaining input uncertainty. */
-[[nodiscard]] DynamicGeometryValue dynamic_orientation(const std::array<DynamicPoint, 4>&);
-[[nodiscard]] bool dynamic_points_identical(const DynamicPoint&, const DynamicPoint&);
 /** Retained point allocation, including sealed provenance/support keys. */
 [[nodiscard]] std::size_t dynamic_point_storage_bytes(const DynamicPoint&);
-/** Bootstrap-only source coordinate/support export, separate from step work. */
-[[nodiscard]] DynamicPoint dynamic_source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>&,
-    std::span<const char> point_identity, ArithmeticMode = ArithmeticMode::BoundedCertification);
-/** One bootstrap coordinate export plus the union of true supports over the
- * complete authenticated incident source-cell fan (including hanging nodes). */
-[[nodiscard]] DynamicPoint dynamic_source_point(
-    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>> incident_sources, std::span<const char> point_identity,
-    ArithmeticMode = ArithmeticMode::BoundedCertification);
-[[nodiscard]] DynamicPoint dynamic_point_displaced(const DynamicPoint&, const DynamicPoint& displacement);
 
 class DynamicConvexGeometry;
-class DynamicConvexPartition;
 using DynamicConvexGeometryPtr = std::shared_ptr<const DynamicConvexGeometry>;
 struct DynamicFaceConstraint
 {
     DynamicConvexGeometryPtr geometry;
     std::size_t face = 0;
 };
-/** Authenticate every wall incidence, then construct motion in the common
- * tangent space using certified cross/triple-product rank. Ambiguous rank
- * rejects; nearly parallel walls are never merged by an angular tolerance. */
-[[nodiscard]] DynamicPoint dynamic_backtrace_constrained(const DynamicPoint&, GeometryPoint velocity, double timestep,
-    std::span<const DynamicFaceConstraint>, GeometryLimits = {});
 struct DynamicClipResult
 {
     DynamicConvexGeometryPtr inside, outside;
@@ -169,98 +151,27 @@ struct DynamicPhaseMeasures
     DynamicGeometryValue bulk, gas, carrier;
 };
 
-/** Immutable local, power-of-two-scaled convex shell. Ordinary uses nominal FP
- * arithmetic. BoundedCertification uses directed enclosures and rejects
- * unresolved certification. Exact is rejected; there is no automatic fallback.
- * Caps apply to each operation; callers also charge aggregate trial work.
- */
+/** Immutable finite storage carrier at the runtime state boundary. Numerical
+ * operations are available only through ConvexCellGeometry<Mode>; this handle
+ * never selects an arithmetic kernel. */
 class DynamicConvexGeometry
 {
 public:
     struct Impl;
     [[nodiscard]] ArithmeticMode arithmetic_mode() const noexcept;
-    [[nodiscard]] static DynamicConvexGeometryPtr make(
-        std::span<const GeometryPoint>, const std::vector<std::vector<std::size_t>>&, GeometryLimits = {});
-    /** Global coordinates retain valid sealed input-point identities locally;
-     * equal coordinate/error tuples alone never establish point identity. */
-    [[nodiscard]] static DynamicConvexGeometryPtr make_bounded(
-        std::span<const DynamicPoint>, const std::vector<std::vector<std::size_t>>&, GeometryLimits = {});
-    [[nodiscard]] static DynamicConvexGeometryPtr make_bounded_local(GeometryPoint origin,
-        std::span<const DynamicPoint> relative_vertices, const std::vector<std::vector<std::size_t>>&,
-        GeometryLimits = {});
-    /** Explicit source-authority export, once per immutable source: coordinate
-     * enclosures only, never exact volumes or moments. */
-    [[nodiscard]] static DynamicConvexGeometryPtr from_geometry(
-        const ConvexCellGeometry<ArithmeticMode::Ordinary>&, GeometryLimits = {});
-    [[nodiscard]] static DynamicConvexGeometryPtr box(GeometryPoint, GeometryPoint, GeometryLimits = {});
-    /** Null only for proven zero determinant; an uncertain determinant rejects. */
-    [[nodiscard]] static DynamicConvexGeometryPtr tetrahedron(const std::array<DynamicPoint, 4>&, GeometryLimits = {});
-    /** A strict-sign clipping construction proves positive interior even when
-     * its quantitative volume enclosure includes zero. Such uncertainty is
-     * retained; division, centroid and packet export still require a positive
-     * numerical lower bound. Independent imports retain strict admission. */
-    [[nodiscard]] DynamicGeometryValue volume() const;
-    [[nodiscard]] DynamicGeometryMoments moments() const;
-    [[nodiscard]] DynamicGeometryMoments moments(GeometryPoint origin) const;
-    [[nodiscard]] GeometryPoint centroid() const;
-    /** Stable default moment reference. Numerical clipping frames may rebase
-     * privately without moving the physical geometry or this reference. */
     [[nodiscard]] GeometryPoint origin() const;
     [[nodiscard]] const std::vector<DynamicPoint>& points() const;
-    /** Coordinates relative to origin(); global support authority is omitted. */
-    [[nodiscard]] std::vector<DynamicPoint> local_points() const;
     [[nodiscard]] const std::vector<std::vector<std::size_t>>& faces() const;
-    [[nodiscard]] std::array<DynamicGeometryValue, 3> axis_spans() const;
-    [[nodiscard]] DynamicSupport support(GeometryPoint normal, GeometryPoint anchor) const;
-    [[nodiscard]] DynamicClipResult clip(const GeometryHalfspace&, bool measure_section = true) const;
-    [[nodiscard]] DynamicClipResult clip_by_face(
-        const DynamicConvexGeometry&, std::size_t face, bool measure_section = false) const;
-    [[nodiscard]] DynamicPhaseMeasures phases(const GeometryHalfspace&) const;
-    /** Test nominal spatial extents in Ordinary; in BoundedCertification true
-     * certifies disjoint interiors with outward extents. False is inconclusive.
-     * Face/edge/point contacts may still exist.
-     * This certificate concerns volume/moments, not surface integrals. */
-    [[nodiscard]] bool bounds_prove_disjoint_interiors(const DynamicConvexGeometry&) const;
-    /** Construct and certify only the requested intersection. Unused outside
-     * pieces are not measured; complementary clip APIs still certify both.
-     * Outward local bounds reject separated interiors before and during clips,
-     * including zero-volume contacts. Overlapping bounds supply no certificate. */
-    [[nodiscard]] DynamicConvexGeometryPtr intersect(const DynamicConvexGeometry&) const;
-    [[nodiscard]] DynamicConvexGeometryPtr translated(GeometryPoint displacement) const;
-    /** Containment/disjointness precede completeness. Private subset ancestry
-     * and opposite branches replace geometric tests when they prove the relation.
-     * Authenticated complete
-     * complement ancestry proves exact geometric closure without subtracting
-     * dependent interval measures. Individual measure enclosures are unchanged.
-     * Other partitions use the unchanged physical closure budget or prove an
-     * empty remainder by bounded complementary subtraction after containment
-     * and disjointness checks. Private remainder witnesses retain every strict
-     * positive-interior child without measuring it; they cannot supply public
-     * measures or packets. All proof work shares the original resource caps. */
-    void certify_partition(std::span<const DynamicConvexGeometryPtr>, double relative_budget) const;
-    /** Numerical certificate for an already authenticated owner/publication.
-     * Homogeneous IEEE wider-FP format only; decode does not authenticate MPI
-     * routing, source ownership, epochs or a physical acceptance budget. */
-    [[nodiscard]] std::vector<char> encode(
-        const GeometryPacketContext&, std::size_t byte_budget = 64 * 1024 * 1024) const;
-    [[nodiscard]] static DynamicConvexGeometryPtr decode(std::span<const char>, const GeometryPacketContext&,
-        std::span<const DynamicConvexGeometryPtr> authenticated_sources, GeometryLimits = {});
-    /** Opaque immutable allocation identity for alias-aware payload accounting. */
     [[nodiscard]] const void* storage_identity() const noexcept { return impl_.get(); }
-    [[nodiscard]] std::size_t storage_bytes() const;
+    template<ArithmeticMode Mode> [[nodiscard]] std::size_t storage_bytes() const;
 
 private:
     template<ArithmeticMode> friend class details::ordinary_kernel::GeometryKernel;
     template<ArithmeticMode> friend class details::certification_kernel::GeometryKernel;
     template<ArithmeticMode> friend class details::ordinary_kernel::PartitionKernel;
     template<ArithmeticMode> friend class details::certification_kernel::PartitionKernel;
-    friend class DynamicConvexPartition;
     template<ArithmeticMode> friend class ConvexCellGeometry;
-    friend DynamicPoint dynamic_backtrace_constrained(
-        const DynamicPoint&, GeometryPoint, double, std::span<const DynamicFaceConstraint>, GeometryLimits);
     explicit DynamicConvexGeometry(std::shared_ptr<const Impl>);
-    [[nodiscard]] DynamicClipResult clip_impl(const std::shared_ptr<const Impl>& source, std::size_t plane,
-        bool measure_section, bool construct_outside = true, bool partition_proof = false) const;
     std::shared_ptr<const Impl> impl_;
 };
 
@@ -269,30 +180,6 @@ struct DynamicPartitionPiece
     std::size_t donor = 0;
     DynamicConvexGeometryPtr geometry;
 };
-/** Immutable, validated disjoint donor set. Holds the actual geometry objects,
- * not caller-supplied flags or IDs. Partitioning constructs a shared complement
- * tree, then measures one parent/donor intersection per used donor and binds
- * the complete output set to a private certificate. Temporary subdivisions
- * supply no transfer measures. Any uncovered remainder rejects.
- * The certificate is local; numerical packet decoding does not recreate it. */
-class DynamicConvexPartition
-{
-public:
-    explicit DynamicConvexPartition(std::span<const DynamicConvexGeometryPtr>, GeometryLimits = {});
-    [[nodiscard]] std::vector<DynamicPartitionPiece> partition(
-        const DynamicConvexGeometry&, std::size_t maximum_pieces = 65536) const;
-    [[nodiscard]] std::size_t storage_bytes() const noexcept;
-
-private:
-    template<ArithmeticMode> friend class details::ordinary_kernel::GeometryKernel;
-    template<ArithmeticMode> friend class details::certification_kernel::GeometryKernel;
-    template<ArithmeticMode> friend class details::ordinary_kernel::PartitionKernel;
-    template<ArithmeticMode> friend class details::certification_kernel::PartitionKernel;
-    template<ArithmeticMode> friend class ConvexPartition;
-    std::vector<DynamicConvexGeometryPtr> donors_;
-    GeometryLimits limits_;
-};
-
 /** A finite point's numerical fields follow its arithmetic policy. Original
  * source support evidence is retained separately and invalidated by mutation. */
 template<ArithmeticMode Mode> struct PointCoordinates;
@@ -406,7 +293,7 @@ public:
     [[nodiscard]] GeometryValue<Mode> volume() const;
     [[nodiscard]] GeometryMoments<Mode> moments() const { return moments(origin()); }
     [[nodiscard]] GeometryMoments<Mode> moments(GeometryPoint origin) const;
-    [[nodiscard]] GeometryPoint centroid() const { return geometry_->centroid(); }
+    [[nodiscard]] GeometryPoint centroid() const;
     [[nodiscard]] GeometryPoint origin() const { return geometry_->origin(); }
     [[nodiscard]] std::vector<Point<Mode>> points() const;
     [[nodiscard]] std::vector<Point<Mode>> local_points() const;
@@ -417,18 +304,16 @@ public:
     [[nodiscard]] ClipResult<Mode> clip_by_face(
         const ConvexCellGeometry&, std::size_t face, bool measure_section = false) const;
     [[nodiscard]] PhaseMeasures<Mode> phases(const GeometryHalfspace&) const;
-    [[nodiscard]] bool bounds_prove_disjoint_interiors(const ConvexCellGeometry& other) const
-    {
-        return geometry_->bounds_prove_disjoint_interiors(*other.geometry_);
-    }
+    [[nodiscard]] bool bounds_prove_disjoint_interiors(const ConvexCellGeometry& other) const;
     [[nodiscard]] ConvexGeometryPtr<Mode> intersect(const ConvexCellGeometry&) const;
     [[nodiscard]] ConvexGeometryPtr<Mode> translated(GeometryPoint displacement) const;
     void certify_partition(std::span<const ConvexGeometryPtr<Mode>>, double relative_budget = 8e-15) const;
+    /** Prove a finite transport fragment cover using retained complementary splits,
+     * donor-batch certificates and the selected kernel's physical closure checks.
+     * Native AMR shell partitions retain the separate certify_partition contract. */
+    void certify_fragment_partition(std::span<const ConvexGeometryPtr<Mode>>, double relative_budget = 8e-15) const;
     [[nodiscard]] std::vector<char> encode(
-        const GeometryPacketContext& context, std::size_t byte_budget = 64 * 1024 * 1024) const
-    {
-        return geometry_->encode(context, byte_budget);
-    }
+        const GeometryPacketContext& context, std::size_t byte_budget = 64 * 1024 * 1024) const;
     [[nodiscard]] static ConvexGeometryPtr<Mode> decode(std::span<const char>, const GeometryPacketContext&,
         std::span<const ConvexGeometryPtr<Mode>> authenticated_sources, GeometryLimits = {});
     [[nodiscard]] const void* storage_identity() const noexcept { return geometry_->storage_identity(); }
@@ -436,7 +321,7 @@ public:
      * control blocks and allocator overhead are excluded. */
     [[nodiscard]] std::size_t storage_bytes() const
     {
-        return sizeof(*this) + sizeof(DynamicConvexGeometry) + geometry_->storage_bytes();
+        return sizeof(*this) + sizeof(DynamicConvexGeometry) + geometry_->template storage_bytes<Mode>();
     }
     /** The only runtime policy crossing. A foreign-mode object rejects. */
     [[nodiscard]] static ConvexGeometryPtr<Mode> from_dynamic(DynamicConvexGeometryPtr);
@@ -457,12 +342,21 @@ public:
     explicit ConvexPartition(std::span<const ConvexGeometryPtr<Mode>>, GeometryLimits = {});
     [[nodiscard]] std::vector<PartitionPiece<Mode>> partition(
         const ConvexCellGeometry<Mode>&, std::size_t maximum_pieces = 65536) const;
-    [[nodiscard]] std::size_t storage_bytes() const noexcept { return partition_.storage_bytes(); }
+    [[nodiscard]] std::size_t storage_bytes() const noexcept
+    {
+        return sizeof(*this) + donors_.capacity() * sizeof(DynamicConvexGeometryPtr);
+    }
 
 private:
-    DynamicConvexPartition partition_;
+    std::vector<DynamicConvexGeometryPtr> donors_;
+    GeometryLimits limits_;
 };
 
+template<ArithmeticMode Mode> [[nodiscard]] std::vector<PlaneAuthority> common_supports(std::span<const Point<Mode>>);
+template<ArithmeticMode Mode> [[nodiscard]] std::size_t point_storage_bytes(const Point<Mode>& point)
+{
+    return dynamic_point_storage_bytes(point.dynamic());
+}
 template<ArithmeticMode Mode> [[nodiscard]] Point<Mode> point_average(std::span<const Point<Mode>>);
 template<ArithmeticMode Mode>
 [[nodiscard]] Point<Mode> point_interpolate(const Point<Mode>&, const Point<Mode>&, long double fraction);
@@ -472,6 +366,9 @@ template<ArithmeticMode Mode> [[nodiscard]] Point<Mode> point_displaced(const Po
 template<ArithmeticMode Mode>
 [[nodiscard]] Point<Mode> source_point(
     const ConvexCellGeometry<ArithmeticMode::Ordinary>&, std::span<const char> point_identity);
+template<ArithmeticMode Mode>
+[[nodiscard]] Point<Mode> source_point(
+    std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, std::span<const char> point_identity);
 template<ArithmeticMode Mode>
 [[nodiscard]] Point<Mode> backtrace_constrained(const Point<Mode>&, GeometryPoint velocity, double timestep,
     std::span<const FaceConstraint<Mode>>, GeometryLimits = {});

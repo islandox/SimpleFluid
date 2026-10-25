@@ -38,8 +38,9 @@ public:
     /** Pure cells return no patch. A mixed cell must have a positive physical
      * section; centroid integrates its convex polygon in physical coordinates.
      */
+    template<ArithmeticMode Mode>
     [[nodiscard]] static std::optional<GeneralVoFCurvaturePatch> patch(
-        std::uint64_t cell, const PLIC::DynamicConvexGeometry&, const VoF::PolyhedralInterface&);
+        std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>&, const VoF::PolyhedralInterface&);
     /** Fit a quadratic Monge surface in the target normal's tangential frame.
      * Curvature is div(n) [1/m], positive for convex gas with outward normals.
      */

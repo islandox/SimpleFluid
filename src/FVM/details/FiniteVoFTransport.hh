@@ -2,8 +2,8 @@
  * @brief Finite signed face chains and complementary closed-cell overlays.
  */
 #pragma once
+#include "FVM/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/SweptGeometry.hh"
-#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -12,8 +12,8 @@
 #include <span>
 namespace SimpleFluid::VoF::finite_detail
 {
-using Geometry = PLIC::DynamicConvexGeometry;
-using GeometryPtr = PLIC::DynamicConvexGeometryPtr;
+template<ArithmeticMode Mode> using Geometry = PLIC::ConvexCellGeometry<Mode>;
+template<ArithmeticMode Mode> using GeometryPtr = PLIC::ConvexGeometryPtr<Mode>;
 struct Work
 {
     SimpleFluid::PLIC::SweepLimits limits;
@@ -48,46 +48,50 @@ struct Work
         }
         values.push_back(std::move(value));
     }
-    void created(const GeometryPtr& p, const GeometryPtr& source = {})
+    template<ArithmeticMode Mode> void created(const GeometryPtr<Mode>& p, const GeometryPtr<Mode>& source = {})
     {
-        charge(sizeof(Geometry)); // Every clip result owns its wrapper, even when its immutable payload aliases.
         if (!source || p->storage_identity() != source->storage_identity())
             charge(p->storage_bytes());
+        else
+            charge(sizeof(Geometry<Mode>) + sizeof(PLIC::DynamicConvexGeometry));
     }
-    void atom(const GeometryPtr& p)
+    template<ArithmeticMode Mode> void atom(const GeometryPtr<Mode>& p)
     {
-        charge(sizeof(GeometryPtr));
+        charge(sizeof(GeometryPtr<Mode>));
         created(p);
     }
 
 };
-struct SignedPiece
+template<ArithmeticMode Mode> struct SignedPiece
 {
-    GeometryPtr geometry;
+    GeometryPtr<Mode> geometry;
     int sign = 1;
 };
-struct Sweep
+template<ArithmeticMode Mode> struct Sweep
 {
     std::uint64_t face = 0;
-    std::vector<SignedPiece> pieces;
-    std::vector<Point> current, departure;
-    Point center, backcenter;
+    std::vector<SignedPiece<Mode>> pieces;
+    std::vector<PLIC::Point<Mode>> current, departure;
+    PLIC::Point<Mode> center, backcenter;
     Value control;
     Value constructed_volume, signed_control_difference;
     long double ordinary_volume_budget = 0;
 };
-inline bool same_point(const Point& a, const Point& b)
+template<ArithmeticMode Mode> inline bool same_point(const PLIC::Point<Mode>& a, const PLIC::Point<Mode>& b)
 {
-    return PLIC::dynamic_points_identical(a, b);
+    return PLIC::points_identical<Mode>(a, b);
 }
-inline Value cone_determinant(const Point& origin, const std::array<Point, 3>& triangle)
+template<ArithmeticMode Mode>
+inline Value cone_determinant(const PLIC::Point<Mode>& origin, const std::array<PLIC::Point<Mode>, 3>& triangle)
 {
-    return PLIC::dynamic_orientation({origin, triangle[0], triangle[1], triangle[2]});
+    return runtime_value<Mode>(PLIC::orientation<Mode>({origin, triangle[0], triangle[1], triangle[2]}));
 }
-inline std::vector<std::array<Point, 3>> sweep_boundary(std::span<const std::uint64_t> nodes,
-    const std::vector<Point>& current, const std::vector<Point>& departure, const Point& center, const Point& backcenter)
+template<ArithmeticMode Mode>
+inline std::vector<std::array<PLIC::Point<Mode>, 3>> sweep_boundary(std::span<const std::uint64_t> nodes,
+    const std::vector<PLIC::Point<Mode>>& current, const std::vector<PLIC::Point<Mode>>& departure,
+    const PLIC::Point<Mode>& center, const PLIC::Point<Mode>& backcenter)
 {
-    std::vector<std::array<Point, 3>> result;
+    std::vector<std::array<PLIC::Point<Mode>, 3>> result;
     result.reserve(3 * nodes.size());
     for (std::size_t i = 0; i < nodes.size(); ++i)
     {
@@ -109,13 +113,13 @@ inline std::vector<std::array<Point, 3>> sweep_boundary(std::span<const std::uin
     return result;
 }
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_EXPORT Sweep make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
-    const std::map<std::uint64_t, std::pair<Point, Point>>& traces, Value control, Work& work,
+SIMPLEFLUID_FVM_EXPORT Sweep<Mode> make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
+    const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,
     long double ordinary_volume_budget = 0);
 
-struct OverlayAtom
+template<ArithmeticMode Mode> struct OverlayAtom
 {
-    GeometryPtr geometry;
+    GeometryPtr<Mode> geometry;
     int coefficient = 0;
 };
 struct OverlayFace
@@ -123,7 +127,8 @@ struct OverlayFace
     std::size_t index;
     long double priority;
 };
-inline std::vector<OverlayFace> overlay_face_order(const Geometry& geometry, Work& work)
+template<ArithmeticMode Mode>
+inline std::vector<OverlayFace> overlay_face_order(const Geometry<Mode>& geometry, Work& work)
 {
     const auto charge = [&](std::size_t count, std::size_t size)
     {
@@ -136,7 +141,7 @@ inline std::vector<OverlayFace> overlay_face_order(const Geometry& geometry, Wor
     result.reserve(geometry.faces().size());
     for (std::size_t f = 0; f < geometry.faces().size(); ++f)
         result.push_back({f, 0});
-    charge(geometry.points().size(), sizeof(Point));
+    charge(geometry.points().size(), sizeof(PLIC::Point<Mode>));
     const auto points = geometry.local_points();
     long double magnitude = 0;
     for (const auto& p : points)
@@ -198,10 +203,11 @@ inline std::vector<OverlayFace> overlay_face_order(const Geometry& geometry, Wor
  * disjointness/containment is inherited; integer multiplicity is never inferred
  * from a net volume sum. Every outside piece retains its original coefficient.
  */
-inline std::vector<OverlayAtom> overlay(std::vector<OverlayAtom> atoms, const SignedPiece& piece,
-    int incidence, Work& work)
+template<ArithmeticMode Mode>
+inline std::vector<OverlayAtom<Mode>> overlay(
+    std::vector<OverlayAtom<Mode>> atoms, const SignedPiece<Mode>& piece, int incidence, Work& work)
 {
-    std::vector<OverlayAtom> result;
+    std::vector<OverlayAtom<Mode>> result;
     std::vector<OverlayFace> order;
     for (const auto& atom : atoms)
     {
@@ -226,14 +232,14 @@ inline std::vector<OverlayAtom> overlay(std::vector<OverlayAtom> atoms, const Si
             if (split.outside)
             {
                 work.created(split.outside, inside);
-                work.push(result, OverlayAtom{split.outside, atom.coefficient});
+                work.push(result, OverlayAtom<Mode>{split.outside, atom.coefficient});
             }
             if (split.inside) work.created(split.inside, inside);
             inside = split.inside;
         }
         if (inside)
         {
-            work.push(result, OverlayAtom{inside, atom.coefficient + incidence * piece.sign});
+            work.push(result, OverlayAtom<Mode>{inside, atom.coefficient + incidence * piece.sign});
         }
         else
         {
@@ -246,30 +252,14 @@ inline std::vector<OverlayAtom> overlay(std::vector<OverlayAtom> atoms, const Si
     }
     return result;
 }
-struct Atom
+template<ArithmeticMode Mode> struct Atom
 {
     std::uint64_t donor = 0, recipient = 0;
-    GeometryPtr geometry;
+    GeometryPtr<Mode> geometry;
 };
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_EXPORT std::vector<Atom> recipient_partition(std::uint64_t recipient,
-    const std::map<std::uint64_t, GeometryPtr>& donors, const std::vector<std::pair<const Sweep*, int>>& faces,
-    Work& work, double physical_budget);
+SIMPLEFLUID_FVM_EXPORT std::vector<Atom<Mode>> recipient_partition(std::uint64_t recipient,
+    const std::map<std::uint64_t, GeometryPtr<Mode>>& donors,
+    const std::vector<std::pair<const Sweep<Mode>*, int>>& faces, Work& work, double physical_budget);
 
-inline Sweep make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
-    const std::map<std::uint64_t, std::pair<Point, Point>>& traces, Value control, Work& work,
-    long double ordinary_volume_budget = 0)
-{
-    if (work.arithmetic_mode == ArithmeticMode::Ordinary)
-        return make_sweep<ArithmeticMode::Ordinary>(face, nodes, traces, control, work, ordinary_volume_budget);
-    return make_sweep<ArithmeticMode::BoundedCertification>(face, nodes, traces, control, work, ordinary_volume_budget);
-}
-inline std::vector<Atom> recipient_partition(std::uint64_t recipient,
-    const std::map<std::uint64_t, GeometryPtr>& donors, const std::vector<std::pair<const Sweep*, int>>& faces,
-    Work& work, double physical_budget)
-{
-    if (work.arithmetic_mode == ArithmeticMode::Ordinary)
-        return recipient_partition<ArithmeticMode::Ordinary>(recipient, donors, faces, work, physical_budget);
-    return recipient_partition<ArithmeticMode::BoundedCertification>(recipient, donors, faces, work, physical_budget);
-}
 } // namespace SimpleFluid::VoF::finite_detail

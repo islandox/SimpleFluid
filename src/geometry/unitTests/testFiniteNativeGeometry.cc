@@ -153,7 +153,7 @@ TEST(FiniteNativeGeometryTest, OrdinarySourcePreparationDoesNotInvokeExactBacken
     } sampling;
     const auto cube = Cell::box({0, 0, 0}, {1, 1, 1});
     const auto source = cube->numerical_shell();
-    const auto imported = PLIC::DynamicConvexGeometry::from_geometry(*cube,
+    const auto imported = Cell::from_geometry(*cube,
         []
         {
             PLIC::GeometryLimits limits;

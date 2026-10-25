@@ -236,14 +236,17 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
     {
         order.push_back(key);
         zero.push_back(0);
-        full.push_back(PLIC::DynamicConvexGeometry::from_geometry(*raw->geometry(leaf), limits)->volume().as_double());
+        full.push_back(PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_geometry(*raw->geometry(leaf), limits)
+                ->volume()
+                .as_double());
     }
     auto bound = std::make_shared<const VoF::GeneralVoF>(raw, order, zero, full);
     std::vector<AMR::AdaptiveMark> marks;
     for (const auto& [key, leaf] : bound->hierarchy()->owned())
     {
-        const auto center =
-            PLIC::DynamicConvexGeometry::from_geometry(*bound->hierarchy()->geometry(leaf), limits)->centroid();
+        const auto center = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_geometry(
+            *bound->hierarchy()->geometry(leaf), limits)
+                                ->centroid();
         const double xi = center[0] - .2 * center[1];
         if (xi > .5 && xi < .75)
             marks.push_back({key, AMR::AdaptiveSplit::Isotropic});
@@ -256,7 +259,8 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
     {
         // Initialize both phases with ordinary FP geometry. Native authority
         // import supplies supports only; no rational reference clip or measure.
-        const auto shell = PLIC::DynamicConvexGeometry::from_geometry(*refined->geometry(leaf), limits);
+        const auto shell =
+            PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_geometry(*refined->geometry(leaf), limits);
         const auto amounts = shell->phases({{1, .17, .11}, {0, 0, 0}, .65});
         order.push_back(key);
         gas.push_back(amounts.gas.as_double());

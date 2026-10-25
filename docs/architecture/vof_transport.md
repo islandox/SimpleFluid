@@ -81,9 +81,24 @@ value type. Binary64 publication rejects overflow and nonzero disappearance;
 its error query includes additional narrowing error. In Ordinary that query
 bounds only narrowing of the stored scalar, not untracked construction error.
 
-The solver's runtime arithmetic selection uses explicitly named `Dynamic*`
-adapters. Conversion to a typed finite geometry checks the active mode, and
-cross-mode geometry arguments are incompatible at the typed API. Metadata such
+VoF selects its finite arithmetic mode once at each operation entry, including
+source construction, reconstruction, transport and remap. Cell registries, swept
+pieces, donor partitions, point trajectories and solver face overlaps then use
+`ConvexCellGeometry<Mode>`, `ConvexPartition<Mode>` and `Point<Mode>`. Typed
+geometry methods call their selected compiled kernels directly, including nested
+clipping and partition work; they do not re-enter runtime backend selection.
+`certify_fragment_partition()` preserves transport's complementary-split and
+donor-batch proofs; native AMR retains its separate shell partition proof.
+Reconstruction uses `PolyhedralPhaseSampleFor<Mode>` throughout offset and normal
+fitting. Runtime state, packet and diagnostic records retain checked `Dynamic*`
+representations where an external boundary requires them. The shared runtime
+geometry handle exposes storage metadata only; numerical operations require a
+typed handle. Untyped geometry getters and reconstruction entries have been
+removed. Conversion checks the active mode; cross-mode geometry arguments are
+incompatible at the typed API. `GeometryStatistics::runtime_dispatches` counts
+the remaining runtime value-query selections separately from arithmetic work.
+Typed execution requires zero such selections in each library's instrumentation
+domain. Metadata such
 as `PlaneAuthority`, `GeometryPacketContext` and resource caps remains independent
 of scalar representation. Native mesh/AMR clients use the ordinary PLIC types
 directly. The former `Meshes` geometry aliases and public `Exact*` geometry
