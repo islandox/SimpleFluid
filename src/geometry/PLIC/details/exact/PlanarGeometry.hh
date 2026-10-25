@@ -1,4 +1,5 @@
 #pragma once
+#include "geometry/PLIC/PlanarGeometryDeclarations.hh"
 namespace SimpleFluid::PLIC
 {
 namespace MeshUtils = ::SimpleFluid::MeshUtils;
@@ -108,7 +109,7 @@ private:
     friend std::vector<PlanarFacePtr<ArithmeticMode::Exact>> subtract_planar_faces<ArithmeticMode::Exact>(
         const PlanarFace<ArithmeticMode::Exact>&, std::span<const PlanarFacePtr<ArithmeticMode::Exact>>);
     friend class ConvexCellGeometry<ArithmeticMode::Exact>;
-    friend class ExactSweepAccess;
+    friend class SweepAccess<ArithmeticMode::Exact>;
     friend class ExtrudedConstruction<ArithmeticMode::Exact>;
     friend class PolyhedralComplex<ArithmeticMode::Exact>;
     explicit PlanarFace(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}

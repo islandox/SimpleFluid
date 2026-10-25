@@ -1,5 +1,8 @@
 #include "geometry/PLIC/details/GeometryKernels.hh"
 
+#include "geometry/PLIC/details/bounded/ConvexGeometry.tcc"
+#include "geometry/PLIC/details/ordinary/ConvexGeometry.tcc"
+
 namespace SimpleFluid::PLIC
 {
 const std::vector<PlaneAuthority>& DynamicPoint::supports() const
@@ -193,9 +196,6 @@ Operation::Operation(GeometryLimits limits) : work(limits), previous(active_work
     }
 }
 } // namespace SimpleFluid::PLIC::details
-
-#include "geometry/PLIC/details/bounded/ConvexGeometry.tcc"
-#include "geometry/PLIC/details/ordinary/ConvexGeometry.tcc"
 
 namespace SimpleFluid::PLIC
 {

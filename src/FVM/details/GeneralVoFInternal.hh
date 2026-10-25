@@ -57,13 +57,13 @@ struct Cell
     double native_volume = 0;
     std::size_t canonical_face_count = 0;
     long double ordinary_quota_scale = 0;
-    PolyhedralPhaseSample phase;
+    PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary> phase;
     PLIC::DynamicConvexGeometryPtr finite_geometry;
     PhaseError occupancy;
     PhaseRoundoff roundoff, finite_history;
     std::shared_ptr<const ExperimentalPhaseInventory> experimental_exact;
     GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
-    std::optional<PolyhedralInterface> retained_interface;
+    std::optional<PLIC::PolyhedralInterface> retained_interface;
     bool inherited = false;
 };
 } // namespace general_vof_detail
@@ -128,17 +128,16 @@ SIMPLEFLUID_FVM_LOCAL long double finite_real(wire::Reader& r);
 SIMPLEFLUID_FVM_LOCAL void finite_value(wire::Writer& w, PLIC::DynamicGeometryValue v);
 SIMPLEFLUID_FVM_LOCAL PLIC::DynamicGeometryValue finite_value(
     wire::Reader& r, std::optional<ArithmeticMode> expected = {});
-SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PolyhedralInterface& p);
-SIMPLEFLUID_FVM_LOCAL PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
+SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p);
+SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
     const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
-    const PolyhedralInterface& p);
+    const PLIC::PolyhedralInterface& p);
 SIMPLEFLUID_FVM_LOCAL GeneralVoFPhaseEnclosure diagnostic(
     const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& measures);
 SIMPLEFLUID_FVM_LOCAL double output(const Measure& measure);
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> geometric_labels(
     const Cell& cell);
-SIMPLEFLUID_FVM_LOCAL PolyhedralPhaseSample geometric_sample(const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL void refresh_experimental_catalog(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL void current(const GeneralVoF::Data& data);
 template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void retained_budget(const GeneralVoF::Data& data);
@@ -151,19 +150,18 @@ SIMPLEFLUID_FVM_LOCAL std::uint64_t transaction(Teuchos::RCP<const Teuchos::Comm
 SIMPLEFLUID_FVM_LOCAL void agree_transaction(Teuchos::RCP<const Teuchos::Comm<int>> comm, std::uint64_t id);
 SIMPLEFLUID_FVM_LOCAL void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos::Comm<int>> comm);
 template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void import_phases(GeneralVoF::Data& data);
-template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL PolyhedralPhaseSampleFor<Mode> finite_sample(const Cell& cell);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL std::vector<PolyhedralPhaseSampleFor<Mode>> finite_stencil(
+SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(const Cell& cell);
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
     const GeneralVoF::Data& data, const Key& key);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL PolyhedralInterface reconstruct_finite_cell(const GeneralVoF::Data& data, const Key& key);
+SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_finite_local(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_exact_local(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
 } // namespace general_vof_detail
 } // namespace SimpleFluid::VoF

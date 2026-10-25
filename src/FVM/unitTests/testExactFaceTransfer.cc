@@ -3,6 +3,7 @@
  */
 #include "FVM/ExactFaceTransfer.hh"
 #include "FVM/GeneralVoF.hh"
+#include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
@@ -55,7 +56,9 @@ std::shared_ptr<const GeneralVoF> setup(Teuchos::RCP<const Teuchos::Comm<int>> c
         gas.push_back(0);
         carrier.push_back(cubic ? 1 : .5);
     }
-    return std::make_shared<const GeneralVoF>(hierarchy, keys, gas, carrier);
+    GeneralVoFOptions options;
+    options.arithmetic_mode = ArithmeticMode::Exact;
+    return std::make_shared<const GeneralVoF>(hierarchy, keys, gas, carrier, options);
 }
 std::shared_ptr<const H> bind(const H& source, const H::Plan& plan)
 {
@@ -67,12 +70,15 @@ M cycle(const AdaptiveTile& tile)
 {
     if (tile.exterior)
         return {};
-    const auto p = tile.geometry->centroid();
-    const auto a = tile.geometry->area_vector();
+    // Native tiles retain Ordinary geometry. This explicitly selected exact
+    // oracle lifts the represented face before forming its rational rate.
+    const auto geometry = PLIC::PlanarFace<ArithmeticMode::Exact>::from_geometry(*tile.geometry);
+    const auto p = geometry->centroid();
+    const auto a = geometry->area_vector();
     if (a.x != 0 && (p.y < 1 || p.y > 2))
-        return tile.geometry->area_vector_dot({p.y < 1 ? 1. : -1., 0, 0});
+        return geometry->area_vector_dot({p.y < 1 ? 1. : -1., 0, 0});
     if (a.y != 0 && (p.x < 1 || p.x > 2))
-        return tile.geometry->area_vector_dot({0, p.x > 2 ? 1. : -1., 0});
+        return geometry->area_vector_dot({0, p.x > 2 ? 1. : -1., 0});
     return {};
 }
 std::vector<ExactOwnedFaceRate> rates(const GeneralVoF& state)
@@ -164,7 +170,8 @@ TEST(ExactFaceTransfer, IndependentAcceptedRatesMigrateByActualFaceIdentityWitho
     EXPECT_EQ(source->hierarchy()->fetch_leaves(needed, cap).size(), needed.size());
     EXPECT_THROW((void) source->hierarchy()->lookup_cells(needed, true, source->hierarchy()->options().byte_budget + 1),
         std::invalid_argument);
-    GeneralVoF foreign(source->hierarchy(), source->owned_order(), source->gas_volumes(), source->carrier_volumes());
+    GeneralVoF foreign(
+        source->hierarchy(), source->owned_order(), source->gas_volumes(), source->carrier_volumes(), source->options());
     EXPECT_THROW((void) ExactFaceTransfer::prepare(foreign, *target, phase, old), std::invalid_argument);
     const auto serial_target = setup(Teuchos::rcp(new Teuchos::SerialComm<int>()));
     const auto& mismatched = Tpetra::getDefaultComm()->getRank() == 0 ? *serial_target : *target;
@@ -249,7 +256,8 @@ TEST(ExactFaceTransfer, CrossedBaseRefinementAxialCoarseningPreservesConstantStr
         const auto p = tile.geometry->centroid();
         if (p.x == 1.5 && p.y < 1 && tile.geometry->area_vector().x != 0)
         {
-            EXPECT_EQ(item.rate.compare(tile.geometry->area_vector_dot({1, 0, 0})), 0);
+            const auto geometry = PLIC::PlanarFace<ArithmeticMode::Exact>::from_geometry(*tile.geometry);
+            EXPECT_EQ(item.rate.compare(geometry->area_vector_dot({1, 0, 0})), 0);
             ++local;
         }
     }

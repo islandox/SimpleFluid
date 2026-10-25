@@ -371,7 +371,11 @@ PhysicalNorm leased_physical_norm(const std::vector<Measure>& residual, const st
                 const auto codec = communication / 8;
                 if (first > codec || second > codec - first || codec - first - second < 128)
                     throw std::runtime_error("Leased exact VoF norm codec exceeds communication arena.");
-                const auto er = r.encode(first + 56), eb = b.encode(second + 56);
+                // Retained storage is not an encoder workspace bound: a lazy
+                // zero owns only its wrapper but encodes the canonical rational
+                // zero. Use the admitted codec arena; the unchanged capacity
+                // checks below still bound both encoded buffers and their copy.
+                const auto er = r.encode(codec), eb = b.encode(codec);
                 if (er.capacity() > 2 * (first + 56) || eb.capacity() > 2 * (second + 56))
                     throw std::runtime_error("Leased exact VoF norm encoding capacity exceeds admission.");
                 const auto bytes = er.size() + eb.size() + 16;

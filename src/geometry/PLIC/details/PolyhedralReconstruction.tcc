@@ -1,4 +1,4 @@
-/** @file FinitePolyhedralReconstruction.tcc
+/** @file PolyhedralReconstruction.tcc
  * @brief Resolution admission and mode-selected finite PLIC reconstruction.
  */
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
@@ -11,25 +11,25 @@
 #include <sstream>
 #include <vector>
 
-namespace SimpleFluid::VoF
+namespace SimpleFluid::PLIC
 {
 namespace
 {
-using Point = SimpleFluid::PLIC::GeometryPoint;
+using Vector = SimpleFluid::PLIC::GeometryPoint;
 template<ArithmeticMode Mode> using Value = PLIC::GeometryValue<Mode>;
 constexpr long double infinity = std::numeric_limits<long double>::infinity();
 
-double dot(Point a, Point b)
+double dot(Vector a, Vector b)
 {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
-Point minus(Point a, Point b)
+Vector minus(Vector a, Vector b)
 {
     for (unsigned i = 0; i < 3; ++i)
         a[i] -= b[i];
     return a;
 }
-Point unit(Point a)
+Vector unit(Vector a)
 {
     const double norm = std::hypot(a[0], a[1], a[2]);
     if (!std::isfinite(norm) || norm == 0)
@@ -60,12 +60,12 @@ long double certified_fit_error(Value<ArithmeticMode::BoundedCertification> resi
 }
 long double certified_fit_allowance(long double requested, double tolerance)
 {
-    using Math = finite_detail::Arithmetic<ArithmeticMode::BoundedCertification>;
+    using Math = VoF::finite_detail::Arithmetic<ArithmeticMode::BoundedCertification>;
     return Math::lower(Math::multiply({requested, 0}, {tolerance, 0}));
 }
 Value<ArithmeticMode::Ordinary> ordinary_difference(Value<ArithmeticMode::Ordinary> a, long double b)
 {
-    const auto result = finite_detail::Arithmetic<ArithmeticMode::Ordinary>::make_value(a.value - b);
+    const auto result = VoF::finite_detail::Arithmetic<ArithmeticMode::Ordinary>::make_value(a.value - b);
     return {result.value};
 }
 long double ordinary_fit_allowance(long double requested, double tolerance)
@@ -132,7 +132,7 @@ double outward(long double x, bool upper)
     return result;
 }
 template<ArithmeticMode Mode>
-void validate_sample(const PolyhedralPhaseSampleFor<Mode>& sample, const PolyhedralReconstructionOptions& options)
+void validate_sample(const PolyhedralPhaseSample<Mode>& sample, const PolyhedralReconstructionOptions& options)
 {
     if (Mode == ArithmeticMode::BoundedCertification && !PLIC::certification_environment())
         throw std::invalid_argument("Finite PLIC arithmetic environment is unsupported.");
@@ -187,7 +187,7 @@ std::string resolution_message(const PolyhedralResolutionAssessment& assessment)
             << "), recover missing initial geometry if needed, and reassess; accepted inventories are unchanged.";
     return message.str();
 }
-Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condition)
+Vector solve(std::array<Vector, 3> matrix, Vector rhs, double limit, double& condition)
 {
     double largest = 0, smallest = std::numeric_limits<double>::infinity();
     for (unsigned k = 0; k < 3; ++k)
@@ -212,7 +212,7 @@ Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condit
         }
     }
     condition = largest / smallest;
-    Point result{};
+    Vector result{};
     for (int i = 2; i >= 0; --i)
     {
         double x = rhs[i];
@@ -223,7 +223,7 @@ Point solve(std::array<Point, 3> matrix, Point rhs, double limit, double& condit
     return result;
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface offset_fit(const PolyhedralPhaseSampleFor<Mode>& sample, Point normal,
+PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector normal,
     PolyhedralReconstructionOptions options, std::size_t& evaluations)
 {
     PolyhedralInterface result;
@@ -341,14 +341,14 @@ PolyhedralResolutionRequired::PolyhedralResolutionRequired(PolyhedralResolutionA
 }
 
 template<ArithmeticMode Mode>
-void PolyhedralReconstruction::validate_finite(
-    const PolyhedralPhaseSampleFor<Mode>& sample, PolyhedralReconstructionOptions options)
+void PolyhedralReconstruction<Mode>::validate(
+    const PolyhedralPhaseSample<Mode>& sample, PolyhedralReconstructionOptions options)
 {
     validate_sample<Mode>(sample, options);
 }
 template<ArithmeticMode Mode>
-PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finite(
-    const PolyhedralPhaseSampleFor<Mode>& target, std::span<const PolyhedralPhaseSampleFor<Mode>> stencil,
+PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_resolution(
+    const PolyhedralPhaseSample<Mode>& target, std::span<const PolyhedralPhaseSample<Mode>> stencil,
     PolyhedralReconstructionOptions options)
 {
     validate_sample<Mode>(target, options);
@@ -359,7 +359,7 @@ PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finit
     for (const auto& span : target.geometry->axis_spans())
         result.local_cell_span = std::max(result.local_cell_span, outward(upper<Mode>(span), true));
     result.requested_cell_span = result.local_cell_span * .5;
-    const auto examine = [&](const PolyhedralPhaseSampleFor<Mode>& sample)
+    const auto examine = [&](const PolyhedralPhaseSample<Mode>& sample)
     {
         validate_sample<Mode>(sample, options);
         const long double total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
@@ -387,8 +387,8 @@ PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finit
         const auto center = target.geometry->centroid();
         const auto volume = target.geometry->volume().as_double();
         const double alpha = target.gas_volume / volume;
-        std::array<Point, 3> matrix{};
-        Point rhs{};
+        std::array<Vector, 3> matrix{};
+        Vector rhs{};
         for (const auto& sample : stencil)
         {
             const auto d = minus(sample.geometry->centroid(), center);
@@ -417,31 +417,31 @@ PolyhedralResolutionAssessment PolyhedralReconstruction::assess_resolution_finit
     return result;
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface PolyhedralReconstruction::solve_offset_finite(
-    const PolyhedralPhaseSampleFor<Mode>& sample, Point normal, PolyhedralReconstructionOptions options)
+PolyhedralInterface PolyhedralReconstruction<Mode>::solve_offset(
+    const PolyhedralPhaseSample<Mode>& sample, Vector normal, PolyhedralReconstructionOptions options)
 {
     validate_sample<Mode>(sample, options);
     std::size_t evaluations = 0;
     return offset_fit<Mode>(sample, normal, options, evaluations);
 }
 template<ArithmeticMode Mode>
-PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const PolyhedralPhaseSampleFor<Mode>& target,
-    std::span<const PolyhedralPhaseSampleFor<Mode>> stencil, PolyhedralReconstructionOptions options)
+PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const PolyhedralPhaseSample<Mode>& target,
+    std::span<const PolyhedralPhaseSample<Mode>> stencil, PolyhedralReconstructionOptions options)
 {
-    auto resolution = assess_resolution_finite<Mode>(target, stencil, options);
+    auto resolution = assess_resolution(target, stencil, options);
     if (!resolution.admitted())
         throw PolyhedralResolutionRequired(resolution);
     if (target.gas_volume == 0 || target.carrier_volume == 0)
     {
-        auto result = solve_offset_finite<Mode>(target, {1, 0, 0}, options);
+        auto result = solve_offset(target, {1, 0, 0}, options);
         result.resolution = resolution;
         return result;
     }
     const auto center = target.geometry->centroid();
     const double volume = target.geometry->volume().as_double();
     const double alpha = target.gas_volume / volume;
-    std::array<Point, 3> matrix{};
-    Point rhs{};
+    std::array<Vector, 3> matrix{};
+    Vector rhs{};
     std::vector<double> volumes;
     volumes.reserve(stencil.size());
     for (const auto& sample : stencil)
@@ -461,7 +461,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const Polyhedra
         }
     }
     double condition = 0;
-    Point normal;
+    Vector normal;
     try
     {
         normal = unit(solve(matrix, rhs, options.maximum_condition, condition));
@@ -479,7 +479,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const Polyhedra
         long double objective_upper = 0;
     };
     std::size_t evaluations = 0;
-    const auto evaluate = [&](Point n)
+    const auto evaluate = [&](Vector n)
     {
         Evaluation value;
         value.plane = offset_fit<Mode>(target, unit(n), options, evaluations);
@@ -516,13 +516,13 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const Polyhedra
     for (unsigned iteration = 0; iteration < options.maximum_fit_iterations; ++iteration)
     {
         iterations = iteration + 1;
-        Point axis = std::abs(normal[0]) < .8 ? Point{1, 0, 0} : Point{0, 1, 0};
-        Point tangent = unit(
+        Vector axis = std::abs(normal[0]) < .8 ? Vector{1, 0, 0} : Vector{0, 1, 0};
+        Vector tangent = unit(
             minus(axis, {normal[0] * dot(axis, normal), normal[1] * dot(axis, normal), normal[2] * dot(axis, normal)}));
-        Point second{normal[1] * tangent[2] - normal[2] * tangent[1], normal[2] * tangent[0] - normal[0] * tangent[2],
+        Vector second{normal[1] * tangent[2] - normal[2] * tangent[1], normal[2] * tangent[0] - normal[0] * tangent[2],
             normal[0] * tangent[1] - normal[1] * tangent[0]};
         constexpr double h = 1e-4;
-        Point a = normal, b = normal, am = normal, bm = normal;
+        Vector a = normal, b = normal, am = normal, bm = normal;
         for (unsigned i = 0; i < 3; ++i)
         {
             a[i] += h * tangent[i];
@@ -560,7 +560,7 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const Polyhedra
         bool accepted = false;
         for (double scale = 1; scale >= 1. / 128; scale *= .5)
         {
-            Point trial = normal;
+            Vector trial = normal;
             for (unsigned i = 0; i < 3; ++i)
                 trial[i] += scale * (da * tangent[i] + db * second[i]);
             trial = unit(trial);
@@ -591,4 +591,4 @@ PolyhedralInterface PolyhedralReconstruction::reconstruct_finite(const Polyhedra
     current.plane.resolution = resolution;
     return current.plane;
 }
-} // namespace SimpleFluid::VoF
+} // namespace SimpleFluid::PLIC

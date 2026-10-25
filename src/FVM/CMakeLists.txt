@@ -11,7 +11,7 @@ add_library(SimpleFluidFVM SHARED
     ExactFaceTransfer.cc
     ../geometry/PLIC/details/exact/PolyhedralReconstruction.cc
     ../geometry/PLIC/PolyhedralReconstruction.cc
-    ../geometry/PLIC/details/FinitePolyhedralReconstruction.tcc
+    ../geometry/PLIC/details/PolyhedralReconstruction.tcc
     GeometricVoF.cc
     AdaptiveVoF.cc
     ConservativeAMRRemap.cc

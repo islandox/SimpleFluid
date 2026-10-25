@@ -1,5 +1,8 @@
 #include "geometry/PLIC/details/GeometryKernels.hh"
 
+#include "geometry/PLIC/details/bounded/ConvexPartitions.tcc"
+#include "geometry/PLIC/details/ordinary/ConvexPartitions.tcc"
+
 namespace SimpleFluid::PLIC
 {
 namespace
@@ -60,6 +63,3 @@ template<ArithmeticMode Mode> std::size_t DynamicConvexGeometry::storage_bytes()
 template std::size_t DynamicConvexGeometry::storage_bytes<ArithmeticMode::Ordinary>() const;
 template std::size_t DynamicConvexGeometry::storage_bytes<ArithmeticMode::BoundedCertification>() const;
 } // namespace SimpleFluid::PLIC
-
-#include "geometry/PLIC/details/bounded/ConvexPartitions.tcc"
-#include "geometry/PLIC/details/ordinary/ConvexPartitions.tcc"

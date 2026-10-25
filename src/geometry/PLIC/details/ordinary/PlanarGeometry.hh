@@ -2,6 +2,7 @@
  * @brief Ordinary planar polygons with finite coordinate and support identities.
  */
 #pragma once
+#include "geometry/PLIC/PlanarGeometryDeclarations.hh"
 namespace SimpleFluid::PLIC
 {
 namespace details

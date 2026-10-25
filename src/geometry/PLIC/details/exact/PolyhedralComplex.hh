@@ -1,4 +1,5 @@
 #pragma once
+#include "geometry/PLIC/PolyhedralComplexTypes.hh"
 namespace SimpleFluid::PLIC
 {
 /** A native explicit topology whose geometric constructions stay exact.

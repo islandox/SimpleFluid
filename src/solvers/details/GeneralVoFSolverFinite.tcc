@@ -1,6 +1,8 @@
 /** @file GeneralVoFSolverFinite.tcc
  * @brief Private compiled solver state and finite arithmetic kernels.
  */
+namespace SimpleFluid
+{
 struct GeneralVoFSolver::Impl
 {
     struct State
@@ -209,8 +211,9 @@ struct GeneralVoFSolver::Impl
                     const auto sample = [&]
                     {
                         if constexpr (Mode == ArithmeticMode::Exact)
-                            return detail::Exact::GeneralVoFCurvature::patch(
-                                patch.cell, *patch.geometry, patch.interface);
+                            return detail::GeneralVoFCurvature::patch<ArithmeticMode::Exact>(patch.cell,
+                                *PLIC::ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(*patch.geometry),
+                                patch.interface);
                         else
                             return detail::GeneralVoFCurvature::patch<Mode>(patch.cell,
                                 *PLIC::ConvexCellGeometry<Mode>::from_dynamic(patch.finite_geometry), patch.interface);
@@ -2177,3 +2180,4 @@ struct GeneralVoFSolver::Impl
         return candidate;
     }
 };
+} // namespace SimpleFluid

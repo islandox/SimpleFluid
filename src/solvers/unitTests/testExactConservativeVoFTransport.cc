@@ -456,6 +456,41 @@ TEST(ExactConservativeVoFTransportTest, ExactBindingSharesRemainingCapacityBetwe
     EXPECT_NO_THROW((void) verify(budget));
 }
 
+TEST(ExactConservativeVoFTransportTest, LazyZeroNormSupportsEmptyOwnersAndBudgetRecovery)
+{
+    using M = PLIC::GeometryMeasure<ArithmeticMode::Exact>;
+    namespace E = detail::vof_exact;
+    const auto comm = Tpetra::getDefaultComm();
+    constexpr std::size_t budget = 512 * 1024;
+    for (const auto global_rows : {0u, 1u})
+    {
+        SCOPED_TRACE(global_rows);
+        DefaultTpetraTypes::map_type map(global_rows, 0, comm);
+        std::vector<M> residual(map.getLocalNumElements()), rhs(residual.size());
+        const int local_empty = residual.empty();
+        int empty = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+        EXPECT_EQ(empty, comm->getSize() - int(global_rows));
+        // Default zero has no retained rational allocation, but every rank
+        // still sends a nonempty scalar certificate through the codec arena.
+        const auto zero = E::leased_physical_norm(residual, rhs, .5, map, budget);
+        EXPECT_TRUE(zero.accepted);
+        EXPECT_DOUBLE_EQ(zero.relative_residual, 0);
+        EXPECT_THROW((void) E::leased_physical_norm(
+            residual, rhs, .5, map, comm->getRank() == 0 ? 1 : budget), std::exception);
+        EXPECT_TRUE(E::leased_physical_norm(residual, rhs, .5, map, budget).accepted);
+        if (global_rows)
+        {
+            for (auto& value : residual)
+                value = M::from_value(1);
+            const auto rejected = E::leased_physical_norm(residual, rhs, .5, map, budget);
+            EXPECT_FALSE(rejected.accepted);
+            EXPECT_DOUBLE_EQ(rejected.relative_residual, 1);
+            EXPECT_TRUE(E::leased_physical_norm(residual, rhs, 1, map, budget).accepted);
+        }
+    }
+}
+
 TEST(ExactConservativeVoFTransportTest, LeasedPhysicalNormSeparatesAggregateOperationAndCommunicationStorage)
 {
     using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;

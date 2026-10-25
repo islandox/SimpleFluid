@@ -1,4 +1,5 @@
 #pragma once
+#include "geometry/PLIC/GeometryInstrumentationDeclarations.hh"
 namespace SimpleFluid::PLIC
 {
 /** Thread-local API/kernel event counts, not counts of primitive bigint

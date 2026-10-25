@@ -1,5 +1,5 @@
-/** @file FiniteGeometry.tcc
- * @brief Compiled typed finite geometry adapters over policy-specific kernels.
+/** @file ConvexGeometry.tcc
+ * @brief Compiled mode-typed geometry entry points over policy-specific kernels.
  */
 namespace SimpleFluid::PLIC
 {
@@ -381,27 +381,4 @@ Point<Mode> backtrace_constrained(const Point<Mode>& source, GeometryPoint veloc
         source.dynamic(), velocity, timestep, dynamic_walls, typed_limits<Mode>(limits)));
 }
 
-#include "geometry/PLIC/details/ordinary/NativeCellGeometry.tcc"
-
-template class Point<ArithmeticMode::Ordinary>;
-template class Point<ArithmeticMode::BoundedCertification>;
-template class ConvexCellGeometry<ArithmeticMode::Ordinary>;
-template class ConvexCellGeometry<ArithmeticMode::BoundedCertification>;
-template class ConvexPartition<ArithmeticMode::Ordinary>;
-template class ConvexPartition<ArithmeticMode::BoundedCertification>;
-#define SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(mode)                                                                     \
-    template std::vector<PlaneAuthority> common_supports(std::span<const Point<mode>>);                                \
-    template Point<mode> point_average(std::span<const Point<mode>>);                                                  \
-    template Point<mode> point_interpolate(const Point<mode>&, const Point<mode>&, long double);                       \
-    template GeometryValue<mode> orientation(const std::array<Point<mode>, 4>&);                                       \
-    template bool points_identical(const Point<mode>&, const Point<mode>&);                                            \
-    template Point<mode> point_displaced(const Point<mode>&, const Point<mode>&);                                      \
-    template Point<mode> source_point(const ConvexCellGeometry<ArithmeticMode::Ordinary>&, std::span<const char>);     \
-    template Point<mode> source_point(                                                                                 \
-        std::span<const ConvexGeometryPtr<ArithmeticMode::Ordinary>>, std::span<const char>);                          \
-    template Point<mode> backtrace_constrained(                                                                        \
-        const Point<mode>&, GeometryPoint, double, std::span<const FaceConstraint<mode>>, GeometryLimits);
-SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(ArithmeticMode::Ordinary)
-SIMPLEFLUID_INSTANTIATE_TYPED_POINTS(ArithmeticMode::BoundedCertification)
-#undef SIMPLEFLUID_INSTANTIATE_TYPED_POINTS
 } // namespace SimpleFluid::PLIC

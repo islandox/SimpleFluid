@@ -62,13 +62,13 @@ void require(bool value, const char* message)
         throw std::runtime_error(message);
 }
 } // namespace
-std::optional<GeneralVoFCurvaturePatch> Exact::GeneralVoFCurvature::patch(std::uint64_t cell,
-    const SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Ordinary>& geometry,
-    const VoF::PolyhedralInterface& plane)
+template<>
+std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::Exact>(std::uint64_t cell,
+    const PLIC::ConvexCellGeometry<ArithmeticMode::Exact>& geometry, const PLIC::PolyhedralInterface& plane)
 {
     if (plane.pure_gas || plane.pure_carrier)
         return {};
-    const auto source = PLIC::ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(geometry);
+    const auto* source = &geometry;
     const auto section = source->clip(plane.gas).section;
     require(section.vertices.size() >= 3, "A mixed general VoF cell has no physical PLIC polygon.");
     auto vertices = section.vertices;
@@ -117,7 +117,7 @@ std::optional<GeneralVoFCurvaturePatch> Exact::GeneralVoFCurvature::patch(std::u
 }
 template<ArithmeticMode Mode>
 std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
-    std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>& geometry, const VoF::PolyhedralInterface& plane)
+    std::uint64_t cell, const PLIC::ConvexCellGeometry<Mode>& geometry, const PLIC::PolyhedralInterface& plane)
 {
     if (plane.pure_gas || plane.pure_carrier)
         return {};
@@ -164,10 +164,10 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
     return result;
 }
 template std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::Ordinary>(
-    std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&, const VoF::PolyhedralInterface&);
+    std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>&, const PLIC::PolyhedralInterface&);
 template std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMode::BoundedCertification>(
     std::uint64_t, const PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>&,
-    const VoF::PolyhedralInterface&);
+    const PLIC::PolyhedralInterface&);
 
 GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatch& target,
     std::span<const GeneralVoFCurvaturePatch> support, GeneralVoFCurvatureOptions options)

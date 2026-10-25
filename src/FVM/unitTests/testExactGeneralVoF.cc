@@ -160,7 +160,7 @@ TEST(ExactGeneralVoF, ActualUnsplitCirculationHasPositiveRoutesIndependentComple
     int local_empty = state.owned_order().empty(), empty = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
     EXPECT_EQ(empty, std::max(0, comm->getSize() - 2));
-    GeneralVoF another(f.hierarchy, f.order, f.gas, f.carrier);
+    GeneralVoF another(f.hierarchy, f.order, f.gas, f.carrier, exact_reference_options());
     EXPECT_THROW(another.apply(trial), std::invalid_argument);
     if (comm->getSize() > 1)
     {
@@ -388,8 +388,8 @@ TEST(ExactGeneralVoF, DirectAdoptionWitnessRejectsLookAlikesAndDoesNotRetainOldP
         auto fixture = setup();
         fixture.gas.assign(fixture.order.size(), 0);
         fixture.carrier.assign(fixture.order.size(), 1);
-        auto source =
-            std::make_shared<const GeneralVoF>(fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier);
+        auto source = std::make_shared<const GeneralVoF>(
+            fixture.hierarchy, fixture.order, fixture.gas, fixture.carrier, exact_reference_options());
         old_identity = source->accepted_identity();
         EXPECT_NE(source->accepted_control(), 0);
         EXPECT_EQ(source->accepted_identity(), source->accepted_identity());
@@ -406,12 +406,20 @@ TEST(ExactGeneralVoF, DirectAdoptionWitnessRejectsLookAlikesAndDoesNotRetainOldP
         EXPECT_NE(retained_target->accepted_identity(), source->accepted_identity());
         EXPECT_NE(retained_target->accepted_control(), source->accepted_control());
         GeneralVoF look_alike(retained_target->hierarchy(), retained_target->owned_order(),
-            retained_target->gas_volumes(), retained_target->carrier_volumes(), {},
+            retained_target->gas_volumes(), retained_target->carrier_volumes(), exact_reference_options(),
             std::vector<GeneralVoFPhaseGeometry>(
                 retained_target->owned_order().size(), GeneralVoFPhaseGeometry::PureCarrier));
         EXPECT_EQ(look_alike.gas_volumes(), retained_target->gas_volumes());
         EXPECT_EQ(look_alike.carrier_volumes(), retained_target->carrier_volumes());
         EXPECT_THROW(look_alike.validate_transfer_target(transfer), std::invalid_argument);
+        GeneralVoF finite(retained_target->hierarchy(), retained_target->owned_order(),
+            retained_target->gas_volumes(), retained_target->carrier_volumes());
+        const auto finite_identity = finite.accepted_identity();
+        EXPECT_THROW((void) finite.export_transfer_source(false), std::invalid_argument);
+        EXPECT_THROW((void) finite.adopt_transfer(transfer), std::invalid_argument);
+        EXPECT_THROW(finite.validate_transfer_target(transfer), std::invalid_argument);
+        EXPECT_EQ(finite.accepted_identity(), finite_identity);
+        EXPECT_EQ(finite.inventory_policy(), PhaseInventoryPolicy::Finite);
         const auto moved_trial = retained_target->plan_transport(nodes(*retained_target), cycle(*retained_target), 1);
         const auto moved = retained_target->apply(moved_trial);
         EXPECT_EQ(moved->gas_volumes(), retained_target->gas_volumes());
@@ -502,7 +510,8 @@ TEST(ExactGeneralVoF, ExactZeroBootstrapRetainsPureEvidenceWithoutClassifyingNon
     EXPECT_GT(unresolved, 0);
 
     auto initial_tail = setup(true);
-    GeneralVoF nonzero(initial_tail.hierarchy, initial_tail.order, initial_tail.gas, initial_tail.carrier);
+    GeneralVoF nonzero(initial_tail.hierarchy, initial_tail.order, initial_tail.gas, initial_tail.carrier,
+        exact_reference_options());
     const auto nonzero_source = nonzero.export_transfer_source(false);
     for (const auto& capsule : nonzero_source.owned())
     {
@@ -677,17 +686,18 @@ TEST(ExactGeneralVoF, ExperimentalInventoryPolicyIsExplicitCollectiveAndIsolated
     GeneralVoF finite(f.hierarchy, f.order, f.gas, f.carrier);
     EXPECT_EQ(finite.inventory_policy(), PhaseInventoryPolicy::Finite);
     EXPECT_THROW((void) finite.experimental_phases(), std::invalid_argument);
-    const auto finite_source = finite.export_transfer_source(false);
-    for (const auto& capsule : finite_source.owned())
-    {
-        EXPECT_EQ(capsule.policy, PhaseInventoryPolicy::Finite);
-        EXPECT_FALSE(capsule.experimental_exact);
-    }
+    EXPECT_THROW((void) finite.export_transfer_source(false), std::invalid_argument);
     GeneralVoFOptions options;
     options.arithmetic_mode = ArithmeticMode::Exact;
     GeneralVoF exact(f.hierarchy, f.order, f.gas, f.carrier, options);
     EXPECT_EQ(exact.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
     EXPECT_EQ(exact.experimental_phases().size(), exact.owned_order().size());
+    const auto exact_source = exact.export_transfer_source(false);
+    for (const auto& capsule : exact_source.owned())
+    {
+        EXPECT_EQ(capsule.policy, PhaseInventoryPolicy::ExperimentalExact);
+        EXPECT_TRUE(capsule.experimental_exact);
+    }
     int local_empty = exact.owned_order().empty(), empty = 0;
     const auto comm = Tpetra::getDefaultComm();
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);

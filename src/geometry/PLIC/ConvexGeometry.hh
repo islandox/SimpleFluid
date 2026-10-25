@@ -106,7 +106,7 @@ struct GeometryLimits
     std::size_t maximum_vertices = 4096, maximum_faces = 4096;
     /** Zero selects the checked geometry guard derived from V/F caps. Explicit
      * trajectory limits count interval scalar operations (one add/multiply),
-     * matching ExactTrajectoryLimits arithmetic operations, not endpoint FLOPs. */
+     * matching TrajectoryLimits arithmetic operations, not endpoint FLOPs. */
     std::size_t maximum_operations = 0, maximum_pair_tests = 262144;
     std::size_t byte_budget = 64 * 1024 * 1024;
     ArithmeticMode arithmetic_mode = ArithmeticMode::BoundedCertification;

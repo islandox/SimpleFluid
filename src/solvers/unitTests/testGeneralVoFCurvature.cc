@@ -15,7 +15,7 @@ namespace
 template<ArithmeticMode Mode> void typed_physical_patch()
 {
     const auto geometry = PLIC::ConvexCellGeometry<Mode>::box({2, 3, 4}, {4, 6, 8});
-    VoF::PolyhedralInterface plane;
+    PLIC::PolyhedralInterface plane;
     plane.finite_geometry = true;
     plane.gas = {{0, 0, 1}, {2, 3, 4}, 1};
     PLIC::reset_geometry_statistics();

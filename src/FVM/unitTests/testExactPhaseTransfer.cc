@@ -1,5 +1,5 @@
 /** @file testExactPhaseTransfer.cc
- * @brief Finite phase remap, bounded rounding and transaction-local tiny momentum.
+ * @brief Explicit exact phase remap, diagnostic publication bounds and tiny momentum.
  */
 #include "FVM/ExactPhaseTransfer.hh"
 #include "FVM/GeneralVoF.hh"
@@ -30,7 +30,7 @@ std::shared_ptr<const H> bootstrap(const CartesianAMR& root, std::uint64_t count
     for (std::uint64_t gid = 0; gid < count; ++gid)
         if (int(gid % std::min(2, comm->getSize())) == comm->getRank())
             owned.push_back(gid);
-    auto b = root.detach_owned(owned, {'f', 'i', 'n', 'i', 't', 'e', '_', 'r', 'e', 'm', 'a', 'p'});
+    auto b = root.detach_owned(owned, {'e', 'x', 'a', 'c', 't', '_', 'r', 'e', 'm', 'a', 'p'});
     return std::make_shared<const H>(std::move(b.owned), std::move(b.families), b.kernel, comm);
 }
 std::shared_ptr<const H> bind(const H& source, const H::Plan& plan)
@@ -61,16 +61,24 @@ void empty_owners(const H& h)
     if (h.communicator()->getSize() == 4)
         EXPECT_GT(total, 0);
 }
+GeneralVoFOptions exact_options()
+{
+    GeneralVoFOptions options;
+    options.arithmetic_mode = ArithmeticMode::Exact;
+    return options;
+}
 ExactPhaseTransferSource channels(const GeneralVoF& state)
 {
     auto source = state.export_transfer_source(false);
     std::vector<ExactTransferOwnedChannels> values;
     for (const auto& c : source.owned())
     {
-        ExactTransferPhaseMass mass{
-            M::from_value(c.phases.gas).scaled(2), M::from_value(c.phases.carrier).scaled(1000)};
-        values.push_back(
-            {c.key, {(mass.gas + mass.carrier).scaled(-.5), M::from_value(c.phases.bulk).scaled(3)}, mass});
+        EXPECT_TRUE(c.experimental_exact);
+        if (!c.experimental_exact)
+            continue;
+        const auto& retained = c.experimental_exact->phases;
+        ExactTransferPhaseMass mass{retained.gas.scaled(2), retained.carrier.scaled(1000)};
+        values.push_back({c.key, {(mass.gas + mass.carrier).scaled(-.5), retained.bulk.scaled(3)}, mass});
     }
     return source.with_channels({{"momentum", ExactTransferCarrier::MixtureMass, false},
                                     {"pressure_volume", ExactTransferCarrier::BulkVolume, true}},
@@ -78,11 +86,32 @@ ExactPhaseTransferSource channels(const GeneralVoF& state)
 }
 void conservation(const ExactPhaseTransferSource& source, const ExactPhaseTransferResult& target)
 {
-    M sg, sc, tg, tc, rg, rc, sm, tm, sp, tp;
+    EXPECT_EQ(source.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
+    EXPECT_EQ(target.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
+    M sg, sc, tg, tc, rg, rc, sm, tm, sp, tp, retained_sg, retained_sc, retained_tg, retained_tc;
+    const auto publication = [](const ExactPhaseTransferCapsule& c)
+    {
+        EXPECT_EQ(c.policy, PhaseInventoryPolicy::ExperimentalExact);
+        EXPECT_TRUE(c.experimental_exact);
+        if (!c.experimental_exact)
+            return;
+        const auto& retained = c.experimental_exact->phases;
+        EXPECT_LE(absolute(M::from_value(c.phases.gas) - retained.gas).compare(M::from_value(c.roundoff.gas)), 0);
+        EXPECT_LE(
+            absolute(M::from_value(c.phases.carrier) - retained.carrier).compare(M::from_value(c.roundoff.carrier)), 0);
+    };
     for (const auto& c : source.owned())
     {
+        publication(c);
+        if (c.experimental_exact)
+        {
+            retained_sg = retained_sg + c.experimental_exact->phases.gas;
+            retained_sc = retained_sc + c.experimental_exact->phases.carrier;
+        }
         sg = sg + M::from_value(c.phases.gas);
         sc = sc + M::from_value(c.phases.carrier);
+        rg = rg + M::from_value(c.roundoff.gas);
+        rc = rc + M::from_value(c.roundoff.carrier);
         if (!c.amounts.empty())
         {
             sm = sm + c.amounts[0];
@@ -91,6 +120,12 @@ void conservation(const ExactPhaseTransferSource& source, const ExactPhaseTransf
     }
     for (const auto& c : target.owned())
     {
+        publication(c);
+        if (c.experimental_exact)
+        {
+            retained_tg = retained_tg + c.experimental_exact->phases.gas;
+            retained_tc = retained_tc + c.experimental_exact->phases.carrier;
+        }
         tg = tg + M::from_value(c.phases.gas);
         tc = tc + M::from_value(c.phases.carrier);
         rg = rg + M::from_value(c.roundoff.gas);
@@ -115,15 +150,25 @@ void conservation(const ExactPhaseTransferSource& source, const ExactPhaseTransf
     tm = global(tm);
     sp = global(sp);
     tp = global(tp);
+    retained_sg = global(retained_sg);
+    retained_sc = global(retained_sc);
+    retained_tg = global(retained_tg);
+    retained_tc = global(retained_tc);
     if (Tpetra::getDefaultComm()->getRank() == 0)
     {
+        EXPECT_EQ(retained_tg.compare(retained_sg), 0);
+        EXPECT_EQ(retained_tc.compare(retained_sc), 0);
+        // Retained inventories conserve exactly. The difference between two
+        // independently rounded publications is bounded by the sum of BOTH
+        // endpoint publication radii (triangle inequality), not target error
+        // alone. These are measured conversion bounds, not a physical tolerance.
         EXPECT_LE(absolute(tg - sg).compare(rg), 0);
         EXPECT_LE(absolute(tc - sc).compare(rc), 0);
         EXPECT_EQ(sm.compare(tm), 0);
         EXPECT_EQ(sp.compare(tp), 0);
     }
 }
-TEST(ExactPhaseTransfer, FiniteInventoriesMigrateSplitAndCoarsenWithinActualPublicationBounds)
+TEST(ExactPhaseTransfer, RetainedExactInventoriesMigrateSplitAndCoarsenWithinPublicationBounds)
 {
     AMRGrid grid;
     grid.block_cells = {2, 2, 2};
@@ -139,13 +184,13 @@ TEST(ExactPhaseTransfer, FiniteInventoriesMigrateSplitAndCoarsenWithinActualPubl
         carrier.push_back(h->metrics(leaf).volume);
     }
     std::vector<GeneralVoFPhaseGeometry> declarations(keys.size(), GeneralVoFPhaseGeometry::PureCarrier);
-    GeneralVoF initial(h, keys, gas, carrier, {}, declarations);
+    GeneralVoF initial(h, keys, gas, carrier, exact_options(), declarations);
     auto source = channels(initial);
-    EXPECT_EQ(source.inventory_policy(), PhaseInventoryPolicy::Finite);
+    EXPECT_EQ(source.inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
     for (const auto& c : source.owned())
     {
-        EXPECT_EQ(c.policy, PhaseInventoryPolicy::Finite);
-        EXPECT_FALSE(c.experimental_exact);
+        EXPECT_EQ(c.policy, PhaseInventoryPolicy::ExperimentalExact);
+        EXPECT_TRUE(c.experimental_exact);
     }
     std::vector<int> destinations(
         keys.size(), (h->communicator()->getRank() + 1) % std::min(2, h->communicator()->getSize()));
@@ -164,9 +209,9 @@ TEST(ExactPhaseTransfer, FiniteInventoriesMigrateSplitAndCoarsenWithinActualPubl
             marks.push_back({key, AdaptiveSplit::Isotropic});
     const auto plan = state->hierarchy()->plan_adaptation(marks);
     const auto fine_h = bind(*state->hierarchy(), plan);
-    const auto finite_source = channels(*state);
-    const auto refined = ExactPhaseTransfer::prepare(finite_source, plan, fine_h);
-    conservation(finite_source, refined);
+    const auto retained_source = channels(*state);
+    const auto refined = ExactPhaseTransfer::prepare(retained_source, plan, fine_h);
+    conservation(retained_source, refined);
     empty_owners(*fine_h);
     for (const auto& c : refined.owned())
     {
@@ -177,10 +222,10 @@ TEST(ExactPhaseTransfer, FiniteInventoriesMigrateSplitAndCoarsenWithinActualPubl
     }
     ExactPhaseTransferOptions exhausted;
     exhausted.byte_budget = 1;
-    EXPECT_THROW(ExactPhaseTransfer::prepare(finite_source, plan, fine_h, exhausted), std::invalid_argument);
+    EXPECT_THROW((void) ExactPhaseTransfer::prepare(retained_source, plan, fine_h, exhausted), std::invalid_argument);
     ExactPhaseTransferOptions no_fit;
     no_fit.maximum_relative_target_fit = 0;
-    EXPECT_THROW(ExactPhaseTransfer::prepare(finite_source, plan, fine_h, no_fit), std::invalid_argument);
+    EXPECT_THROW((void) ExactPhaseTransfer::prepare(retained_source, plan, fine_h, no_fit), std::invalid_argument);
     const auto fine = state->adopt_transfer(refined);
     std::vector<AdaptiveBytes> inverse;
     if (h->communicator()->getRank() == 0)
@@ -196,10 +241,10 @@ TEST(ExactPhaseTransfer, FiniteInventoriesMigrateSplitAndCoarsenWithinActualPubl
         EXPECT_EQ(restored->phase_volumes()[i].gas, coarse.owned()[i].phases.gas);
         EXPECT_EQ(restored->phase_volumes()[i].carrier, coarse.owned()[i].phases.carrier);
     }
-    EXPECT_THROW(initial.adopt_transfer(coarse), std::invalid_argument);
-    EXPECT_THROW(ExactPhaseTransfer::prepare(source, coarsening, coarse_h), std::invalid_argument);
+    EXPECT_THROW((void) initial.adopt_transfer(coarse), std::invalid_argument);
+    EXPECT_THROW((void) ExactPhaseTransfer::prepare(source, coarsening, coarse_h), std::invalid_argument);
 }
-TEST(ExactPhaseTransfer, FiniteInheritedDefectAndRoundingAreNotResetByAdoption)
+TEST(ExactPhaseTransfer, InheritedExactDefectAndPublicationRoundingAreNotResetByAdoption)
 {
     AMRGrid grid;
     grid.block_cells = {2, 2, 2};
@@ -216,7 +261,7 @@ TEST(ExactPhaseTransfer, FiniteInheritedDefectAndRoundingAreNotResetByAdoption)
         gas.push_back(mixed ? .5 : 0);
         carrier.push_back(mixed ? .5 + defect : 1);
     }
-    GeneralVoF initial(h, keys, gas, carrier);
+    GeneralVoF initial(h, keys, gas, carrier, exact_options());
     const auto source = initial.export_transfer_source(true);
     std::vector<AdaptiveMark> marks;
     for (const auto& [key, leaf] : initial.hierarchy()->owned())
@@ -244,12 +289,12 @@ TEST(ExactPhaseTransfer, FiniteInheritedDefectAndRoundingAreNotResetByAdoption)
     int inherited = 0;
     Teuchos::reduceAll(*h->communicator(), Teuchos::REDUCE_SUM, 1, &local_inherited, &inherited);
     EXPECT_GT(inherited, 0);
-    EXPECT_THROW(
-        GeneralVoF(adopted->hierarchy(), adopted->owned_order(), adopted->gas_volumes(), adopted->carrier_volumes()),
+    EXPECT_THROW(GeneralVoF(adopted->hierarchy(), adopted->owned_order(), adopted->gas_volumes(),
+                     adopted->carrier_volumes(), exact_options()),
         std::invalid_argument);
     result.validate_observations();
 }
-TEST(ExactPhaseTransfer, TinyMomentumRemainsTransactionLocalUntilAggregationAndVelocityPublication)
+TEST(ExactPhaseTransfer, TinyExactMomentumRemainsTransactionLocalUntilAggregationAndVelocityPublication)
 {
     // Eight admitted even-block cells each have exact volume 2^-1074.
     // Per-cell rho=.5,u=.5 gives momentum eta/4 below binary64, while
@@ -271,13 +316,14 @@ TEST(ExactPhaseTransfer, TinyMomentumRemainsTransactionLocalUntilAggregationAndV
     int local_cells = int(keys.size()), global_cells = 0;
     Teuchos::reduceAll(*h->communicator(), Teuchos::REDUCE_SUM, 1, &local_cells, &global_cells);
     EXPECT_EQ(global_cells, 8);
-    GeneralVoF initial(h, keys, gas, carrier);
+    GeneralVoF initial(h, keys, gas, carrier, exact_options());
     auto source = initial.export_transfer_source(false);
     std::vector<ExactTransferOwnedChannels> values;
     for (const auto& c : source.owned())
     {
         EXPECT_EQ(c.phases.gas, std::numeric_limits<double>::denorm_min());
-        ExactTransferPhaseMass mass{M::from_value(c.phases.gas).scaled(.5), {}};
+        ASSERT_TRUE(c.experimental_exact);
+        ExactTransferPhaseMass mass{c.experimental_exact->phases.gas.scaled(.5), {}};
         const auto momentum = mass.gas.scaled(.5);
         EXPECT_GT(momentum.sign(), 0);
         EXPECT_EQ(static_cast<double>(momentum.enclosure().value), 0);
@@ -395,16 +441,13 @@ TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAn
     catch (const std::invalid_argument& error)
     {
         policy_rejected = true;
-        EXPECT_NE(std::string(error.what()).find("policy"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("requires explicit Exact arithmetic mode"), std::string::npos);
     }
     EXPECT_TRUE(policy_rejected);
-    const auto finite_source = finite.export_transfer_source(false);
-    EXPECT_EQ(finite_source.inventory_policy(), PhaseInventoryPolicy::Finite);
-    for (const auto& c : finite_source.owned())
-    {
-        EXPECT_EQ(c.policy, PhaseInventoryPolicy::Finite);
-        EXPECT_FALSE(c.experimental_exact);
-    }
+    EXPECT_THROW((void) finite.export_transfer_source(false), std::invalid_argument);
+    EXPECT_THROW((void) finite.export_transfer_source(true), std::invalid_argument);
+    EXPECT_THROW(finite.validate_transfer_target(moved), std::invalid_argument);
+    EXPECT_EQ(finite.inventory_policy(), PhaseInventoryPolicy::Finite);
     std::vector<AdaptiveMark> marks;
     for (const auto& [key, leaf] : state->hierarchy()->owned())
         if (key == root.cell_key(0))
@@ -441,10 +484,10 @@ TEST(ExactPhaseTransfer, ExperimentalExactAuthorityIsPinnedAcrossSmallHandoffsAn
     }
     EXPECT_EQ(refined->adopt_transfer(inverse_result)->inventory_policy(), PhaseInventoryPolicy::ExperimentalExact);
     EXPECT_THROW(
-        exact.adopt_transfer(result), std::invalid_argument); // wrong accepted source/control despite same mode
+        (void) exact.adopt_transfer(result), std::invalid_argument); // wrong accepted source/control despite same mode
     ExactPhaseTransferOptions exhausted;
     exhausted.byte_budget = 1;
-    EXPECT_THROW(ExactPhaseTransfer::prepare(state->export_transfer_source(false), plan, target, exhausted),
+    EXPECT_THROW((void) ExactPhaseTransfer::prepare(state->export_transfer_source(false), plan, target, exhausted),
         std::invalid_argument);
     result.validate_observations();
 }

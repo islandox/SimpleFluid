@@ -42,14 +42,14 @@ TEST(ExactPolyhedralReconstruction, InfersObliquePlanarNormalFromIndependentSkew
         // of the actual skew-polyhedron clipping and nonlinear fit under test.
         const auto gas = GeometricVoF::box_plane_volume(lower, upper, reference_normal, offset);
         const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-        return PolyhedralPhaseSample{skew_cell(lower, upper), gas, volume - gas};
+        return PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>{skew_cell(lower, upper), gas, volume - gas};
     };
     auto target = sample(1, 1, 1);
-    std::vector<PolyhedralPhaseSample> stencil;
+    std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil;
     for (auto ijk : std::vector<std::array<int, 3>>{{0, 1, 1}, {2, 1, 1}, {1, 0, 1}, {1, 2, 1}, {1, 1, 0}, {1, 1, 2},
              {0, 0, 0}, {2, 2, 2}, {0, 2, 2}, {2, 0, 0}})
         stencil.push_back(sample(ijk[0], ijk[1], ijk[2]));
-    auto result = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
+    auto result = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil);
     SimpleFluid::PLIC::GeometryPoint expected{.75, -.5 - .25 * .75, .625 - .125 * .75 - .25 * (-.5 - .25 * .75)};
     const double norm = std::hypot(expected[0], expected[1], expected[2]);
     for (unsigned a = 0; a < 3; ++a)
@@ -70,14 +70,14 @@ TEST(ExactPolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedR
         // of the actual skew-polyhedron clipping and nonlinear fit under test.
         const auto gas = GeometricVoF::box_plane_volume(lower, upper, reference_normal, offset);
         const double volume = (upper[0] - lower[0]) * (upper[1] - lower[1]) * (upper[2] - lower[2]);
-        return PolyhedralPhaseSample{skew_cell(lower, upper), gas, volume - gas};
+        return PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>{skew_cell(lower, upper), gas, volume - gas};
     };
     auto target = sample(1, 1, 1);
-    std::vector<PolyhedralPhaseSample> stencil;
+    std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil;
     for (auto ijk : std::vector<std::array<int, 3>>{{0, 1, 1}, {2, 1, 1}, {1, 0, 1}, {1, 2, 1}, {1, 1, 0}, {1, 1, 2},
              {0, 0, 0}, {2, 2, 2}, {0, 2, 2}, {2, 0, 0}})
         stencil.push_back(sample(ijk[0], ijk[1], ijk[2]));
-    auto result = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
+    auto result = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil);
     SimpleFluid::PLIC::GeometryPoint expected{.75, -.5 - .25 * .75, .625 - .125 * .75 - .25 * (-.5 - .25 * .75)};
     const double norm = std::hypot(expected[0], expected[1], expected[2]);
     for (unsigned a = 0; a < 3; ++a)
@@ -87,8 +87,9 @@ TEST(ExactPolyhedralReconstruction, PreparedGeometryRemainsPrivateAfterRejectedR
 
     auto rejected = target;
     rejected.gas_volume = -1;
-    EXPECT_THROW((void) Exact::PolyhedralReconstruction::reconstruct(rejected, stencil), std::invalid_argument);
-    const auto repeated = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
+    EXPECT_THROW((void) PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(rejected, stencil),
+        std::invalid_argument);
+    const auto repeated = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil);
     for (unsigned a = 0; a < 3; ++a)
         EXPECT_EQ(
             std::bit_cast<std::uint64_t>(result.gas.normal[a]), std::bit_cast<std::uint64_t>(repeated.gas.normal[a]));
@@ -101,11 +102,11 @@ TEST(ExactPolyhedralReconstruction, IndependentPhaseVolumesAreUnchangedDuringFit
         for (bool minority_gas : {true, false})
         {
             const double other_volume = 1. - minority_volume;
-            PolyhedralPhaseSample sample{
+            PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> sample{
                 SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1}),
                 minority_gas ? minority_volume : other_volume, minority_gas ? other_volume : minority_volume};
             const auto original = sample;
-            auto plane = Exact::PolyhedralReconstruction::solve_offset(sample, {1, 0, 0});
+            auto plane = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(sample, {1, 0, 0});
             EXPECT_FALSE(plane.pure_gas);
             EXPECT_FALSE(plane.pure_carrier);
             EXPECT_EQ(sample.gas_volume, original.gas_volume);
@@ -132,9 +133,11 @@ TEST(ExactPolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEn
         for (const bool minority_gas : {true, false})
         {
             SCOPED_TRACE(::testing::Message() << direction << " " << minority_gas);
-            PolyhedralPhaseSample sample{cell, minority_gas ? .225 : .675, minority_gas ? .675 : .225};
+            PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> sample{
+                cell, minority_gas ? .225 : .675, minority_gas ? .675 : .225};
             const auto original = sample;
-            const auto plane = Exact::PolyhedralReconstruction::solve_offset(sample, {direction, 0, 0});
+            const auto plane =
+                PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(sample, {direction, 0, 0});
             const auto phases = fragment->phases(plane.gas);
             const auto minority = minority_gas ? phases.gas : phases.carrier;
             EXPECT_TRUE(minority.relative_error_at_most(
@@ -149,7 +152,7 @@ TEST(ExactPolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEn
     for (const double direction : {1., -1.})
         for (const bool pure_gas : {true, false})
         {
-            const auto plane = Exact::PolyhedralReconstruction::solve_offset(
+            const auto plane = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(
                 {cell, pure_gas ? .9 : 0., pure_gas ? 0. : .9}, {direction, 0, 0});
             const auto phases = fragment->phases(plane.gas);
             EXPECT_EQ((pure_gas ? phases.carrier : phases.gas).sign(), 0);
@@ -168,51 +171,57 @@ TEST(ExactPolyhedralReconstruction, CurvedVolumeModelSeparatesAngularConvergence
         // rectangle; the graph stays strictly within the middle Z layer.
         const double mean = .5 + linear_x * i + linear_y * j + curvature * (i * i + j * j + width * width / 6);
         const double gas = k < 0 ? volume : k > 0 ? 0 : volume * mean;
-        return PolyhedralPhaseSample{
+        return PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>{
             SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(lower, upper), gas,
             volume - gas};
     };
     const auto target = sample(0, 0, 0);
-    std::vector<PolyhedralPhaseSample> stencil;
+    std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil;
     for (int j = -1; j <= 1; ++j)
         for (int i = -1; i <= 1; ++i)
             if (i || j)
                 stencil.push_back(sample(i, j, 0));
     stencil.push_back(sample(0, 0, -1));
     stencil.push_back(sample(0, 0, 1));
-    const auto fit = Exact::PolyhedralReconstruction::reconstruct(target, stencil);
+    const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil);
     const double norm = std::hypot(linear_x, linear_y, 1);
     EXPECT_TRUE(fit.fit_converged);
     EXPECT_GT(fit.stencil_volume_residual, 1e-3);
     EXPECT_NEAR(fit.gas.normal[0], -linear_x / norm, 2e-7);
     EXPECT_NEAR(fit.gas.normal[1], -linear_y / norm, 2e-7);
     EXPECT_NEAR(fit.gas.normal[2], 1 / norm, 2e-7);
-    PolyhedralReconstructionOptions strict;
+    PLIC::PolyhedralReconstructionOptions strict;
     strict.maximum_model_residual = 1e-3;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil, strict), std::invalid_argument);
+    EXPECT_THROW(PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, strict),
+        std::invalid_argument);
     strict = {};
     strict.maximum_fit_iterations = 1;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil, strict), std::invalid_argument);
+    EXPECT_THROW(PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, strict),
+        std::invalid_argument);
 }
 TEST(ExactPolyhedralReconstruction, RejectsDeficientPhysicalStencilAndInvalidOccupancy)
 {
-    PolyhedralPhaseSample target{
+    PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact> target{
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1}), .5, .5};
-    std::vector<PolyhedralPhaseSample> stencil;
+    std::vector<PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>> stencil;
     for (int i : {-2, -1, 1, 2})
         stencil.push_back({SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
                                {double(i), 0, 0}, {double(i + 1), 1, 1}),
             .5, .5});
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil), std::invalid_argument);
-    PolyhedralReconstructionOptions limited;
+    EXPECT_THROW(
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil), std::invalid_argument);
+    PLIC::PolyhedralReconstructionOptions limited;
     limited.maximum_clip_evaluations = 1;
     target.gas_volume = .3;
     target.carrier_volume = .7;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::solve_offset(target, {1, 0, 0}, limited), std::invalid_argument);
+    EXPECT_THROW(PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(target, {1, 0, 0}, limited),
+        std::invalid_argument);
     limited = {};
     limited.maximum_stencil_cells = 2;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::reconstruct(target, stencil, limited), std::invalid_argument);
+    EXPECT_THROW(PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, limited),
+        std::invalid_argument);
     target.carrier_volume = .4;
-    EXPECT_THROW(Exact::PolyhedralReconstruction::solve_offset(target, {1, 0, 0}), std::invalid_argument);
+    EXPECT_THROW(
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::solve_offset(target, {1, 0, 0}), std::invalid_argument);
 }
 } // namespace

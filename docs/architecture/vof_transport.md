@@ -89,8 +89,11 @@ geometry methods call their selected compiled kernels directly, including nested
 clipping and partition work; they do not re-enter runtime backend selection.
 `certify_fragment_partition()` preserves transport's complementary-split and
 donor-batch proofs; native AMR retains its separate shell partition proof.
-Reconstruction uses `PolyhedralPhaseSampleFor<Mode>` throughout offset and normal
-fitting. Runtime state, packet and diagnostic records retain checked `Dynamic*`
+Reconstruction uses `PLIC::PolyhedralReconstruction<Mode>` and matching
+`PolyhedralPhaseSample<Mode>` throughout offset and normal fitting. Its common
+`validate`, `solve_offset` and `reconstruct` entries include an explicit Exact
+specialization; the finite modes additionally provide `assess_resolution`.
+There is no separate `VoF::Exact` reconstruction class or compatibility alias. Runtime state, packet and diagnostic records retain checked `Dynamic*`
 representations where an external boundary requires them. The shared runtime
 geometry handle exposes storage metadata only; numerical operations require a
 typed handle. Untyped geometry getters and reconstruction entries have been
