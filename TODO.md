@@ -1616,6 +1616,10 @@ the specified focused coverage, not production or application qualification.
       pressure/capillary/viscous operators, geometry-based timestep controls,
       attainable inner solves and original physical-residual acceptance under
       shared iteration/resource limits.
+- [x] Balance missing-direction normal momentum with physical wall-pressure
+      traction on qualified closed slabs. Check pressure offsets, cell momentum,
+      face flux and divergence in both finite modes, including empty MPI owners;
+      retain separate full hydrostatic and general-flow qualification gates.
 - [x] Verify focused reconstruction, donor budgets, microscopic/subnormal
       inventories, stale identity, rejection, rollback, regrid, policy and
       empty-owner contracts in serial and MPI.
@@ -1656,6 +1660,17 @@ the specified focused coverage, not production or application qualification.
       Preserve ordinary-volume signed support, complementary fits and phase-aware
       accuracy. No exact result for each positive intermediate piece is required;
       bounded aggregate accounting must retain all contributions without mass loss.
+- [ ] Preserve generated shared-edge/contact incidence through complementary cuts
+      and authenticated trial packets; qualify determinant permutation invariance,
+      defining-plane admission and recoverable optional PLIC trials together.
+- [ ] Replace full retained-donor and route scans with conservative spatial
+      candidates and donor indexing; reuse overlay buffers and measure local work
+      scaling without changing cumulative construction-budget semantics.
+- [ ] Prepare finite momentum routing and its operator once per three-component
+      update, retaining independent physical-residual and iteration gates.
+- [ ] Remove certification-only communication and closure preparation from
+      Ordinary projection; index pure-cell curvature support and qualify its work
+      with surface tension enabled.
 - [ ] Qualify the implemented structural partition evidence, bounded closure
       and lazy moment evaluation across full physical horizons. Finite face
       rates, inventory calculations and residuals use scaled/compensated FP with

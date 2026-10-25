@@ -698,6 +698,20 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   # Fixed-width finite arithmetic has independent capacity/empty-owner coverage.
   foreach(_finite_projection_procs IN ITEMS 2 4)
     simplefluid_add_mpi_test(
+    NAME GeneralVoFWallPressure_${_finite_projection_procs}procs
+    TARGET testGeneralVoFSolver
+    PROCS ${_finite_projection_procs}
+    ARGS "--gtest_filter=GeneralVoFSolverTest.SingleLayerNormalGravityHasWallPressureReactionAndZeroAcceptedMomentum:GeneralVoFSolverTest.SingleLayerInitialNormalMotionUsesPressureWithoutApplyingGravity"
+    LABELS "mpi;vof;finite;pressure;collective;empty_rank"
+    TIMEOUT 180)
+  simplefluid_add_mpi_test(
+    NAME GeneralVoFWallPressureWorkspace_${_finite_projection_procs}procs
+    TARGET testGeneralVoFFlowWorkspace
+    PROCS ${_finite_projection_procs}
+    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.OrdinaryMissingAxisWallPressureBalancesPhysicalMassAndInitialNormalMotion:GeneralVoFFlowWorkspaceTest.CertifiedMissingAxisWallPressureBalancesPhysicalMassAndInitialNormalMotion:GeneralVoFFlowWorkspaceTest.SingleLayerPressureReactionPreservesResolvedTangentialProjection:GeneralVoFFlowWorkspaceTest.SampledThreeDimensionalProjectionHasNoAffineWallLift:GeneralVoFFlowWorkspaceTest.UnsupportedUnsampledNormalMotionRejectsWithoutChangingCandidates"
+    LABELS "mpi;vof;finite;pressure;collective;empty_rank"
+    TIMEOUT 180)
+  simplefluid_add_mpi_test(
     NAME GeneralVoFFixedGeometry_${_finite_projection_procs}procs
     TARGET testGeneralVoFSolver
     PROCS ${_finite_projection_procs}

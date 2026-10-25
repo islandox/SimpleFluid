@@ -279,6 +279,45 @@ void GeneralVoFFlowWorkspace::prepare_gradient_geometry()
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, sampled.data(), global_sampled.data());
     for (unsigned a = 0; a < 3; ++a)
         absent_gradient_axis_[a] = global_low[a] == global_high[a] && !global_sampled[a];
+    // An unsampled coordinate direction can still carry a pressure gradient
+    // between its two impermeable caps. Qualify a straight closed prism: cap
+    // normals are axial, while all other face normals have zero axial component.
+    // This is a geometry support contract, not a tolerance-based normal snap.
+    std::array<int, 3> local_wall_axis{1, 1, 1}, global_wall_axis{};
+    bool wall_geometry_valid = true;
+    try
+    {
+        const auto lease = mesh_->acquire_execution_view();
+        for (std::size_t c = 0; c < volumes_.size(); ++c)
+            for (unsigned a = 0; a < 3; ++a)
+            {
+                if (!absent_gradient_axis_[a])
+                    continue;
+                bool lower = false, upper = false;
+                for (const auto fid : mesh_->faces(LO(c)))
+                {
+                    const auto& face = geometry_[fid];
+                    if (face.normal[a] == 0)
+                        continue;
+                    bool cap = face.boundary && face.owner == LO(c);
+                    for (unsigned b = 0; b < 3; ++b)
+                        if (b != a)
+                            cap = cap && face.normal[b] == 0;
+                    local_wall_axis[a] = local_wall_axis[a] && cap;
+                    lower = lower || (cap && face.normal[a] < 0);
+                    upper = upper || (cap && face.normal[a] > 0);
+                }
+                local_wall_axis[a] = local_wall_axis[a] && lower && upper;
+            }
+    }
+    catch (...)
+    {
+        wall_geometry_valid = false;
+    }
+    require(wall_geometry_valid, "General VoF wall-pressure geometry preparation failed.");
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 3, local_wall_axis.data(), global_wall_axis.data());
+    for (unsigned a = 0; a < 3; ++a)
+        wall_reaction_axis_[a] = absent_gradient_axis_[a] && global_wall_axis[a];
     for (auto& stencil : gradient_stencils_)
     {
         std::array<std::array<double, 7>, 3> m{};

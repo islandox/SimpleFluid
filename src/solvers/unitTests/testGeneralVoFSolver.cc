@@ -19,6 +19,47 @@ TEST(GeneralVoFSolverTest, ClosedTwoByTwoSingleLayerConstantCarrierAdvancesAndRe
     EXPECT_EQ(after.maximum_divergence, 0);
     EXPECT_EQ(solver.time(), .01);
 }
+TEST(GeneralVoFSolverTest, SingleLayerNormalGravityHasWallPressureReactionAndZeroAcceptedMomentum)
+{
+    auto material = inviscid();
+    material.gas_density = material.liquid_density = 1;
+    GeneralVoFSolverOptions options;
+    options.flow.gravity = {0, 0, 1};
+    GeneralVoFSolver solver(phases(0, false, true), material, options);
+    const auto before = solver.diagnostics();
+    EXPECT_EQ(before.maximum_velocity, 0);
+    const auto after = solver.step(.125);
+    EXPECT_DOUBLE_EQ(solver.time(), .125);
+    EXPECT_EQ(after.liquid_mass, before.liquid_mass);
+    for (const auto& velocity : solver.velocity())
+        for (const auto component : velocity)
+            EXPECT_NEAR(component, 0, 1e-12);
+    for (const auto velocity : solver.face_velocity())
+        EXPECT_NEAR(velocity, 0, 1e-12);
+    for (const auto momentum : after.momentum)
+        EXPECT_NEAR(momentum, 0, 1e-12);
+    EXPECT_LT(after.maximum_divergence, options.flow.divergence_tolerance);
+    EXPECT_NEAR(after.maximum_velocity, 0, 1e-12);
+}
+TEST(GeneralVoFSolverTest, SingleLayerInitialNormalMotionUsesPressureWithoutApplyingGravity)
+{
+    auto material = inviscid();
+    material.gas_density = material.liquid_density = 1;
+    GeneralVoFSolverOptions options;
+    options.flow.gravity = {0, 0, 17};
+    GeneralVoFSolver solver(phases(0, false, true), material, options);
+    EXPECT_EQ(solver.diagnostics().maximum_velocity, 0);
+    std::vector<VoF::Vector> initial(solver.mesh()->num_owned_cells(), {0, 0, .25});
+    solver.initialize(initial);
+    EXPECT_EQ(solver.time(), 0);
+    for (const auto& velocity : solver.velocity())
+        for (const auto component : velocity)
+            EXPECT_NEAR(component, 0, 1e-12);
+    for (const auto velocity : solver.face_velocity())
+        EXPECT_NEAR(velocity, 0, 1e-12);
+    for (const auto momentum : solver.diagnostics().momentum)
+        EXPECT_NEAR(momentum, 0, 1e-12);
+}
 TEST(GeneralVoFSolverTest, FiniteSolverKeepsSelectedGeometryThroughStepAndRegrid)
 {
     const auto source = phases(0, false, true);

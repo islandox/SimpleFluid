@@ -42,7 +42,11 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
     // authenticated sparse closure uses the other half. Backend allocations
     // remain outside this application-payload accounting, as in the exact API.
     const auto cells_count = mesh_->num_cells(), faces_count = mesh_->num_faces();
-    const auto payload_units = 256 * (static_cast<long double>(cells_count) + faces_count + n + nf + 1);
+    const bool missing_direction =
+        std::any_of(absent_gradient_axis_.begin(), absent_gradient_axis_.end(), [](bool absent) { return absent; });
+    const auto payload_units =
+        256 * (static_cast<long double>(cells_count) + faces_count + n + nf + 1) +
+        (provenance && missing_direction ? sizeof(long double) * static_cast<long double>(nf) : 0);
     valid = valid && budget > 0 && payload_units <= budget / 2;
     require(valid,
         "Finite General VoF projection has invalid inputs, unsupported FP environment or exhausted payload cap.");
@@ -245,6 +249,73 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
     const long double limit =
         std::min(static_cast<long double>(options.divergence_tolerance), A::lower(pressure_limit));
     require(std::isfinite(limit) && limit > 0, "Finite projection has invalid original physical threshold.");
+    std::vector<long double> wall_pressure_offset(provenance && missing_direction ? nf : 0);
+    long double wall_normal_residual = 0;
+    if (missing_direction)
+    {
+        arithmetic_guard(
+            [&]
+            {
+                const auto lease = mesh_->acquire_execution_view();
+                for (std::size_t c = 0; c < n; ++c)
+                {
+                    const auto volume = arithmetic_value(volumes_[c], 0);
+                    const auto mass = physical_mass ? arithmetic_value((*physical_mass)[c],
+                                                          physical_mass_error ? (*physical_mass_error)[c] : 0)
+                                                    : A::multiply(arithmetic_value(density[c], 0), volume);
+                    const auto physical_density = A::divide(mass, volume);
+                    for (unsigned a = 0; a < 3; ++a)
+                    {
+                        if (!absent_gradient_axis_[a])
+                            continue;
+                        if (!wall_reaction_axis_[a])
+                        {
+                            if (velocity[c][a] != 0)
+                                throw std::invalid_argument(
+                                    "Unsampled normal motion requires a supported closed-slab pressure mode.");
+                            continue;
+                        }
+                        // Cell centers cannot represent this affine pressure
+                        // variation. Its cap values still exert the physical
+                        // traction needed to enforce zero wall-normal velocity.
+                        // The predictor is the supplied candidate, not gravity:
+                        // a resting initialization has no artificial impulse.
+                        const auto gradient =
+                            A::divide(A::multiply(physical_density, arithmetic_value(velocity[c][a], 0)),
+                                arithmetic_value(dt, 0));
+                        for (const auto fid : mesh_->faces(LO(c)))
+                        {
+                            const auto& g = geometry_[fid];
+                            if (!g.boundary || g.normal[a] == 0)
+                                continue;
+                            const auto normal = arithmetic_value(g.normal[a], 0);
+                            const auto predictor = A::multiply(arithmetic_value(velocity[c][a], 0), normal);
+                            const auto normal_gradient = A::multiply(gradient, normal);
+                            const auto correction =
+                                A::multiply(A::divide(normal_gradient, physical_density), arithmetic_value(dt, 0));
+                            const auto mismatch =
+                                A::divide(A::subtract(predictor, correction), arithmetic_value(spans_[c][a], 0));
+                            wall_normal_residual = std::max(wall_normal_residual,
+                                std::abs(mismatch.value) + (bounded ? mismatch.absolute_error : 0));
+                            const auto offset = A::multiply(arithmetic_value(g.left, 0), normal_gradient);
+                            if (provenance)
+                            {
+                                if (fid < 0 || std::size_t(fid) >= nf)
+                                    throw std::invalid_argument("A wall pressure face is not owned with its cell.");
+                                wall_pressure_offset[fid] = offset.value;
+                            }
+                            const auto traction = A::negate(A::multiply(offset, arithmetic_value(g.area, 0)));
+                            for (unsigned b = 0; b < 3; ++b)
+                                add_force(c, b, A::multiply(traction, arithmetic_value(g.normal[b], 0)));
+                        }
+                    }
+                }
+            },
+            "Finite projection wall pressure requires supported slab geometry and finite physical data.");
+        wall_normal_residual = wide_maximum(wall_normal_residual);
+        require(std::isfinite(wall_normal_residual) && wall_normal_residual <= limit,
+            "Finite wall pressure failed its original physical normal-velocity threshold.");
+    }
     pressure.assign(n, 0);
     std::vector<long double> wide_pressure(n);
     diagnostics.pressure_iterations = 0;
@@ -428,6 +499,26 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
         valid = false;
     }
     require(valid, "Finite projection candidate cannot be represented without range loss.");
+    if (missing_direction)
+    {
+        arithmetic_guard(
+            [&]
+            {
+                for (std::size_t c = 0; c < n; ++c)
+                    for (unsigned a = 0; a < 3; ++a)
+                        if (absent_gradient_axis_[a])
+                        {
+                            const auto normal_speed = A::divide(arithmetic_value(velocity[c][a], velocity_error[c][a]),
+                                arithmetic_value(spans_[c][a], 0));
+                            wall_normal_residual = std::max(wall_normal_residual,
+                                std::abs(normal_speed.value) + (bounded ? normal_speed.absolute_error : 0));
+                        }
+            },
+            "Finite projected wall-normal velocity exceeds its arithmetic range.");
+        wall_normal_residual = wide_maximum(wall_normal_residual);
+        require(std::isfinite(wall_normal_residual) && wall_normal_residual <= limit,
+            "Finite projected cell momentum failed its original wall-normal threshold.");
+    }
     diagnostics.maximum_divergence = double(residual);
     diagnostics.pressure_residual = double(residual / dt);
     if (provenance)
@@ -437,6 +528,8 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
         provenance->face_radius = std::move(radius);
         provenance->cell_radius = std::move(cell_radius);
         provenance->velocity_error = std::move(velocity_error);
+        provenance->wall_pressure_offset = std::move(wall_pressure_offset);
+        provenance->maximum_wall_normal_residual = double(wall_normal_residual);
         provenance->closure_storage_bytes = closure_storage;
     }
 }

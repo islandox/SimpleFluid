@@ -878,6 +878,20 @@ face and incident-cell allowances, using compensated defects and verified forest
 parent/depth relations. Physical pressure/divergence targets and the shared
 iteration budget remain independent gates. An unresolved FP trial rejects.
 
+When cell centers do not sample a coordinate direction, the finite projector
+supports an affine pressure variation across a straight closed slab in that
+direction. Each cell must have opposing axial exterior caps; all other face
+normals must have zero component in that direction. The wall pressure gradient
+is `(physical_mass / volume) * predictor_velocity / dt`. Its cap pressures supply
+the balancing traction while the published boundary flux remains impermeable.
+Initialization uses the supplied predictor, without applying gravity. Cell-center
+pressure retains its sampled gauge value; the finite projection provenance also
+retains the wall-minus-cell pressure offsets. Both virtual wall-flux cancellation
+and accepted normal speed divided by cell span must meet the original physical
+projection threshold. Tangential and fully sampled pressure operators retain
+their existing contracts. Nonzero motion in an unqualified unsampled direction
+rejects collectively rather than relying on zero face divergence alone.
+
 The default transport, remap, momentum, projection and closure use unsuffixed
 entry points (`plan_transport`, `plan_remap`, `solve`, `project`) defined in their
 owning `.cc` files. Immutable topology and geometry preparation are shared with
