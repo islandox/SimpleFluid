@@ -29,6 +29,21 @@ the schema and target, authenticates overlap requests, transfers contributions,
 certifies recipient coverage and installs phase inventories and their evidence
 together. A source-pinned trial remains responsible for observation validation.
 
+## Solver transaction ownership
+
+`src/solvers/details/GeneralVoF/State.hh` declares accepted/candidate fields and
+arithmetic evidence. `SolverImpl.hh` declares the private coordinator and its
+mesh-bound resources; the public solver implementation forwards operations to it.
+Substantial definitions compile privately, while simple members remain in the
+header and the caller-dependent collective callback is defined in `.ipp`.
+
+Initialization and advancement prepare a detached state. Remap prepares a
+replacement resource owner and detached state. Both finite and Exact preparation
+complete their physical checks and final phase observation validation before
+returning. Only the coordinator installs the returned accepted snapshot; failed
+preparation leaves the original publication and clock unchanged. Destruction
+performs no collective work.
+
 ## Compilation and resource contracts
 
 Private `.hh` files declare interfaces and retain simple one-line members.

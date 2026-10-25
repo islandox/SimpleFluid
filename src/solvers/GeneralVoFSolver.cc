@@ -1,43 +1,11 @@
 /** @file GeneralVoFSolver.cc
- * @brief Transactional native phase/implicit-momentum/physical-flow composition.
+ * @brief Public general VoF solver forwarding and statistics entry points.
  */
 #include "solvers/GeneralVoFSolver.hh"
-#include "FVM/ExactFaceTransfer.hh"
-#include "FVM/ExactPhaseTransfer.hh"
-#include "FVM/details/FiniteGeometryAccess.hh"
-#include "geometry/PLIC/PlanarFace.hh"
-#include "geometry/PLIC/PlanarGeometry.hh"
-#include "geometry/PLIC/details/PhaseArithmetic.hh"
-#include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
-#include "parallel/SparseOwnerExchange.hh"
-#include "solvers/details/ConservativeVoFExactArithmetic.hh"
-#include "solvers/details/ConservativeVoFTransport.hh"
-#include "solvers/details/GeneralVoFCurvature.hh"
-#include "solvers/details/GeneralVoFExactStorage.hh"
-#include "solvers/details/GeneralVoFFlowWorkspace.hh"
-#include "solvers/details/GeneralVoFPhiClosure.hh"
-#include "utils/CompensatedSum.hh"
-#include <Teuchos_CommHelpers.hpp>
-#include <algorithm>
-#include <array>
-#include <bit>
-#include <cmath>
-#include <cstring>
-#include <exception>
-#include <limits>
-#include <map>
-#include <set>
+#include "geometry/PLIC/GeometryInstrumentation.hh"
+#include "solvers/details/GeneralVoF/SolverImpl.hh"
 #include <stdexcept>
-#include <tuple>
-#include <type_traits>
 #include <utility>
-
-// Compiled providers depend on the declarations above and each preceding provider.
-// clang-format off
-#include "solvers/details/GeneralVoFSolverSupport.tcc"
-#include "solvers/details/GeneralVoFExactSolver.tcc"
-#include "solvers/details/GeneralVoFSolverFinite.tcc"
-// clang-format on
 
 namespace SimpleFluid
 {
@@ -132,4 +100,4 @@ Meshes::GeometryStatisticsSnapshot GeneralVoFSolver::geometry_statistics()
         PLIC::geometry_statistics_domain(), SimpleFluid::PLIC::backend_statistics<SimpleFluid::ArithmeticMode::Exact>(),
         PLIC::geometry_statistics()};
 }
-}
+} // namespace SimpleFluid

@@ -1,6 +1,6 @@
-/** @file GeneralVoFExactSolver.tcc
+/** @file Operations.tcc
  * @brief Optional rational backend in the Exact namespace.
- * Included only by GeneralVoFSolver.cc after its shared support provider.
+ * Included only by SolverImpl.cc after its shared support provider.
  */
 namespace SimpleFluid::Exact
 {
@@ -101,7 +101,7 @@ template<class Context> struct GeneralVoFSolver
             "General VoF global accepted budget is nonfinite.");
     }
 
-    VoFStepDiagnostics step(double dt)
+    std::shared_ptr<State> prepare_step(double dt)
     {
         self.require(std::isfinite(dt) && dt > 0, "General VoF timestep must be positive and finite.");
         double minimum = 0, maximum_dt = 0;
@@ -253,13 +253,12 @@ template<class Context> struct GeneralVoFSolver
             "General VoF timestep did not advance its finite clock.");
         budget(*next);
         // The authority verifies source identity again only after every flow
-        // gate passes. Publishing this one immutable snapshot is the commit.
+        // gate passes. The coordinator publishes the returned immutable snapshot.
         next->phases = old.phases->apply(trial);
-        self.accepted = std::move(next);
-        return self.accepted->diagnostics;
+        return next;
     }
 
-    std::unique_ptr<Impl> remap(bool migration, std::span<const int> destinations,
+    typename Impl::PreparedRemap prepare_remap(bool migration, std::span<const int> destinations,
         std::span<const Meshes::AMR::AdaptiveMark> refine, std::span<const Meshes::AMR::AdaptiveBytes> coarsen) const
     {
         using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
@@ -509,8 +508,7 @@ template<class Context> struct GeneralVoFSolver
                 "General VoF fixed-clock remap changed physical phase-mass-weighted momentum.");
         }
         transferred_faces.validate_observations(*old.phases, *candidate_phase);
-        candidate->accepted = std::move(state);
-        return candidate;
+        return {std::move(candidate), std::move(state)};
     }
 
     double stable_timestep(const State& state, double bound, double speed, double global_thickness) const

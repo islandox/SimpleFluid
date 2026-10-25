@@ -61,8 +61,7 @@ endforeach()
 foreach(source IN ITEMS
     FVM/GeneralVoF.cc FVM/GeneralVoF.hh FVM/details/GeneralVoFState.cc
     FVM/details/FiniteVoFTransport.cc FVM/details/FiniteVoFTransport.tcc
-    solvers/GeneralVoFSolver.cc solvers/details/GeneralVoFSolverSupport.tcc
-    solvers/details/GeneralVoFSolverFinite.tcc solvers/details/GeneralVoFExactSolver.tcc)
+    solvers/GeneralVoFSolver.cc)
     simplefluid_check_plic_include_order("${SIMPLEFLUID_SOURCE_DIR}/src/${source}")
 endforeach()
 foreach(component IN ITEMS FVM solvers)
