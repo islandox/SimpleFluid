@@ -12,6 +12,7 @@
 #pragma once
 
 #include "equations/ReactingGasModel.hh"
+#include "equations/BubblePopulationKinetics.hh"
 
 #include "FVM/CellOperators.hh"
 #include "FVM/TransportSystem.hh"
@@ -2384,8 +2385,6 @@ auto ReactingGasModel<Pack, MeshType>::integrate_cell_kinetics(
     auto& state = result.state;
     state = initial;
     const auto substep = substeps.duration;
-    const auto produced = production_rate * substep;
-    const auto produced_number = produced / properties.nucleation_moles;
     const auto conversion_pressure_factor =
         d_options.micro_to_large_conversion_coefficient * properties.pressure;
 
@@ -2447,47 +2446,35 @@ auto ReactingGasModel<Pack, MeshType>::integrate_cell_kinetics(
     }
 
     result.subcycles = substeps.count;
+    const BubbleGasPhysics::MicrobubbleSubstep micro_step{
+        .duration = substep,
+        .bulk_production_rate = production_rate,
+        .liquid_fraction = liquid_fraction,
+        .nucleation_moles = properties.nucleation_moles,
+        .critical_concentration = critical_concentration,
+        .micro_decay_fraction = substeps.micro_decay_fraction,
+        .micro_retention = substeps.micro_retention,
+        .conversion_pressure_factor = conversion_pressure_factor,
+        .heaviside_mode = d_options.heaviside_mode,
+        .smooth_heaviside_width = d_options.smooth_heaviside_width};
     for (int cycle = 0; cycle < substeps.count; ++cycle)
     {
-        state.micro_moles += produced;
-        state.micro_number += produced_number;
-
-        const auto micro_decay_moles =
-            state.micro_moles * substeps.micro_decay_fraction;
-        state.micro_moles -= micro_decay_moles;
-        state.micro_number *= substeps.micro_retention;
-        state.dissolved_inventory += micro_decay_moles;
-        dissolved_moles += micro_decay_moles;
-
-        // Concentration, conversion and bubble properties depend on the
-        // evolving populations and must be recomputed in every subcycle.
-        const auto dissolved_concentration =
-            concentration(state, liquid_fraction);
-        const auto supersaturation =
-            dissolved_concentration / critical_concentration - 1.0;
-        const auto activation =
-            BubbleGasPhysics::smoothed_heaviside(
-                supersaturation,
-                d_options.heaviside_mode,
-                d_options.smooth_heaviside_width);
-        const auto conversion_frequency =
-            conversion_pressure_factor
-          * std::max(supersaturation, scalar_type{})
-          * activation;
-        const auto conversion_fraction =
-            1.0 - std::exp(-conversion_frequency * substep);
-        const auto number_to_large =
-            state.micro_number * conversion_fraction;
-        const auto moles_to_large =
-            std::min(
-                state.micro_moles,
-                properties.nucleation_moles * number_to_large);
-        state.micro_number -= number_to_large;
-        state.micro_moles -= moles_to_large;
+        const auto micro = BubbleGasPhysics::advance_microbubble_substep(
+            {state.dissolved_inventory, state.micro_number, state.micro_moles}, micro_step);
+        state.dissolved_inventory = micro.state.dissolved_inventory;
+        state.micro_number = micro.state.number_density;
+        state.micro_moles = micro.state.molar_inventory;
+        dissolved_moles += micro.dissolved_moles;
+        const auto number_to_large = micro.converted.number_density;
+        const auto moles_to_large = micro.converted.molar_inventory;
         state.large_number += number_to_large;
         state.large_moles += moles_to_large;
         converted_number += number_to_large;
         converted_moles += moles_to_large;
+
+        // The upper population still sees the same post-micro concentration
+        // in every legacy subcycle. Its existing transfer/lifetime law follows.
+        const auto dissolved_concentration = concentration(state, liquid_fraction);
 
         if (state.large_number <= d_options.min_population
             || state.large_moles <= 0.0)
