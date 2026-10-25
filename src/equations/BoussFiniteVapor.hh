@@ -176,8 +176,9 @@ SIMPLEFLUID_EQUATIONS_EXPORT void validate_bouss_sources(
     const SpeciesCatalog&, const BoussReferenceVolume&, const CellSpeciesState&);
 /** Actual source executes first and rejects overcapacity without rescaling. Gas
  * requests then reserve remaining finite stocks jointly/capacity in request order; vapor uses
- * the remainder and the available sensible superheat/subcooling. Each stage is
- * atomic. Admission rounds toward zero to a representable admissible extent;
+ * the remainder and the available sensible superheat/subcooling. Accepted source
+ * heating reduces condensation's available subcooling without changing its request.
+ * Each stage is atomic. Admission rounds toward zero to a representable admissible extent;
  * resulting endpoint/receipt representability is still checked, never clipped.
  */
 /** Same explicit finite-count/capacity rules for subsequent paired micro/large

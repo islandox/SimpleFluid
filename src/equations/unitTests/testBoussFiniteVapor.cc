@@ -129,6 +129,72 @@ TEST(BoussFiniteVaporTest, CondensationConsumesActualVaporAndReleasesItsAdmitted
     EXPECT_EQ(accepted.transfers[0].donor, P::Resolved);
     EXPECT_EQ(accepted.transfers[0].receiver, P::Liquid);
 }
+TEST(BoussFiniteVaporTest, CondensationUsesSubcoolingLeftByActualAndAdmittedSourceHeating)
+{
+    // C=100 J/K and initial subcooling=1000 J. Test independent heat,
+    // actual reaction heat, and capacity-admitted reaction heat separately.
+    for (const double heating : {980.0, 1000.0, 1020.0})
+        for (unsigned channel = 0; channel < 3; ++channel)
+        {
+            SCOPED_TRACE(::testing::Message() << "heating=" << heating << " channel=" << channel);
+            Fixture f;
+            f.environment.temperature = 363;
+            f.environment.bulkVolume = 10;
+            f.initial.set_amount(*f.catalog, solvent, P::Resolved, 5);
+            auto definitions = f.mechanism.reactions();
+            definitions[0].heatPerExtent = heating;
+            const R::ReactionMechanism mechanism(f.catalog, definitions, R::EnergyConvention::SensibleEnergy);
+            R::ReactionSourceInput actual;
+            if (channel == 0)
+                actual.heat.integratedEnergy = heating;
+            else if (channel == 1)
+                actual.integratedExtents = {{gasReaction, 1}};
+            else
+                f.sources.gas = R::BoussGasAdmissionLaw{"heated_admitted_request", 1, f.catalog->fingerprint(),
+                    [](const R::ReactionContext&, double)
+                    { return std::vector<R::IntegratedReactionExtent>{{gasReaction, 1}}; }};
+            const auto accepted = R::advance_bouss_sources(
+                mechanism, f.volumes, f.sources, f.initial, {}, f.environment, 1, .9, actual);
+            const double condensed = heating < 1000 ? 2 : 0;
+            EXPECT_DOUBLE_EQ(accepted.vapor.requestedCondensation, 100);
+            EXPECT_DOUBLE_EQ(accepted.vapor.condensation, condensed);
+            EXPECT_DOUBLE_EQ(accepted.vapor.evaporation, 0);
+            EXPECT_DOUBLE_EQ(accepted.state.amount(*f.catalog, solvent, P::Resolved), 5 - condensed);
+            EXPECT_DOUBLE_EQ(accepted.state.amount(*f.catalog, solvent, P::Liquid), 2 + condensed);
+            EXPECT_EQ(accepted.vapor.latentEnergy, 10 * condensed);
+            EXPECT_EQ(accepted.thermalEnergy, heating + 10 * condensed);
+            const double endpoint = 363 + static_cast<double>(accepted.thermalEnergy) / 100;
+            EXPECT_DOUBLE_EQ(endpoint, heating <= 1000 ? 373 : 373.2);
+            if (channel == 2)
+            {
+                ASSERT_EQ(accepted.admissions.size(), 1);
+                EXPECT_DOUBLE_EQ(accepted.admissions[0].admittedMoles, 1);
+            }
+        }
+}
+TEST(BoussFiniteVaporTest, CondensationSubcoolingRetainsSmallRemainderAfterCancelingSourceHeats)
+{
+    Fixture f;
+    f.environment.temperature = 363;
+    f.environment.bulkVolume = 10;
+    f.initial.set_amount(*f.catalog, solvent, P::Resolved, 5);
+    auto definitions = f.mechanism.reactions();
+    definitions[0].heatPerExtent = -1e20;
+    const R::ReactionMechanism mechanism(f.catalog, definitions, R::EnergyConvention::SensibleEnergy);
+    R::ReactionSourceInput actual;
+    actual.heat.integratedEnergy = 1e20;
+    actual.integratedExtents = {{gasReaction, 1}};
+    // Transfer energy is an independent accepted source channel, not inferred
+    // from carried enthalpy; the net heating is exactly 990 J.
+    actual.externalTransfers = {{"declared_energy_feed", donor, P::Liquid, 0, 0, 990}};
+    const auto accepted = R::advance_bouss_sources(
+        mechanism, f.volumes, f.sources, f.initial, {}, f.environment, 1, .9, actual);
+    EXPECT_DOUBLE_EQ(accepted.vapor.requestedCondensation, 100);
+    EXPECT_DOUBLE_EQ(accepted.vapor.condensation, 1);
+    EXPECT_EQ(accepted.vapor.latentEnergy, 10);
+    EXPECT_EQ(accepted.thermalEnergy, 1000);
+    EXPECT_DOUBLE_EQ(accepted.state.amount(*f.catalog, solvent, P::Resolved), 4);
+}
 TEST(BoussFiniteVaporTest, IndependentHeatIsNotConvertedToChemistryOrDoubleDebited)
 {
     Fixture f;

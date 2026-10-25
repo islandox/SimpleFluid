@@ -76,7 +76,7 @@ struct Fixture
         R::BoussReferenceVolume{"manufactured.fixed_rho_cp", 1, catalog->fingerprint(), 2, 2, 5, {.2, 1, 0, .1}});
     Fixture(double temperature = 383, double alpha = .19, double maximum = .2, double dt = 1, double solventDensity = 2,
         double initialVapor = 0, bool mixedMicro = false, double wallFlux = 0, double conductivity = 0,
-        BoundaryConditionType wallType = BoundaryConditionType::Neumann)
+        BoundaryConditionType wallType = BoundaryConditionType::Neumann, double sourceHeating = 0)
     {
         Grid::DistributionOptions distribution;
         distribution.allow_empty_partitions = true;
@@ -122,6 +122,13 @@ struct Fixture
         options.bouss_reference = reference;
         options.bouss_sources = initialSources;
         options.reference_pressure = 100000;
+        if (sourceHeating != 0)
+            options.species_source = [sourceHeating](const R::ReactionContext& context, double dt)
+            {
+                R::ReactionSourceInput input;
+                input.heat.integratedEnergy = sourceHeating * context.environment.bulkVolume * dt;
+                return input;
+            };
         options.population_ids = {"micro", "large", "vapor_bin"};
         options.min_radius = 1e-10;
         options.max_radius = 10;
@@ -415,6 +422,31 @@ TEST(BoussFiniteVaporCouplingTest, FiniteCondensationReturnsActualSolventAndOnly
     EXPECT_NEAR(integral(f.scalar->alpha_g()), .19, 1e-13);
     for (std::size_t c = 0; c < f.grid->num_owned_cells(); ++c)
         EXPECT_NEAR(f.solver->temperature().value(static_cast<LO>(c)), 363.005, 1e-10);
+}
+TEST(BoussFiniteVaporCouplingTest, AcceptedSourceHeatingBoundsCondensationWithoutLosingItsRequest)
+{
+    for (const double heating : {80.0, 100.0, 120.0})
+    {
+        SCOPED_TRACE(heating);
+        Fixture f(363, 0, .9, 1, 2, .5, false, 0, 0, BoundaryConditionType::Neumann, heating);
+        f.vapor(100);
+        f.coupling->step();
+        const double condensed = heating < 100 ? .2 : 0;
+        EXPECT_NEAR(integral(f.model->species_field(solvent, P::Resolved)), .5 - condensed, 1e-13);
+        EXPECT_NEAR(integral(f.model->species_field(solvent, P::Liquid)), 2 + condensed, 1e-13);
+        EXPECT_NEAR(integral(f.model->thermal_source()), heating + 100 * condensed, 1e-11);
+        EXPECT_NEAR(integral(f.scalar->alpha_g()), .5 - condensed, 1e-13);
+        for (std::size_t c = 0; c < f.grid->num_owned_cells(); ++c)
+        {
+            const auto cell = static_cast<LO>(c);
+            const auto volume = f.grid->cell_volume(cell);
+            const auto& receipt = f.model->bouss_receipts()[c];
+            EXPECT_NEAR(receipt.vapor.requestedCondensation, volume, 1e-13);
+            EXPECT_NEAR(receipt.vapor.condensation, condensed * volume, 1e-13);
+            EXPECT_NEAR(receipt.vapor.latentEnergy, 100 * condensed * volume, 1e-11);
+            EXPECT_NEAR(f.solver->temperature().value(cell), heating <= 100 ? 373 : 375, 1e-10);
+        }
+    }
 }
 TEST(BoussFiniteVaporCouplingTest, RejectsVariableCpAndIndependentLegacyBoilingBeforeAdvancement)
 {

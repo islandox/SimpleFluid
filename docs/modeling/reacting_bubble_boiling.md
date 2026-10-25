@@ -54,8 +54,12 @@ its vapor compartment/population, saturation temperature, latent heat and time
 scale. It may also declare a signed scalar-storage sensible correction.
 Evaporation transfers the same material amount from Liquid to vapor and
 condensation reverses it. Available superheat/subcooling and finite stocks
-bound the admitted event. A scalar cap cannot delete material or supply a
-missing donor.
+bound the admitted event. Condensation retains the constitutive request based
+on initial subcooling, but admission subtracts heat already accepted from
+reaction and external source channels. Partial heating reduces its energy
+budget; heating that exhausts subcooling admits no condensation. Only the
+admitted material transfer releases latent heat. A scalar cap cannot delete
+material or supply a missing donor.
 
 The net evaporation cooling is
 `dm*(latentHeat-sensibleCorrection)` and must be positive. The accepted latent

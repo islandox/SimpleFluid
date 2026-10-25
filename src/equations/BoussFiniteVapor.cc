@@ -722,9 +722,17 @@ BoussSourceAdvance advance_bouss_sources(const ReactionMechanism& mechanism, con
         {
             const long double requested = sensible * duration / vapor.timeScale / latentPerMole;
             require(std::isfinite(requested), "Bouss condensation request overflows.");
+            // Accepted source heating already spends the initial subcooling.
+            // Preserve raw channels so a small remaining budget survives large
+            // canceling heats. Cooling cannot enlarge the constitutive request.
+            Sum subcooling;
+            subcooling += sensible;
+            for (const auto event : result.thermalContributions)
+                subcooling += -event;
+            const auto available = std::clamp(subcooling.value(), 0.0L, sensible);
             const long double limit = std::min({requested, vaporDonor.value(),
                 static_cast<long double>(state.amount(catalog, vapor.solvent, vapor.vaporPhase, vapor.population)),
-                sensible / coolingPerMole});
+                available / coolingPerMole});
             result.vapor.requestedCondensation = narrow(requested);
             result.vapor.condensation = admitted(limit);
             transfer(false, result.vapor.condensation);
