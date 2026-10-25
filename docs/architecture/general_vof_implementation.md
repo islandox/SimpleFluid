@@ -32,17 +32,30 @@ together. A source-pinned trial remains responsible for observation validation.
 ## Solver transaction ownership
 
 `src/solvers/details/GeneralVoF/State.hh` declares accepted/candidate fields and
-arithmetic evidence. `SolverImpl.hh` declares the private coordinator and its
-mesh-bound resources; the public solver implementation forwards operations to it.
-Substantial definitions compile privately, while simple members remain in the
-header and the caller-dependent collective callback is defined in `.ipp`.
+arithmetic evidence. `SolverImpl.hh` declares the private coordinator, which
+owns a `Resources` instance and the accepted state. `Resources` owns the native
+mesh, immutable operation controls, geometry metrics, projection workspace and
+momentum workspace. It has no accepted-state pointer. The public solver
+implementation forwards operations to the coordinator. Substantial definitions
+compile privately, while simple members remain in headers and the
+caller-dependent `Execution` collective callback is defined in `.ipp`.
 
 Initialization and advancement prepare a detached state. Remap prepares a
 replacement resource owner and detached state. Both finite and Exact preparation
 complete their physical checks and final phase observation validation before
 returning. Only the coordinator installs the returned accepted snapshot; failed
-preparation leaves the original publication and clock unchanged. Destruction
-performs no collective work.
+preparation leaves the original publication and clock unchanged. Final remap
+publication swaps the prepared resources and state without allocation or
+additional numerical work. Old resources remain alive through those swaps.
+Destruction performs no collective work.
+
+`Initialization<Mode>`, `Advance<Mode>` and `Remap<Mode>` compose the narrow
+components below. The coordinator selects a mode once per operation; selected
+numerical loops call compiled typed implementations directly. Initialization
+shares its operation sequence across all three modes. Advance and remap have
+separate Exact specializations under `exact/`; finite remap and Exact transfer
+retain their different protocols. The old unrestricted Exact context adapter
+and aggregate implementation fragments are removed.
 
 ## Solver numerical components
 
@@ -65,6 +78,9 @@ face fields, projection evidence and divergence. Phase storage returns separate
 finite mass/error or rational mass results. Exact storage and diagnostics use
 explicit specializations compiled in `exact/`; their shared rational reduction
 retains the existing codec and storage admission checks.
+
+The architecture check rejects component includes of the coordinator and
+rejects whole-state/resource dependencies in the narrow numerical components.
 
 Curvature assembly delegates patch fitting to the existing curvature kernel.
 Projection and implicit momentum remain owned by the existing flow workspace

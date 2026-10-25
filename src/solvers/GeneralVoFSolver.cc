@@ -30,16 +30,16 @@ VoFStepDiagnostics GeneralVoFSolver::step(double dt)
 }
 double GeneralVoFSolver::stable_timestep() const
 {
-    return impl_->stable_timestep(*impl_->accepted, impl_->node_velocity(*impl_->accepted));
+    return impl_->stable_timestep();
 }
 void GeneralVoFSolver::regrid(
     std::span<const Meshes::AMR::AdaptiveMark> refine, std::span<const Meshes::AMR::AdaptiveBytes> coarsen)
 {
-    impl_ = impl_->remap(false, {}, refine, coarsen);
+    impl_->remap(false, {}, refine, coarsen);
 }
 void GeneralVoFSolver::repartition(std::span<const int> destinations)
 {
-    impl_ = impl_->remap(true, destinations, {}, {});
+    impl_->remap(true, destinations, {}, {});
 }
 double GeneralVoFSolver::time() const noexcept
 {
@@ -51,7 +51,7 @@ const std::shared_ptr<const VoF::GeneralVoF>& GeneralVoFSolver::phases() const n
 }
 const std::shared_ptr<const MeshHandle<>>& GeneralVoFSolver::mesh() const noexcept
 {
-    return impl_->mesh;
+    return impl_->resources->mesh;
 }
 const std::vector<double>& GeneralVoFSolver::gas_fraction() const noexcept
 {

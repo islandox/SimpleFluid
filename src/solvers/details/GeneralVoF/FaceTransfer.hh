@@ -31,7 +31,7 @@ struct FaceTransferControls
     std::size_t byte_budget;
     double divergence_tolerance;
 };
-/** Detached output. Only the solver coordinator may install it in a candidate. */
+/** Detached output with no authority to publish accepted solver state. */
 struct FaceTransferResult
 {
     std::vector<double> face_velocity;
