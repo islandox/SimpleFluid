@@ -1323,7 +1323,8 @@ endforeach()
 # The preexisting substrate excludes the 142 definitions maintained on the
 # separate VoF branch. Exact API anchors and private-family guards above remain
 # authoritative; the ceiling never depends on the inspected library.
-set(simplefluid_pre_retirement_api_symbol_lower_bound 1250)
+set(simplefluid_pre_retirement_api_symbol_lower_bound 1308)
+# Feature floor 1450 excludes its 142 opt-in entries before native retirement.
 set(simplefluid_final_species_cleanup_symbol_delta -35)
 set(simplefluid_preexisting_api_symbol_upper_bound 1408)
 # The feature adds 142 reviewed solver/controller/caloric definitions when enabled.
