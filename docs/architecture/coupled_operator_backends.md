@@ -25,6 +25,16 @@ row receives `1e-10 * max(1,max(abs(accumulated row entries)))` on its diagonal.
 There is no per-component dropping in this checkout. Products use Tpetra's
 distributed multiplication, including remote rows beyond a field's one-hop halo.
 
+The pressure inverse uses a global MueLu hierarchy with one symmetric
+Gauss-Seidel sweep for level smoothing and four symmetric Gauss-Seidel sweeps
+for coarse relaxation. Extended Schur stencils can have pressure modes amplified
+by undamped Jacobi. Ifpack2 performs each SGS sweep within an MPI rank, with
+Jacobi coupling between ranks; it is not a global SGS traversal. The Schur block
+may be nonsymmetric, so the forward/backward sweep does not establish an SPD
+contract. Momentum retains its single undamped Jacobi sweep. The assembled
+equations, residual scaling, forcing tolerances, and physical continuity and
+acceptance gates retain their contracts.
+
 The block preconditioner shares momentum/G/Schur handles, owns Ifpack2 one-sweep Jacobi
 and MueLu state, and retains pressure, velocity, gradient and packed-result
 scratch. Belos owns its problem/Krylov state and can retain the previous

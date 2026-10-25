@@ -220,12 +220,14 @@ each nonlinear velocity-pressure solve. Their ordinary updates run once after
 the accepted flow solve. It is not a monolithic nonlinear solve of all transported
 fields. See the [nonlinear solver contract](../../../docs/architecture/coupled_nonlinear_solver.md).
 
-The active 1008-cell scale-1 reference is unqualified for a two-step NOX startup.
-With prescribed sources and forcing controls unchanged, GMRES corrections reject
-the first step and BiCGStab corrections reject the second at the strict explicit
-residual-forcing gate. Smaller registered NOX/SAS/rollback tests do not establish
-convergence for this application. The invocation below selects the supported
-interface; it is not a passing qualification recipe.
+The 1008-cell scale-1 reference has a bounded serial NOX qualification through
+two physical steps (0.04 s), using native block-composite/cached-product assembly,
+analytic Newton with either GMRES or BiCGStab corrections, and pressure Schur
+AMG/SGS. Prescribed sources, timestep, forcing controls, and every residual and
+physical gate were retained. Developed-flow, longer-run, and MPI application
+qualification remain open. The invocation below illustrates the interface;
+the bounded startup qualification uses `mesh_scale1.dat` and
+`reference_scale1.properties`.
 
 ```sh
 bottom_heated_bubbly_convection --coupling nox \

@@ -710,13 +710,15 @@ public:
         pressure_parameters.set("verbosity", "none");
         pressure_parameters.set("coarse: max size", 64);
         pressure_parameters.set("smoother: type", "RELAXATION");
-        pressure_parameters.sublist("smoother: params").set("relaxation: type", "Jacobi");
+        // Extended Schur stencils contain positive second-neighbor terms whose modes
+        // undamped Jacobi can amplify; use forward/backward pressure relaxation.
+        pressure_parameters.sublist("smoother: params").set("relaxation: type", "Symmetric Gauss-Seidel");
         pressure_parameters.set("coarse: type", "RELAXATION");
         // Keep the transfer operators, but rebuild coarse coefficients and
         // smoother diagonals when the Schur values change. MueLu's "full"
         // mode retains both and would apply stale numeric preconditioning.
         pressure_parameters.set("reuse: type", "RP");
-        pressure_parameters.sublist("coarse: params").set("relaxation: type", "Jacobi");
+        pressure_parameters.sublist("coarse: params").set("relaxation: type", "Symmetric Gauss-Seidel");
         pressure_parameters.sublist("coarse: params").set("relaxation: sweeps", 4);
         Teuchos::RCP<operator_type> pressure_operator = d_schur;
         d_pressure_preconditioner = MueLu::CreateTpetraPreconditioner(pressure_operator, pressure_parameters);

@@ -150,6 +150,14 @@ simplefluid_add_mpi_test(
     TIMEOUT 60)
 
 simplefluid_add_mpi_test(
+    NAME CoupledPressureSmoothing_2procs
+    TARGET testCoupledPressureVelocitySolver
+    PROCS 2
+    ARGS "--gtest_filter=CoupledPressureVelocitySolverTest.PressureMultigridContractsCheckerboardModeAndRefreshesNumerics"
+    LABELS "mpi;pressure_velocity;preconditioner;accuracy;reuse"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
     NAME BelosAccurateResidual_2procs
     TARGET testBelosLinearSolver
     PROCS 2

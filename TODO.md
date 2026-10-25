@@ -853,11 +853,11 @@ only their documented configurations; skipped or omitted tests are not passes.
 - [x] Audit public exports and disabled-family boundaries with exact API anchors.
 - [ ] Qualify broader material, toolchain, solver and mesh combinations and hosted
       coverage without treating local focused tests as a full-suite/CI result.
-- [ ] Resolve the strict correction-forcing rejection and qualify the active
-      1008-cell scale-1 bottom-convection two-step NOX startup. GMRES fails the
-      first step and BiCGStab the second with unchanged prescribed sources and
-      forcing controls; retain every residual and physical gate. Smaller
-      registered NOX cases do not qualify this application.
+- [x] Qualify the 1008-cell scale-1 bottom-convection NOX startup through two
+      serial physical steps with GMRES and BiCGStab corrections and pressure
+      Schur AMG/SGS, retaining the prescribed sources, timestep, forcing controls,
+      and every residual and physical gate. This bounded startup qualification
+      does not establish developed-flow, longer-run, or MPI application behavior.
 - [ ] Complete independent physical validation and convergence campaigns.
 
 ---
