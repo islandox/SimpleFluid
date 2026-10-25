@@ -264,6 +264,9 @@ template<class Power> ReactingGasOptions options(const Parameters& p, const Powe
                     packet.transfers.push_back({species, Phase::Dispersed, Phase::Dispersed, "micro", "large",
                         static_cast<double>(original * conversion)});
                 const long double added = static_cast<long double>(source) * fraction;
+                M::require(
+                    source == 0 || fraction > 0, "Positive continuous gas retention underflows local arithmetic.");
+                M::require(source == 0 || added > 0, "Positive supplied gas birth underflows local arithmetic.");
                 if (small_loss)
                 {
                     // Retain the independently small positive continuous-source decay channel.

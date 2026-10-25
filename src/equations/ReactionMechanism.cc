@@ -103,6 +103,21 @@ double checked(long double value)
     return result;
 }
 
+long double product(long double left, long double right)
+{
+    const auto value = left * right;
+    require(std::isfinite(value) && (left == 0 || right == 0 || value != 0),
+        "Reaction product overflows/underflows local arithmetic.");
+    return value;
+}
+
+void add_product(Sum& sum, long double left, long double right)
+{
+    const auto value = product(left, right);
+    sum += value;
+    sum += std::fma(left, right, -value);
+}
+
 void balanced(long double residual, long double scale, const char* message)
 {
     constexpr long double tolerance = 1e-12L;
@@ -203,7 +218,7 @@ Event reaction_event(const ReactionMechanism& mechanism, const CellSpeciesState&
         for (const auto& term : mechanism.reactions()[r].changes)
         {
             const auto i = slot(mechanism.catalog(), topology, term.species, term.phase, term.population);
-            const long double delta = static_cast<long double>(term.coefficient) * extents[r];
+            const long double delta = product(term.coefficient, extents[r]);
             checked(delta);
             if (delta != 0.0L)
                 result.terms.push_back({i, delta});
@@ -570,8 +585,10 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
     if (input.heat.rate)
     {
         require(std::isfinite(input.heat.rate->value), "External heat rate must be finite.");
-        externalHeat +=
-            static_cast<long double>(input.heat.rate->value) * volume(environment, input.heat.rate->basis) * duration;
+        Sum power;
+        add_product(power, input.heat.rate->value, volume(environment, input.heat.rate->basis));
+        for (const auto part : power.parts())
+            add_product(externalHeat, part, duration);
     }
     if (input.heat.integratedEnergy)
     {
@@ -694,7 +711,7 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
                 local.chemicalChanges.push_back(
                     {mechanism.catalog().species()[s].id, SpeciesPhase::Dispersed, population.id, value});
         }
-    local.externalHeat = externalHeat.value();
+    local.externalHeat = externalHeat.parts();
     local.reactionHeatContributions.reserve(extentSums.size());
 
     ledger.chemicalChange = store(zeros(initial), chemicalValues);
@@ -705,9 +722,12 @@ ReactionAdvance advance_reactions(const ReactionMechanism& mechanism, const Cell
         ledger.reactionExtents.push_back(checked(extentSums[r].value()));
         ledger.forwardReactionExtents.push_back(checked(forwardExtents[r].value()));
         ledger.reverseReactionExtents.push_back(checked(reverseExtents[r].value()));
-        const auto contribution = extentSums[r].value() * mechanism.reactions()[r].heatPerExtent;
-        local.reactionHeatContributions.push_back(contribution);
-        reactionHeat += contribution;
+        Sum contribution;
+        for (const auto part : extentSums[r].parts())
+            add_product(contribution, part, mechanism.reactions()[r].heatPerExtent);
+        local.reactionHeatContributions.push_back(contribution.parts());
+        for (const auto part : contribution.parts())
+            reactionHeat += part;
     }
     ledger.externalTransfers = input.externalTransfers;
     ledger.externalHeat = checked(externalHeat.value());

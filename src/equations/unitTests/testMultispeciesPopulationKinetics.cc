@@ -31,6 +31,7 @@ TEST(MultispeciesPopulationKineticsTest, FullMixedGasDissolutionAndRebirthPreser
     B::MultispeciesPopulationPacket dissolution;
     dissolution.transfers = {
         {17, P::Dispersed, P::Dissolved, "micro", {}, 1.}, {91, P::Dispersed, P::Dissolved, "micro", {}, 3.}};
+    dissolution.numberEvents = {{"micro", 0., 100.}};
     const auto dissolved = B::advance_multispecies_population_exchange(
         *schema, state, {{"micro", 100.}, {"large", 0.}}, environment(), dissolution);
     EXPECT_DOUBLE_EQ(dissolved.numbers[0].number, 0.);

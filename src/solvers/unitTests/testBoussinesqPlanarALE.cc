@@ -3416,7 +3416,7 @@ ConfiguredCase make(double heat_rate = .4, bool bubbles = false, bool fail_expan
     settings.species_source = [heat_rate, fail_expanded_volume](const R::ReactionContext& context, double duration)
     {
         const double reactant = context.state.amount(context.catalog, M::reactant, R::SpeciesPhase::Liquid);
-        if (fail_expanded_volume && context.environment.bulkVolume > .5 * (1 + 1e-8) &&
+        if (fail_expanded_volume && duration > 1e-3 && context.environment.bulkVolume > .5 * (1 + 1e-8) &&
             reactant / context.environment.bulkVolume > .15)
             throw std::runtime_error("manufactured bottom-cell expanded-volume source failure");
         R::ReactionSourceInput source;
@@ -3536,7 +3536,9 @@ TEST(BoussinesqSpeciesPlanarALETest, RankLocalSourceFailureAfterMotionRestoresGe
     EXPECT_EQ(coupling.free_surface_history().size(), history);
     for (std::size_t c = 0; c < volumes.size(); ++c)
         EXPECT_DOUBLE_EQ(configured.mesh->cell_volume(static_cast<Pack::local_ordinal_type>(c)), volumes[c]);
-    configured.solver->set_time_step(1e-5);
+    // Remain below the manufactured duration threshold while resolving the
+    // accepted volume increment before division by dt on double-only platforms.
+    configured.solver->set_time_step(1e-3);
     EXPECT_NO_THROW(coupling.step());
     EXPECT_EQ(gas.species_event_receipt().revision, receipt.revision + 1);
 }

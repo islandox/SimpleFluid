@@ -67,6 +67,21 @@ TEST(BoussFiniteVaporTest, LongStepCannotSpendMoreThanSensibleSuperheat)
     EXPECT_NEAR(383 + static_cast<double>(accepted.thermalEnergy) / 10, 373, 1e-13);
     EXPECT_NEAR(-static_cast<double>(accepted.vapor.latentEnergy) / 2, 50, 1e-13);
 }
+TEST(BoussFiniteVaporTest, GasAndVaporAdmissionFitRoundedStoredCapacity)
+{
+    Fixture f;
+    f.environment.bulkVolume = .5;
+    f.initial.set_amount(*f.catalog, solvent, P::Liquid, 1);
+    f.initial.set_amount(*f.catalog, donor, P::Liquid, .5);
+    f.initial.set_amount(*f.catalog, gasOne, P::Resolved, .95);
+    f.sources.gas = R::BoussGasAdmissionLaw{"manufactured.shared_capacity", 1, f.catalog->fingerprint(),
+        [](const R::ReactionContext&, double)
+        { return std::vector<R::IntegratedReactionExtent>{{gasReaction, .005}}; }};
+    const auto accepted = f.step(.1);
+    EXPECT_LE(R::bouss_gas_volume(*f.catalog, f.volumes, accepted.state), .1);
+    EXPECT_NEAR(accepted.vapor.evaporation, .0035, 1e-16);
+    EXPECT_DOUBLE_EQ(accepted.state.amount(*f.catalog, gasTwo, P::Resolved), .005);
+}
 TEST(BoussFiniteVaporTest, SharedGasRequestAdmissionPrecedesVaporWithoutScalingActualSources)
 {
     Fixture f;

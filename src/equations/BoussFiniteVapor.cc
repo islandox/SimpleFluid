@@ -141,9 +141,11 @@ void debit_gas_budget(
 }
 void append_heat(std::vector<long double>& events, const ReactionAdvance& advance)
 {
-    events.push_back(advance.localReceipt.externalHeat);
-    for (const auto value : advance.localReceipt.reactionHeatContributions)
-        events.push_back(value);
+    for (const auto part : advance.localReceipt.externalHeat)
+        events.push_back(part);
+    for (const auto& value : advance.localReceipt.reactionHeatContributions)
+        for (const auto part : value)
+            events.push_back(part);
     for (const auto& transfer : advance.ledger.externalTransfers)
         events.push_back(transfer.energy);
 }
@@ -195,8 +197,8 @@ void combine(ReactionAdvance& first, const ReactionAdvance& second, const Specie
             narrow(add(first.ledger.forwardReactionExtents[r], second.ledger.forwardReactionExtents[r]));
         first.ledger.reverseReactionExtents[r] =
             narrow(add(first.ledger.reverseReactionExtents[r], second.ledger.reverseReactionExtents[r]));
-        first.localReceipt.reactionHeatContributions[r] =
-            add(first.localReceipt.reactionHeatContributions[r], second.localReceipt.reactionHeatContributions[r]);
+        for (const auto part : second.localReceipt.reactionHeatContributions[r])
+            add_raw(first.localReceipt.reactionHeatContributions[r], part);
     }
     std::map<Key, Sum> changes;
     for (const auto& entry : first.localReceipt.chemicalChanges)
@@ -220,8 +222,9 @@ void combine(ReactionAdvance& first, const ReactionAdvance& second, const Specie
         }
     }
     Sum reactionHeat;
-    for (const auto value : first.localReceipt.reactionHeatContributions)
-        reactionHeat += value;
+    for (const auto& value : first.localReceipt.reactionHeatContributions)
+        for (const auto part : value)
+            reactionHeat += part;
     first.ledger.reactionHeat = narrow(reactionHeat.value());
     first.ledger.substeps += second.ledger.substeps;
     first.ledger.retries += second.ledger.retries;
@@ -783,11 +786,40 @@ BoussSourceAdvance advance_bouss_sources(const ReactionMechanism& mechanism, con
                 capacityMargin.value() / volumes.gasMolarVolumes[species], available / coolingPerMole});
         }
         require(std::isfinite(scale) && scale >= 0 && scale <= 1, "Invalid joint wall/bulk admission scale.");
+        const auto fits_evaporation = [&](double amount)
+        {
+            auto nextCapacity = capacityMargin;
+            nextCapacity += -static_cast<long double>(amount) * volumes.gasMolarVolumes[species];
+            auto nextVapor = vaporStock;
+            nextVapor += amount;
+            auto represented = state;
+            represented.set_amount(
+                catalog, vapor.solvent, vapor.vaporPhase, narrow(nextVapor.value()), vapor.population);
+            return nextCapacity.value() >= 0 && volume_margin(catalog, volumes, represented, capacity).value() >= 0;
+        };
         for (auto& proposal : proposals)
         {
             proposal.admittedMoles = proposals.size() == 1
                                          ? admitted(admittedTotal)
                                          : admitted(static_cast<long double>(proposal.requestedMoles) * scale);
+            if (!fits_evaporation(proposal.admittedMoles))
+            {
+                // As for gas requests, admit only an extent whose raw event and
+                // rounded stored vapor both fit the unchanged physical capacity.
+                double low = 0, high = proposal.admittedMoles;
+                require(fits_evaporation(low), "Pre-evaporation gas inventory exceeds shared scalar capacity.");
+                for (unsigned iteration = 0; iteration < 80; ++iteration)
+                {
+                    const auto middle = std::midpoint(low, high);
+                    if (middle == low || middle == high)
+                        break;
+                    if (fits_evaporation(middle))
+                        low = middle;
+                    else
+                        high = middle;
+                }
+                proposal.admittedMoles = low;
+            }
             transfer(true, proposal.admittedMoles);
             evaporationMoles += proposal.admittedMoles;
         }

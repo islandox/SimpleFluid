@@ -268,16 +268,20 @@ struct SourceEngine
                         catalog.index(change.species), change.moles);
             }
             Sum declared_heat;
-            declared_heat += raw.externalHeat;
-            for (const auto heat : raw.reactionHeatContributions)
-                declared_heat += heat;
+            for (const auto part : raw.externalHeat)
+                declared_heat += part;
+            for (const auto& heat : raw.reactionHeatContributions)
+                for (const auto part : heat)
+                    declared_heat += part;
 
             if (options.partition_heat)
             {
                 // Declare original channels before custom double allocation. Later cancellation must not hide loss.
-                stage.sums.declare_energy(c, raw.externalHeat);
-                for (const auto heat : raw.reactionHeatContributions)
-                    stage.sums.declare_energy(c, heat);
+                for (const auto part : raw.externalHeat)
+                    stage.sums.declare_energy(c, part);
+                for (const auto& heat : raw.reactionHeatContributions)
+                    for (const auto part : heat)
+                        stage.sums.declare_energy(c, part);
                 const double heat = static_cast<double>(declared_heat.value());
                 require(std::isfinite(heat) && (declared_heat.value() == 0 || heat != 0),
                     "Heat allocation input is not representable.");
@@ -298,9 +302,11 @@ struct SourceEngine
             }
             else
             {
-                stage.sums.add_energy(c, options.heat_phase, raw.externalHeat);
-                for (const auto heat : raw.reactionHeatContributions)
-                    stage.sums.add_energy(c, options.heat_phase, heat);
+                for (const auto part : raw.externalHeat)
+                    stage.sums.add_energy(c, options.heat_phase, part);
+                for (const auto& heat : raw.reactionHeatContributions)
+                    for (const auto part : heat)
+                        stage.sums.add_energy(c, options.heat_phase, part);
             }
             for (const auto& transfer : chemistry.ledger.externalTransfers)
             {

@@ -291,7 +291,8 @@ struct ReactionCompartmentChange
 /** Local composition receipt from the kernel's actual accepted sums.
  * These channels precede double reporting: do not reconstruct them from reactionExtents.
  * chemicalChanges contains only nonzero entries in state phase/catalog/population order.
- * reactionHeatContributions is in mechanism order and contains accepted unrounded extent * heatPerExtent.
+ * Heat channels retain high and correction separately, including when long double equals double.
+ * reactionHeatContributions is in mechanism order and contains accepted extent * heatPerExtent.
  * External material/energy/momentum packets retain their individual ledger.externalTransfers records.
  * This is O(compartments + reactions), with no per-substep diary or MPI serialization contract.
  * It is transient local composition data, not an alternative authoritative stored species state.
@@ -300,8 +301,8 @@ struct ReactionLocalReceipt
 {
     std::uint64_t schemaFingerprint = 0;
     std::vector<ReactionCompartmentChange> chemicalChanges;
-    std::vector<long double> reactionHeatContributions;
-    long double externalHeat = 0;
+    std::vector<std::array<long double, 2>> reactionHeatContributions;
+    std::array<long double, 2> externalHeat{};
     /** Actual post-source endpoint, including chemistry and external material.
      * Dense state phase/catalog/named-population order; each pair is high and correction.
      * Later material stages must retain both terms for finite donor reservation.

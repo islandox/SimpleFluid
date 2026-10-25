@@ -630,7 +630,9 @@ TEST(ReactionMechanismTest, LocalAcceptedReceiptPreservesHeatAndMaterialLostByRo
     using P = R::SpeciesPhase;
     const auto schema = std::make_shared<const R::SpeciesCatalog>(std::vector<R::SpeciesDefinition>{
         {11, "left", .1, {{"X", 1}}, {P::Liquid}}, {29, "right", .1, {{"X", 1}}, {P::Liquid}}});
-    const double large = std::ldexp(1., 60), quantum = std::ldexp(1., -60);
+    // Exceed even the x86 extended-precision mantissa: the correction must
+    // survive independently until the opposing reaction cancels the high part.
+    const double large = std::ldexp(1., 100), quantum = std::ldexp(1., -100);
     const R::ReactionMechanism mechanism(
         schema, {{41, "forward", {{11, P::Liquid, -quantum}, {29, P::Liquid, quantum}}, 1.},
                     {83, "opposing", {{29, P::Liquid, -quantum}, {11, P::Liquid, quantum}}, -1.}});
@@ -647,7 +649,7 @@ TEST(ReactionMechanismTest, LocalAcceptedReceiptPreservesHeatAndMaterialLostByRo
     provider.evaluate = [large](const R::ReactionContext& context)
     {
         const double time = context.environment.time;
-        // The first .5-s SSPRK2 interval accepts 2^60 for each reaction.
+        // The first .5-s SSPRK2 interval accepts 2^100 for each reaction.
         // The second accepts exactly one additional forward extent, without a large donor stock.
         return std::vector<R::ReactionRate>{
             {41, time == 0 ? 4 * large : (time == 1 ? 4. : 0.), R::SourceVolumeBasis::BulkVolume},
@@ -668,9 +670,12 @@ TEST(ReactionMechanismTest, LocalAcceptedReceiptPreservesHeatAndMaterialLostByRo
     const auto& receipt = result.localReceipt;
     EXPECT_EQ(receipt.schemaFingerprint, schema->fingerprint());
     ASSERT_EQ(receipt.reactionHeatContributions.size(), 2U);
-    const long double actual_heat = receipt.reactionHeatContributions[0] + receipt.reactionHeatContributions[1];
-    EXPECT_EQ(actual_heat, 1.L);
-    EXPECT_EQ(receipt.externalHeat, 0.L);
+    SimpleFluid::detail::CompensatedSum<long double> actual_heat;
+    for (const auto& contribution : receipt.reactionHeatContributions)
+        for (const auto part : contribution)
+            actual_heat += part;
+    EXPECT_EQ(actual_heat.value(), 1.L);
+    EXPECT_EQ(receipt.externalHeat, (std::array<long double, 2>{0, 0}));
     ASSERT_EQ(receipt.chemicalChanges.size(), 2U);
     EXPECT_EQ(receipt.chemicalChanges[0].species, 11U);
     EXPECT_EQ(receipt.chemicalChanges[0].phase, P::Liquid);
@@ -691,13 +696,17 @@ TEST(ReactionMechanismTest, LocalReceiptRetainsVolumetricHeatBeforeItsDoubleRepo
         std::vector<R::SpeciesDefinition>{{7, "ordinary carrier", .1, {{"X", 1}}, {R::SpeciesPhase::Liquid}}});
     const R::ReactionMechanism mechanism(schema, {}, R::EnergyConvention::IncludesFormationEnergy);
     R::CellSpeciesState initial(*schema);
-    const double factor = std::ldexp(1., 30);
+    const double factor = std::ldexp(1., 40);
     R::ReactionSourceInput input;
     input.heat.rate = R::VolumetricHeatRate{factor + 1., R::SourceVolumeBasis::BulkVolume};
     const R::ReactionEnvironment environment{0., 300., 100000., 0., factor - 1.};
     const auto result = R::advance_reactions(mechanism, initial, environment, 1., input);
-    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, std::ldexp(1., 60));
-    EXPECT_EQ(result.localReceipt.externalHeat, std::ldexp(1.L, 60) - 1.L);
+    EXPECT_DOUBLE_EQ(result.ledger.externalHeat, std::ldexp(1., 80));
+    SimpleFluid::detail::CompensatedSum<long double> residual;
+    for (const auto part : result.localReceipt.externalHeat)
+        residual += part;
+    residual += -std::ldexp(1.L, 80);
+    EXPECT_EQ(residual.value(), -1.L);
     EXPECT_TRUE(result.localReceipt.chemicalChanges.empty());
     EXPECT_TRUE(result.localReceipt.reactionHeatContributions.empty());
     EXPECT_DOUBLE_EQ(result.ledger.reactionHeat, 0.);

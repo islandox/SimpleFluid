@@ -86,10 +86,11 @@ TEST(PopulationRawCountsTest, CompleteMaterialReplacementRetainsRepresentableTin
 TEST(PopulationRawCountsTest, UnrepresentablePositiveCountCannotEraseAnOccupiedGasPhase)
 {
     PureFixture f(1, 1e-30);
-    const long double desired = static_cast<long double>(std::numeric_limits<double>::denorm_min()) / 2;
-    ASSERT_GT(desired, 0);
-    ASSERT_EQ(static_cast<double>(desired), 0);
-    EXPECT_THROW((void) f.apply({{}, {{"bin", static_cast<double>(desired), 1}}}), std::runtime_error);
+    // A positive mathematical half-denormal cannot be supplied as a double count.
+    // Exercise its represented zero without assuming a wider long-double exponent range.
+    const double desired = std::numeric_limits<double>::denorm_min() / 2;
+    ASSERT_EQ(desired, 0);
+    EXPECT_THROW((void) f.apply({{}, {{"bin", desired, 1}}}), std::runtime_error);
     EXPECT_DOUBLE_EQ(f.counts.front().number, 1);
     EXPECT_DOUBLE_EQ(f.state.amount(f.catalog, gas, P::Dispersed, "bin"), 1e-30);
 }

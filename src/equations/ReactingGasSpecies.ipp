@@ -1383,9 +1383,10 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                         "Field thermal receipt does not match its mechanism/schema.");
                     if (d_options.source_schedule == ReactingSourceSchedule::PrescribedCarrierAfterTemperature)
                     {
-                        require(raw.externalHeat == 0.0L &&
+                        require(raw.externalHeat[0] + raw.externalHeat[1] == 0 &&
                                     std::ranges::all_of(
-                                        raw.reactionHeatContributions, [](long double heat) { return heat == 0.0L; }) &&
+                                        raw.reactionHeatContributions, [](const auto& heat)
+                                        { return heat[0] + heat[1] == 0; }) &&
                                     std::ranges::all_of(chemistry.ledger.externalTransfers,
                                         [](const auto& transfer) { return transfer.energy == 0.0; }),
                             "Post-temperature gas references require exactly zero applied source heat "
@@ -1399,9 +1400,11 @@ void ReactingGasModel<Pack, MeshType>::advance_species_fields(scalar_type time, 
                     }
                     else
                     {
-                        thermalEnergy += raw.externalHeat;
-                        for (const auto heat : raw.reactionHeatContributions)
-                            thermalEnergy += heat;
+                        for (const auto part : raw.externalHeat)
+                            thermalEnergy += part;
+                        for (const auto& heat : raw.reactionHeatContributions)
+                            for (const auto part : heat)
+                                thermalEnergy += part;
                         for (const auto& transfer : chemistry.ledger.externalTransfers)
                             thermalEnergy += transfer.energy;
                     }

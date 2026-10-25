@@ -158,6 +158,7 @@ SpeciesDiffusionPreview preview_species_diffusion(const SpeciesCatalog& catalog,
             require(face.moles[s] == 0.0 || catalog.allows(catalog.species()[s].id, binding.transported.phase),
                 "A diffusing species is forbidden in its transported compartment.");
             const long double mass = static_cast<long double>(face.moles[s]) * catalog.species()[s].molarMass;
+            require(face.moles[s] == 0 || mass != 0, "Nonzero diffusive mass underflows local arithmetic.");
             narrow(mass);
             primaryMass += mass;
             massScale += std::abs(mass);

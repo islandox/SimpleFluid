@@ -356,7 +356,8 @@ endforeach()
 
 # Exact-count anchors distinguish overload families that a broad method-name
 # match cannot. Constructor counts are two because the Itanium ABI emits both
-# complete-object and base-object constructor entry points.
+# complete-object and base-object constructor entry points for concrete classes.
+# Counts may list alternatives for compiler-dependent abstract/inline-only entries.
 set(simplefluid_required_exact_api_patterns)
 set(simplefluid_required_exact_api_counts)
 macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
@@ -454,8 +455,8 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::preview_interphase_exchange[(]${simplefluid_reacting_phase_span}, (unsigned long|unsigned long long), (unsigned long|unsigned long long), std::(__[0-9]+::)?function<SimpleFluid::Reacting::InterphaseExchange [(]SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&, SimpleFluid::Reacting::PhaseThermalState const&, SimpleFluid::Reacting::MixtureThermodynamicPoint const&[)]> const&, SimpleFluid::Reacting::PhaseThermalMode[)]$" 1)
 
-# Caloric feasibility adds exactly five functions (including two constructor
-# entries) and the three RTTI/vtable definitions of its typed unresolved error.
+# Caloric feasibility adds five functions (including two constructor entries)
+# and up to three RTTI/vtable definitions of its typed unresolved error.
 # The original EOS constructor and every earlier thermodynamic anchor remain.
 set(simplefluid_caloric_domain_public_symbol_budget 8)
 simplefluid_require_reacting_api(
@@ -467,8 +468,14 @@ simplefluid_require_reacting_api(
 simplefluid_require_reacting_api(
     "^SimpleFluid::Reacting::evaluate_caloric_pressure_margins[(]SimpleFluid::Reacting::CaloricPressureQuery const&, double[)]$" 1)
 foreach(simplefluid_caloric_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
+    set(simplefluid_caloric_rtti_count 1)
+    if(simplefluid_caloric_rtti STREQUAL "vtable for")
+        # An inline-only exception has no key function; Clang can omit its
+        # unused vtable in Release while retaining the cross-DSO catch RTTI.
+        set(simplefluid_caloric_rtti_count "0|1")
+    endif()
     simplefluid_require_exact_api(
-        "^${simplefluid_caloric_rtti} SimpleFluid::Reacting::CaloricDomainUnresolved$" 1)
+        "^${simplefluid_caloric_rtti} SimpleFluid::Reacting::CaloricDomainUnresolved$" "${simplefluid_caloric_rtti_count}")
 endforeach()
 
 # The distributed face adapter stays private. Its pure finite-counter packet
@@ -758,8 +765,12 @@ foreach(simplefluid_thermal_query IN ITEMS interphase_receipt final_thermal_eval
         "^SimpleFluid::Reacting::ReactingMixtureCoupler::Trial::${simplefluid_thermal_query}[(][)] const$" 1)
 endforeach()
 foreach(simplefluid_thermal_rtti IN ITEMS "typeinfo for" "typeinfo name for" "vtable for")
+    set(simplefluid_thermal_rtti_count 1)
+    if(simplefluid_thermal_rtti STREQUAL "vtable for")
+        set(simplefluid_thermal_rtti_count "0|1")
+    endif()
     simplefluid_require_exact_api(
-        "^${simplefluid_thermal_rtti} SimpleFluid::Reacting::ThermalCaloricRangeError$" 1)
+        "^${simplefluid_thermal_rtti} SimpleFluid::Reacting::ThermalCaloricRangeError$" "${simplefluid_thermal_rtti_count}")
 endforeach()
 
 # Fixed-reference finite vapor: seven pure functions, one controller entry point,
@@ -803,11 +814,25 @@ foreach(simplefluid_surface_mesh_kind IN ITEMS native legacy)
 endforeach()
 simplefluid_require_exact_api(
     "^SimpleFluid::MultiphysicsSolverCoupler<SimpleFluid::TpetraTypes<.*>[ ]*>::configure_free_surface[(]SimpleFluid::FreeSurfaceOptions const&, ${simplefluid_stage3_std}unique_ptr<SimpleFluid::HeadspaceModel, ${simplefluid_stage3_std}default_delete<SimpleFluid::HeadspaceModel>[ ]*>[)]$" 1)
-# Keep the original one-argument exported constructor as well as the metadata overload.
+# Keep both base-object constructors. Clang omits complete-object constructors
+# for abstract classes; GCC can also export those otherwise unused C1 entries.
+foreach(simplefluid_headspace_ctor IN ITEMS
+        "_ZN11SimpleFluid14HeadspaceModelC2ENS_16HeadspaceOptionsE"
+        "_ZN11SimpleFluid14HeadspaceModelC2ENS_16HeadspaceOptionsENS_17HeadspaceMetadataE")
+    set(simplefluid_found_headspace_ctor FALSE)
+    foreach(simplefluid_symbol IN LISTS simplefluid_dynamic_symbols)
+        if(simplefluid_symbol MATCHES "^${simplefluid_headspace_ctor}(@@SIMPLEFLUID_[0-9.]+)?$")
+            set(simplefluid_found_headspace_ctor TRUE)
+        endif()
+    endforeach()
+    if(NOT simplefluid_found_headspace_ctor)
+        message(FATAL_ERROR "Missing abstract base-object constructor: ${simplefluid_headspace_ctor}")
+    endif()
+endforeach()
 simplefluid_require_exact_api(
-    "^SimpleFluid::HeadspaceModel::HeadspaceModel[(]SimpleFluid::HeadspaceOptions[)]$" 2)
+    "^SimpleFluid::HeadspaceModel::HeadspaceModel[(]SimpleFluid::HeadspaceOptions[)]$" "1|2")
 simplefluid_require_exact_api(
-    "^SimpleFluid::HeadspaceModel::HeadspaceModel[(]SimpleFluid::HeadspaceOptions, SimpleFluid::HeadspaceMetadata[)]$" 2)
+    "^SimpleFluid::HeadspaceModel::HeadspaceModel[(]SimpleFluid::HeadspaceOptions, SimpleFluid::HeadspaceMetadata[)]$" "1|2")
 simplefluid_require_exact_api("^SimpleFluid::HeadspaceModel::metadata[(][)] const$" 1)
 set(simplefluid_surface_string
     "std::(__[0-9]+::|__cxx11::)?basic_string<char, ${simplefluid_stage3_std}char_traits<char>, ${simplefluid_stage3_std}allocator<char>[ ]*>")
@@ -1054,8 +1079,8 @@ foreach(simplefluid_required_exact_api_index
                  "${simplefluid_found_exact_api_count} + 1")
         endif()
     endforeach()
-    if(NOT simplefluid_found_exact_api_count EQUAL
-       simplefluid_required_exact_api_count)
+    if(NOT "${simplefluid_found_exact_api_count}" MATCHES
+       "^(${simplefluid_required_exact_api_count})$")
         list(APPEND simplefluid_missing_exact_api_patterns
              "${simplefluid_required_exact_api_pattern} (expected ${simplefluid_required_exact_api_count}, found ${simplefluid_found_exact_api_count})")
     endif()
