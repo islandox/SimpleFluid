@@ -1,4 +1,11 @@
 set(SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES
+    details/GeneralVoF/Resources.cc
+    details/GeneralVoF/Initialization.cc
+    details/GeneralVoF/Advance.cc
+    details/GeneralVoF/Remap.cc
+    details/GeneralVoF/exact/FaceRates.cc
+    details/GeneralVoF/exact/Advance.cc
+    details/GeneralVoF/exact/Remap.cc
     details/GeneralVoF/AdaptedFaceTransfer.cc
     details/GeneralVoF/Curvature.cc
     details/GeneralVoF/Diagnostics.cc
@@ -16,10 +23,8 @@ set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     GeneralVoFSolver.cc
     ${SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES}
     details/GeneralVoF/SolverImpl.cc
-    details/GeneralVoF/Implementation.tcc
     details/GeneralVoFFiniteProjection.tcc
     details/ConservativeVoFFiniteTransport.tcc
-    details/GeneralVoF/exact/Operations.tcc
     VoFSolver.cc
     details/ConservativeVoFTransport.cc
     details/ConservativeVoFExactTransport.cc
@@ -123,7 +128,6 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
         set_source_files_properties(
             GeneralVoFSolver.cc
     details/GeneralVoF/SolverImpl.cc
-    details/GeneralVoF/Implementation.tcc
     details/GeneralVoFFiniteProjection.tcc
     details/ConservativeVoFFiniteTransport.tcc
             details/ConservativeVoFTransport.cc
