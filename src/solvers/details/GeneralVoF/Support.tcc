@@ -1,4 +1,4 @@
-/** @file GeneralVoFSolverSupport.tcc
+/** @file Support.tcc
  * @brief Compiled helpers shared by the selected General VoF solver kernels.
  */
 namespace SimpleFluid

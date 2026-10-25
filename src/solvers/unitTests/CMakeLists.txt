@@ -741,6 +741,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
           testGeneralVoFFlowWorkspace.cc
           testExactGeneralVoFFlowWorkspace.cc
           ../GeneralVoFSolver.cc
+        ../details/GeneralVoF/SolverImpl.cc
           ../details/ConservativeVoFTransport.cc
           ../details/ConservativeVoFExactTransport.cc
           ../details/GeneralVoFFlowWorkspace.cc
