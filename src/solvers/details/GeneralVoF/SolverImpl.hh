@@ -4,6 +4,7 @@
 #pragma once
 #include "solvers/GeneralVoFSolver.hh"
 #include "solvers/details/ConservativeVoFTransport.hh"
+#include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/State.hh"
 #include "solvers/details/GeneralVoFFlowWorkspace.hh"
 #include "solvers/details/GeneralVoFPhiClosure.hh"

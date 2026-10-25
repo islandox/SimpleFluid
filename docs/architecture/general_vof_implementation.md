@@ -44,6 +44,33 @@ returning. Only the coordinator installs the returned accepted snapshot; failed
 preparation leaves the original publication and clock unchanged. Destruction
 performs no collective work.
 
+## Solver numerical components
+
+The private `GeneralVoF/` directory contains independently compiled components:
+
+| Component | Inputs and responsibility |
+| --- | --- |
+| `Execution` | Borrowed native mesh/maps; collective failure propagation, reductions and imports |
+| `NodeVelocity` | Phase support metadata, cell velocity and byte cap; authenticated canonical node exchange |
+| `Curvature<Mode>` | Phase interfaces, native geometry and capillary controls; distributed patch assembly |
+| `PhaseStorage<Mode>` | Phase authority and material densities; mixture storage and publication validation |
+| `Diagnostics<Mode>` | Phase authority, mass and velocity; physical inventory, momentum and energy reductions |
+| `FaceRates` | Phase authority, canonical rate evidence and flow workspace; rates, integrated volumes and topology |
+| `AdaptedFaceTransfer` | Source/target geometry and remap evidence; common-refinement face transfer and closure |
+| `OwnedFaceTransfer` | Source/target canonical identities and rates; ownership-only face transfer |
+
+These components have no access to the solver coordinator or its accepted-state
+pointer. Face transfer borrows pinned source/target views and returns detached
+face fields, projection evidence and divergence. Phase storage returns separate
+finite mass/error or rational mass results. Exact storage and diagnostics use
+explicit specializations compiled in `exact/`; their shared rational reduction
+retains the existing codec and storage admission checks.
+
+Curvature assembly delegates patch fitting to the existing curvature kernel.
+Projection and implicit momentum remain owned by the existing flow workspace
+and conservative transport components. The extraction does not create another
+numerical backend or broaden their support matrices.
+
 ## Compilation and resource contracts
 
 Private `.hh` files declare interfaces and retain simple one-line members.

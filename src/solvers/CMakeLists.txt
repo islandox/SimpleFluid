@@ -1,5 +1,20 @@
+set(SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES
+    details/GeneralVoF/AdaptedFaceTransfer.cc
+    details/GeneralVoF/Curvature.cc
+    details/GeneralVoF/Diagnostics.cc
+    details/GeneralVoF/Execution.cc
+    details/GeneralVoF/FaceRates.cc
+    details/GeneralVoF/FaceTransfer.cc
+    details/GeneralVoF/NodeVelocity.cc
+    details/GeneralVoF/OwnedFaceTransfer.cc
+    details/GeneralVoF/PhaseStorage.cc
+    details/GeneralVoF/exact/Diagnostics.cc
+    details/GeneralVoF/exact/PhaseStorage.cc
+    details/GeneralVoF/exact/Reduction.cc
+)
 set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     GeneralVoFSolver.cc
+    ${SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES}
     details/GeneralVoF/SolverImpl.cc
     details/GeneralVoF/Implementation.tcc
     details/GeneralVoFFiniteProjection.tcc
@@ -144,3 +159,14 @@ simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFLowMach.cc)
 simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFRepresentation.cc)
 simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFThermodynamics.cc)
 simplefluid_exclude_from_pgo_sources(details/AdaptiveVoFLowMachTransport.cc)
+
+# General VoF operation components retain their original numerical boundary.
+foreach(source IN LISTS SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES)
+    simplefluid_exclude_from_pgo_sources(${source})
+endforeach()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(${SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES} PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
+endif()
