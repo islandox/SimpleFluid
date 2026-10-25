@@ -1,5 +1,10 @@
 # PLIC reconstruction and phase arithmetic live with geometry, while their
 # established shared-library symbols remain owned/exported by SimpleFluidFVM.
+set(SIMPLEFLUID_GENERAL_VOF_INSTANTIATION_SOURCES
+    explicit_instantiation/GeneralVoF/Transport.cc
+    explicit_instantiation/GeneralVoF/Remap.cc
+    explicit_instantiation/GeneralVoF/PhaseAllocation.cc
+)
 add_library(SimpleFluidFVM SHARED
     GeneralVoF.cc
     details/GeneralVoFState.cc
@@ -7,7 +12,7 @@ add_library(SimpleFluidFVM SHARED
     details/GeneralVoF/Transport.tcc
     details/GeneralVoF/Remap.cc
     details/GeneralVoF/Remap.tcc
-    details/GeneralVoF/PhaseAllocation.cc
+    ${SIMPLEFLUID_GENERAL_VOF_INSTANTIATION_SOURCES}
     details/GeneralVoF/PhaseAllocation.tcc
     details/GeneralVoF/Wire.cc
     details/GeneralVoFExactTransport.cc
@@ -54,14 +59,14 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # The independent VoF workstream is outside the existing Shiri PGO workload.
-simplefluid_exclude_from_pgo_sources(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoF/Transport.cc details/GeneralVoF/Remap.cc details/GeneralVoF/PhaseAllocation.cc details/GeneralVoF/Wire.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc ../geometry/PLIC/details/exact/PolyhedralReconstruction.cc ../geometry/PLIC/PolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc ../geometry/PLIC/details/PhaseArithmetic.cc
+simplefluid_exclude_from_pgo_sources(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoF/Transport.cc details/GeneralVoF/Remap.cc ${SIMPLEFLUID_GENERAL_VOF_INSTANTIATION_SOURCES} details/GeneralVoF/Wire.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc ExactPhaseTransfer.cc ExactFaceTransfer.cc ../geometry/PLIC/details/exact/PolyhedralReconstruction.cc ../geometry/PLIC/PolyhedralReconstruction.cc GeometricVoF.cc AdaptiveVoF.cc ConservativeAMRRemap.cc DistributedAdaptiveState.cc details/DistributedAMROverlap.cc details/ExactPhaseLabelMap.cc details/ExactLiveStorage.cc details/ExactPhaseAccumulator.cc details/PhaseArithmetic.cc ../geometry/PLIC/details/PhaseArithmetic.cc
     details/FiniteVoFTransport.cc details/ExperimentalPhaseBackend.cc)
 
 # Error-free transforms and directed residual bounds require strict arithmetic in
 # every caller translation unit; a strictly compiled geometry callee alone does
 # not constrain reassociation of its inline finite ledger helpers.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoF/Transport.cc details/GeneralVoF/Remap.cc details/GeneralVoF/PhaseAllocation.cc details/GeneralVoF/Wire.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc PROPERTIES
+    set_source_files_properties(GeneralVoF.cc details/GeneralVoFState.cc details/GeneralVoF/Transport.cc details/GeneralVoF/Remap.cc ${SIMPLEFLUID_GENERAL_VOF_INSTANTIATION_SOURCES} details/GeneralVoF/Wire.cc details/GeneralVoFExactTransport.cc details/GeneralVoFExactTransfer.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE
         SKIP_PRECOMPILE_HEADERS TRUE)

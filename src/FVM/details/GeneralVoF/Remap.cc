@@ -1,7 +1,7 @@
 /** @file Remap.cc
- * @brief Operation entry and supported compiled arithmetic modes.
+ * @brief Operation dispatch and trial publication validation.
  */
-#include "FVM/details/GeneralVoF/Remap.tcc"
+#include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF
 {
 void GeneralVoF::FiniteRemapTrial::validate_observations() const
@@ -33,10 +33,4 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap(const Hierarchy::Plan& plan,
     return plan_remap_finite<ArithmeticMode::BoundedCertification>(
         plan, std::move(target), channels, std::move(options));
 }
-template GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite<ArithmeticMode::Ordinary>(const Hierarchy::Plan&,
-    std::shared_ptr<const Hierarchy>, std::span<const GeneralVoFFiniteOwnedChannels>,
-    GeneralVoFFiniteRemapOptions) const;
-template GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite<ArithmeticMode::BoundedCertification>(
-    const Hierarchy::Plan&, std::shared_ptr<const Hierarchy>, std::span<const GeneralVoFFiniteOwnedChannels>,
-    GeneralVoFFiniteRemapOptions) const;
 } // namespace SimpleFluid::VoF

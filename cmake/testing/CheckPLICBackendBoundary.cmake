@@ -69,7 +69,8 @@ foreach(component IN ITEMS FVM solvers)
         "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.hh"
         "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.cc"
         "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.ipp"
-        "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.tcc")
+        "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.tcc"
+        "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/explicit_instantiation/GeneralVoF/*.cc")
     foreach(source IN LISTS operation_sources)
         simplefluid_check_plic_include_order("${source}")
         if(component STREQUAL "solvers" AND NOT source MATCHES "/SolverImpl[.]")
