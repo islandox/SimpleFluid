@@ -518,6 +518,11 @@ laws; no universal chemistry or physical material calibration is implied.
       with collective configuration/failure handling and immutable accepted state.
 - [x] Remove enabled null-mechanism/yield fallbacks, old source selectors and
       misleading fixed-species fields; explicit retired keys reject.
+- [ ] Resolve the native low-Mach exactly-empty-gas rejection under nonuniform
+      heating at small timesteps (`Empty phase has unallocated physical energy/volume work`)
+      without dropping physical work or weakening empty-phase energy constraints.
+- [ ] Improve or explicitly bound large-volume/small-timestep EOS-minus-advected-volume
+      cancellation while retaining independent physical continuity and occupancy gates.
 - [ ] Add a separately qualified stiff-chemistry/Jacobian integration backend.
 - [ ] Calibrate supplied reaction and property data and verify physical
       pressure/temperature/composition ranges with spatial/time convergence.
@@ -878,6 +883,9 @@ key/default/unit/validity reference remains open.
       limitations of the existing numerical foundation.
 - [x] Separate weak RANS-plus-bubble coupling from phase-aware turbulent
       Euler–Euler flow and distinguish proposed design from current APIs.
+- [ ] Complete the [external host companion migration](docs/architecture/external_host_reacting_flow.md),
+      including finite species/isotope feedback and a supported bulk Winter-diffusion
+      owner before claiming parity with the removed reacting APIs.
 - [ ] Document every supported configuration key with default, SI unit,
       validity range and migration mapping; retired source keys must reject.
 - [x] Document supplied rate/stoichiometry/property interfaces, finite donor
