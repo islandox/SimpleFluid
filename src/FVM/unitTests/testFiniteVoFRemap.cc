@@ -2,6 +2,7 @@
  * @brief Independent plane, conservation, history and owner-pin remap oracles.
  */
 #include "FVM/GeneralVoF.hh"
+#include "geometry/PLIC/ConvexCellGeometry.hh"
 #include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
@@ -21,6 +22,7 @@ using namespace SimpleFluid::Meshes;
 using namespace SimpleFluid::Meshes::AMR;
 using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 using Value = SimpleFluid::PLIC::DynamicGeometryValue;
+using OracleGeometry = PLIC::ConvexCellGeometry<ArithmeticMode::Exact>;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 
 struct Input
@@ -57,7 +59,7 @@ Input input(double scale = 1, SimpleFluid::PLIC::GeometryPoint origin = {}, bool
     // acceptance path receives exact phase measures from this calculation.
     for (const auto& [key, leaf] : hierarchy->owned())
     {
-        const auto geometry = hierarchy->geometry(leaf);
+        const auto geometry = OracleGeometry::from_geometry(*hierarchy->geometry(leaf));
         order.push_back(key);
         if (pure_carrier)
         {
@@ -175,8 +177,10 @@ void allocation_oracle(const GeneralVoF& source, const GeneralVoF& target, const
             EXPECT_EQ(route.fit_allocation.absolute_error, 0);
             continue;
         }
-        const auto source_geometry = source.hierarchy()->geometry(source.hierarchy()->owned().at(route.source_key));
-        const auto piece = target.hierarchy()->geometry(target.hierarchy()->owned().at(route.target_key));
+        const auto source_geometry = OracleGeometry::from_geometry(
+            *source.hierarchy()->geometry(source.hierarchy()->owned().at(route.source_key)));
+        const auto piece = OracleGeometry::from_geometry(
+            *target.hierarchy()->geometry(target.hierarchy()->owned().at(route.target_key)));
         const auto source_cut = source_geometry->clip(plane.gas);
         const auto piece_cut = piece->clip(plane.gas);
         const auto volume = Measure::volume(*source_geometry);
@@ -246,7 +250,7 @@ void plane_oracle(const GeneralVoF& state, SimpleFluid::PLIC::GeometryHalfspace 
     for (std::size_t i = 0; i < state.owned_order().size(); ++i)
     {
         const auto& leaf = state.hierarchy()->owned().at(state.owned_order()[i]);
-        const auto geometry = state.hierarchy()->geometry(leaf);
+        const auto geometry = OracleGeometry::from_geometry(*state.hierarchy()->geometry(leaf));
         const auto cut = geometry->clip(plane); // Explicit independent exact reference.
         const double gas = cut.inside ? cut.inside->moments().volume.as_double() : 0;
         const double carrier = cut.outside ? cut.outside->moments().volume.as_double() : 0;

@@ -60,10 +60,19 @@ foreach(source IN LISTS plic_sources)
 endforeach()
 foreach(source IN ITEMS
     FVM/GeneralVoF.cc FVM/GeneralVoF.hh FVM/details/GeneralVoFState.cc
-    FVM/details/GeneralVoFFiniteTransport.cc FVM/details/GeneralVoFFiniteTransport.tcc
     FVM/details/FiniteVoFTransport.cc FVM/details/FiniteVoFTransport.tcc
     solvers/GeneralVoFSolver.cc solvers/details/GeneralVoFSolverSupport.tcc
     solvers/details/GeneralVoFSolverFinite.tcc solvers/details/GeneralVoFExactSolver.tcc)
     simplefluid_check_plic_include_order("${SIMPLEFLUID_SOURCE_DIR}/src/${source}")
+endforeach()
+foreach(component IN ITEMS FVM solvers)
+    file(GLOB_RECURSE operation_sources
+        "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.hh"
+        "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.cc"
+        "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.ipp"
+        "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/details/GeneralVoF/*.tcc")
+    foreach(source IN LISTS operation_sources)
+        simplefluid_check_plic_include_order("${source}")
+    endforeach()
 endforeach()
 message(STATUS "Native AMR, FVM and solver clients use public PLIC backend boundaries")
