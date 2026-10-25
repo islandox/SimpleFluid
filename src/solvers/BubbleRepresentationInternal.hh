@@ -1,9 +1,9 @@
 /**
  * @file BubbleRepresentationInternal.hh
- * @brief Private representation planner owned transactionally by the radiolytic controller.
+ * @brief Private representation planner owned transactionally by the reacting controller.
  */
 #pragma once
-#include "equations/RadiolyticBubbleKinetics.hh"
+#include "equations/BubblePopulationKinetics.hh"
 #include "solvers/AdaptiveVoFSolver.hh"
 #include "solvers/BubbleRepresentation.hh"
 
@@ -28,7 +28,7 @@ public:
         std::vector<std::vector<SimpleFluid::Meshes::AMR::AMRBox>> supports;
         std::shared_ptr<const Snapshot> next;
     };
-    BubbleRepresentationEngine(BubbleRepresentationOptions options, RadiolyticGasPhysics::MolarPivotGrid pivots,
+    BubbleRepresentationEngine(BubbleRepresentationOptions options, BubbleGasPhysics::MolarPivotGrid pivots,
         std::vector<std::string> populations);
     void request_births(const std::vector<BubbleBirthSeed>& seeds);
     [[nodiscard]] const Snapshot& snapshot() const noexcept;
@@ -40,7 +40,7 @@ public:
 
 private:
     BubbleRepresentationOptions options_;
-    RadiolyticGasPhysics::MolarPivotGrid pivots_;
+    BubbleGasPhysics::MolarPivotGrid pivots_;
     std::vector<std::string> populations_;
     std::shared_ptr<const Snapshot> state_;
     std::uint64_t binding_revision_ = 0;

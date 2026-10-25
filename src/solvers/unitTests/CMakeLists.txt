@@ -1,6 +1,12 @@
 # Unit tests for solvers
 
 file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
+if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+  # Solver/private-VoF fixtures are omitted, not registered as skipped passes.
+  # Lower-level FVM and geometry tests retain their independent registrations.
+  list(FILTER TEST_SOURCES EXCLUDE REGEX
+       ".*/(test[^/]*VoF[^/]*|testBubbleRepresentation)\\.cc$")
+endif()
 list(FILTER TEST_SOURCES EXCLUDE REGEX
      ".*/testReactingGasModelMultiRank\\.cc$")
 list(FILTER TEST_SOURCES EXCLUDE REGEX
@@ -19,8 +25,29 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     # Exercise the private adapter directly without exporting it from the DSO.
     target_sources(${TEST_NAME} PRIVATE ../details/LowMachFaceTransportAdapter.cc)
   endif()
+  if(TEST_NAME STREQUAL "testConservativeVoFTransport")
+    # Compile the private numerical boundary directly; it is not a DSO export.
+    target_sources(${TEST_NAME} PRIVATE ../details/ConservativeVoFTransport.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc ../details/GeneralVoFTransferBinding.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFCurvature")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFCurvature.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFFlowWorkspace")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFFlowWorkspace.cc ../details/VoFProjectionWorkspace.cc
+      ../details/GeneralVoFPhiClosure.cc ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactPressure.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFExactPressure")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFExactPressure.cc
+      ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
+  endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFPhiClosure")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoFPhiClosure.cc
+      ../details/GeneralVoFProjectionArithmetic.cc ../details/GeneralVoFExactStorage.cc ../details/ConservativeVoFExactArithmetic.cc)
+  endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  if(TEST_NAME STREQUAL "testVerificationCases")
+  if(TEST_NAME STREQUAL "testGeneralVoFSolver")
+    simplefluid_discover_tests(${TEST_NAME} PROPERTIES LABELS "vof\\;general_mesh\\;integration" TIMEOUT 1800)
+  elseif(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
       ${TEST_NAME}
       PROPERTIES LABELS "verification\\;integration"
@@ -30,6 +57,19 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       ${TEST_NAME}
       PROPERTIES LABELS "ale\\;free_surface\\;boussinesq\\;conservation\\;transaction"
     )
+  elseif(TEST_NAME STREQUAL "testAdaptiveVoFLowMach" OR TEST_NAME STREQUAL "testVoFLowMach"
+         OR TEST_NAME STREQUAL "testReactingVoFCoupler" OR TEST_NAME STREQUAL "testBubbleRepresentation")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;reacting_gas\\;thermodynamics\\;conservation\\;transaction\\;collective")
+  elseif(TEST_NAME STREQUAL "testAdaptiveVoFSolver")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;amr\\;conservation\\;capillary\\;transaction\\;collective")
+  elseif(TEST_NAME STREQUAL "testConservativeVoFTransport")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testVoFSolver")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;conservation\\;capillary\\;transaction")
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
@@ -140,6 +180,61 @@ simplefluid_add_mpi_test(NAME ReactingBoussinesqCoupling_2procs TARGET testReact
     LABELS "mpi;reacting_gas;boussinesq;conservation;transaction" TIMEOUT 180)
 simplefluid_add_mpi_test(NAME SpeciesLiquidMassInventory_2procs TARGET testSpeciesLiquidMassInventory PROCS 2
     LABELS "mpi;reacting_gas;free_surface;ale;conservation;transaction" TIMEOUT 180)
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+  simplefluid_add_mpi_test(
+      NAME BubbleRepresentation_2procs
+      TARGET testBubbleRepresentation
+      PROCS 2
+      LABELS "vof;reacting_gas;representation;conservation;transaction;collective"
+      TIMEOUT 300)
+
+  simplefluid_add_mpi_test(
+      NAME BubbleRepresentation_EmptyRank_9procs
+      TARGET testBubbleRepresentation
+      PROCS 9
+      ARGS "--gtest_filter=BubbleRepresentationTest.EmptyOwnedRankParticipatesInRegistryPreviewAndReplay"
+      LABELS "vof;reacting_gas;representation;conservation;transaction;collective;empty_rank"
+      TIMEOUT 120)
+
+  simplefluid_add_mpi_test(
+      NAME AdaptiveVoFLowMach_2procs
+      TARGET testAdaptiveVoFLowMach
+      PROCS 2
+      LABELS "vof;reacting_gas;thermodynamics;conservation;transaction;collective"
+      TIMEOUT 240)
+
+  simplefluid_add_mpi_test(
+      NAME AdaptiveVoFLowMach_EmptyRank_9procs
+      TARGET testAdaptiveVoFLowMach
+      PROCS 9
+      ARGS "--gtest_filter=AdaptiveVoFLowMachTest.EmptyOwnedRankParticipatesInInitializationPopulationSourcesAndHintGuards"
+      LABELS "vof;reacting_gas;thermodynamics;conservation;transaction;collective;empty_rank"
+      TIMEOUT 120)
+
+  simplefluid_add_mpi_test(
+      NAME ReactingVoFCoupler_2procs
+      TARGET testReactingVoFCoupler
+      PROCS 2
+      LABELS "vof;reacting_gas;thermodynamics;conservation;transaction;collective"
+      TIMEOUT 240)
+
+  simplefluid_add_mpi_test(
+      NAME AdaptiveVoFSolver_2procs
+      TARGET testAdaptiveVoFSolver
+      PROCS 2
+      LABELS "vof;amr;conservation;capillary;transaction;collective"
+      TIMEOUT 1200)
+
+  simplefluid_add_mpi_test(
+      NAME VoFRejectsDistributedConstruction_2procs
+      TARGET testVoFSolver
+      PROCS 2
+      ARGS "--gtest_filter=VoFSolverParallelTest.RejectsDistributedConstruction"
+      LABELS "vof;collective"
+      TIMEOUT 60)
+
+endif()
 
 simplefluid_add_mpi_test(
     NAME CoupledPreconditionerValidation_2procs
@@ -361,6 +456,7 @@ simplefluid_add_mpi_test(
     LABELS "mpi;scalar_source_decay;transport"
     TIMEOUT 120)
 
+
 simplefluid_add_mpi_test(
     NAME ScalarVoidDiffusionConservation_2procs
     TARGET testPhase13PlusModels
@@ -483,6 +579,7 @@ simplefluid_add_mpi_test(NAME SASScalarVoid_2procs TARGET testSASSupportedPaths 
     ARGS "--gtest_filter=SASSupportedPathsTest.ScalarVoidDiffusionCollapseAndFeedbackRollBackWithSAS"
     LABELS "mpi;turbulence;sas;void;small_fixture" TIMEOUT 120)
 
+
 simplefluid_add_mpi_test(NAME SASReactingGas_2procs TARGET testSASSupportedPaths PROCS 2
     ARGS "--gtest_filter=SASSupportedPathsTest.ReactingGasAndSpeciesLedgersRollBackWithSAS"
     LABELS "mpi;turbulence;sas;reacting_gas;small_fixture" TIMEOUT 120)
@@ -501,6 +598,129 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;ale;continuity;validation"
     TIMEOUT 60)
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+  # Direct transport update, before pressure or accepted-state publication.
+  simplefluid_add_mpi_test(
+      NAME ConservativeVoFTransport_2procs
+      TARGET testConservativeVoFTransport
+      PROCS 2
+      LABELS "vof;conservation;collective"
+  )
+
+  # The largest direct fixture has 32 cells; 33 ranks guarantee empty owners.
+  simplefluid_add_mpi_test(
+      NAME ConservativeVoFTransport_EmptyRank_33procs
+      TARGET testConservativeVoFTransport
+      PROCS 33
+      LABELS "vof;conservation;collective;empty_rank"
+      TIMEOUT 120)
+
+
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFFlowWorkspace_2procs
+      TARGET testGeneralVoFFlowWorkspace
+      PROCS 2
+      LABELS "vof;amr;flow;collective"
+      TIMEOUT 180)
+
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFSolver_2procs
+      TARGET testGeneralVoFSolver
+      PROCS 2
+      ARGS "--gtest_filter=GeneralVoFSolverTest.*"
+      LABELS "mpi;vof;general_mesh;integration"
+      TIMEOUT 3600
+  )
+
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFFlowWorkspace_EmptyRank_4procs
+      TARGET testGeneralVoFFlowWorkspace
+      PROCS 4
+      LABELS "mpi;vof;flow;collective;empty_rank"
+      TIMEOUT 180)
+
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFSolver_SingleLayer_4procs
+      TARGET testGeneralVoFSolver
+      PROCS 4
+      ARGS "--gtest_filter=GeneralVoFSolverTest.ClosedTwoByTwoSingleLayerConstantCarrierAdvancesAndRejectsAtomically"
+      LABELS "mpi;vof;general_mesh;integration;empty_rank"
+      TIMEOUT 180)
+
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFSolver_EmptyRank_4procs
+      TARGET testGeneralVoFSolver
+      PROCS 4
+      ARGS "--gtest_filter=GeneralVoFSolverTest.NativeSourceFreeStationaryAdvanceAndRejectedStepRetainAcceptedPublication:GeneralVoFSolverTest.IndependentMixedPlaneRetainsBothPhaseMassesInSourceFreeStationaryFlow:GeneralVoFSolverTest.MicroscopicDeclaredTraceAggregatesPhaseMassBeforeDiagnosticNarrowing:GeneralVoFSolverTest.SymmetricNativeRegridRetainsAcceptedPhysicalMomentumAtFixedClock:GeneralVoFSolverTest.TinyCellRepartitionRetainsIndependentZeroRatesAndSubnormalAggregateMomentum"
+      LABELS "mpi;vof;general_mesh;integration;empty_rank"
+      TIMEOUT 3600
+  )
+
+  # Explicit optional-authority contract checks, not experimental physical qualification.
+  set(general_vof_experimental_inventory_filter
+      "--gtest_filter=GeneralVoFSolverTest.ExperimentalInventoryIsExplicitAndRollbackPreservesItsSelectedAuthority:GeneralVoFSolverTest.ExperimentalInventorySamePolicyRegridRetainsClockAndPhaseAuthority:GeneralVoFSolverTest.ExperimentalInventoryRejectsForeignPolicyTrialWithoutChangingAcceptedSolver")
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFSolver_ExperimentalInventory_2procs
+      TARGET testGeneralVoFSolver
+      PROCS 2
+      ARGS "${general_vof_experimental_inventory_filter}"
+      LABELS "mpi;vof;general_mesh;experimental;policy"
+      TIMEOUT 180)
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFSolver_ExperimentalInventory_4procs
+      TARGET testGeneralVoFSolver
+      PROCS 4
+      ARGS "${general_vof_experimental_inventory_filter}"
+      LABELS "mpi;vof;general_mesh;experimental;policy;empty_rank"
+      TIMEOUT 180)
+
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFExactPressure_2procs
+      TARGET testGeneralVoFExactPressure
+      PROCS 2
+      LABELS "vof;pressure;exact;collective;empty_rank"
+      TIMEOUT 180)
+  simplefluid_add_mpi_test(
+      NAME GeneralVoFExactPressure_4procs
+      TARGET testGeneralVoFExactPressure
+      PROCS 4
+      LABELS "vof;pressure;exact;collective;empty_rank"
+      TIMEOUT 180)
+
+  # Fixed-width finite arithmetic has independent capacity/empty-owner coverage.
+  foreach(_finite_projection_procs IN ITEMS 2 4)
+    simplefluid_add_mpi_test(
+      NAME GeneralVoFFiniteProjection_${_finite_projection_procs}procs
+      TARGET testGeneralVoFFlowWorkspace
+      PROCS ${_finite_projection_procs}
+      ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.FiniteProjectionKeepsOriginalPhysicalThresholdWithObservedEmptyOwners"
+      LABELS "mpi;vof;finite;projection;collective;empty_rank"
+      TIMEOUT 180)
+    simplefluid_add_mpi_test(
+      NAME GeneralVoFFinitePhiClosure_${_finite_projection_procs}procs
+      TARGET testGeneralVoFPhiClosure
+      PROCS ${_finite_projection_procs}
+      ARGS "--gtest_filter=GeneralVoFPhiClosureTest.FiniteSparseForestPreservesCirculationAndRejectsIndependentCapacityExhaustion"
+      LABELS "mpi;vof;finite;conservation;collective"
+      TIMEOUT 180)
+  endforeach()
+
+  # Private numerical sources are compiled directly in these test executables.
+  # Source properties are directory-scoped, so repeat the production policy here.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+      set_source_files_properties(
+          ../GeneralVoFSolver.cc
+          ../details/ConservativeVoFTransport.cc
+          ../details/GeneralVoFFlowWorkspace.cc
+          ../details/GeneralVoFPhiClosure.cc
+          ../details/GeneralVoFCurvature.cc
+          PROPERTIES
+          COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+          SKIP_UNITY_BUILD_INCLUSION TRUE
+          SKIP_PRECOMPILE_HEADERS TRUE)
+  endif()
+endif()
 
 foreach(_semi_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME SemiStructuredFlow_${_semi_ranks}procs

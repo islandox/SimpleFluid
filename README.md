@@ -5,6 +5,11 @@ reacting-flow foundation. The roadmap records which interface and AMR
 components are present in this snapshot. Retained source does not establish
 supported generic reacting-VoF execution or physical qualification.
 
+**VoF disabled:** VoF solvers remain unqualified and excluded from this refactor.
+Configuration rejects `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON`; keep it `OFF`.
+The multispecies VoF migration, bounded floating-point path, and exact-rational
+path are deferred. Shared geometry and FVM utilities remain available.
+
 A finite-volume computational fluid dynamics code for incompressible Boussinesq
 natural convection, built on [Trilinos](https://trilinos.github.io) for distributed-memory,
 GPU-portable parallelism.
@@ -802,8 +807,11 @@ laws. Its closed, orthogonal, inviscid/slip-wall and nonperiodic limits do not
 establish a Boussinesq boiling/free-surface combination.
 
 Neither planar path is a general moving-interface or cross-mesh phase-occupancy
-model. The retained VoF and AMR sources do not extend this reacting-flow
-support matrix or establish generic reacting-VoF coupling.
+model. VoF is disabled and explicit enablement rejects configuration. Its old
+resolved/dispersed, adaptive/capillary, bounded-FP and exact-rational routes are
+deferred, not alternate reacting-flow configurations. The
+[general AMR design](docs/architecture/general_amr.md) remains a separate
+geometry/distribution/flow qualification program.
 
 ## Dependencies
 
@@ -852,8 +860,12 @@ example and storage accounting](docs/region_meshes.md).
 | Region composition, MPI, and ALE | [Region meshes](docs/region_meshes.md) |
 | Conservative cell-field projection | [Mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md) |
 | Coupled linear and nonlinear solvers | [Operator backends](docs/architecture/coupled_operator_backends.md) and [NOX solver](docs/architecture/coupled_nonlinear_solver.md) |
+| Deferred uniform-mesh VoF | [Historical guide; backend unavailable in this refactor](docs/modeling/vof.md) |
+| Deferred adaptive VoF | [Historical adaptive guide](docs/modeling/adaptive_vof.md) |
+| General native AMR and flow qualification | [XY/Z, polyhedral, and mixed-region design](docs/architecture/general_amr.md) |
 | Native conservative reacting flow | [Species, phase energy, pressure and transactions](docs/architecture/low_mach_reacting_flow.md) |
 | Reacting gas sources in solution | [Species, source, energy, and conservation contract](docs/modeling/reacting_gas_sources.md) |
+| Bubble representation changes | [Birth registry, promotion, demotion, and pressure history](docs/modeling/bubble_representation.md) |
 | SST-SAS configuration and supported paths | [Model contract and qualification](docs/modeling/sst_sas.md) |
 | Gas sources, boiling, and moving pool volume | [Bubble/boiling model](docs/modeling/reacting_bubble_boiling.md) and [planar ALE](docs/modeling/planar_free_surface_volume_budget.md) |
 | External reference comparisons | [OpenFOAM workflows](verification/openfoam/README.md) |

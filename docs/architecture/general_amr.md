@@ -30,7 +30,7 @@ documentation consolidation is not a new execution of those tests.
 | 5. Local/mixed products | Shared base/run storage, typed participants, closed face/edge/vertex grading, native tiles and conservative remap | Unsupported crossed patch groupings reject; contacts have separate domains and no implicit exchange law; storage reports are nonadditive |
 | 6. Distributed state | Detached owner-local closure, typed ancestry, sparse native/state migration, accepted/history frames, final packet-cost admission and asserted empty owners | Initial complete-source bootstrap, unsupported topology changes, sparse ALE and production scaling remain outside qualification |
 | 7. General flow | Finite-default inventories; explicit experimental exact policy; PLIC, unsplit transport, physical-residual pressure/momentum, rollback/regrid and selected serial/MPI flow checks | Complete physical, long-horizon, high-contrast curved-seam and production-scale qualification remains open |
-| 8–9 | No general-mesh reacting/representation integration or certified nonconvex flow is claimed | Implement and qualify the separate stages below |
+| 8–9 | No general-mesh reacting-gas/representation integration or certified nonconvex flow is claimed | Implement and qualify the separate stages below |
 
 The finite-default ten-step skew coarse/fine passage fixture has completed its
 original 0.02 s endpoint and unchanged inventory, momentum, positivity and
@@ -75,7 +75,7 @@ selected here; external algorithm references explain proposed approaches only.
 | Mixed native regions | Conforming, nested planar coarse/fine, and translated periodic joins | Independent ancestry with cross-region closure, stage 5 |
 | Analytic cylindrical / `SweptRZ` providers | Native geometry and existing supported motion | Retain as static topology participants; refinement or incompatible neighboring splits reject until provider-specific refiners/joins qualify |
 | Distributed shard input | Legacy partition planning assembles shards at a root | Stage 6 detached owner-local closure and migration after bounded complete-source bootstrap; bounded correctness, memory and work-accounting gates qualified |
-| Extruded/polyhedral VoF and reaction kinetics | No support implied by native geometry | General geometric transport/flow, then physical coupling, stages 7 and 8 |
+| Extruded/polyhedral VoF and reacting gas | No support implied by native geometry | General geometric transport/flow, then physical coupling, stages 7 and 8 |
 
 The relevant seams are [`CartesianAMR::adapt`](../../src/geometry/mesh/AMR/CartesianAMR.hh),
 [`MultiRegionMesh::Region`](../../src/geometry/mesh/MultiRegionMesh.hh),
@@ -1007,7 +1007,8 @@ with the existing split phase update and is not a permitted adapter shortcut.
 Incompressible flow derives mass from fixed phase densities and the corrected
 phase-volume ledger. Low-Mach flow instead uses final liquid/species/population
 inventories and their actual mass fluxes. Its velocity is the continuous/liquid
-velocity, with physical momentum `P = M*u + sum(W_H2*n_k*w_k)`. Account for
+velocity, with physical momentum `P = M*u + sum(m_k*w_k)`, where `m_k` is the
+physical gas mass of population `k`. Account for
 drift face/cell impulses separately. Use physical source impulses, never species
 molar flux inferred from geometric volume or source velocity inferred from a
 tiny fraction. Passive velocity bounds apply to the source-free, force-free
@@ -1051,7 +1052,13 @@ coverage protects a uniformly fine interface neighborhood. The high-contrast
 curved-seam gate remains open: retain the disabled strict Cartesian oracle and
 equivalent new-provider criteria without relaxing pressure or velocity gates.
 
-## Transactions, reaction kinetics, and checkpoint boundaries
+## Transactions, reacting-gas sources, and checkpoint boundaries
+
+The [general reacting-gas source contract](../modeling/reacting_gas_sources.md)
+requires supplied reaction extents, finite reactant inventories, and independent
+thermal input. Stage 8 must qualify that interface on each admitted geometry.
+Current hydrogen-specific controller coverage does not establish general
+reaction-network or multispecies support.
 
 Prepare geometry, partition/maps, remapped state, operators, coupling maps, and
 registry changes privately. Pin source stamps and revisions throughout; catch
@@ -1282,7 +1289,7 @@ matrices require a specific scaling question.
 | 5. Mixed-region / layer-local closure | Product runs, independent ancestry, nested joins, then validated multi-provider tiles | Crossed-trace closure/rejection; one canonical subface flux; periodic matching; contact isolation; physical gradation; no duplicated/gapped tiles; compact repeated seams |
 | 6. Distributed migration | Distributed closure/planning and owner-to-owner topology/state migration | Serial/partition-equivalent keys and budgets; split siblings; asserted empty ownership; unique ownership; stale/rank-divergent failures without deadlock; bounded per-rank memory; no root union |
 | 7. General VoF / flow | Polyhedral reconstruction, unsplit phase budgets, compatible implicit momentum and physical-residual solves | Oblique planes and skew/coarse-fine/rank transport; microscopic phase/complement budgets; constant velocity and passive momentum bounds; microscopic/subnormal carrier oracle and original residual; correction-budget rejection/reuse; hydrostatics and finite-duration capillarity with independent mixed fractions; retain open high-contrast curved-seam gate; viscous modes and regrid momentum |
-| 8. Reacting / representation integration | Nonzero volume sources, closure/schema support, actual film/birth geometry, complete coupled transactions | Phase mass/species/energy/physical momentum and source-divergence closure; tiny retained carriers; empty/depleted front speed and timestep parity; same-mesh schema reorder/removal; remote deposition and donor competition; immutable retained trials after failure; pending-history rejection and checkpoint replay |
+| 8. Reacting-gas / representation integration | Nonzero volume sources, closure/schema support, actual film/birth geometry, complete coupled transactions | Phase mass/species/energy/physical momentum and source-divergence closure; tiny retained carriers; empty/depleted front speed and timestep parity; same-mesh schema reorder/removal; remote deposition and donor competition; immutable retained trials after failure; pending-history rejection and checkpoint replay |
 | 9. Certified nonconvex extension | Kernel-certified star cells, then constrained general decomposition | Invalid/self-intersecting shell rejection; disjoint union and shell/moment equality; canonical boundary splits; disconnected phase patches; saved-parent recovery; repeat geometry, VoF, and coupling gates on each admitted class |
 
 Use [`testCartesianAMR`](../../src/geometry/unitTests/testCartesianAMR.cc),

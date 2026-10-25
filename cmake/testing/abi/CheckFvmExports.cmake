@@ -201,4 +201,17 @@ foreach(method IN ITEMS
     endif()
 endforeach()
 
+# Native AMR consumers in this branch link MeshHandle construction into FVM,
+# which therefore owns the orthogonal planner and topology observers too.
+foreach(method IN ITEMS OrthogonalMeshDecomposition owned_begin owned_end num_owned_cells owner storage_bytes)
+    if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::Meshes::OrthogonalMeshDecomposition::${method}([(]|\n|$)")
+        message(FATAL_ERROR "Missing compiled orthogonal partition API: ${method}")
+    endif()
+endforeach()
+foreach(method IN ITEMS orthogonal_decomposition decomposed_orthogonal_topology)
+    if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::MeshHandle<[^\n]+>::${method}([(]|\n|$)")
+        message(FATAL_ERROR "Missing compiled orthogonal observer: ${method}")
+    endif()
+endforeach()
+
 message(STATUS "FVM shared-library exports verified")

@@ -346,15 +346,15 @@ struct Snapshot
     }
 };
 
-RadiolyticVoFOptions options_for(const Solver& flow)
+ReactingVoFOptions options_for(const Solver& flow)
 {
-    RadiolyticVoFOptions options;
-    options.radiolysis.mode = RadiolyticGasMode::Disabled;
-    options.radiolysis.surface_tension = flow.material().surface_tension;
-    options.radiolysis.henry_coefficient = 1e-5;
-    options.radiolysis.hydrogen_diffusivity = 1e-5;
-    options.radiolysis.nucleation_radius = 1e-5;
-    options.radiolysis.micro_to_large_conversion_coefficient = 0.0;
+    ReactingVoFOptions options;
+    options.reacting_gas.mode = ReactingGasMode::Disabled;
+    options.reacting_gas.surface_tension = flow.material().surface_tension;
+    options.reacting_gas.henry_coefficient = 1e-5;
+    options.reacting_gas.hydrogen_diffusivity = 1e-5;
+    options.reacting_gas.nucleation_radius = 1e-5;
+    options.reacting_gas.micro_to_large_conversion_coefficient = 0.0;
     options.dissolved_diffusion = false;
     const double pivot = sphere_moles(radius, flow.material().surface_tension);
     options.upper_populations = {"lower", "birth", "upper"};
@@ -1119,7 +1119,7 @@ TEST(BubbleRepresentationTest, InvalidSparseParcelAndRankLocalStaleRevisionRejec
     accepted.expect_equal(*flow);
 }
 
-TEST(BubbleRepresentationTest, CoupledContinuationReplaysPendingHistoryWithoutDuplicatingHeatOrRadiolysis)
+TEST(BubbleRepresentationTest, CoupledContinuationReplaysPendingHistoryWithoutDuplicatingHeatOrReactingGas)
 {
     constexpr double sigma = 0.05, dt = 1e-4, conversion_radius = 0.25;
     SimpleFluid::Meshes::AMR::AMRGrid grid;
@@ -1160,10 +1160,10 @@ TEST(BubbleRepresentationTest, CoupledContinuationReplaysPendingHistoryWithoutDu
     flow->initialize_low_mach(thermodynamics(0.0, 0.0), initial);
     auto options = options_for(*flow);
     options.upper_pivots.mol_per_bubble = {0.5 * pivot, pivot, 2.0 * pivot};
-    options.radiolysis.mode = RadiolyticGasMode::Sheng2024TwoPopulation;
-    options.radiolysis.hydrogen_yield_mol_per_j = 2e-7;
-    options.radiolysis.gas_release_efficiency = 0.5;
-    options.radiolysis.microbubble_lifetime = 1e100;
+    options.reacting_gas.mode = ReactingGasMode::TwoPopulation;
+    options.reacting_gas.hydrogen_yield_mol_per_j = 2e-7;
+    options.reacting_gas.gas_release_efficiency = 0.5;
+    options.reacting_gas.microbubble_lifetime = 1e100;
     ReactingVoFCoupler coupler(flow, options);
     coupler.request_births({seed(100, {0.5, 0.5, 0.5}, {{0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}})});
     const auto conversion = coupler.preview_representation();
@@ -1174,14 +1174,14 @@ TEST(BubbleRepresentationTest, CoupledContinuationReplaysPendingHistoryWithoutDu
     const Snapshot pending(*flow);
     const Inventory before(*flow, pending.state);
     const auto event_id = coupler.conversion_history().front().event_id;
-    RadiolyticVoFInput input;
+    ReactingVoFInput input;
     for (std::size_t c = 0; c < flow->mesh()->num_owned_cells(); ++c)
     {
         const double cell_volume = flow->mesh()->cell_volume(static_cast<LO>(c));
-        input.absorbed_radiation_energy.push_back(100.0 * cell_volume);
+        input.reaction_driver_energy.push_back(100.0 * cell_volume);
         input.net_thermal_energy.push_back(20.0 * cell_volume);
     }
-    const double expected_production = 1e-7 * total(input.absorbed_radiation_energy);
+    const double expected_production = 1e-7 * total(input.reaction_driver_energy);
     const double expected_heat = total(input.net_thermal_energy);
     const auto checkpoint = coupler.checkpoint();
     const auto trial = coupler.preview(dt, input);
@@ -1222,7 +1222,7 @@ TEST(BubbleRepresentationTest, CoupledContinuationReplaysPendingHistoryWithoutDu
     EXPECT_NEAR(global_sum(static_cast<double>(local_energy_change)), expected_heat + diagnostic.pressure_work,
         1e-8 * expected_heat);
     expect_scaled(diagnostic.net_thermal_energy, expected_heat, 2e-13);
-    expect_scaled(diagnostic.radiolysis_energy, total(input.absorbed_radiation_energy), 2e-13);
+    expect_scaled(diagnostic.reacting_gas_energy, total(input.reaction_driver_energy), 2e-13);
     EXPECT_LE(diagnostic.maximum_occupancy_error, 2e-8);
     EXPECT_LE(diagnostic.maximum_continuity_residual, 5e-8);
     coupler.restore(checkpoint);

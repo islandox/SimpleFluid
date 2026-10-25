@@ -5,6 +5,11 @@ reacting-flow foundation. The roadmap records which interface and AMR
 components are present in this snapshot. Retained source does not establish
 supported generic reacting-VoF execution or physical qualification.
 
+**VoF disabled:** VoF solvers remain unqualified and excluded from this refactor.
+Configuration rejects `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON`; keep it `OFF`.
+The multispecies VoF migration, bounded floating-point path, and exact-rational
+path are deferred. Shared geometry and FVM utilities remain available.
+
 **Documentation review date:** October 24, 2026
 
 This refresh reconciles the current source, public APIs, and checked-in test
@@ -24,9 +29,12 @@ phase's unchecked tasks and acceptance criteria as its completion contract.
 
 ### Current priorities
 
-The retained VoF and AMR source extent is recorded in the status map below.
-Generic reacting-VoF integration and physical qualification remain open;
-a source-presence entry is not a tested or supported execution claim.
+The retained Phase 22/23 VoF sources are deferred, including bounded floating-point
+and exact-rational execution paths. Their historical component checkmarks below
+do not enable a supported reacting-VoF application. Independent hierarchy,
+geometry/remap and mesh-partition infrastructure remains available within its
+own documented scope; production scaling and broader physical qualification
+remain open.
 
 1. Qualify supplied reaction/property laws and physical cases against the
    implemented Phases 12/14.1 species, donor, phase and thermal contracts.
@@ -395,7 +403,7 @@ Keep this phase independent of the new physics so solver performance changes can
 - [ ] Revisit scoped geometry execution in
       `PlanarALEMeshMotion::compute_trial_state` only with stronger
       application-level performance evidence. The October 11, 2026 review of
-      external-host candidate C2 reverted the trial-read lease and its two added
+      external host candidate C2 reverted the trial-read lease and its two added
       tests because the measured benefit did not clear the predeclared
       performance gate, not because of a correctness failure. On the
       267,652-cell, six-rank, 0–0.1 s startup fixture, warmed ABBAAB runs passed
@@ -410,7 +418,7 @@ Keep this phase independent of the new physics so solver performance changes can
       by a competing build were excluded. Preserve arithmetic, traversal order,
       collective failure handling, and physical gates in any requalification;
       do not treat the inclusive phase reduction as an established wall-time
-      speedup. The patch and evidence remain in the external host's local, untracked
+      speedup. The patch and evidence remain in the local, untracked external host
       directory `build/next-optimization-20261010/`: `C2.patch`,
       `C2-comparison.json`, `C2-decision.json`, and `report.json`.
 
@@ -894,9 +902,9 @@ key/default/unit/validity reference remains open.
       limitations of the existing numerical foundation.
 - [x] Separate weak RANS-plus-bubble coupling from phase-aware turbulent
       Euler–Euler flow and distinguish proposed design from current APIs.
-- [ ] Complete the [external-host integration](docs/architecture/external_host_reacting_flow.md),
-      including finite species/composition feedback and a supported bulk dissolved-
-      diffusion owner before claiming coupled-application transport parity.
+- [ ] Complete the [external host companion migration](docs/architecture/external_host_reacting_flow.md),
+      including finite species/isotope feedback and a supported bulk Winter-diffusion
+      owner before claiming parity with the removed reacting APIs.
 - [ ] Document every supported configuration key with default, SI unit,
       validity range and migration mapping; retired source keys must reject.
 - [x] Document supplied rate/stoichiometry/property interfaces, finite donor
@@ -1141,9 +1149,8 @@ physical closure; generic cell transfer alone does not complete them.
 - [ ] Validate pool-volume and extensive-inventory closure across supported MPI
       partition counts.
 
-Full VoF interface capturing and macroscopic surface breakup are outside
-this planar budget. Retained VoF sources have separate contracts;
-Euler–Euler gas momentum remains Phase 21.
+Full VoF interface capturing and macroscopic surface breakup belong to the
+separate Phase 22 program below; Euler–Euler gas momentum remains Phase 21.
 Completing this planar phase must not imply those capabilities.
 
 ---
@@ -1194,3 +1201,511 @@ not liquid-volume-fraction weighted.
 - [ ] Full model is validated against at least one independent bubbly-flow benchmark.
 
 ---
+
+## Phase 22 — Resolved and dispersed reacting-gas bubbles
+
+**Status:** Stage 1's serial uniform backend and Stage 2's distributed Cartesian
+AMR backend are implemented and focused-tested. Stage 3 adds numerical
+low-Mach single-gas source and resolved/dispersed interface coupling. Stage 4 adds
+opt-in conservative representation trials with a persistent birth registry.
+Adaptive levels share one timestep. The target is centimetric resolved gas in
+reacting solutions. Existing implementation/checkmarks below refer to the
+legacy single-gas substrate. General species/rate integration, physical
+calibration, application resolution studies and the listed extensions remain
+open; numerical tests alone do not qualify reacting-solution transients.
+
+### Physical and ownership contracts
+
+- [ ] Generalize the legacy single-gas substrate to the species/rate and shared
+      donor/heat contracts in [Phase 12](#phase-12--general-reacting-gas-source-in-solution)
+      and [Phase 14.1](#phase-141--dissolved-gas-transport-and-bubble-populations).
+      Verify each species through dissolved/dispersed/resolved/headspace storage,
+      source acceptance, representation changes, adaptation and MPI exchange.
+
+- [x] Keep resolved gas `f`, dispersed fractions `alpha_d,k`, and liquid
+      `alpha_l = 1 - f - sum(alpha_d,k)` distinct. Canonical conservative
+      physical arrays store extensive amounts per owned cell. Published
+      population number/molar densities are per bulk volume. Dissolved
+      concentration `C_H2` is per liquid volume; the legacy bulk inventory
+      density `I_H2 = alpha_l*C_H2` corresponds to cell amount `V*I_H2`.
+- [x] Add resolved-gas molar inventory and a single-gas ledger covering
+      dissolved, dispersed, resolved, produced, and escaped gas. Every molecule
+      belongs to one inventory; representation changes create no gas inventory.
+- [x] Extend conservative phase mass/momentum/thermal transport to low-Mach
+      gas EOS and material-volume sources, keeping absolute thermodynamic and
+      gauge pressures distinct and counting capillary pressure once.
+- [x] Keep supplied solution properties and legacy material correlations
+      external. Use validated domains for all selected transfer/slip laws.
+- [x] Retain external shared ownership of the flow solver. Checkpoint phase
+      inventories and cumulative physical-transfer ledgers; publish accepted
+      states only.
+- [x] Extend checkpoints to persistent birth identities, pending conversion
+      reservations, and accepted representation-change events. Instantaneous
+      component labels are not a material-lineage tracker through advection,
+      breakup or coalescence.
+
+### Stage 1 — Uniform-mesh geometric VoF
+
+The first executable baseline is fixed, uniform Cartesian, isothermal,
+source-free flow with two incompressible phases of different densities. It
+establishes the geometric/conservative flow core before gas EOS, thermal and
+reaction-source coupling is introduced. Supported boundary and parallel contracts
+must be explicit and unsupported modes rejected.
+
+- [x] Add compiled geometric PLIC reconstruction and conservative swept-volume
+      advection with bounded fractions and shared phase face fluxes.
+- [x] Add a variable-density VoF flow solver with consistent mass/momentum
+      transport, variable-coefficient pressure projection, balanced surface
+      tension, and computed interface curvature.
+- [x] Bound the timestep by advection, explicit capillarity, and applicable
+      viscous limits; reject invalid input or a failed step without publishing
+      partially advanced fields/time.
+- [x] Expose native mesh/field results and focused reproducible verification
+      cases without changing the existing Boussinesq path.
+- [x] Verify geometric plane volumes, translation/deformation transport,
+      boundedness, and phase-mass conservation.
+- [x] Verify static Laplace pressure, spurious-current behavior, capillary
+      oscillation, and transport/projection at the intended density ratios.
+- [x] Document algorithms, units, boundary/parallel scope, and numerical
+      qualification separately from future physical validation.
+
+See the [solver guide](docs/modeling/vof.md) and the dedicated
+[VoF verification contracts](docs/verification/vof_solver_contracts.md).
+The evidence includes density ratio 10,000, a complete capillary-wave period,
+and matched-time static bubbles. Short inviscid tests do not establish
+long-time parasitic-current limits, viscous rising-bubble accuracy, or coupled
+reacting-solution qualification.
+
+### Stage 2 — Conservative three-dimensional AMR
+
+The implemented backend uses immutable Cartesian blocks and one shared
+timestep in serial and MPI. Its native mesh/field transaction is the seam for
+the later physical coupling controller.
+
+- [x] Add a dyadic block hierarchy with 2:1 neighboring refinement, including
+      edges/corners, and canonical conservative coarse/fine subfaces. Match
+      periodic face levels and retain exact partial coarse-patch coverage.
+- [x] Refine interface/curvature stencils, predicted motion buffers,
+      curvature-driven thin-neck indicators, nearby interfaces/walls, supplied
+      wake indicators, and imminent promotion regions. Restrict coarsening to
+      uniform pure-phase siblings outside protected neighborhoods.
+- [x] Expose a configurable 24–32-cell minimum-diameter target (0.31–0.42 mm
+      for 10 mm bubbles), with an explicit maximum-level resolution limitation.
+- [x] Prolong PLIC geometry geometrically and transfer phase masses, dissolved
+      and population amounts, signed momentum, and thermal amounts
+      conservatively. These quantities are passive extensives until Stage 3
+      supplies their physical equations and closures.
+- [x] Publish mesh/state changes atomically; freeze topology while a replay
+      checkpoint is active. Rebuild native maps, halos, graphs, and fields;
+      expose topology/partition generations and reject stale refinement plans
+      so external transfers can be invalidated at accepted coupling boundaries.
+- [x] Verify refinement/coarsening and three-dimensional interface passage
+      across coarse/fine and MPI boundaries, capillary startup against a uniform
+      fine reference, viscous stress, pressure balance, rejection, and replay.
+- [x] Verify conservative implicit passive-momentum bounds, microscopic phase
+      donor budgets and passive-carrier conditioning without inventory clipping.
+- [x] Share immutable adaptive geometry and reuse compatible transport/projection
+      workspaces, while refreshing numerical coefficients and protecting replay.
+- [x] Add active curved-interface seam passage at density ratio ten and a stated
+      finite-duration static-bubble check with a uniformly fine interface band.
+- [ ] Qualify active curved interfaces at high density contrast directly on a
+      coarse/fine seam. The retained strict qualification probe remains disabled;
+      short fine-band static and lower-contrast moving cases do not close it.
+- [ ] Qualify prism subdivision and vessel-boundary geometry through the
+      separate [Phase 23](#phase-23--amr-for-native-extruded-polyhedral-and-mixed-region-meshes)
+      geometry and solver gates.
+- [ ] Perform finer centimetric-bubble resolution studies. Interface resolution
+      alone is not wake DNS or mass-transfer resolution; the startup pressure
+      comparison does not qualify rise speed, shape dynamics, or long-time
+      parasitic currents.
+- [ ] Add optional level subcycling only with conservative flux-register
+      corrections. Synchronous levels currently use the same canonical
+      subface flux directly and require no time-subcycling flux register.
+
+See the [adaptive solver guide](docs/modeling/adaptive_vof.md) and the dedicated
+[VoF verification contracts](docs/verification/vof_solver_contracts.md) for the
+supported contracts, reproducible checks, and remaining qualification limits.
+
+### Stage 3 — Reaction-source and interface coupling
+
+**Numerical implementation present; physical calibration and application
+qualification remain open.**
+
+- [x] Retain the legacy microbubble substep through shared reactions-only
+      kernels. Add fixed-molar-pivot upper populations, conservative birth/
+      growth/dissolution/breakup/coalescence event ledgers, explicit underflow
+      policy, and externally supplied rates with declared validity domains.
+      Physical collision kernels use the actual carrier volume, while stored
+      population densities remain bulk-based.
+- [x] Add resolved-interface dissolved single-gas flux using uniquely owned PLIC or
+      aligned-face area, one-sided single-gas partial pressure and Henry equilibrium.
+      Implement a prescribed stagnant-film closure with exact carrier-geometry
+      averaging and analytic planar/oblique checks; thickness and its physical
+      validity remain supplied inputs.
+- [x] Couple liquid/gas caloric EOS, thermal transport, finite chemical-donor
+      and liquid-mass accounting, and dispersed slip to one material-volume
+      constraint. Close global volume with thermodynamic pressure and local
+      volume with a compressibility-aware pressure solve; retain actual mass,
+      physical momentum and internal-energy ledgers.
+- [x] Extend geometric phase transport and its source splitting consistently
+      to nonzero material-volume sources; preserve boundedness and matching
+      phase/momentum fluxes rather than bypassing the Stage 1 divergence guard.
+- [x] Capture dispersed gas from interface-relative collision flux and an
+      explicit coalescence efficiency; retain uncaptured inventory in liquid.
+      Use actual molecular Stefan flux and relative slip; EOS-only motion
+      does not count as a collision flux.
+- [x] Define unresolved drainage/rupture through supplied efficiency/rate
+      laws and retain geometric VoF coalescence at resolved grid contact.
+- [x] Define fixed-domain headspace ownership by accepted fully gas cells in
+      supplied regions. Record only actual vented legacy gas/inert amounts, enthalpy and
+      momentum as escape, and publish cumulative ledgers only on commit.
+- [x] Verify production, dissolution/growth, capture and escape against
+      independent manufactured rates and single-gas/liquid/thermal budgets.
+      Cover periodic momentum, source rejection, mixed-phase remap,
+      retained tiny-phase inventories, stale trials and checkpoint replay,
+      with serial, two-rank and empty-rank cases.
+- [ ] Supply and qualify aqueous growth, breakup, coalescence, capture and
+      film-thickness calibrations over the intended size/flow/temperature
+      range. A shared slip selector does not automatically qualify both
+      microbubbles and upper populations; per-population physical closure
+      selection remains application work.
+- [ ] Qualify high-Peclet centimetric-bubble transfer, source/time/mesh
+      convergence and grid-scale coalescence sensitivity. The prescribed
+      film is not the full reconstructed boundary-layer SGS algorithm.
+- [ ] Qualify application caloric/chemical-energy references and any required
+      surface-energy, drag or viscous-heating closures. Variable surface
+      tension/Marangoni stresses and a planar-ALE extension remain separate
+      implementation and qualification gates.
+
+See the [current source/VoF coupling contract](docs/modeling/reacting_vof.md) and the separate
+[VoF verification contracts](docs/verification/vof_solver_contracts.md) for the
+implemented contracts, supplied inputs and reproducible verification scope.
+
+### Stage 4 — Bidirectional representation changes
+
+**Numerical implementation and focused verification are present; physical
+localization/calibration and application convergence remain open.**
+
+- [x] Add a checkpointed birth registry with caller-supplied persistent spatial
+      IDs, eligible fixed-molar-bin donors, and one whole bubble per promotion.
+      Bind reservations to state/topology revisions and require the insertion
+      and guard region to be sufficiently resolved at `max_level`. Void
+      fraction alone is not a birth criterion.
+- [x] Use configurable physical-size and resolution hysteresis. Initial
+      diameter defaults are 10 mm and 4 mm, with 24 cells across promotion and
+      a 16-cell demotion resolution threshold. Demotion inspects actual cell
+      widths, not an unused finer configured level.
+- [x] Identify complete gas components through shared PLIC traces across
+      coarse/fine, periodic and MPI faces. Retain attached ligaments,
+      wall/headspace-connected components, and inert-containing gas. Current
+      conversion stencils must fit the domain coordinate box; wrapped events
+      are explicitly deferred.
+- [x] Transfer typed gas inventories, internal energy and physical momentum
+      atomically. Redistribute the complete remaining carrier, including
+      liquid, dissolved/donor stock and other dispersed populations, within
+      disjoint event supports. Preserve fixed-pivot number/molar moments,
+      including tiny nonzero bins; reject undefined generic passive transfers.
+- [x] Keep conversion at fixed physical time with retained phase-volume,
+      pressure and energy histories. The next requested physical step performs
+      EOS/capillary relaxation; a private predictor initializes coupled source
+      correctors without duplicate time, heat or production. Report actual
+      surface-area/energy and represented-number changes separately.
+- [x] Verify whole-bubble and round-trip budgets, local displacement, donor
+      exhaustion, hysteresis/refinement guards, distributed component/event
+      ownership, rejection, stale plans and checkpoint replay. Cover serial,
+      two-rank and active sparse conversion with an empty-owned rank.
+- [ ] Qualify birth localization, demotion host-volume assumptions and physical
+      threshold sensitivity for the intended aqueous bubble population.
+- [ ] Extend wrapped conversion stencils, dispersed inert species and
+      incompatible carried-temperature mixtures beyond the current defer/
+      reject policies. General advected material-lineage tracking remains
+      separate from the persistent birth registry.
+- [ ] Use Hysing-style algorithm checks followed by three-dimensional
+      centimetric-bubble convergence of rise speed, shape, wake, and gas
+      transfer. Coupled reacting-solution qualification is an additional application gate.
+      The original Hysing no-slip horizontal walls are outside the present
+      adaptive slip-wall contract.
+
+See the [representation guide](docs/modeling/bubble_representation.md) and the
+separate [VoF verification contracts](docs/verification/vof_solver_contracts.md)
+for the implemented API, reproducible checks and qualification limits.
+
+---
+
+## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
+
+**Status: Stages 1–6 implemented and verified within the stated scope; Stage 7
+implemented and under qualification; Stages 8–9 remain proposed.** See the
+[general AMR design](docs/architecture/general_amr.md) for the algorithms,
+ownership/API contracts, admission rules, and focused acceptance matrix.
+Geometry refinement and VoF/physical-coupling qualification are separate gates.
+Preserve the corrected Cartesian [transport/state contracts](docs/architecture/vof_transport.md)
+and [numerical verification gates](docs/verification/vof_solver_contracts.md)
+throughout; each non-Cartesian algorithm also needs its own focused and physical gates.
+
+### Stage 1 — Common hierarchy contracts and Cartesian adapter
+
+- [x] Introduce immutable provider-specific ancestry behind an
+      `AdaptiveHierarchy` seam, preserving the `CartesianAMR` API and optimized
+      backend. Keep physical region/material identity separate from fragments,
+      canonical GIDs, and MPI/local field order.
+- [x] Track topology, partition, geometry, and accepted-state/control revisions
+      independently. Pin plans and trials to exact source observations and
+      preserve collective preflight, atomic publication, and stale-plan rejection.
+- [x] Separate canonical inventories/history and immutable trial ledgers from
+      derived fields and mutable workspaces. Require exact collective geometry
+      and numerical-operator cache compatibility; schema identity is independent
+      of mesh identity, and reinitialization invalidates old trials.
+- [x] Verify unchanged corrected Cartesian geometry/numerics, native traversal,
+      independent repartition stamps, retained-trial isolation after failure,
+      cache refresh/reuse, and rollback without compatibility CSR.
+
+Stage 1 support and qualification limits are maintained in
+[general AMR qualification summary](docs/architecture/general_amr.md#qualification-status). Native partition
+bindings qualify hierarchy, FVM and solver construction; live accepted-state
+repartition/migration uses the separate detached Stage 6 path.
+
+### Stage 2 — Geometric kernels and ancestry-based overlap
+
+- [x] Add certified actual-cell halfspace clips, sections, moments, face
+      apertures, and nested ancestry overlap records. Preserve positive tiny
+      pieces; reject invalid/sliver geometry instead of dropping volume.
+- [x] Factor reusable sparse transfer semantics while retaining physical
+      carrier geometry. Use polygon-area times Z-overlap for bulk products and
+      actual 3D clipped intersections for tilted PLIC phase volumes.
+- [x] Verify analytic cube/tetrahedron/prism/skew cuts, tangencies, complements,
+      represented coverage under scale/translation, first moments, and signed
+      and nonnegative extensive conservation. Use provider-specific arithmetic
+      bounds on actual clipped queries; retain real-gap rejection without
+      nominal-spacing/origin-scaled tolerances or coverage normalization.
+- [x] Preserve positive phase remnants hidden by rounded pure fractions,
+      moving paired inventories by consistent overlap weights only when that
+      retained phase volume lies within its consistency bound; reject material
+      carrier mismatches.
+
+Stage 2 support and qualification limits are maintained in
+[certified geometry and remap scope](docs/architecture/general_amr.md#qualification-status).
+This utility stage does not enable general-mesh VoF or a new refinement provider.
+
+### Stage 3 — Whole-product XY/Z refinement
+
+- [x] Add separate base-cell/edge and axial-interval ancestry, deterministic
+      triangular base refinement with conformity closure, and common Z
+      bisection. XY refinement initially covers whole columns.
+- [x] Add quality-checked convex quadrilateral/polygon templates with complete
+      inverse families. Preserve original polygonal walls and patch labels.
+- [x] Verify XY-then-Z/Z-then-XY key and geometry identity, factor-specific
+      sibling coarsening, exact parent recovery, compact O(base + layers)
+      storage, and the native composite serial/MPI route. Initial extrusions
+      are nonperiodic; new periodic descriptors need separate qualification.
+
+Stage 3 support and limits are maintained in
+[whole-product construction and remap scope](docs/architecture/general_amr.md#qualification-status).
+Compact provider/hierarchy storage does not imply scalable distributed remap
+catalog construction; bounded complete-family catalogs remain a bootstrap.
+General-mesh VoF/flow and local/mixed product adaptation remain later stages.
+
+### Stage 4 — Convex polyhedral refinement
+
+- [x] Clip the actual convex parent with its AABB midpoint planes; record a
+      variable set of nonempty octant children. Certify convexity, closed
+      topology, representability, child quality, containment, and disjoint union.
+- [x] Construct canonical parent-face subdivisions from both incident split
+      patterns and propagate new edge vertices through every incident loop.
+      Restore saved parent geometry on complete-family coarsening while
+      retaining finer-neighbor face tiles.
+- [x] Verify variable child counts, unrelated neighboring cuts, face/edge
+      closure, signed incidence, volume/first moments, sliver rejection,
+      transactional failure, and exact parent-shell recovery.
+
+Stage 4 support and limits are maintained in
+[convex hierarchy and exact explicit-provider scope](docs/architecture/general_amr.md#qualification-status).
+This is bounded replicated canonical planning with sparse native resident
+providers, not scalable distributed hierarchy storage. The separate detached Stage 6 path qualifies exact sparse shard reassembly. Stage 4 alone does not qualify mixed-region closure
+(Stage 5) or general VoF/flow.
+
+### Stage 5 — Mixed-region closure and local XY/Z products
+
+Implemented and verified within the scope recorded in
+[local/mixed qualification scope](docs/architecture/general_amr.md#qualification-status). The boundary includes
+shared exact base/axis/run views, typed multiple adaptive/static participants,
+stable physical-patch joins, bounded physical-span closure and closed face/edge/
+vertex admission (including one-generation comparable factor traces), exact multi-provider
+native tiles, grouped complete native-patch membership, and independent sparse
+patch cardinality catalogs. Explicit O(interface tiles) seam metadata remains a
+bounded bootstrap cost rather than a universal base-plus-layers bound. Contacts retain
+separate native domains. Mixed storage reports are explicitly nonadditive and
+do not establish complete planner/RSS or distributed scaling bounds. Native
+field/remap qualification does not enable a general VoF/flow solver.
+
+- [x] Represent local extrusion refinement as shared base patches times Z
+      runs, with immutable shared base topology/metrics and compact seam
+      descriptors. Account for unique templates and local-product overhead.
+- [x] Close refinement across region joins using physical scales and common
+      interface ancestry; preserve same-fluid pressure connectivity and
+      distinct material/contact laws. Keep unsupported providers static.
+- [x] Initially require nested supported joins. Add validated multi-provider
+      subface descriptors for local products after qualifying coverage and
+      ownership; crossed anisotropic tilings must close compatibly or reject.
+- [x] Verify one canonical integrated flux per tile, complete unique coverage,
+      patch inheritance, periodic support limits, contact isolation, bounded
+      closure, and compact repeated seam storage.
+
+### Stage 6 — Distributed planning and migration
+
+Implemented and verified within the bounded scope of the design. Detached
+owner-local Cartesian/product/convex/Mixed kernels use typed ancestry and exact
+registered face/edge/node contact authorities, sparse actual native maps,
+full requested ghosts and outer metric neighbors. Named accepted/history frames
+preserve independent gas/carrier amounts and pair metadata. Ownership-only
+migration has a distinct whole-domain frozen-native route for unsupported
+accepted geometry; any topology request on that route rejects globally.
+Measured compute work and final prepared native-plus-state application packet
+bytes govern balance acceptance before owner exchange. Payload, capacity
+estimates, packet scratch and normalized process RSS are separate reports.
+Qualification limits are maintained in [the general AMR design](docs/architecture/general_amr.md#qualification-status).
+The initial complete-source bootstrap remains bounded; this stage does not
+qualify general VoF, sparse ALE, production scaling or physical applications.
+
+- [x] Replace root-assembled AMR planning with distributed closure, ancestry
+      lookup, canonical face/edge decisions, and owner-to-owner geometry/state
+      migration. Use the present root assembly only as an explicitly bounded
+      bootstrap for preceding stages.
+- [x] Replace Stage 2's global-maximum-width padded native certificate bootstrap
+      with variable-length sparse owner packets; bound heterogeneous-shell memory
+      by actual local/imported payload and add a sharded typed ancestry directory.
+      Include distributed seam/contact proofs and explicit membership payloads,
+      planner ancestry, partition maps and actual per-rank memory accounting.
+- [x] Balance measured reconstruction/interface/population work and migration
+      cost; retain sparse native fragments and reconstruction halos.
+- [x] Verify partition-equivalent keys and budgets, split sibling families,
+      observed/asserted empty owners, unique ownership, collective failures
+      without deadlock, and per-rank memory bounds without global explicit
+      geometry or solution copies. Separate metadata payload from normalized
+      process RSS in bounded correctness and work-accounting checks. Production
+      scaling and matched performance qualification remain open.
+
+### Stage 7 — General VoF and flow qualification
+
+**Deferred from the reacting-flow refactor:** VoF execution, the bounded floating-point path and the exact-rational path remain disabled or omitted. The historical implementation records below do not change that boundary.
+
+Implementation has focused numerical coverage for the bounded source-free,
+closed, nonperiodic convex-native backend. Overall Stage 7 physical
+qualification remains incomplete. The [general AMR design](docs/architecture/general_amr.md#qualification-status)
+maintains the scope and limits. Checked items below mean implementation plus
+the specified focused coverage, not production or application qualification.
+
+- [x] Implement polyhedral PLIC, canonical unsplit swept-volume transport,
+      independent complementary phase ledgers and finite accepted histories.
+      Publish independent binary64 gas/carrier amounts once per step/remap with
+      counted roundoff bounds; retain representable tiny phases without clipping.
+- [x] Implement source-free compatible implicit momentum, physical-coordinate
+      pressure/capillary/viscous operators, geometry-based timestep controls,
+      attainable inner solves and original physical-residual acceptance under
+      shared iteration/resource limits.
+- [x] Verify focused reconstruction, donor budgets, microscopic/subnormal
+      inventories, stale identity, rejection, rollback, regrid, policy and
+      empty-owner contracts in serial and MPI.
+- [x] Complete the original ten-step skew coarse/fine phase passage to 0.02 s
+      in serial/MPI2/MPI4 with its original physical gates. Earlier resource
+      failures are superseded for this fixture only.
+- [x] Retain `ExperimentalExact` as a separately delivered, explicit opt-in
+      policy with source/result/capsule pins and same-mode remap. Reject
+      cross-policy adoption and silent fallback; finite history remains default.
+- [x] Reuse authenticated preparation, immutable topology, volume-only queries
+      and certification-local exact support planes without weakening proofs.
+- [ ] Integrate the separately staged bounded integer signs and certified
+      binary64/lazy-distance candidate. Its recorded focused matrix and full
+      coarse/fine runs pass; preserve exact fallback and compiler/mode guards.
+- [ ] Complete a coherent physical campaign on the integrated source, including
+      reflected-cylinder capillarity and finite-duration viscous decay. Later
+      optimization campaigns did not repeat those two long methods.
+- [ ] Qualify high-contrast curved interfaces directly on refinement seams,
+      nonzero-time regrid momentum across the intended mesh families, and
+      long-horizon spatial/time convergence before claiming general physical use.
+- [ ] Resolve the recorded Release failure in
+      `DistributedAdaptiveBalance.MeasuredOperationsDrivePinnedHierarchyMigration`;
+      the later selected balance matrix excluded it explicitly.
+- [ ] Qualify optional exact-history physical accuracy, rational-history growth,
+      storage/RSS, long-horizon performance and scaling. Focused policy tests
+      do not close these gates.
+- [ ] Qualify production runtime and distributed scaling with matched source,
+      runtime and complete physical horizons. Small-case speedups and operation
+      counts do not establish bounded rational width or whole-process memory.
+
+Periodic images, material-volume/species sources, low-Mach thermodynamics,
+population drift and representation coupling remain outside this backend;
+Stages 8–9 retain their separate gates. Per-rank memory guards are engineering
+admission limits, not physical constraints.
+
+
+### Stage 8 — Reacting-gas and representation integration
+
+- [ ] Extend Phase 22 source/thermodynamic ledgers, film/aperture integration,
+      birth supports, donor selection, component inspection, and coupled maps
+      to actual native cell geometry. Retain external controller ownership.
+- [ ] Rebind required population names collectively at source preparation,
+      including same-mesh reinitialization; verify reorder/removal and stale
+      trial rejection without misrouting sources or altering accepted state.
+- [ ] Preserve liquid-carrier ConstantSlip and populated-side radius-closure
+      drift at empty fronts. Use paired accepted-plus-signed-source moments
+      for support, requiring finite nonnegative paired results after sources,
+      including complete depletion; transport and source-drift timestep
+      estimation must share the canonical face rule.
+- [ ] Preserve birth IDs/events and accepted inventories while invalidating
+      geometry-dependent reservations and labels. Continue blocking topology
+      change during active checkpoints or pending representation relaxation;
+      exact history-preserving repartition and mesh-inclusive replay are
+      separate later gates.
+- [ ] Verify source-divergence/occupancy closure, all phase mass/species/energy
+      and physical momentum budgets, tiny retained carriers, front speed and
+      timestep parity, remote deposition, donor competition, retained-trial
+      isolation after rejection, and checkpoint replay. Application calibration
+      and centimetric-bubble convergence remain required.
+
+### Stage 9 — Certified nonconvex cells
+
+- [ ] Admit star-shaped cells through certified kernel points and canonical
+      constrained face triangulations; then add boundary-conforming constrained
+      tetrahedral/convex decomposition for non-star-shaped cells.
+- [ ] Preserve the original shell, shared boundary subdivisions, disconnected
+      clipped components, and multiple phase patches. Do not infer a kernel
+      from a centroid or replace a nonconvex parent with its convex hull.
+- [ ] Certify shell/union/first-moment recovery and disjoint positive pieces,
+      reject self-intersections, and repeat geometry, VoF, and physical-coupling
+      gates for every admitted class before extending support claims.
+
+Every stage requires focused affected checks; serial/MPI correctness evidence
+does not establish scaling or physical application accuracy. Assert actual
+ownership in empty-rank fixtures; choose rank counts from global cell counts or
+deliberate sparse partitions, not root-block counts. Keep dated commands/results
+in local validation artifacts and maintain support status and remaining gates in
+the design and modeling documents. Level subcycling, simultaneous
+ALE/regridding, curved-cell refinement, and rotated periodic transformations
+remain outside this design.
+
+---
+
+## Global acceptance criteria
+
+**Overall status: not met.** The core configure/build/test criteria are
+satisfied, but an auxiliary verification-launcher path, open model work,
+turbulence validation, and documentation criteria remain.
+
+- [x] `cmake --preset GCC-ninja-multi` succeeds.
+- [x] `cmake --build --preset GCC-Debug` succeeds.
+- [x] `ctest --preset GCC-Debug` passes, including registered MPI tests, in the
+      supported local development environment.
+- [x] Require a representative GCC Debug configure/build/test job in CI while
+      retaining GCC and LLVM Release coverage.
+- [x] Any MPI failures caused by sandbox/PMIx restrictions are reported separately from code failures.
+- [x] Existing verified cases remain stable when new physics is disabled.
+- [x] New physics fields are bounded and finite.
+- [x] New source terms are dimensionally documented.
+- [x] VTU output supports the implemented solver feedback fields.
+- [x] Supported runtime model selectors and options can be changed from
+      `Database` without recompilation.
+- [x] Documentation clearly states which models are engineering placeholders and which are verified numerical capabilities.
+- [ ] Complete the Phase 18 key/default/unit reference.
+- [ ] Satisfy every acceptance criterion in the non-deferred roadmap phases.
+- [ ] Close the remaining quantitative RANS validation criteria.

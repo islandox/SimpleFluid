@@ -204,7 +204,7 @@ struct ReactingVoFCoupler::Impl
             [&]
             {
                 const bool needs_micro =
-                    options.radiolysis.mode != ReactingGasMode::Disabled ||
+                    options.reacting_gas.mode != ReactingGasMode::Disabled ||
                     (!options.upper_populations.empty() &&
                         options.population_step.underflow == Physics::BubbleUnderflowPolicy::ReturnToMicro);
                 if (needs_micro)
@@ -227,7 +227,7 @@ struct ReactingVoFCoupler::Impl
     void validate_options()
     {
         identical(options.representation.enabled ? 1.0 : 0.0, "Representation selections differ across ranks.");
-        const auto& r = options.radiolysis;
+        const auto& r = options.reacting_gas;
         for (double value : {double(r.mode), r.hydrogen_yield_mol_per_j, r.gas_release_efficiency, r.henry_coefficient,
                  r.microbubble_lifetime, r.micro_to_large_conversion_coefficient, double(r.max_subcycles),
                  double(r.heaviside_mode), r.smooth_heaviside_width, double(r.rise_velocity_mode),
@@ -269,7 +269,7 @@ struct ReactingVoFCoupler::Impl
                 identical(b.upper[a], "Headspace bounds differ across ranks.");
                 require_all(b.upper[a] >= b.lower[a], "Headspace bounds must be ordered.");
             }
-        require_all((r.mode == ReactingGasMode::Disabled || r.mode == ReactingGasMode::Sheng2024TwoPopulation) &&
+        require_all((r.mode == ReactingGasMode::Disabled || r.mode == ReactingGasMode::TwoPopulation) &&
                         r.hydrogen_yield_mol_per_j >= 0 && r.gas_release_efficiency >= 0 &&
                         r.gas_release_efficiency <= 1 && options.maximum_correctors >= 2 &&
                         options.relative_tolerance > 0 && options.relative_tolerance < 1 &&
@@ -359,7 +359,7 @@ struct ReactingVoFCoupler::Impl
                     p.liquid_volume[c] = state.liquid_fraction.at(c) * p.volume[c];
                     p.carrier_volume[c] = (state.liquid_fraction.at(c) + state.dispersed_fraction.at(c)) * p.volume[c];
                     p.gas_volume[c] = state.resolved_fraction.at(c) * p.volume[c];
-                    const auto& r = options.radiolysis;
+                    const auto& r = options.reacting_gas;
                     if (r.diffusivity_mode == HydrogenDiffusivityMode::External || r.hydrogen_diffusivity > 0)
                         p.diffusivity[c] = Physics::hydrogen_diffusivity(r, p.temperature[c]);
                     const double sigma = surface_tension(r, p.temperature[c]);
@@ -621,7 +621,7 @@ struct ReactingVoFCoupler::Impl
                         throw std::runtime_error("The interface has no finite aqueous sampling distance.");
                     const double concentration = I[i] / vl[i], partial = pg[i] * H[i] / (H[i] + inert[i]);
                     amount[i] = dt * patch.area * D[i] / length *
-                                (concentration - options.radiolysis.henry_coefficient * partial);
+                                (concentration - options.reacting_gas.henry_coefficient * partial);
                     if (!std::isfinite(amount[i]))
                         throw std::runtime_error("Interfacial hydrogen transfer overflowed.");
                     out_l[i] = std::max(amount[i], 0.0);
@@ -793,7 +793,7 @@ struct ReactingVoFCoupler::Impl
     /** Derive physical particle geometry from the new moments, before capture. */
     void update_dispersed_geometry(State& working, const Properties& p) const
     {
-        const auto& r = options.radiolysis;
+        const auto& r = options.reacting_gas;
         const auto& thermodynamics = flow->low_mach_options();
         const auto& gravity = flow->options().gravity;
         const double acceleration = std::sqrt(dot(gravity, gravity));
@@ -873,7 +873,7 @@ struct ReactingVoFCoupler::Impl
         for (auto* values :
             {&source.liquid_mass_change, &source.resolved_hydrogen_change, &source.resolved_inert_change,
                 &source.dissolved_hydrogen_change, &source.donor_hydrogen_change, &source.net_thermal_energy,
-                &source.radiolysis_energy, &source.enthalpy_transfer, &source.vent_hydrogen_moles,
+                &source.reacting_gas_energy, &source.enthalpy_transfer, &source.vent_hydrogen_moles,
                 &source.vent_inert_moles, &source.vent_enthalpy, &source.produced_hydrogen, &source.captured_hydrogen})
             values->assign(n, 0.0);
         source.momentum_transfer.resize(n);
@@ -882,8 +882,8 @@ struct ReactingVoFCoupler::Impl
             source.dispersed.push_back({population.name, std::vector<double>(n), std::vector<double>(n), {}});
         if (!input.net_thermal_energy.empty())
             source.net_thermal_energy = input.net_thermal_energy;
-        if (!input.absorbed_radiation_energy.empty())
-            source.radiolysis_energy = input.absorbed_radiation_energy;
+        if (!input.reaction_driver_energy.empty())
+            source.reacting_gas_energy = input.reaction_driver_energy;
         stats.thermal_input = total(source.net_thermal_energy);
         const auto p = properties(guess);
         State working = base;
@@ -894,7 +894,7 @@ struct ReactingVoFCoupler::Impl
         const auto patches = (options.resolved_transfer.enabled || options.capture.enabled)
                                  ? geometry->interface_patches(base.resolved_fraction)
                                  : std::vector<VoF::InterfacePatch>{};
-        const auto& r = options.radiolysis;
+        const auto& r = options.reacting_gas;
         const bool active = r.mode != ReactingGasMode::Disabled;
         int substeps = 1;
         if (active)
@@ -915,12 +915,12 @@ struct ReactingVoFCoupler::Impl
                     if (active)
                     {
                         source.produced_hydrogen[c] =
-                            r.gas_release_efficiency * r.hydrogen_yield_mol_per_j * source.radiolysis_energy[c];
+                            r.gas_release_efficiency * r.hydrogen_yield_mol_per_j * source.reacting_gas_energy[c];
                         if (!std::isfinite(source.produced_hydrogen[c]) ||
                             source.produced_hydrogen[c] > base.donor_hydrogen_moles[c])
                             throw std::runtime_error("Reacting production exhausts its finite chemical donor.");
                         if (source.produced_hydrogen[c] > 0 && !(p.liquid_volume[c] > 0))
-                            throw std::runtime_error("Liquid-absorbed radiolysis requires a true aqueous carrier.");
+                            throw std::runtime_error("Liquid-absorbed reacting_gas requires a true aqueous carrier.");
                         source.donor_hydrogen_change[c] = -source.produced_hydrogen[c];
                         ledger.liquid_moles[c] += -source.produced_hydrogen[c];
                     }
@@ -1249,9 +1249,9 @@ ReactingVoFCoupler::Trial ReactingVoFCoupler::preview(double dt, const ReactingV
     impl_->refresh_geometry();
     const State base = impl_->flow->low_mach_state();
     const auto n = base.liquid_mass.size();
-    bool valid = (input.absorbed_radiation_energy.empty() || input.absorbed_radiation_energy.size() == n) &&
+    bool valid = (input.reaction_driver_energy.empty() || input.reaction_driver_energy.size() == n) &&
                  (input.net_thermal_energy.empty() || input.net_thermal_energy.size() == n);
-    for (double value : input.absorbed_radiation_energy)
+    for (double value : input.reaction_driver_energy)
         valid = valid && std::isfinite(value) && value >= 0;
     for (double value : input.net_thermal_energy)
         valid = valid && std::isfinite(value);

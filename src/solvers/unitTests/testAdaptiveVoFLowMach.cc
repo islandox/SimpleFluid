@@ -192,7 +192,7 @@ TEST(AdaptiveVoFLowMachTest, ClosedIdealGasHeatingMatchesTheExactMixtureAndDoesN
         const double heat = rise * (old.resolved_hydrogen_moles[c] * options.hydrogen.molar_heat_capacity_v +
                                        old.resolved_inert_moles[c] * options.inert.molar_heat_capacity_v);
         sources.net_thermal_energy.push_back(heat);
-        sources.radiolysis_energy.push_back(100.0 * heat); // Chemistry diagnostic, not another thermal source.
+        sources.reacting_gas_energy.push_back(100.0 * heat); // Chemistry diagnostic, not another thermal source.
     }
     const auto checkpoint = s->checkpoint();
     const auto trial = s->preview_low_mach_step(dt, sources);

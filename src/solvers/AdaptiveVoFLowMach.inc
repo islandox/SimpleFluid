@@ -244,7 +244,7 @@ std::optional<ThermoEvaluation> evaluate_low(const VoF::LowMachState& s, const s
                 result.bubble_pressure[q][c] = pl;
                 if (population.number[c] == 0)
                     continue;
-                const auto radius = RadiolyticGasPhysics::solve_bubble_radius(
+                const auto radius = BubbleGasPhysics::solve_bubble_radius(
                     population.hydrogen_moles[c] / population.number[c], pl, material.surface_tension, o.gas_constant,
                     temperature, o.minimum_bubble_radius, o.maximum_bubble_radius, o.maximum_thermodynamic_iterations,
                     4 * std::numeric_limits<double>::epsilon());
@@ -787,7 +787,7 @@ VoF::LowMachSources normalize_low_sources(const State& old, const VoF::LowMachSo
     SF_LOW_SOURCE(dissolved_hydrogen_change, false);
     SF_LOW_SOURCE(donor_hydrogen_change, false);
     SF_LOW_SOURCE(net_thermal_energy, false);
-    SF_LOW_SOURCE(radiolysis_energy, true);
+    SF_LOW_SOURCE(reacting_gas_energy, true);
     SF_LOW_SOURCE(enthalpy_transfer, false);
     SF_LOW_SOURCE(vent_hydrogen_moles, true);
     SF_LOW_SOURCE(vent_inert_moles, true);
@@ -1204,7 +1204,7 @@ void recover_low_volume_fluxes(const State& candidate, LowFluxWork& work) const
                 double pressure = pl;
                 if (material.surface_tension > 0)
                 {
-                    const auto radius = RadiolyticGasPhysics::solve_bubble_radius(moles / number, pl,
+                    const auto radius = BubbleGasPhysics::solve_bubble_radius(moles / number, pl,
                         material.surface_tension, low_options->gas_constant, T, low_options->minimum_bubble_radius,
                         low_options->maximum_bubble_radius, low_options->maximum_thermodynamic_iterations,
                         4 * std::numeric_limits<double>::epsilon());
@@ -1326,7 +1326,7 @@ State initialize_low(const VoF::LowMachInitialState& initial)
                 if (population.number[c] == 0)
                     continue;
                 const auto root =
-                    RadiolyticGasPhysics::solve_bubble_radius(population.hydrogen_moles[c] / population.number[c], pl,
+                    BubbleGasPhysics::solve_bubble_radius(population.hydrogen_moles[c] / population.number[c], pl,
                         material.surface_tension, low_options->gas_constant, q.temperature[c],
                         low_options->minimum_bubble_radius, low_options->maximum_bubble_radius,
                         low_options->maximum_thermodynamic_iterations, 4 * std::numeric_limits<double>::epsilon());
@@ -1631,7 +1631,7 @@ State advance_low(const State& old, double dt, const VoF::LowMachSources& input,
             };
             next.low_diagnostics.pressure_work = total(new_work);
             next.low_diagnostics.net_thermal_energy = total(source.net_thermal_energy);
-            next.low_diagnostics.radiolysis_energy = total(source.radiolysis_energy);
+            next.low_diagnostics.reacting_gas_energy = total(source.reacting_gas_energy);
             next.low_diagnostics.produced_hydrogen = total(source.produced_hydrogen);
             next.low_diagnostics.captured_hydrogen = total(source.captured_hydrogen);
             next.low_diagnostics.escaped_hydrogen = total(source.vent_hydrogen_moles);

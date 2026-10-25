@@ -1,3 +1,26 @@
+set(SIMPLEFLUID_VOF_SOLVER_SOURCES
+    GeneralVoFSolver.cc
+    details/GeneralVoFExactSolver.inc
+    VoFSolver.cc
+    details/ConservativeVoFTransport.cc
+    details/ConservativeVoFExactTransport.inc
+    details/VoFProjectionWorkspace.cc
+    details/GeneralVoFPhiClosure.cc
+    details/GeneralVoFExactPhiClosure.inc
+    details/GeneralVoFProjectionArithmetic.cc
+    details/GeneralVoFExactPressure.cc
+    details/GeneralVoFFlowWorkspace.cc
+    details/GeneralVoFExactProjection.inc
+    details/GeneralVoFCurvature.cc
+    details/GeneralVoFExactStorage.cc
+    details/ConservativeVoFExactArithmetic.cc
+    details/GeneralVoFTransferBinding.cc
+    AdaptiveVoFSolver.cc
+    VoFLowMach.cc
+    ReactingVoFCoupler.cc
+    BubbleRepresentation.cc
+)
+
 set(SIMPLEFLUID_SOLVER_SOURCES
     LowMachMixtureSolver.cc
     ReactingMixtureCoupler.cc
@@ -17,6 +40,10 @@ set(SIMPLEFLUID_SOLVER_SOURCES
     ClosedMixtureHeadspaceModel.cc
     SteadyStateSearch.cc
 )
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    list(APPEND SIMPLEFLUID_SOLVER_SOURCES ${SIMPLEFLUID_VOF_SOLVER_SOURCES})
+endif()
 
 # Keep equations and solvers in one physical DSO to preserve cross-layer type
 # identity. The FVM DSO below it now supplies the canonical Kokkos runtime
@@ -44,4 +71,38 @@ simplefluid_add_equations_linker_alias()
 if(SIMPLEFLUID_CXX_HAS_FNO_SEMANTIC_INTERPOSITION)
     target_compile_options(SimpleFluidSolvers PRIVATE
         "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release,RelWithDebInfo,MinSizeRel>>:-fno-semantic-interposition>")
+endif()
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    simplefluid_exclude_from_pgo_sources(VoFSolver.cc)
+    simplefluid_exclude_from_pgo_sources(details/ConservativeVoFTransport.cc)
+    simplefluid_exclude_from_pgo_sources(details/VoFProjectionWorkspace.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFFlowWorkspace.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFCurvature.cc)
+    simplefluid_exclude_from_pgo_sources(details/ConservativeVoFExactArithmetic.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFTransferBinding.cc)
+    simplefluid_exclude_from_pgo_sources(AdaptiveVoFSolver.cc)
+    simplefluid_exclude_from_pgo_sources(VoFLowMach.cc)
+    simplefluid_exclude_from_pgo_sources(ReactingVoFCoupler.cc)
+    simplefluid_exclude_from_pgo_sources(BubbleRepresentation.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFPhiClosure.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFProjectionArithmetic.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactPressure.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFExactStorage.cc)
+    simplefluid_exclude_from_pgo_sources(GeneralVoFSolver.cc)
+    # Bounded interval/ledger proofs constrain every caller, including inline helpers.
+    # Per-source options follow target/global options and keep relaxed arithmetic or
+    # link-time transforms from crossing this numerical boundary.
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(
+            GeneralVoFSolver.cc
+            details/ConservativeVoFTransport.cc
+            details/GeneralVoFFlowWorkspace.cc
+            details/GeneralVoFPhiClosure.cc
+            details/GeneralVoFCurvature.cc
+            PROPERTIES
+            COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+            SKIP_UNITY_BUILD_INCLUSION TRUE
+            SKIP_PRECOMPILE_HEADERS TRUE)
+    endif()
 endif()

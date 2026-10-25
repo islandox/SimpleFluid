@@ -1,5 +1,5 @@
 /** @file ReactingVoFCoupler.hh
- * @brief Transactional aqueous radiolysis and resolved/dispersed gas exchange.
+ * @brief Transactional aqueous reacting_gas and resolved/dispersed gas exchange.
  */
 #pragma once
 
@@ -57,7 +57,7 @@ struct ReactingVoFOptions
      * conversion law; incompatible number/molar ratios reject without resetting
      * the representative molar size or changing the legacy conversion formula.
      */
-    ReactingGasOptions radiolysis;
+    ReactingGasOptions reacting_gas;
     BubbleGasPhysics::MolarPivotGrid upper_pivots;
     BubbleGasPhysics::BubblePopulationKernels upper_kernels;
     BubbleGasPhysics::BubblePopulationStepOptions population_step;
@@ -76,7 +76,7 @@ struct ReactingVoFOptions
 struct ReactingVoFInput
 {
     /** Liquid-absorbed radiation energy [J/owned cell]; yield is applied once, with no extra void weight. */
-    std::vector<double> absorbed_radiation_energy;
+    std::vector<double> reaction_driver_energy;
     /** Already net thermal deposition [J/owned cell]; chemical-energy allocation is the caller's responsibility. */
     std::vector<double> net_thermal_energy;
 };

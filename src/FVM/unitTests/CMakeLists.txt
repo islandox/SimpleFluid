@@ -12,15 +12,71 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testFvmLibrary")
+  if(TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFinitePolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
+      OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
+      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     # Catch dependencies from FVM back into the higher-level solver DSO.
     target_link_libraries(${TEST_NAME} SimpleFluid::FVM GTest::gtest_main)
   else()
     target_link_libraries(${TEST_NAME} SimpleFluid::Equations GTest::gtest_main)
   endif()
   simplefluid_configure_test_executable(${TEST_NAME})
-  simplefluid_discover_tests(${TEST_NAME})
+  if(TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
+      OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;amr\\;geometry\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFinitePolyhedralReconstruction")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;geometry\\;conservation\\;collective")
+  elseif(TEST_NAME STREQUAL "testGeometricVoF")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;geometry\\;conservation")
+  else()
+    simplefluid_discover_tests(${TEST_NAME})
+  endif()
 endforeach()
+
+simplefluid_add_mpi_test(
+    NAME PolyhedralAMRRemap_2procs
+    TARGET testPolyhedralAMRRemap
+    PROCS 2
+    LABELS "amr;polyhedral;conservation;collective"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
+    NAME ProductAMRRemap_2procs
+    TARGET testProductAMRRemap
+    PROCS 2
+    LABELS "amr;geometry;conservation;collective;constructed_product"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
+    NAME ConservativeAMRRemap_2procs
+    TARGET testConservativeAMRRemap
+    PROCS 2
+    LABELS "vof;amr;geometry;conservation;collective"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME VoFPhysicalSources_2procs
+    TARGET testVoFPhysicalSources
+    PROCS 2
+    LABELS "vof;amr;geometry;source;conservation;collective"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoF_2procs
+    TARGET testAdaptiveVoF
+    PROCS 2
+    LABELS "vof;amr;geometry;conservation;collective"
+    TIMEOUT 180)
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoFThreeDimensional_2procs
+    TARGET testAdaptiveVoFThreeDimensional
+    PROCS 2
+    LABELS "vof;amr;geometry;conservation;collective"
+    TIMEOUT 180)
 
 simplefluid_add_mpi_test(
     NAME CompositePartitionOperators_2procs
@@ -174,6 +230,86 @@ simplefluid_add_mpi_test(
     PROCS 2
     LABELS "mpi;fvm;transport;traverse"
     TIMEOUT 120)
+
+simplefluid_add_mpi_test(
+    NAME AdaptiveVoFPhaseBudget_EmptyRank_9procs
+    TARGET testAdaptiveVoF
+    PROCS 9
+    ARGS "--gtest_filter=AdaptiveVoFTest.MicroscopicPhaseOutflowCannotOverdrawCanonicalSubfaceDonors"
+    LABELS "vof;amr;geometry;conservation;collective;empty_rank"
+    TIMEOUT 120)
+
+simplefluid_add_mpi_test(NAME MixedAMRRemap_2procs TARGET testMixedAMRRemap PROCS 2 LABELS "mpi;amr;mixed;conservation" TIMEOUT 180)
+
+foreach(_distributed_native_procs IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME DistributedNativeOperators_${_distributed_native_procs}procs
+    TARGET testDistributedNativeOperators PROCS ${_distributed_native_procs} LABELS "mpi;amr;native;fvm" TIMEOUT 180)
+endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME DistributedAdaptiveState_${PROCS}procs
+    TARGET testDistributedAdaptiveState
+    PROCS ${PROCS}
+    LABELS "amr;distributed;state;history;conservation;collective"
+    TIMEOUT 240)
+endforeach()
+
+# General unsplit transport is separate from the optimized Cartesian backend.
+simplefluid_add_mpi_test(
+    NAME GeneralVoF_2procs
+    TARGET testGeneralVoF
+    PROCS 2
+    LABELS "vof;geometry;conservation;collective"
+    TIMEOUT 300)
+simplefluid_add_mpi_test(
+    NAME GeneralVoF_4procs
+    TARGET testGeneralVoF
+    PROCS 4
+    LABELS "vof;geometry;conservation;collective"
+    TIMEOUT 300)
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME ExactPhaseTransfer_${PROCS}procs
+    TARGET testExactPhaseTransfer PROCS ${PROCS}
+    LABELS "vof;amr;exact;history;conservation;collective"
+    TIMEOUT 300)
+endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME ExactFaceTransfer_${PROCS}procs
+    TARGET testExactFaceTransfer PROCS ${PROCS}
+    LABELS "vof;amr;exact;face_flux;conservation;collective"
+    TIMEOUT 300)
+endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(
+    NAME FinitePolyhedralReconstruction_${PROCS}procs
+    TARGET testFinitePolyhedralReconstruction PROCS ${PROCS}
+    LABELS "vof;geometry;resolution;finite;collective"
+    TIMEOUT 180)
+endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFFinite_${PROCS}procs TARGET testGeneralVoFFinite PROCS ${PROCS}
+    LABELS "vof;geometry;conservation;collective;finite" TIMEOUT 300)
+endforeach()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
+        SKIP_UNITY_BUILD_INCLUSION TRUE
+        SKIP_PRECOMPILE_HEADERS TRUE)
+endif()
+
+# Independent finite AMR remap oracles include explicitly empty owners.
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME FiniteVoFRemap_${PROCS}procs TARGET testFiniteVoFRemap PROCS ${PROCS}
+    LABELS "vof;amr;finite;history;conservation;collective;empty_rank" TIMEOUT 300)
+endforeach()
 
 foreach(_semi_ranks IN ITEMS 2 4)
     simplefluid_add_mpi_test(NAME SemiStructuredDistributedOperators_${_semi_ranks}procs

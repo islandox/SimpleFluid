@@ -3,7 +3,7 @@
  * @brief Reproducible sphere and capillary-wave measurements for the VoF core.
  *
  * These scaled, source-free cases verify numerical behavior. They do not
- * qualify centimetric bubbly-flow, radiolysis, AMR, or phase-change models.
+ * qualify centimetric bubbly-flow, reacting_gas, AMR, or phase-change models.
  */
 
 #include "solvers/VoFSolver.hh"

@@ -87,9 +87,6 @@ endif()
 # alternate-path objects are compiled with ordinary LTO optimization in USE
 # builds instead of silently applying profile-use without matching data.
 set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
-    mesh/DecomposedOrthogonalTopology.cc
-    mesh/DecomposedSemiStructuredTopology.cc
-    details/SemiStructuredPartition.cc
     mesh/AMR/AdaptiveHierarchy.cc
     mesh/AMR/DistributedAdaptiveTypes.cc
     mesh/AMR/DistributedAdaptivePackets.cc
@@ -109,6 +106,9 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     mesh/AMR/ExtrudedAMR.cc
     ConvexCellGeometry.cc
     BoundedConvexGeometry.cc
+    mesh/DecomposedOrthogonalTopology.cc
+    mesh/DecomposedSemiStructuredTopology.cc
+    details/SemiStructuredPartition.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc

@@ -1,12 +1,16 @@
 # Resolved and dispersed bubble representation changes
 
-Representation changes belong to the external reacting controller. They
+Representation changes belong to the external reacting-gas controller. They
 move existing gas between the resolved VoF field and dispersed molar-pivot
-populations; they do not produce hydrogen, dissolve gas, vent a reservoir, or
+populations; they do not produce gas, dissolve gas, vent a reservoir, or
 advance physical time. The physical models remain those described in the
-[reacting coupling guide](reacting_vof.md).
+[resolved/dispersed gas coupling guide](reacting_vof.md).
 
-`ReactingVoFOptions::representation` enables the conversion policy.
+The [general reacting-gas design](reacting_gas_sources.md) is the target source
+contract. The current implementation below remains hydrogen-specific; general
+species inventories and reactions require separate qualification.
+
+`ReactingVoFOptions::representation` enables the current conversion policy.
 `request_births` registers caller seeds, `inspect_representation` returns
 eligibility and refinement requirements, and `preview_representation` prepares
 a fixed-clock candidate. The existing controller `commit`, `checkpoint` and

@@ -26,6 +26,7 @@ function(simplefluid_add_abi_tests)
         add_test(NAME simplefluid_elf_export_boundary
             COMMAND "${CMAKE_COMMAND}"
                 "-DSIMPLEFLUID_LIBRARY=$<TARGET_FILE:SimpleFluidSolvers>"
+                "-DSIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=$<BOOL:${SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF}>"
                 "-DSIMPLEFLUID_RUNTIME_LIBRARY=$<TARGET_FILE:${SIMPLEFLUID_RUNTIME_TARGET}>"
                 "-DSIMPLEFLUID_RUNTIME_SONAME=$<TARGET_SONAME_FILE_NAME:${SIMPLEFLUID_RUNTIME_TARGET}>"
                 "-DSIMPLEFLUID_TRILINOS_SHARED=$<BOOL:${Trilinos_BUILD_SHARED_LIBS}>"

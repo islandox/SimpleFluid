@@ -186,7 +186,6 @@ validation of boiling, nucleation or interfacial constitutive laws.
 
 Explicit H2/IF97/OpenFOAM references may retain those physical names and supplied
 correlations. Their documented external-carrier approximation does not imply
-finite-water inlet conservation or general latent ownership. Generic
-reacting-VoF coupling remains unqualified; retained VoF sources do not
-establish supported enablement of that coupling. Bounded-FP and exact-rational
-geometry execution have separate integration and qualification requirements.
+finite-water inlet conservation or general latent ownership. VoF remains
+disabled and an explicit experimental-VoF enable request rejects configuration;
+bounded-FP and exact-rational geometry paths remain deferred.
