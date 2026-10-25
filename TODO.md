@@ -518,9 +518,14 @@ laws; no universal chemistry or physical material calibration is implied.
       with collective configuration/failure handling and immutable accepted state.
 - [x] Remove enabled null-mechanism/yield fallbacks, old source selectors and
       misleading fixed-species fields; explicit retired keys reject.
-- [ ] Resolve the native low-Mach exactly-empty-gas rejection under nonuniform
-      heating at small timesteps (`Empty phase has unallocated physical energy/volume work`)
-      without dropping physical work or weakening empty-phase energy constraints.
+- [x] Resolve the reproduced native low-Mach exactly-empty-gas rejection under
+      nonuniform heating at small timesteps through componentwise conservative
+      transport checks and bounded refinement within the original scalar iteration
+      budget. Focused serial and two-/four-rank mixture tests cover tiny physical
+      arrivals, signed fixed/ALE energy, absent gas and budget rejection/rollback;
+      [the transport contract](docs/architecture/low_mach_reacting_flow.md#componentwise-transport-consistency)
+      retains the original true-residual, physical-work and empty-phase gates.
+      This does not qualify untested source, mesh or thermodynamic combinations.
 - [ ] Improve or explicitly bound large-volume/small-timestep EOS-minus-advected-volume
       cancellation while retaining independent physical continuity and occupancy gates.
 - [ ] Add a separately qualified stiff-chemistry/Jacobian integration backend.

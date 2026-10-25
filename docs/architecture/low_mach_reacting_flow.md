@@ -90,6 +90,69 @@ non-Laplacian deviatoric stress terms require a supplied contribution when used.
 Pressure work uses the phase-volume trial and the same transported volume packet
 as the continuity budget.
 
+## Componentwise transport consistency
+
+Each native scalar transport uses backward Euler, first-order upwind advection,
+unit storage/advection weights and zero diffusion. Its canonical phase flux is
+mesh-relative under planar ALE. A global Krylov residual alone cannot certify an
+exactly empty receiving cell: a tiny physical arrival can be lost beside much
+larger inventories elsewhere while its incoming material-volume packet remains
+positive. Species, signed phase internal energy and population counts therefore
+also pass an independent local extensive balance before any source callback.
+
+For returned amount `q`, donor concentration `C = q/V_new`, and the actual
+owner-oriented face packets `F = phi*C_upwind`, the cell defect is
+`q_new - q_old + dt*sum(outward F)`. Its physical relative scale is
+`abs(q_new) + abs(q_old) + dt*sum(abs(F))`; there is no unit-sized absolute
+stock floor. An all-zero scale requires an exactly zero defect. The check uses
+the returned binary64 amounts and the same `q/V_new` donor concentrations used
+by subsequent phase-face reconstruction. Scalar packets retain the canonical
+owner orientation. Counts also retain their independently ordered existing
+count-balance check.
+
+A scalar solve must first pass its original Krylov true-residual gate. If the
+local balance needs refinement, synchronized upwind row sweeps solve the same
+implicit equation, with incoming/outgoing fluxes oriented outward from this cell:
+
+```
+q_new = (q_old + dt*sum_in(abs(phi)*C_donor))
+        / (1 + dt*sum_out(phi)/V_new)
+```
+
+The old extensive amount supplies storage; ALE uses the new control volume in
+the denominator. This monotone update preserves nonnegative species/counts.
+Energy remains signed, including negative or zero caloric references. A negative
+Krylov species/count candidate triggers a collective initializer restart from
+accepted old stocks; it is never clipped or replaced by an invented gas seed.
+A globally absent phase stays exactly absent. A transport endpoint without
+physical material must have exactly zero transported energy and advected
+material volume; later source/thermal empty-phase constraints still apply.
+
+Every local sweep consumes one remaining iteration from that scalar solve's
+original total linear budget. Exhaustion rejects the trial. After local checks
+pass, the actual returned concentration must again satisfy the original stored
+CRS/RHS true-residual tolerance. This adds neither an alternative transport model
+nor a relaxed linear or physical gate. All ranks, including empty owners, share
+completion/restart decisions and participate in the same halo/collective order.
+Sources, population events and pressure work are not re-evaluated by the repair.
+
+`transport_linear` retains Krylov iteration accounting and reports the final
+returned-field true residual. `transport_consistency_refinements` separately
+counts local sweeps over scalar calls in the final corrector; both counts are
+needed to describe its work. Initial and final componentwise residual diagnostics
+expose the physical balance checks. Accepted snapshots, source receipts and
+rollback remain owned by the enclosing solver/controller transaction.
+
+Focused serial and registered two-/four-rank mixture tests cover the reproduced
+ordinary-pressure empty-gas arrival, stationary inventory invariance, fixed/ALE
+signed caloric references, globally absent gas, actual empty owners and rejected
+accuracy budgets. Direct reaction-controller, population-event, interphase and
+ALE regressions retain their conservation and replay checks. This qualifies
+that numerical failure and these test cases;
+it does not establish every mesh, source or thermodynamic configuration. The
+large-volume EOS-minus-advected-volume cancellation limitation described above
+remains open and retains its original rejection gates.
+
 ## Transport-first reaction and heat integration
 
 `MixturePhaseBinding` explicitly maps catalog species compartments to physical
