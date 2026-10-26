@@ -176,8 +176,15 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     execution.collective(
         [&]
         {
+            const bool signed_family = phase_preparation->family == VoF::GeneralVoFTransportFamily::InterfaceLocalSwept;
+            if (signed_family && Mode != ArithmeticMode::Ordinary)
+                throw std::runtime_error("Signed momentum transport requires Ordinary arithmetic.");
+            const auto& budgets =
+                signed_family ? phase_preparation->numerical_support_budgets : phase_preparation->donor_budgets;
+            const auto& transfers =
+                signed_family ? phase_preparation->numerical_support_transfers : phase_preparation->positive_transfers;
             std::set<GO> seen;
-            for (const auto& donor : phase_preparation->donor_budgets)
+            for (const auto& donor : budgets)
             {
                 const auto row = mesh->owned_cell_map()->getLocalElement(GO(donor.donor));
                 if (row < 0 || !seen.insert(GO(donor.donor)).second)
@@ -188,7 +195,7 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
             }
             if (seen.size() != volume.size())
                 throw std::runtime_error("Finite VoF donor budgets are incomplete.");
-            for (const auto& route : phase_preparation->positive_transfers)
+            for (const auto& route : transfers)
                 if (route.donor != route.recipient)
                 {
                     const auto value = mass(route.amount);
@@ -217,9 +224,13 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
             momentum[c] = value.value;
             momentum_error[c] = value.absolute_error;
         }
-        const auto carried = transport.solve(momentum, source, phase_preparation->new_mass, outgoing, incoming,
-            face_contributions, false, options.maximum_momentum_iterations, options.momentum_relative_tolerance,
-            options.byte_budget, momentum_error, {}, phase_preparation->new_mass_error, outgoing_error, arithmetic_mode_);
+        const auto carried =
+            transport.solve(momentum, source, phase_preparation->new_mass, outgoing, incoming, face_contributions,
+                false, options.maximum_momentum_iterations, options.momentum_relative_tolerance, options.byte_budget,
+                momentum_error, {}, phase_preparation->new_mass_error, outgoing_error, arithmetic_mode_,
+                phase_preparation->family == VoF::GeneralVoFTransportFamily::InterfaceLocalSwept
+                    ? detail::ConservativeVoFTransport::FiniteOperatorMode::SignedFaceLedger
+                    : detail::ConservativeVoFTransport::FiniteOperatorMode::EquivalentRoutes);
         next->momentum_transport[a] = {
             carried.physical_relative_residual, carried.iterations, carried.physical_refinements};
         for (std::size_t c = 0; c < volume.size(); ++c)

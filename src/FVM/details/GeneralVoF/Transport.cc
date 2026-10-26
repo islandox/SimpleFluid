@@ -66,7 +66,7 @@ void GeneralVoF::Trial::validate_retained_algebraic_payload() const
                 using Record = typename std::remove_reference_t<decltype(records)>::value_type;
                 if (records.capacity() > (limit - budget.used) / sizeof(Record))
                     throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
-                        "Homogeneous VoF trial exceeds its retained byte budget.");
+                        "Finite face-ledger trial exceeds its retained byte budget.");
                 budget.add(records.capacity() * sizeof(Record));
             };
             retain(unbound_streams_);
@@ -75,6 +75,17 @@ void GeneralVoF::Trial::validate_retained_algebraic_payload() const
             retain(finite_budgets_);
             retain(finite_trajectories_);
             retain(roundoff_);
+            retain(signed_receipts_);
+            retain(signed_budgets_);
+            retain(numerical_support_transfers_);
+            retain(numerical_support_budgets_);
+            retain(finite_face_chain_);
+            retain(finite_cell_closure_);
+            for (const auto& closure : finite_cell_closure_)
+                budget.add(AMR::encode_adaptive_key(closure.key).size());
+            for (const auto& trace : finite_trajectories_)
+                budget.add(PLIC::dynamic_point_storage_bytes(trace.point) +
+                           PLIC::dynamic_point_storage_bytes(trace.departure) - 2 * sizeof(PLIC::DynamicPoint));
         });
 }
 } // namespace SimpleFluid::VoF

@@ -1,6 +1,7 @@
 # General-native VoF transport families and preparation
 
-General-native VoF has two transport families. The family describes how material
+General-native VoF records the selected transport family independently of the
+configured backend. The family describes how material
 crosses a face; it is independent of `ArithmeticMode` and does not imply physical
 qualification.
 
@@ -9,7 +10,8 @@ qualification.
 | Algebraic face-volume | `DonorCell` | Canonical integrated face volume with donor composition and endpoint/export budgets |
 | Algebraic face-volume | `GeometricFace` | The same face-volume contract with measure-only PLIC candidates and conservative limiting |
 | Algebraic face-volume | `SweptPartition`, Ordinary interface-free step | Canonical face-volume authority after collective homogeneous admission |
-| Geometric swept-tetrahedra | `SweptPartition`, remaining cases | Authenticated node trajectories, corrected signed tetrahedral face sweeps, donor intersections and positive recipient partitions |
+| Interface-local swept | `SweptPartition`, moving Ordinary mixed domain | Indexed geometric face candidates, algebraic bulk faces, one limited signed phase/momentum ledger |
+| Geometric swept-tetrahedra | `SweptPartition`, BoundedCertification/Exact | Complete swept construction and positive recipient partitions |
 
 `SweptPartition` remains the default. `GeometricFace` uses geometry to estimate
 phase coverage, but does not construct swept tetrahedra. Neither selecting a
@@ -39,9 +41,9 @@ attempting nodal interpolation, including in `stable_timestep()`.
 
 A declaration is geometric evidence, not a phase-volume cutoff. Independently
 positive traces remain transported material. An `Infer` cell or an opposite-pure
-face excludes the specialization even if its current face flux is zero. Stage 2
-specializes an entire interface-free step; joining local bulk regions to geometric
-transport within a mixed domain is Stage 3 work.
+face excludes the whole-step homogeneous specialization even if its current
+face flux is zero. A moving Ordinary mixed domain instead uses the interface-local
+family below; the globally stationary node-control identity path stays unchanged.
 
 For old independent inventories `G,L`, let `S=G+L`. A directed canonical bulk
 transfer `q` carries the smaller phase as `q*min(G,L)/S`; the other phase completes
@@ -73,6 +75,136 @@ globally zero-motion identity shortcut remains unchanged. No stationary trajecto
 are fabricated. There are no swept tetrahedra, donor intersections, recipient
 overlays or PLIC cuts on the homogeneous path.
 
+## Interface-local swept transport
+
+`InterfaceLocalSwept` is the Ordinary moving mixed-domain path. It retains the
+configured `SweptPartition` backend and the complete authenticated node/face
+controls. It replaces recipient-overlay publication with a single canonical signed
+face ledger. Algebraic faces and geometric faces contribute to the same update;
+independently constructed recipient partitions are not spliced together.
+
+### Conservative reach and sparse geometry
+
+A scalar sweep recipe includes current and departure vertices, their centers, and
+the private corrected departure center that matches the canonical volume control.
+That corrected center can extend beyond every node trajectory. A balanced AABB
+index over retained full native cells selects donors using the complete corrected
+hull. A second index covers the retained-domain frontier, including physical walls.
+The frontier catalog is retained with immutable topology before native assembly
+consumes its construction draft.
+
+The public Ordinary orientation predicate must prove the hull remains on the
+retained side of every potentially crossed frontier tile. It uses represented
+finite coordinates, handles its floating-point environment internally, and rejects
+unresolved signs. A missing donor, uncertain contact or hull leaving the admitted
+shell rejects collectively; the path does not silently expand the halo or assume
+that unknown fluid is homogeneous. This is a conservative admission boundary,
+including for nonconvex or disconnected retained domains.
+
+Any `Infer` donor, retained mixed surface, or conflict between pure declarations
+among reachable donors/endpoints selects geometric work. Thus a face-aligned
+interface requires geometry without an artificially mixed cell. Only selected
+nonzero-effect recipes construct tetrahedra. Zero **net** control does not establish
+zero effect: opposing swept pieces remain significant. Pure bulk faces use the
+admitted donor-cell stream model.
+
+Only requested donor planes are reconstructed, at their owners with the existing
+reconstruction stencil. Requests/replies bind source control, transaction,
+topology/partition generation, cell revision and owner. Ghost phase records carry
+an owner-authenticated retained-interface flag. Each geometric face partitions its
+tetrahedra against its indexed candidate set, preserving overlap and coverage
+checks. No recipient overlay is constructed. Indexes are rebuilt for each trial;
+classification is never reused solely because the mesh geometry is unchanged.
+
+### Shared correction and signed source contributions
+
+Let `L[f,d,p]` be the admitted donor-cell contribution and `H[f,d,p]` the signed
+swept contribution, resolved by face `f`, old donor `d`, and bulk/gas/liquid channel
+`p`. One coefficient is shared by every channel and provenance/history field:
+
+$$
+J_{fdp}=(1-\theta_f)L_{fdp}+\theta_f H_{fdp},\qquad 0\le\theta_f\le1.
+$$
+
+The face owner retains separate positive/negative donor groups. It never replaces
+them with net face volume. Endpoint and old-donor demand exchanges select the same
+`theta` on both incidences. Low-order admission is mandatory before geometric
+candidates. Endpoint availability comes from compensated **unpublished** low-order
+receipts, since binary64 publication can round that availability upward.
+
+With outward face incidence `B[c,f]`, the physical source-resolved update is
+
+$$
+W_{cdp}=\delta_{cd}V^n_{dp}-\sum_f B_{cf}J_{fdp},\qquad
+V^{n+1}_{cp}=\sum_d W_{cdp}.
+$$
+
+The bulk coefficient uses the finite donor geometry volume; gas and liquid use
+the independently accepted inventories. Native metric discrepancy remains in
+occupancy provenance. Individual `W` entries may be negative. They are signed numerical source
+coefficients, not negative accepted inventories or positive material parcels.
+The limiter bounds adverse endpoint corrections and increases in positive remote
+source contributions. Its ratios round inward, and final values are independently
+rechecked. The signed donor budget records
+
+$$
+E^+_{dp}=\sum_{c\ne d}\max(W_{cdp},0),\quad
+E^-_{dp}=\sum_{c\ne d}\max(-W_{cdp},0),\quad
+V^n_{dp}=W_{ddp}+E^+_{dp}-E^-_{dp},\quad E^+_{dp}\le V^n_{dp}.
+$$
+
+`old-positive_remote` is budget slack, not the diagonal retained coefficient.
+Accepted gas and liquid are separately nonnegative and separately conserved.
+Each final face bulk amount must meet its original canonical-face allowance.
+Two-sided cell closure budgets also constrain differing face coefficients; signed
+cancellations before limiting cannot justify a larger allowance afterward.
+
+### Histories and occupancy evidence
+
+Contributions from the same old source are combined before taking absolute values.
+For a positive old phase, its history weight is `abs(W/old_phase)`. For an absent
+phase on pure geometry, retain the normalized coefficient operator directly:
+low-order shares use `q/(G+L)` and high-order shares use geometric `bulk/V`.
+Outward coefficient-arithmetic bounds and new publication uncertainty are added.
+An absent physical phase with retained mixed geometry rejects rather than guessing
+its history normalization. Signed antidiffusion can amplify histories; those
+histories never relax the independent physical phase-conservation gate.
+
+Occupancy evidence requires a separate operator because normalized low-order
+transport leaves the old occupancy discrepancy local. For high-order bulk share
+`k=H_bulk/V_old`, define
+
+$$
+R_{cd}=\delta_{cd}-\sum_f B_{cf}\theta_f k_{fd}.
+$$
+
+Old occupancy and fitting evidence propagate with `abs(R)`, while signed
+`PhaseLabel` allocation is retained separately. Raw phase-cut closure defects
+are source-derived and charged alongside sweep/control defects to the **original**
+cell geometry allowance. `signed_phase_cut_closure` exposes that extra diagnostic;
+combined closure is canonical residual plus signed geometry difference plus phase
+cut closure. Neither observed output discrepancy nor a physical minority amount
+creates a new error allowance. Compensated publication preserves even microscopic
+occupancy residuals. Pure-fit evidence and geometric-presence declarations remain
+separate from inventory amounts.
+
+### Physical momentum and numerical support
+
+The final phase ledger defines mixture mass and the physical operator
+
+$$
+A_{cd}=M^{n+1}_c\delta_{cd}+\sum_f B_{cf}\sum_{p\in\{g,l\}}\rho_p J_{fdp}.
+$$
+
+Positive donor-cell routes are retained as explicitly named numerical support.
+For `SignedFaceLedger`, GMRES solves the actual signed matrix, with positive row
+scaling `D=M_new+outgoing_low`. It does not normalize by the physical diagonal,
+which may be zero or negative, or require equality with the low-order operator.
+Every correction still solves the physical matrix; the original long-double
+physical-residual gate, shared iteration limit and refinement limit remain.
+Matching component right-hand sides reuse one preparation. Legacy equivalent-route
+solves retain their previous matrix, preconditioner and coefficient-agreement gate.
+
 ## One detached finite ledger
 
 `GeneralVoF::Trial::prepare_transport` binds a finite trial to positive constant
@@ -94,8 +226,13 @@ Canonical signed physical face contributions and positive donor-to-recipient
 route support have different meanings. Swept contributions can name nonincident
 geometric donors and can oppose each other on a face; they must not be reinterpreted
 as adjacent upwind streams or collapsed to a net volume. Face-volume preparations
-also retain their directed streams and limiter diagnostics. Independent gas and
-liquid amounts remain authoritative, including traces on declared pure geometry.
+also retain their directed streams and limiter diagnostics. Interface-local
+preparations expose `signed_receipts` and `signed_donor_budgets`, separately from
+`numerical_support_transfers` and `numerical_support_budgets`. Their legacy
+`positive_transfers`, `donor_budgets` and trial positive-record views are empty;
+consumers must select the prepared family, not infer an identity update from empty
+collections. Independent gas and liquid amounts remain authoritative, including
+traces on declared pure geometry.
 
 The solver obtains this preparation before the component solves, checks phase
 publication and mass capacities, and derives momentum inputs from its retained
@@ -103,8 +240,9 @@ ledger. The finite momentum workspace validates routing and raw face agreement
 when preparing the numerical operator, then reuses its immutable routing, imports,
 coefficients and applicable preconditioner for matching component right-hand sides.
 Every right-hand side still has its own input, iteration and original physical
-residual checks. Both families preserve the existing coefficient-agreement requirement;
-positive route support is not permission to change the accepted physical equation.
+residual checks. Equivalent-route families preserve their coefficient-agreement
+requirement. Interface-local signed execution uses its explicitly different
+numerical-support contract without changing the accepted physical equation.
 
 Only successful whole-step publication exposes the preparation, including its
 momentum identity and build/reuse counts, through `GeneralVoFSolver::prepared_transport()`.
@@ -138,11 +276,21 @@ rules.
 ## Remaining repair stages
 
 The [Stage 7 roadmap](../../TODO.md#stage-7--general-vof-and-flow-qualification)
-separates the implemented shared foundation and homogeneous specialization from
-the remaining Ordinary swept repairs: an interface-local signed face ledger,
-aggregate fragment measurement, and unified capillary surfaces. The homogeneous
-path does not replace partitions in mixed domains, coalesce fragments, or change
-the configured default backend.
+separates the implemented shared foundation, homogeneous specialization and
+interface-local signed ledger from aggregate fragment measurement and unified
+capillary surfaces. The configured default backend is unchanged. Individual
+required swept/intersection fragments still use the existing strict construction
+and measurement rules; there is no coalescence, clipping, exact fallback, or
+increase in resource caps.
+
+Focused checks cover analytic phase transfer, competing exports, zero-net signed
+counterflow and correlated histories, native-owner agreement, empty owners,
+locality counters, and a single accepted coupled phase/momentum/projection step.
+This is not repeated-flow qualification. Residual transverse motion can still
+produce unresolved or zero-volume fragments and exhausted construction work;
+uncertain or uncovered corrected reach also rejects. Repeated coupled horizons
+remain open for the geometry-robustness and physical-qualification stages.
+Index/candidate counts measure local work, not wall time, RSS or production scaling.
 
 Binary-staircase filtering is a later explicit capillary model; it must preserve
 component geometric volume without changing accepted cell inventories. Complete

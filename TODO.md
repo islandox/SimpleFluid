@@ -1639,20 +1639,26 @@ implicit-upwind specialization while retaining the general swept path.
       Preserve independent traces, absent-phase uncertainty and pure-fit evidence.
       Check nonconstant velocity against an independent implicit circulation
       solution, pure gas/liquid motion and unchanged hydrostatic gates, including
-      empty MPI owners. Local bulk regions inside mixed domains remain Stage 3.
-- [ ] **Repair Stage 3 — interface-local transport:** make one canonical signed
+      empty MPI owners. Mixed domains use the separate Stage 3 signed ledger.
+- [x] **Repair Stage 3 — interface-local transport:** make one canonical signed
       face ledger authoritative for phase/momentum updates, with shared
       conservative flux correction and old-donor/endpoint/history budgets.
       Select the interface transport neighborhood from geometric declarations,
       face-aligned interfaces and conservative trajectory reach; authenticate
       sparse donors through a spatial index. Do not splice independent recipient
       partitions with algebraic routes or discard opposing signed streams.
+      Keep signed source coefficients/budgets distinct from positive numerical
+      support; propagate correlated histories before taking absolute values.
+      Use the raw signed momentum operator with positive low-order row scaling.
+      Retain explicit halo/reach rejection, original face/cell allowances and
+      the remaining repeated-flow qualification gates.
 - [ ] **Repair Stage 4 — aggregate geometry:** keep unmeasured source/cut witnesses
       for computational pieces, cancel shared internal boundaries, and measure
       physical aggregates. Separate fragment, minority-inventory and surface
       accuracy contracts; check inaccurate positive results too. Account every
       approximation within existing shared budgets without clipping, arbitrary
-      phase cutoffs, exact fallback or weakened physical tolerances.
+      phase cutoffs, exact fallback or weakened physical tolerances. Qualify
+      residual-motion fragments in repeated coupled steps under existing caps.
 
 #### Shared surfaces, interfaces and qualification — repair Stages 5–6
 
@@ -1761,9 +1767,10 @@ the specified focused coverage, not production or application qualification.
       conservative bounds and shared existing face/cell/phase budgets. Keep face
       streams, donor/recipient inventories, momentum and replay consistent; retain
       independent moment/section requirements for surface-sensitive consumers.
-- [ ] Replace full retained-donor and route scans with conservative spatial
-      candidates and donor indexing; reuse overlay buffers and measure local work
-      scaling without changing cumulative construction-budget semantics.
+- [x] Replace Ordinary full retained-donor/recipient-overlay scans with indexed
+      face candidates and signed-ledger publication. Track local index/candidate
+      work without changing construction caps; BoundedCertification and Exact
+      retain their separate partition paths. Production scaling remains open.
 - [ ] Remove certification-only communication and closure preparation from
       Ordinary projection; index pure-cell curvature support and qualify its work
       with surface tension enabled.

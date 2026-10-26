@@ -3,7 +3,7 @@
 namespace SimpleFluid::VoF::finite_detail
 {
 template<ArithmeticMode Mode>
-Sweep<Mode> make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
+Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
     const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,
     long double ordinary_volume_budget)
 {
@@ -75,6 +75,21 @@ Sweep<Mode> make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
     if (difference.value != 0 || difference.absolute_error != 0)
         result.backcenter = PLIC::point_displaced<Mode>(
             result.backcenter, Points::scale(normal, Math::divide(difference, coefficient.value())));
+    return result;
+}
+template<ArithmeticMode Mode>
+Sweep<Mode> materialize_sweep(Sweep<Mode> result, std::span<const std::uint64_t> nodes, Work& work)
+{
+    using Math = Arithmetic<Mode>;
+    namespace failure = ::SimpleFluid::detail::vof_failure;
+    failure::Scope context("sweep_construction");
+    context.record.face = result.face;
+    context.record.mark(failure::Field::Face);
+    context.record.arithmetic_mode = Mode;
+    context.record.mark(failure::Field::Arithmetic);
+    context.record.volume_budget = result.ordinary_volume_budget;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        context.record.mark(failure::Field::VolumeBudget);
     SumFor<Mode> check;
     SumFor<Mode> constructed(work.arithmetic_mode);
     const auto corrected = sweep_boundary(nodes, result.current, result.departure, result.center, result.backcenter);
@@ -113,18 +128,27 @@ Sweep<Mode> make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
         result.pieces.push_back({std::move(geometry), volume.value > 0 ? 1 : -1});
         check.add(volume);
     }
-    const auto residual = Math::subtract(Math::divide(check.value(), {6, 0}), control);
+    const auto residual = Math::subtract(Math::divide(check.value(), {6, 0}), result.control);
     result.constructed_volume = constructed.value();
-    result.signed_control_difference = Math::subtract(result.constructed_volume, control);
+    result.signed_control_difference = Math::subtract(result.constructed_volume, result.control);
     const auto mismatch = [&]
     {
         if constexpr (Mode == ArithmeticMode::Ordinary)
-            return std::abs(result.signed_control_difference.value) > ordinary_volume_budget;
-        else return std::abs(residual.value) > residual.absolute_error;
+            return std::abs(result.signed_control_difference.value) > result.ordinary_volume_budget;
+        else
+            return std::abs(residual.value) > residual.absolute_error;
     }();
     if (mismatch)
         throw std::invalid_argument("Finite VoF corrected face chain does not match its canonical control.");
     return result;
+}
+template<ArithmeticMode Mode>
+Sweep<Mode> make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
+    const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,
+    long double ordinary_volume_budget)
+{
+    return materialize_sweep<Mode>(
+        prepare_sweep<Mode>(face, nodes, traces, control, work, ordinary_volume_budget), nodes, work);
 }
 template<ArithmeticMode Mode>
 std::vector<Atom<Mode>> recipient_partition(std::uint64_t recipient,
@@ -187,4 +211,4 @@ std::vector<Atom<Mode>> recipient_partition(std::uint64_t recipient,
         throw std::invalid_argument("Finite VoF recipient closure exceeds its original arithmetic/physical budget.");
     return result;
 }
-}
+} // namespace SimpleFluid::VoF::finite_detail

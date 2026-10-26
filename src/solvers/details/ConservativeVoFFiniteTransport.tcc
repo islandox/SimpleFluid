@@ -8,7 +8,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
     const std::vector<FiniteFaceContribution>& contributions, bool nonnegative, int maximum_iterations,
     double tolerance, std::size_t byte_budget, std::span<const long double> old_error,
     std::span<const long double> source_error, std::span<const long double> capacity_error,
-    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode)
+    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode, FiniteOperatorMode operator_mode)
 {
     namespace fp = VoF::finite_detail;
     using A = fp::Arithmetic<Mode>;
@@ -17,6 +17,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
     const auto comm = map->getComm();
     const auto n = mesh_->num_owned_cells();
     constexpr bool bounded = Mode == ArithmeticMode::BoundedCertification;
+    const bool signed_operator = operator_mode == FiniteOperatorMode::SignedFaceLedger;
     const auto arithmetic_value = [&](long double value, long double error = 0) { return A::make_value(value, error); };
     namespace failure = ::SimpleFluid::detail::vof_failure;
     failure::Scope transport_context("finite_momentum");
@@ -85,7 +86,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
     {
         const auto& key = *finite_preparation_;
         same = key.geometry_epoch == epoch && key.arithmetic_mode == arithmetic_mode &&
-               key.byte_budget == byte_budget && key.tolerance == tolerance &&
+               key.operator_mode == operator_mode && key.byte_budget == byte_budget && key.tolerance == tolerance &&
                key.owned_map.getRawPtr() == map.getRawPtr() &&
                key.overlap_map.getRawPtr() == mesh_->overlap_cell_map().getRawPtr() &&
                key.owned_face_map.getRawPtr() == mesh_->owned_face_map().getRawPtr() &&
@@ -298,7 +299,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                     raw_sums[row][donor].add(arithmetic_value(amount, error));
                     donor_ids.insert(donor);
                 }
-                for (std::size_t c = 0; c < n; ++c)
+                for (std::size_t c = 0; !signed_operator && c < n; ++c)
                 {
                     const auto self = map->getGlobalElement(LO(c));
                     std::set<GO> columns{self};
@@ -349,7 +350,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                         raw[c].emplace(donor, sum.value());
             });
         std::size_t width = 1;
-        for (const auto& row : routes)
+        for (const auto& row : signed_operator ? raw : routes)
             width = std::max(width, row.size() + 1);
         auto matrix = Teuchos::rcp(new Pack::matrix_type(map, width));
         std::vector<long double> diagonal(n);
@@ -366,19 +367,44 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                         throw std::invalid_argument("Finite momentum has a nonpositive row diagonal.");
                     Teuchos::Array<GO> columns;
                     Teuchos::Array<double> values;
-                    columns.push_back(map->getGlobalElement(LO(c)));
-                    values.push_back(1);
-                    for (const auto& [donor, amount] : routes[c])
+                    // The positive low-order support defines D only. The signed
+                    // physical diagonal may vanish or be negative; never divide by it.
+                    if (signed_operator)
                     {
-                        failure::Scope donor_context;
-                        donor_context.record.donor = donor;
-                        donor_context.record.mark(failure::Field::Donor);
-                        const auto value = static_cast<double>(-amount.value / diagonal[c]);
-                        if (!std::isfinite(value) || (amount.value != 0 && value == 0))
-                            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
-                                "Finite momentum row coefficient is outside representable range.");
-                        columns.push_back(donor);
-                        values.push_back(value);
+                        std::map<GO, long double> coefficients;
+                        const auto self = map->getGlobalElement(LO(c));
+                        coefficients[self] = capacity[c];
+                        for (const auto& [donor, amount] : raw[c])
+                            coefficients[donor] += amount.value;
+                        for (const auto& [donor, amount] : coefficients)
+                        {
+                            failure::Scope donor_context;
+                            donor_context.record.donor = donor;
+                            donor_context.record.mark(failure::Field::Donor);
+                            const auto value = static_cast<double>(amount / diagonal[c]);
+                            if (!std::isfinite(value) || (amount != 0 && value == 0))
+                                throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                                    "Finite momentum row coefficient is outside representable range.");
+                            columns.push_back(donor);
+                            values.push_back(value);
+                        }
+                    }
+                    else
+                    {
+                        columns.push_back(map->getGlobalElement(LO(c)));
+                        values.push_back(1);
+                        for (const auto& [donor, amount] : routes[c])
+                        {
+                            failure::Scope donor_context;
+                            donor_context.record.donor = donor;
+                            donor_context.record.mark(failure::Field::Donor);
+                            const auto value = static_cast<double>(-amount.value / diagonal[c]);
+                            if (!std::isfinite(value) || (amount.value != 0 && value == 0))
+                                throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                                    "Finite momentum row coefficient is outside representable range.");
+                            columns.push_back(donor);
+                            values.push_back(value);
+                        }
                     }
                     matrix->insertGlobalValues(map->getGlobalElement(LO(c)), columns(), values());
                 }
@@ -423,6 +449,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                 candidate->matrix = matrix;
                 candidate->geometry_epoch = epoch;
                 candidate->arithmetic_mode = arithmetic_mode;
+                candidate->operator_mode = operator_mode;
                 candidate->byte_budget = byte_budget;
                 candidate->tolerance = tolerance;
                 prepared = std::move(candidate);
@@ -451,7 +478,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         });
     LinearSolverOptions linear;
     linear.backend = LinearSolverBackend::Gmres;
-    linear.preconditioner = LinearPreconditioner::Jacobi;
+    linear.preconditioner = signed_operator ? LinearPreconditioner::None : LinearPreconditioner::Jacobi;
     linear.reuse_preconditioner = true;
     linear.tolerance = std::max(tolerance, 64 * std::numeric_limits<double>::epsilon());
     linear.max_iterations = maximum_iterations;
@@ -584,6 +611,29 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         }
         ++result.physical_refinements;
     }
+    if (signed_operator)
+    {
+        // Keep each physical donor group until its implicit trace is applied.
+        // Opposing geometric streams survive even when their net mass is zero.
+        std::vector<CompensatedSum<>> flux(mesh_->num_owned_faces());
+        result.flux.resize(mesh_->num_faces());
+        safe(
+            [&]
+            {
+                const auto donor_values = donor_trace.getData();
+                for (const auto& face : contributions)
+                    flux[face.face] += face.amount * donor_values[donor_map->getLocalElement(face.donor)];
+                for (std::size_t f = 0; f < flux.size(); ++f)
+                {
+                    const auto value = flux[f].value();
+                    result.flux[f] = static_cast<double>(value);
+                    if (!std::isfinite(result.flux[f]) || (value != 0 && result.flux[f] == 0))
+                        throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                            "Finite momentum physical face publication is outside qualified range.");
+                }
+            });
+        result.flux = faces(result.flux);
+    }
     result.cell_trace = trace;
     result.amount.resize(n);
     safe(
@@ -621,7 +671,7 @@ template ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite
     const std::vector<ConservativeVoFTransport::FiniteFaceContribution>& contributions, bool nonnegative,
     int maximum_iterations, double tolerance, std::size_t byte_budget, std::span<const long double> old_error,
     std::span<const long double> source_error, std::span<const long double> capacity_error,
-    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode);
+    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode, FiniteOperatorMode operator_mode);
 
 template ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite<ArithmeticMode::BoundedCertification>(
     const std::vector<long double>& old, const std::vector<long double>& source,
@@ -630,4 +680,4 @@ template ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite
     const std::vector<ConservativeVoFTransport::FiniteFaceContribution>& contributions, bool nonnegative,
     int maximum_iterations, double tolerance, std::size_t byte_budget, std::span<const long double> old_error,
     std::span<const long double> source_error, std::span<const long double> capacity_error,
-    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode);
+    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode, FiniteOperatorMode operator_mode);

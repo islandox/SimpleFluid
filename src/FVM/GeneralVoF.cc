@@ -231,6 +231,34 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             {
                 if (!tile.second_image_identity.empty())
                     throw std::invalid_argument("General VoF periodic image sweeps are not qualified.");
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                {
+                    const bool first_full = data->cells.contains(tile.first);
+                    const bool second_full = tile.second && data->cells.contains(*tile.second);
+                    if (!first_full && !second_full)
+                        throw std::invalid_argument("General VoF native tile has no full retained endpoint.");
+                    if (first_full != second_full)
+                    {
+                        if (topology->frontier_tiles.size() == topology->frontier_tiles.capacity())
+                        {
+                            const auto capacity = topology->frontier_tiles.capacity();
+                            if (capacity > std::numeric_limits<std::size_t>::max() / 2)
+                                throw std::invalid_argument("General VoF frontier capacity overflows.");
+                            const auto next = capacity ? 2 * capacity : 1;
+                            if (next - capacity > (budget.limit - budget.used) / sizeof(AMR::AdaptiveTile))
+                                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                                    "General VoF frontier exceeds its byte budget.");
+                            budget.add((next - capacity) * sizeof(AMR::AdaptiveTile));
+                            topology->frontier_tiles.reserve(next);
+                        }
+                        budget.add(
+                            (tile.node_gids.size() + tile.second_node_gids.size()) * sizeof(std::uint64_t) +
+                            tile.domain.size() + tile.surface.size() + tile.identity.size() + tile.boundary.size() +
+                            tile.second_image_identity.size() + AMR::encode_adaptive_key(tile.first).size() +
+                            (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
+                        topology->frontier_tiles.push_back(tile);
+                    }
+                }
                 if (tile.second)
                 {
                     topology->adjacency[tile.first].insert(*tile.second);

@@ -3,17 +3,17 @@
  */
 #pragma once
 #include "FVM/GeneralVoF.hh"
-#include "FVM/details/ExactLiveStorage.hh"
-#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
-#include "FVM/details/FiniteVoFTransport.hh"
+#include "FVM/details/ExactLiveStorage.hh"
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/ExperimentalPhaseBackend.hh"
+#include "FVM/details/FiniteVoFTransport.hh"
 #include "FVM/details/PhaseArithmetic.hh"
+#include "FVM/details/VoFFailure.hh"
+#include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "utils/CompensatedSum.hh"
-#include "FVM/details/VoFFailure.hh"
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <bit>
@@ -23,8 +23,8 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
-#include <type_traits>
 #include <tuple>
+#include <type_traits>
 namespace SimpleFluid::VoF
 {
 namespace Exact
@@ -89,6 +89,8 @@ struct Cell
     GeneralVoFPhaseGeometry declaration = GeneralVoFPhaseGeometry::Infer;
     std::optional<PLIC::PolyhedralInterface> retained_interface;
     bool inherited = false;
+    // Authenticated independently of the optional owner-only retained plane.
+    bool requires_interface = false;
 };
 } // namespace general_vof_detail
 using namespace general_vof_detail;
@@ -117,6 +119,8 @@ struct GeneralVoF::Data
         AMR::AdaptiveNativePublication native;
         AMR::AdaptiveNativeDraft draft;
         std::vector<AMR::AdaptiveTile> tiles, surface_tiles;
+        // Full-shell boundary evidence survives moving draft into the native publication.
+        std::vector<AMR::AdaptiveTile> frontier_tiles;
         std::vector<AMR::AdaptiveNode> nodes;
         std::map<std::uint64_t, PLIC::DynamicPoint> finite_nodes;
         std::map<std::uint64_t, FaceAuthority> construction_faces;
@@ -199,6 +203,8 @@ SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(
+    const GeneralVoF::Data& data, const std::set<Key>& requested, const PLIC::GeometryPacketContext& context);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
 } // namespace general_vof_detail
 } // namespace SimpleFluid::VoF

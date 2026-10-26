@@ -20,7 +20,14 @@
 #include <vector>
 namespace SimpleFluid::VoF
 {
-namespace Exact { struct GeneralVoF; }
+namespace Exact
+{
+struct GeneralVoF;
+}
+namespace general_vof_detail
+{
+struct LocalTransportControls;
+}
 enum class GeneralVoFPhaseGeometry
 {
     Infer,
@@ -43,6 +50,10 @@ struct GeneralVoFTransportDiagnostics
     std::size_t streams = 0, limited_streams = 0, fallback_streams = 0, plane_measurements = 0;
     long double maximum_outgoing_courant = 0, maximum_continuity_defect = 0, maximum_occupancy_defect = 0;
     long double limited_volume = 0, fallback_volume = 0;
+    std::size_t indexed_cells = 0, index_queries = 0, index_node_visits = 0, donor_candidates = 0;
+    std::size_t geometric_faces = 0, algebraic_faces = 0, swept_pieces = 0, plane_requests = 0;
+    std::size_t limited_faces = 0, gross_counterstreams = 0;
+    long double minimum_theta = 1;
 };
 struct GeneralVoFPreparedTransport;
 struct GeneralVoFFaceInterface
@@ -192,6 +203,22 @@ struct GeneralVoFFiniteDonorBudget
     std::uint64_t donor = 0;
     PLIC::DynamicPhaseMeasures old, exported, retained;
 };
+/** Source-resolved signed update coefficient, combined before taking absolute
+ * history weights. Negative coefficients are not negative accepted inventories. */
+struct GeneralVoFSignedReceipt
+{
+    std::uint64_t donor = 0, recipient = 0;
+    int donor_owner = -1, recipient_owner = -1;
+    PLIC::DynamicPhaseMeasures amount;
+    PhaseRoundoff inherited_error;
+};
+/** old = diagonal + positive_remote - negative_remote, independently for bulk
+ * and each phase. Positive remote coefficients are bounded by old inventory. */
+struct GeneralVoFSignedDonorBudget
+{
+    std::uint64_t donor = 0;
+    PLIC::DynamicPhaseMeasures old, positive_remote, negative_remote, diagonal;
+};
 struct GeneralVoFFiniteNodeTrajectory
 {
     std::uint64_t node = 0;
@@ -215,10 +242,18 @@ struct GeneralVoFCellClosureDiagnostic
     long double quota_scale = 0;
     PLIC::DynamicGeometryValue canonical_residual, signed_geometry_difference, combined_residual;
     long double absolute_geometry_difference = 0, allowed_closure = 0;
+    /** Signed phase-label cut closure, separate from the physical face chain.
+     * combined_residual = canonical_residual + signed_geometry_difference + this value. */
+    long double signed_phase_cut_closure = 0;
 };
 /** The transport family is independent of arithmetic and candidate measurement.
  * GeometricFace measures a geometric candidate, then uses algebraic face volume. */
-enum class GeneralVoFTransportFamily { AlgebraicFaceVolume, GeometricSweptTetrahedra };
+enum class GeneralVoFTransportFamily
+{
+    AlgebraicFaceVolume,
+    GeometricSweptTetrahedra,
+    InterfaceLocalSwept
+};
 /** Immutable, source-pinned phase ledger. Signed physical face contributions
  * and positive donor/recipient support remain separate; swept donors need not
  * be adjacent to their face. streams is populated only for algebraic transport.
@@ -236,9 +271,15 @@ struct GeneralVoFPreparedTransport
     /** Physical signed coefficients: direction multiplies amount, never clip
      * or reinterpret these records as positive adjacent-cell streams. */
     std::vector<GeneralVoFFiniteFaceContribution> signed_face_contributions;
-    /** Positive route support, including self transfers and inherited errors. */
+    /** Positive physical transfers for legacy/homogeneous paths. Empty for
+     * InterfaceLocalSwept; its signed receipts and numerical support are below. */
     std::vector<GeneralVoFFiniteTransfer> positive_transfers;
     std::vector<GeneralVoFFiniteDonorBudget> donor_budgets;
+    std::vector<GeneralVoFSignedReceipt> signed_receipts;
+    std::vector<GeneralVoFSignedDonorBudget> signed_donor_budgets;
+    /** Donor-cell numerical support only; never physical signed receipts. */
+    std::vector<GeneralVoFFiniteTransfer> numerical_support_transfers;
+    std::vector<GeneralVoFFiniteDonorBudget> numerical_support_budgets;
     std::vector<GeneralVoFFiniteNodeTrajectory> node_trajectories;
     std::vector<PhaseRoundoff> phase_roundoff, old_phase_history, new_phase_history;
     std::vector<long double> old_mass, new_mass, old_mass_error, new_mass_error;
@@ -413,8 +454,8 @@ public:
     class Trial
     {
     public:
-        /** Explicit exact-route records. Empty for Finite; its authoritative
-         * numerical records are available through the finite_* accessors. */
+        /** Explicit exact-route records. Empty for Finite; canonical face views
+         * are below and family-specific ledgers are bound by prepare_transport. */
         [[nodiscard]] const std::vector<GeneralVoFFaceContribution>& face_contributions() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFTransfer>& transfers() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFDonorBudget>& donor_budgets() const noexcept;
@@ -422,6 +463,8 @@ public:
         [[nodiscard]] const std::vector<PhaseRoundoff>& phase_roundoff_bounds() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFNodeTrajectory>& node_trajectories() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFFiniteFaceContribution>& finite_face_contributions() const noexcept;
+        /** Legacy/homogeneous positive records. InterfaceLocalSwept leaves these
+         * empty; use its prepared signed receipts/budgets and numerical support. */
         [[nodiscard]] const std::vector<GeneralVoFFiniteTransfer>& finite_transfers() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFFiniteDonorBudget>& finite_donor_budgets() const noexcept;
         [[nodiscard]] const std::vector<GeneralVoFFiniteNodeTrajectory>& finite_node_trajectories() const noexcept;
@@ -432,15 +475,17 @@ public:
         finite_cell_closure_diagnostics() const noexcept;
         [[nodiscard]] std::shared_ptr<const GeneralVoF> candidate() const;
         [[nodiscard]] const std::shared_ptr<const GeneralVoFPreparedTransport>& prepared_transport() const noexcept
-        { return prepared_; }
+        {
+            return prepared_;
+        }
         /** Collective detached finite preparation. Preserves both transport
          * families without reinterpreting the physical signed ledger. Exact
          * trials retain their separate authority and reject this finite seam. */
         [[nodiscard]] std::shared_ptr<const GeneralVoFPreparedTransport> prepare_transport(
             std::array<double, 2> density = {1, 1}, std::uint64_t time_stage = 0) const;
         /** Collective transaction and caller-context authentication. */
-        void validate_prepared_transport(const GeneralVoFPreparedTransport&,
-            std::array<double, 2> density, std::uint64_t time_stage) const;
+        void validate_prepared_transport(
+            const GeneralVoFPreparedTransport&, std::array<double, 2> density, std::uint64_t time_stage) const;
 
     private:
         friend GeneralVoF;
@@ -450,7 +495,11 @@ public:
         std::uint64_t transaction_ = 0;
         double timestep_ = 0;
         std::shared_ptr<const GeneralVoFPreparedTransport> prepared_;
-        bool homogeneous_algebraic_ = false;
+        bool homogeneous_algebraic_ = false, interface_local_ = false;
+        std::vector<GeneralVoFSignedReceipt> signed_receipts_;
+        std::vector<GeneralVoFSignedDonorBudget> signed_budgets_;
+        std::vector<GeneralVoFFiniteTransfer> numerical_support_transfers_;
+        std::vector<GeneralVoFFiniteDonorBudget> numerical_support_budgets_;
         std::vector<GeneralVoFDirectedStream> unbound_streams_;
         GeneralVoFTransportDiagnostics unbound_diagnostics_;
         std::vector<GeneralVoFFaceContribution> faces_;
@@ -512,12 +561,16 @@ public:
 private:
     friend struct Exact::GeneralVoF;
     SIMPLEFLUID_FVM_LOCAL Trial plan_face_transport_impl(std::span<const GeneralVoFFaceVolume>, double,
-        std::array<double, 2>, std::uint64_t, bool homogeneous, std::uint64_t transaction_id = 0) const;
-    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL Trial plan_transport_finite(
+        std::array<double, 2>, std::uint64_t, bool homogeneous, std::uint64_t transaction_id = 0,
+        bool numerical_baseline = false) const;
+    SIMPLEFLUID_FVM_LOCAL Trial plan_interface_transport(
+        Trial, const general_vof_detail::LocalTransportControls&) const;
+    template<ArithmeticMode Mode>
+    SIMPLEFLUID_FVM_LOCAL Trial plan_transport_finite(
         std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
-    template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL FiniteRemapTrial plan_remap_finite(const Hierarchy::Plan&,
-        std::shared_ptr<const Hierarchy>, std::span<const GeneralVoFFiniteOwnedChannels>,
-        GeneralVoFFiniteRemapOptions) const;
+    template<ArithmeticMode Mode>
+    SIMPLEFLUID_FVM_LOCAL FiniteRemapTrial plan_remap_finite(const Hierarchy::Plan&, std::shared_ptr<const Hierarchy>,
+        std::span<const GeneralVoFFiniteOwnedChannels>, GeneralVoFFiniteRemapOptions) const;
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key>, std::vector<double>, std::vector<double>,
         GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*);
     template<ArithmeticMode Mode>

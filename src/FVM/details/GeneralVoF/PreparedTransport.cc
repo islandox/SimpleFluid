@@ -50,7 +50,16 @@ void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) co
     reserve(signed_face_contributions.capacity(), sizeof(GeneralVoFFiniteFaceContribution));
     reserve(positive_transfers.capacity(), sizeof(GeneralVoFFiniteTransfer));
     reserve(donor_budgets.capacity(), sizeof(GeneralVoFFiniteDonorBudget));
+    reserve(signed_receipts.capacity(), sizeof(GeneralVoFSignedReceipt));
+    reserve(signed_donor_budgets.capacity(), sizeof(GeneralVoFSignedDonorBudget));
+    reserve(numerical_support_transfers.capacity(), sizeof(GeneralVoFFiniteTransfer));
+    reserve(numerical_support_budgets.capacity(), sizeof(GeneralVoFFiniteDonorBudget));
     reserve(node_trajectories.capacity(), sizeof(GeneralVoFFiniteNodeTrajectory));
+    for (const auto& trace : node_trajectories)
+    {
+        reserve(PLIC::dynamic_point_storage_bytes(trace.point) - sizeof(PLIC::DynamicPoint), 1);
+        reserve(PLIC::dynamic_point_storage_bytes(trace.departure) - sizeof(PLIC::DynamicPoint), 1);
+    }
     for (const auto* history : {&phase_roundoff, &old_phase_history, &new_phase_history})
         reserve(history->capacity(), sizeof(PhaseRoundoff));
     for (const auto* mass : {&old_mass, &new_mass, &old_mass_error, &new_mass_error})
@@ -72,8 +81,9 @@ void GeneralVoF::Trial::validate_prepared_transport(
                 prepared.new_mass.size() != source_->phases.size() ||
                 prepared.old_mass_error.size() != source_->phases.size() ||
                 prepared.new_mass_error.size() != source_->phases.size() ||
-                prepared.family != (homogeneous_algebraic_ || source_->options.transport_backend !=
-                                                                  GeneralVoFTransportBackend::SweptPartition
+                prepared.family != (interface_local_ ? GeneralVoFTransportFamily::InterfaceLocalSwept
+                                       : homogeneous_algebraic_ || source_->options.transport_backend !=
+                                                                       GeneralVoFTransportBackend::SweptPartition
                                            ? GeneralVoFTransportFamily::AlgebraicFaceVolume
                                            : GeneralVoFTransportFamily::GeometricSweptTetrahedra))
                 throw std::invalid_argument("Prepared VoF transport trial or caller context differs.");
@@ -96,7 +106,10 @@ void GeneralVoF::validate_prepared_transport_source(const GeneralVoFPreparedTran
                 prepared.authenticated_family_ != prepared.family ||
                 (prepared.family == GeneralVoFTransportFamily::AlgebraicFaceVolume &&
                     prepared.arithmetic_mode != ArithmeticMode::Ordinary) ||
-                (prepared.family == GeneralVoFTransportFamily::GeometricSweptTetrahedra &&
+                (prepared.family == GeneralVoFTransportFamily::InterfaceLocalSwept &&
+                    prepared.arithmetic_mode != ArithmeticMode::Ordinary) ||
+                ((prepared.family == GeneralVoFTransportFamily::GeometricSweptTetrahedra ||
+                     prepared.family == GeneralVoFTransportFamily::InterfaceLocalSwept) &&
                     prepared.backend != GeneralVoFTransportBackend::SweptPartition))
                 throw std::invalid_argument("Prepared VoF transport belongs to another source or mesh publication.");
         });
@@ -172,6 +185,10 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             reserve(finite_faces_.size(), sizeof(GeneralVoFFiniteFaceContribution));
             reserve(finite_transfers_.size(), sizeof(GeneralVoFFiniteTransfer));
             reserve(finite_budgets_.size(), sizeof(GeneralVoFFiniteDonorBudget));
+            reserve(signed_receipts_.size(), sizeof(GeneralVoFSignedReceipt));
+            reserve(signed_budgets_.size(), sizeof(GeneralVoFSignedDonorBudget));
+            reserve(numerical_support_transfers_.size(), sizeof(GeneralVoFFiniteTransfer));
+            reserve(numerical_support_budgets_.size(), sizeof(GeneralVoFFiniteDonorBudget));
             reserve(finite_trajectories_.size(), sizeof(GeneralVoFFiniteNodeTrajectory));
             reserve(roundoff_.size() + source_->phase_history.size() + candidate_->phase_history.size(),
                 sizeof(PhaseRoundoff));
@@ -190,7 +207,8 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             result->density = density;
             result->arithmetic_mode = source_->options.arithmetic_mode;
             result->backend = source_->options.transport_backend;
-            result->family = homogeneous_algebraic_ || result->backend != GeneralVoFTransportBackend::SweptPartition
+            result->family = interface_local_ ? GeneralVoFTransportFamily::InterfaceLocalSwept
+                             : homogeneous_algebraic_ || result->backend != GeneralVoFTransportBackend::SweptPartition
                                  ? GeneralVoFTransportFamily::AlgebraicFaceVolume
                                  : GeneralVoFTransportFamily::GeometricSweptTetrahedra;
             result->authenticated_source_ = source_;
@@ -202,7 +220,7 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
                 result->streams = prepared_->streams;
                 result->diagnostics = prepared_->diagnostics;
             }
-            else if (homogeneous_algebraic_)
+            else if (homogeneous_algebraic_ || interface_local_)
             {
                 result->streams = unbound_streams_;
                 result->diagnostics = unbound_diagnostics_;
@@ -211,6 +229,10 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             }
             result->signed_face_contributions = finite_faces_;
             result->positive_transfers = finite_transfers_;
+            result->signed_receipts = signed_receipts_;
+            result->signed_donor_budgets = signed_budgets_;
+            result->numerical_support_transfers = numerical_support_transfers_;
+            result->numerical_support_budgets = numerical_support_budgets_;
             result->donor_budgets = finite_budgets_;
             result->node_trajectories = finite_trajectories_;
             result->phase_roundoff = roundoff_;
