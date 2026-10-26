@@ -20,8 +20,10 @@ TEST(GeneralVoFSolverTest, ClosedTwoByTwoSingleLayerConstantCarrierAdvancesAndRe
     EXPECT_EQ(solver.time(), .01);
     const auto preparation = solver.prepared_transport();
     ASSERT_TRUE(preparation);
-    EXPECT_EQ(preparation->family, VoF::GeneralVoFTransportFamily::GeometricSweptTetrahedra);
+    EXPECT_EQ(preparation->family, VoF::GeneralVoFTransportFamily::AlgebraicFaceVolume);
     EXPECT_EQ(preparation->source_identity, accepted->accepted_identity());
+    EXPECT_EQ(solver.phases()->accepted_identity(), accepted->accepted_identity());
+    EXPECT_EQ(preparation->candidate_identity, accepted->accepted_identity());
     EXPECT_TRUE(preparation->streams.empty());
     EXPECT_TRUE(preparation->momentum_preparation);
     EXPECT_EQ(preparation->momentum_builds, 1u);

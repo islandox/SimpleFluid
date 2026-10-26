@@ -71,7 +71,11 @@ void GeneralVoF::Trial::validate_prepared_transport(
                 prepared.old_mass.size() != source_->phases.size() ||
                 prepared.new_mass.size() != source_->phases.size() ||
                 prepared.old_mass_error.size() != source_->phases.size() ||
-                prepared.new_mass_error.size() != source_->phases.size())
+                prepared.new_mass_error.size() != source_->phases.size() ||
+                prepared.family != (homogeneous_algebraic_ || source_->options.transport_backend !=
+                                                                  GeneralVoFTransportBackend::SweptPartition
+                                           ? GeneralVoFTransportFamily::AlgebraicFaceVolume
+                                           : GeneralVoFTransportFamily::GeometricSweptTetrahedra))
                 throw std::invalid_argument("Prepared VoF transport trial or caller context differs.");
         });
 }
@@ -86,10 +90,14 @@ void GeneralVoF::validate_prepared_transport_source(const GeneralVoFPreparedTran
                 prepared.mesh_generation != data_->hierarchy->partition_generation() ||
                 prepared.mesh_topology_generation != data_->hierarchy->topology_generation() ||
                 prepared.arithmetic_mode != data_->options.arithmetic_mode ||
-                prepared.backend != data_->options.transport_backend ||
-                prepared.family != (prepared.backend == GeneralVoFTransportBackend::SweptPartition
-                                           ? GeneralVoFTransportFamily::GeometricSweptTetrahedra
-                                           : GeneralVoFTransportFamily::AlgebraicFaceVolume))
+                prepared.backend != data_->options.transport_backend || prepared.authenticated_source_ != data_ ||
+                prepared.authenticated_candidate_ != prepared.candidate_identity ||
+                prepared.authenticated_transaction_ != prepared.transaction ||
+                prepared.authenticated_family_ != prepared.family ||
+                (prepared.family == GeneralVoFTransportFamily::AlgebraicFaceVolume &&
+                    prepared.arithmetic_mode != ArithmeticMode::Ordinary) ||
+                (prepared.family == GeneralVoFTransportFamily::GeometricSweptTetrahedra &&
+                    prepared.backend != GeneralVoFTransportBackend::SweptPartition))
                 throw std::invalid_argument("Prepared VoF transport belongs to another source or mesh publication.");
         });
 }
@@ -160,7 +168,7 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
                 remaining -= count * width;
             };
             reserve(1, sizeof(GeneralVoFPreparedTransport));
-            reserve(prepared_ ? prepared_->streams.size() : 0, sizeof(GeneralVoFDirectedStream));
+            reserve(prepared_ ? prepared_->streams.size() : unbound_streams_.size(), sizeof(GeneralVoFDirectedStream));
             reserve(finite_faces_.size(), sizeof(GeneralVoFFiniteFaceContribution));
             reserve(finite_transfers_.size(), sizeof(GeneralVoFFiniteTransfer));
             reserve(finite_budgets_.size(), sizeof(GeneralVoFFiniteDonorBudget));
@@ -182,13 +190,24 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             result->density = density;
             result->arithmetic_mode = source_->options.arithmetic_mode;
             result->backend = source_->options.transport_backend;
-            result->family = result->backend == GeneralVoFTransportBackend::SweptPartition
-                                 ? GeneralVoFTransportFamily::GeometricSweptTetrahedra
-                                 : GeneralVoFTransportFamily::AlgebraicFaceVolume;
+            result->family = homogeneous_algebraic_ || result->backend != GeneralVoFTransportBackend::SweptPartition
+                                 ? GeneralVoFTransportFamily::AlgebraicFaceVolume
+                                 : GeneralVoFTransportFamily::GeometricSweptTetrahedra;
+            result->authenticated_source_ = source_;
+            result->authenticated_candidate_ = candidate_;
+            result->authenticated_transaction_ = transaction_;
+            result->authenticated_family_ = result->family;
             if (prepared_)
             {
                 result->streams = prepared_->streams;
                 result->diagnostics = prepared_->diagnostics;
+            }
+            else if (homogeneous_algebraic_)
+            {
+                result->streams = unbound_streams_;
+                result->diagnostics = unbound_diagnostics_;
+                for (auto& stream : result->streams)
+                    stream.mass = density[0] * stream.gas + density[1] * stream.liquid;
             }
             result->signed_face_contributions = finite_faces_;
             result->positive_transfers = finite_transfers_;

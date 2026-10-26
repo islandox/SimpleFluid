@@ -105,36 +105,43 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &dt, &minimum);
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &dt, &maximum_dt);
     execution.require(minimum == maximum_dt, "Finite VoF timestep differs across ranks.");
-    const bool face_backend = old.phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition;
-    const auto nodes = face_backend ? std::vector<VoF::GeneralVoFNodeVelocity>{}
-        : node_velocity(*mesh, *old.phases, old.velocity, options.byte_budget);
+    const bool face_backend =
+        old.phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition;
+    const bool homogeneous = !face_backend && old.phases->homogeneous_transport_eligible();
+    const bool algebraic = face_backend || homogeneous;
+    const auto nodes = algebraic ? std::vector<VoF::GeneralVoFNodeVelocity>{}
+                                 : node_velocity(*mesh, *old.phases, old.velocity, options.byte_budget);
     execution.require(
         dt <= stable_timestep(resources, old, nodes), "Finite VoF timestep exceeds physical geometry/trajectory CFL.");
     const auto controls = face_volumes<Mode>(*mesh, *old.phases, old.finite_projection, flow, dt);
-    const auto trial = face_backend
-        ? old.phases->plan_face_transport(controls, dt, {material.gas_density, material.liquid_density}, std::bit_cast<std::uint64_t>(old.diagnostics.time))
-        : old.phases->plan_transport(nodes, controls, dt);
-    double local_h = std::numeric_limits<double>::infinity(), global_h = 0;
-    for (auto h : thickness)
-        local_h = std::min(local_h, h);
-    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local_h, &global_h);
-    execution.collective(
-        [&]
-        {
-            if (face_backend) return; // Fixed-mesh stream CFL is checked by the phase preparation.
-            if (trial.finite_node_trajectories().size() != nodes.size())
-                throw std::runtime_error("Finite VoF trajectory certificate is incomplete.");
-            const auto limit = A::multiply(A::make_value(global_h, 0), A::make_value(options.flow.max_courant, 0));
-            const auto square_limit = A::multiply(limit, limit);
-            for (const auto& node : trial.finite_node_trajectories())
+    const auto trial =
+        face_backend  ? old.phases->plan_face_transport(controls, dt, {material.gas_density, material.liquid_density},
+                            std::bit_cast<std::uint64_t>(old.diagnostics.time))
+        : homogeneous ? old.phases->plan_homogeneous_transport(controls, dt)
+                      : old.phases->plan_transport(nodes, controls, dt);
+    if (!algebraic)
+    {
+        double local_h = std::numeric_limits<double>::infinity(), global_h = 0;
+        for (auto h : thickness)
+            local_h = std::min(local_h, h);
+        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local_h, &global_h);
+        execution.collective(
+            [&]
             {
-                const auto displacement = A::subtract(node.point, node.departure);
-                const auto square = A::dot(displacement, displacement);
-                if (square.value + (bounded_mode ? square.absolute_error : 0) >
-                    square_limit.value - (bounded_mode ? square_limit.absolute_error : 0))
-                    throw std::runtime_error("Finite VoF bounded trajectory exceeds physical displacement CFL.");
-            }
-        });
+                if (trial.finite_node_trajectories().size() != nodes.size())
+                    throw std::runtime_error("Finite VoF trajectory certificate is incomplete.");
+                const auto limit = A::multiply(A::make_value(global_h, 0), A::make_value(options.flow.max_courant, 0));
+                const auto square_limit = A::multiply(limit, limit);
+                for (const auto& node : trial.finite_node_trajectories())
+                {
+                    const auto displacement = A::subtract(node.point, node.departure);
+                    const auto square = A::dot(displacement, displacement);
+                    if (square.value + (bounded_mode ? square.absolute_error : 0) >
+                        square_limit.value - (bounded_mode ? square_limit.absolute_error : 0))
+                        throw std::runtime_error("Finite VoF bounded trajectory exceeds physical displacement CFL.");
+                }
+            });
+    }
     auto next = std::make_shared<State>();
     next->phases = trial.candidate();
     execution.require(
