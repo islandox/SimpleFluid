@@ -139,7 +139,10 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     next->phases = trial.candidate();
     execution.require(
         next->phases->mesh().get() == mesh.get(), "Finite VoF transport changed its immutable native mesh.");
-    PhaseStorage<Mode>::validate(*mesh, *old.phases, trial, *next->phases);
+    const auto stage = std::bit_cast<std::uint64_t>(old.diagnostics.time);
+    const auto phase_preparation = trial.prepare_transport({material.gas_density, material.liquid_density}, stage);
+    trial.validate_prepared_transport(*phase_preparation, {material.gas_density, material.liquid_density}, stage);
+    PhaseStorage<Mode>::validate(*mesh, *old.phases, *phase_preparation, *next->phases);
     {
         auto storage = PhaseStorage<Mode>::evaluate(*resources.mesh, *next->phases, resources.material);
         next->fraction = std::move(storage.fraction);
@@ -148,26 +151,26 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         next->finite_mass_error = std::move(storage.mass_error);
         next->physical_mass.clear();
     }
-    if (face_backend)
-        execution.collective([&]
-        {
-            const auto& prepared = *trial.prepared_transport();
-            if (prepared.old_mass != old.finite_mass || prepared.new_mass != next->finite_mass)
-                throw std::runtime_error("Prepared phase/momentum mass capacities differ.");
-        });
+    execution.collective([&]
+    {
+        if (phase_preparation->old_mass != old.finite_mass || phase_preparation->new_mass != next->finite_mass ||
+            phase_preparation->old_mass_error != old.finite_mass_error ||
+            phase_preparation->new_mass_error != next->finite_mass_error)
+            throw std::runtime_error("Prepared phase/momentum mass capacities differ.");
+    });
     std::vector<long double> outgoing(volume.size()), outgoing_error(volume.size()), source(volume.size());
     std::vector<detail::ConservativeVoFTransport::FiniteTransfer> incoming;
     std::vector<detail::ConservativeVoFTransport::FiniteFaceContribution> face_contributions;
     const auto mass = [&](const PLIC::DynamicPhaseMeasures& p)
     {
-        return A::add(A::multiply(p.gas, A::make_value(material.gas_density, 0)),
-            A::multiply(p.carrier, A::make_value(material.liquid_density, 0)));
+        return A::add(A::multiply(p.gas, A::make_value(phase_preparation->density[0], 0)),
+            A::multiply(p.carrier, A::make_value(phase_preparation->density[1], 0)));
     };
     execution.collective(
         [&]
         {
             std::set<GO> seen;
-            for (const auto& donor : trial.finite_donor_budgets())
+            for (const auto& donor : phase_preparation->donor_budgets)
             {
                 const auto row = mesh->owned_cell_map()->getLocalElement(GO(donor.donor));
                 if (row < 0 || !seen.insert(GO(donor.donor)).second)
@@ -178,13 +181,13 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
             }
             if (seen.size() != volume.size())
                 throw std::runtime_error("Finite VoF donor budgets are incomplete.");
-            for (const auto& route : trial.finite_transfers())
+            for (const auto& route : phase_preparation->positive_transfers)
                 if (route.donor != route.recipient)
                 {
                     const auto value = mass(route.amount);
                     incoming.push_back({GO(route.donor), GO(route.recipient), value.value, value.absolute_error});
                 }
-            for (const auto& face : trial.finite_face_contributions())
+            for (const auto& face : phase_preparation->signed_face_contributions)
             {
                 const auto row = mesh->owned_face_map()->getLocalElement(GO(face.face));
                 if (row < 0 || (face.direction != 1 && face.direction != -1))
@@ -193,6 +196,7 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
                 face_contributions.push_back({row, GO(face.donor), face.direction * value.value, value.absolute_error});
             }
         });
+    old.phases->validate_prepared_transport_source(*phase_preparation);
     const auto preparation_before = transport.preparation_statistics();
     next->velocity.resize(volume.size());
     for (unsigned a = 0; a < 3; ++a)
@@ -201,40 +205,19 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         for (std::size_t c = 0; c < volume.size(); ++c)
         {
             const auto value = A::multiply(
-                A::make_value(old.finite_mass[c], old.finite_mass_error[c]), A::make_value(old.velocity[c][a], 0));
+                A::make_value(phase_preparation->old_mass[c], phase_preparation->old_mass_error[c]),
+                A::make_value(old.velocity[c][a], 0));
             momentum[c] = value.value;
             momentum_error[c] = value.absolute_error;
         }
-        const auto carried = transport.solve(momentum, source, next->finite_mass, outgoing, incoming,
+        const auto carried = transport.solve(momentum, source, phase_preparation->new_mass, outgoing, incoming,
             face_contributions, false, options.maximum_momentum_iterations, options.momentum_relative_tolerance,
-            options.byte_budget, momentum_error, {}, next->finite_mass_error, outgoing_error, arithmetic_mode_);
+            options.byte_budget, momentum_error, {}, phase_preparation->new_mass_error, outgoing_error, arithmetic_mode_);
         next->momentum_transport[a] = {
             carried.physical_relative_residual, carried.iterations, carried.physical_refinements};
         for (std::size_t c = 0; c < volume.size(); ++c)
             next->velocity[c][a] = carried.cell_trace[c];
     }
-    if (face_backend)
-        execution.collective([&]
-        {
-            const auto& phase_preparation = *trial.prepared_transport();
-            std::size_t remaining = options.byte_budget;
-            const auto reserve = [&](std::size_t count, std::size_t width)
-            {
-                if (count > remaining / width)
-                    throw std::runtime_error("Coupled face preparation exceeds its retained byte budget.");
-                remaining -= count * width;
-            };
-            reserve(1, sizeof(VoF::GeneralVoFPreparedTransport));
-            reserve(phase_preparation.streams.size(), sizeof(VoF::GeneralVoFDirectedStream));
-            reserve(phase_preparation.old_mass.size(), sizeof(long double));
-            reserve(phase_preparation.new_mass.size(), sizeof(long double));
-            auto prepared = std::make_shared<VoF::GeneralVoFPreparedTransport>(phase_preparation);
-            const auto after = transport.preparation_statistics();
-            prepared->momentum_preparation = transport.finite_preparation_identity();
-            prepared->momentum_builds = after.finite_builds - preparation_before.finite_builds;
-            prepared->momentum_reuses = after.finite_hits - preparation_before.finite_hits;
-            next->prepared_transport = std::move(prepared);
-        });
     std::vector<double> viscosity(volume.size());
     execution.collective(
         [&]
@@ -287,6 +270,16 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     next->diagnostics = Diagnostics<Mode>::evaluate(
         *resources.mesh, *next->phases, resources.material, next->finite_mass, next->velocity, next->diagnostics);
     next->phases = old.phases->apply(trial);
+    execution.collective([&]
+    {
+        phase_preparation->validate_byte_budget(options.byte_budget);
+        auto prepared = std::make_shared<VoF::GeneralVoFPreparedTransport>(*phase_preparation);
+        const auto after = transport.preparation_statistics();
+        prepared->momentum_preparation = transport.finite_preparation_identity();
+        prepared->momentum_builds = after.finite_builds - preparation_before.finite_builds;
+        prepared->momentum_reuses = after.finite_hits - preparation_before.finite_hits;
+        next->prepared_transport = std::move(prepared);
+    });
     return next;
 }
 

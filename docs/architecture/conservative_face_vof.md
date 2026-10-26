@@ -1,5 +1,9 @@
 # Conservative face transport for general-native VoF
 
+The [shared transport contract](general_vof_transport.md) classifies both backends
+below as algebraic face-volume transport and distinguishes them from geometric
+swept-tetrahedra transport. A geometric PLIC candidate does not change that family.
+
 The opt-in `GeneralVoFTransportBackend::DonorCell` and `GeometricFace` backends
 advance phase inventories on a fixed native mesh without swept solids,
 donor/recipient overlays, or a complete geometric partition of each donor.

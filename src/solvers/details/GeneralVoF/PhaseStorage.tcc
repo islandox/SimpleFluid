@@ -54,7 +54,7 @@ typename PhaseStorage<Mode>::Result PhaseStorage<Mode>::evaluate(
 
 template<ArithmeticMode Mode>
 void PhaseStorage<Mode>::validate(const MeshHandle<>& mesh_view, const VoF::GeneralVoF& source,
-    const VoF::GeneralVoF::Trial& trial, const VoF::GeneralVoF& candidate)
+    const VoF::GeneralVoFPreparedTransport& prepared, const VoF::GeneralVoF& candidate)
 {
     using GO = DefaultTpetraTypes::global_ordinal_type;
     const auto* mesh = &mesh_view;
@@ -74,7 +74,7 @@ void PhaseStorage<Mode>::validate(const MeshHandle<>& mesh_view, const VoF::Gene
                 carrier(owned_count, VoF::finite_detail::SumFor<Mode>(Mode));
             std::vector<CompensatedSum<>> gas_magnitude(owned_count), carrier_magnitude(owned_count);
             std::vector<std::size_t> publication_terms(owned_count);
-            for (const auto& route : trial.finite_transfers())
+            for (const auto& route : prepared.positive_transfers)
             {
                 const auto row = mesh->owned_cell_map()->getLocalElement(GO(route.recipient));
                 if (row < 0)
@@ -86,7 +86,7 @@ void PhaseStorage<Mode>::validate(const MeshHandle<>& mesh_view, const VoF::Gene
                 ++publication_terms[row];
             }
             const auto& phases = candidate.phase_volumes();
-            const auto& bounds = trial.phase_roundoff_bounds();
+            const auto& bounds = prepared.phase_roundoff;
             if (phases.size() != owned_count || bounds.size() != owned_count)
                 throw std::runtime_error("Finite phase publication has incompatible shape.");
             for (std::size_t c = 0; c < owned_count; ++c)

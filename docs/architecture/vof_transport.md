@@ -1,5 +1,7 @@
 # Floating-point VoF transport and state ownership
 
+The two general-native transport families and their shared prepared ledger are
+documented in [general-native transport](general_vof_transport.md).
 The opt-in fixed-mesh face-stream redesign is documented in
 [conservative face transport](conservative_face_vof.md). It separates donor-cell
 admission, measure-only PLIC candidates, shared limiting, and reusable momentum

@@ -1,4 +1,5 @@
 #include "solvers/details/ConservativeVoFTransportSupport.hh"
+#include "FVM/details/VoFFailure.hh"
 /** @file ConservativeVoFTransport.cc
  * @brief Native conservative implicit upwind assembly and per-inventory validation.
  */

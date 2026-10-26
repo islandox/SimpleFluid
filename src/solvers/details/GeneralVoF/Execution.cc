@@ -10,10 +10,14 @@ namespace SimpleFluid::detail::general_vof
 using Pack = DefaultTpetraTypes;
 void Execution::require(bool condition, const char* message) const
 {
-    int local = condition, global = 0;
-    Teuchos::reduceAll(*mesh_.owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &local, &global);
-    if (!global)
-        throw std::runtime_error(message);
+    vof_failure::collective<std::runtime_error>(
+        *mesh_.owned_cell_map()->getComm(),
+        [&]
+        {
+            if (!condition)
+                throw std::invalid_argument(message);
+        },
+        "solver_admission");
 }
 double Execution::maximum(double value) const
 {

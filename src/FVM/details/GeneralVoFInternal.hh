@@ -13,6 +13,7 @@
 #include "FVM/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include "utils/CompensatedSum.hh"
+#include "FVM/details/VoFFailure.hh"
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <bit>
@@ -44,7 +45,30 @@ struct SIMPLEFLUID_FVM_LOCAL GeneralVoF
 namespace general_vof_detail
 {
 namespace AMR = Meshes::AMR;
-namespace wire = AMR::adaptive_detail;
+namespace wire
+{
+using namespace AMR::adaptive_detail;
+struct Budget : AMR::adaptive_detail::Budget
+{
+    explicit Budget(std::size_t limit) : AMR::adaptive_detail::Budget{limit} {}
+    void add(std::size_t bytes)
+    {
+        if (bytes > limit - std::min(used, limit))
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                "General VoF payload byte budget exhausted.");
+        used += bytes;
+    }
+    void packet(std::size_t payload)
+    {
+        add(sizeof(OwnerPacket));
+        add(payload);
+    }
+};
+template<class Work> void collective(const Teuchos::Comm<int>& comm, Work&& action)
+{
+    ::SimpleFluid::detail::vof_failure::collective(comm, std::forward<Work>(action));
+}
+} // namespace wire
 using Key = AMR::AdaptiveCellKey;
 using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 namespace fp = finite_detail;

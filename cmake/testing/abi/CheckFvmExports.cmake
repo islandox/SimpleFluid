@@ -91,6 +91,7 @@ foreach(mode IN ITEMS full names)
 endforeach()
 
 string(REPLACE "\n" ";" api_names "${demangled_names}")
+string(REPLACE "\n" ";" api_full_names "${demangled_full}")
 list(LENGTH api_symbols symbol_count)
 list(LENGTH api_names name_count)
 if(NOT symbol_count EQUAL name_count)
@@ -99,6 +100,7 @@ endif()
 math(EXPR last_symbol "${symbol_count} - 1")
 foreach(index RANGE ${last_symbol})
     list(GET api_names ${index} name)
+    list(GET api_full_names ${index} full_name)
     list(GET api_symbol_types ${index} symbol_type)
     if(name MATCHES "^_Z")
         message(FATAL_ERROR
@@ -109,6 +111,12 @@ foreach(index RANGE ${last_symbol})
        OR name MATCHES "^SimpleFluid::Meshes::DecomposedSemiStructuredTopology::(View|Group)::"
        OR name MATCHES "^SimpleFluid::MeshHandle<.*>[ ]*::initialize_contiguous_native_maps([(]|$)")
         message(FATAL_ERROR "Private mesh implementation exported: ${name}")
+    endif()
+    # FVM owns one thread-local diagnostic context shared with solver and caller
+    # scopes. This exact bridge is intentional; all other detail functions stay
+    # private. Header-local TLS would lose context across the DSO boundary.
+    if(full_name STREQUAL "SimpleFluid::detail::vof_failure::context_state()")
+        continue()
     endif()
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::(FVM::)?detail::")
         message(FATAL_ERROR "Private implementation exported: ${name}")
@@ -129,6 +137,11 @@ if(demangled_full MATCHES "(^|\n|[ ,<(])SimpleFluid::(Mesh|CellField|VectorCellF
    OR demangled_names MATCHES "(^|\n)SimpleFluid::MeshHandle<[^\n]+[ ]*::(legacy_mesh|is_stk)([(]|\n|$)")
     message(FATAL_ERROR "Retired mesh/storage class or adapter API remains exported from FVM")
 endif()
+
+if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::detail::vof_failure::context_state[(][)]($|\n)")
+    message(FATAL_ERROR "Missing shared VoF diagnostic context bridge in FVM")
+endif()
+
 
 # These functions have declarations in public headers and definitions in the
 # compiled FVM library. A hidden instantiation breaks downstream linking.

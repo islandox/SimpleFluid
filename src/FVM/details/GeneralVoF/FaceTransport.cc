@@ -131,6 +131,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                 throw std::invalid_argument("Face transport controls differ.");
         });
     trial.transaction_ = transaction(comm);
+    trial.timestep_ = dt;
     prepared->source_identity = data_;
     prepared->source_control = data.control;
     prepared->transaction = trial.transaction_;
@@ -789,6 +790,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
         });
     trial.prepared_ = std::move(prepared);
     trial.candidate_ = std::move(candidate);
+    trial.prepared_ = trial.prepare_transport(density, time_stage);
     return trial;
 }
 } // namespace SimpleFluid::VoF
