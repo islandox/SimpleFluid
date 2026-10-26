@@ -15,10 +15,6 @@ validation evidence.
   change and focused verification without asking about routine choices.
 - Read the relevant public header, implementation fragments, tests, and CMake
   registration together before editing. Prefer `rg` for repository searches.
-- When work is complex and has separable subtasks, the primary agent invoked
-  by the user should delegate focused work to subagents where useful. Define
-  clear scopes and file ownership to avoid conflicting edits; the primary
-  agent remains responsible for integration, verification, and the final reply.
 - Keep changes focused. Do not commit, push, publish, or run broad benchmark
   campaigns unless requested. Explain the need and obtain direction before
   expanding focused validation to a full suite or broad toolchain matrix.
