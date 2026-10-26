@@ -13,6 +13,7 @@ namespace SimpleFluid::detail::general_vof
 struct SIMPLEFLUID_SOLVERS_LOCAL State
 {
     std::shared_ptr<const VoF::GeneralVoF> phases;
+    std::shared_ptr<const VoF::GeneralVoFPreparedTransport> prepared_transport;
     std::vector<double> fraction, density, face_velocity, pressure, curvature;
     std::vector<VoF::Vector> velocity;
     // Derived from the source-selected authority. Finite mode always

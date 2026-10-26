@@ -61,6 +61,10 @@ const std::array<GeneralVoFMomentumDiagnostics, 3>& GeneralVoFSolver::momentum_t
 {
     return impl_->accepted->momentum_transport;
 }
+const std::shared_ptr<const VoF::GeneralVoFPreparedTransport>& GeneralVoFSolver::prepared_transport() const noexcept
+{
+    return impl_->accepted->prepared_transport;
+}
 const std::vector<VoF::Vector>& GeneralVoFSolver::velocity() const noexcept
 {
     return impl_->accepted->velocity;

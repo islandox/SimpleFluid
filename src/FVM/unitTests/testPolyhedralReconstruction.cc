@@ -3,6 +3,7 @@
  */
 #include "FVM/GeneralVoF.hh"
 #include "FVM/GeometricVoF.hh"
+#include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
@@ -653,6 +654,57 @@ TEST(PolyhedralReconstruction, OrdinaryOffsetIterationAndClipBudgetsRemainFatal)
         EXPECT_EQ(sample.gas_volume, .3);
         EXPECT_EQ(sample.carrier_volume, .7);
     }
+}
+
+TEST(PolyhedralReconstruction, OrdinaryMeasureOffsetSolvesTinyPhasesWithoutCutCellConstruction)
+{
+    using Cell = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+    const auto cell = Cell::box({0, 0, 0}, {1, 1, 1});
+    const double minority = 1e-27;
+    for (const bool gas : {false, true})
+    {
+        const OrdinarySample sample{cell, gas ? minority : 1., gas ? 1. : minority};
+        PLIC::reset_geometry_statistics();
+        PLIC::PolyhedralReconstructionOptions options;
+        options.measure_only = true;
+        const auto fit =
+            PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(sample, {1, 1, 1}, options);
+        auto plane = fit.gas;
+        if (!gas)
+        {
+            for (auto& n : plane.normal)
+                n = -n;
+            plane.offset = -plane.offset;
+        }
+        const auto measured = PLIC::OrdinaryPlaneMeasure(*cell).below(plane);
+        EXPECT_LE(std::abs(measured.volume - minority) + measured.numerical_error_estimate,
+            minority * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
+        EXPECT_GT(fit.target_volume_numerical_error_estimate, 0);
+        EXPECT_EQ(PLIC::geometry_statistics().constructions, 0u);
+        EXPECT_EQ(PLIC::geometry_statistics().moment_evaluations, 0u);
+        EXPECT_EQ(sample.gas_volume, gas ? minority : 1.);
+        EXPECT_EQ(sample.carrier_volume, gas ? 1. : minority);
+    }
+}
+
+TEST(PolyhedralReconstruction, OrdinaryMeasureRejectsToleranceBelowItsReportedAccuracyFloor)
+{
+    const auto sample = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .25);
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    options.volume_tolerance = 1e-25;
+    try
+    {
+        (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(sample, {1, 0, 0}, options);
+        FAIL() << "An unattainable numerical target was accepted.";
+    }
+    catch (const PLIC::GeometryError& error)
+    {
+        EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::UnresolvedArithmetic);
+        EXPECT_NE(std::string(error.what()).find("numerical_error_estimate="), std::string::npos);
+    }
+    EXPECT_EQ(sample.gas_volume, .25);
+    EXPECT_EQ(sample.carrier_volume, .75);
 }
 
 } // namespace

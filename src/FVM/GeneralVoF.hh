@@ -27,6 +27,50 @@ enum class GeneralVoFPhaseGeometry
     PureGas,
     PureCarrier
 };
+/** One coherent Eulerian backend per step. SweptPartition remains the default
+ * until the conservative face backend passes its coupled physical gates. */
+enum class GeneralVoFTransportBackend { SweptPartition, DonorCell, GeometricFace };
+struct GeneralVoFDirectedStream
+{
+    std::uint64_t face = 0, donor = 0, recipient = 0;
+    int donor_owner = -1, recipient_owner = -1, direction = 1;
+    long double volume = 0, gas = 0, liquid = 0, mass = 0;
+    long double gas_low = 0, gas_high = 0, liquid_low = 0, liquid_high = 0, theta = 1;
+    bool lower_order = false;
+};
+struct GeneralVoFTransportDiagnostics
+{
+    std::size_t streams = 0, limited_streams = 0, fallback_streams = 0, plane_measurements = 0;
+    long double maximum_outgoing_courant = 0, maximum_continuity_defect = 0, maximum_occupancy_defect = 0;
+    long double limited_volume = 0, fallback_volume = 0;
+};
+/** Immutable trial payload: all streams are canonical first-owner records;
+ * local replicas are consumed with opposite endpoint incidence. The container
+ * permits multiple directed streams; this version admits one per face/substep.
+ * Capacities follow owned_order. Source/mesh pins and controls prevent replay
+ * against a different accepted interval. Momentum derives only from final fluxes. */
+struct GeneralVoFPreparedTransport
+{
+    std::shared_ptr<const void> source_identity;
+    std::uint64_t source_control = 0, transaction = 0, mesh_generation = 0, time_stage = 0;
+    double timestep = 0;
+    std::array<double, 2> density{1, 1};
+    GeneralVoFTransportBackend backend = GeneralVoFTransportBackend::DonorCell;
+    std::vector<GeneralVoFDirectedStream> streams;
+    std::vector<long double> old_mass, new_mass;
+    GeneralVoFTransportDiagnostics diagnostics;
+    /** Solver-attached immutable preparation; opaque at the FVM dependency
+     * boundary. Shared by the three component solves, never a convergence result. */
+    std::shared_ptr<const void> momentum_preparation;
+    std::size_t momentum_builds = 0, momentum_reuses = 0;
+};
+struct GeneralVoFFaceInterface
+{
+    std::uint64_t face = 0, first_cell = 0, second_cell = 0;
+    int first_owner = -1, second_owner = -1;
+    PLIC::GeometryPoint centroid{}, normal{};
+    double area = 0;
+};
 struct GeneralVoFOptions
 {
     /** Rank-local application allocation bound, checked at each construction /
@@ -36,6 +80,7 @@ struct GeneralVoFOptions
      * agree collectively, including on empty owners. */
     std::size_t byte_budget = 64 * 1024 * 1024, maximum_stencil_cells = 128, maximum_halo_cells = 65536;
     unsigned support_rings = 2;
+    GeneralVoFTransportBackend transport_backend = GeneralVoFTransportBackend::SweptPartition;
     PLIC::PolyhedralReconstructionOptions reconstruction;
     SimpleFluid::PLIC::SweepLimits sweep;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
@@ -278,6 +323,9 @@ public:
     [[nodiscard]] std::vector<GeneralVoFResolutionRequest> resolution_requests() const;
     [[nodiscard]] std::vector<PLIC::PolyhedralInterface> reconstruct() const;
     [[nodiscard]] std::vector<GeneralVoFReconstructionPatch> reconstruction_patches() const;
+    /** Explicit opposite-pure interfaces on bounded halo canonical fine subfaces.
+     * Requires a face backend. Replicas must be deduplicated by face ID. */
+    [[nodiscard]] std::vector<GeneralVoFFaceInterface> face_interfaces() const;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveNode>& nodes() const noexcept;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveTile>& tiles() const noexcept;
     /** Retained tile ordinals incident to a canonical node, in tiles() order.
@@ -358,12 +406,15 @@ public:
         [[nodiscard]] const std::vector<GeneralVoFCellClosureDiagnostic>&
         finite_cell_closure_diagnostics() const noexcept;
         [[nodiscard]] std::shared_ptr<const GeneralVoF> candidate() const;
+        [[nodiscard]] const std::shared_ptr<const GeneralVoFPreparedTransport>& prepared_transport() const noexcept
+        { return prepared_; }
 
     private:
         friend GeneralVoF;
         friend struct Exact::GeneralVoF;
         std::shared_ptr<const Data> source_, candidate_;
         std::uint64_t transaction_ = 0;
+        std::shared_ptr<const GeneralVoFPreparedTransport> prepared_;
         std::vector<GeneralVoFFaceContribution> faces_;
         std::vector<GeneralVoFTransfer> transfers_;
         std::vector<GeneralVoFDonorBudget> budgets_;
@@ -401,6 +452,13 @@ public:
      * Unsupported periodic images reject until image-qualified sweeps exist. */
     [[nodiscard]] Trial plan_transport(
         std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double timestep) const;
+    /** Fixed-mesh source-free Ordinary transport. Canonical integrated volumes
+     * are authoritative under a constant normal face velocity model. Closed
+     * boundaries only: nonzero exterior flux and periodic images reject.
+     * No swept solids, recipient overlays, or complete donor partitions.
+     * Densities and time-stage identity are collective controls. */
+    [[nodiscard]] Trial plan_face_transport(std::span<const GeneralVoFFaceVolume>, double timestep,
+        std::array<double, 2> density = {1, 1}, std::uint64_t time_stage = 0) const;
     [[nodiscard]] std::shared_ptr<const GeneralVoF> apply(const Trial&) const;
 
 private:

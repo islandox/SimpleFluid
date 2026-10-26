@@ -15,6 +15,8 @@ GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<K
     std::vector<double> carrier, GeneralVoFOptions options, std::vector<GeneralVoFPhaseGeometry> declarations,
     const ExactPhaseTransferResult* transfer)
 {
+    if (options.transport_backend == GeneralVoFTransportBackend::GeometricFace)
+        options.reconstruction.measure_only = true;
     if (options.arithmetic_mode == ArithmeticMode::Exact)
         construct_mode<ArithmeticMode::Exact>(std::move(hierarchy), std::move(order), std::move(gas),
             std::move(carrier), options, std::move(declarations), transfer);
@@ -237,6 +239,14 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 if (hierarchy->owned().contains(tile.first) ||
                     (tile.second && hierarchy->owned().contains(*tile.second)))
                     topology->tiles.push_back(tile);
+                if (options.transport_backend != GeneralVoFTransportBackend::SweptPartition && tile.second &&
+                    data->cells.contains(tile.first) && data->cells.contains(*tile.second))
+                {
+                    budget.add(sizeof(AMR::AdaptiveTile) + tile.node_gids.size() * sizeof(std::uint64_t) +
+                        tile.domain.size() + tile.surface.size() + tile.identity.size() + tile.boundary.size() +
+                        AMR::encode_adaptive_key(tile.first).size() + AMR::encode_adaptive_key(*tile.second).size());
+                    topology->surface_tiles.push_back(tile);
+                }
                 if constexpr (Mode != ArithmeticMode::Exact)
                 {
                     budget.add(sizeof(Data::FaceAuthority) + sizeof(std::uint64_t) + 4 * sizeof(void*) +

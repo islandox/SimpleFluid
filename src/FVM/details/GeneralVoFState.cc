@@ -247,6 +247,7 @@ void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
     real(w, p.orientation_step);
     w.word(p.fit_iterations);
     w.word(p.fit_converged);
+    finite_real(w, p.target_volume_numerical_error_estimate);
     w.word(p.finite_geometry);
     if (p.finite_geometry)
         finite_value(w, p.finite_target_volume_difference);
@@ -266,6 +267,7 @@ PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> m
     p.orientation_step = real(r);
     p.fit_iterations = r.word();
     p.fit_converged = r.word();
+    p.target_volume_numerical_error_estimate = finite_real(r);
     p.finite_geometry = r.word();
     if (p.finite_geometry)
         p.finite_target_volume_difference = finite_value(r, mode);
@@ -389,6 +391,13 @@ template<ArithmeticMode Mode> void retained_budget(const GeneralVoF::Data& data)
         budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t));
         if (geometry.insert(tile.geometry.get()).second)
             budget.add(tile.geometry->storage_bytes());
+    }
+    for (const auto& tile : data.topology->surface_tiles)
+    {
+        budget.add(sizeof(tile) + tile.node_gids.capacity() * sizeof(std::uint64_t) + tile.domain.capacity() +
+            tile.surface.capacity() + tile.identity.capacity() + tile.boundary.capacity() +
+            AMR::encode_adaptive_key(tile.first).size() + (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
+        if (geometry.insert(tile.geometry.get()).second) budget.add(tile.geometry->storage_bytes());
     }
     auto graph = [&](const auto& entries)
     {
@@ -620,11 +629,16 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
             wire::Budget budget{options.byte_budget};
             if (std::uint64_t(options.arithmetic_mode) > std::uint64_t(ArithmeticMode::Exact))
                 throw std::invalid_argument("Unknown General VoF arithmetic mode.");
-            budget.packet(18 * 8);
+            if (std::uint64_t(options.transport_backend) > std::uint64_t(GeneralVoFTransportBackend::GeometricFace) ||
+                (options.transport_backend != GeneralVoFTransportBackend::SweptPartition &&
+                    options.arithmetic_mode != ArithmeticMode::Ordinary))
+                throw std::invalid_argument("Face transport currently supports Ordinary arithmetic only.");
+            budget.packet(20 * 8);
             wire::Writer w;
             w.word(2); // Full arithmetic-mode protocol, distinct from legacy inventory policy.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
                      std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
+                     std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
                      std::uint64_t(options.reconstruction.maximum_offset_iterations),
                      std::uint64_t(options.reconstruction.maximum_fit_iterations),
                      std::uint64_t(options.reconstruction.maximum_stencil_cells),

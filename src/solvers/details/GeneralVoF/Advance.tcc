@@ -11,6 +11,7 @@
 #include "solvers/details/GeneralVoF/NodeVelocity.hh"
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -104,11 +105,15 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MIN, 1, &dt, &minimum);
     Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &dt, &maximum_dt);
     execution.require(minimum == maximum_dt, "Finite VoF timestep differs across ranks.");
-    const auto nodes = node_velocity(*mesh, *old.phases, old.velocity, options.byte_budget);
+    const bool face_backend = old.phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition;
+    const auto nodes = face_backend ? std::vector<VoF::GeneralVoFNodeVelocity>{}
+        : node_velocity(*mesh, *old.phases, old.velocity, options.byte_budget);
     execution.require(
         dt <= stable_timestep(resources, old, nodes), "Finite VoF timestep exceeds physical geometry/trajectory CFL.");
-    const auto trial =
-        old.phases->plan_transport(nodes, face_volumes<Mode>(*mesh, *old.phases, old.finite_projection, flow, dt), dt);
+    const auto controls = face_volumes<Mode>(*mesh, *old.phases, old.finite_projection, flow, dt);
+    const auto trial = face_backend
+        ? old.phases->plan_face_transport(controls, dt, {material.gas_density, material.liquid_density}, std::bit_cast<std::uint64_t>(old.diagnostics.time))
+        : old.phases->plan_transport(nodes, controls, dt);
     double local_h = std::numeric_limits<double>::infinity(), global_h = 0;
     for (auto h : thickness)
         local_h = std::min(local_h, h);
@@ -116,6 +121,7 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     execution.collective(
         [&]
         {
+            if (face_backend) return; // Fixed-mesh stream CFL is checked by the phase preparation.
             if (trial.finite_node_trajectories().size() != nodes.size())
                 throw std::runtime_error("Finite VoF trajectory certificate is incomplete.");
             const auto limit = A::multiply(A::make_value(global_h, 0), A::make_value(options.flow.max_courant, 0));
@@ -142,6 +148,13 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         next->finite_mass_error = std::move(storage.mass_error);
         next->physical_mass.clear();
     }
+    if (face_backend)
+        execution.collective([&]
+        {
+            const auto& prepared = *trial.prepared_transport();
+            if (prepared.old_mass != old.finite_mass || prepared.new_mass != next->finite_mass)
+                throw std::runtime_error("Prepared phase/momentum mass capacities differ.");
+        });
     std::vector<long double> outgoing(volume.size()), outgoing_error(volume.size()), source(volume.size());
     std::vector<detail::ConservativeVoFTransport::FiniteTransfer> incoming;
     std::vector<detail::ConservativeVoFTransport::FiniteFaceContribution> face_contributions;
@@ -180,6 +193,7 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
                 face_contributions.push_back({row, GO(face.donor), face.direction * value.value, value.absolute_error});
             }
         });
+    const auto preparation_before = transport.preparation_statistics();
     next->velocity.resize(volume.size());
     for (unsigned a = 0; a < 3; ++a)
     {
@@ -199,6 +213,28 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         for (std::size_t c = 0; c < volume.size(); ++c)
             next->velocity[c][a] = carried.cell_trace[c];
     }
+    if (face_backend)
+        execution.collective([&]
+        {
+            const auto& phase_preparation = *trial.prepared_transport();
+            std::size_t remaining = options.byte_budget;
+            const auto reserve = [&](std::size_t count, std::size_t width)
+            {
+                if (count > remaining / width)
+                    throw std::runtime_error("Coupled face preparation exceeds its retained byte budget.");
+                remaining -= count * width;
+            };
+            reserve(1, sizeof(VoF::GeneralVoFPreparedTransport));
+            reserve(phase_preparation.streams.size(), sizeof(VoF::GeneralVoFDirectedStream));
+            reserve(phase_preparation.old_mass.size(), sizeof(long double));
+            reserve(phase_preparation.new_mass.size(), sizeof(long double));
+            auto prepared = std::make_shared<VoF::GeneralVoFPreparedTransport>(phase_preparation);
+            const auto after = transport.preparation_statistics();
+            prepared->momentum_preparation = transport.finite_preparation_identity();
+            prepared->momentum_builds = after.finite_builds - preparation_before.finite_builds;
+            prepared->momentum_reuses = after.finite_hits - preparation_before.finite_hits;
+            next->prepared_transport = std::move(prepared);
+        });
     std::vector<double> viscosity(volume.size());
     execution.collective(
         [&]
