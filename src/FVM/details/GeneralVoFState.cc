@@ -399,6 +399,19 @@ template<ArithmeticMode Mode> void retained_budget(const GeneralVoF::Data& data)
             AMR::encode_adaptive_key(tile.first).size() + (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
         if (geometry.insert(tile.geometry.get()).second) budget.add(tile.geometry->storage_bytes());
     }
+    budget.add((data.topology->frontier_tiles.capacity() - data.topology->frontier_tiles.size()) *
+               sizeof(AMR::AdaptiveTile));
+    for (const auto& tile : data.topology->frontier_tiles)
+    {
+        budget.add(sizeof(tile) +
+                   (tile.node_gids.capacity() + tile.second_node_gids.capacity()) * sizeof(std::uint64_t) +
+                   tile.domain.capacity() + tile.surface.capacity() + tile.identity.capacity() +
+                   tile.boundary.capacity() + tile.second_image_identity.capacity() +
+                   AMR::encode_adaptive_key(tile.first).size() +
+                   (tile.second ? AMR::encode_adaptive_key(*tile.second).size() : 0));
+        if (geometry.insert(tile.geometry.get()).second)
+            budget.add(tile.geometry->storage_bytes());
+    }
     auto graph = [&](const auto& entries)
     {
         for (const auto& [key, values] : entries)
@@ -707,7 +720,7 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 wire::Writer w;
                 w.bytes(bytes);
                 w.word(revision);
-                w.word(3);
+                w.word(Mode == ArithmeticMode::Ordinary ? 4 : 3);
                 w.word(std::uint64_t(data.options.arithmetic_mode));
                 w.word(cell.canonical_face_count);
                 finite_real(w, cell.ordinary_quota_scale);
@@ -715,6 +728,9 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 real(w, cell.phase.carrier_volume);
                 w.word(std::uint64_t(cell.declaration));
                 w.word(cell.inherited);
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                    w.word(cell.retained_interface && !cell.retained_interface->pure_gas &&
+                           !cell.retained_interface->pure_carrier);
                 real(w, cell.roundoff.gas);
                 real(w, cell.roundoff.carrier);
                 real(w, cell.finite_history.gas);
@@ -750,7 +766,8 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
                     !seen.insert(key).second)
                     throw std::invalid_argument("General VoF unauthenticated phase reply.");
-                if (r.word() != 3 || r.word() != std::uint64_t(data.options.arithmetic_mode))
+                if (r.word() != (Mode == ArithmeticMode::Ordinary ? 4 : 3) ||
+                    r.word() != std::uint64_t(data.options.arithmetic_mode))
                     throw std::invalid_argument("General VoF ghost inventory policy differs.");
                 const auto count = r.word();
                 const auto quota = finite_real(r);
@@ -763,6 +780,13 @@ template<ArithmeticMode Mode> void import_phases(GeneralVoF::Data& data)
                 cell.phase.carrier_volume = real(r);
                 cell.declaration = GeneralVoFPhaseGeometry(r.word());
                 cell.inherited = r.word();
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                {
+                    const auto requires_interface = r.word();
+                    if (requires_interface > 1)
+                        throw std::invalid_argument("General VoF malformed owner interface requirement.");
+                    cell.requires_interface = requires_interface;
+                }
                 cell.roundoff.gas = real(r);
                 cell.roundoff.carrier = real(r);
                 cell.finite_history.gas = real(r);
@@ -994,6 +1018,118 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
     return result;
 }
 
+std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(
+    const GeneralVoF::Data& data, const std::set<Key>& requested, const PLIC::GeometryPacketContext& context)
+{
+    constexpr auto Mode = ArithmeticMode::Ordinary;
+    const auto comm = data.hierarchy->communicator();
+    const auto limit = data.options.byte_budget;
+    std::map<Key, PLIC::PolyhedralInterface> result;
+    wire::collective(*comm,
+        [&]
+        {
+            current(data);
+            if (context.publication[0] != data.control ||
+                context.publication[1] != data.hierarchy->topology_generation() ||
+                context.publication[2] != data.hierarchy->partition_generation())
+                throw std::invalid_argument("General VoF sparse plane source context is stale.");
+            for (const auto& key : requested)
+                if (data.cells.at(key).owner == comm->getRank())
+                    result.emplace(key, reconstruct_cell<Mode>(data, key));
+        });
+    std::vector<OwnerPacket> requests;
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{limit};
+            for (const auto& key : requested)
+                if (const auto& cell = data.cells.at(key); cell.owner != comm->getRank())
+                {
+                    auto bytes = AMR::encode_adaptive_key(key);
+                    budget.packet(bytes.size() + 48);
+                    wire::Writer w;
+                    w.bytes(bytes);
+                    w.word(cell.revision);
+                    for (auto word : context.publication)
+                        w.word(word);
+                    requests.push_back({cell.owner, std::move(w.data)});
+                }
+        });
+    auto incoming = exchange_owner_packets(requests, comm, limit);
+    std::vector<OwnerPacket> replies;
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{limit};
+            for (const auto& packet : incoming.packets)
+            {
+                wire::Reader r{packet.bytes};
+                auto bytes = r.bytes();
+                auto key = AMR::decode_adaptive_key(bytes);
+                auto revision = r.word();
+                for (auto word : context.publication)
+                    if (r.word() != word)
+                        throw std::invalid_argument("General VoF sparse plane context mismatch.");
+                r.done();
+                const auto& cell = data.cells.at(key);
+                if (cell.owner != comm->getRank() || cell.revision != revision)
+                    throw std::invalid_argument("General VoF stale plane request.");
+
+                wire::Writer w;
+                w.bytes(bytes);
+                w.word(revision);
+                for (auto word : context.publication)
+                    w.word(word);
+                plane(w, reconstruct_cell<Mode>(data, key));
+                budget.packet(w.data.size());
+                replies.push_back({packet.peer, std::move(w.data)});
+            }
+        });
+    auto received = exchange_owner_packets(replies, comm, limit);
+    wire::collective(*comm,
+        [&]
+        {
+            std::set<Key> seen;
+            for (const auto& packet : received.packets)
+            {
+                wire::Reader r{packet.bytes};
+                auto key = AMR::decode_adaptive_key(r.bytes());
+                auto revision = r.word();
+                for (auto word : context.publication)
+                    if (r.word() != word)
+                        throw std::invalid_argument("General VoF sparse plane context mismatch.");
+                const auto& cell = data.cells.at(key);
+                if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
+                    !requested.contains(key) || !seen.insert(key).second)
+                    throw std::invalid_argument("General VoF unauthenticated plane reply.");
+                auto fitted =
+                    plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
+                                                                                   : data.options.arithmetic_mode);
+                if constexpr (Mode != ArithmeticMode::Exact)
+                {
+                    if (!fitted.finite_geometry)
+                        throw std::invalid_argument("Finite VoF imported an exact interface authority.");
+                    if (!fitted.pure_gas && !fitted.pure_carrier)
+                    {
+                        const auto amounts = fp::runtime_phases<Mode>(
+                            PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->phases(fitted.gas));
+                        const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
+                        fitted.finite_target_volume_difference =
+                            fp::Arithmetic<Mode>::subtract(gas ? amounts.gas : amounts.carrier,
+                                {gas ? cell.phase.gas_volume : cell.phase.carrier_volume, 0});
+                        fitted.target_volume_residual =
+                            static_cast<double>(fitted.finite_target_volume_difference.value);
+                    }
+                }
+                result.emplace(key, std::move(fitted));
+                r.done();
+            }
+            if (seen.size() != requests.size())
+                throw std::invalid_argument("General VoF incomplete plane replies.");
+        });
+    return result;
+}
+
 std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data)
 {
     if (data.options.arithmetic_mode == ArithmeticMode::Exact)
@@ -1039,4 +1175,4 @@ template void import_phases<ArithmeticMode::Exact>(GeneralVoF::Data&);
 template void retained_budget<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
 template void retained_budget<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&);
 template void retained_budget<ArithmeticMode::Exact>(const GeneralVoF::Data&);
-}
+} // namespace SimpleFluid::VoF::general_vof_detail

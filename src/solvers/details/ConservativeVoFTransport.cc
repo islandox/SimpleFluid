@@ -594,6 +594,7 @@ struct ConservativeVoFTransport::FinitePreparation
     Teuchos::RCP<const Pack::matrix_type> matrix;
     std::uint64_t geometry_epoch = 0;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
+    FiniteOperatorMode operator_mode = FiniteOperatorMode::EquivalentRoutes;
     std::size_t byte_budget = 0;
     double tolerance = 0;
 };
@@ -604,7 +605,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
     const std::vector<FiniteFaceContribution>& contributions, bool nonnegative, int maximum_iterations,
     double tolerance, std::size_t byte_budget, std::span<const long double> old_error,
     std::span<const long double> source_error, std::span<const long double> capacity_error,
-    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode)
+    std::span<const long double> outgoing_error, ArithmeticMode arithmetic_mode, FiniteOperatorMode operator_mode)
 {
     namespace fp = VoF::finite_detail;
     using Value = PLIC::DynamicGeometryValue;
@@ -619,15 +620,23 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve(const std::vect
             maximum_mode <= int(ArithmeticMode::BoundedCertification) &&
             (!finite_arithmetic_mode_ || *finite_arithmetic_mode_ == arithmetic_mode),
         "Finite momentum arithmetic mode is invalid, differs across ranks, or changed its cached workspace.");
+    int local_operator = int(operator_mode), minimum_operator = 0, maximum_operator = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_operator, &minimum_operator);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_operator, &maximum_operator);
+    require(*map,
+        minimum_operator == maximum_operator && minimum_operator >= int(FiniteOperatorMode::EquivalentRoutes) &&
+            maximum_operator <= int(FiniteOperatorMode::SignedFaceLedger) &&
+            (operator_mode != FiniteOperatorMode::SignedFaceLedger || arithmetic_mode == ArithmeticMode::Ordinary),
+        "Finite momentum operator mode is invalid, differs across ranks, or requires Ordinary arithmetic.");
     finite_arithmetic_mode_ = arithmetic_mode;
 
     if (arithmetic_mode == ArithmeticMode::Ordinary)
         return solve_finite<ArithmeticMode::Ordinary>(old, source, capacity, outgoing, incoming, contributions,
             nonnegative, maximum_iterations, tolerance, byte_budget, old_error, source_error, capacity_error,
-            outgoing_error, arithmetic_mode);
+            outgoing_error, arithmetic_mode, operator_mode);
     return solve_finite<ArithmeticMode::BoundedCertification>(old, source, capacity, outgoing, incoming, contributions,
         nonnegative, maximum_iterations, tolerance, byte_budget, old_error, source_error, capacity_error,
-        outgoing_error, arithmetic_mode);
+        outgoing_error, arithmetic_mode, operator_mode);
 }
 } // namespace SimpleFluid::detail
 

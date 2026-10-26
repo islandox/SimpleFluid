@@ -226,7 +226,7 @@ TEST(GeneralVoFHomogeneousTransport, OppositeDeclarationsRemainOnGeometricSweptP
         declarations.push_back(g == 0 ? Declaration::PureCarrier : Declaration::PureGas);
     GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, {}, declarations);
     const auto trial = state.plan_transport(stationary(state), circulation(state), 1);
-    EXPECT_EQ(trial.prepare_transport()->family, Family::GeometricSweptTetrahedra);
+    EXPECT_EQ(trial.prepare_transport()->family, Family::InterfaceLocalSwept);
     EXPECT_TRUE(trial.prepare_transport()->streams.empty());
 }
 TEST(GeneralVoFHomogeneousTransport, InferAndBoundedStatesRemainOnGeometricSweptPath)
@@ -242,7 +242,8 @@ TEST(GeneralVoFHomogeneousTransport, InferAndBoundedStatesRemainOnGeometricSwept
         for (const auto declaration : state.phase_geometry_declarations())
             EXPECT_EQ(declaration, Declaration::Infer);
         const auto trial = state.plan_transport(stationary(state), circulation(state), 1);
-        EXPECT_EQ(trial.prepare_transport()->family, Family::GeometricSweptTetrahedra);
+        EXPECT_EQ(trial.prepare_transport()->family, mode == ArithmeticMode::Ordinary ?
+            Family::InterfaceLocalSwept : Family::GeometricSweptTetrahedra);
         EXPECT_TRUE(trial.prepare_transport()->streams.empty());
     }
 }

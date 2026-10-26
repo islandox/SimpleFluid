@@ -2,6 +2,7 @@
  * @brief Moving phase transport; collective stages remain coordinated here.
  */
 #include "FVM/details/GeneralVoF/ConstructionControls.tcc"
+#include "FVM/details/GeneralVoF/LocalTransport.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 namespace SimpleFluid::VoF
@@ -244,6 +245,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             algebraic.validate_retained_algebraic_payload();
             return algebraic;
         }
+        return plan_interface_transport(std::move(trial), {face_volume, traces, flux, face_budgets, packet_context});
     }
     PLIC::GeometryLimits registry_limits = geometry_limits(Mode, limit);
     registry_limits.maximum_pair_tests = data.options.sweep.maximum_pair_tests;
@@ -313,8 +315,8 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 {
                     face_context.record.scale = data.cells.at(tile.first).ordinary_quota_scale;
                     if (tile.second)
-                        face_context.record.scale = std::min(face_context.record.scale,
-                            data.cells.at(*tile.second).ordinary_quota_scale);
+                        face_context.record.scale =
+                            std::min(face_context.record.scale, data.cells.at(*tile.second).ordinary_quota_scale);
                     face_context.record.mark(failure::Field::Scale);
                 }
                 face_context.record.pair_budget = work.limits.maximum_pair_tests;

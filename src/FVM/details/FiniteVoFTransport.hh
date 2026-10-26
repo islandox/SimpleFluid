@@ -4,8 +4,8 @@
 #pragma once
 #include "FVM/details/FiniteGeometryAccess.hh"
 #include "FVM/details/VoFFailure.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
+#include "geometry/PLIC/SweptGeometry.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -116,6 +116,15 @@ inline std::vector<std::array<PLIC::Point<Mode>, 3>> sweep_boundary(std::span<co
     }
     return result;
 }
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
+    const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,
+    long double ordinary_volume_budget = 0);
+
+/** Instantiate the signed tetrahedra only after the scalar recipe needs geometry. */
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL Sweep<Mode> materialize_sweep(
+    Sweep<Mode> recipe, std::span<const std::uint64_t> nodes, Work& work);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_EXPORT Sweep<Mode> make_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
     const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,

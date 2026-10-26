@@ -134,6 +134,154 @@ TEST(ConservativeVoFTransportTest, FiniteMomentumReusesThreeRhsAndInvalidatesCha
     EXPECT_EQ(transport.preparation_statistics().finite_hits, 3);
 }
 
+TEST(ConservativeVoFTransportTest, SignedNonincidentCounterflowUsesPhysicalOperatorAndCollectiveMode)
+{
+    using Transport = detail::ConservativeVoFTransport;
+    using Operator = Transport::FiniteOperatorMode;
+    using GO = DefaultTpetraTypes::global_ordinal_type;
+    using Handle = MeshHandle<>;
+    const auto comm = Tpetra::getDefaultComm();
+    auto geometry = std::make_shared<Handle::Cartesian>(Vec3D<ArrReal>{{{0., 1., 2.}, {0., 1., 2.}, {0., 1.}}});
+    Handle::DistributionOptions distribution;
+    distribution.allow_empty_partitions = true;
+    // Two populated owner rows in Y, with every extra MPI owner empty.
+    distribution.orthogonal_partitions = std::array<std::size_t, 3>{1, std::size_t(comm->getSize()), 1};
+    auto mesh = std::make_shared<Handle>(geometry, distribution);
+    const auto n = mesh->num_owned_cells();
+    const auto map = mesh->owned_cell_map();
+    int empty = n == 0, empty_count = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &empty_count);
+    EXPECT_EQ(empty_count, std::max(0, comm->getSize() - 2));
+    const auto index = [](const auto& p) { return unsigned(p.x > 1) + 2 * unsigned(p.y > 1); };
+    GO local_ids[4]{}, ids[4]{};
+    for (std::size_t c = 0; c < n; ++c)
+        local_ids[index(mesh->cell_centroid(LO(c)))] = map->getGlobalElement(LO(c));
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, local_ids, ids);
+    constexpr long double a = 1.L / 8;
+    std::vector<long double> capacity(n, 1), outgoing(n), zero(n), old(n);
+    const std::vector<Transport::FiniteTransfer> routes;
+    std::vector<Transport::FiniteFaceContribution> faces;
+    for (std::size_t f = 0; f < mesh->num_owned_faces(); ++f)
+    {
+        const auto face = LO(f);
+        if (mesh->is_geometry_exterior_face(face))
+            continue;
+        const auto p = mesh->face_centroid(face);
+        if (p.x == 1 && p.y < 1)
+        {
+            const auto orientation = mesh->cell_centroid(mesh->owner_cell(face)).x < 1 ? 1 : -1;
+            faces.push_back({face, ids[2], orientation * a, 0});
+            faces.push_back({face, ids[3], -orientation * a, 0});
+        }
+    }
+    Transport legacy(mesh);
+    EXPECT_THROW((void) legacy.solve(old, zero, capacity, outgoing, routes, faces, false, 3000), std::runtime_error);
+    Transport transport(mesh);
+    const auto call = [&](Operator mode)
+    {
+        return transport.solve(old, zero, capacity, outgoing, routes, faces, false, 3000, 1e-12, 64 * 1024 * 1024, {},
+            {}, {}, {}, ArithmeticMode::Ordinary, mode);
+    };
+    for (const double scale : {1., -.5, 2.})
+    {
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            const auto i = index(mesh->cell_centroid(LO(c)));
+            old[c] = i < 2 ? 0 : (i == 2 ? scale : -scale);
+        }
+        const auto result = call(Operator::SignedFaceLedger);
+        EXPECT_LE(result.physical_relative_residual, 1e-12);
+        double local_trace[4]{}, trace[4]{}, local_momentum[2]{}, momentum[2]{};
+        constexpr std::array<double, 4> answer{-.25, .25, 1, -1};
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            const auto i = index(mesh->cell_centroid(LO(c)));
+            EXPECT_NEAR(result.cell_trace[c], scale * answer[i], 1e-13);
+            EXPECT_NEAR(result.amount[c], scale * answer[i], 1e-13);
+            local_trace[i] = result.cell_trace[c];
+            local_momentum[0] += static_cast<double>(old[c]);
+            local_momentum[1] += result.amount[c];
+        }
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, local_trace, trace);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_momentum, momentum);
+        EXPECT_NEAR(momentum[0], momentum[1], 1e-13);
+        // Independent physical equations: the only active face is A -> B,
+        // with +a from C and -a from D. Its net mass is exactly zero.
+        const std::array<long double, 4> residual{trace[0] + a * trace[2] - a * trace[3],
+            trace[1] - a * trace[2] + a * trace[3], trace[2] - scale, trace[3] + scale};
+        long double norm = 0;
+        for (const auto r : residual)
+            norm += r * r;
+        EXPECT_LE(std::sqrt(norm / (2 * scale * scale)), 1e-12);
+        for (const auto& contribution : faces)
+        {
+            const double orientation = mesh->cell_centroid(mesh->owner_cell(contribution.face)).x < 1 ? 1 : -1;
+            EXPECT_NEAR(result.flux[contribution.face], orientation * scale / 4, 1e-13);
+        }
+    }
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 1u);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 2u);
+    EXPECT_THROW((void) call(static_cast<Operator>(42)), std::runtime_error);
+    if (comm->getSize() > 1)
+    {
+        const auto mode =
+            comm->getRank() + 1 == comm->getSize() ? Operator::EquivalentRoutes : Operator::SignedFaceLedger;
+        EXPECT_THROW((void) call(mode), std::runtime_error);
+    }
+    Transport bounded(mesh);
+    EXPECT_THROW(
+        (void) bounded.solve(old, zero, capacity, outgoing, routes, faces, false, 3000, 1e-12, 64 * 1024 * 1024, {}, {},
+            {}, {}, ArithmeticMode::BoundedCertification, Operator::SignedFaceLedger),
+        std::runtime_error);
+    // Zero physical streams admit either mode. Changing only the mode must
+    // rebuild the preparation even though every numeric coefficient is equal.
+    const auto counterflow_faces = faces;
+    faces.clear();
+    (void) call(Operator::EquivalentRoutes);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 2u);
+    const auto equivalent_identity = transport.finite_preparation_identity();
+    (void) call(Operator::SignedFaceLedger);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 3u);
+    EXPECT_NE(equivalent_identity, transport.finite_preparation_identity());
+
+    // These independent two-cell equations have physical diagonals 1-strength,
+    // including zero and negative values. D remains the positive identity.
+    // At strength=1 the A/B operator swaps the two traces; at strength=2 its
+    // equations are -u_A+2*u_B=1 and 2*u_A-u_B=2.
+    for (const long double strength : {1.L, 2.L})
+    {
+        faces.clear();
+        for (std::size_t f = 0; f < counterflow_faces.size(); f += 2)
+        {
+            const auto face = counterflow_faces[f].face;
+            const auto orientation = counterflow_faces[f].amount > 0 ? 1 : -1;
+            faces.push_back({face, ids[0], -orientation * strength, 0});
+            faces.push_back({face, ids[1], orientation * strength, 0});
+        }
+        for (std::size_t c = 0; c < n; ++c)
+            old[c] = 1 + index(mesh->cell_centroid(LO(c)));
+        const auto result = call(Operator::SignedFaceLedger);
+        EXPECT_LE(result.physical_relative_residual, 1e-12);
+        const std::array<long double, 4> answer =
+            strength == 1 ? std::array<long double, 4>{2, 1, 3, 4} : std::array<long double, 4>{5.L / 3, 4.L / 3, 3, 4};
+        double local_trace[4]{}, trace[4]{}, local_momentum = 0, momentum = 0;
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            const auto i = index(mesh->cell_centroid(LO(c)));
+            EXPECT_NEAR(result.cell_trace[c], answer[i], 1e-12);
+            EXPECT_NEAR(result.amount[c], answer[i], 1e-12);
+            local_trace[i] = result.cell_trace[c];
+            local_momentum += result.amount[c];
+        }
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, local_trace, trace);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_momentum, &momentum);
+        EXPECT_NEAR(momentum, 10, 1e-12);
+        const auto r_a = (1 - strength) * trace[0] + strength * trace[1] - 1;
+        const auto r_b = strength * trace[0] + (1 - strength) * trace[1] - 2;
+        EXPECT_LE(std::sqrt((r_a * r_a + r_b * r_b) / 5), 1e-12);
+    }
+}
+
 TEST(ConservativeVoFTransportTest, HomogeneousSweptLedgerMatchesIndependentImplicitCirculation)
 {
     namespace AMR = Meshes::AMR;

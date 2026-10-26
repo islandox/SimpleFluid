@@ -57,17 +57,20 @@ TEST(GeneralVoFPreparedTransport, AlgebraicBackendsRetainTheirDirectedStreamsAnd
         EXPECT_THROW((void) trial.prepare_transport({1, 1000}, 14), std::invalid_argument);
     }
 }
-TEST(GeneralVoFPreparedTransport, SweptSignedLedgerRemainsSeparateFromPositiveRouteSupport)
+TEST(GeneralVoFPreparedTransport, InterfaceSignedLedgerKeepsSeparateNumericalSupport)
 {
     const auto input = fixture();
     GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier);
     const auto controls = circulation(source);
     const auto trial = source.plan_transport(stationary(source), controls, 1);
     const auto prepared = trial.prepare_transport({1, 1000}, 17);
-    EXPECT_EQ(prepared->family, GeneralVoFTransportFamily::GeometricSweptTetrahedra);
+    EXPECT_EQ(prepared->family, GeneralVoFTransportFamily::InterfaceLocalSwept);
     EXPECT_TRUE(prepared->streams.empty());
     ASSERT_EQ(prepared->signed_face_contributions.size(), trial.finite_face_contributions().size());
-    ASSERT_EQ(prepared->positive_transfers.size(), trial.finite_transfers().size());
+    EXPECT_TRUE(prepared->positive_transfers.empty());
+    EXPECT_TRUE(trial.finite_transfers().empty());
+    EXPECT_EQ(prepared->signed_donor_budgets.size(), input.order.size());
+    EXPECT_EQ(prepared->numerical_support_budgets.size(), input.order.size());
     std::map<std::uint64_t, long double> signed_bulk;
     for (std::size_t i = 0; i < prepared->signed_face_contributions.size(); ++i)
     {
@@ -85,7 +88,7 @@ TEST(GeneralVoFPreparedTransport, SweptSignedLedgerRemainsSeparateFromPositiveRo
         if (row >= 0)
             EXPECT_NEAR(signed_bulk[control.face], control.integrated_volume, 1e-14);
     }
-    for (const auto& route : prepared->positive_transfers)
+    for (const auto& route : prepared->numerical_support_transfers)
     {
         EXPECT_GE(route.amount.gas.value, 0);
         EXPECT_GE(route.amount.carrier.value, 0);

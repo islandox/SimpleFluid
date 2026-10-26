@@ -74,7 +74,10 @@ void PhaseStorage<Mode>::validate(const MeshHandle<>& mesh_view, const VoF::Gene
                 carrier(owned_count, VoF::finite_detail::SumFor<Mode>(Mode));
             std::vector<CompensatedSum<>> gas_magnitude(owned_count), carrier_magnitude(owned_count);
             std::vector<std::size_t> publication_terms(owned_count);
-            for (const auto& route : prepared.positive_transfers)
+            const bool signed_family = prepared.family == VoF::GeneralVoFTransportFamily::InterfaceLocalSwept;
+            if (signed_family && Mode != ArithmeticMode::Ordinary)
+                throw std::runtime_error("Signed phase publication requires Ordinary arithmetic.");
+            const auto add_receipt = [&](const auto& route)
             {
                 const auto row = mesh->owned_cell_map()->getLocalElement(GO(route.recipient));
                 if (row < 0)
@@ -84,7 +87,13 @@ void PhaseStorage<Mode>::validate(const MeshHandle<>& mesh_view, const VoF::Gene
                 gas_magnitude[row] += std::abs(route.amount.gas.value);
                 carrier_magnitude[row] += std::abs(route.amount.carrier.value);
                 ++publication_terms[row];
-            }
+            };
+            if (signed_family)
+                for (const auto& receipt : prepared.signed_receipts)
+                    add_receipt(receipt);
+            else
+                for (const auto& route : prepared.positive_transfers)
+                    add_receipt(route);
             const auto& phases = candidate.phase_volumes();
             const auto& bounds = prepared.phase_roundoff;
             if (phases.size() != owned_count || bounds.size() != owned_count)

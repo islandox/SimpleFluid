@@ -67,6 +67,9 @@ endif()
       PROPERTIES LABELS "vof\\;exact\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testGeneralVoFSolver")
     simplefluid_discover_tests(${TEST_NAME} PROPERTIES LABELS "vof\\;general_mesh\\;integration" TIMEOUT 1800)
+  elseif(TEST_NAME STREQUAL "testGeneralVoFInterfaceFlow")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;interface\\;conservation\\;transaction" TIMEOUT 300)
   elseif(TEST_NAME STREQUAL "testGeneralVoFHomogeneousFlow")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;general_mesh\\;homogeneous\\;conservation\\;transaction" TIMEOUT 180)
@@ -838,5 +841,20 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     simplefluid_add_mpi_test(NAME GeneralVoFFailures_${PROCS}procs
       TARGET testGeneralVoFFailures PROCS ${PROCS}
       LABELS "mpi;vof;diagnostics;collective;empty_rank" TIMEOUT 90)
+  endforeach()
+endif()
+
+foreach(PROCS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFSignedMomentum_${PROCS}procs
+    TARGET testConservativeVoFTransport PROCS ${PROCS}
+    ARGS "--gtest_filter=ConservativeVoFTransportTest.SignedNonincidentCounterflowUsesPhysicalOperatorAndCollectiveMode"
+    LABELS "mpi;vof;signed;momentum;conservation;empty_rank" TIMEOUT 180)
+endforeach()
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+  foreach(PROCS 2 4)
+    simplefluid_add_mpi_test(NAME GeneralVoFInterfaceFlow_${PROCS}procs
+      TARGET testGeneralVoFInterfaceFlow PROCS ${PROCS}
+      LABELS "mpi;vof;interface;conservation;transaction;empty_rank" TIMEOUT 300)
   endforeach()
 endif()

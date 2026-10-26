@@ -61,7 +61,8 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
     return plan_face_transport_impl(controls, dt, density, time_stage, false);
 }
 GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVoFFaceVolume> controls, double dt,
-    std::array<double, 2> density, std::uint64_t time_stage, bool homogeneous, std::uint64_t transaction_id) const
+    std::array<double, 2> density, std::uint64_t time_stage, bool homogeneous, std::uint64_t transaction_id,
+    bool numerical_baseline) const
 {
     const auto& data = *data_;
     const auto comm = data.hierarchy->communicator();
@@ -145,7 +146,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                 throw std::invalid_argument("Face transport controls differ.");
         });
     trial.transaction_ = homogeneous && transaction_id != 0 ? transaction_id : transaction(comm);
-    trial.homogeneous_algebraic_ = homogeneous;
+    trial.homogeneous_algebraic_ = homogeneous && !numerical_baseline;
     trial.timestep_ = dt;
     prepared->source_identity = data_;
     prepared->source_control = data.control;
@@ -749,7 +750,11 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                     c.declaration = GeneralVoFPhaseGeometry::PureGas;
                 const auto geometric_volume =
                     PLIC::ConvexCellGeometry<mode>::from_dynamic(c.finite_geometry)->volume().value;
-                const long double defect = static_cast<long double>(pg.first) + pl.first - geometric_volume;
+                SimpleFluid::detail::CompensatedSum<long double> defect_sum;
+                defect_sum += pg.first;
+                defect_sum += pl.first;
+                defect_sum += -geometric_volume;
+                const long double defect = defect_sum.value();
                 const long double arithmetic = (16 + 4 * data.topology->cell_tiles.at(key).size()) *
                                                std::numeric_limits<long double>::epsilon() * c.native_volume;
                 const auto closure = std::abs(totals[c.gid].bulk_in.value() - totals[c.gid].bulk_out.value());

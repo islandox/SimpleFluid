@@ -108,6 +108,15 @@ public:
         const std::vector<FaceContribution>& contributions, bool nonnegative, int maximum_iterations,
         double tolerance = 1e-12, bool equilibrate_rows = true, std::size_t byte_budget = 64 * 1024 * 1024);
 
+    /** EquivalentRoutes preserves the positive pullback operator. SignedFaceLedger
+     * assembles the signed raw physical operator; positive support supplies only
+     * the strictly positive row scale. Signed mode is Ordinary-only. */
+    enum class FiniteOperatorMode
+    {
+        EquivalentRoutes,
+        SignedFaceLedger
+    };
+
     struct FiniteTransfer
     {
         DefaultTpetraTypes::global_ordinal_type donor = 0, recipient = 0;
@@ -125,14 +134,18 @@ public:
      * explicit BoundedCertification also propagates arithmetic bounds. A cached
      * workspace cannot change its selected FP mode. Identical admitted
      * coefficients reuse immutable routing, donor maps and the linear operator
-     * across RHS calls; each RHS still passes the original physical residual. */
+     * across RHS calls; each RHS still passes the original physical residual.
+     * SignedFaceLedger admits independent numerical support and assembles raw
+     * face coefficients directly. Its flux result retains canonical overlap-face
+     * momentum flux, including opposing groups at zero net carrier flux. */
     [[nodiscard]] Result solve(const std::vector<long double>& old, const std::vector<long double>& source,
         const std::vector<long double>& capacity, const std::vector<long double>& outgoing,
         const std::vector<FiniteTransfer>& incoming, const std::vector<FiniteFaceContribution>& contributions,
         bool nonnegative, int maximum_iterations, double tolerance = 1e-12, std::size_t byte_budget = 64 * 1024 * 1024,
         std::span<const long double> old_error = {}, std::span<const long double> source_error = {},
         std::span<const long double> capacity_error = {}, std::span<const long double> outgoing_error = {},
-        ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary);
+        ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary,
+        FiniteOperatorMode operator_mode = FiniteOperatorMode::EquivalentRoutes);
 
     struct ExactTransfer
     {
@@ -155,7 +168,7 @@ private:
         bool nonnegative, int maximum_iterations, double tolerance, std::size_t byte_budget,
         std::span<const long double> old_error, std::span<const long double> source_error,
         std::span<const long double> capacity_error, std::span<const long double> outgoing_error,
-        ArithmeticMode arithmetic_mode);
+        ArithmeticMode arithmetic_mode, FiniteOperatorMode operator_mode);
     friend struct Exact::ConservativeVoFTransport;
     using Pack = DefaultTpetraTypes;
     struct SparseAssembly;

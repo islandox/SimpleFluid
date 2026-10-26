@@ -87,7 +87,7 @@ void check_budget_diagnostics(const GeneralVoF& state, const GeneralVoF::Trial& 
         EXPECT_LE(budgets.value().value, cell.allowed_closure);
         EXPECT_EQ(cell.absolute_geometry_difference, actual.value().value);
         EXPECT_EQ(cell.combined_residual.value,
-            cell.canonical_residual.value + cell.signed_geometry_difference.value);
+            cell.canonical_residual.value + cell.signed_geometry_difference.value + cell.signed_phase_cut_closure);
         EXPECT_EQ(cell.allowed_closure,
             state.options().reconstruction.volume_tolerance * geometry[c]->volume().value);
         EXPECT_LE(std::abs(cell.combined_residual.value), cell.allowed_closure);
@@ -327,7 +327,11 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
     check_budget_diagnostics(state, trial);
     EXPECT_TRUE(trial.transfers().empty());
     EXPECT_TRUE(trial.donor_budgets().empty());
-    ASSERT_EQ(trial.finite_donor_budgets().size(), input.order.size());
+    const auto ledger = trial.prepare_transport();
+    EXPECT_EQ(ledger->family, GeneralVoFTransportFamily::InterfaceLocalSwept);
+    EXPECT_TRUE(trial.finite_donor_budgets().empty());
+    EXPECT_TRUE(trial.finite_transfers().empty());
+    ASSERT_EQ(ledger->signed_donor_budgets.size(), input.order.size());
     ASSERT_EQ(candidate->accumulated_phase_errors().size(), input.order.size());
     fp::Sum gas(state.arithmetic_mode()), carrier(state.arithmetic_mode());
     for (std::size_t i = 0; i < candidate->phase_volumes().size(); ++i)
@@ -346,14 +350,14 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, local, global);
     EXPECT_NEAR(global[0], 1., global[2] + 1e-14);
     EXPECT_NEAR(global[1], 7., global[3] + 1e-14);
-    for (const auto& route : trial.finite_transfers())
+    for (const auto& route : ledger->signed_receipts)
     {
         EXPECT_EQ(route.recipient_owner, comm->getRank());
         EXPECT_EQ(route.amount.bulk.arithmetic_mode, ArithmeticMode::Ordinary);
         EXPECT_EQ(route.amount.gas.arithmetic_mode, ArithmeticMode::Ordinary);
         EXPECT_EQ(route.amount.carrier.arithmetic_mode, ArithmeticMode::Ordinary);
-        EXPECT_GE(route.amount.gas.value, 0);
-        EXPECT_GE(route.amount.carrier.value, 0);
+        EXPECT_TRUE(std::isfinite(route.amount.gas.value));
+        EXPECT_TRUE(std::isfinite(route.amount.carrier.value));
     }
     int local_empty = input.order.empty(), empty = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
