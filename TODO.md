@@ -1589,20 +1589,81 @@ qualify general VoF, sparse ALE, production scaling or physical applications.
 
 ### Stage 7 — General VoF and flow qualification
 
-The opt-in [conservative face transport backend](docs/architecture/conservative_face_vof.md)
-implements independent donor-cell streams, measure-only geometric candidates,
-shared endpoint/export limiting, and reusable finite momentum preparation. Keep
-`SweptPartition` as the default while the coupled physical gates remain open.
+The transport roadmap has two explicit paths, independent of the arithmetic
+selector. `SweptPartition` remains the default; this is not a migration plan
+that replaces geometric sweeps with the opt-in face backend. Both paths share
+source-pinned phase/momentum preparation and collective rejection. See the
+[shared transport contract](docs/architecture/general_vof_transport.md).
 
-- [x] Implement the opt-in source-free fixed-mesh conservative face contract.
+#### Shared foundation — repair Stage 1
+
+- [x] Provide bounded collective failure records with originating rank, stage,
+      category, available cell/face/construction identities, scales and retry
+      context; preserve the local cause and atomic rejection.
+- [x] Prepare an immutable finite transport ledger for both paths, carrying
+      independent phase transfers/history, canonical signed physical face
+      contributions, positive route support, capacities and source/mesh/stage
+      identity. Validate before the three momentum component solves.
+- [x] Reuse finite momentum routing/operator/preconditioner across component
+      RHSs. Each RHS retains its own physical residual and iteration gate;
+      route support does not replace the original signed physical equation.
+
+#### Path A — algebraic face-volume transport
+
+`DonorCell` and `GeometricFace` use canonical integrated face volumes and
+algebraic endpoint/export accounting. `GeometricFace` measures a PLIC candidate;
+it does not construct swept tetrahedra or recipient partitions. The
+[face transport contract](docs/architecture/conservative_face_vof.md) records
+its explicit fixed-mesh support and rejection boundaries.
+
+- [x] Implement the opt-in source-free donor-cell and limited geometric-candidate
+      face transport contract, retaining independent trace inventories.
 - [x] Separate scalar PLIC measurements from explicit closed-surface construction.
-- [x] Reuse finite momentum routing/operator/preconditioner across component RHSs.
 - [x] Expose explicit face-aligned surfaces with bounded halo planar support.
 - [ ] Qualify high-density-ratio drop translation and rotation/deformation accuracy.
-- [ ] Unify mixed-cell and face-aligned curved surface fitting and qualify capillarity.
 - [ ] Qualify open boundary interfaces and multiple physical streams per face.
-- [ ] Complete relevant coupled-flow gates before switching the ordinary default.
 
+#### Path B — geometric swept-tetrahedra transport
+
+`SweptPartition` uses authenticated node trajectories and corrected signed
+swept tetrahedra. The following repairs target `Ordinary` first; preserve
+explicit BoundedCertification and Exact paths and their separate qualification.
+Stage 1 establishes the shared contract without changing transport numerics.
+
+- [ ] **Repair Stage 2 — homogeneous transport:** bypass swept construction in
+      homogeneous regions using algebraic canonical face-volume transport and
+      adjacent-cell upwind momentum. Retain independently positive traces;
+      qualify nonconstant velocity as well as constant-velocity preservation.
+- [ ] **Repair Stage 3 — interface-local transport:** make one canonical signed
+      face ledger authoritative for phase/momentum updates, with shared
+      conservative flux correction and old-donor/endpoint/history budgets.
+      Select the interface transport neighborhood from geometric declarations,
+      face-aligned interfaces and conservative trajectory reach; authenticate
+      sparse donors through a spatial index. Do not splice independent recipient
+      partitions with algebraic routes or discard opposing signed streams.
+- [ ] **Repair Stage 4 — aggregate geometry:** keep unmeasured source/cut witnesses
+      for computational pieces, cancel shared internal boundaries, and measure
+      physical aggregates. Separate fragment, minority-inventory and surface
+      accuracy contracts; check inaccurate positive results too. Account every
+      approximation within existing shared budgets without clipping, arbitrary
+      phase cutoffs, exact fallback or weakened physical tolerances.
+
+#### Shared surfaces, interfaces and qualification — repair Stages 5–6
+
+- [ ] Unify mixed-cell and face-aligned patches in a backend-independent surface
+      catalog and conditioned curvature fit. Add an explicit mesh-scale filtered
+      capillary surface for binary staircases, preserving component geometric
+      volume without changing stored cell inventories; reject unresolved topology.
+- [ ] Complete checked policy views and source-provider boundaries while retaining
+      compatible public adapters and the existing library ownership.
+- [ ] Exercise complete homogeneous/hydrostatic, interface-passage,
+      translation/rotation/deformation and curved-capillary horizons in serial
+      and MPI, including empty owners and mixed/face transitions. Keep existing
+      conservation, boundedness, residual and rollback gates. Report accuracy,
+      convergence and local work counts separately from those passes.
+- [ ] Agree and meet quantitative interface and capillary accuracy/convergence
+      thresholds before claiming full physical qualification. Conservation-only
+      checks do not establish those thresholds or authorize a default switch.
 
 **Experimental source-free execution:** explicit VoF enablement permits focused finite geometry/flow development. Reacting-VoF schema migration and full-flow qualification remain open; historical implementation records are not current validation.
 
@@ -1697,8 +1758,6 @@ the specified focused coverage, not production or application qualification.
 - [ ] Replace full retained-donor and route scans with conservative spatial
       candidates and donor indexing; reuse overlay buffers and measure local work
       scaling without changing cumulative construction-budget semantics.
-- [ ] Prepare finite momentum routing and its operator once per three-component
-      update, retaining independent physical-residual and iteration gates.
 - [ ] Remove certification-only communication and closure preparation from
       Ordinary projection; index pure-cell curvature support and qualify its work
       with surface tension enabled.

@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "FVM/details/FiniteGeometryAccess.hh"
+#include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/SweptGeometry.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
 #include <algorithm>
@@ -25,26 +26,27 @@ struct Work
     void charge(std::size_t n)
     {
         if (n > limits.byte_budget - std::min(bytes, limits.byte_budget))
-            throw std::invalid_argument("Finite VoF cumulative construction byte budget is exhausted.");
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                "Finite VoF cumulative construction byte budget is exhausted.");
         bytes += n;
     }
     void test()
     {
         if (++pair_tests > limits.maximum_pair_tests)
-            throw std::invalid_argument("Finite VoF pair-test budget is exhausted.");
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Finite VoF pair-test budget is exhausted.");
     }
     template<class T> void push(std::vector<T>& values, T value)
     {
         if (values.size() >= limits.maximum_atoms)
-            throw std::invalid_argument("Finite VoF atom buffer capacity is exhausted.");
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Finite VoF atom buffer capacity is exhausted.");
         if (values.size() == values.capacity())
         {
             const auto capacity = values.capacity();
             if (capacity > std::numeric_limits<std::size_t>::max() / 2)
-                throw std::invalid_argument("Finite VoF atom capacity overflows.");
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Finite VoF atom capacity overflows.");
             const auto next = capacity ? 2 * capacity : 1;
             if (next > std::numeric_limits<std::size_t>::max() / sizeof(T))
-                throw std::invalid_argument("Finite VoF atom byte capacity overflows.");
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Finite VoF atom byte capacity overflows.");
             charge(next * sizeof(T));
             values.reserve(next);
         }

@@ -118,9 +118,16 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     std::map<Key, PLIC::ConvexGeometryPtr<Mode>> cell_geometry;
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
+    namespace failure = ::SimpleFluid::detail::vof_failure;
+    failure::Scope transport_context("swept_transport");
+    transport_context.record.arithmetic_mode = Mode;
+    transport_context.record.mark(failure::Field::Arithmetic);
+    transport_context.record.byte_budget = limit;
+    transport_context.record.mark(failure::Field::ByteBudget);
     Trial trial;
     trial.source_ = data_;
     trial.transaction_ = transaction(comm);
+    trial.timestep_ = timestep;
     const PLIC::GeometryPacketContext packet_context{{data.control, data.hierarchy->topology_generation(),
         data.hierarchy->partition_generation(), trial.transaction_}};
     std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>> traces;
@@ -285,10 +292,26 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             partition_limits.arithmetic_mode = data.options.arithmetic_mode;
             partition_limits.maximum_pair_tests = work.limits.maximum_pair_tests;
             partition_limits.byte_budget = work.limits.byte_budget;
+            failure::Scope partition_context("donor_partition");
             const PLIC::ConvexPartition<Mode> donor_partition(donor_geometries, partition_limits);
             work.charge(donor_partition.storage_bytes());
             for (const auto& tile : data.topology->tiles)
             {
+                failure::Scope face_context("face_sweep_partition");
+                face_context.record.face = tile.face_gid;
+                face_context.record.mark(failure::Field::Face);
+                face_context.record.volume_budget = face_budgets.at(tile.face_gid);
+                face_context.record.mark(failure::Field::VolumeBudget);
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                {
+                    face_context.record.scale = data.cells.at(tile.first).ordinary_quota_scale;
+                    if (tile.second)
+                        face_context.record.scale = std::min(face_context.record.scale,
+                            data.cells.at(*tile.second).ordinary_quota_scale);
+                    face_context.record.mark(failure::Field::Scale);
+                }
+                face_context.record.pair_budget = work.limits.maximum_pair_tests;
+                face_context.record.mark(failure::Field::PairBudget);
                 work.pair_tests = 0; // Existing face-partition work-cap scope.
                 auto sweep = fp::make_sweep<Mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid), work,
                     face_budgets.at(tile.face_gid));
@@ -301,14 +324,25 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 // Construct one complete complementary partition per signed simplex.
                 // The immutable donor set has already proved disjointness; the
                 // shared split tree certifies coverage without replaying geometry.
-                for (const auto& piece : sweep.pieces)
+                for (std::size_t ordinal = 0; ordinal < sweep.pieces.size(); ++ordinal)
                 {
+                    const auto& piece = sweep.pieces[ordinal];
+                    failure::Scope piece_context("donor_sweep_partition");
+                    piece_context.record.construction = ordinal;
+                    piece_context.record.mark(failure::Field::Construction);
+                    piece_context.record.bytes_used = work.bytes;
+                    piece_context.record.mark(failure::Field::BytesUsed);
                     const auto partition = donor_partition.partition(*piece.geometry, work.limits.maximum_atoms);
                     for (const auto& intersection : partition)
                     {
                         work.test();
                         const auto& key = *donor_keys.at(intersection.donor);
                         const auto& cell = data.cells.at(key);
+                        failure::Scope donor_context("donor_phase_measure");
+                        donor_context.record.donor = cell.gid;
+                        donor_context.record.mark(failure::Field::Donor);
+                        donor_context.record.scale = cell.ordinary_quota_scale;
+                        donor_context.record.mark(failure::Field::Scale);
                         work.atom(intersection.geometry);
                         if (tile.first_owner == comm->getRank())
                             face_amounts[{tile.face_gid, cell.gid, piece.sign}].add(
@@ -322,6 +356,11 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             for (const auto& key : data.topology->order)
             {
                 const auto& cell = data.cells.at(key);
+                failure::Scope cell_context("recipient_closure");
+                cell_context.record.cell = cell.gid;
+                cell_context.record.mark(failure::Field::Cell);
+                cell_context.record.scale = cell.ordinary_quota_scale;
+                cell_context.record.mark(failure::Field::Scale);
                 fp::SumFor<Mode> canonical(data.options.arithmetic_mode), signed_geometry(data.options.arithmetic_mode),
                     absolute_geometry(data.options.arithmetic_mode);
                 for (const auto index : data.topology->cell_tiles.at(key))

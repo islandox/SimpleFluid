@@ -1,3 +1,4 @@
+#include "FVM/details/VoFFailure.hh"
 #include "general_vof_finite_test_helpers.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include <limits>
@@ -250,15 +251,16 @@ TEST(GeneralVoFFaceTransport, NumericalFloorFallsBackButResourceExhaustionReject
     {
         (void) exhausted.plan_face_transport(circulation(exhausted), 1);
     }
-    catch (const PLIC::GeometryError& e)
+    catch (const SimpleFluid::detail::vof_failure::Failure& error)
     {
-        EXPECT_EQ(e.code(), PLIC::GeometryErrorCode::ResourceLimit);
+        const auto& record = error.record();
+        EXPECT_EQ(record.category, SimpleFluid::detail::vof_failure::Category::ResourceLimit);
+        EXPECT_TRUE(record.has(SimpleFluid::detail::vof_failure::Field::GeometryCode));
+        EXPECT_EQ(record.geometry_code, int(PLIC::GeometryErrorCode::ResourceLimit));
+        EXPECT_GE(record.origin_rank, 0);
+        EXPECT_LT(record.origin_rank, Tpetra::getDefaultComm()->getSize());
         rejected = true;
     }
-    catch (const std::invalid_argument&)
-    {
-        rejected = true;
-    } // Remote owner collective rejection.
     EXPECT_TRUE(rejected);
     EXPECT_EQ(exhausted.accepted_identity(), before);
 }

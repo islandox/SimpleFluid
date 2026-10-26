@@ -18,6 +18,27 @@ TEST(GeneralVoFSolverTest, ClosedTwoByTwoSingleLayerConstantCarrierAdvancesAndRe
     EXPECT_EQ(after.maximum_velocity, 0);
     EXPECT_EQ(after.maximum_divergence, 0);
     EXPECT_EQ(solver.time(), .01);
+    const auto preparation = solver.prepared_transport();
+    ASSERT_TRUE(preparation);
+    EXPECT_EQ(preparation->family, VoF::GeneralVoFTransportFamily::GeometricSweptTetrahedra);
+    EXPECT_EQ(preparation->source_identity, accepted->accepted_identity());
+    EXPECT_TRUE(preparation->streams.empty());
+    EXPECT_TRUE(preparation->momentum_preparation);
+    EXPECT_EQ(preparation->momentum_builds, 1u);
+    EXPECT_EQ(preparation->momentum_reuses, 2u);
+    for (const auto& result : solver.momentum_transport_diagnostics())
+        EXPECT_EQ(result.physical_relative_residual, 0);
+    const auto phases_after = solver.phases();
+    const auto velocity_after = solver.velocity();
+    const auto face_velocity_after = solver.face_velocity();
+    const auto pressure_after = solver.pressure();
+    EXPECT_THROW((void) solver.step(-1), std::runtime_error);
+    EXPECT_EQ(solver.phases(), phases_after);
+    EXPECT_EQ(solver.prepared_transport(), preparation);
+    EXPECT_EQ(solver.velocity(), velocity_after);
+    EXPECT_EQ(solver.face_velocity(), face_velocity_after);
+    EXPECT_EQ(solver.pressure(), pressure_after);
+    EXPECT_EQ(solver.time(), .01);
 }
 TEST(GeneralVoFSolverTest, SingleLayerNormalGravityHasWallPressureReactionAndZeroAcceptedMomentum)
 {

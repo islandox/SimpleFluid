@@ -20,7 +20,7 @@ template<ArithmeticMode Mode> struct SIMPLEFLUID_SOLVERS_LOCAL PhaseStorage
     /** Collective. Derives storage from the selected physical phase authority. */
     [[nodiscard]] static Result evaluate(const MeshHandle<>&, const VoF::GeneralVoF&, const VoFMaterial&);
     /** Collective. Checks represented publication against its own transfer ledger. */
-    static void validate(const MeshHandle<>&, const VoF::GeneralVoF& source, const VoF::GeneralVoF::Trial&,
+    static void validate(const MeshHandle<>&, const VoF::GeneralVoF& source, const VoF::GeneralVoFPreparedTransport&,
         const VoF::GeneralVoF& candidate);
 };
 template<> struct SIMPLEFLUID_SOLVERS_LOCAL PhaseStorage<ArithmeticMode::Exact>

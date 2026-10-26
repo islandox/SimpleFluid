@@ -27,8 +27,8 @@ enum class GeneralVoFPhaseGeometry
     PureGas,
     PureCarrier
 };
-/** One coherent Eulerian backend per step. SweptPartition remains the default
- * until the conservative face backend passes its coupled physical gates. */
+/** One coherent Eulerian backend per step. SweptPartition is the primary
+ * default; the algebraic face backends remain explicit alternatives. */
 enum class GeneralVoFTransportBackend { SweptPartition, DonorCell, GeometricFace };
 struct GeneralVoFDirectedStream
 {
@@ -44,26 +44,7 @@ struct GeneralVoFTransportDiagnostics
     long double maximum_outgoing_courant = 0, maximum_continuity_defect = 0, maximum_occupancy_defect = 0;
     long double limited_volume = 0, fallback_volume = 0;
 };
-/** Immutable trial payload: all streams are canonical first-owner records;
- * local replicas are consumed with opposite endpoint incidence. The container
- * permits multiple directed streams; this version admits one per face/substep.
- * Capacities follow owned_order. Source/mesh pins and controls prevent replay
- * against a different accepted interval. Momentum derives only from final fluxes. */
-struct GeneralVoFPreparedTransport
-{
-    std::shared_ptr<const void> source_identity;
-    std::uint64_t source_control = 0, transaction = 0, mesh_generation = 0, time_stage = 0;
-    double timestep = 0;
-    std::array<double, 2> density{1, 1};
-    GeneralVoFTransportBackend backend = GeneralVoFTransportBackend::DonorCell;
-    std::vector<GeneralVoFDirectedStream> streams;
-    std::vector<long double> old_mass, new_mass;
-    GeneralVoFTransportDiagnostics diagnostics;
-    /** Solver-attached immutable preparation; opaque at the FVM dependency
-     * boundary. Shared by the three component solves, never a convergence result. */
-    std::shared_ptr<const void> momentum_preparation;
-    std::size_t momentum_builds = 0, momentum_reuses = 0;
-};
+struct GeneralVoFPreparedTransport;
 struct GeneralVoFFaceInterface
 {
     std::uint64_t face = 0, first_cell = 0, second_cell = 0;
@@ -235,6 +216,40 @@ struct GeneralVoFCellClosureDiagnostic
     PLIC::DynamicGeometryValue canonical_residual, signed_geometry_difference, combined_residual;
     long double absolute_geometry_difference = 0, allowed_closure = 0;
 };
+/** The transport family is independent of arithmetic and candidate measurement.
+ * GeometricFace measures a geometric candidate, then uses algebraic face volume. */
+enum class GeneralVoFTransportFamily { AlgebraicFaceVolume, GeometricSweptTetrahedra };
+/** Immutable, source-pinned phase ledger. Signed physical face contributions
+ * and positive donor/recipient support remain separate; swept donors need not
+ * be adjacent to their face. streams is populated only for algebraic transport.
+ * Owned capacities and histories follow the source owned_order. */
+struct GeneralVoFPreparedTransport
+{
+    std::shared_ptr<const void> source_identity, candidate_identity, mesh_identity, topology_identity;
+    std::uint64_t source_control = 0, transaction = 0, mesh_generation = 0, mesh_topology_generation = 0, time_stage = 0;
+    double timestep = 0;
+    std::array<double, 2> density{1, 1};
+    ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
+    GeneralVoFTransportBackend backend = GeneralVoFTransportBackend::DonorCell;
+    GeneralVoFTransportFamily family = GeneralVoFTransportFamily::AlgebraicFaceVolume;
+    std::vector<GeneralVoFDirectedStream> streams;
+    /** Physical signed coefficients: direction multiplies amount, never clip
+     * or reinterpret these records as positive adjacent-cell streams. */
+    std::vector<GeneralVoFFiniteFaceContribution> signed_face_contributions;
+    /** Positive route support, including self transfers and inherited errors. */
+    std::vector<GeneralVoFFiniteTransfer> positive_transfers;
+    std::vector<GeneralVoFFiniteDonorBudget> donor_budgets;
+    std::vector<GeneralVoFFiniteNodeTrajectory> node_trajectories;
+    std::vector<PhaseRoundoff> phase_roundoff, old_phase_history, new_phase_history;
+    std::vector<long double> old_mass, new_mass, old_mass_error, new_mass_error;
+    GeneralVoFTransportDiagnostics diagnostics;
+    /** Solver-attached immutable coefficient preparation, shared by component
+     * solves. Traces, histories and convergence results are never cached here. */
+    std::shared_ptr<const void> momentum_preparation;
+    std::size_t momentum_builds = 0, momentum_reuses = 0;
+    /** Checks the complete retained ledger allocation before copying it. */
+    SIMPLEFLUID_FVM_EXPORT void validate_byte_budget(std::size_t) const;
+};
 struct GeneralVoFSupportCell
 {
     std::uint64_t cell = 0, revision = 0;
@@ -346,6 +361,8 @@ public:
     [[nodiscard]] std::shared_ptr<const void> accepted_identity() const noexcept;
     [[nodiscard]] std::uint64_t accepted_control() const noexcept;
     [[nodiscard]] bool accepted_unchanged() const noexcept;
+    /** Collective source and native-publication authentication. */
+    void validate_prepared_transport_source(const GeneralVoFPreparedTransport&) const;
     /** Collective on the opaque transfer's source communicator. Authenticate
      * this actual adopted publication without exporting/reconstructing capsules. */
     void validate_transfer_target(const ExactPhaseTransferResult&) const;
@@ -408,12 +425,21 @@ public:
         [[nodiscard]] std::shared_ptr<const GeneralVoF> candidate() const;
         [[nodiscard]] const std::shared_ptr<const GeneralVoFPreparedTransport>& prepared_transport() const noexcept
         { return prepared_; }
+        /** Collective detached finite preparation. Preserves both transport
+         * families without reinterpreting the physical signed ledger. Exact
+         * trials retain their separate authority and reject this finite seam. */
+        [[nodiscard]] std::shared_ptr<const GeneralVoFPreparedTransport> prepare_transport(
+            std::array<double, 2> density = {1, 1}, std::uint64_t time_stage = 0) const;
+        /** Collective transaction and caller-context authentication. */
+        void validate_prepared_transport(const GeneralVoFPreparedTransport&,
+            std::array<double, 2> density, std::uint64_t time_stage) const;
 
     private:
         friend GeneralVoF;
         friend struct Exact::GeneralVoF;
         std::shared_ptr<const Data> source_, candidate_;
         std::uint64_t transaction_ = 0;
+        double timestep_ = 0;
         std::shared_ptr<const GeneralVoFPreparedTransport> prepared_;
         std::vector<GeneralVoFFaceContribution> faces_;
         std::vector<GeneralVoFTransfer> transfers_;

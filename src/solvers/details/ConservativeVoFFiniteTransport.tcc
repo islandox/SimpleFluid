@@ -18,29 +18,37 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
     const auto n = mesh_->num_owned_cells();
     constexpr bool bounded = Mode == ArithmeticMode::BoundedCertification;
     const auto arithmetic_value = [&](long double value, long double error = 0) { return A::make_value(value, error); };
+    namespace failure = ::SimpleFluid::detail::vof_failure;
+    failure::Scope transport_context("finite_momentum");
+    transport_context.record.arithmetic_mode = arithmetic_mode;
+    transport_context.record.mark(failure::Field::Arithmetic);
+    transport_context.record.byte_budget = byte_budget;
+    transport_context.record.mark(failure::Field::ByteBudget);
     const auto safe = [&](auto&& action)
+    { failure::collective<std::runtime_error>(*comm, std::forward<decltype(action)>(action), "finite_momentum"); };
+    const auto admit = [&](bool condition, const char* message, bool arithmetic = false)
     {
-        bool ok = true;
-        try
-        {
-            action();
-        }
-        catch (...)
-        {
-            ok = false;
-        }
-        require(*map, ok, "Finite VoF transport rejected its bounded local arithmetic or metadata.");
+        failure::collective<std::runtime_error>(
+            *comm,
+            [&]
+            {
+                if (!condition)
+                {
+                    if (arithmetic)
+                        throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, message);
+                    throw std::invalid_argument(message);
+                }
+            },
+            "finite_momentum_admission");
     };
-    require(*map,
-        old.size() == n && source.size() == n && capacity.size() == n && outgoing.size() == n &&
-            maximum_iterations > 0 && std::isfinite(tolerance) && tolerance > 0 && byte_budget > 0,
+    admit(old.size() == n && source.size() == n && capacity.size() == n && outgoing.size() == n &&
+              maximum_iterations > 0 && std::isfinite(tolerance) && tolerance > 0 && byte_budget > 0,
         "Finite VoF transport has invalid dimensions or controls.");
     const auto error_at = [](std::span<const long double> values, std::size_t i)
     { return values.empty() ? 0.L : values[i]; };
-    require(*map,
-        (old_error.empty() || old_error.size() == n) && (source_error.empty() || source_error.size() == n) &&
-            (capacity_error.empty() || capacity_error.size() == n) &&
-            (outgoing_error.empty() || outgoing_error.size() == n),
+    admit((old_error.empty() || old_error.size() == n) && (source_error.empty() || source_error.size() == n) &&
+              (capacity_error.empty() || capacity_error.size() == n) &&
+              (outgoing_error.empty() || outgoing_error.size() == n),
         "Finite momentum input error shape mismatch.");
     bool valid = true, current = false;
     std::uint64_t epoch = 0;
@@ -54,11 +62,17 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                       mesh_->owned_face_map().getRawPtr() == face_owned_.getMap().getRawPtr() &&
                       mesh_->overlap_face_map().getRawPtr() == face_overlap_.getMap().getRawPtr();
             for (std::size_t c = 0; c < n; ++c)
-                valid = valid && std::isfinite(old[c]) && std::isfinite(source[c]) &&
-                        std::isfinite(error_at(old_error, c)) && error_at(old_error, c) >= 0 &&
-                        std::isfinite(error_at(source_error, c)) && error_at(source_error, c) >= 0;
+            {
+                failure::Scope row_context("finite_momentum_input");
+                row_context.record.cell = map->getGlobalElement(LO(c));
+                row_context.record.mark(failure::Field::Cell);
+                if (!(std::isfinite(old[c]) && std::isfinite(source[c]) && std::isfinite(error_at(old_error, c)) &&
+                        error_at(old_error, c) >= 0 && std::isfinite(error_at(source_error, c)) &&
+                        error_at(source_error, c) >= 0))
+                    throw std::invalid_argument("Finite momentum requires current partition and finite RHS data.");
+            }
         });
-    require(*map, current && valid, "Finite momentum requires current partition and finite RHS data.");
+    admit(current && valid, "Finite momentum requires current partition and finite RHS data.");
     const auto same_errors = [&](const std::vector<long double>& stored, std::span<const long double> errors)
     {
         for (std::size_t c = 0; c < n; ++c)
@@ -102,9 +116,20 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         std::size_t bytes = 0;
         const auto charge = [&](std::size_t count, std::size_t width)
         {
+            if (failure::context_state().active)
+            {
+                failure::context_state().active->bytes_used = bytes;
+                failure::context_state().active->mark(failure::Field::BytesUsed);
+            }
             if (width && count > (byte_budget - bytes) / width)
-                throw std::invalid_argument("Finite momentum preparation exceeds its unchanged byte budget.");
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                    "Finite momentum preparation exceeds its unchanged byte budget.");
             bytes += count * width;
+            if (failure::context_state().active)
+            {
+                failure::context_state().active->bytes_used = bytes;
+                failure::context_state().active->mark(failure::Field::BytesUsed);
+            }
         };
         safe(
             [&]
@@ -118,40 +143,62 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                 charge(incoming.size(), sizeof(FiniteTransfer));
                 charge(contributions.size(), sizeof(FiniteFaceContribution));
                 routes.resize(n);
+                constexpr auto input_message =
+                    "Finite VoF momentum requires positive routes and canonical internal face streams.";
                 for (const auto& errors : {capacity_error, outgoing_error})
-                    for (auto error : errors)
-                        valid = valid && std::isfinite(error) && error >= 0;
+                    for (std::size_t c = 0; c < errors.size(); ++c)
+                    {
+                        failure::Scope row_context("finite_momentum_capacity");
+                        row_context.record.cell = map->getGlobalElement(LO(c));
+                        row_context.record.mark(failure::Field::Cell);
+                        if (!(std::isfinite(errors[c]) && errors[c] >= 0))
+                            throw std::invalid_argument(input_message);
+                    }
                 for (std::size_t c = 0; c < n; ++c)
-                    valid = valid && std::isfinite(capacity[c]) && capacity[c] > 0 && std::isfinite(outgoing[c]) &&
-                            outgoing[c] >= 0;
+                {
+                    failure::Scope row_context("finite_momentum_capacity");
+                    row_context.record.cell = map->getGlobalElement(LO(c));
+                    row_context.record.mark(failure::Field::Cell);
+                    if (!(std::isfinite(capacity[c]) && capacity[c] > 0 && std::isfinite(outgoing[c]) &&
+                            outgoing[c] >= 0))
+                        throw std::invalid_argument(input_message);
+                }
                 for (const auto& route : incoming)
                 {
+                    failure::Scope route_context("finite_momentum_routes");
+                    route_context.record.donor = route.donor;
+                    route_context.record.recipient = route.recipient;
+                    route_context.record.mark(failure::Field::Donor);
+                    route_context.record.mark(failure::Field::Recipient);
                     const auto row = map->getLocalElement(route.recipient);
-                    valid = valid && row >= 0 && route.donor != route.recipient && std::isfinite(route.amount) &&
-                            route.amount >= 0 && std::isfinite(route.absolute_error) && route.absolute_error >= 0;
-                    if (row >= 0)
-                        valid = routes[row]
-                                    .emplace(route.donor, arithmetic_value(route.amount, route.absolute_error))
-                                    .second &&
-                                valid;
+                    if (!(row >= 0 && route.donor != route.recipient && std::isfinite(route.amount) &&
+                            route.amount >= 0 && std::isfinite(route.absolute_error) && route.absolute_error >= 0))
+                        throw std::invalid_argument(input_message);
+                    if (!routes[row].emplace(route.donor, arithmetic_value(route.amount, route.absolute_error)).second)
+                        throw std::invalid_argument(input_message);
                     donor_ids.insert(route.donor);
                     charge(1, sizeof(route) + sizeof(std::pair<const GO, Value>) + 8 * sizeof(void*));
                 }
                 for (const auto& face : contributions)
                 {
-                    valid = valid && face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces() &&
-                            std::isfinite(face.amount) && std::isfinite(face.absolute_error) &&
-                            face.absolute_error >= 0;
-                    if (face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces())
-                        valid = valid && !mesh_->is_geometry_exterior_face(face.face);
+                    failure::Scope face_context("finite_momentum_face_input");
+                    face_context.record.donor = face.donor;
+                    face_context.record.mark(failure::Field::Donor);
+                    if (!(face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces()))
+                        throw std::invalid_argument(input_message);
+                    face_context.record.face = mesh_->face_global_id(face.face);
+                    face_context.record.mark(failure::Field::Face);
+                    if (!(std::isfinite(face.amount) && std::isfinite(face.absolute_error) && face.absolute_error >= 0) ||
+                        mesh_->is_geometry_exterior_face(face.face))
+                        throw std::invalid_argument(input_message);
                     donor_ids.insert(face.donor);
                     charge(1, sizeof(face) + 128);
                 }
                 if (bytes > byte_budget)
-                    throw std::invalid_argument(
+                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
                         "Finite VoF momentum input capacity exceeds its unchanged byte budget.");
             });
-        require(*map, valid, "Finite VoF momentum requires positive routes and canonical internal face streams.");
+        admit(valid, "Finite VoF momentum requires positive routes and canonical internal face streams.");
         // Route raw signed face coefficients once to their incident owned rows.
         // The wire is hi/lo significand plus exponent, independent of ABI padding.
         const auto word = [](std::vector<char>& b, std::uint64_t v)
@@ -208,7 +255,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
             valid = valid && endpoint_owners[i] >= 0;
             owner.emplace(endpoint_ids[i], endpoint_owners[i]);
         }
-        require(*map, valid, "Finite momentum face references a foreign endpoint.");
+        admit(valid, "Finite momentum face references a foreign endpoint.");
         std::vector<OwnerPacket> packets;
         safe(
             [&]
@@ -229,7 +276,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                         packets.push_back(std::move(packet));
                     }
                 if (packets.size() > (byte_budget - std::min(bytes, byte_budget)) / 128)
-                    throw std::invalid_argument("Finite momentum packet capacity exceeds its unchanged budget.");
+                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                        "Finite momentum packet capacity exceeds its unchanged budget.");
             });
         const auto received = exchange_owner_packets(packets, comm, byte_budget - bytes);
         std::vector<std::map<GO, fp::SumFor<Mode>>> raw_sums(n);
@@ -288,7 +336,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         donor_trace.doImport(marker, *donor_import, Tpetra::INSERT);
         for (auto value : donor_trace.getData())
             valid = valid && value == 1;
-        require(*map, valid, "Finite VoF momentum references an absent geometric donor.");
+        admit(valid, "Finite VoF momentum references an absent geometric donor.");
         std::vector<std::map<GO, Value>> raw;
         safe(
             [&]
@@ -310,6 +358,9 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
             {
                 for (std::size_t c = 0; c < n; ++c)
                 {
+                    failure::Scope row_context("finite_momentum_matrix");
+                    row_context.record.cell = map->getGlobalElement(LO(c));
+                    row_context.record.mark(failure::Field::Cell);
                     diagonal[c] = capacity[c] + outgoing[c];
                     if (!(diagonal[c] > 0) || !std::isfinite(diagonal[c]))
                         throw std::invalid_argument("Finite momentum has a nonpositive row diagonal.");
@@ -319,9 +370,12 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                     values.push_back(1);
                     for (const auto& [donor, amount] : routes[c])
                     {
+                        failure::Scope donor_context;
+                        donor_context.record.donor = donor;
+                        donor_context.record.mark(failure::Field::Donor);
                         const auto value = static_cast<double>(-amount.value / diagonal[c]);
                         if (!std::isfinite(value) || (amount.value != 0 && value == 0))
-                            throw std::invalid_argument(
+                            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
                                 "Finite momentum row coefficient is outside representable range.");
                         columns.push_back(donor);
                         values.push_back(value);
@@ -385,9 +439,13 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         {
             for (std::size_t c = 0; c < n; ++c)
             {
+                failure::Scope row_context("finite_momentum_rhs");
+                row_context.record.cell = map->getGlobalElement(LO(c));
+                row_context.record.mark(failure::Field::Cell);
                 const auto value = static_cast<double>((old[c] + source[c]) / diagonal[c]);
                 if (!std::isfinite(value))
-                    throw std::invalid_argument("Finite momentum normalized RHS overflows.");
+                    throw PLIC::GeometryError(
+                        PLIC::GeometryErrorCode::UnresolvedArithmetic, "Finite momentum normalized RHS overflows.");
                 rhs_.replaceLocalValue(LO(c), value);
             }
         });
@@ -405,7 +463,7 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         linear.max_iterations = maximum_iterations - result.iterations;
         const auto stats = solver_.solve_from_zero_with_statistics(
             Teuchos::rcp_implicit_cast<const Pack::operator_type>(matrix), rhs_, solution_, linear);
-        require(*map, stats.converged, "Finite momentum inner solve failed its true residual.");
+        admit(stats.converged, "Finite momentum inner solve failed its true residual.", true);
         result.iterations += stats.iterations;
     };
     solve();
@@ -439,6 +497,13 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                 fp::SumFor<Mode> residual_squared(arithmetic_mode), reference_squared(arithmetic_mode);
                 for (std::size_t c = 0; c < n; ++c)
                 {
+                    failure::Scope row_context("finite_momentum_residual");
+                    row_context.record.cell = map->getGlobalElement(LO(c));
+                    row_context.record.mark(failure::Field::Cell);
+                    row_context.record.scale = reference_scale;
+                    row_context.record.mark(failure::Field::Scale);
+                    row_context.record.retry = result.physical_refinements;
+                    row_context.record.mark(failure::Field::Retry);
                     fp::SumFor<Mode> equation(arithmetic_mode);
                     equation.add(A::multiply(
                         arithmetic_value(capacity[c], error_at(capacity_error, c)), arithmetic_value(trace[c], 0)));
@@ -446,6 +511,9 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                     equation.add(arithmetic_value(-source[c], error_at(source_error, c)));
                     for (const auto& [donor, amount] : raw[c])
                     {
+                        failure::Scope donor_context;
+                        donor_context.record.donor = donor;
+                        donor_context.record.mark(failure::Field::Donor);
                         const auto donor_lid = donor_map->getLocalElement(donor);
                         if (donor_lid < 0)
                             throw std::invalid_argument("Finite momentum raw row references absent trace.");
@@ -468,7 +536,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                 if (bounded && static_cast<long double>(local_norm[1]) > lower)
                     local_norm[1] = std::nextafter(local_norm[1], 0.);
                 if (!std::isfinite(local_norm[0]) || !std::isfinite(local_norm[1]))
-                    throw std::invalid_argument("Finite momentum physical residual reduction overflows.");
+                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                        "Finite momentum physical residual reduction overflows.");
             });
         Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_norm, global_norm);
         const auto reduction_u = bounded ? (8.L * comm->getSize() + 16) * std::numeric_limits<double>::epsilon() : 0;
@@ -480,8 +549,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                  residual_upper <= static_cast<long double>(tolerance) * tolerance * reference_lower) ||
                 (reference_lower == 0 && residual_upper == 0)))
             break;
-        require(*map, result.physical_refinements < 4 && result.iterations < maximum_iterations,
-            "Finite momentum failed its unchanged original physical residual.");
+        admit(result.physical_refinements < 4 && result.iterations < maximum_iterations,
+            "Finite momentum failed its unchanged original physical residual.", true);
         int local_defect_exponent = std::numeric_limits<int>::min(), defect_exponent = 0;
         safe(
             [&]
@@ -490,7 +559,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                 {
                     defect[c] /= diagonal[c];
                     if (!std::isfinite(defect[c]))
-                        throw std::invalid_argument("Finite momentum defect is outside qualified range.");
+                        throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                            "Finite momentum defect is outside qualified range.");
                     if (defect[c] != 0)
                     {
                         int e = 0;
@@ -500,8 +570,8 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
                 }
             });
         Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_defect_exponent, &defect_exponent);
-        require(*map, defect_exponent != std::numeric_limits<int>::min(),
-            "Finite momentum arithmetic bound cannot establish the physical residual target.");
+        admit(defect_exponent != std::numeric_limits<int>::min(),
+            "Finite momentum arithmetic bound cannot establish the physical residual target.", true);
         const auto defect_scale = std::scalbn(1.L, defect_exponent - 1);
         for (std::size_t c = 0; c < n; ++c)
             rhs_.replaceLocalValue(LO(c), static_cast<double>(defect[c] / defect_scale));
@@ -521,11 +591,17 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         {
             for (std::size_t c = 0; c < n; ++c)
             {
+                failure::Scope row_context("finite_momentum_publication");
+                row_context.record.cell = map->getGlobalElement(LO(c));
+                row_context.record.mark(failure::Field::Cell);
+                row_context.record.retry = result.physical_refinements;
+                row_context.record.mark(failure::Field::Retry);
                 const auto amount = capacity[c] * trace[c];
                 result.amount[c] = static_cast<double>(amount);
                 if (!std::isfinite(trace[c]) || !std::isfinite(result.amount[c]) ||
                     (amount != 0 && result.amount[c] == 0) || (nonnegative && amount < 0))
-                    throw std::invalid_argument("Finite momentum final publication is outside qualified range.");
+                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                        "Finite momentum final publication is outside qualified range.");
             }
         });
     numeric_valid_ = false;

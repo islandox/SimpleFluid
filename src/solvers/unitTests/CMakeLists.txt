@@ -805,3 +805,11 @@ simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_Stripes_3procs
 simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_StripesEmpty_4procs
   TARGET testGeneralVoFFaceSurface PROCS 4
   ARGS "--gtest_filter=GeneralVoFFaceSurface.ThreeOrMoreTangentStripesRetainCollectivesWithAnEmptyOwner")
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+  foreach(PROCS 2 4)
+    simplefluid_add_mpi_test(NAME GeneralVoFFailures_${PROCS}procs
+      TARGET testGeneralVoFFailures PROCS ${PROCS}
+      LABELS "mpi;vof;diagnostics;collective;empty_rank" TIMEOUT 90)
+  endforeach()
+endif()
