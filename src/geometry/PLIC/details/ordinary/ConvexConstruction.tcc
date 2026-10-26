@@ -104,7 +104,7 @@ template<ArithmeticMode Mode> Integrals integrate(const StoredGeometry& poly, bo
     return integrate_ordinary<Mode>(poly, moments);
 }
 
-template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_proof, bool positive_construction)
+template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool partition_proof)
 {
     static_assert(Mode == kernel_mode);
     if (poly.vertices.size() > std::min(poly.limits.maximum_vertices, active_work->limits.maximum_vertices) ||
@@ -113,6 +113,13 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
     active_work->charge(1, sizeof(MomentCache));
     active_work->charge(poly.vertices.size(), sizeof(Vertex) + sizeof(DynamicPoint));
     active_work->charge(poly.faces.size(), sizeof(Face) + sizeof(Surface));
+    // Draft rebuilds invalidate all derived caches together. In particular,
+    // a copied shell must never clear the immutable parent's shared cache.
+    // A populated cache has a completed once_flag and cannot be cleared in
+    // place. Only a unique, never-prepared cache is reusable by a fresh draft.
+    if (!poly.moment_cache || !poly.moment_cache.unique() || poly.moment_cache->integrals)
+        poly.moment_cache = std::make_shared<MomentCache>();
+    poly.volume = StorageScalar{};
     poly.displayed.clear();
     for (const auto& v : poly.vertices)
     {
@@ -158,6 +165,12 @@ template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_p
         poly.bounds[axis] = {lo, hi};
     }
     poly.partition_proof_only = partition_proof;
+}
+
+template<ArithmeticMode Mode> void finish(StoredGeometry& poly, bool partition_proof, bool positive_construction)
+{
+    static_assert(Mode == kernel_mode);
+    prepare_finish<Mode>(poly, partition_proof);
     if (!partition_proof)
     {
         ++statistics.volume_evaluations;
@@ -769,6 +782,7 @@ DynamicSupport GeometryKernel<Mode>::support(GeometryPoint normal, GeometryPoint
 
 template Integrals integrate_ordinary<kernel_mode>(const StoredGeometry& poly, bool moments);
 template Integrals integrate<kernel_mode>(const StoredGeometry& poly, bool moments);
+template void prepare_finish<kernel_mode>(StoredGeometry& poly, bool partition_proof);
 template void finish<kernel_mode>(StoredGeometry& poly, bool partition_proof, bool positive_construction);
 template void validate_connected_boundary<kernel_mode>(std::size_t vertex_count, const std::vector<Face>& faces);
 template std::shared_ptr<StoredGeometry> import<kernel_mode>(GeometryPoint origin,

@@ -48,7 +48,8 @@ set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     details/AdaptiveVoFLowMachTransport.cc
     details/AdaptiveVoFRepresentation.cc
     VoFLowMach.cc
-    ReactingVoFCoupler.cc
+    # ReactingVoFCoupler depends on retired single-gas source options.
+    # Keep its implementation excluded pending species-schema migration.
     BubbleRepresentation.cc
 )
 

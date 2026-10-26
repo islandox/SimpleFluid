@@ -185,6 +185,36 @@ tolerance or resource cap; invalid, unresolved or unrepresentable geometry rejec
 Bulk product overlap factors into actual XY polygon area times Z overlap; tilted
 phase cuts retain the full three-dimensional intersection.
 
+Ordinary clipping finalizes requested children through private drafts. Crossings
+reuse recovered source identities, and face cleanup removes only repeated
+references; coordinate proximity does not merge distinct points. Before measuring,
+each requested child must have a connected boundary with two opposite directed
+incidences per edge. Shared cap winding comes from the inherited face boundary.
+The finalizer retains each child's positive, zero, negative or unresolved measure
+status until joint admission, then measures any requested section. Derived bounds,
+displayed points and moment caches belong to the finalized construction. Inside-only
+intersection still constructs and measures only its requested child.
+
+Contacts remain classified from parent/cut evidence and retain their face, edge
+or point section. Strict vertices on both sides prohibit treating an inverted or
+unresolved child as contact. A failed measured strict tetrahedral split may
+retry once near a retained source vertex. The side with the smaller maximum
+original cut distance selects that vertex; coordinate-order ties keep the
+choice independent of cut reversal and vertex numbering. Compensated frame differences must prove
+that every inherited parent coordinate is exactly representable in the candidate
+frame. The retry reconstructs shared crossings from that unchanged parent and
+the original cut distances; it never reuses the malformed child's coordinates.
+Both requested children, their section and lazy moments use the rebuilt frame,
+while authenticated replay retains the original parent/cut recipe. Failed attempts
+remain charged to the existing work/storage caps.
+
+This retry preserves the parent coordinates, but its new crossings still follow
+Ordinary rounded arithmetic. It does not certify tiny-feature relative volume,
+area or moment accuracy. Existing reconstruction, phase and transport acceptance
+gates remain authoritative. Numerical-only packets, private partition witnesses,
+lossy frame changes and other unsupported failures do not acquire this retry.
+There is no coordinate perturbation or small-volume omission.
+
 `GeometryValue<Mode>` follows its selected arithmetic contract. Ordinary values
 carry a scalar and report additional binary64 narrowing error, without claiming
 a tracked construction enclosure. Bounded values retain enclosures. Exact

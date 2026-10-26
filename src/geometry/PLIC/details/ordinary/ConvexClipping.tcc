@@ -1,6 +1,11 @@
 /** @file ordinary/ConvexClipping.tcc
  * @brief Ordinary convex clipping with retained topology and construction provenance.
  */
+#include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
+#include <exception>
+#include <sstream>
+
 namespace SimpleFluid::PLIC::details
 {
 namespace ordinary_kernel SIMPLEFLUID_LOCAL
@@ -92,7 +97,8 @@ template<ArithmeticMode Mode> bool incident(const Vertex& v, const PlanePtr& pla
     return construction_edge_incident<Mode>(v, plane);
 }
 
-bool recover_source_identity(Vertex& vertex, const Frame& frame)
+bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeometry* parent, const Vertex* edge_first,
+    const Vertex* edge_second)
 {
     if (vertex.numerical_only || vertex.source_identity || vertex.incident.size() < 3 || !certification_environment())
         return false;
@@ -160,10 +166,220 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame)
             }
     if (!independent)
         return false;
+    const auto source_point = DynamicGeometryAccess::original_source(unique);
+    if (!source_point)
+    {
+        ++statistics.rejections;
+        throw GeometryError(
+            GeometryErrorCode::ProvenanceMismatch, "Source recovery lost its original point authority.");
+    }
+    for (const auto error : source_point->absolute_error)
+        if (error != 0)
+        {
+            ++statistics.rejections;
+            throw GeometryError(std::isfinite(error) && error > 0 ? GeometryErrorCode::UnresolvedArithmetic
+                                                                  : GeometryErrorCode::InvalidInput,
+                "Original source point does not have a resolved represented placement.");
+        }
+    if (parent)
+    {
+        if (!edge_first || !edge_second)
+        {
+            ++statistics.rejections;
+            throw GeometryError(
+                GeometryErrorCode::InvalidInput, "Source recovery requires the original edge endpoints.");
+        }
+        // A unique intersection of infinite support planes need not belong to
+        // the retained parent or edge. Check the proposed original point before
+        // assigning any recovered coordinates, identity or support authority.
+        Vertex candidate;
+        candidate.source_identity = unique;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            candidate.coordinates[axis] = StorageScalar(source_point->value[axis]);
+        for (const auto& surface : parent->surfaces)
+        {
+            active_work->pair();
+            if (sign<kernel_mode>(
+                    distance<kernel_mode>(candidate, Frame{}, surface.plane) * Scalar(surface.orientation)) > 0)
+            {
+                ++statistics.rejections;
+                throw GeometryError(GeometryErrorCode::InvalidTopology,
+                    "Recovered source point lies outside an inherited parent halfspace.");
+            }
+        }
+        const ordinary_predicates::FramedPoint proposed{source_point->value, {}, 0};
+        const auto endpoint = [&](const Vertex& v)
+        {
+            return ordinary_predicates::FramedPoint{
+                {v.coordinates[0].value, v.coordinates[1].value, v.coordinates[2].value}, parent->frame.origin,
+                parent->frame.exponent};
+        };
+        const auto first = endpoint(*edge_first), second = endpoint(*edge_second);
+        bool coordinate_bracket = true;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            ordinary_predicates::Point unit{};
+            unit[axis] = 1;
+            const auto a =
+                ordinary_predicates::require_sign(ordinary_predicates::plane_distance(proposed, first, unit, 0));
+            const auto b =
+                ordinary_predicates::require_sign(ordinary_predicates::plane_distance(proposed, second, unit, 0));
+            if (a != 0 && a == b)
+            {
+                coordinate_bracket = false;
+                break;
+            }
+        }
+        if (!coordinate_bracket)
+        {
+            // Rounded generated endpoints can lie just beyond their original
+            // endpoint support. A shared root edge alone does not prove current
+            // segment membership: require a proved current endpoint or two
+            // transverse current-parent faces that bound the common source line.
+            const auto exact_anchor = [&](const PlanePtr& support)
+            {
+                if (!support->normal_error || *support->normal_error != 0 || support->offset.value != 0 ||
+                    support->source_vertices.empty())
+                    return false;
+                const auto token = DynamicGeometryAccess::original_source(support->source_vertices.front().lock());
+                if (!token || token->constructed || token->arithmetic_mode != ArithmeticMode::Ordinary ||
+                    token->absolute_error != std::array<long double, 3>{})
+                    return false;
+                const ordinary_predicates::FramedPoint anchor{
+                    {support->anchor[0].value, support->anchor[1].value, support->anchor[2].value},
+                    support->frame.origin, support->frame.exponent};
+                const ordinary_predicates::FramedPoint original_anchor{token->value, {}, 0};
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                {
+                    ordinary_predicates::Point unit{};
+                    unit[axis] = 1;
+                    const auto residual = ordinary_predicates::plane_distance(anchor, original_anchor, unit, 0);
+                    if (residual.value != 0 || residual.absolute_error != 0)
+                        return false;
+                }
+                return true;
+            };
+            const auto common_support = [&](const PlanePtr& support)
+            {
+                return incident<kernel_mode>(*edge_first, support) && incident<kernel_mode>(*edge_second, support) &&
+                       incident<kernel_mode>(candidate, support);
+            };
+            struct EndpointBounds
+            {
+                bool coincident = false;
+                unsigned directions = 0;
+            };
+            const auto endpoint_bounds = [&](const Vertex& endpoint, const Vertex& other, const PlanePtr& first_support,
+                                             const PlanePtr& second_support)
+            {
+                EndpointBounds result;
+                for (const auto& bound : endpoint.incident)
+                {
+                    active_work->pair();
+                    if (incident<kernel_mode>(other, bound))
+                        continue;
+                    const int derivative = source_normal_orientation(*first_support, *second_support, *bound);
+                    if (!derivative)
+                        continue;
+                    if (incident<kernel_mode>(candidate, bound))
+                    {
+                        result.coincident = true;
+                        continue;
+                    }
+                    // Numerical signs require an exact original plane
+                    // expression, including its anchor, not just a rank bound.
+                    if (!exact_anchor(bound))
+                        continue;
+                    const int candidate_side = sign<kernel_mode>(distance<kernel_mode>(candidate, Frame{}, bound));
+                    if (!candidate_side)
+                    {
+                        result.coincident = true;
+                        continue;
+                    }
+                    for (const auto& surface : parent->surfaces)
+                    {
+                        active_work->pair();
+                        if (surface.plane != bound)
+                            continue;
+                        const int other_side = sign<kernel_mode>(distance<kernel_mode>(other, parent->frame, bound));
+                        if (other_side * surface.orientation >= 0)
+                            continue;
+                        if (candidate_side * surface.orientation > 0)
+                        {
+                            ++statistics.rejections;
+                            throw GeometryError(GeometryErrorCode::InvalidTopology,
+                                "Recovered source point violates an original endpoint bound.");
+                        }
+                        result.directions |= derivative * surface.orientation < 0 ? 1u : 2u;
+                    }
+                }
+                return result;
+            };
+            const auto source_segment = [&]
+            {
+                for (std::size_t a = 0; a + 1 < vertex.incident.size(); ++a)
+                {
+                    const auto& first_support = vertex.incident[a];
+                    if (!common_support(first_support))
+                        continue;
+                    for (std::size_t b = a + 1; b < vertex.incident.size(); ++b)
+                    {
+                        const auto& second_support = vertex.incident[b];
+                        if (!common_support(second_support))
+                            continue;
+                        const auto first_bound =
+                            endpoint_bounds(*edge_first, *edge_second, first_support, second_support);
+                        const auto second_bound =
+                            endpoint_bounds(*edge_second, *edge_first, first_support, second_support);
+                        if (first_bound.coincident || second_bound.coincident)
+                            return true;
+                        // Interior admission needs two current parent faces
+                        // cutting the common line in opposite outward senses.
+                        // Arbitrary ancestral planes or same-direction bounds
+                        // cannot widen a retained subsegment.
+                        if ((first_bound.directions == 1 && second_bound.directions == 2) ||
+                            (first_bound.directions == 2 && second_bound.directions == 1))
+                            return true;
+                    }
+                }
+                return false;
+            };
+            bool source_segment_admitted = false;
+            try
+            {
+                source_segment_admitted = source_segment();
+            }
+            catch (const GeometryError& error)
+            {
+                if (error.code() != GeometryErrorCode::UnresolvedArithmetic)
+                    throw;
+            }
+            if (!source_segment_admitted)
+            {
+                ++statistics.rejections;
+                throw GeometryError(GeometryErrorCode::InvalidTopology,
+                    "Recovered source point lies outside the original edge bracket.");
+            }
+        }
+    }
     // Three independent original supports identify this source point uniquely.
     // No rounded residual or coordinate proximity participates in the proof.
-    const auto original = DynamicPoint{unique->value, unique->absolute_error, ArithmeticMode::Ordinary};
-    const auto coordinates = transform<kernel_mode>(point<kernel_mode>(original), Frame{}, frame);
+    const ordinary_predicates::FramedPoint original{source_point->value, {}, 0};
+    const ordinary_predicates::FramedPoint destination{{}, frame.origin, frame.exponent};
+    Point coordinates;
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        ordinary_predicates::Point unit{};
+        unit[axis] = 1;
+        const auto placed = ordinary_predicates::plane_distance(original, destination, unit, 0);
+        if (placed.absolute_error != 0)
+        {
+            ++statistics.rejections;
+            throw GeometryError(GeometryErrorCode::UnresolvedArithmetic,
+                "Original source point cannot be placed exactly in the construction frame.");
+        }
+        coordinates[axis] = StorageScalar(placed.value);
+    }
     for (const auto& key : unique->supports)
     {
         bool retained = false;
@@ -324,11 +540,11 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         negative = negative || s < 0;
         positive = positive || s > 0;
     }
-    DynamicClipResult result;
-    result.section.area = bounded<Mode>(Scalar{});
-    result.section.centroid = bounded<Mode>(Point{});
     if (!negative || !positive)
     {
+        DynamicClipResult result;
+        result.section.area = bounded<Mode>(Scalar{});
+        result.section.centroid = bounded<Mode>(Point{});
         // A support face/edge/point is a proven zero-volume contact. Preserve
         // its section dimension rather than manufacturing a positive piece.
         std::vector<std::size_t> contact;
@@ -388,250 +604,557 @@ DynamicClipResult GeometryKernel<Mode>::clip_impl(const std::shared_ptr<const Dy
         return result;
     }
 
-    std::vector<Vertex> vertices = impl_->vertices;
-    // Authenticate every zero-distance input incidence on the new shared plane.
-    for (std::size_t i = 0; i < signs.size(); ++i)
-        if (signs[i] == 0)
-        {
-            // Materialize the proved relation even when a local point token
-            // already establishes it; numerical packets retain plane pointers
-            // as indexed incidences, but deliberately omit those local tokens.
-            if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), plane) ==
-                vertices[i].incident.end())
-                vertices[i].incident.push_back(plane);
-            for (const auto& key : plane->authorities)
-                if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), key) ==
-                    vertices[i].authorities.end())
-                    vertices[i].authorities.push_back(key);
-        }
-    std::map<std::pair<std::size_t, std::size_t>, std::size_t> crossings;
-    const auto crossing = [&](std::size_t a, std::size_t b)
+    // Match source-frame coordinates only where relocation is exact for every
+    // immutable parent vertex and does not increase that axis's maximum local
+    // magnitude. This keeps small source-relative displacements before any
+    // crossing is rounded, without moving the parent or selecting a tolerance.
+    Frame aligned_frame = impl_->frame;
+    std::vector<Point> aligned;
+    const auto relocated = [&](const Point& point, const Frame& destination, std::size_t axis)
     {
-        const std::pair<std::size_t, std::size_t> key{std::min(a, b), std::max(a, b)};
-        if (auto found = crossings.find(key); found != crossings.end())
-            return found->second;
-        a = key.first;
-        b = key.second;
-        // Strict opposite endpoint distances prove a unique intersection in
-        // the open edge. An independently enclosed da/(da-db) loses the shared
-        // denominator dependency near an endpoint and need not exclude 0/1.
-        if (!((distances[a].value > 0 && distances[b].value < 0) || (distances[b].value > 0 && distances[a].value < 0)))
-            reject("edge intersection lacks certified opposite endpoint signs.");
-        Vertex vertex;
-        vertex.numerical_only = impl_->numerical_only || source->numerical_only;
-        const auto denominator = distances[a] - distances[b];
-        for (std::size_t axis = 0; axis < 3; ++axis)
-        {
-            // Delay the common division. A nonbinary edge parameter can
-            // produce an exactly representable coordinate; rounding the
-            // parameter first would destroy that cancellation and its support.
-            vertex.coordinates[axis] =
-                (vertices[b].coordinates[axis] * distances[a] - vertices[a].coordinates[axis] * distances[b]) /
-                denominator;
-        }
-        for (const auto& p : vertices[a].incident)
-            if (incident<Mode>(vertices[b], p))
-                vertex.incident.push_back(p);
-        if (std::find(vertex.incident.begin(), vertex.incident.end(), plane) == vertex.incident.end())
-            vertex.incident.push_back(plane);
-        for (const auto& key : vertices[a].authorities)
-            if (std::find(vertices[b].authorities.begin(), vertices[b].authorities.end(), key) !=
-                vertices[b].authorities.end())
-                vertex.authorities.push_back(key);
-        for (const auto& key : plane->authorities)
-            if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) == vertex.authorities.end())
-                vertex.authorities.push_back(key);
-        recover_source_identity(vertex, impl_->frame);
-        preserve_crossing_incidence<Mode>(vertex, vertices[a], vertices[b], impl_->frame,
-            impl_->numerical_only || source->numerical_only);
-        if (vertices.size() >= impl_->limits.maximum_vertices)
-            reject("intersection vertex cap exhausted.");
-        const auto index = vertices.size();
-        vertices.push_back(std::move(vertex));
-        crossings.emplace(key, index);
-        return index;
+        const ordinary_predicates::FramedPoint original{
+            {point[0].value, point[1].value, point[2].value}, impl_->frame.origin, impl_->frame.exponent};
+        const ordinary_predicates::FramedPoint anchor{{}, destination.origin, destination.exponent};
+        ordinary_predicates::Point unit{};
+        unit[axis] = 1;
+        return ordinary_predicates::plane_distance(original, anchor, unit, 0);
     };
-    std::array<std::vector<Face>, 2> output_faces;
-    std::array<std::vector<Surface>, 2> output_surfaces;
-    struct CapEdge
+    for (std::size_t axis = 0; axis < 3; ++axis)
     {
-        unsigned occurrences = 0;
-        int orientation = 0;
-    };
-    std::map<std::pair<std::size_t, std::size_t>, CapEdge> cap_edges;
-    for (std::size_t f = 0; f < impl_->faces.size(); ++f)
-    {
-        const auto& face = impl_->faces[f];
-        for (unsigned outside = 0; outside < (construct_outside ? 2u : 1u); ++outside)
+        if (plane->frame.origin[axis] == impl_->frame.origin[axis])
+            continue;
+        auto candidate = aligned_frame;
+        candidate.origin[axis] = plane->frame.origin[axis];
+        const auto maximum = std::max(std::abs(impl_->bounds[axis].lo), std::abs(impl_->bounds[axis].hi));
+        bool eligible = true;
+        try
         {
-            Face loop;
-            for (std::size_t i = 0; i < face.size(); ++i)
+            for (const auto bound : {impl_->bounds[axis].lo, impl_->bounds[axis].hi})
             {
-                const auto a = face[i], b = face[(i + 1) % face.size()];
-                if (outside ? signs[a] >= 0 : signs[a] <= 0)
-                    loop.push_back(a);
-                if (signs[a] * signs[b] < 0)
-                    loop.push_back(crossing(a, b));
+                Point endpoint{};
+                endpoint[axis] = StorageScalar(bound);
+                const auto converted = relocated(endpoint, candidate, axis);
+                if (converted.absolute_error != 0 || std::abs(converted.value) > maximum)
+                {
+                    eligible = false;
+                    break;
+                }
             }
-            if (loop.size() >= 3 &&
-                !std::all_of(loop.begin(), loop.end(), [&](auto i) { return incident<Mode>(vertices[i], plane); }))
+            if (eligible)
             {
-                // A source face can meet the cut in an edge containing three
-                // or more propagated collinear vertices. It is not a positive
-                // area output face; the retained adjacent face contributes the
-                // same authenticated edge chain to the cap.
-                output_faces[outside].push_back(loop);
-                output_surfaces[outside].push_back(impl_->surfaces[f]);
-                if (!outside)
-                    for (std::size_t i = 0; i < loop.size(); ++i)
+                if (aligned.empty())
+                {
+                    active_work->charge(impl_->vertices.size(), sizeof(Point));
+                    aligned.reserve(impl_->vertices.size());
+                    for (const auto& vertex : impl_->vertices)
+                        aligned.push_back(vertex.coordinates);
+                }
+                for (std::size_t i = 0; i < impl_->vertices.size(); ++i)
+                {
+                    const auto converted = relocated(impl_->vertices[i].coordinates, candidate, axis);
+                    if (converted.absolute_error != 0)
                     {
-                        const auto a = loop[i], b = loop[(i + 1) % loop.size()];
-                        if (a != b && incident<Mode>(vertices[a], plane) && incident<Mode>(vertices[b], plane))
+                        eligible = false;
+                        break;
+                    }
+                    aligned[i][axis] = StorageScalar(converted.value);
+                }
+            }
+        }
+        catch (const GeometryError& error)
+        {
+            if (error.code() != GeometryErrorCode::UnresolvedArithmetic)
+                throw;
+            eligible = false;
+        }
+        if (eligible)
+            aligned_frame = candidate;
+        else if (!aligned.empty())
+            for (std::size_t i = 0; i < impl_->vertices.size(); ++i)
+                aligned[i][axis] = impl_->vertices[i].coordinates[axis];
+    }
+    const auto build_split = [&](auto&& build_split, const Frame& frame, std::span<const Point> reframed,
+                                 bool reconstruction_attempt) -> DynamicClipResult
+    {
+        DynamicClipResult result;
+        result.section.area = bounded<Mode>(Scalar{});
+        result.section.centroid = bounded<Mode>(Point{});
+        std::vector<Vertex> vertices = impl_->vertices;
+        for (std::size_t i = 0; i < reframed.size(); ++i)
+            vertices[i].coordinates = reframed[i];
+        // Authenticate every zero-distance input incidence on the new shared plane.
+        for (std::size_t i = 0; i < signs.size(); ++i)
+            if (signs[i] == 0)
+            {
+                // Materialize the proved relation even when a local point token
+                // already establishes it; numerical packets retain plane pointers
+                // as indexed incidences, but deliberately omit those local tokens.
+                if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), plane) ==
+                    vertices[i].incident.end())
+                    vertices[i].incident.push_back(plane);
+                for (const auto& key : plane->authorities)
+                    if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), key) ==
+                        vertices[i].authorities.end())
+                        vertices[i].authorities.push_back(key);
+            }
+        std::map<std::pair<std::size_t, std::size_t>, std::size_t> crossings;
+        const auto crossing = [&](std::size_t a, std::size_t b)
+        {
+            const std::pair<std::size_t, std::size_t> key{std::min(a, b), std::max(a, b)};
+            if (auto found = crossings.find(key); found != crossings.end())
+                return found->second;
+            a = key.first;
+            b = key.second;
+            // Strict opposite endpoint distances prove a unique intersection in
+            // the open edge. An independently enclosed da/(da-db) loses the shared
+            // denominator dependency near an endpoint and need not exclude 0/1.
+            if (!((distances[a].value > 0 && distances[b].value < 0) ||
+                    (distances[b].value > 0 && distances[a].value < 0)))
+                reject("edge intersection lacks certified opposite endpoint signs.");
+            Vertex vertex;
+            vertex.numerical_only = impl_->numerical_only || source->numerical_only;
+            const auto denominator = distances[a] - distances[b];
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                // Delay the common division. A nonbinary edge parameter can
+                // produce an exactly representable coordinate; rounding the
+                // parameter first would destroy that cancellation and its support.
+                vertex.coordinates[axis] =
+                    (vertices[b].coordinates[axis] * distances[a] - vertices[a].coordinates[axis] * distances[b]) /
+                    denominator;
+            }
+            for (const auto& p : vertices[a].incident)
+                if (incident<Mode>(vertices[b], p))
+                    vertex.incident.push_back(p);
+            if (std::find(vertex.incident.begin(), vertex.incident.end(), plane) == vertex.incident.end())
+                vertex.incident.push_back(plane);
+            for (const auto& key : vertices[a].authorities)
+                if (std::find(vertices[b].authorities.begin(), vertices[b].authorities.end(), key) !=
+                    vertices[b].authorities.end())
+                    vertex.authorities.push_back(key);
+            for (const auto& key : plane->authorities)
+                if (std::find(vertex.authorities.begin(), vertex.authorities.end(), key) == vertex.authorities.end())
+                    vertex.authorities.push_back(key);
+            const bool recovered_source =
+                recover_source_identity(vertex, frame, impl_.get(), &impl_->vertices[a], &impl_->vertices[b]);
+            preserve_crossing_incidence<Mode>(
+                vertex, vertices[a], vertices[b], frame, impl_->numerical_only || source->numerical_only);
+            // Distinct source edges can recover the same original point. Reuse
+            // that authenticated identity in every incident face and both children;
+            // equal rounded coordinates alone never authorize this replacement.
+            if (recovered_source)
+                for (std::size_t i = 0; i < vertices.size(); ++i)
+                {
+                    active_work->pair();
+                    if (!DynamicGeometryAccess::same_represented_source(
+                            vertex.source_identity, vertices[i].source_identity) ||
+                        !incident<Mode>(vertices[i], plane))
+                        continue;
+                    for (const auto& support : vertex.incident)
+                        if (std::find(vertices[i].incident.begin(), vertices[i].incident.end(), support) ==
+                            vertices[i].incident.end())
+                            vertices[i].incident.push_back(support);
+                    for (const auto& authority : vertex.authorities)
+                        if (std::find(vertices[i].authorities.begin(), vertices[i].authorities.end(), authority) ==
+                            vertices[i].authorities.end())
+                            vertices[i].authorities.push_back(authority);
+                    crossings.emplace(key, i);
+                    return i;
+                }
+            if (vertices.size() >= impl_->limits.maximum_vertices)
+                reject("intersection vertex cap exhausted.");
+            const auto index = vertices.size();
+            vertices.push_back(std::move(vertex));
+            crossings.emplace(key, index);
+            return index;
+        };
+        std::array<std::vector<Face>, 2> output_faces;
+        std::array<std::vector<Surface>, 2> output_surfaces;
+        struct CapEdge
+        {
+            unsigned occurrences = 0;
+            int orientation = 0;
+        };
+        std::map<std::pair<std::size_t, std::size_t>, CapEdge> cap_edges;
+        for (std::size_t f = 0; f < impl_->faces.size(); ++f)
+        {
+            const auto& face = impl_->faces[f];
+            for (unsigned outside = 0; outside < (construct_outside ? 2u : 1u); ++outside)
+            {
+                Face loop;
+                for (std::size_t i = 0; i < face.size(); ++i)
+                {
+                    const auto a = face[i], b = face[(i + 1) % face.size()];
+                    if (outside ? signs[a] >= 0 : signs[a] <= 0)
+                        loop.push_back(a);
+                    if (signs[a] * signs[b] < 0)
+                        loop.push_back(crossing(a, b));
+                }
+                // Only repeated references are removed. Keep all established edge
+                // subdivisions, including collinear ones, conforming across faces.
+                loop.erase(std::unique(loop.begin(), loop.end()), loop.end());
+                if (loop.size() > 1 && loop.front() == loop.back())
+                    loop.pop_back();
+                if (loop.size() >= 3 &&
+                    !std::all_of(loop.begin(), loop.end(), [&](auto i) { return incident<Mode>(vertices[i], plane); }))
+                {
+                    // A source face can meet the cut in an edge containing three
+                    // or more propagated collinear vertices. It is not a positive
+                    // area output face; the retained adjacent face contributes the
+                    // same authenticated edge chain to the cap.
+                    output_faces[outside].push_back(loop);
+                    output_surfaces[outside].push_back(impl_->surfaces[f]);
+                    if (!outside)
+                        for (std::size_t i = 0; i < loop.size(); ++i)
                         {
-                            active_work->pair();
-                            const std::pair key{std::min(a, b), std::max(a, b)};
-                            auto edge = cap_edges.find(key);
-                            if (edge == cap_edges.end())
+                            const auto a = loop[i], b = loop[(i + 1) % loop.size()];
+                            if (a != b && incident<Mode>(vertices[a], plane) && incident<Mode>(vertices[b], plane))
                             {
-                                active_work->charge(
-                                    1, sizeof(typename decltype(cap_edges)::value_type) + 4 * sizeof(void*));
-                                edge = cap_edges.emplace(key, CapEdge{}).first;
+                                active_work->pair();
+                                const std::pair key{std::min(a, b), std::max(a, b)};
+                                auto edge = cap_edges.find(key);
+                                if (edge == cap_edges.end())
+                                {
+                                    active_work->charge(
+                                        1, sizeof(typename decltype(cap_edges)::value_type) + 4 * sizeof(void*));
+                                    edge = cap_edges.emplace(key, CapEdge{}).first;
+                                }
+                                if (++edge->second.occurrences > 2)
+                                    reject("section edge has more than two face incidences.");
+                                edge->second.orientation += a < b ? 1 : -1;
                             }
-                            if (++edge->second.occurrences > 2)
-                                reject("section edge has more than two face incidences.");
-                            edge->second.orientation += a < b ? 1 : -1;
+                        }
+                }
+            }
+        }
+        std::map<std::size_t, std::set<std::size_t>> adjacency;
+        for (const auto& [edge, incidence] : cap_edges)
+        {
+            active_work->pair();
+            if (incidence.occurrences == 2)
+            {
+                if (incidence.orientation != 0)
+                    reject("section edge has repeated oriented boundary coverage.");
+                continue; // Opposite inherited face edges are internal.
+            }
+            if (std::abs(incidence.orientation) != 1)
+                reject("section edge has invalid oriented boundary coverage.");
+            const auto [a, b] = edge;
+            adjacency[a].insert(b);
+            adjacency[b].insert(a);
+        }
+        if (adjacency.size() < 3)
+            reject("positive complementary cut has no closed section.");
+        for (const auto& [vertex, neighbors] : adjacency)
+            if (neighbors.size() != 2)
+                reject("section edge incidence is not one closed cycle.");
+        Face cap;
+        const auto first = adjacency.begin()->first;
+        std::size_t previous = first, current = *adjacency.at(first).begin();
+        cap.push_back(first);
+        while (current != first)
+        {
+            if (cap.size() >= adjacency.size())
+                reject("section cycle repeats a vertex.");
+            cap.push_back(current);
+            const auto& neighbors = adjacency.at(current);
+            const auto next = *neighbors.begin() == previous ? *neighbors.rbegin() : *neighbors.begin();
+            previous = current;
+            current = next;
+        }
+        if (cap.size() != adjacency.size())
+            reject("section has disconnected boundaries.");
+        // The retained faces inherit outward winding. Their unmatched edges
+        // determine the cap's opposite winding without a numerical normal test.
+        // Strict signs on both sides already prove a positive-area section.
+        bool same_direction = false, opposite_direction = false;
+        for (std::size_t i = 0; i < cap.size(); ++i)
+        {
+            active_work->pair();
+            const auto a = cap[i], b = cap[(i + 1) % cap.size()];
+            const auto orientation = cap_edges.at(std::minmax(a, b)).orientation;
+            const auto direction = a < b ? 1 : -1;
+            if (direction != orientation && direction != -orientation)
+                reject("section cycle contains an unproved boundary edge.");
+            same_direction |= direction == orientation;
+            opposite_direction |= direction == -orientation;
+        }
+        if (same_direction && opposite_direction)
+            reject("section boundary has inconsistent directed winding.");
+        if (same_direction)
+            std::reverse(cap.begin(), cap.end());
+        output_faces[0].push_back(cap);
+        output_surfaces[0].push_back(support);
+        if (construct_outside)
+        {
+            auto outside_cap = cap;
+            std::reverse(outside_cap.begin(), outside_cap.end());
+            output_faces[1].push_back(std::move(outside_cap));
+            output_surfaces[1].push_back({plane, -support.orientation});
+        }
+        // Charge immutable proof nodes and geometry wrappers as well as the shell
+        // payload charged by finish<Mode>(). Private partition clips have no outer FVM
+        // wrapper allocator to account for discarded temporary children.
+        active_work->charge(1, sizeof(Split));
+        auto split = std::make_shared<Split>();
+        split->parent = impl_->ancestry;
+        if (impl_->ancestry->depth == std::numeric_limits<std::size_t>::max())
+            reject("construction ancestry depth overflows.");
+        active_work->charge(1, sizeof(GeometryClipConstruction));
+        auto construction = std::make_shared<GeometryClipConstruction>();
+        construction->parent = construction_source<Mode>(impl_);
+        construction->plane = plane;
+        construction->mode = Mode;
+        construction->orientation = support.orientation;
+        construction->measure_section = measure_section;
+        construction->construct_outside = construct_outside;
+        construction->partition_proof = partition_proof;
+        active_work->charge(plane->source_vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
+        for (const auto& weak : plane->source_vertices)
+            if (const auto point = weak.lock())
+                construction->retained_points.push_back(point);
+        const auto draft_child = [&](unsigned outside)
+        {
+            active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
+            auto poly = std::make_shared<Impl>();
+            poly->frame = frame;
+            poly->reference_origin = impl_->reference_origin;
+            poly->limits = impl_->limits;
+            poly->numerical_only = impl_->numerical_only || source->numerical_only;
+            active_work->charge(1, sizeof(GeometryConstruction));
+            auto recipe = std::make_shared<GeometryConstruction>();
+            recipe->kind = GeometryConstruction::Kind::Clip;
+            recipe->clip = construction;
+            recipe->outside = outside != 0;
+            poly->construction = std::move(recipe);
+            poly->ancestry =
+                std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
+            std::set<std::size_t> used;
+            for (const auto& face : output_faces[outside])
+                used.insert(face.begin(), face.end());
+            std::map<std::size_t, std::size_t> remap;
+            for (const auto i : used)
+            {
+                remap.emplace(i, poly->vertices.size());
+                poly->vertices.push_back(vertices[i]);
+            }
+            poly->faces = std::move(output_faces[outside]);
+            poly->surfaces = std::move(output_surfaces[outside]);
+            for (auto& face : poly->faces)
+                for (auto& i : face)
+                    i = remap.at(i);
+            return poly;
+        };
+        std::array<std::shared_ptr<Impl>, 2> drafts{draft_child(0), nullptr};
+        if (construct_outside)
+            drafts[1] = draft_child(1);
+
+        // Validate the whole requested split before evaluating either child. The
+        // cap already has the directed winding inherited from the parent faces;
+        // no near-degenerate numerical normal is needed to orient it again.
+        const auto validate_draft = [&](const Impl& poly)
+        {
+            if (poly.vertices.size() < 4 || poly.faces.size() < 4 || poly.faces.size() != poly.surfaces.size())
+                reject("positive complementary child has an incomplete boundary.");
+            std::map<std::pair<std::size_t, std::size_t>, CapEdge> edges;
+            for (const auto& face : poly.faces)
+            {
+                if (face.size() < 3)
+                    reject("complementary child face has fewer than three vertices.");
+                active_work->charge(face.size(), sizeof(std::size_t) + 4 * sizeof(void*));
+                std::set<std::size_t> distinct;
+                for (std::size_t i = 0; i < face.size(); ++i)
+                {
+                    active_work->pair();
+                    const auto a = face[i], b = face[(i + 1) % face.size()];
+                    if (a >= poly.vertices.size() || b >= poly.vertices.size() || !distinct.insert(a).second)
+                        reject("complementary child has an invalid or repeated face vertex.");
+                    const std::pair edge{std::min(a, b), std::max(a, b)};
+                    auto found = edges.find(edge);
+                    if (found == edges.end())
+                    {
+                        active_work->charge(1, sizeof(typename decltype(edges)::value_type) + 4 * sizeof(void*));
+                        found = edges.emplace(edge, CapEdge{}).first;
+                    }
+                    if (++found->second.occurrences > 2)
+                        reject("complementary child edge has more than two face incidences.");
+                    found->second.orientation += a < b ? 1 : -1;
+                }
+            }
+            for (const auto& [edge, incidence] : edges)
+                if (incidence.occurrences != 2 || incidence.orientation != 0)
+                    reject("complementary child is not an oriented closed two-manifold.");
+            validate_connected_boundary<Mode>(poly.vertices.size(), poly.faces);
+        };
+        for (const auto& draft : drafts)
+            if (draft)
+                validate_draft(*draft);
+        for (const auto& draft : drafts)
+            if (draft)
+                prepare_finish<Mode>(*draft, partition_proof);
+
+        // Keep numerical statuses until every requested child has been measured.
+        // Parent signs, not a zero/unresolved rounded child, establish contact.
+        // A strict two-sided split must therefore still reject a nonpositive shell.
+        enum class MeasureStatus
+        {
+            Positive,
+            Zero,
+            Negative,
+            Unresolved,
+            PrivateWitness
+        };
+        struct DraftMeasure
+        {
+            MeasureStatus status = MeasureStatus::PrivateWitness;
+            std::exception_ptr unresolved;
+        };
+        std::array<DraftMeasure, 2> measures;
+        if (!partition_proof)
+            for (std::size_t side = 0; side < drafts.size(); ++side)
+                if (const auto& draft = drafts[side])
+                {
+                    try
+                    {
+                        ++statistics.volume_evaluations;
+                        draft->volume = integrate<Mode>(*draft, false).volume;
+                        measures[side].status = draft->volume.value > 0   ? MeasureStatus::Positive
+                                                : draft->volume.value < 0 ? MeasureStatus::Negative
+                                                                          : MeasureStatus::Zero;
+                    }
+                    catch (const GeometryError& error)
+                    {
+                        if (error.code() != GeometryErrorCode::UnresolvedArithmetic)
+                            throw;
+                        measures[side].status = MeasureStatus::Unresolved;
+                        measures[side].unresolved = std::current_exception();
+                    }
+                }
+        // A thin cut can be unrepresentable in the parent's distant frame
+        // even though its positive intersection is representable near a retained
+        // source vertex. Retry once from the immutable parent and cut, never
+        // from the rejected child. The frame change must preserve every parent
+        // coordinate exactly; only Ordinary crossing rounding is evaluated anew.
+        const auto failed_measure = [](MeasureStatus status)
+        {
+            return status == MeasureStatus::Zero || status == MeasureStatus::Negative ||
+                   status == MeasureStatus::Unresolved;
+        };
+        if ((failed_measure(measures[0].status) || failed_measure(measures[1].status)) && !reconstruction_attempt &&
+            !partition_proof && !impl_->numerical_only && !source->numerical_only && impl_->vertices.size() == 4 &&
+            impl_->faces.size() == 4 &&
+            std::all_of(impl_->faces.begin(), impl_->faces.end(), [](const auto& face) { return face.size() == 3; }) &&
+            std::find(signs.begin(), signs.end(), 0) == signs.end())
+        {
+            // Choose the side nearest the cut from original distance data,
+            // independent of which outputs were requested or failed. Sorted
+            // source-coordinate ties preserve reversal and permutation symmetry.
+            const auto key = [&](std::size_t i)
+            {
+                const auto& p = impl_->vertices[i].coordinates;
+                return std::array<long double, 3>{p[0].value, p[1].value, p[2].value};
+            };
+            struct Side
+            {
+                long double maximum_distance = 0;
+                std::array<std::size_t, 4> vertices{};
+                std::size_t count = 0;
+            };
+            std::array<Side, 2> sides;
+            for (std::size_t i = 0; i < signs.size(); ++i)
+            {
+                active_work->pair();
+                auto& side = sides[signs[i] > 0 ? 1 : 0];
+                side.maximum_distance = std::max(side.maximum_distance, std::abs(distances[i].value));
+                side.vertices[side.count++] = i;
+            }
+            const auto coordinate_less = [&](std::size_t a, std::size_t b)
+            {
+                active_work->pair();
+                return key(a) < key(b);
+            };
+            for (auto& side : sides)
+                std::sort(side.vertices.begin(), side.vertices.begin() + side.count, coordinate_less);
+            const bool inside_nearer =
+                sides[0].maximum_distance < sides[1].maximum_distance ||
+                (sides[0].maximum_distance == sides[1].maximum_distance &&
+                    std::lexicographical_compare(sides[0].vertices.begin(), sides[0].vertices.begin() + sides[0].count,
+                        sides[1].vertices.begin(), sides[1].vertices.begin() + sides[1].count, coordinate_less));
+            const auto corner = sides[inside_nearer ? 0 : 1].vertices[0];
+            Frame candidate_frame = impl_->frame;
+            const auto global = scaled<Mode>(impl_->vertices[corner].coordinates, impl_->frame.exponent) +
+                                point<Mode>(impl_->frame.origin);
+            bool eligible = true;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                candidate_frame.origin[axis] = static_cast<double>(global[axis].value);
+                eligible = eligible && std::isfinite(candidate_frame.origin[axis]);
+            }
+            eligible = eligible && candidate_frame.origin != frame.origin;
+            std::array<Point, 4> original_in_frame;
+            try
+            {
+                if (eligible)
+                    for (std::size_t i = 0; i < impl_->vertices.size() && eligible; ++i)
+                    {
+                        const auto& coordinate = impl_->vertices[i].coordinates;
+                        const ordinary_predicates::FramedPoint original{
+                            {coordinate[0].value, coordinate[1].value, coordinate[2].value}, impl_->frame.origin,
+                            impl_->frame.exponent};
+                        const ordinary_predicates::FramedPoint anchor{
+                            {}, candidate_frame.origin, candidate_frame.exponent};
+                        for (std::size_t axis = 0; axis < 3; ++axis)
+                        {
+                            ordinary_predicates::Point unit{};
+                            unit[axis] = 1;
+                            const auto transformed = ordinary_predicates::plane_distance(original, anchor, unit, 0);
+                            if (transformed.absolute_error != 0)
+                            {
+                                eligible = false;
+                                break;
+                            }
+                            original_in_frame[i][axis] = Scalar(transformed.value);
                         }
                     }
             }
+            catch (const GeometryError& error)
+            {
+                if (error.code() != GeometryErrorCode::UnresolvedArithmetic)
+                    throw;
+                eligible = false;
+            }
+            if (eligible)
+                return build_split(build_split, candidate_frame, original_in_frame, true);
         }
-    }
-    std::map<std::size_t, std::set<std::size_t>> adjacency;
-    for (const auto& [edge, incidence] : cap_edges)
-    {
-        active_work->pair();
-        if (incidence.occurrences == 2)
-        {
-            if (incidence.orientation != 0)
-                reject("section edge has repeated oriented boundary coverage.");
-            continue; // Opposite inherited face edges are internal.
-        }
-        if (std::abs(incidence.orientation) != 1)
-            reject("section edge has invalid oriented boundary coverage.");
-        const auto [a, b] = edge;
-        adjacency[a].insert(b);
-        adjacency[b].insert(a);
-    }
-    if (adjacency.size() < 3)
-        reject("positive complementary cut has no closed section.");
-    for (const auto& [vertex, neighbors] : adjacency)
-        if (neighbors.size() != 2)
-            reject("section edge incidence is not one closed cycle.");
-    Face cap;
-    const auto first = adjacency.begin()->first;
-    std::size_t previous = first, current = *adjacency.at(first).begin();
-    cap.push_back(first);
-    while (current != first)
-    {
-        if (cap.size() >= adjacency.size())
-            reject("section cycle repeats a vertex.");
-        cap.push_back(current);
-        const auto& neighbors = adjacency.at(current);
-        const auto next = *neighbors.begin() == previous ? *neighbors.rbegin() : *neighbors.begin();
-        previous = current;
-        current = next;
-    }
-    if (cap.size() != adjacency.size())
-        reject("section has disconnected boundaries.");
-    // The retained faces inherit outward winding. Their unmatched edges
-    // determine the cap's opposite winding without a numerical normal test.
-    // Strict signs on both sides already prove a positive-area section.
-    bool same_direction = false, opposite_direction = false;
-    for (std::size_t i = 0; i < cap.size(); ++i)
-    {
-        active_work->pair();
-        const auto a = cap[i], b = cap[(i + 1) % cap.size()];
-        const auto orientation = cap_edges.at(std::minmax(a, b)).orientation;
-        const auto direction = a < b ? 1 : -1;
-        if (direction != orientation && direction != -orientation)
-            reject("section cycle contains an unproved boundary edge.");
-        same_direction |= direction == orientation;
-        opposite_direction |= direction == -orientation;
-    }
-    if (same_direction && opposite_direction)
-        reject("section boundary has inconsistent directed winding.");
-    if (same_direction)
-        std::reverse(cap.begin(), cap.end());
-    if (measure_section)
-        result.section = section<Mode>(*impl_, vertices, cap);
-    output_faces[0].push_back(cap);
-    output_surfaces[0].push_back(support);
-    if (construct_outside)
-    {
-        std::reverse(cap.begin(), cap.end());
-        output_faces[1].push_back(cap);
-        output_surfaces[1].push_back({plane, -support.orientation});
-    }
-    // Charge immutable proof nodes and geometry wrappers as well as the shell
-    // payload charged by finish<Mode>(). Private partition clips have no outer FVM
-    // wrapper allocator to account for discarded temporary children.
-    active_work->charge(1, sizeof(Split));
-    auto split = std::make_shared<Split>();
-    split->parent = impl_->ancestry;
-    if (impl_->ancestry->depth == std::numeric_limits<std::size_t>::max())
-        reject("construction ancestry depth overflows.");
-    active_work->charge(1, sizeof(GeometryClipConstruction));
-    auto construction = std::make_shared<GeometryClipConstruction>();
-    construction->parent = construction_source<Mode>(impl_);
-    construction->plane = plane;
-    construction->mode = Mode;
-    construction->orientation = support.orientation;
-    construction->measure_section = measure_section;
-    construction->construct_outside = construct_outside;
-    construction->partition_proof = partition_proof;
-    active_work->charge(plane->source_vertices.size(), sizeof(std::shared_ptr<const DynamicPointProvenance>));
-    for (const auto& weak : plane->source_vertices)
-        if (const auto point = weak.lock())
-            construction->retained_points.push_back(point);
-    const auto child = [&](unsigned outside)
-    {
-        active_work->charge(1, sizeof(Impl) + 2 * sizeof(Ancestry) + sizeof(DynamicConvexGeometry));
-        auto poly = std::make_shared<Impl>();
-        poly->frame = impl_->frame;
-        poly->reference_origin = impl_->reference_origin;
-        poly->limits = impl_->limits;
-        poly->numerical_only = impl_->numerical_only || source->numerical_only;
-        active_work->charge(1, sizeof(GeometryConstruction));
-        auto recipe = std::make_shared<GeometryConstruction>();
-        recipe->kind = GeometryConstruction::Kind::Clip;
-        recipe->clip = construction;
-        recipe->outside = outside != 0;
-        poly->construction = std::move(recipe);
-        poly->ancestry =
-            std::make_shared<Ancestry>(Ancestry{impl_->ancestry, split, outside != 0, impl_->ancestry->depth + 1});
-        std::set<std::size_t> used;
-        for (const auto& face : output_faces[outside])
-            used.insert(face.begin(), face.end());
-        std::map<std::size_t, std::size_t> remap;
-        for (const auto i : used)
-        {
-            remap.emplace(i, poly->vertices.size());
-            poly->vertices.push_back(vertices[i]);
-        }
-        poly->faces = std::move(output_faces[outside]);
-        poly->surfaces = std::move(output_surfaces[outside]);
-        for (auto& face : poly->faces)
-            for (auto& i : face)
-                i = remap.at(i);
-        // Certified strict signs on both sides of a full-dimensional convex
-        // parent prove that both children have positive interiors. Private
-        // partition witnesses use only that geometry and never their measures.
-        finish<Mode>(*poly, partition_proof, true);
-        return DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(poly)));
+        for (std::size_t side = 0; side < drafts.size(); ++side)
+            if (drafts[side])
+            {
+                if (measures[side].status == MeasureStatus::Zero || measures[side].status == MeasureStatus::Negative)
+                {
+                    std::ostringstream reason;
+                    reason.precision(std::numeric_limits<long double>::max_digits10);
+                    reason << "computed signed volume is not positive (volume=" << drafts[side]->volume.value << ").";
+                    reject(reason.str());
+                }
+            }
+        // A resolved inconsistency on either side takes precedence over a
+        // recoverable numerical trial failure on its requested complement.
+        for (const auto& measure : measures)
+            if (measure.status == MeasureStatus::Unresolved)
+                std::rethrow_exception(measure.unresolved);
+        if (measure_section)
+            result.section = section<Mode>(*drafts[0], vertices, cap);
+        for (const auto& draft : drafts)
+            if (draft)
+                ++statistics.constructions;
+        result.inside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(drafts[0])));
+        if (construct_outside)
+            result.outside = DynamicConvexGeometryPtr(new DynamicConvexGeometry(std::move(drafts[1])));
+        return result;
     };
-    result.inside = child(0);
-    if (construct_outside)
-        result.outside = child(1);
-    return result;
+    if (aligned_frame.origin != impl_->frame.origin)
+        return build_split(build_split, aligned_frame, aligned, false);
+    return build_split(build_split, impl_->frame, {}, false);
 }
 
 template<ArithmeticMode Mode> DynamicPhaseMeasures GeometryKernel<Mode>::phases(const GeometryHalfspace& gas) const

@@ -29,9 +29,10 @@ There are two distinct flow integrations:
   follow the [native low-Mach contract](../architecture/low_mach_reacting_flow.md).
 
 A resolved-gas inventory compartment does not imply interface reconstruction.
-VoF and reacting-VoF integration are disabled; bounded floating-point and
-exact-rational VoF/general-AMR paths are deferred from this refactor. Shared
-lower-level geometry and finite-volume utilities remain available.
+Reacting-VoF integration remains excluded pending species-schema migration.
+Experimental source-free VoF enablement and finite geometry/flow development
+are separate from that integration. Shared lower-level geometry and
+finite-volume utilities remain available.
 
 ## Current interfaces
 

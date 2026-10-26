@@ -71,11 +71,51 @@ long double rounding_gap(long double value)
 }
 long double sum_gap(long double a, long double b, long double result)
 {
-    return a == 0 || b == 0 || a == -b ? 0 : rounding_gap(result);
+    if (!certification_environment() || !std::isfinite(a) || !std::isfinite(b) || !std::isfinite(result) ||
+        add(a, b) != result)
+        return infinity;
+    // Knuth TwoSum retains the actual rounding residual, including exact
+    // cancellation. Every intermediate must remain in the finite range.
+    const auto recovered = add(result, -a);
+    const auto first = add(a, -add(result, -recovered));
+    const auto second = add(b, -recovered);
+    const auto residual = add(first, second);
+    return std::isfinite(recovered) && std::isfinite(first) && std::isfinite(second) && std::isfinite(residual)
+               ? std::abs(residual)
+               : infinity;
 }
 long double product_gap(long double a, long double b, long double result)
 {
-    return a == 0 || b == 0 ? 0 : rounding_gap(result);
+    if (!certification_environment() || !std::isfinite(a) || !std::isfinite(b) || !std::isfinite(result) ||
+        multiply(a, b) != result)
+        return infinity;
+    if (a == 0 || b == 0)
+        return 0;
+    charge();
+    const auto residual = std::fma(a, b, -result);
+    if (!std::isfinite(residual))
+        return infinity;
+    int first_exponent, second_exponent;
+    charge();
+    std::frexp(a, &first_exponent);
+    charge();
+    std::frexp(b, &second_exponent);
+    using Limits = std::numeric_limits<long double>;
+    // FMA retains the product residual unless that residual itself rounds at
+    // gradual underflow. The product's input lattice proves when this cannot
+    // happen; otherwise one denorm_min bounds that possible loss, even at zero.
+    const auto lattice = static_cast<long long>(first_exponent) + second_exponent - 2 * Limits::digits;
+    return lattice < Limits::min_exponent - Limits::digits ? add_up(std::abs(residual), Limits::denorm_min())
+                                                           : std::abs(residual);
+}
+long double scale_gap(long double a, int exponent, long double result)
+{
+    if (!certification_environment() || !std::isfinite(a) || !std::isfinite(result) ||
+        exponent == std::numeric_limits<int>::min() || scale(a, exponent) != result)
+        return infinity;
+    // Binary scaling is exact when it reverses to the original represented
+    // input. Retain the full-spacing bound for actual underflow rounding.
+    return scale(result, -exponent) == a ? 0 : rounding_gap(result);
 }
 long double product_error(long double a, long double b, long double ea, long double eb, long double product)
 {
@@ -114,7 +154,7 @@ std::optional<std::array<long double, 3>> source_point_error(const DynamicPoint&
         if (scale(relative.value[axis], -frame.exponent) != stored[axis].value)
             return std::nullopt;
         error[axis] =
-            add_up(scale_up(e, -frame.exponent), relative.value[axis] == 0 ? 0 : rounding_gap(stored[axis].value));
+            add_up(scale_up(e, -frame.exponent), scale_gap(relative.value[axis], -frame.exponent, stored[axis].value));
         if (!std::isfinite(error[axis]))
             return std::nullopt;
     }
@@ -157,65 +197,73 @@ std::optional<long double> source_normal_error(
     return error;
 }
 
-bool independent_source_normals(const Plane& a, const Plane& b, const Plane& c)
+int source_normal_orientation(const Plane& a, const Plane& b, const Plane& c)
 {
     using namespace source_witness;
     if (!certification_environment())
-        return false;
+        return 0;
     const std::array<const Plane*, 3> planes{&a, &b, &c};
     std::array<std::array<long double, 3>, 3> normals, errors;
     for (std::size_t row = 0; row < 3; ++row)
     {
         const auto& plane = *planes[row];
         if (!plane.normal_error || !std::isfinite(*plane.normal_error) || *plane.normal_error < 0)
-            return false;
+            return 0;
         long double maximum = 0;
         for (const auto x : plane.normal)
             maximum = std::max(maximum, std::abs(x.value));
         if (!(maximum > 0) || !std::isfinite(maximum))
-            return false;
+            return 0;
         int exponent;
         std::frexp(maximum, &exponent);
         const auto error = scale_up(*plane.normal_error, -exponent);
         for (std::size_t axis = 0; axis < 3; ++axis)
         {
             normals[row][axis] = scale(plane.normal[axis].value, -exponent);
-            errors[row][axis] = add_up(error, plane.normal[axis].value == 0 ? 0 : rounding_gap(normals[row][axis]));
+            errors[row][axis] = add_up(error, scale_gap(plane.normal[axis].value, -exponent, normals[row][axis]));
             if (!std::isfinite(normals[row][axis]) || !std::isfinite(errors[row][axis]))
-                return false;
+                return 0;
         }
     }
-    constexpr std::array<std::array<std::size_t, 3>, 6> permutations{
-        {{0, 1, 2}, {1, 2, 0}, {2, 0, 1}, {0, 2, 1}, {1, 0, 2}, {2, 1, 0}}};
-    long double determinant = 0, error = 0;
-    for (std::size_t term = 0; term < permutations.size(); ++term)
+    // Preserve the shared factor before propagating its uncertainty. Expanding
+    // six independent triple products loses cancellation in a nearly parallel
+    // pair and can multiply a third normal's error by unrelated large terms.
+    // Each cyclic grouping bounds the same determinant; one resolved nonzero
+    // enclosure proves rank. There is no chosen sign or altered source normal.
+    for (std::size_t first = 0; first < 3; ++first)
     {
-        const auto& permutation = permutations[term];
-        std::array<long double, 3> x, e;
-        for (std::size_t row = 0; row < 3; ++row)
+        const auto second = (first + 1) % 3, third = (first + 2) % 3;
+        std::array<long double, 3> cross, cross_error;
+        for (std::size_t axis = 0; axis < 3; ++axis)
         {
-            x[row] = normals[row][permutation[row]];
-            e[row] = errors[row][permutation[row]];
+            const auto j = (axis + 1) % 3, k = (axis + 2) % 3;
+            const auto p = multiply(normals[first][j], normals[second][k]);
+            const auto q = multiply(normals[first][k], normals[second][j]);
+            cross[axis] = add(p, -q);
+            cross_error[axis] = add_up(
+                add_up(product_error(normals[first][j], normals[second][k], errors[first][j], errors[second][k], p),
+                    product_error(normals[first][k], normals[second][j], errors[first][k], errors[second][j], q)),
+                sum_gap(p, -q, cross[axis]));
         }
-        const auto product = multiply(x[0], x[1]);
-        const auto value = multiply(product, x[2]);
-        auto term_error =
-            add_up(multiply_up(std::abs(x[2]), product_gap(x[0], x[1], product)), product_gap(product, x[2], value));
-        // Expand all seven input-error terms directly; subtracting two
-        // product magnitudes would erase the very error being bounded.
-        for (unsigned mask = 1; mask < 8; ++mask)
+        long double determinant = 0, error = 0;
+        for (std::size_t axis = 0; axis < 3; ++axis)
         {
-            long double expansion = 1;
-            for (unsigned row = 0; row < 3; ++row)
-                expansion = multiply_up(expansion, mask & (1u << row) ? e[row] : std::abs(x[row]));
-            term_error = add_up(term_error, expansion);
+            const auto term = multiply(cross[axis], normals[third][axis]);
+            const auto term_error =
+                product_error(cross[axis], normals[third][axis], cross_error[axis], errors[third][axis], term);
+            const auto next = add(determinant, term);
+            error = add_up(error, add_up(term_error, sum_gap(determinant, term, next)));
+            determinant = next;
         }
-        const auto signed_value = term < 3 ? value : -value;
-        const auto next = add(determinant, signed_value);
-        error = add_up(error, add_up(term_error, sum_gap(determinant, signed_value, next)));
-        determinant = next;
+        if (std::isfinite(determinant) && std::isfinite(error) && std::abs(determinant) > error)
+            return determinant > 0 ? 1 : -1;
     }
-    return std::isfinite(determinant) && std::isfinite(error) && std::abs(determinant) > error;
+    return 0;
+}
+
+bool independent_source_normals(const Plane& a, const Plane& b, const Plane& c)
+{
+    return source_normal_orientation(a, b, c) != 0;
 }
 
 template<ArithmeticMode Mode> Scalar scalar_value(DynamicGeometryValue a)

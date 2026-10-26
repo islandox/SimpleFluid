@@ -94,6 +94,7 @@ also own the same typed solvent/vapor latent inventory. Supplied-EOS surface/
 headspace and native low-Mach thermal stages retain their own contracts; this
 adapter is not evidence for those combinations.
 
-VoF is disabled and explicit experimental ON is rejected at configuration.
-Bounded-FP and exact-rational VoF/general-AMR paths remain deferred; lower-level
-geometry behavior is unchanged. Focused serial and actual2/4-rank qualification remains required.
+Experimental source-free VoF enablement is separate from this adapter; the
+reacting VoF coupler remains excluded pending species-schema migration. No
+VoF/boiling integration is qualified by these tests. Focused serial and actual
+2/4-rank qualification remains required.
