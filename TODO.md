@@ -1652,13 +1652,20 @@ implicit-upwind specialization while retaining the general swept path.
       Use the raw signed momentum operator with positive low-order row scaling.
       Retain explicit halo/reach rejection, original face/cell allowances and
       the remaining repeated-flow qualification gates.
-- [ ] **Repair Stage 4 — aggregate geometry:** keep unmeasured source/cut witnesses
-      for computational pieces, cancel shared internal boundaries, and measure
-      physical aggregates. Separate fragment, minority-inventory and surface
-      accuracy contracts; check inaccurate positive results too. Account every
-      approximation within existing shared budgets without clipping, arbitrary
-      phase cutoffs, exact fallback or weakened physical tolerances. Qualify
-      residual-motion fragments in repeated coupled steps under existing caps.
+- [x] **Repair Stage 4 — aggregate geometry:** retain immutable source tetrahedra
+      and unmeasured barycentric cut witnesses; cancel surviving shared boundaries
+      by construction identity before measuring face/donor/sign/phase aggregates.
+      Use independent old-phase accuracy allowances shared across all requested
+      face/sign authorities through sparse owner counts, including remote donors.
+      Check positive results, placement error and arithmetic range; permit one
+      source replay per authority and reject unresolved geometry. Limit the final
+      shared correction by its independent phase-quality shares. Keep numerical
+      quality estimates distinct from conservative approximation bounds; the
+      resolved provider accepts no nonzero approximation without a ledger debit.
+      Preserve separate surface accuracy, original caps and physical gates.
+      Cover analytic tiny phases, budget/range rejection and three accepted
+      aligned/mixed coupled steps, including empty MPI owners. Complete physical
+      horizons and unresolved aggregate approximations remain separate work.
 
 #### Shared surfaces, interfaces and qualification — repair Stages 5–6
 
@@ -1763,10 +1770,12 @@ the specified focused coverage, not production or application qualification.
       without loss. Rebuild shared crossings from the original parent/cut and
       retain replay and resource gates. This does not qualify tiny-feature relative
       accuracy or the complete flow horizon; strict cuts cannot become contacts.
-- [ ] Admit contact-like computational-fragment coalescence only through explicit
-      conservative bounds and shared existing face/cell/phase budgets. Keep face
-      streams, donor/recipient inventories, momentum and replay consistent; retain
-      independent moment/section requirements for surface-sensitive consumers.
+- [ ] Extend aggregate geometry to unresolved contact-like contributions only
+      with conservative bounds and explicit shared face/cell/phase ledger debits.
+      Resolved Ordinary aggregate witnesses already avoid per-child metric
+      admission; unresolved approximations still reject. Keep signed streams,
+      independent inventories, momentum and replay consistent, and retain separate
+      moment/section requirements for surface-sensitive consumers.
 - [x] Replace Ordinary full retained-donor/recipient-overlay scans with indexed
       face candidates and signed-ledger publication. Track local index/candidate
       work without changing construction caps; BoundedCertification and Exact

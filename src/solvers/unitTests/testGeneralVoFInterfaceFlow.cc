@@ -31,10 +31,10 @@ std::shared_ptr<const VoF::GeneralVoF> interface_phases(unsigned initial)
     EXPECT_EQ(empty, std::max(0, comm->getSize() - 2));
     return std::make_shared<const VoF::GeneralVoF>(hierarchy, order, gas, liquid);
 }
-TEST(GeneralVoFInterfaceFlow, SingleStepAlignedAndMixedPassageUsesSignedMomentumAtomically)
+TEST(GeneralVoFInterfaceFlow, ThreeStepAlignedAndMixedPassageUsesSignedMomentumAtomically)
 {
-    // This checks one accepted phase/momentum/projection transaction. Repeated
-    // coupled steps still need the Stage4 thin-fragment robustness qualification.
+    // Repeated accepted transactions exercise thin computational pieces created
+    // after both aligned and mixed interfaces enter neighboring pure cells.
     for (unsigned initial : {1u, 2u})
     {
         SCOPED_TRACE(::testing::Message() << "initial=" << initial);
@@ -64,7 +64,7 @@ TEST(GeneralVoFInterfaceFlow, SingleStepAlignedAndMixedPassageUsesSignedMomentum
         const auto before = solver.diagnostics();
         const auto original_gas = solver.phases()->gas_volumes();
         EXPECT_GT(before.maximum_velocity, 0);
-        for (unsigned step = 0; step < 1; ++step)
+        for (unsigned step = 0; step < 3; ++step)
         {
             SCOPED_TRACE(::testing::Message() << "step=" << step);
             VoFStepDiagnostics after;
@@ -79,6 +79,14 @@ TEST(GeneralVoFInterfaceFlow, SingleStepAlignedAndMixedPassageUsesSignedMomentum
             EXPECT_TRUE(prepared->positive_transfers.empty());
             EXPECT_EQ(prepared->momentum_builds, 1u);
             EXPECT_EQ(prepared->momentum_reuses, 2u);
+            const int local_quality = int(prepared->diagnostics.quality_limited_faces);
+            int quality_faces = 0;
+            Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_quality, &quality_faces);
+            RecordProperty(
+                "quality_limited_faces_" + std::to_string(initial) + "_" + std::to_string(step), quality_faces);
+            EXPECT_GT(prepared->diagnostics.minimum_quality_theta, 0);
+            EXPECT_LE(prepared->diagnostics.minimum_quality_theta, 1);
+            EXPECT_LE(prepared->diagnostics.minimum_theta, prepared->diagnostics.minimum_quality_theta);
             for (const auto& residual : solver.momentum_transport_diagnostics())
                 EXPECT_LE(residual.physical_relative_residual, 1e-12);
             for (const auto& amount : solver.phases()->phase_volumes())
@@ -87,7 +95,7 @@ TEST(GeneralVoFInterfaceFlow, SingleStepAlignedAndMixedPassageUsesSignedMomentum
                 EXPECT_GE(amount.carrier, 0);
             }
         }
-        EXPECT_EQ(solver.time(), 1. / 64);
+        EXPECT_EQ(solver.time(), 3. / 64);
         double local = 0, passage = 0;
         for (std::size_t c = 0; c < original_gas.size(); ++c)
             local += std::abs(solver.phases()->gas_volumes()[c] - original_gas[c]);
@@ -104,7 +112,7 @@ TEST(GeneralVoFInterfaceFlow, SingleStepAlignedAndMixedPassageUsesSignedMomentum
         EXPECT_EQ(solver.velocity(), velocity);
         EXPECT_EQ(solver.pressure(), pressure);
         EXPECT_EQ(solver.face_velocity(), flux);
-        EXPECT_EQ(solver.time(), 1. / 64);
+        EXPECT_EQ(solver.time(), 3. / 64);
     }
 }
 } // namespace

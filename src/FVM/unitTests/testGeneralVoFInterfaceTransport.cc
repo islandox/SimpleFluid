@@ -141,6 +141,50 @@ TEST(GeneralVoFInterfaceTransport, PurePaddingKeepsGeometricWorkLocal)
     EXPECT_LT(global[1][5], 4 * global[0][5]);
     EXPECT_LT(global[1][6], 3 * global[0][6]);
 }
+TEST(GeneralVoFInterfaceTransport, ThreePlanarCyclesUseAggregateWitnessesAndPreserveIndependentInventories)
+{
+    const auto input = planar_fixture();
+    auto source = std::make_shared<const GeneralVoF>(input.hierarchy, input.order, input.gas, input.carrier);
+    for (unsigned step = 0; step < 3; ++step)
+    {
+        SCOPED_TRACE(::testing::Message() << "step=" << step);
+        const auto identity = source->accepted_identity();
+        const auto gas = source->gas_volumes(), carrier = source->carrier_volumes();
+        const auto trial = source->plan_transport(stationary(*source), loops(*source, 1. / 64), 1);
+        const auto prepared = trial.prepare_transport({1, 1000}, 29 + step);
+        const auto next = source->apply(trial);
+        EXPECT_EQ(prepared->family, Family::InterfaceLocalSwept);
+        EXPECT_EQ(prepared->backend, GeneralVoFTransportBackend::SweptPartition);
+        EXPECT_TRUE(prepared->positive_transfers.empty());
+        check_signed_budget(*prepared);
+        std::array<double, 6> local{0, 0, double(prepared->diagnostics.aggregate_groups),
+            double(prepared->diagnostics.aggregate_witnesses), double(prepared->diagnostics.cancelled_boundaries),
+            double(prepared->diagnostics.aggregate_retries)}, global{};
+        for (const auto& amount : next->phase_volumes())
+        {
+            EXPECT_GE(amount.gas, 0);
+            EXPECT_GE(amount.carrier, 0);
+            local[0] += amount.gas;
+            local[1] += amount.carrier;
+        }
+        Teuchos::reduceAll(
+            *Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, int(local.size()), local.data(), global.data());
+        // Four unit cells are gas and four are half gas. The remaining eight
+        // are wholly carrier, independently giving six gas and ten carrier units.
+        EXPECT_NEAR(global[0], 6, 2e-11 * 6);
+        EXPECT_NEAR(global[1], 10, 2e-11 * 10);
+        EXPECT_GT(global[2], 0);
+        EXPECT_GT(global[3], 0);
+        RecordProperty("aggregate_groups_" + std::to_string(step), global[2]);
+        RecordProperty("aggregate_witnesses_" + std::to_string(step), global[3]);
+        RecordProperty("cancelled_boundaries_" + std::to_string(step), global[4]);
+        RecordProperty("aggregate_retries_" + std::to_string(step), global[5]);
+        EXPECT_EQ(source->accepted_identity(), identity);
+        EXPECT_EQ(source->gas_volumes(), gas);
+        EXPECT_EQ(source->carrier_volumes(), carrier);
+        source = next;
+    }
+}
 TEST(GeneralVoFInterfaceTransport, FaceAlignedInterfaceWithoutMixedCellsUsesGeometry)
 {
     const auto input = fixture();

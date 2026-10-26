@@ -389,7 +389,13 @@ TEST(GeneralVoFFinite, OrdinaryTransportKeepsIndependentPhasesCanonicalRoutesAnd
                                      statistics.volume_evaluations - prepared.bounded.volume_evaluations;
     std::uint64_t global_work = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_work, &global_work);
-    EXPECT_GT(global_work, 0);
+    // Opposite-pure faces need swept transport, but their computational
+    // witnesses no longer require measured ConvexGeometry children.
+    EXPECT_EQ(global_work, 0u);
+    const std::uint64_t local_witnesses = ledger->diagnostics.aggregate_witnesses;
+    std::uint64_t global_witnesses = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_witnesses, &global_witnesses);
+    EXPECT_GT(global_witnesses, 0u);
     EXPECT_EQ(state.gas_volumes(), input.gas);
     EXPECT_EQ(state.carrier_volumes(), input.carrier);
 }

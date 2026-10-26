@@ -104,17 +104,85 @@ including for nonconvex or disconnected retained domains.
 Any `Infer` donor, retained mixed surface, or conflict between pure declarations
 among reachable donors/endpoints selects geometric work. Thus a face-aligned
 interface requires geometry without an artificially mixed cell. Only selected
-nonzero-effect recipes construct tetrahedra. Zero **net** control does not establish
+nonzero-effect recipes retain tetrahedral source witnesses. Zero **net** control does not establish
 zero effect: opposing swept pieces remain significant. Pure bulk faces use the
 admitted donor-cell stream model.
 
 Only requested donor planes are reconstructed, at their owners with the existing
 reconstruction stencil. Requests/replies bind source control, transaction,
 topology/partition generation, cell revision and owner. Ghost phase records carry
-an owner-authenticated retained-interface flag. Each geometric face partitions its
-tetrahedra against its indexed candidate set, preserving overlap and coverage
-checks. No recipient overlay is constructed. Indexes are rebuilt for each trial;
+an owner-authenticated retained-interface flag. Each geometric face cuts its
+source witnesses against its indexed candidate set, preserving overlap and
+coverage checks. No recipient overlay is constructed. Indexes are rebuilt for each trial;
 classification is never reused solely because the mesh geometry is unchanged.
+
+### Aggregate metric admission
+
+`OrdinaryAggregateSource` retains immutable tetrahedron recipes and explicit
+source-vertex identities. A computational cut is an unmeasured barycentric
+witness; its rounded shell need not have a separately measurable positive volume.
+Donor supports come from the retained geometry authority. Complementary cuts
+retain outside witnesses until donor coverage is complete. Donor overlap,
+missing coverage, inconsistent identities and exhausted construction work reject.
+
+Scalar integration groups only one canonical face, old donor, stream direction
+and phase at a time. Shared internal boundaries cancel by source construction
+identity before integration; equal coordinates alone do not authorize cancellation.
+Opposing streams and distinct donors remain separate. No convex hull or recipient
+redistribution replaces the witness collection. The resulting bulk, gas and
+carrier measures feed the same phase labels and source-resolved face ledger.
+
+Integration uses translated, power-of-two scaled frames and compensated sums.
+Original support distances and source determinants use the Ordinary compensated
+predicates. Barycentric placement error contributes to a separate numerical
+quality estimate. Every positive aggregate is checked, including small physical
+phase amounts. A sparse donor-owner exchange counts every requested face/sign
+authority across ranks. Each independent old source-phase allowance is divided
+by that count and intersected with the face allowance; a remote or nonadjacent
+face cannot spend the same donor allowance again. Pure geometric labels use the
+source bulk scale, then their independent inventory factors carry that accuracy
+to retained traces. These are inventory-scaled budgets, not a new relative
+accuracy requirement on every tiny counterstream. Failed quality permits one
+reconstruction from immutable source supports; it never retries from a failed rounded child. The retry applies the
+phase support before donor supports and evaluates the same aggregate through
+closed witness integrals in translated source-barycentric frames, using the
+original source Jacobian. Different local reference frames require retaining all
+faces of each witness in this equivalent domain sum. Structural boundary
+cancellation still authenticates the aggregate, but the retry is not an
+exterior-only quadrature. All raw signed terms accumulate before the aggregate
+positivity/quality gate; no witness needs its own admitted measure. A
+still-unresolved or nonpositive candidate rejects collectively.
+
+A resolved positive candidate can exceed an old-phase quality share while fitting
+its face allowance. In that case an inward-rounded ratio further limits the one
+shared face correction coefficient: the final contribution's high-order quality
+estimate is `theta * E_high`. The existing endpoint/export limits may reduce that
+same coefficient again. This cannot rescue unresolved geometry, and it does not
+change the low-order arithmetic/publication gates. `quality_limited_faces` and
+`minimum_quality_theta` distinguish this admission from unrestricted swept
+correction. The estimates remain Ordinary numerical indicators, not enclosures.
+
+Three accuracy obligations remain distinct:
+
+- Computational pieces need structural containment, orientation and coverage;
+  they do not each need an accurately measured closed solid.
+- Physical phase aggregates need independent gas/carrier accuracy and the
+  original face/cell allowances. A bulk-volume allowance does not authorize
+  losing a minority phase. Phase labels preserve independently stored traces.
+- Surface sections, first moments and curvature retain their separate measured
+  geometry contract. Scalar aggregate admission supplies no surface accuracy.
+
+The provider reports numerical error **estimates**, not certificates. Its explicit
+conservative approximation field is separate and remains zero in the implemented
+resolved path. The transport consumer rejects a nonzero approximation field until
+an explicit shared ledger debit is supplied; unresolved witnesses are never
+silently deleted. Existing physical conservation, export, occupancy and momentum
+residual gates remain unchanged. BoundedCertification, Exact, remap and public
+measured-polyhedron consumers retain their existing paths.
+
+`swept_pieces` counts unmeasured source tetrahedra on this path. `aggregate_groups`,
+`aggregate_witnesses`, `cancelled_boundaries` and `aggregate_retries` report local
+geometry work. These are operation counts, not memory or timing qualification.
 
 ### Shared correction and signed source contributions
 
@@ -270,27 +338,26 @@ FVM context provider shares the thread-local diagnostic stack across solver, FVM
 and caller scopes; the export boundary permits only that exact bridge.
 
 These records improve diagnosis; they do not make a failed geometric construction
-acceptable. A zero-volume failure still rejects atomically under the same numerical
-rules.
+acceptable. An unresolved final aggregate or required surface measurement still
+rejects atomically; a computational witness is not itself a measured output.
 
 ## Remaining repair stages
 
 The [Stage 7 roadmap](../../TODO.md#stage-7--general-vof-and-flow-qualification)
-separates the implemented shared foundation, homogeneous specialization and
-interface-local signed ledger from aggregate fragment measurement and unified
-capillary surfaces. The configured default backend is unchanged. Individual
-required swept/intersection fragments still use the existing strict construction
-and measurement rules; there is no coalescence, clipping, exact fallback, or
-increase in resource caps.
+separates the shared foundation, homogeneous specialization, interface-local signed
+ledger and aggregate metric admission from unified capillary surfaces. The
+configured default backend and resource caps are unchanged. Aggregate transport
+does not change strict measured geometry required by other consumers.
 
 Focused checks cover analytic phase transfer, competing exports, zero-net signed
-counterflow and correlated histories, native-owner agreement, empty owners,
-locality counters, and a single accepted coupled phase/momentum/projection step.
-This is not repeated-flow qualification. Residual transverse motion can still
-produce unresolved or zero-volume fragments and exhausted construction work;
-uncertain or uncovered corrected reach also rejects. Repeated coupled horizons
-remain open for the geometry-robustness and physical-qualification stages.
-Index/candidate counts measure local work, not wall time, RSS or production scaling.
+counterflow and correlated histories, native-owner agreement, empty owners and
+locality counters. The coupled regression covers three accepted steps from both
+aligned and mixed interfaces at density ratio 1000, with the original mass,
+physical-residual, divergence and rollback gates. Quality-limited corrections are
+reported separately from unrestricted swept candidates. This finite horizon does
+not qualify complete interface-motion or capillary cycles. Uncertain or uncovered
+corrected reach still rejects. Index/candidate counts measure local work, not wall
+time, RSS or production scaling.
 
 Binary-staircase filtering is a later explicit capillary model; it must preserve
 component geometric volume without changing accepted cell inventories. Complete
