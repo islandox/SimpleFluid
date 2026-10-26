@@ -18,6 +18,7 @@ struct LocalFaceGeometry
 {
     std::uint64_t face = 0;
     bool geometric = false;
+    long double quality_theta = 1;
     GeneralVoFFaceChainDiagnostic chain;
     std::vector<LocalGeometricGroup> groups;
 };

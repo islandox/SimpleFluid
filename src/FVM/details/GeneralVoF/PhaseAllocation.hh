@@ -24,6 +24,10 @@ template<ArithmeticMode Mode> struct SIMPLEFLUID_FVM_LOCAL PhaseLabel
     PhaseValue gas_deviation, carrier_deviation;
     bool gas_bulk = false, carrier_bulk = false;
     PhaseValue allocation(const PhaseValues& raw_piece) const;
+    /** Aggregate scalar admission has its own metric contract and supplies both
+     * phases independently. This overload never constructs a cut-cell shell. */
+    PhaseValues apply(const PhaseValues& raw_piece) const;
+    PhaseValues history(const PhaseValues& raw_piece) const;
     PhaseValues apply(const PLIC::ConvexCellGeometry<Mode>& geometry, const PLIC::PolyhedralInterface& plane,
         std::array<bool, 2>* geometric_presence = nullptr, PhaseValue* fit_allocation = nullptr) const;
     PhaseValues history(const PLIC::ConvexCellGeometry<Mode>& geometry, const PLIC::PolyhedralInterface& plane) const;

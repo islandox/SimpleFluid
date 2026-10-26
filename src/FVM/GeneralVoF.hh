@@ -52,7 +52,11 @@ struct GeneralVoFTransportDiagnostics
     long double limited_volume = 0, fallback_volume = 0;
     std::size_t indexed_cells = 0, index_queries = 0, index_node_visits = 0, donor_candidates = 0;
     std::size_t geometric_faces = 0, algebraic_faces = 0, swept_pieces = 0, plane_requests = 0;
-    std::size_t limited_faces = 0, gross_counterstreams = 0;
+    /** Ordinary interface-local scalar geometry; swept_pieces counts immutable
+     * source tetrahedra, not individually measured closed solids. */
+    std::size_t aggregate_groups = 0, aggregate_witnesses = 0, cancelled_boundaries = 0, aggregate_retries = 0;
+    std::size_t limited_faces = 0, gross_counterstreams = 0, quality_limited_faces = 0;
+    long double minimum_quality_theta = 1;
     long double minimum_theta = 1;
 };
 struct GeneralVoFPreparedTransport;

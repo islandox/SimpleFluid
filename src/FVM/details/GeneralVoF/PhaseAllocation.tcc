@@ -28,6 +28,21 @@ template<ArithmeticMode Mode> PhaseValue PhaseLabel<Mode>::allocation(const Phas
         Math::multiply(carrier_deviation, Math::subtract(carrier_share, bulk_share)));
 }
 
+template<ArithmeticMode Mode> PhaseValues PhaseLabel<Mode>::apply(const PhaseValues& raw) const
+{
+    using Math = fp::Arithmetic<Mode>;
+    return {raw.bulk, Math::multiply(gas_bulk ? raw.bulk : raw.gas, gas_factor),
+        Math::multiply(carrier_bulk ? raw.bulk : raw.carrier, carrier_factor)};
+}
+
+template<ArithmeticMode Mode> PhaseValues PhaseLabel<Mode>::history(const PhaseValues& raw) const
+{
+    using Math = fp::Arithmetic<Mode>;
+    return {Math::make_value(raw.bulk.arithmetic_mode, 0),
+        Math::multiply(gas_bulk ? raw.bulk : raw.gas, gas_history_factor),
+        Math::multiply(carrier_bulk ? raw.bulk : raw.carrier, carrier_history_factor)};
+}
+
 template<ArithmeticMode Mode>
 PhaseValues PhaseLabel<Mode>::apply(const PLIC::ConvexCellGeometry<Mode>& geometry,
     const PLIC::PolyhedralInterface& plane, std::array<bool, 2>* geometric_presence, PhaseValue* fit_allocation) const

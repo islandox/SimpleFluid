@@ -222,6 +222,12 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 face.tile = &tile;
                 face.geometric = entry.geometric;
                 face.chain = entry.chain;
+                if (!(entry.quality_theta > 0) || entry.quality_theta > 1 || !std::isfinite(entry.quality_theta))
+                    throw std::invalid_argument("Interface geometric quality coefficient is invalid.");
+                face.theta = entry.quality_theta;
+                trial.unbound_diagnostics_.quality_limited_faces += face.theta < 1;
+                trial.unbound_diagnostics_.minimum_quality_theta =
+                    std::min(trial.unbound_diagnostics_.minimum_quality_theta, face.theta);
                 if (low_faces.contains(entry.face))
                 {
                     const auto& s = *low_faces.at(entry.face);
