@@ -189,6 +189,17 @@ endforeach()
 
 # The Mesh archive's decomposition implementation is linked into the FVM DSO.
 # Keep its declared public lookups available to downstream native-mesh users.
+if(NOT demangled_names MATCHES
+   "(^|\n)SimpleFluid::MeshHandle<[^\n]+>[ ]*::decomposed_orthogonal_topology([(]|\n|$)")
+    message(FATAL_ERROR "Missing compiled orthogonal-topology observer in FVM")
+endif()
+foreach(method IN ITEMS
+        OrthogonalMeshDecomposition owned_begin owned_end num_owned_cells owner storage_bytes)
+    if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::Meshes::OrthogonalMeshDecomposition::${method}([(]|\n|$)")
+        message(FATAL_ERROR "Missing compiled orthogonal-decomposition API: ${method}")
+    endif()
+endforeach()
+
 foreach(method IN ITEMS
         DecomposedSemiStructuredTopology source_cell source_face source_node
         cell_local_id face_local_id node_local_id cell_faces owner_cell neighbor_cell
