@@ -48,12 +48,14 @@ public:
         std::vector<SimpleFluid::PLIC::GeometryValue<SimpleFluid::ArithmeticMode::Exact>> flux_enclosure;
     };
     explicit ConservativeVoFTransport(SP<const MeshHandle<>> mesh);
-    /** Successful published exact preparations and successful reuses. */
+    /** Successful published preparations and successful reuses, per arithmetic path. */
     struct PreparationStatistics
     {
         std::size_t exact_builds = 0, exact_hits = 0;
+        std::size_t finite_builds = 0, finite_hits = 0;
     };
     [[nodiscard]] PreparationStatistics preparation_statistics() const noexcept { return preparation_statistics_; }
+    [[nodiscard]] std::shared_ptr<const void> finite_preparation_identity() const noexcept;
     /** Extensive Q_old/S/M_new; overlap-face F in canonical owner orientation.
      * Optional row equilibration preserves microscopic carrier rows without a
      * reciprocal diagonal overflow; the original physical residual still must
@@ -121,7 +123,9 @@ public:
      * solve aid; acceptance checks the original canonical raw-face equation
      * with the unchanged physical tolerance. Ordinary uses represented values;
      * explicit BoundedCertification also propagates arithmetic bounds. A cached
-     * workspace cannot change its selected FP mode. */
+     * workspace cannot change its selected FP mode. Identical admitted
+     * coefficients reuse immutable routing, donor maps and the linear operator
+     * across RHS calls; each RHS still passes the original physical residual. */
     [[nodiscard]] Result solve(const std::vector<long double>& old, const std::vector<long double>& source,
         const std::vector<long double>& capacity, const std::vector<long double>& outgoing,
         const std::vector<FiniteTransfer>& incoming, const std::vector<FiniteFaceContribution>& contributions,
@@ -155,6 +159,8 @@ private:
     friend struct Exact::ConservativeVoFTransport;
     using Pack = DefaultTpetraTypes;
     struct SparseAssembly;
+    struct FinitePreparation;
+    std::shared_ptr<const FinitePreparation> finite_preparation_;
     std::shared_ptr<Exact::TransportPreparation> exact_preparation_;
     std::optional<ArithmeticMode> finite_arithmetic_mode_;
     PreparationStatistics preparation_statistics_;

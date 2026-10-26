@@ -1,6 +1,7 @@
 /** @file PolyhedralReconstruction.tcc
  * @brief Resolution admission and mode-selected finite PLIC reconstruction.
  */
+#include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
@@ -9,6 +10,7 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <vector>
 
@@ -227,6 +229,10 @@ template<ArithmeticMode Mode>
 PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector normal,
     PolyhedralReconstructionOptions options, std::size_t& evaluations)
 {
+    std::optional<OrdinaryPlaneMeasure> ordinary_measure;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (options.measure_only)
+            ordinary_measure.emplace(*sample.geometry);
     PolyhedralInterface result;
     result.finite_geometry = true;
     result.finite_target_volume_difference = published_difference<Mode>({});
@@ -290,10 +296,36 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Finite PLIC clip evaluation budget exhausted.");
         auto plane = result.gas;
         plane.offset = offset;
-        const auto phases = sample.geometry->phases(plane);
-        const auto measured = gas ? phases.gas : phases.carrier;
+        long double section_area = 0, numerical_error = 0;
+        const auto measured = [&]() -> Value<Mode>
+        {
+            if constexpr (Mode == ArithmeticMode::Ordinary)
+            {
+                if (ordinary_measure)
+                {
+                    auto minority = plane;
+                    if (!gas)
+                    {
+                        for (auto& component : minority.normal)
+                            component = -component;
+                        minority.offset = -minority.offset;
+                    }
+                    const auto volume = ordinary_measure->below(minority, true);
+                    section_area = volume.section_area;
+                    numerical_error = volume.numerical_error_estimate;
+                    return {volume.volume};
+                }
+                const auto phases = sample.geometry->phases(plane);
+                return gas ? phases.gas : phases.carrier;
+            }
+            else
+            {
+                const auto phases = sample.geometry->phases(plane);
+                return gas ? phases.gas : phases.carrier;
+            }
+        }();
         const auto residual = difference<Mode>(measured, requested);
-        const auto error = fit_error<Mode>(residual);
+        const auto error = fit_error<Mode>(residual) + numerical_error;
         if (error < best_bound)
         {
             have_best = true;
@@ -301,9 +333,16 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
             result.gas = plane;
             result.finite_target_volume_difference = published_difference<Mode>(residual);
             result.target_volume_residual = static_cast<double>(residual.value);
+            result.target_volume_numerical_error_estimate = numerical_error;
         }
         if (best_bound <= allowed)
             return result;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (numerical_error > allowed && std::abs(residual.value) <= numerical_error)
+            {
+                arithmetic_stalled = true;
+                break;
+            }
         // Update only when the whole enclosure determines the monotone side.
         // An unresolved comparison cannot be converted to an exact volume.
         if (lower<Mode>(residual) > 0)
@@ -330,7 +369,21 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
             arithmetic_stalled = true;
             break;
         }
-        offset = std::midpoint(lo, hi);
+        double next = std::midpoint(lo, hi);
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+        {
+            // A Newton proposal is optional acceleration. Every accepted trial
+            // remains strictly inside the updated bracket; periodic bisection
+            // guarantees progress even for very small sections.
+            if (section_area > 0 && iteration % 4 != 3)
+            {
+                const auto step = residual.value / section_area;
+                const double candidate = static_cast<double>(offset + (gas ? -step : step));
+                if (candidate > lo && candidate < hi && candidate != offset)
+                    next = candidate;
+            }
+        }
+        offset = next;
     }
     if (!have_best || best_bound > allowed)
     {
@@ -340,8 +393,9 @@ PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector
         message << (exhausted ? "Finite PLIC offset iteration budget exhausted before target-volume acceptance: target="
                               : "Finite PLIC arithmetic cannot establish the original target-volume tolerance: target=")
                 << requested << ", residual=" << result.finite_target_volume_difference.value
-                << ", radius=" << result.finite_target_volume_difference.absolute_error << ", bound=" << best_bound
-                << ", allowed=" << allowed << ", bracket=[" << lo << "," << hi << "].";
+                << ", radius=" << result.finite_target_volume_difference.absolute_error
+                << ", numerical_error_estimate=" << result.target_volume_numerical_error_estimate
+                << ", bound=" << best_bound << ", allowed=" << allowed << ", bracket=[" << lo << "," << hi << "].";
         throw GeometryError(!exhausted && arithmetic_stalled ? GeometryErrorCode::UnresolvedArithmetic
                                                              : GeometryErrorCode::ResourceLimit,
             message.str());
@@ -459,6 +513,10 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     Vector rhs{};
     std::vector<double> volumes;
     volumes.reserve(stencil.size());
+    std::vector<OrdinaryPlaneMeasure> ordinary_stencil;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (options.measure_only)
+            ordinary_stencil.reserve(stencil.size());
     for (const auto& sample : stencil)
     {
         const auto d = minus(sample.geometry->centroid(), center);
@@ -467,6 +525,9 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
             throw std::invalid_argument("Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
         const double v = sample.geometry->volume().as_double();
         volumes.push_back(v);
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+            if (options.measure_only)
+                ordinary_stencil.emplace_back(*sample.geometry);
         const double delta = sample.gas_volume / v - alpha;
         for (unsigned i = 0; i < 3; ++i)
         {
@@ -505,9 +566,31 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
             const bool gas = sample.gas_volume <= sample.carrier_volume;
             if (evaluations++ >= options.maximum_clip_evaluations)
                 throw GeometryError(GeometryErrorCode::ResourceLimit, "Finite PLIC clip evaluation budget exhausted.");
-            const auto phases = sample.geometry->phases(value.plane.gas);
-            const auto residual =
-                difference<Mode>(gas ? phases.gas : phases.carrier, gas ? sample.gas_volume : sample.carrier_volume);
+            const auto measured = [&]() -> Value<Mode>
+            {
+                if constexpr (Mode == ArithmeticMode::Ordinary)
+                {
+                    if (options.measure_only)
+                    {
+                        auto plane = value.plane.gas;
+                        if (!gas)
+                        {
+                            for (auto& component : plane.normal)
+                                component = -component;
+                            plane.offset = -plane.offset;
+                        }
+                        return {ordinary_stencil[i].below(plane).volume};
+                    }
+                    const auto phases = sample.geometry->phases(value.plane.gas);
+                    return gas ? phases.gas : phases.carrier;
+                }
+                else
+                {
+                    const auto phases = sample.geometry->phases(value.plane.gas);
+                    return gas ? phases.gas : phases.carrier;
+                }
+            }();
+            const auto residual = difference<Mode>(measured, gas ? sample.gas_volume : sample.carrier_volume);
             const double normalized = static_cast<double>(residual.value / volumes[i]);
             value.residual.push_back(normalized);
             value.objective += normalized * normalized;

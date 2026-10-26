@@ -42,219 +42,355 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
             (capacity_error.empty() || capacity_error.size() == n) &&
             (outgoing_error.empty() || outgoing_error.size() == n),
         "Finite momentum input error shape mismatch.");
-    std::vector<std::map<GO, Value>> routes(n);
-    std::set<GO> donor_ids;
-    bool valid = true;
-    std::size_t bytes = n * (sizeof(long double) * 12 + sizeof(std::map<GO, Value>));
-    safe(
-        [&]
-        {
-            for (const auto& errors : {old_error, source_error, capacity_error, outgoing_error})
-                for (auto error : errors)
-                    valid = valid && std::isfinite(error) && error >= 0;
-            for (std::size_t c = 0; c < n; ++c)
-                valid = valid && std::isfinite(old[c]) && std::isfinite(source[c]) && std::isfinite(capacity[c]) &&
-                        capacity[c] > 0 && std::isfinite(outgoing[c]) && outgoing[c] >= 0;
-            for (const auto& route : incoming)
-            {
-                const auto row = map->getLocalElement(route.recipient);
-                valid = valid && row >= 0 && route.donor != route.recipient && std::isfinite(route.amount) &&
-                        route.amount >= 0 && std::isfinite(route.absolute_error) && route.absolute_error >= 0;
-                if (row >= 0)
-                    valid =
-                        routes[row].emplace(route.donor, arithmetic_value(route.amount, route.absolute_error)).second &&
-                        valid;
-                donor_ids.insert(route.donor);
-                bytes += sizeof(route) + sizeof(std::pair<const GO, Value>) + 8 * sizeof(void*);
-            }
-            for (const auto& face : contributions)
-            {
-                valid = valid && face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces() &&
-                        std::isfinite(face.amount) && std::isfinite(face.absolute_error) && face.absolute_error >= 0;
-                if (face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces())
-                    valid = valid && !mesh_->is_geometry_exterior_face(face.face);
-                donor_ids.insert(face.donor);
-                bytes += sizeof(face) + 128;
-            }
-            if (bytes > byte_budget)
-                throw std::invalid_argument("Finite VoF momentum input capacity exceeds its unchanged byte budget.");
-        });
-    require(*map, valid, "Finite VoF momentum requires positive routes and canonical internal face streams.");
-    // Route raw signed face coefficients once to their incident owned rows.
-    // The wire is hi/lo significand plus exponent, independent of ABI padding.
-    const auto word = [](std::vector<char>& b, std::uint64_t v)
-    {
-        for (unsigned a = 0; a < 8; ++a)
-            b.push_back(char(v >> (8 * a)));
-    };
-    const auto scalar = [&](std::vector<char>& b, long double v)
-    {
-        int exponent = 0;
-        const auto m = std::frexp(v, &exponent);
-        const auto hi = static_cast<double>(m), lo = static_cast<double>(m - hi);
-        if (!std::isfinite(v) || static_cast<long double>(hi) + lo != m)
-            throw std::invalid_argument("Finite momentum scalar exceeds its fixed wire representation.");
-        word(b, std::bit_cast<std::uint64_t>(hi));
-        word(b, std::bit_cast<std::uint64_t>(lo));
-        word(b, std::bit_cast<std::uint64_t>(static_cast<std::int64_t>(exponent)));
-    };
-    const auto read = [](const std::vector<char>& b, std::size_t& offset)
-    {
-        std::uint64_t v = 0;
-        for (unsigned a = 0; a < 8; ++a)
-            v |= std::uint64_t(static_cast<unsigned char>(b.at(offset++))) << (8 * a);
-        return v;
-    };
-    const auto read_scalar = [&](const std::vector<char>& b, std::size_t& offset)
-    {
-        const auto hi = std::bit_cast<double>(read(b, offset)), lo = std::bit_cast<double>(read(b, offset));
-        const auto exponent = std::bit_cast<std::int64_t>(read(b, offset));
-        if (exponent < std::numeric_limits<int>::min() || exponent > std::numeric_limits<int>::max())
-            throw std::invalid_argument("Finite momentum exponent is malformed.");
-        const auto value = std::scalbn(static_cast<long double>(hi) + lo, int(exponent));
-        if (!std::isfinite(value))
-            throw std::invalid_argument("Finite momentum wire value is nonfinite.");
-        return value;
-    };
-    std::set<GO> endpoints;
+    bool valid = true, current = false;
+    std::uint64_t epoch = 0;
     safe(
         [&]
         {
             const auto lease = mesh_->acquire_execution_view();
-            for (const auto& face : contributions)
-            {
-                endpoints.insert(mesh_->cell_global_id(mesh_->owner_cell(face.face)));
-                endpoints.insert(mesh_->cell_global_id(mesh_->neighbor_cell(face.face)));
-            }
+            epoch = mesh_->geometry_epoch();
+            current = map.getRawPtr() == cell_owned_.getMap().getRawPtr() &&
+                      mesh_->overlap_cell_map().getRawPtr() == cell_overlap_.getMap().getRawPtr() &&
+                      mesh_->owned_face_map().getRawPtr() == face_owned_.getMap().getRawPtr() &&
+                      mesh_->overlap_face_map().getRawPtr() == face_overlap_.getMap().getRawPtr();
+            for (std::size_t c = 0; c < n; ++c)
+                valid = valid && std::isfinite(old[c]) && std::isfinite(source[c]) &&
+                        std::isfinite(error_at(old_error, c)) && error_at(old_error, c) >= 0 &&
+                        std::isfinite(error_at(source_error, c)) && error_at(source_error, c) >= 0;
         });
-    Teuchos::Array<GO> endpoint_ids(endpoints.begin(), endpoints.end());
-    Teuchos::Array<int> endpoint_owners(endpoint_ids.size(), -1);
-    (void) map->getRemoteIndexList(endpoint_ids(), endpoint_owners());
-    std::map<GO, int> owner;
-    for (std::size_t i = 0; i < std::size_t(endpoint_ids.size()); ++i)
+    require(*map, current && valid, "Finite momentum requires current partition and finite RHS data.");
+    const auto same_errors = [&](const std::vector<long double>& stored, std::span<const long double> errors)
     {
-        valid = valid && endpoint_owners[i] >= 0;
-        owner.emplace(endpoint_ids[i], endpoint_owners[i]);
+        for (std::size_t c = 0; c < n; ++c)
+            if (stored[c] != error_at(errors, c))
+                return false;
+        return true;
+    };
+    bool same = false;
+    if (finite_preparation_)
+    {
+        const auto& key = *finite_preparation_;
+        same = key.geometry_epoch == epoch && key.arithmetic_mode == arithmetic_mode &&
+               key.byte_budget == byte_budget && key.tolerance == tolerance &&
+               key.owned_map.getRawPtr() == map.getRawPtr() &&
+               key.overlap_map.getRawPtr() == mesh_->overlap_cell_map().getRawPtr() &&
+               key.owned_face_map.getRawPtr() == mesh_->owned_face_map().getRawPtr() &&
+               key.overlap_face_map.getRawPtr() == mesh_->overlap_face_map().getRawPtr() && key.capacity == capacity &&
+               key.outgoing == outgoing && same_errors(key.capacity_error, capacity_error) &&
+               same_errors(key.outgoing_error, outgoing_error) && key.incoming.size() == incoming.size() &&
+               key.contributions.size() == contributions.size();
+        for (std::size_t i = 0; same && i < incoming.size(); ++i)
+            same = key.incoming[i].donor == incoming[i].donor && key.incoming[i].recipient == incoming[i].recipient &&
+                   key.incoming[i].amount == incoming[i].amount &&
+                   key.incoming[i].absolute_error == incoming[i].absolute_error;
+        for (std::size_t i = 0; same && i < contributions.size(); ++i)
+            same = key.contributions[i].face == contributions[i].face &&
+                   key.contributions[i].donor == contributions[i].donor &&
+                   key.contributions[i].amount == contributions[i].amount &&
+                   key.contributions[i].absolute_error == contributions[i].absolute_error;
     }
-    require(*map, valid, "Finite momentum face references a foreign endpoint.");
-    std::vector<OwnerPacket> packets;
-    safe(
-        [&]
+    int local_same = same, global_same = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 1, &local_same, &global_same);
+    const bool cache_hit = global_same;
+    auto prepared = finite_preparation_;
+    if (!cache_hit)
+    {
+        finite_preparation_.reset();
+        prepared.reset();
+        std::vector<std::map<GO, Value>> routes;
+        std::set<GO> donor_ids;
+        std::size_t bytes = 0;
+        const auto charge = [&](std::size_t count, std::size_t width)
         {
-            const auto lease = mesh_->acquire_execution_view();
-            for (const auto& face : contributions)
-                for (int sign : {1, -1})
-                {
-                    const auto row = mesh_->cell_global_id(
-                        sign > 0 ? mesh_->owner_cell(face.face) : mesh_->neighbor_cell(face.face));
-                    OwnerPacket packet;
-                    packet.peer = owner.at(row);
-                    word(packet.bytes, std::uint64_t(row));
-                    word(packet.bytes, std::uint64_t(face.donor));
-                    word(packet.bytes, std::uint64_t(mesh_->face_global_id(face.face)));
-                    scalar(packet.bytes, sign * face.amount);
-                    scalar(packet.bytes, face.absolute_error);
-                    packets.push_back(std::move(packet));
-                }
-            if (packets.size() > (byte_budget - std::min(bytes, byte_budget)) / 128)
-                throw std::invalid_argument("Finite momentum packet capacity exceeds its unchanged budget.");
-        });
-    const auto received = exchange_owner_packets(packets, comm, byte_budget - bytes);
-    std::vector<std::map<GO, fp::SumFor<Mode>>> raw_sums(n);
-    safe(
-        [&]
-        {
-            std::set<std::tuple<int, GO, GO, GO, long double>> seen;
-            for (const auto& packet : received.packets)
+            if (width && count > (byte_budget - bytes) / width)
+                throw std::invalid_argument("Finite momentum preparation exceeds its unchanged byte budget.");
+            bytes += count * width;
+        };
+        safe(
+            [&]
             {
-                std::size_t offset = 0;
-                const auto row_gid = GO(read(packet.bytes, offset)), donor = GO(read(packet.bytes, offset));
-                const auto face = GO(read(packet.bytes, offset));
-                const auto amount = read_scalar(packet.bytes, offset), error = read_scalar(packet.bytes, offset);
-                const auto row = map->getLocalElement(row_gid);
-                if (row < 0 || offset != packet.bytes.size() || error < 0 || !std::isfinite(amount) ||
-                    !seen.emplace(packet.peer, row_gid, donor, face, amount).second)
-                    throw std::invalid_argument("Finite momentum raw coefficient is duplicate or malformed.");
-                raw_sums[row][donor].add(arithmetic_value(amount, error));
-                donor_ids.insert(donor);
-            }
+                charge(n, sizeof(long double) * 12 + sizeof(std::map<GO, Value>));
+                // Retained coefficient copies coexist with caller inputs and
+                // build scratch. Admit their complete payload before copying;
+                // the raw row nodes are admitted after routing reveals counts.
+                charge(1, sizeof(FinitePreparation));
+                charge(n, sizeof(long double) * 5 + sizeof(std::map<GO, Value>));
+                charge(incoming.size(), sizeof(FiniteTransfer));
+                charge(contributions.size(), sizeof(FiniteFaceContribution));
+                routes.resize(n);
+                for (const auto& errors : {capacity_error, outgoing_error})
+                    for (auto error : errors)
+                        valid = valid && std::isfinite(error) && error >= 0;
+                for (std::size_t c = 0; c < n; ++c)
+                    valid = valid && std::isfinite(capacity[c]) && capacity[c] > 0 && std::isfinite(outgoing[c]) &&
+                            outgoing[c] >= 0;
+                for (const auto& route : incoming)
+                {
+                    const auto row = map->getLocalElement(route.recipient);
+                    valid = valid && row >= 0 && route.donor != route.recipient && std::isfinite(route.amount) &&
+                            route.amount >= 0 && std::isfinite(route.absolute_error) && route.absolute_error >= 0;
+                    if (row >= 0)
+                        valid = routes[row]
+                                    .emplace(route.donor, arithmetic_value(route.amount, route.absolute_error))
+                                    .second &&
+                                valid;
+                    donor_ids.insert(route.donor);
+                    charge(1, sizeof(route) + sizeof(std::pair<const GO, Value>) + 8 * sizeof(void*));
+                }
+                for (const auto& face : contributions)
+                {
+                    valid = valid && face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces() &&
+                            std::isfinite(face.amount) && std::isfinite(face.absolute_error) &&
+                            face.absolute_error >= 0;
+                    if (face.face >= 0 && std::size_t(face.face) < mesh_->num_owned_faces())
+                        valid = valid && !mesh_->is_geometry_exterior_face(face.face);
+                    donor_ids.insert(face.donor);
+                    charge(1, sizeof(face) + 128);
+                }
+                if (bytes > byte_budget)
+                    throw std::invalid_argument(
+                        "Finite VoF momentum input capacity exceeds its unchanged byte budget.");
+            });
+        require(*map, valid, "Finite VoF momentum requires positive routes and canonical internal face streams.");
+        // Route raw signed face coefficients once to their incident owned rows.
+        // The wire is hi/lo significand plus exponent, independent of ABI padding.
+        const auto word = [](std::vector<char>& b, std::uint64_t v)
+        {
+            for (unsigned a = 0; a < 8; ++a)
+                b.push_back(char(v >> (8 * a)));
+        };
+        const auto scalar = [&](std::vector<char>& b, long double v)
+        {
+            int exponent = 0;
+            const auto m = std::frexp(v, &exponent);
+            const auto hi = static_cast<double>(m), lo = static_cast<double>(m - hi);
+            if (!std::isfinite(v) || static_cast<long double>(hi) + lo != m)
+                throw std::invalid_argument("Finite momentum scalar exceeds its fixed wire representation.");
+            word(b, std::bit_cast<std::uint64_t>(hi));
+            word(b, std::bit_cast<std::uint64_t>(lo));
+            word(b, std::bit_cast<std::uint64_t>(static_cast<std::int64_t>(exponent)));
+        };
+        const auto read = [](const std::vector<char>& b, std::size_t& offset)
+        {
+            std::uint64_t v = 0;
+            for (unsigned a = 0; a < 8; ++a)
+                v |= std::uint64_t(static_cast<unsigned char>(b.at(offset++))) << (8 * a);
+            return v;
+        };
+        const auto read_scalar = [&](const std::vector<char>& b, std::size_t& offset)
+        {
+            const auto hi = std::bit_cast<double>(read(b, offset)), lo = std::bit_cast<double>(read(b, offset));
+            const auto exponent = std::bit_cast<std::int64_t>(read(b, offset));
+            if (exponent < std::numeric_limits<int>::min() || exponent > std::numeric_limits<int>::max())
+                throw std::invalid_argument("Finite momentum exponent is malformed.");
+            const auto value = std::scalbn(static_cast<long double>(hi) + lo, int(exponent));
+            if (!std::isfinite(value))
+                throw std::invalid_argument("Finite momentum wire value is nonfinite.");
+            return value;
+        };
+        std::set<GO> endpoints;
+        safe(
+            [&]
+            {
+                const auto lease = mesh_->acquire_execution_view();
+                for (const auto& face : contributions)
+                {
+                    endpoints.insert(mesh_->cell_global_id(mesh_->owner_cell(face.face)));
+                    endpoints.insert(mesh_->cell_global_id(mesh_->neighbor_cell(face.face)));
+                }
+            });
+        Teuchos::Array<GO> endpoint_ids(endpoints.begin(), endpoints.end());
+        Teuchos::Array<int> endpoint_owners(endpoint_ids.size(), -1);
+        (void) map->getRemoteIndexList(endpoint_ids(), endpoint_owners());
+        std::map<GO, int> owner;
+        for (std::size_t i = 0; i < std::size_t(endpoint_ids.size()); ++i)
+        {
+            valid = valid && endpoint_owners[i] >= 0;
+            owner.emplace(endpoint_ids[i], endpoint_owners[i]);
+        }
+        require(*map, valid, "Finite momentum face references a foreign endpoint.");
+        std::vector<OwnerPacket> packets;
+        safe(
+            [&]
+            {
+                const auto lease = mesh_->acquire_execution_view();
+                for (const auto& face : contributions)
+                    for (int sign : {1, -1})
+                    {
+                        const auto row = mesh_->cell_global_id(
+                            sign > 0 ? mesh_->owner_cell(face.face) : mesh_->neighbor_cell(face.face));
+                        OwnerPacket packet;
+                        packet.peer = owner.at(row);
+                        word(packet.bytes, std::uint64_t(row));
+                        word(packet.bytes, std::uint64_t(face.donor));
+                        word(packet.bytes, std::uint64_t(mesh_->face_global_id(face.face)));
+                        scalar(packet.bytes, sign * face.amount);
+                        scalar(packet.bytes, face.absolute_error);
+                        packets.push_back(std::move(packet));
+                    }
+                if (packets.size() > (byte_budget - std::min(bytes, byte_budget)) / 128)
+                    throw std::invalid_argument("Finite momentum packet capacity exceeds its unchanged budget.");
+            });
+        const auto received = exchange_owner_packets(packets, comm, byte_budget - bytes);
+        std::vector<std::map<GO, fp::SumFor<Mode>>> raw_sums(n);
+        safe(
+            [&]
+            {
+                std::set<std::tuple<int, GO, GO, GO, long double>> seen;
+                for (const auto& packet : received.packets)
+                {
+                    std::size_t offset = 0;
+                    const auto row_gid = GO(read(packet.bytes, offset)), donor = GO(read(packet.bytes, offset));
+                    const auto face = GO(read(packet.bytes, offset));
+                    const auto amount = read_scalar(packet.bytes, offset), error = read_scalar(packet.bytes, offset);
+                    const auto row = map->getLocalElement(row_gid);
+                    if (row < 0 || offset != packet.bytes.size() || error < 0 || !std::isfinite(amount) ||
+                        !seen.emplace(packet.peer, row_gid, donor, face, amount).second)
+                        throw std::invalid_argument("Finite momentum raw coefficient is duplicate or malformed.");
+                    raw_sums[row][donor].add(arithmetic_value(amount, error));
+                    donor_ids.insert(donor);
+                }
+                for (std::size_t c = 0; c < n; ++c)
+                {
+                    const auto self = map->getGlobalElement(LO(c));
+                    std::set<GO> columns{self};
+                    for (const auto& [donor, value] : raw_sums[c])
+                        columns.insert(donor);
+                    for (const auto& [donor, value] : routes[c])
+                        columns.insert(donor);
+                    for (auto donor : columns)
+                    {
+                        const auto observed =
+                            raw_sums[c].contains(donor) ? raw_sums[c].at(donor).value() : arithmetic_value(0);
+                        const auto expected = donor == self ? arithmetic_value(outgoing[c], error_at(outgoing_error, c))
+                                              : routes[c].contains(donor) ? A::negate(routes[c].at(donor))
+                                                                          : arithmetic_value(0);
+                        const auto defect = A::subtract(observed, expected);
+                        // Routes supply the positive preconditioner. Ordinary FP
+                        // compares their coefficients on the original equation scale;
+                        // the raw-face operator below still owns physical acceptance.
+                        const auto allowed = bounded ? defect.absolute_error
+                                                     : static_cast<long double>(tolerance) *
+                                                           (capacity[c] + outgoing[c] + std::abs(expected.value));
+                        if (std::abs(defect.value) > allowed)
+                            throw std::invalid_argument(
+                                "Finite momentum positive routes differ from original raw face coefficients.");
+                    }
+                }
+            });
+        Teuchos::Array<GO> ids(donor_ids.begin(), donor_ids.end());
+        const auto donor_map = Teuchos::rcp(new Pack::map_type(
+            Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), ids(), map->getIndexBase(), comm));
+        auto donor_import = std::make_unique<Pack::import_type>(map, donor_map);
+        Pack::vector_type marker(map), donor_trace(donor_map);
+        marker.putScalar(1);
+        donor_trace.putScalar(0);
+        donor_trace.doImport(marker, *donor_import, Tpetra::INSERT);
+        for (auto value : donor_trace.getData())
+            valid = valid && value == 1;
+        require(*map, valid, "Finite VoF momentum references an absent geometric donor.");
+        std::vector<std::map<GO, Value>> raw;
+        safe(
+            [&]
+            {
+                for (const auto& row : raw_sums)
+                    charge(row.size(), sizeof(std::pair<const GO, Value>) + 4 * sizeof(void*));
+                raw.resize(n);
+                for (std::size_t c = 0; c < n; ++c)
+                    for (const auto& [donor, sum] : raw_sums[c])
+                        raw[c].emplace(donor, sum.value());
+            });
+        std::size_t width = 1;
+        for (const auto& row : routes)
+            width = std::max(width, row.size() + 1);
+        auto matrix = Teuchos::rcp(new Pack::matrix_type(map, width));
+        std::vector<long double> diagonal(n);
+        safe(
+            [&]
+            {
+                for (std::size_t c = 0; c < n; ++c)
+                {
+                    diagonal[c] = capacity[c] + outgoing[c];
+                    if (!(diagonal[c] > 0) || !std::isfinite(diagonal[c]))
+                        throw std::invalid_argument("Finite momentum has a nonpositive row diagonal.");
+                    Teuchos::Array<GO> columns;
+                    Teuchos::Array<double> values;
+                    columns.push_back(map->getGlobalElement(LO(c)));
+                    values.push_back(1);
+                    for (const auto& [donor, amount] : routes[c])
+                    {
+                        const auto value = static_cast<double>(-amount.value / diagonal[c]);
+                        if (!std::isfinite(value) || (amount.value != 0 && value == 0))
+                            throw std::invalid_argument(
+                                "Finite momentum row coefficient is outside representable range.");
+                        columns.push_back(donor);
+                        values.push_back(value);
+                    }
+                    matrix->insertGlobalValues(map->getGlobalElement(LO(c)), columns(), values());
+                }
+            });
+        matrix->fillComplete();
+        solver_.notify_operator_values_changed();
+        safe(
+            [&]
+            {
+                auto candidate = std::make_shared<FinitePreparation>();
+                candidate->capacity.resize(n);
+                candidate->outgoing.resize(n);
+                candidate->capacity_error.resize(n);
+                candidate->outgoing_error.resize(n);
+                candidate->incoming.resize(incoming.size());
+                candidate->contributions.resize(contributions.size());
+                // Audit actual vector capacities before copying as well; an
+                // allocator/library may retain more slots than requested.
+                for (const auto* values : {&candidate->capacity, &candidate->outgoing, &candidate->capacity_error,
+                         &candidate->outgoing_error, &diagonal})
+                    charge(values->capacity() - n, sizeof(long double));
+                charge(candidate->incoming.capacity() - incoming.size(), sizeof(FiniteTransfer));
+                charge(candidate->contributions.capacity() - contributions.size(), sizeof(FiniteFaceContribution));
+                charge(raw.capacity() - n, sizeof(std::map<GO, Value>));
+                std::copy(capacity.begin(), capacity.end(), candidate->capacity.begin());
+                std::copy(outgoing.begin(), outgoing.end(), candidate->outgoing.begin());
+                std::copy(incoming.begin(), incoming.end(), candidate->incoming.begin());
+                std::copy(contributions.begin(), contributions.end(), candidate->contributions.begin());
+                for (std::size_t c = 0; c < n; ++c)
+                {
+                    candidate->capacity_error[c] = error_at(capacity_error, c);
+                    candidate->outgoing_error[c] = error_at(outgoing_error, c);
+                }
+                candidate->raw = std::move(raw);
+                candidate->diagonal = std::move(diagonal);
+                candidate->owned_map = map;
+                candidate->overlap_map = mesh_->overlap_cell_map();
+                candidate->owned_face_map = mesh_->owned_face_map();
+                candidate->overlap_face_map = mesh_->overlap_face_map();
+                candidate->donor_map = donor_map;
+                candidate->donor_import = std::move(donor_import);
+                candidate->matrix = matrix;
+                candidate->geometry_epoch = epoch;
+                candidate->arithmetic_mode = arithmetic_mode;
+                candidate->byte_budget = byte_budget;
+                candidate->tolerance = tolerance;
+                prepared = std::move(candidate);
+            });
+    }
+    const auto& diagonal = prepared->diagonal;
+    const auto& raw = prepared->raw;
+    const auto& donor_map = prepared->donor_map;
+    const auto& donor_import = *prepared->donor_import;
+    const auto& matrix = prepared->matrix;
+    Pack::vector_type donor_trace(donor_map);
+    safe(
+        [&]
+        {
             for (std::size_t c = 0; c < n; ++c)
             {
-                const auto self = map->getGlobalElement(LO(c));
-                std::set<GO> columns{self};
-                for (const auto& [donor, value] : raw_sums[c])
-                    columns.insert(donor);
-                for (const auto& [donor, value] : routes[c])
-                    columns.insert(donor);
-                for (auto donor : columns)
-                {
-                    const auto observed =
-                        raw_sums[c].contains(donor) ? raw_sums[c].at(donor).value() : arithmetic_value(0);
-                    const auto expected = donor == self ? arithmetic_value(outgoing[c], error_at(outgoing_error, c))
-                                          : routes[c].contains(donor) ? A::negate(routes[c].at(donor))
-                                                                      : arithmetic_value(0);
-                    const auto defect = A::subtract(observed, expected);
-                    // Routes supply the positive preconditioner. Ordinary FP
-                    // compares their coefficients on the original equation scale;
-                    // the raw-face operator below still owns physical acceptance.
-                    const auto allowed = bounded ? defect.absolute_error
-                                                 : static_cast<long double>(tolerance) *
-                                                       (capacity[c] + outgoing[c] + std::abs(expected.value));
-                    if (std::abs(defect.value) > allowed)
-                        throw std::invalid_argument(
-                            "Finite momentum positive routes differ from original raw face coefficients.");
-                }
-            }
-        });
-    Teuchos::Array<GO> ids(donor_ids.begin(), donor_ids.end());
-    const auto donor_map = Teuchos::rcp(
-        new Pack::map_type(Teuchos::OrdinalTraits<Tpetra::global_size_t>::invalid(), ids(), map->getIndexBase(), comm));
-    Pack::import_type donor_import(map, donor_map);
-    Pack::vector_type marker(map), donor_trace(donor_map);
-    marker.putScalar(1);
-    donor_trace.putScalar(0);
-    donor_trace.doImport(marker, donor_import, Tpetra::INSERT);
-    for (auto value : donor_trace.getData())
-        valid = valid && value == 1;
-    require(*map, valid, "Finite VoF momentum references an absent geometric donor.");
-    std::vector<std::map<GO, Value>> raw(n);
-    for (std::size_t c = 0; c < n; ++c)
-        for (const auto& [donor, sum] : raw_sums[c])
-            raw[c].emplace(donor, sum.value());
-    std::size_t width = 1;
-    for (const auto& row : routes)
-        width = std::max(width, row.size() + 1);
-    auto matrix = Teuchos::rcp(new Pack::matrix_type(map, width));
-    std::vector<long double> diagonal(n);
-    safe(
-        [&]
-        {
-            for (std::size_t c = 0; c < n; ++c)
-            {
-                diagonal[c] = capacity[c] + outgoing[c];
-                if (!(diagonal[c] > 0) || !std::isfinite(diagonal[c]))
-                    throw std::invalid_argument("Finite momentum has a nonpositive row diagonal.");
-                Teuchos::Array<GO> columns;
-                Teuchos::Array<double> values;
-                columns.push_back(map->getGlobalElement(LO(c)));
-                values.push_back(1);
-                for (const auto& [donor, amount] : routes[c])
-                {
-                    const auto value = static_cast<double>(-amount.value / diagonal[c]);
-                    if (!std::isfinite(value) || (amount.value != 0 && value == 0))
-                        throw std::invalid_argument("Finite momentum row coefficient is outside representable range.");
-                    columns.push_back(donor);
-                    values.push_back(value);
-                }
-                matrix->insertGlobalValues(map->getGlobalElement(LO(c)), columns(), values());
                 const auto value = static_cast<double>((old[c] + source[c]) / diagonal[c]);
                 if (!std::isfinite(value))
                     throw std::invalid_argument("Finite momentum normalized RHS overflows.");
                 rhs_.replaceLocalValue(LO(c), value);
             }
         });
-    matrix->fillComplete();
-    solver_.notify_operator_values_changed();
     LinearSolverOptions linear;
     linear.backend = LinearSolverBackend::Gmres;
     linear.preconditioner = LinearPreconditioner::Jacobi;
@@ -394,6 +530,11 @@ ConservativeVoFTransport::Result ConservativeVoFTransport::solve_finite(const st
         });
     numeric_valid_ = false;
     exact_preparation_.reset();
+    finite_preparation_ = std::move(prepared);
+    if (cache_hit)
+        ++preparation_statistics_.finite_hits;
+    else
+        ++preparation_statistics_.finite_builds;
     return result;
 }
 

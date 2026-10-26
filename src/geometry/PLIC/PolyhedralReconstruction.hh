@@ -49,8 +49,14 @@ private:
 };
 struct PolyhedralReconstructionOptions
 {
+    /** Opt-in Ordinary boundary-integration path. BoundedCertification and
+     * Exact retain their existing arithmetic/construction paths. */
+    bool measure_only = false;
     unsigned maximum_offset_iterations = 192, maximum_fit_iterations = 24;
     std::size_t maximum_stencil_cells = 128, maximum_clip_evaluations = 32768;
+    /** Relative to the independently supplied smaller phase. Ordinary fits
+     * include their numerical roundoff indicator and reject below that floor;
+     * bounded fits retain the construction/arithmetic enclosure gate. */
     double volume_tolerance = 8e-15, fit_tolerance = 2e-9;
     double maximum_condition = 1e8;
     double orientation_tolerance = 2e-8, maximum_model_residual = .2;
@@ -66,6 +72,8 @@ struct PolyhedralInterface
     double target_volume_residual = 0, stencil_volume_residual = 0;
     GeometryValue<ArithmeticMode::Exact> target_volume_difference; ///< Exact-mode signed minority residual.
     DynamicGeometryValue finite_target_volume_difference;          ///< Finite construction/arithmetic enclosure.
+    /** Ordinary-only roundoff indicator; this is not a certified enclosure. */
+    long double target_volume_numerical_error_estimate = 0;
     bool finite_geometry = false; ///< Selects numerical residual evidence; no exact authority is implied.
     PolyhedralResolutionAssessment resolution;
     double stencil_condition = 0, orientation_step = 0;

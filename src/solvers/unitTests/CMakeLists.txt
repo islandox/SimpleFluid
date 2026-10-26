@@ -791,3 +791,17 @@ foreach(_semi_ranks IN ITEMS 2 4)
         TARGET testVolumeContinuityModel PROCS ${_semi_ranks}
         LABELS "mpi;semi_structured;ale;continuity;transaction;empty_rank" TIMEOUT 120)
 endforeach()
+
+foreach(PROCS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFFaceFlow_${PROCS}procs
+    TARGET testGeneralVoFFaceFlow PROCS ${PROCS} ARGS "--gtest_filter=GeneralVoFFaceFlow.*")
+  simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_${PROCS}procs
+    TARGET testGeneralVoFFaceSurface PROCS ${PROCS} ARGS "--gtest_filter=GeneralVoFFaceSurface.*-GeneralVoFFaceSurface.*TangentStripes*")
+endforeach()
+
+simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_Stripes_3procs
+  TARGET testGeneralVoFFaceSurface PROCS 3
+  ARGS "--gtest_filter=GeneralVoFFaceSurface.ThreeOrMoreTangentStripesUseAuthenticatedHaloFaceSupport")
+simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_StripesEmpty_4procs
+  TARGET testGeneralVoFFaceSurface PROCS 4
+  ARGS "--gtest_filter=GeneralVoFFaceSurface.ThreeOrMoreTangentStripesRetainCollectivesWithAnEmptyOwner")

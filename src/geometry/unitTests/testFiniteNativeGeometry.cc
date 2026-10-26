@@ -5,6 +5,7 @@
 #include "geometry/PLIC/GeometryInstrumentation.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/PlaneMeasure.hh"
 #include <cmath>
 #include <gtest/gtest.h>
 #include <set>
@@ -201,4 +202,64 @@ TEST(FiniteNativeGeometryTest, OrdinaryRetainedSupportDoesNotCertifyRoundedBound
     const auto point = PLIC::source_point<ArithmeticMode::BoundedCertification>(*cube, point_id);
     EXPECT_TRUE(point.supports().empty());
 }
+TEST(FiniteNativeGeometryTest, PlaneMeasureIntegratesObliqueCubeAndComplementWithoutConstructingCuts)
+{
+    const auto cell = Cell::box({0, 0, 0}, {1, 1, 1});
+    const PLIC::OrdinaryPlaneMeasure measure(*cell);
+    PLIC::reset_geometry_statistics();
+    for (const auto [offset, expected] :
+        std::array<std::array<double, 2>, 4>{{{.5, 1. / 48}, {1, 1. / 6}, {1.5, .5}, {2.5, 47. / 48}}})
+    {
+        const auto below = measure.below({{1, 1, 1}, {}, offset}, true);
+        const auto above = measure.below({{-1, -1, -1}, {}, -offset});
+        EXPECT_NEAR(below.volume, expected, 4e-16L);
+        EXPECT_NEAR(above.volume, 1 - static_cast<long double>(expected), 4e-16L);
+        EXPECT_NEAR(below.volume + above.volume, 1, 4e-18L);
+        EXPECT_EQ(below.status, PLIC::PlaneMeasureStatus::Resolved);
+        EXPECT_GT(below.numerical_error_estimate, 0);
+        if (offset <= 1)
+            EXPECT_NEAR(below.section_area, std::sqrt(3.L) * offset * offset / 2, 4e-18L);
+    }
+    const auto stats = PLIC::geometry_statistics();
+    EXPECT_EQ(stats.constructions, 0u);
+    EXPECT_EQ(stats.intersections, 0u);
+    EXPECT_EQ(stats.moment_evaluations, 0u);
+}
+
+TEST(FiniteNativeGeometryTest, PlaneMeasureUsesLocalScaledCoordinatesAndMeasuresTinyPhaseDirectly)
+{
+    for (const auto exponent : {-20, 0, 20})
+    {
+        const double scale = std::ldexp(1., exponent), shift = std::ldexp(scale, 20);
+        const PLIC::GeometryPoint origin{shift, -shift, shift};
+        const auto cell = Cell::box(origin, {shift + scale, -shift + scale, shift + scale});
+        const PLIC::OrdinaryPlaneMeasure measure(*cell);
+        for (const double width : {.5, 1e-9})
+        {
+            const auto result = measure.below({{1, 1, 1}, origin, width * scale}, true);
+            const long double expected = std::pow(static_cast<long double>(width * scale), 3) / 6;
+            EXPECT_NEAR(result.volume / expected, 1, 4e-16L);
+            EXPECT_LT(result.numerical_error_estimate / expected, 8e-15L);
+            EXPECT_EQ(result.status, PLIC::PlaneMeasureStatus::Resolved);
+            const auto rescaled_normal = measure.below({{2, 2, 2}, origin, 2 * width * scale});
+            EXPECT_NEAR(rescaled_normal.volume / expected, 1, 4e-16L);
+        }
+    }
+}
+
+TEST(FiniteNativeGeometryTest, PlaneFaceAreaCoversAnalyticPolygonAndPreservesComplement)
+{
+    const std::array<std::array<long double, 3>, 4> square{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
+    const auto triangle = PLIC::ordinary_plane_face_area(square, {{1, 1, 0}, {}, .5});
+    const auto complement = PLIC::ordinary_plane_face_area(square, {{-1, -1, 0}, {}, -.5});
+    EXPECT_NEAR(triangle.area, .125L, 1e-18L);
+    EXPECT_NEAR(triangle.area + complement.area, 1, 1e-18L);
+    EXPECT_GT(triangle.numerical_error_estimate, 0);
+    const PLIC::GeometryPoint translated{1e9, -2e9, 3e9};
+    const auto moved = PLIC::ordinary_plane_face_area(square, {{1, 1, 0}, translated, .5}, translated);
+    EXPECT_EQ(moved.area, triangle.area);
+    EXPECT_EQ(PLIC::ordinary_plane_face_area(square, {{1, 0, 0}, {}, -1}).area, 0);
+    EXPECT_EQ(PLIC::ordinary_plane_face_area(square, {{1, 0, 0}, {}, 2}).area, 1);
+}
+
 } // namespace

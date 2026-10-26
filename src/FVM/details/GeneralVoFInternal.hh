@@ -92,7 +92,7 @@ struct GeneralVoF::Data
     {
         AMR::AdaptiveNativePublication native;
         AMR::AdaptiveNativeDraft draft;
-        std::vector<AMR::AdaptiveTile> tiles;
+        std::vector<AMR::AdaptiveTile> tiles, surface_tiles;
         std::vector<AMR::AdaptiveNode> nodes;
         std::map<std::uint64_t, PLIC::DynamicPoint> finite_nodes;
         std::map<std::uint64_t, FaceAuthority> construction_faces;

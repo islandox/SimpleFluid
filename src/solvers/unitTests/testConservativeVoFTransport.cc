@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <string>
 
 namespace
@@ -25,6 +26,113 @@ namespace
 using namespace SimpleFluid;
 using LO = DefaultTpetraTypes::local_ordinal_type;
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+
+TEST(ConservativeVoFTransportTest, FiniteMomentumReusesThreeRhsAndInvalidatesChangedFlux)
+{
+    Meshes::AMR::AMRGrid grid;
+    grid.root_blocks = {2, 1, 1};
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {4, 2, 2};
+    grid.periodic = {true, true, true};
+    VoF::AdaptiveVoF geometry(std::make_shared<const Meshes::AMR::CartesianAMR>(grid));
+    const auto mesh = geometry.mesh();
+    const auto map = mesh->owned_cell_map();
+    const auto n = mesh->num_owned_cells();
+    using GO = DefaultTpetraTypes::global_ordinal_type;
+    using Transport = detail::ConservativeVoFTransport;
+    Transport transport(mesh);
+    std::vector<long double> capacity(n), old_mass(n), outgoing(n), incoming_mass(n), source(n), old(n);
+    std::vector<Transport::FiniteTransfer> routes;
+    std::vector<Transport::FiniteFaceContribution> faces;
+    const auto ledger = [&](long double scale)
+    {
+        routes.clear();
+        faces.clear();
+        std::fill(outgoing.begin(), outgoing.end(), 0);
+        std::fill(incoming_mass.begin(), incoming_mass.end(), 0);
+        std::vector<std::map<GO, long double>> rows(n);
+        const auto lease = mesh->acquire_execution_view();
+        for (std::size_t f = 0; f < mesh->num_faces(); ++f)
+        {
+            const auto face = LO(f);
+            // A varying positive x flux gives a nonzero storage change. The
+            // old/new storage contrast remains close to the 1000:1 density jump.
+            const auto amount = scale * mesh->face_normal(face).x * (1 + .25L * mesh->face_centroid(face).x);
+            if (amount == 0)
+                continue;
+            const auto owner = mesh->cell_global_id(mesh->owner_cell(face));
+            const auto neighbor = mesh->cell_global_id(mesh->neighbor_cell(face));
+            const GO donor = amount > 0 ? owner : neighbor, recipient = amount > 0 ? neighbor : owner;
+            if (f < mesh->num_owned_faces())
+                faces.push_back({face, donor, amount, 0});
+            const auto donor_lid = map->getLocalElement(donor), recipient_lid = map->getLocalElement(recipient);
+            if (donor_lid >= 0)
+                outgoing[donor_lid] += std::abs(amount);
+            if (recipient_lid >= 0)
+            {
+                incoming_mass[recipient_lid] += std::abs(amount);
+                rows[recipient_lid][donor] += std::abs(amount);
+            }
+        }
+        for (std::size_t c = 0; c < n; ++c)
+            for (const auto& [donor, amount] : rows[c])
+                routes.push_back({donor, map->getGlobalElement(LO(c)), amount, 0});
+    };
+    ledger(.125L);
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        old_mass[c] = mesh->cell_centroid(LO(c)).x < 2 ? 1000 : 1;
+        capacity[c] = old_mass[c] - outgoing[c] + incoming_mass[c];
+        ASSERT_GT(capacity[c], 0);
+        // Independent row-sum identity for the physical conservative equation.
+        EXPECT_EQ(capacity[c] + outgoing[c] - incoming_mass[c], old_mass[c]);
+    }
+    const auto check_constant = [&](double velocity)
+    {
+        for (std::size_t c = 0; c < n; ++c)
+            old[c] = old_mass[c] * velocity;
+        const auto result = transport.solve(old, source, capacity, outgoing, routes, faces, false, 3000, 1e-12);
+        EXPECT_LE(result.physical_relative_residual, 1e-12);
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            EXPECT_NEAR(result.cell_trace[c], velocity, 1e-11);
+            EXPECT_NEAR(result.amount[c], static_cast<double>(capacity[c] * velocity), 1e-9);
+        }
+    };
+    for (double velocity : {.5, -.75, 1.25})
+        check_constant(velocity);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 1);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 2);
+
+    // Reusing admitted coefficients must still admit every new RHS collectively,
+    // including calls involving empty owners. Rejection does not count as a hit.
+    if (n)
+        old[0] = std::numeric_limits<long double>::quiet_NaN();
+    EXPECT_THROW(
+        (void) transport.solve(old, source, capacity, outgoing, routes, faces, false, 3000, 1e-12), std::runtime_error);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 1);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 2);
+
+    // Keep capacities fixed and change the physical flux coefficients. A new
+    // old mass follows from the independent row sum; constant velocity remains
+    // the analytic solution, so stale matrix/raw-row reuse cannot pass silently.
+    ledger(.25L);
+    for (std::size_t c = 0; c < n; ++c)
+        old_mass[c] = capacity[c] + outgoing[c] - incoming_mass[c];
+    check_constant(.375);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 2);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 2);
+    check_constant(-.625);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 2);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 3);
+    EXPECT_THROW((void) transport.solve(old, source, capacity, outgoing, routes, faces, false, 3000, 1e-12, 1),
+        std::runtime_error);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 2);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 3);
+    check_constant(.125);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 3);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 3);
+}
 
 TEST(ConservativeVoFTransportTest, OrdinaryWideMomentumPreservesPhysicalStorageWithoutIntervalAdmission)
 {

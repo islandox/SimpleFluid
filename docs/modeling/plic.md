@@ -1,5 +1,12 @@
 # Piecewise-linear interface reconstruction (PLIC)
 
+The opt-in `measure_only` Ordinary reconstruction path uses original-boundary
+face integration and a safeguarded minority-phase offset solve; see
+[the face transport contract](../architecture/conservative_face_vof.md#measure-only-plic-and-geometric-candidates).
+Its numerical error estimates are not certified bounds. The legacy scalar and
+explicit surface construction paths described below remain available.
+
+
 PLIC represents the gas/liquid interface inside a cell by a plane. This guide
 describes the finite `PLIC::PolyhedralReconstruction<Mode>` used by `GeneralVoF` on
 actual convex native cells. It covers the geometric model, normal and offset

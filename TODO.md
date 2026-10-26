@@ -1589,6 +1589,21 @@ qualify general VoF, sparse ALE, production scaling or physical applications.
 
 ### Stage 7 — General VoF and flow qualification
 
+The opt-in [conservative face transport backend](docs/architecture/conservative_face_vof.md)
+implements independent donor-cell streams, measure-only geometric candidates,
+shared endpoint/export limiting, and reusable finite momentum preparation. Keep
+`SweptPartition` as the default while the coupled physical gates remain open.
+
+- [x] Implement the opt-in source-free fixed-mesh conservative face contract.
+- [x] Separate scalar PLIC measurements from explicit closed-surface construction.
+- [x] Reuse finite momentum routing/operator/preconditioner across component RHSs.
+- [x] Expose explicit face-aligned surfaces with bounded halo planar support.
+- [ ] Qualify high-density-ratio drop translation and rotation/deformation accuracy.
+- [ ] Unify mixed-cell and face-aligned curved surface fitting and qualify capillarity.
+- [ ] Qualify open boundary interfaces and multiple physical streams per face.
+- [ ] Complete relevant coupled-flow gates before switching the ordinary default.
+
+
 **Experimental source-free execution:** explicit VoF enablement permits focused finite geometry/flow development. Reacting-VoF schema migration and full-flow qualification remain open; historical implementation records are not current validation.
 
 **Floating-point arithmetic is the primary VoF implementation and development

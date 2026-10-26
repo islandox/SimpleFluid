@@ -92,6 +92,9 @@ public:
      * physical gas/carrier extensive inventories in phases(). */
     [[nodiscard]] const std::vector<double>& gas_fraction() const noexcept;
     [[nodiscard]] const std::array<GeneralVoFMomentumDiagnostics, 3>& momentum_transport_diagnostics() const noexcept;
+    /** Accepted face-stream step and attached reusable momentum preparation.
+     * Empty before advancement or for the legacy swept backend. */
+    [[nodiscard]] const std::shared_ptr<const VoF::GeneralVoFPreparedTransport>& prepared_transport() const noexcept;
     [[nodiscard]] const std::vector<VoF::Vector>& velocity() const noexcept;
     [[nodiscard]] const std::vector<double>& face_velocity() const noexcept;
     [[nodiscard]] const std::vector<double>& pressure() const noexcept;

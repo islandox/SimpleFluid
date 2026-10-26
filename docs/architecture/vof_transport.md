@@ -1,5 +1,12 @@
 # Floating-point VoF transport and state ownership
 
+The opt-in fixed-mesh face-stream redesign is documented in
+[conservative face transport](conservative_face_vof.md). It separates donor-cell
+admission, measure-only PLIC candidates, shared limiting, and reusable momentum
+from the legacy swept partition route described below. The default has not
+switched.
+
+
 Floating-point arithmetic is the primary choice for VoF. The general-native
 backend uses `ArithmeticMode::Ordinary` by default; Cartesian VoF retains
 its specialized FP reconstruction and directional sweeps. Conservation,
