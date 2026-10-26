@@ -72,9 +72,12 @@ VoFStepDiagnostics GeneralVoFSolver::Impl::step(double dt)
 }
 double GeneralVoFSolver::Impl::stable_timestep() const
 {
-    const auto nodes = accepted->phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition
-        ? std::vector<VoF::GeneralVoFNodeVelocity>{}
-        : node_velocity(*resources->mesh, *accepted->phases, accepted->velocity, resources->options.byte_budget);
+    const bool face_backend =
+        accepted->phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition;
+    const bool homogeneous = !face_backend && accepted->phases->homogeneous_transport_eligible();
+    const auto nodes = face_backend || homogeneous ? std::vector<VoF::GeneralVoFNodeVelocity>{}
+                                                   : node_velocity(*resources->mesh, *accepted->phases,
+                                                         accepted->velocity, resources->options.byte_budget);
     switch (resources->arithmetic_mode)
     {
         case ArithmeticMode::Ordinary:

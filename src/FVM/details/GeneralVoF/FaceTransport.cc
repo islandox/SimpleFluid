@@ -58,6 +58,11 @@ struct Totals
 GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFaceVolume> controls, double dt,
     std::array<double, 2> density, std::uint64_t time_stage) const
 {
+    return plan_face_transport_impl(controls, dt, density, time_stage, false);
+}
+GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVoFFaceVolume> controls, double dt,
+    std::array<double, 2> density, std::uint64_t time_stage, bool homogeneous, std::uint64_t transaction_id) const
+{
     const auto& data = *data_;
     const auto comm = data.hierarchy->communicator();
     const auto rank = comm->getRank();
@@ -66,16 +71,17 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
     trial.source_ = data_;
     std::shared_ptr<GeneralVoFPreparedTransport> prepared;
     std::map<std::uint64_t, const AMR::AdaptiveTile*> tiles;
-    std::map<std::uint64_t, long double> phi;
+    std::map<std::uint64_t, long double> phi, control_error;
     std::vector<OwnerPacket> packets;
     wire::collective(*comm,
         [&]
         {
             current(data);
             prepared = std::make_shared<GeneralVoFPreparedTransport>();
-            if (data.options.transport_backend == Backend::SweptPartition || arithmetic_mode() != mode ||
-                !std::isfinite(dt) || dt < 0 || controls.size() != data.topology->tiles.size() ||
-                !std::isfinite(density[0]) || density[0] <= 0 || !std::isfinite(density[1]) || density[1] <= 0)
+            if ((!homogeneous && data.options.transport_backend == Backend::SweptPartition) ||
+                arithmetic_mode() != mode || !std::isfinite(dt) || dt < 0 ||
+                controls.size() != data.topology->tiles.size() || !std::isfinite(density[0]) || density[0] <= 0 ||
+                !std::isfinite(density[1]) || density[1] <= 0)
                 throw std::invalid_argument(
                     "Face transport requires Ordinary, finite dt and positive constant densities.");
             wire::Budget budget{limit};
@@ -93,9 +99,16 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                                                                      : static_cast<long double>(c.integrated_volume))
                         .second)
                     throw std::invalid_argument("Face transport control is foreign, duplicated or nonfinite.");
-                if (c.bounded_integrated_volume && (c.bounded_integrated_volume->arithmetic_mode != mode ||
-                                                       !std::isfinite(c.bounded_integrated_volume->value)))
-                    throw std::invalid_argument("Face transport arithmetic control differs.");
+                if (c.bounded_integrated_volume)
+                {
+                    const auto& input = *c.bounded_integrated_volume;
+                    fp::validate(input);
+                    if (input.arithmetic_mode != mode || !std::isfinite(input.value) ||
+                        !std::isfinite(input.absolute_error) || input.absolute_error < 0)
+                        throw std::invalid_argument("Face transport arithmetic control differs.");
+                }
+                control_error.emplace(
+                    c.face, c.bounded_integrated_volume ? c.bounded_integrated_volume->absolute_error : 0);
                 const auto& tile = *tiles.at(c.face);
                 if ((tile.exterior || !tile.second || dt == 0) && phi.at(c.face) != 0)
                     throw std::invalid_argument("Face transport requires zero flux at impermeable boundaries/zero dt.");
@@ -107,6 +120,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                 real(w, density[0]);
                 real(w, density[1]);
                 finite_real(w, phi.at(c.face));
+                finite_real(w, control_error.at(c.face));
                 budget.packet(w.data.size());
                 packets.push_back({tile.first_owner, std::move(w.data)});
             }
@@ -130,7 +144,8 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
             if (low != high)
                 throw std::invalid_argument("Face transport controls differ.");
         });
-    trial.transaction_ = transaction(comm);
+    trial.transaction_ = homogeneous && transaction_id != 0 ? transaction_id : transaction(comm);
+    trial.homogeneous_algebraic_ = homogeneous;
     trial.timestep_ = dt;
     prepared->source_identity = data_;
     prepared->source_control = data.control;
@@ -154,7 +169,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                 const auto face = r.word();
                 if (!tiles.contains(face) || tiles.at(face)->first_owner != rank || r.word() != data.control ||
                     r.word() != time_stage || real(r) != dt || real(r) != density[0] || real(r) != density[1] ||
-                    finite_real(r) != phi.at(face))
+                    finite_real(r) != phi.at(face) || finite_real(r) != control_error.at(face))
                     throw std::invalid_argument("Face transport shared controls/ownership differ.");
                 r.done();
                 if (!subscribers[face].insert(p.peer).second)
@@ -246,6 +261,34 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                     std::max(prepared->diagnostics.maximum_continuity_defect, std::abs(continuity));
             }
         });
+    if (homogeneous)
+    {
+        int local_streams = !streams.empty(), any_streams = 0;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_streams, &any_streams);
+        if (!any_streams)
+        {
+            // All controls, scalar agreement and canonical ownership have been
+            // authenticated above. Exact zero flux is an identity publication,
+            // retaining both phase histories without synthetic trajectories.
+            wire::collective(*comm,
+                [&]
+                {
+                    trial.candidate_ = data_;
+                    trial.roundoff_.resize(data.topology->order.size());
+                    for (const auto& key : data.topology->order)
+                    {
+                        const auto& cell = data.cells.at(key);
+                        const auto old = measures(cell.native_volume, cell.phase.gas_volume, cell.phase.carrier_volume);
+                        trial.finite_transfers_.push_back(
+                            {cell.gid, cell.gid, cell.owner, cell.owner, old, cell.finite_history});
+                        trial.finite_budgets_.push_back({cell.gid, old, measures(0, 0, 0), old});
+                    }
+                    current(data);
+                });
+            trial.validate_retained_algebraic_payload();
+            return trial;
+        }
+    }
     if (data.options.transport_backend == Backend::GeometricFace)
     {
         // Low-order admission above is mandatory, before any candidate geometry.
@@ -639,7 +682,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                 routes[{c.gid, c.gid}] = {c.gid, c.gid, rank, rank, retained, {}};
             }
             std::map<std::uint64_t, fp::SumFor<mode>> gas, liquid;
-            std::map<std::uint64_t, long double> history_g, history_l;
+            std::map<std::uint64_t, long double> history_g, history_l, pure_fit;
             std::set<std::uint64_t> mixed_receipts;
             for (auto& [pair, route] : routes)
             {
@@ -647,9 +690,25 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                 gas[route.recipient].add(route.amount.gas);
                 liquid[route.recipient].add(route.amount.carrier);
                 const auto& donor = data.cells.at(data.topology->by_gid.at(route.donor));
-                const long double gf = donor.phase.gas_volume > 0 ? route.amount.gas.value / donor.phase.gas_volume : 0;
-                const long double lf =
-                    donor.phase.carrier_volume > 0 ? route.amount.carrier.value / donor.phase.carrier_volume : 0;
+                const auto phase_capacity =
+                    static_cast<long double>(donor.phase.gas_volume) + donor.phase.carrier_volume;
+                // The occupancy discrepancy stays local. Normalize absent-phase
+                // uncertainty with physical capacity, including the self residual.
+                const auto bulk_fraction = route.donor == route.recipient
+                                               ? 1 - totals[donor.gid].bulk_out.value() / phase_capacity
+                                               : route.amount.bulk.value / phase_capacity;
+                const long double gf = donor.phase.gas_volume > 0 ? route.amount.gas.value / donor.phase.gas_volume
+                                                                  : (homogeneous ? bulk_fraction : 0);
+                const long double lf = donor.phase.carrier_volume > 0
+                                           ? route.amount.carrier.value / donor.phase.carrier_volume
+                                           : (homogeneous ? bulk_fraction : 0);
+                if (homogeneous)
+                {
+                    const auto fraction = donor.declaration == GeneralVoFPhaseGeometry::PureGas ? lf : gf;
+                    pure_fit[route.recipient] = fp::bound_add(pure_fit[route.recipient],
+                        fp::upward(fp::upward(fraction) *
+                                   std::max(donor.occupancy.fit_bound, donor.occupancy.admitted_bound)));
+                }
                 route.inherited_error = {fp::upper_double(fp::upward(fp::upward(gf) * donor.finite_history.gas)),
                     fp::upper_double(fp::upward(fp::upward(lf) * donor.finite_history.carrier))};
                 history_g[route.recipient] = fp::bound_add(history_g[route.recipient], route.inherited_error.gas);
@@ -700,6 +759,13 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
                 c.occupancy.transferred_bound = c.occupancy.admitted_bound;
                 if (c.declaration == GeneralVoFPhaseGeometry::Infer)
                     c.occupancy.fit_bound = c.occupancy.fit_residual = 0;
+                else if (homogeneous)
+                {
+                    c.occupancy.fit_residual = c.declaration == GeneralVoFPhaseGeometry::PureGas ? pl.first : pg.first;
+                    const auto publication =
+                        c.declaration == GeneralVoFPhaseGeometry::PureGas ? c.roundoff.carrier : c.roundoff.gas;
+                    c.occupancy.fit_bound = fp::upper_double(fp::bound_add(pure_fit[c.gid], publication));
+                }
                 validate_cell<mode>(c, data.options);
                 prepared->diagnostics.maximum_occupancy_defect =
                     std::max(prepared->diagnostics.maximum_occupancy_defect, std::abs(defect));
@@ -788,9 +854,20 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFace
             current(data);
             retained_budget<mode>(*candidate);
         });
-    trial.prepared_ = std::move(prepared);
     trial.candidate_ = std::move(candidate);
-    trial.prepared_ = trial.prepare_transport(density, time_stage);
+    if (homogeneous)
+    {
+        trial.unbound_streams_ = std::move(prepared->streams);
+        for (auto& stream : trial.unbound_streams_)
+            stream.mass = 0;
+        trial.unbound_diagnostics_ = prepared->diagnostics;
+        trial.validate_retained_algebraic_payload();
+    }
+    else
+    {
+        trial.prepared_ = std::move(prepared);
+        trial.prepared_ = trial.prepare_transport(density, time_stage);
+    }
     return trial;
 }
 } // namespace SimpleFluid::VoF

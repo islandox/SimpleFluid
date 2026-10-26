@@ -249,6 +249,14 @@ struct GeneralVoFPreparedTransport
     std::size_t momentum_builds = 0, momentum_reuses = 0;
     /** Checks the complete retained ledger allocation before copying it. */
     SIMPLEFLUID_FVM_EXPORT void validate_byte_budget(std::size_t) const;
+
+private:
+    friend class GeneralVoF;
+    // The actual family is factory-authenticated, independently of public
+    // backend configuration and of whether this rank retains any streams.
+    std::shared_ptr<const void> authenticated_source_, authenticated_candidate_;
+    std::uint64_t authenticated_transaction_ = 0;
+    GeneralVoFTransportFamily authenticated_family_ = GeneralVoFTransportFamily::GeometricSweptTetrahedra;
 };
 struct GeneralVoFSupportCell
 {
@@ -437,10 +445,14 @@ public:
     private:
         friend GeneralVoF;
         friend struct Exact::GeneralVoF;
+        SIMPLEFLUID_FVM_LOCAL void validate_retained_algebraic_payload() const;
         std::shared_ptr<const Data> source_, candidate_;
         std::uint64_t transaction_ = 0;
         double timestep_ = 0;
         std::shared_ptr<const GeneralVoFPreparedTransport> prepared_;
+        bool homogeneous_algebraic_ = false;
+        std::vector<GeneralVoFDirectedStream> unbound_streams_;
+        GeneralVoFTransportDiagnostics unbound_diagnostics_;
         std::vector<GeneralVoFFaceContribution> faces_;
         std::vector<GeneralVoFTransfer> transfers_;
         std::vector<GeneralVoFDonorBudget> budgets_;
@@ -478,6 +490,16 @@ public:
      * Unsupported periodic images reject until image-qualified sweeps exist. */
     [[nodiscard]] Trial plan_transport(
         std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double timestep) const;
+    /** Collective whole-domain admission for Ordinary SweptPartition's
+     * interface-free algebraic specialization. Explicit pure declarations and
+     * same-phase nonperiodic adjacency are required, including retained ghosts. */
+    [[nodiscard]] bool homogeneous_transport_eligible() const;
+    /** Explicit fixed-mesh homogeneous model with authoritative canonical face
+     * volumes. Rechecks collective eligibility and face controls, without
+     * requesting or fabricating node trajectories. Density and time-stage are
+     * bound later by Trial::prepare_transport. Exact zero flux preserves the
+     * source publication identity and phase histories. */
+    [[nodiscard]] Trial plan_homogeneous_transport(std::span<const GeneralVoFFaceVolume>, double timestep) const;
     /** Fixed-mesh source-free Ordinary transport. Canonical integrated volumes
      * are authoritative under a constant normal face velocity model. Closed
      * boundaries only: nonzero exterior flux and periodic images reject.
@@ -489,6 +511,8 @@ public:
 
 private:
     friend struct Exact::GeneralVoF;
+    SIMPLEFLUID_FVM_LOCAL Trial plan_face_transport_impl(std::span<const GeneralVoFFaceVolume>, double,
+        std::array<double, 2>, std::uint64_t, bool homogeneous, std::uint64_t transaction_id = 0) const;
     template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL Trial plan_transport_finite(
         std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
     template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL FiniteRemapTrial plan_remap_finite(const Hierarchy::Plan&,

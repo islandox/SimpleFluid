@@ -134,6 +134,145 @@ TEST(ConservativeVoFTransportTest, FiniteMomentumReusesThreeRhsAndInvalidatesCha
     EXPECT_EQ(transport.preparation_statistics().finite_hits, 3);
 }
 
+TEST(ConservativeVoFTransportTest, HomogeneousSweptLedgerMatchesIndependentImplicitCirculation)
+{
+    namespace AMR = Meshes::AMR;
+    using GO = DefaultTpetraTypes::global_ordinal_type;
+    using Transport = detail::ConservativeVoFTransport;
+    const auto comm = Tpetra::getDefaultComm();
+    AMR::AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {2, 2, 2};
+    AMR::CartesianAMR provider(grid);
+    std::vector<std::uint64_t> owned;
+    for (std::uint64_t c = 0; c < 8; ++c)
+        if (int(c % std::min(2, comm->getSize())) == comm->getRank())
+            owned.push_back(c);
+    auto bootstrap = provider.detach_owned(owned, {'h', 'o', 'm', 'o', 'g', 'e', 'n', 'e', 'o', 'u', 's'});
+    auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
+        std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
+    std::vector<AMR::AdaptiveCellKey> order;
+    for (const auto& [key, leaf] : hierarchy->owned())
+        order.push_back(key);
+    int empty = order.empty(), global_empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &empty, &global_empty);
+    EXPECT_EQ(global_empty, std::max(0, comm->getSize() - 2));
+    constexpr long double q = 1.L / 64, r = q / (1 + q);
+    const std::array<std::array<double, 4>, 3> velocity = {{{1, 4, -2, .5}, {-3, .25, 2, -1}, {.75, -4, 3, 1.5}}};
+    // Counterclockwise ordering is independent of global/local numbering.
+    const auto cycle_index = [](const auto& p) { return p.y < 1 ? (p.x < 1 ? 0u : 1u) : (p.x > 1 ? 2u : 3u); };
+    for (bool gas : {false, true})
+    {
+        SCOPED_TRACE(::testing::Message() << "gas=" << gas);
+        std::vector<double> gas_volume(order.size(), gas ? 1 : 0), liquid_volume(order.size(), gas ? 0 : 1);
+        VoF::GeneralVoF state(hierarchy, order, gas_volume, liquid_volume);
+        const auto mesh = state.mesh();
+        const auto n = mesh->num_owned_cells();
+        const auto map = mesh->owned_cell_map();
+        const long double rho = gas ? 1 : 1000;
+        std::vector<VoF::GeneralVoFNodeVelocity> nodes;
+        for (const auto& node : state.nodes())
+            nodes.push_back({node.gid, {.001, -.002, .003}});
+        std::vector<VoF::GeneralVoFFaceVolume> controls;
+        for (const auto& tile : state.tiles())
+        {
+            const auto p = tile.geometry->centroid(), normal = tile.geometry->area_vector();
+            double phi = 0;
+            if (!tile.exterior && p.x == 1 && normal.x != 0)
+                phi = (p.y < 1 ? 1 : -1) * (normal.x > 0 ? 1 : -1) / 64.;
+            if (!tile.exterior && p.y == 1 && normal.y != 0)
+                phi = (p.x > 1 ? 1 : -1) * (normal.y > 0 ? 1 : -1) / 64.;
+            controls.push_back({tile.face_gid, phi});
+        }
+        const auto trial = state.plan_transport(nodes, controls, 1);
+        const auto prepared = trial.prepare_transport({1, 1000}, 17);
+        EXPECT_EQ(prepared->backend, VoF::GeneralVoFTransportBackend::SweptPartition);
+        EXPECT_EQ(prepared->family, VoF::GeneralVoFTransportFamily::AlgebraicFaceVolume);
+        EXPECT_NO_THROW(trial.validate_prepared_transport(*prepared, {1, 1000}, 17));
+        std::vector<long double> outgoing(n), source(n), old(n);
+        std::vector<Transport::FiniteTransfer> routes;
+        std::vector<Transport::FiniteFaceContribution> faces;
+        const auto mass = [](const auto& amount) { return amount.gas.value + 1000.L * amount.carrier.value; };
+        for (const auto& budget : prepared->donor_budgets)
+        {
+            const auto lid = map->getLocalElement(GO(budget.donor));
+            ASSERT_GE(lid, 0);
+            outgoing[lid] = mass(budget.exported);
+            EXPECT_EQ(outgoing[lid], rho * q);
+        }
+        for (const auto& route : prepared->positive_transfers)
+            if (route.donor != route.recipient)
+            {
+                EXPECT_EQ(mass(route.amount), rho * q);
+                routes.push_back({GO(route.donor), GO(route.recipient), mass(route.amount), 0});
+            }
+        for (const auto& face : prepared->signed_face_contributions)
+        {
+            const auto lid = mesh->owned_face_map()->getLocalElement(GO(face.face));
+            ASSERT_GE(lid, 0);
+            EXPECT_EQ(mass(face.amount), rho * q);
+            faces.push_back({lid, GO(face.donor), face.direction * mass(face.amount), 0});
+        }
+        for (const auto& stream : prepared->streams)
+        {
+            EXPECT_EQ(stream.volume, q);
+            EXPECT_EQ(stream.mass, rho * q);
+            const auto donor = mesh->overlap_cell_map()->getLocalElement(GO(stream.donor));
+            const auto recipient = mesh->overlap_cell_map()->getLocalElement(GO(stream.recipient));
+            ASSERT_GE(donor, 0);
+            ASSERT_GE(recipient, 0);
+            EXPECT_EQ(cycle_index(mesh->cell_centroid(recipient)), (cycle_index(mesh->cell_centroid(donor)) + 1) % 4);
+        }
+        Transport transport(mesh);
+        for (unsigned component = 0; component < 3; ++component)
+        {
+            for (std::size_t c = 0; c < n; ++c)
+            {
+                EXPECT_EQ(prepared->old_mass[c], rho);
+                EXPECT_EQ(prepared->new_mass[c], rho);
+                old[c] = rho * velocity[component][cycle_index(mesh->cell_centroid(LO(c)))];
+            }
+            const auto result =
+                transport.solve(old, source, prepared->new_mass, outgoing, routes, faces, false, 3000, 1e-12);
+            EXPECT_LE(result.physical_relative_residual, 1e-12);
+            double local_trace[4]{}, global_trace[4]{};
+            for (std::size_t c = 0; c < n; ++c)
+                local_trace[cycle_index(mesh->cell_centroid(LO(c)))] += result.cell_trace[c];
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 4, local_trace, global_trace);
+            // Both z layers carry the same independently prescribed mode.
+            for (auto& value : global_trace)
+                value /= 2;
+            // Published traces and amounts are binary64; these eight-cell
+            // reductions stay in range and use Trilinos' portable MPI type.
+            double local[2]{}, global[2]{};
+            double local_norm[2]{}, global_norm[2]{};
+            for (std::size_t c = 0; c < n; ++c)
+            {
+                const auto i = cycle_index(mesh->cell_centroid(LO(c)));
+                const auto& u = velocity[component];
+                // Solve the four independent scalar recurrence equations
+                // (1+q)u_i' - q*u_prev' = u_i by a geometric series.
+                const auto expected =
+                    (u[i] + r * u[(i + 3) % 4] + r * r * u[(i + 2) % 4] + r * r * r * u[(i + 1) % 4]) /
+                    ((1 + q) * (1 - r * r * r * r));
+                EXPECT_NEAR(result.cell_trace[c], expected, 2e-11);
+                EXPECT_NEAR(result.amount[c], rho * expected, 2e-11 * rho);
+                const auto residual = rho * ((1 + q) * result.cell_trace[c] - q * global_trace[(i + 3) % 4]) - old[c];
+                local_norm[0] += static_cast<double>(residual * residual);
+                local_norm[1] += static_cast<double>(old[c] * old[c]);
+                local[0] += static_cast<double>(old[c]);
+                local[1] += result.amount[c];
+            }
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local, global);
+            EXPECT_NEAR(global[1], global[0], 2e-11 * rho);
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local_norm, global_norm);
+            EXPECT_LE(std::sqrt(global_norm[0] / global_norm[1]), 1e-12);
+        }
+        EXPECT_EQ(transport.preparation_statistics().finite_builds, 1u);
+        EXPECT_EQ(transport.preparation_statistics().finite_hits, 2u);
+    }
+}
+
 TEST(ConservativeVoFTransportTest, OrdinaryWideMomentumPreservesPhysicalStorageWithoutIntervalAdmission)
 {
     Meshes::AMR::AMRGrid grid;

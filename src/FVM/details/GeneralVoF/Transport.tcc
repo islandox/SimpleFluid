@@ -68,11 +68,8 @@ void prepare_transport_controls(const GeneralVoF::Data& data, std::span<const Ge
         const auto input = face.bounded_integrated_volume.value_or(
             Math::make_value(data.options.arithmetic_mode, face.integrated_volume));
         fp::validate(input);
-        if constexpr (Mode == ArithmeticMode::BoundedCertification)
-        {
-            if (input.arithmetic_mode != data.options.arithmetic_mode)
-                throw std::invalid_argument("Finite VoF face control arithmetic mode differs.");
-        }
+        if (input.arithmetic_mode != data.options.arithmetic_mode)
+            throw std::invalid_argument("Finite VoF face control arithmetic mode differs.");
         const auto value = Math::make_value(data.options.arithmetic_mode, input.value, input.absolute_error);
         if (!std::isfinite(value.value) || !std::isfinite(value.absolute_error) || value.absolute_error < 0 ||
             !flux.emplace(face.face, value).second)
@@ -237,6 +234,16 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 }
             });
         return trial;
+    }
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        if (homogeneous_transport_eligible())
+        {
+            auto algebraic = plan_face_transport_impl(face_volume, timestep, {1, 1}, 0, true, trial.transaction_);
+            algebraic.finite_trajectories_ = std::move(trial.finite_trajectories_);
+            algebraic.validate_retained_algebraic_payload();
+            return algebraic;
+        }
     }
     PLIC::GeometryLimits registry_limits = geometry_limits(Mode, limit);
     registry_limits.maximum_pair_tests = data.options.sweep.maximum_pair_tests;

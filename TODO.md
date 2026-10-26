@@ -1628,12 +1628,18 @@ its explicit fixed-mesh support and rejection boundaries.
 `SweptPartition` uses authenticated node trajectories and corrected signed
 swept tetrahedra. The following repairs target `Ordinary` first; preserve
 explicit BoundedCertification and Exact paths and their separate qualification.
-Stage 1 establishes the shared contract without changing transport numerics.
+Stage 1 establishes the shared contract. Stage 2 adds the explicit homogeneous
+implicit-upwind specialization while retaining the general swept path.
 
-- [ ] **Repair Stage 2 — homogeneous transport:** bypass swept construction in
-      homogeneous regions using algebraic canonical face-volume transport and
-      adjacent-cell upwind momentum. Retain independently positive traces;
-      qualify nonconstant velocity as well as constant-velocity preservation.
+- [x] **Repair Stage 2 — homogeneous transport:** bypass swept construction in
+      interface-free Ordinary steps using algebraic canonical face-volume transport
+      and adjacent-cell implicit upwind momentum. Select the face-only solver
+      entry before unused nodal interpolation; retain face-based stability gates
+      and authenticate all supplied controls on either public entry.
+      Preserve independent traces, absent-phase uncertainty and pure-fit evidence.
+      Check nonconstant velocity against an independent implicit circulation
+      solution, pure gas/liquid motion and unchanged hydrostatic gates, including
+      empty MPI owners. Local bulk regions inside mixed domains remain Stage 3.
 - [ ] **Repair Stage 3 — interface-local transport:** make one canonical signed
       face ledger authoritative for phase/momentum updates, with shared
       conservative flux correction and old-donor/endpoint/history budgets.

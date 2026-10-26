@@ -56,6 +56,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
       PROPERTIES LABELS "vof\\;exact\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testGeneralVoFSolver")
     simplefluid_discover_tests(${TEST_NAME} PROPERTIES LABELS "vof\\;general_mesh\\;integration" TIMEOUT 1800)
+  elseif(TEST_NAME STREQUAL "testGeneralVoFHomogeneousFlow")
+    simplefluid_discover_tests(${TEST_NAME}
+      PROPERTIES LABELS "vof\\;general_mesh\\;homogeneous\\;conservation\\;transaction" TIMEOUT 180)
   elseif(TEST_NAME STREQUAL "testVerificationCases")
     simplefluid_discover_tests(
       ${TEST_NAME}
@@ -793,6 +796,17 @@ foreach(_semi_ranks IN ITEMS 2 4)
 endforeach()
 
 foreach(PROCS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFHomogeneousFlow_${PROCS}procs
+    TARGET testGeneralVoFHomogeneousFlow PROCS ${PROCS}
+    LABELS "mpi;vof;homogeneous;conservation;transaction;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFHomogeneousMomentum_${PROCS}procs
+    TARGET testConservativeVoFTransport PROCS ${PROCS}
+    ARGS "--gtest_filter=ConservativeVoFTransportTest.HomogeneousSweptLedgerMatchesIndependentImplicitCirculation"
+    LABELS "mpi;vof;homogeneous;momentum;conservation;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFHomogeneousHydrostatic_${PROCS}procs
+    TARGET testGeneralVoFSolver PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFSolverTest.PhysicalHydrostaticPressureBalancesSkewNativeCentersOverFourSteps"
+    LABELS "mpi;vof;homogeneous;hydrostatic;empty_rank" TIMEOUT 180)
   simplefluid_add_mpi_test(NAME GeneralVoFFaceFlow_${PROCS}procs
     TARGET testGeneralVoFFaceFlow PROCS ${PROCS} ARGS "--gtest_filter=GeneralVoFFaceFlow.*")
   simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_${PROCS}procs

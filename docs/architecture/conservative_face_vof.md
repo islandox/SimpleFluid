@@ -3,6 +3,9 @@
 The [shared transport contract](general_vof_transport.md) classifies both backends
 below as algebraic face-volume transport and distinguishes them from geometric
 swept-tetrahedra transport. A geometric PLIC candidate does not change that family.
+The Ordinary swept backend also reuses the donor-cell stream/publication provider
+for its authenticated interface-free specialization; its configured backend stays
+`SweptPartition` and its prepared family records the algebraic execution.
 
 The opt-in `GeneralVoFTransportBackend::DonorCell` and `GeometricFace` backends
 advance phase inventories on a fixed native mesh without swept solids,
