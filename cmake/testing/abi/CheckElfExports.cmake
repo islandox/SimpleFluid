@@ -220,6 +220,8 @@ string(REPLACE "\n" ";"
        simplefluid_demangled_symbols "${simplefluid_demangled_symbols}")
 
 set(simplefluid_forbidden_api_patterns
+    # Experimental source-free VoF must not restore the unmigrated reacting API.
+    "^SimpleFluid::ReactingVoFCoupler::"
     "SimpleFluid::PrescribedHeatSource<.*>[ ]*::require_finite[(]"
     # Removed source-specific APIs have no compatibility/export aliases.
     "^SimpleFluid::(FissionPowerSource|RadiolyticGasModel|RadiolyticVoFCoupler|RadiolyticBubbleKinetics|DelayedNeutronPrecursorModel)(<|::)"
@@ -377,7 +379,7 @@ macro(simplefluid_require_exact_api simplefluid_pattern simplefluid_count)
          "${simplefluid_count}")
 endmacro()
 
-# VoF configuration currently rejects ON. Disabled builds
+# VoF remains experimental and opt-in. Disabled builds
 # must contain no solver/controller/caloric exports from that path; reusable FVM
 # geometry and transport kernels are audited separately in their owning library.
 if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
@@ -400,17 +402,6 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     "^SimpleFluid::AdaptiveVoFSolver::state_revision[(][)] const$"
     "^SimpleFluid::AdaptiveVoFSolver::pending_representation_relaxation[(][)] const$"
     "^SimpleFluid::AdaptiveVoFSolver::LowMachTrial::representation_diagnostics[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::ReactingVoFCoupler[(]"
-    "^SimpleFluid::ReactingVoFCoupler::preview[(]"
-    "^SimpleFluid::ReactingVoFCoupler::commit[(]"
-    "^SimpleFluid::ReactingVoFCoupler::checkpoint[(][)]$"
-    "^SimpleFluid::ReactingVoFCoupler::Trial::state[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::request_births[(]"
-    "^SimpleFluid::ReactingVoFCoupler::birth_registry[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::conversion_history[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::inspect_representation[(][)] const$"
-    "^SimpleFluid::ReactingVoFCoupler::preview_representation[(][)]$"
-    "^SimpleFluid::ReactingVoFCoupler::Trial::representation[(][)] const$"
     "^SimpleFluid::VoF::LiquidThermodynamics::evaluate[(]double, double[)] const$"
     "^SimpleFluid::VoF::make_linear_compressible_liquid[(]"
 )

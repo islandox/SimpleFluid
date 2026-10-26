@@ -2,9 +2,10 @@
 
 **VoF disabled by default:** VoF solvers are unqualified and excluded from the
 supported general multispecies refactor. `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON`
-opts into the unqualified pre-refactor VoF implementation, including its tests
-and applications. The deferred multispecies VoF migration is not enabled by this
-option. Reusable lower-level FVM and geometry mathematics remain available.
+opts into source-free VoF development and its qualification fixtures. The
+unmigrated `ReactingVoFCoupler` and fixtures that construct it remain excluded;
+the reacting contracts below are retained design history, not enabled behavior.
+Reusable lower-level FVM and geometry mathematics remain available.
 
 The [general reacting-gas design](reacting_gas_sources.md) separates supplied
 reaction rates, species stoichiometry, finite reactants, and net reaction

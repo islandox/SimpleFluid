@@ -3,6 +3,8 @@
  */
 #include "geometry/unitTests/plic_analytic_test_geometry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/ConstructionRegistry.hh"
+#include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include <algorithm>
@@ -13,6 +15,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <sstream>
 #include <type_traits>
 
 namespace
@@ -493,6 +496,461 @@ TEST(BoundedConvexGeometryTest, OrdinaryGeometryRetainsFiniteDomainTopologyAndRe
     EXPECT_THROW((void) cube(), std::invalid_argument);
 }
 
+TEST(BoundedConvexGeometryTest, OrdinaryFinalizationKeepsContactsDistinctFromPositiveSlices)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    const auto parent = Ordinary::box({0, 0, 0}, {1, 1, 1});
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 3> normals{{{1, 0, 0}, {1, 1, 0}, {1, 1, 1}}};
+    const std::array<std::size_t, 3> dimensions{4, 2, 1};
+    const double width = 0x1p-20;
+    for (std::size_t dimension = 0; dimension < normals.size(); ++dimension)
+    {
+        SCOPED_TRACE(dimension);
+        const auto contact = parent->clip({normals[dimension], {}, 0});
+        EXPECT_FALSE(contact.inside);
+        ASSERT_TRUE(contact.outside);
+        EXPECT_EQ(contact.outside->storage_identity(), parent->storage_identity());
+        EXPECT_EQ(contact.section.vertices.size(), dimensions[dimension]);
+        EXPECT_EQ(contact.section.area.value, dimension == 0 ? 1 : 0);
+
+        const auto slice = parent->clip({normals[dimension], {}, width});
+        ASSERT_TRUE(slice.inside);
+        ASSERT_TRUE(slice.outside);
+        long double expected = width;
+        if (dimension == 1)
+            expected = static_cast<long double>(width) * width / 2;
+        if (dimension == 2)
+            expected = static_cast<long double>(width) * width * width / 6;
+        EXPECT_GT(slice.inside->volume().value, 0);
+        EXPECT_NEAR(slice.inside->volume().value, expected, expected * 2e-17L);
+        EXPECT_GT(slice.section.area.value, 0);
+        auto reverse_normal = normals[dimension];
+        for (auto& coordinate : reverse_normal)
+            coordinate = -coordinate;
+        const auto reversed = parent->clip({reverse_normal, {}, -width});
+        ASSERT_TRUE(reversed.outside);
+        EXPECT_EQ(reversed.outside->volume().value, slice.inside->volume().value);
+        const std::array pieces{slice.inside, slice.outside};
+        EXPECT_NO_THROW(parent->certify_fragment_partition(pieces));
+    }
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryFinalizedCapsConformAcrossPermutationsAndReplay)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    std::vector<SimpleFluid::PLIC::GeometryPoint> vertices;
+    for (unsigned i = 0; i < 8; ++i)
+        vertices.push_back({double(i & 1), double((i >> 1) & 1), double((i >> 2) & 1)});
+    vertices.push_back({0, 0, .5});
+    Faces faces{{0, 8, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4, 8}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}};
+    const SimpleFluid::PLIC::GeometryHalfspace plane{{1, -1, 0}, {}, 0};
+    const auto check_closed_shell = [](const auto& child)
+    {
+        std::map<std::pair<std::size_t, std::size_t>, std::pair<unsigned, int>> edges;
+        for (const auto& face : child.faces())
+        {
+            EXPECT_GE(face.size(), 3u);
+            for (std::size_t i = 0; i < face.size(); ++i)
+            {
+                const auto a = face[i], b = face[(i + 1) % face.size()];
+                EXPECT_NE(a, b);
+                auto& edge = edges[std::minmax(a, b)];
+                ++edge.first;
+                edge.second += a < b ? 1 : -1;
+            }
+        }
+        for (const auto& [key, edge] : edges)
+        {
+            EXPECT_EQ(edge.first, 2u);
+            EXPECT_EQ(edge.second, 0);
+        }
+    };
+    for (unsigned permutation = 0; permutation < 3; ++permutation)
+    {
+        SCOPED_TRACE(permutation);
+        const auto parent = Ordinary::make(vertices, faces);
+        const auto split = parent->clip(plane);
+        ASSERT_TRUE(split.inside);
+        ASSERT_TRUE(split.outside);
+        EXPECT_EQ(split.inside->volume().value, .5L);
+        EXPECT_EQ(split.outside->volume().value, .5L);
+        EXPECT_NEAR(split.section.area.value, std::sqrt(2.L), 2e-18L);
+        const std::array children{split.inside, split.outside};
+        EXPECT_NO_THROW(parent->certify_fragment_partition(children));
+        std::array<std::set<std::array<long double, 3>>, 2> caps;
+        for (std::size_t side = 0; side < children.size(); ++side)
+        {
+            check_closed_shell(*children[side]);
+            for (const auto& point : children[side]->points())
+                if (point.value[0] == point.value[1])
+                    caps[side].insert(point.value);
+        }
+        EXPECT_EQ(caps[0], caps[1]);
+        EXPECT_EQ(caps[0].size(), 5u);
+        const auto repeated = split.inside->clip(plane);
+        ASSERT_TRUE(repeated.inside);
+        EXPECT_FALSE(repeated.outside);
+        EXPECT_EQ(repeated.inside->storage_identity(), split.inside->storage_identity());
+        const SimpleFluid::PLIC::GeometryPacketContext context{{41, 43, 47, permutation}};
+        const std::array roots{parent};
+        for (const auto& child : children)
+        {
+            const auto restored = Ordinary::decode(child->encode(context), context, roots);
+            check_closed_shell(*restored);
+            EXPECT_EQ(restored->volume().value, child->volume().value);
+            const auto before = child->moments(), after = restored->moments();
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(after.first_moment[axis].value, before.first_moment[axis].value);
+            EXPECT_EQ(restored->clip(plane).section.vertices.size(), split.section.vertices.size());
+        }
+        std::reverse(vertices.begin(), vertices.end());
+        for (auto& face : faces)
+        {
+            for (auto& index : face)
+                index = vertices.size() - 1 - index;
+            std::rotate(face.begin(), face.begin() + 1, face.end());
+        }
+        std::rotate(faces.begin(), faces.begin() + 1, faces.end());
+    }
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryFinalizationPreservesInsideOnlyMeasurementAndAtomicRejection)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    const std::array<SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>, 4> points{
+        SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>({0, 0, 0}),
+        SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>({1, 0, 0}),
+        SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>({0, 1, 0}),
+        SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>({0, 0, 1})};
+    const auto parent = Ordinary::tetrahedron(points);
+    const double height = 1 - 0x1p-20;
+    const auto cutter = Ordinary::box({0, 0, 0}, {1, height, 1});
+    const auto before = parent->moments();
+    SimpleFluid::PLIC::reset_geometry_statistics();
+    const auto intersection = parent->intersect(*cutter);
+    ASSERT_TRUE(intersection);
+    EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().volume_evaluations, 1u);
+    SimpleFluid::PLIC::reset_geometry_statistics();
+    const auto split = parent->clip({{0, 1, 0}, {}, height}, false);
+    ASSERT_TRUE(split.inside);
+    ASSERT_TRUE(split.outside);
+    EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().volume_evaluations, 2u);
+    EXPECT_EQ(intersection->volume().value, split.inside->volume().value);
+    auto limits = geometry_limits(ArithmeticMode::Ordinary);
+    limits.maximum_pair_tests = 1;
+    {
+        SimpleFluid::PLIC::details::Operation scope(limits);
+        try
+        {
+            (void) parent->clip({{1, 1, 1}, {}, .5});
+            FAIL() << "Resource exhaustion must remain fatal during finalization.";
+        }
+        catch (const SimpleFluid::PLIC::GeometryError& error)
+        {
+            EXPECT_EQ(error.code(), SimpleFluid::PLIC::GeometryErrorCode::ResourceLimit);
+            EXPECT_FALSE(error.recoverable_trial());
+        }
+    }
+    EXPECT_THROW((void) parent->clip({{0, 0, 0}, {}, 0}), std::invalid_argument);
+    EXPECT_EQ(parent->volume().value, before.volume.value);
+    const auto after = parent->moments();
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(after.first_moment[axis].value, before.first_moment[axis].value);
+    const auto counters = SimpleFluid::PLIC::geometry_statistics();
+    EXPECT_EQ(counters.interval_operations, 0u);
+    EXPECT_EQ(counters.exact_predicates, 0u);
+    EXPECT_EQ(counters.rational_constructions, 0u);
+    EXPECT_EQ(counters.rational_measures, 0u);
+    EXPECT_EQ(counters.rational_ledgers, 0u);
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryCapturedStrictCornerRepairRetainsPositiveInteriors)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    using Point = SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>;
+    // Valid parent and cut from the hydrostatic intersection capture. The
+    // rounded failed child's coordinates are deliberately not an input oracle.
+    const SimpleFluid::PLIC::GeometryPoint origin{1.4500000000000002, 1.5, .5};
+    const std::array points{Point({-1.11022302462515654042e-16L, 0, 0}),
+        Point({-6.63531729561128713613e-17L, -1.45933612416548896817e-16L, 0}),
+        Point({.149999999999999955743L, .499999999999999854066L, -.5L}),
+        Point({-.150000000000000088666L, -.500000000000000145934L, -.5L})};
+    const Faces faces{{1, 2, 0}, {3, 1, 0}, {2, 3, 0}, {3, 2, 1}};
+    // The two pairs of vertices share z=0 and z=-.5. Their stable planar
+    // determinant independently gives the original parent volume. For a
+    // retained tetrahedral corner its fraction is product(a/(a+b_i)).
+    const long double determinant =
+        (points[1].value[0] - points[0].value[0]) * (points[3].value[1] - points[2].value[1]) -
+        (points[1].value[1] - points[0].value[1]) * (points[3].value[0] - points[2].value[0]);
+    const long double parent_volume = std::abs(points[2].value[2] * determinant) / 6;
+    const long double penetration = -(points[3].value[1] + .5L);
+    ASSERT_GT(parent_volume, 0x1p-57L);
+    ASSERT_LT(parent_volume, 0x1p-56L);
+    ASSERT_GT(penetration, 0x1p-53L);
+    ASSERT_LT(penetration, 0x1p-52L);
+    long double analytic_corner = parent_volume;
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+        const long double denominator = penetration + points[i].value[1] + .5L;
+        ASSERT_GT(denominator, .25L);
+        ASSERT_LT(denominator, 2.L);
+        analytic_corner *= penetration / denominator;
+    }
+    // These power-of-two bounds follow from the inequalities above. They
+    // check the tiny fragment's scale without inventing relative-tip accuracy
+    // or replacing the unchanged parent-relative production closure gate.
+    ASSERT_GT(analytic_corner, 0x1p-219L);
+    ASSERT_LT(analytic_corner, 0x1p-206L);
+    auto permuted_points = points;
+    auto permuted_faces = faces;
+    for (unsigned permutation = 0; permutation < 2; ++permutation)
+    {
+        SCOPED_TRACE(permutation);
+        const auto parent = Ordinary::make_local(origin, permuted_points, permuted_faces);
+        const auto before = parent->moments();
+        ASSERT_GT(before.volume.value, 0);
+        const auto split = parent->clip({{0, 1, 0}, origin, -.5});
+        ASSERT_TRUE(split.inside);
+        ASSERT_TRUE(split.outside);
+        EXPECT_GT(split.inside->volume().value, 0x1p-219L);
+        EXPECT_LT(split.inside->volume().value, 0x1p-206L);
+        EXPECT_GT(split.outside->volume().value, 0);
+        EXPECT_GT(split.section.area.value, 0);
+        EXPECT_EQ(split.section.vertices.size(), 3u);
+        const std::array pieces{split.inside, split.outside};
+        const auto closure_budget = before.volume.value * 8e-15L;
+        EXPECT_NEAR(pieces[0]->volume().value + pieces[1]->volume().value, before.volume.value, closure_budget);
+        const std::array child_moments{pieces[0]->moments(origin), pieces[1]->moments(origin)};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            long double length = 0;
+            for (const auto& point : points)
+                length = std::max(length, std::abs(point.value[axis]));
+            EXPECT_NEAR(child_moments[0].first_moment[axis].value + child_moments[1].first_moment[axis].value,
+                before.first_moment[axis].value, closure_budget * length);
+        }
+        std::ostringstream observed, analytic;
+        observed.precision(std::numeric_limits<long double>::max_digits10);
+        analytic.precision(std::numeric_limits<long double>::max_digits10);
+        observed << pieces[0]->volume().value;
+        analytic << analytic_corner;
+        RecordProperty("measured_corner_volume_" + std::to_string(permutation), observed.str());
+        RecordProperty("analytic_corner_volume", analytic.str());
+        EXPECT_NO_THROW(parent->certify_fragment_partition(pieces));
+        const auto reverse = parent->clip({{0, -1, 0}, origin, .5});
+        ASSERT_TRUE(reverse.outside);
+        EXPECT_EQ(reverse.outside->volume().value, split.inside->volume().value);
+        const SimpleFluid::PLIC::GeometryPacketContext context{{151, 157, 163, permutation + 1}};
+        const std::array roots{parent};
+        SimpleFluid::PLIC::ConstructionRegistry<ArithmeticMode::Ordinary> registry(context);
+        registry.register_native(0, permutation, parent);
+        registry.register_plane(0, {{0, 1, 0}, origin, -.5});
+        for (const auto& child : pieces)
+        {
+            const auto moments = child->moments();
+            const std::array restored{Ordinary::decode(child->encode(context), context, roots),
+                Ordinary::decode(child->encode(registry), registry)};
+            for (const auto& replay : restored)
+            {
+                EXPECT_EQ(replay->volume().value, child->volume().value);
+                const auto replayed_moments = replay->moments();
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                {
+                    EXPECT_TRUE(std::isfinite(moments.first_moment[axis].value));
+                    EXPECT_EQ(replayed_moments.first_moment[axis].value, moments.first_moment[axis].value);
+                }
+            }
+        }
+        EXPECT_EQ(parent->volume().value, before.volume.value);
+        const auto after = parent->moments();
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(after.first_moment[axis].value, before.first_moment[axis].value);
+        std::reverse(permuted_points.begin(), permuted_points.end());
+        for (auto& face : permuted_faces)
+            for (auto& vertex : face)
+                vertex = permuted_points.size() - 1 - vertex;
+        std::reverse(permuted_faces.begin(), permuted_faces.end());
+    }
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryCapturedThinEdgeRepairRetainsMeasuredWedge)
+{
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    using Point = SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>;
+    const SimpleFluid::PLIC::GeometryPoint origin{1.4500000000000002, 1.5, .5};
+    std::array points{Point({-1.11022302462515654042e-16L, 0, 0}),
+        Point({-6.63531729561128713613e-17L, -1.45933612416548896817e-16L, 0}),
+        Point({-.150000000000000088666L, -.500000000000000145934L, -.5L}),
+        Point({-.150000000000000088666L, -.500000000000000145934L, .5L})};
+    Faces faces{{1, 2, 0}, {3, 1, 0}, {2, 3, 0}, {3, 2, 1}};
+    // Equal negative distances at the retained edge give volume fraction
+    // t0*t1*(3-t0-t1), where ti=a/(a+bi). The independent parent determinant
+    // uses its vertical edge and the short opposite edge without cancellation.
+    const long double parent_volume =
+        std::abs((points[1].value[0] - points[0].value[0]) * (points[2].value[1] - points[0].value[1]) -
+                 (points[1].value[1] - points[0].value[1]) * (points[2].value[0] - points[0].value[0])) /
+        6;
+    const long double a = -(points[2].value[1] + .5L);
+    ASSERT_GT(parent_volume, 0x1p-57L);
+    ASSERT_LT(parent_volume, 0x1p-56L);
+    ASSERT_GT(a, 0x1p-53L);
+    ASSERT_LT(a, 0x1p-52L);
+    std::array<long double, 2> fraction;
+    for (std::size_t i = 0; i < 2; ++i)
+    {
+        const long double denominator = a + points[i].value[1] + .5L;
+        ASSERT_GT(denominator, .25L);
+        ASSERT_LT(denominator, 2.L);
+        fraction[i] = a / denominator;
+        ASSERT_LT(fraction[i], 0x1p-50L);
+    }
+    const auto analytic_wedge = parent_volume * fraction[0] * fraction[1] * (3 - fraction[0] - fraction[1]);
+    ASSERT_GT(analytic_wedge, 0x1p-165L);
+    ASSERT_LT(analytic_wedge, 0x1p-154L);
+    // Reproduce the actual captured donor and its rounded native y=1 plane.
+    // A differently scaled input plane need not give bitwise-equal Ordinary
+    // crossings; request-shape comparisons below use this same donor root.
+    const std::array<SimpleFluid::PLIC::GeometryPoint, 8> donor_vertices{
+        {{1, 0, 0}, {2, 0, 0}, {2.3, 1, 0}, {1.3, 1, 0}, {1, 0, 1}, {2, 0, 1}, {2.3, 1, 1}, {1.3, 1, 1}}};
+    const auto cutter = Ordinary::make(
+        donor_vertices, {{3, 2, 1, 0}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}});
+    const auto broad_cutter = Ordinary::box({0, 0, -1}, {2, 1, 2});
+    for (unsigned permutation = 0; permutation < 2; ++permutation)
+    {
+        SCOPED_TRACE(permutation);
+        const auto parent = Ordinary::make_local(origin, points, faces);
+        const auto before = parent->moments(origin);
+        const auto split = parent->clip({{0, 1, 0}, origin, -.5});
+        ASSERT_TRUE(split.inside);
+        ASSERT_TRUE(split.outside);
+        EXPECT_EQ(split.inside->points().size(), 6u);
+        EXPECT_EQ(split.inside->faces().size(), 5u);
+        EXPECT_GT(split.inside->volume().value, 0x1p-165L);
+        EXPECT_LT(split.inside->volume().value, 0x1p-154L);
+        EXPECT_EQ(split.section.vertices.size(), 4u);
+        EXPECT_GT(split.section.area.value, 0);
+        const auto allowance = before.volume.value * 8e-15L;
+        EXPECT_NEAR(split.inside->volume().value + split.outside->volume().value, before.volume.value, allowance);
+        const std::array children{split.inside, split.outside};
+        const std::array moments{children[0]->moments(origin), children[1]->moments(origin)};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            long double length = 0;
+            for (const auto& point : points)
+                length = std::max(length, std::abs(point.value[axis]));
+            EXPECT_NEAR(moments[0].first_moment[axis].value + moments[1].first_moment[axis].value,
+                before.first_moment[axis].value, allowance * length);
+        }
+        EXPECT_NO_THROW(parent->certify_fragment_partition(children));
+        const auto reverse = parent->clip({{0, -1, 0}, origin, .5});
+        ASSERT_TRUE(reverse.outside);
+        EXPECT_EQ(reverse.outside->volume().value, split.inside->volume().value);
+        SimpleFluid::PLIC::reset_geometry_statistics();
+        const auto native_split = parent->clip_by_face(*cutter, 4, true);
+        ASSERT_TRUE(native_split.inside);
+        ASSERT_TRUE(native_split.outside);
+        EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().volume_evaluations, 4u);
+        EXPECT_GT(native_split.inside->volume().value, 0x1p-165L);
+        EXPECT_LT(native_split.inside->volume().value, 0x1p-154L);
+        EXPECT_NEAR(
+            native_split.inside->volume().value + native_split.outside->volume().value, before.volume.value, allowance);
+        const std::array native_moments{native_split.inside->moments(origin), native_split.outside->moments(origin)};
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            long double length = 0;
+            for (const auto& point : points)
+                length = std::max(length, std::abs(point.value[axis]));
+            EXPECT_NEAR(native_moments[0].first_moment[axis].value + native_moments[1].first_moment[axis].value,
+                before.first_moment[axis].value, allowance * length);
+        }
+        SimpleFluid::PLIC::reset_geometry_statistics();
+        const auto inside_only = parent->intersect(*cutter);
+        ASSERT_TRUE(inside_only);
+        EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().volume_evaluations, 2u);
+        EXPECT_GT(inside_only->volume().value, 0x1p-165L);
+        EXPECT_LT(inside_only->volume().value, 0x1p-154L);
+        EXPECT_EQ(inside_only->volume().value, native_split.inside->volume().value);
+        // Ordinary's existing parent-relative allowance controls this
+        // differently represented plane. Its positive rounded shell has no
+        // tiny-feature relative-accuracy qualification.
+        const auto broad_inside = parent->intersect(*broad_cutter);
+        ASSERT_TRUE(broad_inside);
+        EXPECT_GT(broad_inside->volume().value, 0);
+        EXPECT_LE(std::abs(broad_inside->volume().value - analytic_wedge), allowance);
+        const SimpleFluid::PLIC::GeometryPacketContext context{{167, 173, 179, permutation + 1}};
+        SimpleFluid::PLIC::ConstructionRegistry<ArithmeticMode::Ordinary> registry(context);
+        registry.register_native(0, permutation, parent);
+        registry.register_native(1, 0, cutter);
+        registry.register_plane(0, {{0, 1, 0}, origin, -.5});
+        for (const auto& child : {split.inside, native_split.inside, inside_only})
+        {
+            const auto replay = Ordinary::decode(child->encode(registry), registry);
+            EXPECT_EQ(replay->volume().value, child->volume().value);
+            const auto replayed_moments = replay->moments(origin), original_moments = child->moments(origin);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(replayed_moments.first_moment[axis].value, original_moments.first_moment[axis].value);
+        }
+        std::ostringstream measured, analytic, broad;
+        measured.precision(std::numeric_limits<long double>::max_digits10);
+        analytic.precision(std::numeric_limits<long double>::max_digits10);
+        broad.precision(std::numeric_limits<long double>::max_digits10);
+        measured << split.inside->volume().value;
+        analytic << analytic_wedge;
+        broad << broad_inside->volume().value;
+        RecordProperty("measured_wedge_volume_" + std::to_string(permutation), measured.str());
+        RecordProperty("analytic_wedge_volume", analytic.str());
+        RecordProperty("broad_plane_nominal_volume_" + std::to_string(permutation), broad.str());
+        EXPECT_EQ(parent->volume().value, before.volume.value);
+        const auto after = parent->moments(origin);
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            EXPECT_EQ(after.first_moment[axis].value, before.first_moment[axis].value);
+        std::reverse(points.begin(), points.end());
+        for (auto& face : faces)
+            for (auto& vertex : face)
+                vertex = points.size() - 1 - vertex;
+        std::reverse(faces.begin(), faces.end());
+    }
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryCapturedCornerRefusesLossyParentReframing)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured nonpositive shell uses a 64-bit wider-FP significand.";
+    using Ordinary = Geometry<ArithmeticMode::Ordinary>;
+    using Point = SimpleFluid::PLIC::Point<ArithmeticMode::Ordinary>;
+    const SimpleFluid::PLIC::GeometryPoint origin{1.4500000000000002, 1.5, .5};
+    std::array points{Point({-1.11022302462515654042e-16L, 0, 0}),
+        Point({-6.63531729561128713613e-17L, -1.45933612416548896817e-16L, 0}),
+        Point({.149999999999999955743L, .499999999999999854066L, -.5L}),
+        Point({-.150000000000000088666L, -.500000000000000145934L, -.5L})};
+    points[0].value[0] = std::nextafter(points[0].value[0], 0.L);
+    const auto candidate_origin = static_cast<double>(static_cast<long double>(origin[0]) + points[3].value[0]);
+    const long double delta = static_cast<long double>(origin[0]) - candidate_origin;
+    const long double x = points[0].value[0], sum = x + delta, recovered_delta = sum - x;
+    const long double residual = (x - (sum - recovered_delta)) + (delta - recovered_delta);
+    ASSERT_NE(residual, 0);
+    const auto parent = Ordinary::make_local(origin, points, {{1, 2, 0}, {3, 1, 0}, {2, 3, 0}, {3, 2, 1}});
+    const auto before = parent->moments();
+    ASSERT_GT(before.volume.value, 0);
+    SimpleFluid::PLIC::reset_geometry_statistics();
+    try
+    {
+        (void) parent->clip({{0, 1, 0}, origin, -.5}, false);
+        FAIL() << "A rounded change to an authoritative parent cannot authorize the retry.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_TRUE(
+            std::string(error.what()).starts_with("Ordinary FP geometry: computed signed volume is not positive"));
+        RecordProperty("refused_corner_result", error.what());
+    }
+    EXPECT_EQ(SimpleFluid::PLIC::geometry_statistics().volume_evaluations, 2u);
+    EXPECT_EQ(parent->volume().value, before.volume.value);
+    const auto after = parent->moments();
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(after.first_moment[axis].value, before.first_moment[axis].value);
+}
+
 struct OrdinarySharedCornerFixture
 {
     GeometryPtr<ArithmeticMode::Ordinary> parent, cutter;
@@ -661,6 +1119,536 @@ TEST(BoundedConvexGeometryTest, OrdinarySourcePlaneIdentityRejectsLookAlikesAndU
     capped.maximum_pair_tests = 1;
     arithmetic::Operation limited(capped);
     EXPECT_THROW((void) ordinary::same_source_plane(a, b), std::invalid_argument);
+}
+
+TEST(BoundedConvexGeometryTest, OrdinarySourceWitnessRetainsActualResidualsAndExactScales)
+{
+    namespace ordinary = SimpleFluid::PLIC::details::ordinary_kernel;
+    namespace witness = ordinary::source_witness;
+    SimpleFluid::PLIC::details::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
+    ASSERT_TRUE(SimpleFluid::PLIC::certification_environment());
+    EXPECT_EQ(witness::sum_gap(1, .5L, 1.5L), 0);
+    EXPECT_EQ(witness::sum_gap(1, -1, 0), 0);
+    EXPECT_EQ(witness::product_gap(.5L, 2, 1), 0);
+    EXPECT_EQ(witness::scale_gap(1.25L, 20, std::scalbn(1.25L, 20)), 0);
+    const auto small_addend = std::scalbn(1.L, -std::numeric_limits<long double>::digits - 1);
+    const auto sum = 1.L + small_addend;
+    EXPECT_EQ(sum, 1);
+    EXPECT_EQ(witness::sum_gap(1, small_addend, sum), small_addend);
+    const int shift = (std::numeric_limits<long double>::digits + 2) / 2;
+    const long double a = 1 + std::scalbn(1.L, -shift), b = 1 - std::scalbn(1.L, -shift);
+    const long double product = a * b, residual = std::scalbn(1.L, -2 * shift);
+    EXPECT_EQ(product, 1);
+    EXPECT_EQ(witness::product_gap(a, b, product), residual);
+    EXPECT_TRUE(std::isinf(witness::sum_gap(1, 1, 1)));
+    EXPECT_TRUE(std::isinf(witness::product_gap(1, 1, 0)));
+    EXPECT_TRUE(std::isinf(witness::scale_gap(1, 1, 1)));
+    EXPECT_TRUE(std::isinf(witness::sum_gap(std::numeric_limits<long double>::infinity(), 0, 0)));
+    EXPECT_TRUE(std::isinf(witness::product_gap(std::numeric_limits<long double>::quiet_NaN(), 0, 0)));
+    EXPECT_TRUE(std::isinf(witness::scale_gap(1, std::numeric_limits<int>::min(), 0)));
+}
+
+TEST(BoundedConvexGeometryTest, OrdinarySourceWitnessKeepsUnderflowAndInputUncertaintyBounded)
+{
+    namespace ordinary = SimpleFluid::PLIC::details::ordinary_kernel;
+    namespace witness = ordinary::source_witness;
+    SimpleFluid::PLIC::details::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
+    ASSERT_TRUE(SimpleFluid::PLIC::certification_environment());
+    const auto tiny = std::numeric_limits<long double>::denorm_min();
+    ASSERT_GT(tiny, 0);
+    EXPECT_GE(witness::product_gap(tiny, .5L, tiny * .5L), tiny);
+    EXPECT_GE(witness::scale_gap(tiny, -1, std::scalbn(tiny, -1)), tiny);
+    const SimpleFluid::PLIC::details::Frame frame{{1, 2, 4}, 1};
+    SimpleFluid::PLIC::DynamicPoint original({2, 4, 8}, {}, ArithmeticMode::Ordinary);
+    SimpleFluid::PLIC::DynamicGeometryAccess::seal_represented_source(original);
+    const auto identity = SimpleFluid::PLIC::DynamicGeometryAccess::identity(original);
+    SimpleFluid::PLIC::DynamicPoint relative({1, 2, 4}, {}, ArithmeticMode::Ordinary);
+    ordinary::Point stored{ordinary::Scalar(.5L), ordinary::Scalar(1), ordinary::Scalar(2)};
+    const auto exact = ordinary::source_point_error(relative, identity.get(), frame, stored, false);
+    ASSERT_TRUE(exact);
+    for (const auto error : *exact)
+        EXPECT_EQ(error, 0);
+    relative.absolute_error[0] = .125L;
+    const auto uncertain = ordinary::source_point_error(relative, nullptr, frame, stored, true);
+    ASSERT_TRUE(uncertain);
+    EXPECT_GE((*uncertain)[0], .0625L);
+    relative.absolute_error[0] = -1;
+    EXPECT_FALSE(ordinary::source_point_error(relative, nullptr, frame, stored, true));
+    relative = SimpleFluid::PLIC::DynamicPoint({tiny, 0, 0}, {}, ArithmeticMode::Ordinary);
+    stored = {ordinary::Scalar(0), ordinary::Scalar(0), ordinary::Scalar(0)};
+    const auto underflow = ordinary::source_point_error(relative, nullptr, {{}, 1}, stored, true);
+    ASSERT_TRUE(underflow);
+    EXPECT_GE((*underflow)[0], tiny);
+    const auto previous_rounding = std::fegetround();
+    ASSERT_EQ(std::fesetround(FE_DOWNWARD), 0);
+    const auto unsupported = witness::sum_gap(1, 1, 2);
+    EXPECT_EQ(std::fesetround(previous_rounding), 0);
+    EXPECT_TRUE(std::isinf(unsupported));
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryExactSourceWitnessResolvesIndependentNearlyCoplanarNormals)
+{
+    namespace ordinary = SimpleFluid::PLIC::details::ordinary_kernel;
+    SimpleFluid::PLIC::reset_geometry_statistics();
+    SimpleFluid::PLIC::details::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
+    ASSERT_TRUE(SimpleFluid::PLIC::certification_environment());
+    const auto epsilon = 0x1p-100L;
+    std::array<ordinary::Point, 3> triangle;
+    triangle[0] = {ordinary::Scalar(0), ordinary::Scalar(0), ordinary::Scalar(0)};
+    triangle[1] = {ordinary::Scalar(-1), ordinary::Scalar(1), ordinary::Scalar(0)};
+    triangle[2] = {ordinary::Scalar(0), ordinary::Scalar(-epsilon), ordinary::Scalar(1)};
+    const ordinary::Point normal{ordinary::Scalar(1), ordinary::Scalar(1), ordinary::Scalar(epsilon)};
+    const auto exact = ordinary::source_normal_error(triangle, {}, normal);
+    ASSERT_TRUE(exact);
+    EXPECT_EQ(*exact, 0);
+    ordinary::Plane a, b, c;
+    a.normal[0] = ordinary::StorageScalar(1);
+    b.normal[1] = ordinary::StorageScalar(1);
+    c.normal[0] = c.normal[1] = ordinary::StorageScalar(1);
+    c.normal[2] = ordinary::StorageScalar(epsilon);
+    a.normal_error = b.normal_error = 0;
+    c.normal_error = *exact;
+    EXPECT_TRUE(ordinary::independent_source_normals(a, b, c));
+    c.normal_error = 2 * epsilon;
+    EXPECT_FALSE(ordinary::independent_source_normals(a, b, c));
+    const std::array<std::array<long double, 3>, 3> errors{{{}, {epsilon, 0, 0}, {}}};
+    const auto uncertain = ordinary::source_normal_error(triangle, errors, normal);
+    ASSERT_TRUE(uncertain);
+    EXPECT_GE(*uncertain, epsilon);
+    const auto counters = SimpleFluid::PLIC::geometry_statistics();
+    EXPECT_EQ(counters.interval_operations, 0u);
+    EXPECT_EQ(counters.rational_constructions, 0u);
+    EXPECT_EQ(counters.rational_measures, 0u);
+    EXPECT_EQ(counters.rational_ledgers, 0u);
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryCapturedSourceNormalsRetainCrossDotCancellation)
+{
+    namespace ordinary = SimpleFluid::PLIC::details::ordinary_kernel;
+    std::array<ordinary::Plane, 3> planes;
+    const std::array<std::array<long double, 3>, 3> normals{
+        {{.25L, -.0750000000000000111022L, 0}, {-.499999999999999854066L, .150000000000000066765L, 0},
+            {-4.55364912443911862283e-17L, -5.24211750396741393843e-17L, -6.60821224129914952528e-17L}}};
+    for (std::size_t row = 0; row < 3; ++row)
+    {
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            planes[row].normal[axis] = ordinary::StorageScalar(normals[row][axis]);
+        planes[row].normal_error = 0;
+    }
+    // The exact first two rows have a cross product along z. The third row's
+    // actual retained uncertainty is significant but cannot reach z=0. An
+    // expanded determinant must not lose this shared cancellation structure.
+    planes[2].normal_error = 5.4210108624256282092e-21L;
+    {
+        SimpleFluid::PLIC::details::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
+        ASSERT_TRUE(SimpleFluid::PLIC::certification_environment());
+        std::array<unsigned, 3> order{0, 1, 2};
+        do
+        {
+            SCOPED_TRACE(::testing::Message() << order[0] << order[1] << order[2]);
+            EXPECT_TRUE(ordinary::independent_source_normals(planes[order[0]], planes[order[1]], planes[order[2]]));
+        } while (std::next_permutation(order.begin(), order.end()));
+        // This uncertainty permits a coplanar third row; no ordering may mint
+        // independence once the true determinant can be zero.
+        planes[2].normal_error = std::abs(normals[2][2]);
+        order = {0, 1, 2};
+        do
+        {
+            SCOPED_TRACE(::testing::Message() << order[0] << order[1] << order[2]);
+            EXPECT_FALSE(ordinary::independent_source_normals(planes[order[0]], planes[order[1]], planes[order[2]]));
+        } while (std::next_permutation(order.begin(), order.end()));
+        planes[2].normal = planes[0].normal;
+        planes[2].normal_error = 0;
+        order = {0, 1, 2};
+        do
+        {
+            SCOPED_TRACE(::testing::Message() << order[0] << order[1] << order[2]);
+            EXPECT_FALSE(ordinary::independent_source_normals(planes[order[0]], planes[order[1]], planes[order[2]]));
+        } while (std::next_permutation(order.begin(), order.end()));
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            planes[2].normal[axis] = ordinary::StorageScalar(normals[2][axis]);
+        planes[2].normal_error.reset();
+        EXPECT_FALSE(ordinary::independent_source_normals(planes[0], planes[1], planes[2]));
+    }
+    planes[2].normal_error = 5.4210108624256282092e-21L;
+    auto limits = geometry_limits(ArithmeticMode::Ordinary);
+    limits.maximum_operations = 1;
+    SimpleFluid::PLIC::details::Operation capped(limits);
+    try
+    {
+        (void) ordinary::independent_source_normals(planes[0], planes[1], planes[2]);
+        FAIL() << "Rank proof must not recover from resource exhaustion.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        EXPECT_STREQ(error.what(), "Ordinary FP geometry: scalar operation cap exhausted.");
+    }
+}
+
+TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryHonorsParentAndOriginalEdgeBeforeMutation)
+{
+    namespace detail = SimpleFluid::PLIC::details;
+    namespace ordinary = detail::ordinary_kernel;
+    using Access = SimpleFluid::PLIC::DynamicGeometryAccess;
+    using Code = SimpleFluid::PLIC::GeometryErrorCode;
+    const auto parent = Geometry<ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
+    const auto parent_impl =
+        detail::checked_geometry_storage<ArithmeticMode::Ordinary>(Access::implementation(*parent->dynamic_geometry()));
+    const auto parent_before = parent->moments();
+    struct Scenario
+    {
+        long double original_x, error, export_x, edge_upper;
+        bool exported, accepted;
+        Code rejection;
+    };
+    const std::array cases{Scenario{2, 0, 0, .75L, false, false, Code::InvalidTopology},
+        Scenario{.9L, 0, 0, .75L, false, false, Code::InvalidTopology},
+        Scenario{std::nextafter(1.L, 2.L), 0, 1, 1, true, false, Code::InvalidTopology},
+        Scenario{.5L, 0, std::nextafter(.5L, 0.L), .75L, true, true, Code::InvalidTopology},
+        Scenario{.5L, 0, 0, .75L, false, true, Code::InvalidTopology},
+        Scenario{.5L, .125L, 0, .75L, false, false, Code::UnresolvedArithmetic},
+        Scenario{.5L, std::numeric_limits<long double>::quiet_NaN(), 0, .75L, false, false, Code::InvalidInput}};
+    detail::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
+    const auto edge_vertex = [&](long double x)
+    {
+        ordinary::Vertex result;
+        result.coordinates = ordinary::transform<ArithmeticMode::Ordinary>(
+            {ordinary::Scalar(x), ordinary::Scalar(.5L), ordinary::Scalar(.5L)}, {}, parent_impl->frame);
+        return result;
+    };
+    for (std::size_t scenario = 0; scenario < cases.size(); ++scenario)
+    {
+        SCOPED_TRACE(scenario);
+        const auto& test = cases[scenario];
+        SimpleFluid::PLIC::DynamicPoint source(
+            {test.original_x, .5L, .5L}, {test.error, 0, 0}, ArithmeticMode::Ordinary);
+        Access::seal_represented_source(source);
+        const auto original = Access::identity(source);
+        auto token = original;
+        SimpleFluid::PLIC::DynamicPoint exported({test.export_x, .5L, .5L}, {}, ArithmeticMode::Ordinary);
+        if (test.exported)
+        {
+            Access::seal_export(exported, original, {});
+            token = Access::identity(exported);
+        }
+        auto vertex = edge_vertex(.5L);
+        vertex.authorities.push_back({{190}});
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            auto plane = std::make_shared<ordinary::Plane>();
+            plane->normal[axis] = ordinary::StorageScalar(1);
+            plane->normal_error = 0;
+            for (std::size_t coordinate = 0; coordinate < 3; ++coordinate)
+                plane->anchor[coordinate] = ordinary::StorageScalar(source.value[coordinate]);
+            plane->source_vertices = {token};
+            vertex.incident.push_back(std::move(plane));
+        }
+        const auto before = vertex;
+        const auto first = edge_vertex(.25L), second = edge_vertex(test.edge_upper);
+        if (!original)
+        {
+            EXPECT_TRUE(std::isnan(test.error));
+            EXPECT_FALSE(
+                ordinary::recover_source_identity(vertex, parent_impl->frame, parent_impl.get(), &first, &second));
+        }
+        else if (test.accepted)
+        {
+            EXPECT_TRUE(
+                ordinary::recover_source_identity(vertex, parent_impl->frame, parent_impl.get(), &first, &second));
+            EXPECT_TRUE(Access::same_represented_source(vertex.source_identity, original));
+            const auto expected = edge_vertex(test.original_x);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(vertex.coordinates[axis].value, expected.coordinates[axis].value);
+        }
+        else
+        {
+            try
+            {
+                (void) ordinary::recover_source_identity(
+                    vertex, parent_impl->frame, parent_impl.get(), &first, &second);
+                FAIL() << "Recovery must reject an inadmissible original source point.";
+            }
+            catch (const SimpleFluid::PLIC::GeometryError& error)
+            {
+                EXPECT_EQ(error.code(), test.rejection);
+            }
+        }
+        if (!test.accepted)
+        {
+            EXPECT_EQ(vertex.source_identity, before.source_identity);
+            EXPECT_EQ(vertex.authorities, before.authorities);
+            EXPECT_EQ(vertex.incident, before.incident);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(vertex.coordinates[axis].value, before.coordinates[axis].value);
+        }
+    }
+    EXPECT_EQ(parent->volume().value, parent_before.volume.value);
+    const auto parent_after = parent->moments();
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(parent_after.first_moment[axis].value, parent_before.first_moment[axis].value);
+}
+
+TEST(BoundedConvexGeometryTest, OrdinarySourceRecoveryNeedsEndpointProofBeyondSharedRootEdge)
+{
+    namespace detail = SimpleFluid::PLIC::details;
+    namespace ordinary = detail::ordinary_kernel;
+    using Access = SimpleFluid::PLIC::DynamicGeometryAccess;
+    const auto root = Geometry<ArithmeticMode::Ordinary>::box({0, 0, 0}, {1, 1, 1});
+    const auto parent = root->clip({{1, 0, 0}, {.5, .5, .5}, 2}, false).inside;
+    ASSERT_TRUE(parent);
+    const auto impl =
+        detail::checked_geometry_storage<ArithmeticMode::Ordinary>(Access::implementation(*parent->dynamic_geometry()));
+    const auto parent_before = parent->moments();
+    detail::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
+    SimpleFluid::PLIC::DynamicPoint a({1, 0, 0}, {}, ArithmeticMode::Ordinary);
+    SimpleFluid::PLIC::DynamicPoint b({0, 0, 0}, {}, ArithmeticMode::Ordinary);
+    Access::seal_represented_source(a);
+    Access::seal_represented_source(b);
+    const auto a_token = Access::identity(a), b_token = Access::identity(b);
+    const auto plane = [&](std::array<long double, 3> normal, long double anchor_x,
+                           std::vector<std::weak_ptr<const SimpleFluid::PLIC::DynamicPointProvenance>> tokens)
+    {
+        auto result = std::make_shared<ordinary::Plane>();
+        for (std::size_t axis = 0; axis < 3; ++axis)
+            result->normal[axis] = ordinary::StorageScalar(normal[axis]);
+        result->anchor[0] = ordinary::StorageScalar(anchor_x);
+        result->normal_error = 0;
+        result->source_vertices = std::move(tokens);
+        return result;
+    };
+    const auto p = plane({0, 1, 0}, 0, {a_token, b_token});
+    const auto q = plane({0, 0, 1}, 0, {a_token, b_token});
+    const auto left = plane({1, 0, 0}, 0, {b_token});
+    const auto right = plane({1, 0, 0}, 1, {a_token});
+    const auto query = plane({1, 1, 0}, 0, {b_token});
+    const auto generated_vertex = [&](long double x)
+    {
+        ordinary::Vertex result;
+        result.coordinates = ordinary::transform<ArithmeticMode::Ordinary>(
+            {ordinary::Scalar(x), ordinary::Scalar(0), ordinary::Scalar(0)}, {}, impl->frame);
+        SimpleFluid::PLIC::DynamicPoint point({x, 0, 0}, {}, ArithmeticMode::Ordinary);
+        Access::seal_generated(point, {{a_token, b_token}});
+        result.source_identity = Access::identity(point);
+        result.incident = {p, q};
+        return result;
+    };
+    for (unsigned control = 0; control < 6; ++control)
+    {
+        SCOPED_TRACE(control);
+        auto first = generated_vertex(control == 1 ? .25L : 1.L);
+        auto second = generated_vertex(control == 1 ? .75L : 0.L);
+        auto endpoint_plane = std::make_shared<ordinary::Plane>(*left);
+        if (control != 1)
+        {
+            first.incident.push_back(right);
+            // Retain the original endpoint's source planes while its stored
+            // local coordinate drifts just inside the literal edge bracket.
+            second.coordinates[0] = ordinary::StorageScalar(std::nextafter(second.coordinates[0].value, 0.L));
+            SimpleFluid::PLIC::DynamicPoint rounded;
+            rounded.arithmetic_mode = ArithmeticMode::Ordinary;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                rounded.value[axis] =
+                    std::scalbn(second.coordinates[axis].value, impl->frame.exponent) + impl->frame.origin[axis];
+            Access::seal_generated(rounded, {{a_token, b_token}});
+            second.source_identity = Access::identity(rounded);
+            second.incident.push_back(endpoint_plane);
+        }
+        if (control == 2)
+        {
+            endpoint_plane->source_vertices.clear();
+            endpoint_plane->normal_error.reset();
+        }
+        if (control == 3)
+            endpoint_plane->normal = p->normal;
+        if (control == 4)
+            endpoint_plane->normal_error = 1;
+        if (control == 5)
+            endpoint_plane->source_vertices.clear(); // Bare coefficients do not authenticate an anchor.
+        auto vertex = second;
+        vertex.source_identity.reset();
+        vertex.incident = {p, q, query};
+        vertex.authorities = {{{191}}};
+        const auto before = vertex;
+        if (control == 0)
+        {
+            EXPECT_TRUE(ordinary::recover_source_identity(vertex, impl->frame, impl.get(), &first, &second));
+            EXPECT_TRUE(Access::same_represented_source(vertex.source_identity, b_token));
+            const auto expected = generated_vertex(0);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(vertex.coordinates[axis].value, expected.coordinates[axis].value);
+        }
+        else
+        {
+            try
+            {
+                (void) ordinary::recover_source_identity(vertex, impl->frame, impl.get(), &first, &second);
+                FAIL() << "A shared root edge is not an endpoint-placement proof.";
+            }
+            catch (const SimpleFluid::PLIC::GeometryError& error)
+            {
+                EXPECT_EQ(error.code(), SimpleFluid::PLIC::GeometryErrorCode::InvalidTopology);
+            }
+            EXPECT_EQ(vertex.source_identity, before.source_identity);
+            EXPECT_EQ(vertex.authorities, before.authorities);
+            EXPECT_EQ(vertex.incident, before.incident);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(vertex.coordinates[axis].value, before.coordinates[axis].value);
+        }
+    }
+    EXPECT_EQ(parent->volume().value, parent_before.volume.value);
+    const auto after = parent->moments();
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(after.first_moment[axis].value, parent_before.first_moment[axis].value);
+}
+
+TEST(BoundedConvexGeometryTest, OrdinaryInteriorSourceRecoveryRequiresOppositeCurrentParentBounds)
+{
+    namespace detail = SimpleFluid::PLIC::details;
+    namespace ordinary = detail::ordinary_kernel;
+    using Access = SimpleFluid::PLIC::DynamicGeometryAccess;
+    const auto root = plic_test::axis_box<ArithmeticMode::Ordinary>({0, 0, 0}, {1, 1, 1});
+    const auto parent = root->clip({{1, 0, 0}, {.5, .5, .5}, 2}, false).inside;
+    ASSERT_TRUE(parent);
+    const auto impl =
+        detail::checked_geometry_storage<ArithmeticMode::Ordinary>(Access::implementation(*parent->dynamic_geometry()));
+    const auto parent_before = parent->moments();
+    detail::Operation scope(geometry_limits(ArithmeticMode::Ordinary));
+    const auto p = impl->surfaces[0].plane, q = impl->surfaces[2].plane;
+    const auto lower = impl->surfaces[4].plane, upper = impl->surfaces[5].plane;
+    const auto a = impl->vertices[0].source_identity, b = impl->vertices[4].source_identity;
+    ASSERT_TRUE(a);
+    ASSERT_TRUE(b);
+    ASSERT_FALSE(p->authorities.empty());
+    ASSERT_FALSE(q->authorities.empty());
+    for (unsigned control = 0; control < 8; ++control)
+    {
+        SCOPED_TRACE(control);
+        auto context = std::make_shared<ordinary::StoredGeometry>(*impl);
+        auto end_plane = std::make_shared<ordinary::Plane>(*upper);
+        const auto endpoint = [&](long double z, ordinary::PlanePtr bound)
+        {
+            ordinary::Vertex result;
+            result.coordinates = ordinary::transform<ArithmeticMode::Ordinary>(
+                {ordinary::Scalar(0), ordinary::Scalar(0), ordinary::Scalar(z)}, {}, impl->frame);
+            // The source line is x=y=0, but both stored proxies drift laterally.
+            // The candidate is in the strict interior, not either endpoint.
+            result.coordinates[0] = ordinary::StorageScalar(std::nextafter(result.coordinates[0].value, 0.L));
+            SimpleFluid::PLIC::DynamicPoint point;
+            point.arithmetic_mode = ArithmeticMode::Ordinary;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                point.value[axis] =
+                    std::scalbn(result.coordinates[axis].value, impl->frame.exponent) + impl->frame.origin[axis];
+            Access::seal_generated(point, {{a, b}});
+            result.source_identity = Access::identity(point);
+            result.incident = {p, q, std::move(bound)};
+            return result;
+        };
+        auto first = endpoint(0, lower), second = endpoint(1, upper);
+        if (control == 1)
+            second.incident.pop_back(); // No current upper endpoint witness.
+        if (control == 2)
+            second.incident.back() = end_plane; // Equivalent coefficients are an inactive surface, not the root.
+        std::array<SimpleFluid::PLIC::DynamicPoint, 2> bound_anchors{
+            SimpleFluid::PLIC::DynamicPoint({0, 0, -.5L}, {}, ArithmeticMode::Ordinary),
+            SimpleFluid::PLIC::DynamicPoint({0, 0, -.25L}, {}, ArithmeticMode::Ordinary)};
+        if (control == 3)
+        {
+            // Malformed private evidence: both outward inequalities face down,
+            // yet the candidate and opposite endpoints lie strictly inside.
+            // They must not substitute for opposite bounds of the source line.
+            for (std::size_t end = 0; end < 2; ++end)
+            {
+                Access::seal_represented_source(bound_anchors[end]);
+                auto bound = std::make_shared<ordinary::Plane>();
+                bound->normal[2] = ordinary::StorageScalar(-1);
+                bound->anchor[2] = ordinary::StorageScalar(bound_anchors[end].value[2]);
+                bound->normal_error = 0;
+                bound->source_vertices = {Access::identity(bound_anchors[end])};
+                context->surfaces[4 + end] = {bound, 1};
+                (end ? second : first).incident.back() = bound;
+            }
+        }
+        if (control == 4 || control == 7)
+        {
+            if (control == 4)
+                end_plane->normal_error = std::numeric_limits<long double>::epsilon();
+            else
+                end_plane->source_vertices.clear();
+            context->surfaces[5].plane = end_plane;
+            second.incident.back() = end_plane;
+        }
+        const long double z = control == 5 ? -.25L : control == 6 ? 1.25L : .5L;
+        SimpleFluid::PLIC::DynamicPoint original({0, 0, z}, {}, ArithmeticMode::Ordinary);
+        auto supports = p->authorities;
+        supports.insert(supports.end(), q->authorities.begin(), q->authorities.end());
+        Access::seal_represented_source(original, std::move(supports));
+        const auto token = Access::identity(original);
+        auto query = std::make_shared<ordinary::Plane>();
+        query->normal[2] = ordinary::StorageScalar(1);
+        query->anchor[2] = ordinary::StorageScalar(z);
+        query->normal_error = 0;
+        query->source_vertices = {token};
+        auto vertex = first;
+        vertex.source_identity.reset();
+        vertex.incident = {p, q, query};
+        vertex.authorities = {{{192}}};
+        const auto before = vertex;
+        const int lower_direction =
+            ordinary::source_normal_orientation(*p, *q, *context->surfaces[4].plane) * context->surfaces[4].orientation;
+        const int upper_direction =
+            ordinary::source_normal_orientation(*p, *q, *context->surfaces[5].plane) * context->surfaces[5].orientation;
+        EXPECT_NE(lower_direction, 0);
+        EXPECT_NE(upper_direction, 0);
+        EXPECT_EQ(lower_direction == upper_direction, control == 3);
+        if (control == 3)
+        {
+            ordinary::Vertex candidate;
+            candidate.source_identity = token;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                candidate.coordinates[axis] = ordinary::StorageScalar(original.value[axis]);
+            for (std::size_t end = 0; end < 2; ++end)
+            {
+                const auto& surface = context->surfaces[4 + end];
+                EXPECT_LT(ordinary::distance<ArithmeticMode::Ordinary>(candidate, {}, surface.plane).value *
+                              surface.orientation,
+                    0);
+                EXPECT_LT(ordinary::distance<ArithmeticMode::Ordinary>(end ? first : second, impl->frame, surface.plane)
+                                  .value *
+                              surface.orientation,
+                    0);
+            }
+        }
+        if (control == 0)
+        {
+            EXPECT_TRUE(ordinary::recover_source_identity(vertex, impl->frame, context.get(), &first, &second));
+            EXPECT_TRUE(Access::same_represented_source(vertex.source_identity, token));
+            const auto expected = ordinary::transform<ArithmeticMode::Ordinary>(
+                {ordinary::Scalar(0), ordinary::Scalar(0), ordinary::Scalar(z)}, {}, impl->frame);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(vertex.coordinates[axis].value, expected[axis].value);
+        }
+        else
+        {
+            try
+            {
+                (void) ordinary::recover_source_identity(vertex, impl->frame, context.get(), &first, &second);
+                FAIL() << "An unproved or excluding current edge bound must not admit recovery.";
+            }
+            catch (const SimpleFluid::PLIC::GeometryError& error)
+            {
+                EXPECT_EQ(error.code(), SimpleFluid::PLIC::GeometryErrorCode::InvalidTopology);
+            }
+            EXPECT_EQ(vertex.source_identity, before.source_identity);
+            EXPECT_EQ(vertex.authorities, before.authorities);
+            EXPECT_EQ(vertex.incident, before.incident);
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                EXPECT_EQ(vertex.coordinates[axis].value, before.coordinates[axis].value);
+        }
+    }
+    EXPECT_EQ(parent->volume().value, parent_before.volume.value);
+    const auto after = parent->moments();
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        EXPECT_EQ(after.first_moment[axis].value, parent_before.first_moment[axis].value);
 }
 
 TEST(BoundedConvexGeometryTest, OrdinarySourceRankIncludesConstructionErrorAndRejectsMissingWitness)

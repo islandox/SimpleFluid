@@ -18,9 +18,10 @@ reaction yield or source of heat selects chemistry implicitly. See the
 | Explicit H2/IF97 verification applications | Declared physical reference laws and reservoirs, with the approximation documented by each application |
 
 These paths have different energy and volume contracts. Enabling one does not
-authorize combining every other model. VoF remains unavailable in this refactor;
-explicit `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON` rejects configuration. Bounded
-floating-point and exact-rational VoF/general-AMR geometry paths remain deferred.
+authorize combining every other model. Explicit
+`SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON` permits source-free VoF development;
+the unmigrated reacting coupler stays excluded. Finite geometry/flow tests do
+not establish reacting-VoF or full-flow physical qualification.
 
 ## Catalog, reactions and units
 

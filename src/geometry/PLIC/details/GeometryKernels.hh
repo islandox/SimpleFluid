@@ -195,11 +195,24 @@ std::optional<std::array<long double, 3>> source_point_error(const DynamicPoint&
 std::optional<long double> source_normal_error(
     const std::array<Point, 3>& vertices, const std::array<std::array<long double, 3>, 3>& errors, const Point& normal);
 bool independent_source_normals(const Plane& a, const Plane& b, const Plane& c);
-bool recover_source_identity(Vertex& vertex, const Frame& frame);
+// Zero means that the construction-aware determinant sign is unresolved.
+int source_normal_orientation(const Plane& a, const Plane& b, const Plane& c);
+bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeometry* parent = nullptr,
+    const Vertex* edge_first = nullptr, const Vertex* edge_second = nullptr);
 bool same_source_plane(const Plane& a, const Plane& b);
+namespace source_witness
+{
+// Conservative evaluation-error bounds for the supplied represented operation.
+// Unsupported environments or inconsistent expressions provide no witness.
+long double sum_gap(long double a, long double b, long double result);
+long double product_gap(long double a, long double b, long double result);
+long double scale_gap(long double a, int exponent, long double result);
+} // namespace source_witness
 
 template<ArithmeticMode Mode> Integrals integrate_ordinary(const StoredGeometry& poly, bool moments);
 template<ArithmeticMode Mode> Integrals integrate(const StoredGeometry& poly, bool moments);
+// Private draft preparation: no measure is admitted or published here.
+template<ArithmeticMode Mode> void prepare_finish(StoredGeometry& poly, bool partition_proof);
 template<ArithmeticMode Mode>
 void finish(StoredGeometry& poly, bool partition_proof = false, bool positive_construction = false);
 template<ArithmeticMode Mode>

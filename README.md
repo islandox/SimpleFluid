@@ -5,10 +5,12 @@ reacting-flow foundation. The roadmap records which interface and AMR
 components are present in this snapshot. Retained source does not establish
 supported generic reacting-VoF execution or physical qualification.
 
-**VoF disabled:** VoF solvers remain unqualified and excluded from this refactor.
-Configuration rejects `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON`; keep it `OFF`.
-The multispecies VoF migration, bounded floating-point path, and exact-rational
-path are deferred. Shared geometry and FVM utilities remain available.
+**Experimental VoF:** `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON` builds the retained
+VoF solvers for source-free development and focused qualification; the default
+remains `OFF`. The unmigrated `ReactingVoFCoupler` and its dependent fixtures stay
+excluded. This option does not enable multispecies reacting-VoF integration or
+establish full-flow physical qualification. Shared geometry and FVM utilities
+remain available independently.
 
 A finite-volume computational fluid dynamics code for incompressible Boussinesq
 natural convection, built on [Trilinos](https://trilinos.github.io) for distributed-memory,
@@ -807,13 +809,13 @@ laws. Its closed, orthogonal, inviscid/slip-wall and nonperiodic limits do not
 establish a Boussinesq boiling/free-surface combination.
 
 Neither planar path is a general moving-interface or cross-mesh phase-occupancy
-model. VoF is disabled and explicit enablement rejects configuration. Its old
-resolved/dispersed, adaptive/capillary, bounded-FP and exact-rational routes are
-deferred, not alternate reacting-flow configurations. The
+model. Experimental source-free VoF can be built with
+`SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON`. Its retained resolved/dispersed and
+arithmetic routes do not establish alternate reacting-flow configurations. The
 [general AMR design](docs/architecture/general_amr.md) remains a separate
 geometry/distribution/flow qualification program.
 
-**Within the retained, disabled VoF sources, floating-point arithmetic is the primary design.** Its
+**Within experimental VoF, floating-point arithmetic is the primary design.** Its
 [FP geometry contract](docs/architecture/general_amr.md#floating-point-geometry-and-arithmetic)
 uses `ArithmeticMode::Ordinary` by default. `BoundedCertification` retains
 explicit interval certification, and `Exact` selects the separate exact backend;

@@ -95,7 +95,7 @@ The typed adapter retains the existing laminar, backward-Euler, constant-area,
 vented planar-ALE boundary and motion restrictions. It requires complete
 advective transport of the solution. Selectively freezing dissolved species is
 insufficient for a nonideal liquid-volume packet and is rejected by this path.
-VoF stays disabled; these transactions do not qualify independent boiling,
+Experimental source-free VoF is separate; these transactions do not qualify independent boiling,
 capillary, general moving-wall or native low-Mach ALE combinations.
 
 Each liquid material face-volume packet comes from the same corrected upwind

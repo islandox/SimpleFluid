@@ -5,10 +5,12 @@ reacting-flow foundation. The roadmap records which interface and AMR
 components are present in this snapshot. Retained source does not establish
 supported generic reacting-VoF execution or physical qualification.
 
-**VoF disabled:** VoF solvers remain unqualified and excluded from this refactor.
-Configuration rejects `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON`; keep it `OFF`.
-The multispecies VoF migration, bounded floating-point path, and exact-rational
-path are deferred. Shared geometry and FVM utilities remain available.
+**Experimental VoF:** `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF=ON` builds the retained
+VoF solvers for source-free development and focused qualification; the default
+remains `OFF`. The unmigrated `ReactingVoFCoupler` and its dependent fixtures stay
+excluded. This option does not enable multispecies reacting-VoF integration or
+establish full-flow physical qualification. Shared geometry and FVM utilities
+remain available independently.
 
 **Documentation review date:** October 24, 2026
 
@@ -1587,7 +1589,7 @@ qualify general VoF, sparse ALE, production scaling or physical applications.
 
 ### Stage 7 — General VoF and flow qualification
 
-**Deferred from the reacting-flow refactor:** VoF execution, the bounded floating-point path and the exact-rational path remain disabled or omitted. The historical implementation records below do not change that boundary.
+**Experimental source-free execution:** explicit VoF enablement permits focused finite geometry/flow development. Reacting-VoF schema migration and full-flow qualification remain open; historical implementation records are not current validation.
 
 **Floating-point arithmetic is the primary VoF implementation and development
 priority.** `ArithmeticMode::Ordinary` is the general-VoF default, with explicit
@@ -1664,10 +1666,15 @@ the specified focused coverage, not production or application qualification.
       with focused finite predicate, planar-admission, optional PLIC trial and
       serial/MPI transport coverage. Account shared immutable allocations once
       without increasing construction caps. Full physical horizons remain open.
-- [ ] Add private structural split finalization before bounded approximation:
-      canonicalize proven identities, preserve contacts and shared cap topology,
-      and support one deterministic reconstruction attempt. Preserve inside-only
+- [x] Add private Ordinary split drafts and joint measurement admission in shared
+      geometry. Reuse recovered source identities, validate connected directed
+      boundaries, preserve contact sections and shared caps, and retain inside-only
       operations without requiring an unused sibling measure.
+- [x] Add one deterministic Ordinary reconstruction retry for failed measured
+      strict tetrahedral cuts when every parent coordinate can be reframed
+      without loss. Rebuild shared crossings from the original parent/cut and
+      retain replay and resource gates. This does not qualify tiny-feature relative
+      accuracy or the complete flow horizon; strict cuts cannot become contacts.
 - [ ] Admit contact-like computational-fragment coalescence only through explicit
       conservative bounds and shared existing face/cell/phase budgets. Keep face
       streams, donor/recipient inventories, momentum and replay consistent; retain
