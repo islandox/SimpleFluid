@@ -1620,7 +1620,8 @@ its explicit fixed-mesh support and rejection boundaries.
       face transport contract, retaining independent trace inventories.
 - [x] Separate scalar PLIC measurements from explicit closed-surface construction.
 - [x] Expose explicit face-aligned surfaces with bounded halo planar support.
-- [ ] Qualify high-density-ratio drop translation and rotation/deformation accuracy.
+- [ ] Qualify this path against the shared motion/accuracy gates below, including
+      high-density-ratio drop translation and rotation/deformation.
 - [ ] Qualify open boundary interfaces and multiple physical streams per face.
 
 #### Path B — geometric swept-tetrahedra transport
@@ -1680,8 +1681,14 @@ implicit-upwind specialization while retaining the general swept path.
       model/width/volume/fit diagnostics atomically. See the
       [capillary model](docs/modeling/general_vof_capillarity.md); complete
       capillary-time horizons and quantitative accuracy thresholds remain open.
-- [ ] Complete checked policy views and source-provider boundaries while retaining
-      compatible public adapters and the existing library ownership.
+- [x] **Repair Stage 6 — interfaces and build boundaries:** provide mode-checked,
+      source-pinned control and prepared-trial views, including empty owners;
+      retain checked public adapters and separate Exact authority. Expose swept
+      trajectories, face/cell diagnostics and local work counters through the
+      prepared ledger. Group general-native source-free, adaptive, low-Mach and
+      representation providers with existing library ownership and feature gates.
+      See [implementation boundaries](docs/architecture/general_vof_implementation.md)
+      and the [prepared interface](docs/architecture/general_vof_transport.md#checked-controls-and-prepared-views).
 - [ ] Exercise complete homogeneous/hydrostatic, interface-passage,
       translation/rotation/deformation and curved-capillary horizons in serial
       and MPI, including empty owners and mixed/face transitions. Keep existing
@@ -1743,7 +1750,9 @@ the specified focused coverage, not production or application qualification.
       precision as a substitute for spatial resolution. Mandatory arbitrary
       subcell-phase fit success is retired; preserve accepted mass throughout.
 - [ ] Complete full-flow qualification of the implemented default
-      [finite arithmetic policy](docs/architecture/general_amr.md#primary-floating-point-policy).
+      [finite arithmetic policy](docs/architecture/general_amr.md#primary-floating-point-policy)
+      through the shared motion and accuracy gates above; this is the arithmetic
+      scope of that qualification, not a separate campaign.
       Ordinary FP uses represented values and physical residual tolerances;
       interval certification remains an explicit mode. Mode tags and source
       provenance are separate from imported native authority. Numerical finite

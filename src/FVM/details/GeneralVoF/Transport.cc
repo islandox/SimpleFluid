@@ -4,12 +4,108 @@
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF
 {
+std::shared_ptr<const GeneralVoFTransportControls> GeneralVoF::make_transport_controls(ArithmeticMode mode,
+    std::span<const GeneralVoFNodeVelocity> nodes, std::span<const GeneralVoFFaceVolume> faces, double timestep) const
+{
+    std::shared_ptr<GeneralVoFTransportControls> result;
+    wire::collective(*data_->hierarchy->communicator(),
+        [&]
+        {
+            namespace failure = ::SimpleFluid::detail::vof_failure;
+            failure::Scope context("transport_controls");
+            context.record.arithmetic_mode = mode;
+            context.record.mark(failure::Field::Arithmetic);
+            context.record.byte_budget = data_->options.byte_budget;
+            context.record.mark(failure::Field::ByteBudget);
+            current(*data_);
+            if (mode != arithmetic_mode() || !std::isfinite(timestep) || timestep < 0)
+                throw std::invalid_argument("General VoF control arithmetic mode or timestep differs.");
+            wire::Budget budget{data_->options.byte_budget};
+            budget.add(sizeof(GeneralVoFTransportControls));
+            const auto reserve = [&](std::size_t count, std::size_t width)
+            {
+                if (count > (budget.limit - budget.used) / width)
+                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                        "General VoF control view exceeds its retained byte budget.");
+                budget.add(count * width);
+            };
+            reserve(nodes.size(), sizeof(GeneralVoFNodeVelocity));
+            reserve(faces.size(), sizeof(GeneralVoFFaceVolume));
+            std::set<const void*> exact_payloads;
+            for (const auto& face : faces)
+            {
+                if (mode == ArithmeticMode::Exact)
+                {
+                    if (face.bounded_integrated_volume)
+                        throw std::invalid_argument("Exact VoF cannot adopt a finite-policy face control.");
+                    if (face.exact_integrated_volume)
+                    {
+                        const auto identity = face.exact_integrated_volume->storage_identity();
+                        if (identity && !exact_payloads.contains(identity))
+                        {
+                            reserve(1, sizeof(decltype(exact_payloads)::value_type) + 4 * sizeof(void*));
+                            budget.add(
+                                face.exact_integrated_volume->storage_bytes() - sizeof(*face.exact_integrated_volume));
+                            exact_payloads.insert(identity);
+                        }
+                    }
+                }
+                else
+                {
+                    if (face.exact_integrated_volume)
+                        throw std::invalid_argument("Finite VoF cannot adopt an exact-policy face control.");
+                    if (face.bounded_integrated_volume)
+                    {
+                        fp::validate(*face.bounded_integrated_volume);
+                        if (face.bounded_integrated_volume->arithmetic_mode != mode)
+                            throw std::invalid_argument("General VoF face control arithmetic mode differs.");
+                    }
+                }
+            }
+            result = std::make_shared<GeneralVoFTransportControls>();
+            result->source_ = data_;
+            result->source_control_ = data_->control;
+            result->mode_ = mode;
+            result->timestep_ = timestep;
+            result->nodes_.assign(nodes.begin(), nodes.end());
+            result->faces_.assign(faces.begin(), faces.end());
+            // Account actual allocation, including any vector over-allocation.
+            reserve(result->nodes_.capacity() - nodes.size(), sizeof(GeneralVoFNodeVelocity));
+            reserve(result->faces_.capacity() - faces.size(), sizeof(GeneralVoFFaceVolume));
+        });
+    agree_transaction(data_->hierarchy->communicator(), data_->control);
+    return result;
+}
+void GeneralVoF::validate_transport_controls(
+    const std::shared_ptr<const GeneralVoFTransportControls>& controls, ArithmeticMode mode, bool face_only) const
+{
+    wire::collective(*data_->hierarchy->communicator(),
+        [&]
+        {
+            current(*data_);
+            if (!controls || mode != arithmetic_mode() || controls->mode_ != mode || controls->source_ != data_ ||
+                controls->source_control_ != data_->control || (face_only && !controls->nodes_.empty()))
+                throw std::invalid_argument(
+                    "General VoF control view has incompatible nodes, arithmetic mode or source publication.");
+        });
+    agree_transaction(data_->hierarchy->communicator(), data_->control);
+}
 GeneralVoF::Trial GeneralVoF::plan_transport(std::span<const GeneralVoFNodeVelocity> velocity,
     std::span<const GeneralVoFFaceVolume> volumes, double timestep) const
 {
-    if (data_->options.transport_backend != GeneralVoFTransportBackend::SweptPartition)
-        throw std::invalid_argument(
-            "Face backend requires plan_face_transport with its explicit constant normal velocity model.");
+    const auto controls = make_transport_controls(arithmetic_mode(), velocity, volumes, timestep);
+    return plan_transport_impl(controls->nodes(), controls->faces(), timestep);
+}
+GeneralVoF::Trial GeneralVoF::plan_transport_impl(std::span<const GeneralVoFNodeVelocity> velocity,
+    std::span<const GeneralVoFFaceVolume> volumes, double timestep) const
+{
+    wire::collective(*data_->hierarchy->communicator(),
+        [&]
+        {
+            if (data_->options.transport_backend != GeneralVoFTransportBackend::SweptPartition)
+                throw std::invalid_argument(
+                    "Face backend requires plan_face_transport with its explicit constant normal velocity model.");
+        });
     if (inventory_policy() != PhaseInventoryPolicy::Finite)
         return Exact::GeneralVoF::plan_transport(*this, velocity, volumes, timestep);
     if (arithmetic_mode() == ArithmeticMode::Ordinary)

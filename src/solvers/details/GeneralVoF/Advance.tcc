@@ -114,11 +114,17 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     execution.require(
         dt <= stable_timestep(resources, old, nodes), "Finite VoF timestep exceeds physical geometry/trajectory CFL.");
     const auto controls = face_volumes<Mode>(*mesh, *old.phases, old.finite_projection, flow, dt);
+    const auto control_view = old.phases->transport_controls<Mode>(nodes, controls, dt);
     const auto trial =
-        face_backend  ? old.phases->plan_face_transport(controls, dt, {material.gas_density, material.liquid_density},
+        face_backend  ? old.phases->plan_face_transport(control_view, {material.gas_density, material.liquid_density},
                             std::bit_cast<std::uint64_t>(old.diagnostics.time))
-        : homogeneous ? old.phases->plan_homogeneous_transport(controls, dt)
-                      : old.phases->plan_transport(nodes, controls, dt);
+        : homogeneous ? old.phases->plan_homogeneous_transport(control_view)
+                      : old.phases->plan_transport(control_view);
+    const auto stage = std::bit_cast<std::uint64_t>(old.diagnostics.time);
+    const auto prepared_view = trial.template prepare_transport_view<Mode>(
+        {material.gas_density, material.liquid_density}, stage);
+    trial.validate_prepared_transport(prepared_view, {material.gas_density, material.liquid_density}, stage);
+    const auto& phase_preparation = prepared_view.shared_ledger();
     if (!algebraic)
     {
         double local_h = std::numeric_limits<double>::infinity(), global_h = 0;
@@ -128,11 +134,11 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         execution.collective(
             [&]
             {
-                if (trial.finite_node_trajectories().size() != nodes.size())
+                if (phase_preparation->node_trajectories.size() != nodes.size())
                     throw std::runtime_error("Finite VoF trajectory certificate is incomplete.");
                 const auto limit = A::multiply(A::make_value(global_h, 0), A::make_value(options.flow.max_courant, 0));
                 const auto square_limit = A::multiply(limit, limit);
-                for (const auto& node : trial.finite_node_trajectories())
+                for (const auto& node : phase_preparation->node_trajectories)
                 {
                     const auto displacement = A::subtract(node.point, node.departure);
                     const auto square = A::dot(displacement, displacement);
@@ -146,9 +152,6 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     next->phases = trial.candidate();
     execution.require(
         next->phases->mesh().get() == mesh.get(), "Finite VoF transport changed its immutable native mesh.");
-    const auto stage = std::bit_cast<std::uint64_t>(old.diagnostics.time);
-    const auto phase_preparation = trial.prepare_transport({material.gas_density, material.liquid_density}, stage);
-    trial.validate_prepared_transport(*phase_preparation, {material.gas_density, material.liquid_density}, stage);
     PhaseStorage<Mode>::validate(*mesh, *old.phases, *phase_preparation, *next->phases);
     {
         auto storage = PhaseStorage<Mode>::evaluate(*resources.mesh, *next->phases, resources.material);

@@ -7,6 +7,22 @@ namespace SimpleFluid::VoF
 {
 namespace
 {
+template<class Reserve> void reserve_key_storage(const GeneralVoF::Key& key, const Reserve& reserve)
+{
+    std::visit(
+        [&](const auto& ancestry)
+        {
+            using Ancestry = std::decay_t<decltype(ancestry)>;
+            if constexpr (std::is_same_v<Ancestry, AMR::ConvexCellAncestry>)
+                reserve(ancestry.path.capacity(), sizeof(std::uint64_t));
+            else if constexpr (std::is_same_v<Ancestry, AMR::ProductCellAncestry>)
+            {
+                reserve(ancestry.base.path.capacity(), sizeof(std::uint64_t));
+                reserve(ancestry.axial.path.capacity(), sizeof(std::uint64_t));
+            }
+        },
+        key.ancestry);
+}
 template<ArithmeticMode Mode>
 void capacities(const GeneralVoF::Data& source, const GeneralVoF::Data& candidate, GeneralVoFPreparedTransport& result)
 {
@@ -54,6 +70,10 @@ void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) co
     reserve(signed_donor_budgets.capacity(), sizeof(GeneralVoFSignedDonorBudget));
     reserve(numerical_support_transfers.capacity(), sizeof(GeneralVoFFiniteTransfer));
     reserve(numerical_support_budgets.capacity(), sizeof(GeneralVoFFiniteDonorBudget));
+    reserve(face_chain_diagnostics.capacity(), sizeof(GeneralVoFFaceChainDiagnostic));
+    reserve(cell_closure_diagnostics.capacity(), sizeof(GeneralVoFCellClosureDiagnostic));
+    for (const auto& closure : cell_closure_diagnostics)
+        reserve_key_storage(closure.key, reserve);
     reserve(node_trajectories.capacity(), sizeof(GeneralVoFFiniteNodeTrajectory));
     for (const auto& trace : node_trajectories)
     {
@@ -103,6 +123,12 @@ void GeneralVoF::validate_prepared_transport_source(const GeneralVoFPreparedTran
                 prepared.backend != data_->options.transport_backend || prepared.authenticated_source_ != data_ ||
                 prepared.authenticated_candidate_ != prepared.candidate_identity ||
                 prepared.authenticated_transaction_ != prepared.transaction ||
+                prepared.authenticated_source_control_ != prepared.source_control ||
+                prepared.authenticated_time_stage_ != prepared.time_stage ||
+                prepared.authenticated_timestep_ != prepared.timestep ||
+                prepared.authenticated_density_ != prepared.density ||
+                prepared.authenticated_mesh_generation_ != prepared.mesh_generation ||
+                prepared.authenticated_mesh_topology_generation_ != prepared.mesh_topology_generation ||
                 prepared.authenticated_family_ != prepared.family ||
                 (prepared.family == GeneralVoFTransportFamily::AlgebraicFaceVolume &&
                     prepared.arithmetic_mode != ArithmeticMode::Ordinary) ||
@@ -113,6 +139,28 @@ void GeneralVoF::validate_prepared_transport_source(const GeneralVoFPreparedTran
                     prepared.backend != GeneralVoFTransportBackend::SweptPartition))
                 throw std::invalid_argument("Prepared VoF transport belongs to another source or mesh publication.");
         });
+    agree_transaction(data_->hierarchy->communicator(), data_->control);
+}
+void GeneralVoF::Trial::validate_prepared_transport_mode(
+    ArithmeticMode mode, const std::shared_ptr<const GeneralVoFPreparedTransport>* retained) const
+{
+    if (!source_)
+        throw std::invalid_argument("General VoF trial has no source.");
+    wire::collective(*source_->hierarchy->communicator(),
+        [&]
+        {
+            current(*source_);
+            if ((retained && !*retained) || mode == ArithmeticMode::Exact || mode != source_->options.arithmetic_mode)
+                throw std::invalid_argument("Prepared VoF trial view is empty or its arithmetic mode differs.");
+        });
+}
+std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_transport_checked(
+    ArithmeticMode mode, std::array<double, 2> density, std::uint64_t time_stage) const
+{
+    validate_prepared_transport_mode(mode);
+    const auto prepared = prepare_transport(density, time_stage);
+    validate_prepared_transport(*prepared, density, time_stage);
+    return prepared;
 }
 std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_transport(
     std::array<double, 2> density, std::uint64_t time_stage) const
@@ -190,6 +238,10 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             reserve(numerical_support_transfers_.size(), sizeof(GeneralVoFFiniteTransfer));
             reserve(numerical_support_budgets_.size(), sizeof(GeneralVoFFiniteDonorBudget));
             reserve(finite_trajectories_.size(), sizeof(GeneralVoFFiniteNodeTrajectory));
+            reserve(finite_face_chain_.size(), sizeof(GeneralVoFFaceChainDiagnostic));
+            reserve(finite_cell_closure_.size(), sizeof(GeneralVoFCellClosureDiagnostic));
+            for (const auto& closure : finite_cell_closure_)
+                reserve_key_storage(closure.key, reserve);
             reserve(roundoff_.size() + source_->phase_history.size() + candidate_->phase_history.size(),
                 sizeof(PhaseRoundoff));
             reserve(source_->phases.size(), 4 * sizeof(long double));
@@ -214,6 +266,12 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             result->authenticated_source_ = source_;
             result->authenticated_candidate_ = candidate_;
             result->authenticated_transaction_ = transaction_;
+            result->authenticated_source_control_ = result->source_control;
+            result->authenticated_time_stage_ = time_stage;
+            result->authenticated_timestep_ = timestep_;
+            result->authenticated_density_ = density;
+            result->authenticated_mesh_generation_ = result->mesh_generation;
+            result->authenticated_mesh_topology_generation_ = result->mesh_topology_generation;
             result->authenticated_family_ = result->family;
             if (prepared_)
             {
@@ -235,6 +293,8 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             result->numerical_support_budgets = numerical_support_budgets_;
             result->donor_budgets = finite_budgets_;
             result->node_trajectories = finite_trajectories_;
+            result->face_chain_diagnostics = finite_face_chain_;
+            result->cell_closure_diagnostics = finite_cell_closure_;
             result->phase_roundoff = roundoff_;
             result->old_phase_history = source_->phase_history;
             result->new_phase_history = candidate_->phase_history;

@@ -147,6 +147,41 @@ struct GeneralVoFFaceVolume
     /** Finite numerical authority, separate from the explicit exact control. */
     std::optional<PLIC::DynamicGeometryValue> bounded_integrated_volume;
 };
+/** Immutable owned controls, collectively mode-checked and pinned to their
+ * accepted source. Empty node arrays support face-only transport; empty owners
+ * remain valid typed states. Full catalog agreement is checked when planning. */
+class GeneralVoFTransportControls
+{
+public:
+    [[nodiscard]] std::span<const GeneralVoFNodeVelocity> nodes() const noexcept { return nodes_; }
+    [[nodiscard]] std::span<const GeneralVoFFaceVolume> faces() const noexcept { return faces_; }
+    [[nodiscard]] double timestep() const noexcept { return timestep_; }
+
+private:
+    friend class GeneralVoF;
+    std::shared_ptr<const void> source_;
+    std::uint64_t source_control_ = 0;
+    ArithmeticMode mode_ = ArithmeticMode::Ordinary;
+    double timestep_ = 0;
+    std::vector<GeneralVoFNodeVelocity> nodes_;
+    std::vector<GeneralVoFFaceVolume> faces_;
+};
+template<ArithmeticMode Mode> class GeneralVoFControlView
+{
+public:
+    static constexpr ArithmeticMode arithmetic_mode = Mode;
+    [[nodiscard]] std::span<const GeneralVoFNodeVelocity> nodes() const noexcept { return controls_->nodes(); }
+    [[nodiscard]] std::span<const GeneralVoFFaceVolume> faces() const noexcept { return controls_->faces(); }
+    [[nodiscard]] double timestep() const noexcept { return controls_->timestep(); }
+
+private:
+    friend class GeneralVoF;
+    explicit GeneralVoFControlView(std::shared_ptr<const GeneralVoFTransportControls> controls)
+        : controls_(std::move(controls))
+    {
+    }
+    std::shared_ptr<const GeneralVoFTransportControls> controls_;
+};
 /** Diagnostic intervals only. There is no implicit scalar conversion; a known
  * nonzero interval may contain0 below output range. Never use these to build
  * physical fluxes, budgets or matrix coefficients: use exact measures. */
@@ -289,6 +324,8 @@ struct GeneralVoFPreparedTransport
     std::vector<PhaseRoundoff> phase_roundoff, old_phase_history, new_phase_history;
     std::vector<long double> old_mass, new_mass, old_mass_error, new_mass_error;
     GeneralVoFTransportDiagnostics diagnostics;
+    std::vector<GeneralVoFFaceChainDiagnostic> face_chain_diagnostics;
+    std::vector<GeneralVoFCellClosureDiagnostic> cell_closure_diagnostics;
     /** Solver-attached immutable coefficient preparation, shared by component
      * solves. Traces, histories and convergence results are never cached here. */
     std::shared_ptr<const void> momentum_preparation;
@@ -301,8 +338,34 @@ private:
     // The actual family is factory-authenticated, independently of public
     // backend configuration and of whether this rank retains any streams.
     std::shared_ptr<const void> authenticated_source_, authenticated_candidate_;
-    std::uint64_t authenticated_transaction_ = 0;
+    std::uint64_t authenticated_transaction_ = 0, authenticated_source_control_ = 0;
+    std::uint64_t authenticated_time_stage_ = 0, authenticated_mesh_generation_ = 0,
+                  authenticated_mesh_topology_generation_ = 0;
+    double authenticated_timestep_ = 0;
+    std::array<double, 2> authenticated_density_{1, 1};
     GeneralVoFTransportFamily authenticated_family_ = GeneralVoFTransportFamily::GeometricSweptTetrahedra;
+};
+/** Finite immutable prepared ledger, retaining both source and candidate after
+ * the originating Trial is destroyed. Exact keeps its separate trial authority. */
+template<ArithmeticMode Mode> class GeneralVoFPreparedTrialView
+{
+    static_assert(Mode == ArithmeticMode::Ordinary || Mode == ArithmeticMode::BoundedCertification);
+
+public:
+    static constexpr ArithmeticMode arithmetic_mode = Mode;
+    [[nodiscard]] const GeneralVoFPreparedTransport& ledger() const noexcept { return *prepared_; }
+    [[nodiscard]] const std::shared_ptr<const GeneralVoFPreparedTransport>& shared_ledger() const noexcept
+    {
+        return prepared_;
+    }
+
+private:
+    friend class GeneralVoF;
+    explicit GeneralVoFPreparedTrialView(std::shared_ptr<const GeneralVoFPreparedTransport> prepared)
+        : prepared_(std::move(prepared))
+    {
+    }
+    std::shared_ptr<const GeneralVoFPreparedTransport> prepared_;
 };
 struct GeneralVoFSupportCell
 {
@@ -482,6 +545,9 @@ public:
         [[nodiscard]] const std::vector<GeneralVoFCellClosureDiagnostic>&
         finite_cell_closure_diagnostics() const noexcept;
         [[nodiscard]] std::shared_ptr<const GeneralVoF> candidate() const;
+        /** Optional prebound compatibility ledger for face transport. Swept
+         * callers use prepare_transport()/prepare_transport_view() uniformly;
+         * detached preparation does not mutate this trial or cache context. */
         [[nodiscard]] const std::shared_ptr<const GeneralVoFPreparedTransport>& prepared_transport() const noexcept
         {
             return prepared_;
@@ -491,6 +557,19 @@ public:
          * trials retain their separate authority and reject this finite seam. */
         [[nodiscard]] std::shared_ptr<const GeneralVoFPreparedTransport> prepare_transport(
             std::array<double, 2> density = {1, 1}, std::uint64_t time_stage = 0) const;
+        template<ArithmeticMode Mode>
+        [[nodiscard]] GeneralVoFPreparedTrialView<Mode> prepare_transport_view(
+            std::array<double, 2> density = {1, 1}, std::uint64_t time_stage = 0) const
+        {
+            return GeneralVoFPreparedTrialView<Mode>(prepare_transport_checked(Mode, density, time_stage));
+        }
+        template<ArithmeticMode Mode>
+        void validate_prepared_transport(const GeneralVoFPreparedTrialView<Mode>& view, std::array<double, 2> density,
+            std::uint64_t time_stage) const
+        {
+            validate_prepared_transport_mode(Mode, &view.shared_ledger());
+            validate_prepared_transport(view.ledger(), density, time_stage);
+        }
         /** Collective transaction and caller-context authentication. */
         void validate_prepared_transport(
             const GeneralVoFPreparedTransport&, std::array<double, 2> density, std::uint64_t time_stage) const;
@@ -499,6 +578,10 @@ public:
         friend GeneralVoF;
         friend struct Exact::GeneralVoF;
         SIMPLEFLUID_FVM_LOCAL void validate_retained_algebraic_payload() const;
+        void validate_prepared_transport_mode(ArithmeticMode,
+            const std::shared_ptr<const GeneralVoFPreparedTransport>* retained = nullptr) const;
+        [[nodiscard]] std::shared_ptr<const GeneralVoFPreparedTransport> prepare_transport_checked(
+            ArithmeticMode, std::array<double, 2>, std::uint64_t) const;
         std::shared_ptr<const Data> source_, candidate_;
         std::uint64_t transaction_ = 0;
         double timestep_ = 0;
@@ -547,6 +630,30 @@ public:
      * Unsupported periodic images reject until image-qualified sweeps exist. */
     [[nodiscard]] Trial plan_transport(
         std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double timestep) const;
+    template<ArithmeticMode Mode>
+    [[nodiscard]] GeneralVoFControlView<Mode> transport_controls(std::span<const GeneralVoFNodeVelocity> nodes,
+        std::span<const GeneralVoFFaceVolume> faces, double timestep) const
+    {
+        return GeneralVoFControlView<Mode>(make_transport_controls(Mode, nodes, faces, timestep));
+    }
+    template<ArithmeticMode Mode> [[nodiscard]] Trial plan_transport(const GeneralVoFControlView<Mode>& view) const
+    {
+        validate_transport_controls(view.controls_, Mode, false);
+        return plan_transport_impl(view.nodes(), view.faces(), view.timestep());
+    }
+    template<ArithmeticMode Mode>
+    [[nodiscard]] Trial plan_face_transport(const GeneralVoFControlView<Mode>& view,
+        std::array<double, 2> density = {1, 1}, std::uint64_t time_stage = 0) const
+    {
+        validate_transport_controls(view.controls_, Mode, true);
+        return plan_face_transport(view.faces(), view.timestep(), density, time_stage);
+    }
+    template<ArithmeticMode Mode>
+    [[nodiscard]] Trial plan_homogeneous_transport(const GeneralVoFControlView<Mode>& view) const
+    {
+        validate_transport_controls(view.controls_, Mode, true);
+        return plan_homogeneous_transport(view.faces(), view.timestep());
+    }
     /** Collective whole-domain admission for Ordinary SweptPartition's
      * interface-free algebraic specialization. Explicit pure declarations and
      * same-phase nonperiodic adjacency are required, including retained ghosts. */
@@ -568,6 +675,12 @@ public:
 
 private:
     friend struct Exact::GeneralVoF;
+    [[nodiscard]] std::shared_ptr<const GeneralVoFTransportControls> make_transport_controls(
+        ArithmeticMode, std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
+    void validate_transport_controls(
+        const std::shared_ptr<const GeneralVoFTransportControls>&, ArithmeticMode, bool face_only) const;
+    [[nodiscard]] Trial plan_transport_impl(
+        std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
     SIMPLEFLUID_FVM_LOCAL Trial plan_face_transport_impl(std::span<const GeneralVoFFaceVolume>, double,
         std::array<double, 2>, std::uint64_t, bool homogeneous, std::uint64_t transaction_id = 0,
         bool numerical_baseline = false) const;

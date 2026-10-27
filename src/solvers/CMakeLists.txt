@@ -1,3 +1,5 @@
+# Responsibility groups retain one solver DSO and the existing experimental gate.
+# General-native source-free providers include each explicitly selected arithmetic backend.
 set(SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES
     details/GeneralVoF/Resources.cc
     explicit_instantiation/GeneralVoF/Initialization.cc
@@ -19,16 +21,12 @@ set(SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES
     details/GeneralVoF/exact/PhaseStorage.cc
     details/GeneralVoF/exact/Reduction.cc
 )
-set(SIMPLEFLUID_VOF_SOLVER_SOURCES
+set(SIMPLEFLUID_GENERAL_NATIVE_VOF_SOLVER_SOURCES
     GeneralVoFSolver.cc
     ${SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES}
     details/GeneralVoF/SolverImpl.cc
     details/GeneralVoFFiniteProjection.tcc
     details/ConservativeVoFFiniteTransport.tcc
-    VoFSolver.cc
-    details/ConservativeVoFTransport.cc
-    details/ConservativeVoFExactTransport.cc
-    details/VoFProjectionWorkspace.cc
     details/GeneralVoFPhiClosure.cc
     details/GeneralVoFExactPhiClosure.cc
     details/GeneralVoFPhiClosureSupport.cc
@@ -42,18 +40,37 @@ set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     details/GeneralVoFExactStorage.cc
     details/ConservativeVoFExactArithmetic.cc
     details/GeneralVoFTransferBinding.cc
+)
+set(SIMPLEFLUID_ADAPTIVE_VOF_SOLVER_SOURCES
     AdaptiveVoFSolver.cc
     details/AdaptiveVoFContext.cc
+)
+set(SIMPLEFLUID_LOW_MACH_VOF_SOLVER_SOURCES
+    VoFLowMach.cc
     details/AdaptiveVoFLowMach.cc
     details/AdaptiveVoFThermodynamics.cc
     details/AdaptiveVoFLowMachTransport.cc
+)
+set(SIMPLEFLUID_REPRESENTATION_VOF_SOLVER_SOURCES
     details/AdaptiveVoFRepresentation.cc
-    VoFLowMach.cc
-    # ReactingVoFCoupler depends on retired single-gas source options.
-    # Keep its implementation excluded pending species-schema migration.
     BubbleRepresentation.cc
 )
+set(SIMPLEFLUID_COMMON_VOF_SOLVER_SOURCES
+    VoFSolver.cc
+    details/ConservativeVoFTransport.cc
+    details/ConservativeVoFExactTransport.cc
+    details/VoFProjectionWorkspace.cc
+)
+set(SIMPLEFLUID_VOF_SOLVER_SOURCES
+    ${SIMPLEFLUID_GENERAL_NATIVE_VOF_SOLVER_SOURCES}
+    ${SIMPLEFLUID_ADAPTIVE_VOF_SOLVER_SOURCES}
+    ${SIMPLEFLUID_LOW_MACH_VOF_SOLVER_SOURCES}
+    ${SIMPLEFLUID_REPRESENTATION_VOF_SOLVER_SOURCES}
+    ${SIMPLEFLUID_COMMON_VOF_SOLVER_SOURCES}
+)
 
+# ReactingVoFCoupler depends on retired single-gas source options and remains
+# excluded from all groups pending species-schema migration.
 set(SIMPLEFLUID_SOLVER_SOURCES
     LowMachMixtureSolver.cc
     ReactingMixtureCoupler.cc
@@ -129,14 +146,14 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         set_source_files_properties(
             GeneralVoFSolver.cc
-    details/GeneralVoF/SolverImpl.cc
-    details/GeneralVoFFiniteProjection.tcc
-    details/ConservativeVoFFiniteTransport.tcc
+            details/GeneralVoF/SolverImpl.cc
+            details/GeneralVoFFiniteProjection.tcc
+            details/ConservativeVoFFiniteTransport.tcc
             details/ConservativeVoFTransport.cc
             details/GeneralVoFFlowWorkspace.cc
             details/GeneralVoFPhiClosure.cc
             details/GeneralVoFCurvature.cc
-    details/GeneralVoF/OrdinaryCurvature.cc
+            details/GeneralVoF/OrdinaryCurvature.cc
             PROPERTIES
             COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
             SKIP_UNITY_BUILD_INCLUSION TRUE

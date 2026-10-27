@@ -23,8 +23,10 @@ exchanges in their original order. Rank-local work must complete its collective
 error propagation before the next exchange, including on empty owners. Local
 preparation helpers do not silently initiate collectives.
 
-Transport authenticates controls, constructs departure fragments, authenticates
-donor allocations, exchanges amounts and validates the candidate. Remap agrees
+Transport authenticates mode-checked source-pinned controls, selects algebraic
+bulk or swept interface work, authenticates donor allocations, exchanges amounts
+and validates the candidate. Prepared views retain the selected family's ledger
+and diagnostics without inferring policy from nonempty records. Remap agrees
 the schema and target, authenticates overlap requests, transfers contributions,
 certifies recipient coverage and installs phase inventories and their evidence
 together. A source-pinned trial remains responsible for observation validation.
@@ -103,6 +105,15 @@ headers never include compiled providers.
 New numerical translation units inherit the owning component's strict floating
 point, PGO, PCH and unity-build policy. Internal functions stay hidden inside
 their existing library; FVM must not depend on the solver library.
+
+The component CMake files name general-native source-free provider groups
+separately from adaptive and common VoF sources. The solver also separates
+low-Mach and representation providers. These lists organize existing sources;
+they do not create new libraries or alternate numerical backends. FVM providers
+retain their existing unconditional registration, while solver VoF providers
+retain the `SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF` gate. Explicit instantiations,
+strict arithmetic flags, PGO exclusions and PCH/unity settings stay with their
+existing translation units.
 
 Splitting a function does not grant another resource budget. Existing admission
 scopes, operation counters, packet lifetimes and geometry leases remain in

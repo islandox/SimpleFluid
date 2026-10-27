@@ -275,6 +275,35 @@ solves retain their previous matrix, preconditioner and coefficient-agreement ga
 
 ## One detached finite ledger
 
+### Checked controls and prepared views
+
+`GeneralVoF::transport_controls<Mode>(nodes, faces, dt)` collectively creates a
+`GeneralVoFControlView<Mode>` pinned to the accepted source publication. It owns
+its control arrays, so temporary input vectors do not leave dangling spans.
+Retained control storage obeys the existing allocation cap. The explicit mode
+must match the source even on ranks with no nodes, faces or owned cells. Optional
+finite and Exact face-volume payloads must match that mode; incompatible payloads
+reject before dispatch.
+
+The typed `plan_transport`, `plan_homogeneous_transport` and `plan_face_transport`
+overloads authenticate the pinned source and its native observations. Source
+tokens agree across all ranks, including owners with no control records. Face-only
+execution requires empty node controls and retains the homogeneous interpolation
+bypass; supplied node controls cannot be silently ignored. Existing span-based
+entry points remain checked compatibility adapters.
+Constructing a control view does not establish geometric reach, physical timestep
+admissibility or transport conservation; the selected planning path retains those
+checks.
+
+`Trial::prepare_transport_view<Mode>(density, stage)` returns an owning
+`GeneralVoFPreparedTrialView<Mode>` for Ordinary or BoundedCertification. Its
+factory checks mode collectively and binds the trial, source, densities and time
+stage. Local getters expose the immutable ledger without communication. Exact
+controls remain supported through their separate Exact trial authority; the finite
+prepared view does not convert Exact inventories or coefficients.
+
+### Ledger and solver consumption
+
 `GeneralVoF::Trial::prepare_transport` binds a finite trial to positive constant
 phase densities and a caller time-stage identity. Its immutable
 `GeneralVoFPreparedTransport` retains the source pin, transaction, mesh identity,
@@ -290,6 +319,12 @@ The source and trial validation methods authenticate publication/context pins;
 they are not an admission API for caller-mutated ledger copies. Numerical execution
 consumes the immutable preparation produced by the trial factory.
 
+Prepared transport also retains node trajectories, face-chain diagnostics,
+cell-closure diagnostics and local transport work counters. These records share
+the ledger's lifetime and allocation admission. Face-chain records may include
+replicated retained tiles: deduplicate canonical face IDs before global diagnostic
+sums. Counters describe local work, not physical accuracy or runtime scaling.
+
 Canonical signed physical face contributions and positive donor-to-recipient
 route support have different meanings. Swept contributions can name nonincident
 geometric donors and can oppose each other on a face; they must not be reinterpreted
@@ -302,7 +337,8 @@ consumers must select the prepared family, not infer an identity update from emp
 collections. Independent gas and liquid amounts remain authoritative, including
 traces on declared pure geometry.
 
-The solver obtains this preparation before the component solves, checks phase
+The finite solver uses mode-checked controls and a prepared view, reads trajectory
+evidence through that preparation, and checks phase
 publication and mass capacities, and derives momentum inputs from its retained
 ledger. The finite momentum workspace validates routing and raw face agreement
 when preparing the numerical operator, then reuses its immutable routing, imports,
@@ -341,11 +377,12 @@ These records improve diagnosis; they do not make a failed geometric constructio
 acceptable. An unresolved final aggregate or required surface measurement still
 rejects atomically; a computational witness is not itself a measured output.
 
-## Remaining repair stages
+## Qualification boundary
 
 The [Stage 7 roadmap](../../TODO.md#stage-7--general-vof-and-flow-qualification)
 separates the shared foundation, homogeneous specialization, interface-local signed
-ledger and aggregate metric admission from unified capillary surfaces. The
+ledger and aggregate metric admission from unified capillary surfaces and checked
+preparation interfaces. The
 configured default backend and resource caps are unchanged. Aggregate transport
 does not change strict measured geometry required by other consumers.
 
