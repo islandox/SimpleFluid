@@ -215,9 +215,9 @@ TEST(GeneralVoFMotionAccuracy, IndependentPolygonOracleIntegratesKnownShearedCut
     EXPECT_EQ(clipped_area(patch, 1.L / 8, true), 33.L / 512);
     EXPECT_EQ(clipped_area(patch, 1.L / 8, false), 31.L / 512);
 }
-// Qualification probe: the current reconstructed trajectory exhausts the PLIC
-// angular optimizer on step 3. Keep the complete eight-step horizon and original
-// admission gates available for explicit requalification; two steps are not a pass.
+// Qualification probe: reconstruction requests additional phase/stencil support
+// on step 4. Keep the complete eight-step horizon and original admission gates
+// available for explicit requalification; three steps are not a pass.
 TEST(GeneralVoFMotionAccuracy, DISABLED_RepeatedClosedMotionReportsIndependentPhaseErrorAndTheta)
 {
     auto source = motion_fixture();

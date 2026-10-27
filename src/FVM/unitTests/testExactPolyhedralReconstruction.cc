@@ -121,6 +121,104 @@ TEST(ExactPolyhedralReconstruction, IndependentPhaseVolumesAreUnchangedDuringFit
             EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
         }
 }
+TEST(ExactPolyhedralReconstruction, SmallPhaseRetainsSupportedGradientAndStrictExactOffset)
+{
+    using Sample = PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>;
+    using Geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Exact>;
+    const auto sample = [](std::array<int, 3> index, double gas)
+    {
+        return Sample{Geometry::box({double(index[0]), double(index[1]), double(index[2])},
+                          {double(index[0] + 1), double(index[1] + 1), double(index[2] + 1)}),
+            gas, 1 - gas};
+    };
+    const std::array<std::array<int, 3>, 6> indices{
+        {{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}}};
+    const std::array<double, 6> fractions{1, .4, .9, .5, .8, .6};
+    for (const bool gas : {false, true})
+    {
+        auto target = sample({0, 0, 0}, std::ldexp(1., -20));
+        std::vector<Sample> stencil;
+        for (std::size_t i = 0; i < indices.size(); ++i)
+            stencil.push_back(sample(indices[i], fractions[i]));
+        if (!gas)
+        {
+            std::swap(target.gas_volume, target.carrier_volume);
+            for (auto& neighbor : stencil)
+                std::swap(neighbor.gas_volume, neighbor.carrier_volume);
+        }
+        const auto original = target;
+        PLIC::PolyhedralReconstructionOptions options;
+        options.maximum_fit_iterations = 1;
+        options.maximum_model_residual = 1e-12;
+        const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, options);
+        EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+        EXPECT_FALSE(fit.fit_converged);
+        EXPECT_EQ(fit.fit_iterations, 0u);
+        EXPECT_FALSE(fit.pure_gas);
+        EXPECT_FALSE(fit.pure_carrier);
+        // Six symmetric neighbors give matrix 2I and negative gradient
+        // (.6,.4,.2), independent of target alpha. Swapping phases reverses it.
+        for (unsigned axis = 0; axis < 3; ++axis)
+            EXPECT_NEAR(fit.gas.normal[axis], (gas ? 1. : -1.) * (3. - axis) / std::sqrt(14.), 2e-15);
+        const auto minority = gas ? target.gas_volume : target.carrier_volume;
+        // Independent tetrahedron volume: 3*x+2*y+z <= q has V=q^3/36.
+        EXPECT_NEAR(fit.gas.offset, (gas ? 1 : -1) * std::cbrt(36 * minority) / std::sqrt(14.), 2e-15);
+        const auto fragment =
+            geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*target.geometry);
+        const auto phases = fragment->phases(fit.gas);
+        EXPECT_TRUE((gas ? phases.gas : phases.carrier)
+                .relative_error_at_most(PLIC::GeometryMeasure<ArithmeticMode::Exact>::from_value(minority),
+                    options.volume_tolerance));
+        EXPECT_EQ((phases.gas + phases.carrier).compare(fragment->volume()), 0);
+        EXPECT_EQ(target.gas_volume, original.gas_volume);
+        EXPECT_EQ(target.carrier_volume, original.carrier_volume);
+        auto limited = options;
+        limited.maximum_offset_iterations = 1;
+        EXPECT_THROW((void) PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, limited),
+            std::invalid_argument);
+        for (const double invalid : {-1., 1.01, std::numeric_limits<double>::infinity(),
+                 std::numeric_limits<double>::quiet_NaN()})
+        {
+            auto invalid_options = options;
+            invalid_options.minimum_optimized_phase_length_ratio = invalid;
+            EXPECT_THROW(PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::validate(target, invalid_options),
+                std::invalid_argument);
+        }
+    }
+}
+TEST(ExactPolyhedralReconstruction, SmallPhaseThresholdIsStrictAndZeroDisablesExclusion)
+{
+    using Sample = PLIC::PolyhedralPhaseSample<ArithmeticMode::Exact>;
+    using Geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Exact>;
+    for (const double fraction : {1. / 4096, 1. / 512, 1. / 64})
+    {
+        const Sample target{Geometry::box({0, 0, 0}, {1, 1, 1}), fraction, 1 - fraction};
+        std::vector<Sample> stencil;
+        for (const auto index :
+            std::array<std::array<int, 3>, 6>{{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}}})
+        {
+            const double gas = index[0] < 0 ? 1 : index[0] > 0 ? 0 : fraction;
+            stencil.push_back({Geometry::box({double(index[0]), double(index[1]), double(index[2])},
+                                   {double(index[0] + 1), double(index[1] + 1), double(index[2] + 1)}),
+                gas, 1 - gas});
+        }
+        PLIC::PolyhedralReconstructionOptions options;
+        options.minimum_optimized_phase_length_ratio = .125;
+        const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, options);
+        const bool gradient = fraction < 1. / 512;
+        EXPECT_EQ(fit.orientation_method,
+            gradient ? PLIC::PolyhedralOrientationMethod::Gradient : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+        EXPECT_EQ(fit.fit_converged, !gradient);
+        EXPECT_NEAR(fit.gas.normal[0], 1, 2e-15);
+        EXPECT_NEAR(fit.gas.normal[1], 0, 2e-15);
+        EXPECT_NEAR(fit.gas.normal[2], 0, 2e-15);
+        options.minimum_optimized_phase_length_ratio = 0;
+        const auto angular =
+            PLIC::PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct(target, stencil, options);
+        EXPECT_EQ(angular.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+        EXPECT_TRUE(angular.fit_converged);
+    }
+}
 TEST(ExactPolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEndpoints)
 {
     const auto box =

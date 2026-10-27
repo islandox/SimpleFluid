@@ -1,6 +1,7 @@
 /** @file testGeneralVoFFinite.cc */
 #include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include "FVM/details/GeneralVoF/ConstructionControls.tcc"
+#include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "general_vof_finite_test_helpers.hh"
 namespace
 {
@@ -119,6 +120,83 @@ void check_budget_diagnostics(const GeneralVoF& state, const GeneralVoF::Trial& 
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, int(high.size()), high.data(), maximum.data());
     for (std::size_t i = 0; i < minimum.size(); ++i)
         if (std::isfinite(minimum[i])) EXPECT_EQ(minimum[i], maximum[i]);
+}
+
+TEST(GeneralVoFFinite, SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners)
+{
+    const auto input = fixture(); // Pure phases; validation must precede reconstruction.
+    const auto comm = Tpetra::getDefaultComm();
+    const bool changed_rank = comm->getRank() == comm->getSize() - 1;
+    if (comm->getSize() > 2 && changed_rank)
+        EXPECT_TRUE(input.order.empty());
+    for (const auto mode : {ArithmeticMode::Ordinary, ArithmeticMode::BoundedCertification})
+    {
+        SCOPED_TRACE(static_cast<int>(mode));
+        GeneralVoFOptions options;
+        options.arithmetic_mode = mode;
+        for (const double invalid : {-1., 1.01, std::numeric_limits<double>::infinity(),
+                 std::numeric_limits<double>::quiet_NaN()})
+        {
+            options.reconstruction.minimum_optimized_phase_length_ratio = changed_rank ? invalid : .05;
+            EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options),
+                std::invalid_argument);
+        }
+        for (const double valid : {0., 1.})
+        {
+            options.reconstruction.minimum_optimized_phase_length_ratio = valid;
+            EXPECT_NO_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options));
+        }
+        if (comm->getSize() > 1)
+        {
+            options.reconstruction.minimum_optimized_phase_length_ratio = changed_rank ? .1 : .05;
+            EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options),
+                std::invalid_argument);
+        }
+    }
+}
+
+TEST(GeneralVoFFinite, ConstructionAlgorithmBindsSmallPhasePolicy)
+{
+    namespace controls = SimpleFluid::VoF::construction_controls;
+    GeneralVoFOptions options;
+    const auto defaults = controls::algorithm(options);
+    options.reconstruction.minimum_optimized_phase_length_ratio = 0;
+    const auto disabled = controls::algorithm(options);
+    EXPECT_NE(defaults, disabled);
+    options.reconstruction.minimum_optimized_phase_length_ratio = 1;
+    const auto gradient_only = controls::algorithm(options);
+    EXPECT_NE(defaults, gradient_only);
+    EXPECT_NE(disabled, gradient_only);
+    options.byte_budget /= 2;
+    options.sweep.byte_budget /= 2;
+    EXPECT_EQ(gradient_only, controls::algorithm(options));
+}
+
+TEST(GeneralVoFFinite, OrientationWirePreservesEveryMethodAndRejectsUnknownWords)
+{
+    namespace codec = SimpleFluid::VoF::plane_wire_detail;
+    namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
+    for (const auto method : {PLIC::PolyhedralOrientationMethod::SuppliedNormal,
+             PLIC::PolyhedralOrientationMethod::Gradient, PLIC::PolyhedralOrientationMethod::AngularVolumeFit})
+    {
+        wire::Writer writer;
+        codec::orientation(writer, method);
+        EXPECT_EQ(writer.data.size(), sizeof(std::uint64_t));
+        wire::Reader reader{writer.data};
+        EXPECT_EQ(codec::orientation(reader), method);
+        EXPECT_NO_THROW(reader.done());
+    }
+    for (const auto invalid : {std::uint64_t(3), std::numeric_limits<std::uint64_t>::max()})
+    {
+        wire::Writer writer;
+        writer.word(invalid);
+        wire::Reader reader{writer.data};
+        EXPECT_THROW((void) codec::orientation(reader), std::invalid_argument);
+        wire::Writer outbound;
+        EXPECT_THROW(codec::orientation(outbound, static_cast<PLIC::PolyhedralOrientationMethod>(invalid)),
+            std::invalid_argument);
+        EXPECT_TRUE(outbound.data.empty());
+    }
 }
 
 TEST(GeneralVoFFinite, SelectedGeometryModeStaysStaticThroughConstructionAndReconstruction)

@@ -61,7 +61,7 @@ deleting a trace amount. For inferred geometry, an exactly zero phase amount
 selects the pure-cell offset path. A mixed cell gathers neighbors through the
 configured topology support rings and enters reconstruction.
 
-Mixed-cell admission checks the target and stencil before angular fitting:
+Mixed-cell admission checks the target and stencil before selecting an orientation method:
 
 - At least four stencil cells are required, with a nonzero, sufficiently
   conditioned three-dimensional least-squares normal estimate.
@@ -92,7 +92,9 @@ flowchart TD
     P["Return pure-phase support plane"]
     D{"Sufficient phase support<br/>and conditioned 3D stencil?"}
     R["Request refinement / reassessment<br/>Preserve accepted inventories"]
-    E["Weighted least-squares gradient<br/>Initial gas-outward unit normal"]
+    E["Weighted least-squares gradient<br/>Supported gas-outward unit normal"]
+    S{"Minority equivalent length<br/>below optimization threshold?"}
+    O["Keep gradient normal<br/>Fit only the target offset"]
     F["Fit target offset for current normal<br/>Clip stencil cells and form residuals"]
     G["Perturb normal in two tangent directions<br/>Refit offset at every evaluation"]
     H["Build angular Gauss-Newton system<br/>Check conditioning and observability"]
@@ -106,7 +108,9 @@ flowchart TD
     C -- Yes --> P
     C -- No --> D
     D -- No --> R
-    D -- Yes --> E --> F --> G --> H --> I
+    D -- Yes --> E --> S
+    S -- Yes --> O --> L
+    S -- No --> F --> G --> H --> I
     H -- Singular or unobservable --> X
     I -- No --> J
     J -- Improved normal --> F
@@ -128,9 +132,35 @@ $$
 \qquad \mathbf{n}_0=\frac{\mathbf{q}}{|\mathbf{q}|}.
 $$
 
-The minus sign gives the gas-outward convention. This gradient supplies only an
-initial guess. There is no arbitrary-axis fallback for an unsupported mixed
-three-dimensional stencil.
+The minus sign gives the gas-outward convention. There is no arbitrary-axis
+fallback for an unsupported mixed three-dimensional stencil.
+
+The provisional small-phase policy uses volume-equivalent characteristic lengths:
+
+$$
+\ell_m=\sqrt[3]{\min(V_g,V_l)},\qquad h_K=\sqrt[3]{V_K},\qquad
+\ell_m/h_K < \texttt{minimum\_optimized\_phase\_length\_ratio}.
+$$
+
+The default ratio is `0.05`; it is a configurable modeling choice, not a measured
+interface thickness or a certified resolution bound. It is invariant under unit
+scaling and exchanging the phase labels. Values in `[0,1]` are accepted; zero
+explicitly disables this exclusion. Equality remains eligible for angular fitting.
+
+Below the threshold, the supported gradient determines the orientation. Only the
+target-cell offset is fitted: no neighboring-cell volume objective, angular
+iterations or plane-model RMS gate is evaluated. The original target minority
+volume accuracy and offset-work limits still apply. An unresolved offset rejects;
+the policy neither deletes a phase inventory nor declares a mixed cell pure.
+Ordinary, BoundedCertification and explicit Exact reconstruction share this
+orientation-selection policy while retaining their separate arithmetic and support
+contracts. For other mixed cells, the gradient initializes the angular fit below.
+
+`PolyhedralInterface::orientation_method` distinguishes `Gradient`,
+`AngularVolumeFit` and `SuppliedNormal`. Gradient results report zero angular
+iterations and leave `fit_converged` false because no angular optimizer ran.
+Their zero stencil residual is unmeasured, not evidence of a zero model mismatch.
+Target-volume residual diagnostics remain available on every fitted-offset path.
 
 For each candidate normal, the inner solve fits the target offset anew. That
 same anchored plane is then applied to each stencil cell. For cell $i$, select
@@ -237,6 +267,7 @@ Defaults in `PolyhedralReconstructionOptions` are:
 | `orientation_tolerance` | `2e-8` | Tangent-step norm convergence threshold |
 | `maximum_model_residual` | `0.2` | Maximum accepted dimensionless stencil RMS defect |
 | `minimum_phase_support_fraction` | `0.5` | Required neighborhood support for each phase |
+| `minimum_optimized_phase_length_ratio` | `0.05` | Below this volume-equivalent length ratio, use the supported gradient without angular fitting |
 | `maximum_condition` | `1e8` | Conditioning limit for normal estimation and angular fitting |
 | `maximum_offset_iterations` | `192` | Iteration cap per target-offset fit |
 | `maximum_fit_iterations` | `24` | Outer angular iteration cap |
@@ -253,7 +284,7 @@ phase amounts or return an unconverged fit.
 
 `PolyhedralInterface` returns the gas halfspace, pure-phase flags, signed target
 volume residual, finite residual evidence, stencil RMS residual, condition
-diagnostic, angular step, iteration count, convergence flag, and resolution
+diagnostic, orientation method, angular step, iteration count, convergence flag, and resolution
 assessment. The signed target residual refers to the selected minority phase,
 which need not be gas. Pure or reused geometry does not necessarily carry a
 fresh angular-fit convergence record.

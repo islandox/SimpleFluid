@@ -45,7 +45,9 @@ void validate_sample(
         !std::isfinite(options.maximum_condition) || !std::isfinite(options.orientation_tolerance) ||
         !std::isfinite(options.maximum_model_residual) || !(options.orientation_tolerance > 0) ||
         !(options.maximum_model_residual > 0 && options.maximum_model_residual <= .5) ||
-        !(options.volume_tolerance > 0) || !(options.fit_tolerance > 0) || !(options.maximum_condition >= 1))
+        !(options.volume_tolerance > 0) || !(options.fit_tolerance > 0) || !(options.maximum_condition >= 1) ||
+        !std::isfinite(options.minimum_optimized_phase_length_ratio) ||
+        !(options.minimum_optimized_phase_length_ratio >= 0 && options.minimum_optimized_phase_length_ratio <= 1))
         throw std::invalid_argument("Invalid polyhedral PLIC sample/options.");
     const auto metric = PLIC::GeometryMeasure<ArithmeticMode::Exact>::volume(*sample.geometry).certified();
     const long double discrepancy = static_cast<long double>(sample.gas_volume) + sample.carrier_volume - metric.value;
@@ -297,7 +299,7 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct
     for (const auto& sample : stencil)
     {
         validate_sample(sample, options);
-        stencil_geometry.push_back(prepare_geometry(sample, false, true, true));
+        stencil_geometry.push_back(prepare_geometry(sample, false, false, true));
         const auto& prepared = stencil_geometry.back();
         const auto d = minus(prepared.center, center);
         const auto d2 = dot(d, d);
@@ -313,13 +315,26 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct
     }
     double condition = 0;
     Vector normal = unit(solve(matrix, rhs, options.maximum_condition, condition));
+    std::size_t evaluations = 0;
+    const auto phase_length_ratio =
+        std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
+        std::cbrt(geometry.exact_volume.enclosure().value);
+    if (phase_length_ratio < options.minimum_optimized_phase_length_ratio)
+    {
+        auto result = offset_fit(target, normal, options, evaluations, geometry);
+        result.orientation_method = PolyhedralOrientationMethod::Gradient;
+        result.stencil_condition = condition;
+        return result;
+    }
+    for (std::size_t i = 0; i < stencil.size(); ++i)
+        stencil_geometry[i].fragment =
+            geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*stencil[i].geometry);
     struct Evaluation
     {
         PolyhedralInterface plane;
         std::vector<double> residual;
         double objective = 0;
     };
-    std::size_t evaluations = 0;
     const auto evaluate = [&](Vector n)
     {
         Evaluation value;
@@ -410,6 +425,7 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct
     current.plane.stencil_condition = condition;
     current.plane.orientation_step = last_step;
     current.plane.fit_iterations = iterations;
+    current.plane.orientation_method = PolyhedralOrientationMethod::AngularVolumeFit;
     current.plane.fit_converged = converged;
     if (!converged)
         throw std::invalid_argument("PLIC angular volume optimizer iteration budget exhausted.");
