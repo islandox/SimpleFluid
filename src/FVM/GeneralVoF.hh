@@ -52,6 +52,9 @@ struct GeneralVoFTransportDiagnostics
     long double maximum_outgoing_courant = 0, maximum_continuity_defect = 0, maximum_occupancy_defect = 0;
     long double limited_volume = 0, fallback_volume = 0;
     std::size_t indexed_cells = 0, index_queries = 0, index_node_visits = 0, donor_candidates = 0;
+    /** One cached retained-domain pair of donor/frontier indexes per local
+     * preparation; bytes describes charged retained cache storage. */
+    std::size_t spatial_index_builds = 0, spatial_index_reuses = 0, spatial_index_bytes = 0;
     std::size_t geometric_faces = 0, algebraic_faces = 0, swept_pieces = 0, plane_requests = 0;
     /** Ordinary interface-local scalar geometry; swept_pieces counts immutable
      * source tetrahedra, not individually measured closed solids. */
@@ -59,6 +62,10 @@ struct GeneralVoFTransportDiagnostics
     std::size_t limited_faces = 0, gross_counterstreams = 0, quality_limited_faces = 0;
     long double minimum_quality_theta = 1;
     long double minimum_theta = 1;
+    /** Canonical-owner geometric faces after all limiting: bin 0 is theta=0,
+     * bins 1..8 are floor(8*theta)+1 for 0<theta<1, bin 9 is theta=1.
+     * Algebraic-only faces do not populate this distribution. */
+    std::array<std::size_t, 10> geometric_theta_histogram{};
 };
 struct GeneralVoFPreparedTransport;
 struct GeneralVoFFaceInterface
@@ -682,8 +689,7 @@ private:
     [[nodiscard]] Trial plan_transport_impl(
         std::span<const GeneralVoFNodeVelocity>, std::span<const GeneralVoFFaceVolume>, double) const;
     SIMPLEFLUID_FVM_LOCAL Trial plan_face_transport_impl(std::span<const GeneralVoFFaceVolume>, double,
-        std::array<double, 2>, std::uint64_t, bool homogeneous, std::uint64_t transaction_id = 0,
-        bool numerical_baseline = false) const;
+        std::array<double, 2>, std::uint64_t, bool homogeneous, std::uint64_t transaction_id = 0) const;
     SIMPLEFLUID_FVM_LOCAL Trial plan_interface_transport(
         Trial, const general_vof_detail::LocalTransportControls&) const;
     template<ArithmeticMode Mode>

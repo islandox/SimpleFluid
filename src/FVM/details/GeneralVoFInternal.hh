@@ -20,6 +20,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -72,6 +73,7 @@ template<class Work> void collective(const Teuchos::Comm<int>& comm, Work&& acti
 using Key = AMR::AdaptiveCellKey;
 using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
 namespace fp = finite_detail;
+struct LocalSpatialCache;
 struct Cell
 {
     Key key;
@@ -132,6 +134,10 @@ struct GeneralVoF::Data
         std::vector<Key> order;
         std::map<Key, std::vector<std::size_t>> cell_tiles;
         std::map<std::uint64_t, std::vector<std::size_t>> node_tiles;
+        // Geometry-only cache shared by accepted transport publications. A cache
+        // never retains this topology or a phase-bearing Data/Cell object.
+        mutable std::mutex spatial_cache_mutex;
+        mutable std::shared_ptr<const LocalSpatialCache> spatial_cache;
     };
     std::shared_ptr<const Topology> topology;
     std::shared_ptr<const Hierarchy> hierarchy;
@@ -181,7 +187,9 @@ SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMo
     const Cell& cell);
 SIMPLEFLUID_FVM_LOCAL void refresh_experimental_catalog(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL void current(const GeneralVoF::Data& data);
-template<ArithmeticMode Mode> SIMPLEFLUID_FVM_LOCAL void retained_budget(const GeneralVoF::Data& data);
+template<ArithmeticMode Mode>
+SIMPLEFLUID_FVM_LOCAL void retained_budget(
+    const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes = {});
 // Every incident owner registers its actual cell once. The node authority
 // authenticates those registrations and returns the complete canonical fan;
 // geometric coincidence and whichever ghost rows happen to be resident play no

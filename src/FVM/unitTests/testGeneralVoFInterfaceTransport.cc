@@ -69,6 +69,12 @@ std::vector<GeneralVoFFaceVolume> loops(const GeneralVoF& source, double q, bool
 }
 void check_signed_budget(const GeneralVoFPreparedTransport& prepared)
 {
+    std::array<double, 2> local{}, global{};
+    for (const auto count : prepared.diagnostics.geometric_theta_histogram)
+        local[0] += double(count);
+    local[1] = double(prepared.diagnostics.geometric_faces);
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 2, local.data(), global.data());
+    EXPECT_EQ(global[0], global[1]);
     for (const auto& b : prepared.signed_donor_budgets)
         for (const auto& p : {std::array{b.old.bulk.value, b.positive_remote.bulk.value, b.negative_remote.bulk.value,
                                   b.diagonal.bulk.value},
@@ -82,6 +88,115 @@ void check_signed_budget(const GeneralVoFPreparedTransport& prepared)
             EXPECT_LE(p[1], p[0]);
             EXPECT_NEAR(p[3] + p[1] - p[2], p[0], 8e-15L * p[0]);
         }
+}
+TEST(GeneralVoFInterfaceTransport, AdmittedNumericalSupportMatchesAnalyticDonorCycleAndFacePlanner)
+{
+    const auto input = planar_fixture();
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier);
+    GeneralVoFOptions donor_options;
+    donor_options.transport_backend = GeneralVoFTransportBackend::DonorCell;
+    GeneralVoF donor(input.hierarchy, input.order, input.gas, input.carrier, donor_options);
+    // Native algebraic GIDs can depend on partitioning. Gather physical cell
+    // coordinates and independent initial inventories before evaluating routes.
+    std::array<double, 16 * 5> local{}, cells{};
+    for (std::size_t c = 0; c < input.order.size(); ++c)
+    {
+        const auto gid = source.mesh()->owned_cell_map()->getGlobalElement(c);
+        ASSERT_GE(gid, 0);
+        ASSERT_LT(gid, 16);
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        for (unsigned axis = 0; axis < 3; ++axis)
+            local[5 * gid + axis] = x[axis];
+        local[5 * gid + 3] = input.gas[c];
+        local[5 * gid + 4] = input.carrier[c];
+    }
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, int(local.size()), local.data(), cells.data());
+    for (const double signed_q : {1. / 64, -1. / 64})
+    {
+        SCOPED_TRACE(signed_q);
+        const auto mixed = source.plan_transport(stationary(source), loops(source, signed_q), 1).prepare_transport();
+        const auto face = donor.plan_face_transport(loops(donor, signed_q), 1);
+        ASSERT_EQ(mixed->family, Family::InterfaceLocalSwept);
+        std::map<std::pair<std::uint64_t, std::uint64_t>, const GeneralVoFFiniteTransfer*> face_routes;
+        for (const auto& route : face.finite_transfers())
+            ASSERT_TRUE(face_routes.emplace(std::pair{route.donor, route.recipient}, &route).second);
+        ASSERT_EQ(mixed->numerical_support_transfers.size(), face_routes.size());
+        for (const auto& route : mixed->numerical_support_transfers)
+        {
+            ASSERT_LT(route.donor, 16u);
+            ASSERT_LT(route.recipient, 16u);
+            const auto d = 5 * route.donor, r = 5 * route.recipient;
+            const auto q = std::abs(static_cast<long double>(signed_q));
+            const bool moving = cells[d] < 2;
+            const auto expected_bulk = route.donor == route.recipient ? 1 - (moving ? q : 0) : q;
+            EXPECT_EQ(route.amount.bulk.value, expected_bulk);
+            EXPECT_EQ(route.amount.gas.value, expected_bulk * cells[d + 3]);
+            EXPECT_EQ(route.amount.carrier.value, expected_bulk * cells[d + 4]);
+            if (route.donor != route.recipient)
+            {
+                ASSERT_TRUE(moving);
+                // Positive flow follows (0,0)->(1,0)->(1,1)->(0,1).
+                const int x = int(cells[d]), y = int(cells[d + 1]);
+                const int next_x = signed_q > 0 ? (x == y ? 1 - x : x) : (x != y ? 1 - x : x);
+                const int next_y = signed_q > 0 ? (x != y ? 1 - y : y) : (x == y ? 1 - y : y);
+                EXPECT_EQ(cells[r], next_x + .5);
+                EXPECT_EQ(cells[r + 1], next_y + .5);
+                EXPECT_EQ(cells[r + 2], cells[d + 2]);
+            }
+            const auto found = face_routes.find({route.donor, route.recipient});
+            ASSERT_NE(found, face_routes.end());
+            const auto& other = *found->second;
+            EXPECT_EQ(route.donor_owner, other.donor_owner);
+            EXPECT_EQ(route.recipient_owner, other.recipient_owner);
+            EXPECT_EQ(route.amount.bulk.value, other.amount.bulk.value);
+            EXPECT_EQ(route.amount.gas.value, other.amount.gas.value);
+            EXPECT_EQ(route.amount.carrier.value, other.amount.carrier.value);
+            EXPECT_EQ(route.inherited_error.gas, other.inherited_error.gas);
+            EXPECT_EQ(route.inherited_error.carrier, other.inherited_error.carrier);
+        }
+        std::map<std::uint64_t, const GeneralVoFFiniteDonorBudget*> face_budgets;
+        for (const auto& budget : face.finite_donor_budgets())
+            ASSERT_TRUE(face_budgets.emplace(budget.donor, &budget).second);
+        ASSERT_EQ(mixed->numerical_support_budgets.size(), face_budgets.size());
+        for (const auto& budget : mixed->numerical_support_budgets)
+        {
+            const auto d = 5 * budget.donor;
+            const auto q = cells[d] < 2 ? std::abs(static_cast<long double>(signed_q)) : 0;
+            EXPECT_EQ(budget.exported.bulk.value, q);
+            EXPECT_EQ(budget.exported.gas.value, q * cells[d + 3]);
+            EXPECT_EQ(budget.exported.carrier.value, q * cells[d + 4]);
+            EXPECT_EQ(budget.retained.gas.value, (1 - q) * cells[d + 3]);
+            EXPECT_EQ(budget.retained.carrier.value, (1 - q) * cells[d + 4]);
+            const auto found = face_budgets.find(budget.donor);
+            ASSERT_NE(found, face_budgets.end());
+            EXPECT_EQ(budget.exported.bulk.value, found->second->exported.bulk.value);
+            EXPECT_EQ(budget.exported.gas.value, found->second->exported.gas.value);
+            EXPECT_EQ(budget.exported.carrier.value, found->second->exported.carrier.value);
+        }
+    }
+    EXPECT_EQ(source.gas_volumes(), input.gas);
+    EXPECT_EQ(source.carrier_volumes(), input.carrier);
+}
+TEST(GeneralVoFInterfaceTransport, LowOrderCflAdmissionRejectsBeforeGeometryAndPreservesSource)
+{
+    const auto input = planar_fixture();
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier);
+    const auto identity = source.accepted_identity();
+    std::string cause;
+    try
+    {
+        (void) source.plan_transport(stationary(source), loops(source, 2), 1);
+        ADD_FAILURE() << "A two-volume donor export must fail low-order admission.";
+    }
+    catch (const std::invalid_argument& error)
+    {
+        cause = error.what();
+    }
+    EXPECT_NE(cause.find("outgoing-volume CFL"), std::string::npos) << cause;
+    EXPECT_EQ(source.accepted_identity(), identity);
+    EXPECT_EQ(source.gas_volumes(), input.gas);
+    EXPECT_EQ(source.carrier_volumes(), input.carrier);
+    EXPECT_NO_THROW((void) source.plan_transport(stationary(source), loops(source, 1. / 64), 1));
 }
 TEST(GeneralVoFInterfaceTransport, PlanarCycleHasIndependentGeometricPhaseUpdate)
 {
@@ -145,6 +260,7 @@ TEST(GeneralVoFInterfaceTransport, ThreePlanarCyclesUseAggregateWitnessesAndPres
 {
     const auto input = planar_fixture();
     auto source = std::make_shared<const GeneralVoF>(input.hierarchy, input.order, input.gas, input.carrier);
+    std::size_t spatial_index_bytes = 0;
     for (unsigned step = 0; step < 3; ++step)
     {
         SCOPED_TRACE(::testing::Message() << "step=" << step);
@@ -156,10 +272,17 @@ TEST(GeneralVoFInterfaceTransport, ThreePlanarCyclesUseAggregateWitnessesAndPres
         EXPECT_EQ(prepared->family, Family::InterfaceLocalSwept);
         EXPECT_EQ(prepared->backend, GeneralVoFTransportBackend::SweptPartition);
         EXPECT_TRUE(prepared->positive_transfers.empty());
+        EXPECT_EQ(prepared->diagnostics.spatial_index_builds, step == 0 ? 1u : 0u);
+        EXPECT_EQ(prepared->diagnostics.spatial_index_reuses, step == 0 ? 0u : 1u);
+        EXPECT_GT(prepared->diagnostics.spatial_index_bytes, 0u);
+        if (step == 0)
+            spatial_index_bytes = prepared->diagnostics.spatial_index_bytes;
+        EXPECT_EQ(prepared->diagnostics.spatial_index_bytes, spatial_index_bytes);
         check_signed_budget(*prepared);
         std::array<double, 6> local{0, 0, double(prepared->diagnostics.aggregate_groups),
             double(prepared->diagnostics.aggregate_witnesses), double(prepared->diagnostics.cancelled_boundaries),
-            double(prepared->diagnostics.aggregate_retries)}, global{};
+            double(prepared->diagnostics.aggregate_retries)},
+            global{};
         for (const auto& amount : next->phase_volumes())
         {
             EXPECT_GE(amount.gas, 0);
@@ -224,6 +347,20 @@ TEST(GeneralVoFInterfaceTransport, ZeroNetFaceRetainsOpposingPhaseStreamsAndCorr
     const auto first = source.plan_transport(velocity, zero, dt);
     const auto next = first.candidate();
     const auto prepared = first.prepare_transport();
+    // Counterflow geometry with zero canonical controls has identity low-order
+    // support; it must not invent positive donor exports or rounded receipts.
+    EXPECT_EQ(prepared->numerical_support_transfers.size(), input.order.size());
+    for (const auto& route : prepared->numerical_support_transfers)
+    {
+        EXPECT_EQ(route.donor, route.recipient);
+        EXPECT_EQ(route.amount.bulk.value, 1);
+    }
+    for (const auto& budget : prepared->numerical_support_budgets)
+    {
+        EXPECT_EQ(budget.exported.bulk.value, 0);
+        EXPECT_EQ(budget.exported.gas.value, 0);
+        EXPECT_EQ(budget.exported.carrier.value, 0);
+    }
     for (std::size_t c = 0; c < input.order.size(); ++c)
     {
         const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();

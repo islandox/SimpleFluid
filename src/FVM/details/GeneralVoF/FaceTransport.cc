@@ -1,6 +1,7 @@
 /** @file FaceTransport.cc
  * @brief Conservative fixed-mesh directed transport; geometry is measurement only.
  */
+#include "FVM/details/GeneralVoF/FaceTransport.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
@@ -54,23 +55,25 @@ struct Totals
 {
     SimpleFluid::detail::CompensatedSum<long double> bulk_out, bulk_in, gas_out, gas_in, liquid_out, liquid_in;
 };
-} // namespace
-GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFaceVolume> controls, double dt,
-    std::array<double, 2> density, std::uint64_t time_stage) const
+struct FaceLedger
 {
-    return plan_face_transport_impl(controls, dt, density, time_stage, false);
-}
-GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVoFFaceVolume> controls, double dt,
-    std::array<double, 2> density, std::uint64_t time_stage, bool homogeneous, std::uint64_t transaction_id,
-    bool numerical_baseline) const
+    std::map<std::uint64_t, const AMR::AdaptiveTile*> tiles;
+    std::map<std::uint64_t, std::set<int>> subscribers;
+    std::map<std::uint64_t, Stream> authority, streams;
+    std::map<std::uint64_t, Totals> totals;
+    GeneralVoFTransportDiagnostics diagnostics;
+};
+struct FaceAdmission
 {
-    const auto& data = *data_;
+    std::vector<GeneralVoFFiniteTransfer> transfers;
+    std::vector<GeneralVoFFiniteDonorBudget> budgets;
+};
+FaceLedger build_face_ledger(const GeneralVoF::Data& data, std::span<const GeneralVoFFaceVolume> controls, double dt,
+    std::array<double, 2> density, std::uint64_t time_stage)
+{
     const auto comm = data.hierarchy->communicator();
     const auto rank = comm->getRank();
     const auto limit = data.options.byte_budget;
-    Trial trial;
-    trial.source_ = data_;
-    std::shared_ptr<GeneralVoFPreparedTransport> prepared;
     std::map<std::uint64_t, const AMR::AdaptiveTile*> tiles;
     std::map<std::uint64_t, long double> phi, control_error;
     std::vector<OwnerPacket> packets;
@@ -78,9 +81,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
         [&]
         {
             current(data);
-            prepared = std::make_shared<GeneralVoFPreparedTransport>();
-            if ((!homogeneous && data.options.transport_backend == Backend::SweptPartition) ||
-                arithmetic_mode() != mode || !std::isfinite(dt) || dt < 0 ||
+            if (data.options.arithmetic_mode != mode || !std::isfinite(dt) || dt < 0 ||
                 controls.size() != data.topology->tiles.size() || !std::isfinite(density[0]) || density[0] <= 0 ||
                 !std::isfinite(density[1]) || density[1] <= 0)
                 throw std::invalid_argument(
@@ -146,17 +147,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
             if (low != high)
                 throw std::invalid_argument("Face transport controls differ.");
         });
-    trial.transaction_ = homogeneous && transaction_id != 0 ? transaction_id : transaction(comm);
-    trial.homogeneous_algebraic_ = homogeneous && !numerical_baseline;
-    trial.timestep_ = dt;
-    prepared->source_identity = data_;
-    prepared->source_control = data.control;
-    prepared->transaction = trial.transaction_;
-    prepared->mesh_generation = data.hierarchy->partition_generation();
-    prepared->time_stage = time_stage;
-    prepared->timestep = dt;
-    prepared->density = density;
-    prepared->backend = data.options.transport_backend;
+    GeneralVoFTransportDiagnostics diagnostics;
     std::map<std::uint64_t, std::set<int>> subscribers;
     std::map<std::uint64_t, Stream> authority;
     const auto requested = exchange_owner_packets(packets, comm, limit);
@@ -257,12 +248,338 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                     throw std::invalid_argument("Face transport bulk continuity defect.");
                 if (t.gas_out.value() > g || t.liquid_out.value() > l)
                     throw std::invalid_argument("Face transport low-order phase export exceeds old inventory.");
-                prepared->diagnostics.maximum_outgoing_courant =
-                    std::max(prepared->diagnostics.maximum_outgoing_courant, out / v);
-                prepared->diagnostics.maximum_continuity_defect =
-                    std::max(prepared->diagnostics.maximum_continuity_defect, std::abs(continuity));
+                diagnostics.maximum_outgoing_courant = std::max(diagnostics.maximum_outgoing_courant, out / v);
+                diagnostics.maximum_continuity_defect =
+                    std::max(diagnostics.maximum_continuity_defect, std::abs(continuity));
             }
         });
+    return {std::move(tiles), std::move(subscribers), std::move(authority), std::move(streams), std::move(totals),
+        diagnostics};
+}
+template<class ConsumeCell, class ConsumeFace>
+FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger, bool homogeneous,
+    ConsumeCell&& consume_cell, ConsumeFace&& consume_face)
+{
+    const auto comm = data.hierarchy->communicator();
+    const auto rank = comm->getRank();
+    const auto& tiles = ledger.tiles;
+    const auto& streams = ledger.streams;
+    auto& totals = ledger.totals;
+    FaceAdmission admitted;
+    std::array<double, 8> local{}, global{};
+    wire::collective(*comm,
+        [&]
+        {
+            std::array<fp::SumFor<mode>, 6> sums;
+            std::array<fp::SumFor<mode>, 2> publication;
+            for (auto& sum : sums)
+                sum = fp::SumFor<mode>(data.options.arithmetic_mode);
+            for (auto& sum : publication)
+                sum = fp::SumFor<mode>(data.options.arithmetic_mode);
+            std::map<std::pair<std::uint64_t, std::uint64_t>, GeneralVoFFiniteTransfer> routes;
+            for (const auto& [face, s] : streams)
+            {
+                if (tiles.at(face)->first_owner == rank)
+                {
+                    ++ledger.diagnostics.streams;
+                    if (s.theta < 1)
+                    {
+                        ++ledger.diagnostics.limited_streams;
+                        ledger.diagnostics.limited_volume += s.volume;
+                    }
+                    if (s.lower_order)
+                    {
+                        ++ledger.diagnostics.fallback_streams;
+                        ledger.diagnostics.fallback_volume += s.volume;
+                    }
+                    consume_face(GeneralVoFFiniteFaceContribution{
+                        face, s.donor, s.donor_owner, s.direction, measures(s.volume, s.gas, s.liquid)});
+                }
+                if (s.recipient_owner == rank)
+                {
+                    auto& route = routes[{s.donor, s.recipient}];
+                    route.donor = s.donor;
+                    route.recipient = s.recipient;
+                    route.donor_owner = s.donor_owner;
+                    route.recipient_owner = rank;
+                    route.amount.bulk.value += s.volume;
+                    route.amount.gas.value += s.gas;
+                    route.amount.carrier.value += s.liquid;
+                }
+            }
+            for (const auto& key : data.topology->order)
+            {
+                const auto& old = data.cells.at(key);
+                const auto& c = old;
+                const auto& t = totals[c.gid];
+                const long double g = old.phase.gas_volume, l = old.phase.carrier_volume;
+                const long double rg = g - t.gas_out.value(), rl = l - t.liquid_out.value();
+                auto retained = measures(c.native_volume - t.bulk_out.value(), rg, rl);
+                admitted.budgets.push_back({c.gid, measures(c.native_volume, g, l),
+                    measures(t.bulk_out.value(), t.gas_out.value(), t.liquid_out.value()), retained});
+                routes[{c.gid, c.gid}] = {c.gid, c.gid, rank, rank, retained, {}};
+            }
+            std::map<std::uint64_t, fp::SumFor<mode>> gas, liquid;
+            std::map<std::uint64_t, long double> history_g, history_l, pure_fit;
+            std::set<std::uint64_t> mixed_receipts;
+            for (auto& [pair, route] : routes)
+            {
+                route.amount = measures(route.amount.bulk.value, route.amount.gas.value, route.amount.carrier.value);
+                gas[route.recipient].add(route.amount.gas);
+                liquid[route.recipient].add(route.amount.carrier);
+                const auto& donor = data.cells.at(data.topology->by_gid.at(route.donor));
+                const auto phase_capacity =
+                    static_cast<long double>(donor.phase.gas_volume) + donor.phase.carrier_volume;
+                // The occupancy discrepancy stays local. Normalize absent-phase
+                // uncertainty with physical capacity, including the self residual.
+                const auto bulk_fraction = route.donor == route.recipient
+                                               ? 1 - totals[donor.gid].bulk_out.value() / phase_capacity
+                                               : route.amount.bulk.value / phase_capacity;
+                const long double gf = donor.phase.gas_volume > 0 ? route.amount.gas.value / donor.phase.gas_volume
+                                                                  : (homogeneous ? bulk_fraction : 0);
+                const long double lf = donor.phase.carrier_volume > 0
+                                           ? route.amount.carrier.value / donor.phase.carrier_volume
+                                           : (homogeneous ? bulk_fraction : 0);
+                if (homogeneous)
+                {
+                    const auto fraction = donor.declaration == GeneralVoFPhaseGeometry::PureGas ? lf : gf;
+                    pure_fit[route.recipient] = fp::bound_add(pure_fit[route.recipient],
+                        fp::upward(fp::upward(fraction) *
+                                   std::max(donor.occupancy.fit_bound, donor.occupancy.admitted_bound)));
+                }
+                route.inherited_error = {fp::upper_double(fp::upward(fp::upward(gf) * donor.finite_history.gas)),
+                    fp::upper_double(fp::upward(fp::upward(lf) * donor.finite_history.carrier))};
+                history_g[route.recipient] = fp::bound_add(history_g[route.recipient], route.inherited_error.gas);
+                history_l[route.recipient] = fp::bound_add(history_l[route.recipient], route.inherited_error.carrier);
+                const auto& recipient = data.cells.at(data.topology->by_gid.at(route.recipient));
+                if (route.donor != route.recipient && donor.declaration != recipient.declaration &&
+                    ((recipient.declaration == GeneralVoFPhaseGeometry::PureGas && route.amount.carrier.value > 0) ||
+                        (recipient.declaration == GeneralVoFPhaseGeometry::PureCarrier && route.amount.gas.value > 0)))
+                    mixed_receipts.insert(route.recipient);
+                admitted.transfers.push_back(route);
+            }
+            std::size_t owned_index = 0;
+            for (const auto& key : data.topology->order)
+            {
+                const auto& old = data.cells.at(key);
+                auto c = old;
+                const auto gv = gas[c.gid].value(), lv = liquid[c.gid].value();
+                const auto pg = Math::publish(gv), pl = Math::publish(lv);
+                c.phase.gas_volume = pg.first;
+                c.phase.carrier_volume = pl.first;
+                const auto count = data.topology->cell_tiles.at(key).size();
+                const auto u = (16.L + 8.L * count) * std::numeric_limits<long double>::epsilon();
+                const auto ge = fp::upward(
+                    u * (old.phase.gas_volume + totals[c.gid].gas_in.value() + totals[c.gid].gas_out.value()));
+                const auto le = fp::upward(u * (old.phase.carrier_volume + totals[c.gid].liquid_in.value() +
+                                                   totals[c.gid].liquid_out.value()));
+                c.roundoff = {
+                    fp::upper_double(fp::bound_add(pg.second, ge)), fp::upper_double(fp::bound_add(pl.second, le))};
+                c.finite_history = {fp::upper_double(fp::bound_add(history_g[c.gid], c.roundoff.gas)),
+                    fp::upper_double(fp::bound_add(history_l[c.gid], c.roundoff.carrier))};
+                c.retained_interface.reset();
+                c.inherited = true;
+                // A pure geometric hint survives same-phase trace transport only.
+                if (mixed_receipts.contains(c.gid))
+                    c.declaration = GeneralVoFPhaseGeometry::Infer;
+                if (c.phase.gas_volume == 0)
+                    c.declaration = GeneralVoFPhaseGeometry::PureCarrier;
+                if (c.phase.carrier_volume == 0)
+                    c.declaration = GeneralVoFPhaseGeometry::PureGas;
+                const auto geometric_volume =
+                    PLIC::ConvexCellGeometry<mode>::from_dynamic(c.finite_geometry)->volume().value;
+                SimpleFluid::detail::CompensatedSum<long double> defect_sum;
+                defect_sum += pg.first;
+                defect_sum += pl.first;
+                defect_sum += -geometric_volume;
+                const long double defect = defect_sum.value();
+                const long double arithmetic = (16 + 4 * data.topology->cell_tiles.at(key).size()) *
+                                               std::numeric_limits<long double>::epsilon() * c.native_volume;
+                const auto closure = std::abs(totals[c.gid].bulk_in.value() - totals[c.gid].bulk_out.value());
+                c.occupancy.difference = double(defect);
+                c.occupancy.admitted_bound = fp::upper_double(
+                    old.occupancy.admitted_bound + closure + c.roundoff.gas + c.roundoff.carrier + arithmetic);
+                c.occupancy.transferred_bound = c.occupancy.admitted_bound;
+                if (c.declaration == GeneralVoFPhaseGeometry::Infer)
+                    c.occupancy.fit_bound = c.occupancy.fit_residual = 0;
+                else if (homogeneous)
+                {
+                    c.occupancy.fit_residual = c.declaration == GeneralVoFPhaseGeometry::PureGas ? pl.first : pg.first;
+                    const auto publication =
+                        c.declaration == GeneralVoFPhaseGeometry::PureGas ? c.roundoff.carrier : c.roundoff.gas;
+                    c.occupancy.fit_bound = fp::upper_double(fp::bound_add(pure_fit[c.gid], publication));
+                }
+                validate_cell<mode>(c, data.options);
+                ledger.diagnostics.maximum_occupancy_defect =
+                    std::max(ledger.diagnostics.maximum_occupancy_defect, std::abs(defect));
+                consume_cell(c);
+                const auto i = owned_index++;
+                sums[0].add(Math::make_value(
+                    data.options.arithmetic_mode, static_cast<long double>(pg.first) - data.gas[i], c.roundoff.gas));
+                sums[1].add(Math::make_value(data.options.arithmetic_mode,
+                    static_cast<long double>(pl.first) - data.carrier[i], c.roundoff.carrier));
+                sums[2].add({std::abs(static_cast<long double>(pg.first)) + std::abs(data.gas[i]), 0});
+                sums[3].add(Math::make_value(data.options.arithmetic_mode,
+                    std::abs(static_cast<long double>(pl.first)) + std::abs(data.carrier[i])));
+                sums[4].add(Math::make_value(data.options.arithmetic_mode, data.gas[i]));
+                sums[5].add(Math::make_value(data.options.arithmetic_mode, data.carrier[i]));
+                publication[0].add(Math::make_value(data.options.arithmetic_mode, c.roundoff.gas));
+                publication[1].add(Math::make_value(data.options.arithmetic_mode, c.roundoff.carrier));
+            }
+            for (unsigned a = 0; a < 2; ++a)
+            {
+                const auto sum = sums[a].value();
+                local[a] = static_cast<double>(sum.value);
+                const auto narrowing = [&]
+                {
+                    if constexpr (mode == ArithmeticMode::Ordinary)
+                        return publication[a].value().value;
+                    else
+                        return sum.absolute_error;
+                }();
+                local[2 + a] = fp::upper_double(fp::upward(narrowing + std::abs(sum.value - local[a])));
+                local[4 + a] = fp::upper_double(sums[2 + a].value().value);
+                local[6 + a] = fp::upper_double(sums[4 + a].value().value);
+            }
+        });
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), global.data());
+    wire::collective(*comm,
+        [&]
+        {
+            const auto operations = 8.L * comm->getSize() + 16;
+            const auto u = operations * std::numeric_limits<double>::epsilon();
+            if (!(u < .25L))
+                throw std::invalid_argument("Finite VoF global phase reduction bound is exhausted.");
+            for (unsigned phase = 0; phase < 2; ++phase)
+            {
+                const auto physical = [&]
+                {
+                    if constexpr (mode == ArithmeticMode::Ordinary)
+                        return data.options.reconstruction.volume_tolerance * global[6 + phase];
+                    else
+                        return 0.L;
+                }();
+                const auto bound = physical + global[2 + phase] + u / (1 - u) * (global[4 + phase] + global[2 + phase]);
+                if (!std::isfinite(global[phase]) || !std::isfinite(bound) || std::abs(global[phase]) > bound)
+                    throw std::invalid_argument("Finite VoF global independent phase conservation failed.");
+            }
+            current(data);
+        });
+    return admitted;
+}
+} // namespace
+general_vof_detail::AdmittedLowOrderLedger general_vof_detail::admit_low_order_ledger(
+    const GeneralVoF::Data& data, std::span<const GeneralVoFFaceVolume> controls, double dt)
+{
+    const auto comm = data.hierarchy->communicator();
+    auto ledger = build_face_ledger(data, controls, dt, {1, 1}, 0);
+    AdmittedLowOrderLedger low;
+    int local_streams = !ledger.streams.empty(), any_streams = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_streams, &any_streams);
+    if (!any_streams)
+    {
+        wire::collective(*comm,
+            [&]
+            {
+                for (const auto& key : data.topology->order)
+                {
+                    const auto& c = data.cells.at(key);
+                    const auto old = measures(c.native_volume, c.phase.gas_volume, c.phase.carrier_volume);
+                    low.transfers.push_back({c.gid, c.gid, c.owner, c.owner, old, c.finite_history});
+                    low.budgets.push_back({c.gid, old, measures(0, 0, 0), old});
+                    low.endpoint_capacity.emplace(
+                        c.gid, std::array<long double, 3>{c.native_volume, c.phase.gas_volume, c.phase.carrier_volume});
+                }
+                current(data);
+            });
+    }
+    else
+    {
+        auto admitted =
+            admit_face_ledger(data, ledger, true, [](const Cell&) {}, [](const GeneralVoFFiniteFaceContribution&) {});
+        low.transfers = std::move(admitted.transfers);
+        low.budgets = std::move(admitted.budgets);
+        wire::collective(*comm,
+            [&]
+            {
+                // Preserve the original sorted receipt order and compensated
+                // endpoint availability, independently of binary64 narrowing.
+                std::map<std::uint64_t, std::array<SimpleFluid::detail::CompensatedSum<long double>, 3>> endpoint;
+                wire::Budget budget{data.options.byte_budget};
+                budget.add(data.topology->order.size() * (sizeof(decltype(endpoint)::value_type) + 4 * sizeof(void*)));
+                for (const auto& route : low.transfers)
+                {
+                    endpoint[route.recipient][0] += route.amount.bulk.value;
+                    endpoint[route.recipient][1] += route.amount.gas.value;
+                    endpoint[route.recipient][2] += route.amount.carrier.value;
+                }
+                for (const auto& [gid, sum] : endpoint)
+                    low.endpoint_capacity.emplace(gid, std::array{sum[0].value(), sum[1].value(), sum[2].value()});
+            });
+    }
+    wire::collective(*comm,
+        [&]
+        {
+            for (auto& [face, stream] : ledger.streams)
+            {
+                stream.mass = 0;
+                low.streams.push_back(stream);
+            }
+            low.diagnostics = ledger.diagnostics;
+            // No candidate is retained. Account the actual admitted support,
+            // including endpoint nodes, and retain the accepted-state gate.
+            wire::Budget budget{data.options.byte_budget};
+            budget.add(sizeof(low) + low.streams.capacity() * sizeof(Stream) +
+                       low.transfers.capacity() * sizeof(GeneralVoFFiniteTransfer) +
+                       low.budgets.capacity() * sizeof(GeneralVoFFiniteDonorBudget) +
+                       low.endpoint_capacity.size() *
+                           (sizeof(decltype(low.endpoint_capacity)::value_type) + 4 * sizeof(void*)));
+            retained_budget<mode>(data);
+            current(data);
+        });
+    return low;
+}
+GeneralVoF::Trial GeneralVoF::plan_face_transport(std::span<const GeneralVoFFaceVolume> controls, double dt,
+    std::array<double, 2> density, std::uint64_t time_stage) const
+{
+    return plan_face_transport_impl(controls, dt, density, time_stage, false);
+}
+GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVoFFaceVolume> controls, double dt,
+    std::array<double, 2> density, std::uint64_t time_stage, bool homogeneous, std::uint64_t transaction_id) const
+{
+    const auto& data = *data_;
+    const auto comm = data.hierarchy->communicator();
+    const auto rank = comm->getRank();
+    const auto limit = data.options.byte_budget;
+    wire::collective(*comm,
+        [&]
+        {
+            if (!homogeneous && data.options.transport_backend == Backend::SweptPartition)
+                throw std::invalid_argument(
+                    "Face transport requires Ordinary, finite dt and positive constant densities.");
+        });
+    auto ledger = build_face_ledger(data, controls, dt, density, time_stage);
+    auto& tiles = ledger.tiles;
+    auto& subscribers = ledger.subscribers;
+    auto& authority = ledger.authority;
+    auto& streams = ledger.streams;
+    auto& totals = ledger.totals;
+    std::vector<OwnerPacket> packets;
+    Trial trial;
+    trial.source_ = data_;
+    trial.transaction_ = homogeneous && transaction_id != 0 ? transaction_id : transaction(comm);
+    trial.homogeneous_algebraic_ = homogeneous;
+    trial.timestep_ = dt;
+    std::shared_ptr<GeneralVoFPreparedTransport> prepared;
+    wire::collective(*comm, [&] { prepared = std::make_shared<GeneralVoFPreparedTransport>(); });
+    prepared->source_identity = data_;
+    prepared->source_control = data.control;
+    prepared->transaction = trial.transaction_;
+    prepared->mesh_generation = data.hierarchy->partition_generation();
+    prepared->time_stage = time_stage;
+    prepared->timestep = dt;
+    prepared->density = density;
+    prepared->backend = data.options.transport_backend;
     if (homogeneous)
     {
         int local_streams = !streams.empty(), any_streams = 0;
@@ -385,7 +702,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                                     PLIC::ordinary_plane_face_area(vertices, translated, plane.anchor);
                                 const auto liquid_area =
                                     PLIC::ordinary_plane_face_area(vertices, opposite, plane.anchor);
-                                prepared->diagnostics.plane_measurements += 2;
+                                ledger.diagnostics.plane_measurements += 2;
                                 for (const auto& result : {gas_area, liquid_area})
                                     if (result.status != PLIC::PlaneMeasureStatus::Resolved || result.area > area ||
                                         result.area < 0)
@@ -625,8 +942,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                 }
             });
     }
-    // Publication consumes exactly the same canonical final streams. Retained
-    // amounts remain independent phase residuals; never volume minus dominant phase.
+    // Public publication alone copies Data and imports the candidate ghosts.
     std::shared_ptr<Data> candidate;
     wire::collective(*comm,
         [&]
@@ -639,219 +955,34 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
             candidate->roundoff.clear();
             candidate->phase_history.clear();
             candidate->occupancy.clear();
-            std::map<std::pair<std::uint64_t, std::uint64_t>, GeneralVoFFiniteTransfer> routes;
-            for (const auto& [face, s] : streams)
-            {
-                prepared->streams.push_back(s);
-                if (tiles.at(face)->first_owner == rank)
-                {
-                    ++prepared->diagnostics.streams;
-                    if (s.theta < 1)
-                    {
-                        ++prepared->diagnostics.limited_streams;
-                        prepared->diagnostics.limited_volume += s.volume;
-                    }
-                    if (s.lower_order)
-                    {
-                        ++prepared->diagnostics.fallback_streams;
-                        prepared->diagnostics.fallback_volume += s.volume;
-                    }
-                    trial.finite_faces_.push_back(
-                        {face, s.donor, s.donor_owner, s.direction, measures(s.volume, s.gas, s.liquid)});
-                }
-                if (s.recipient_owner == rank)
-                {
-                    auto& route = routes[{s.donor, s.recipient}];
-                    route.donor = s.donor;
-                    route.recipient = s.recipient;
-                    route.donor_owner = s.donor_owner;
-                    route.recipient_owner = rank;
-                    route.amount.bulk.value += s.volume;
-                    route.amount.gas.value += s.gas;
-                    route.amount.carrier.value += s.liquid;
-                }
-            }
-            for (const auto& key : data.topology->order)
-            {
-                const auto& old = data.cells.at(key);
-                auto& c = candidate->cells.at(key);
-                const auto& t = totals[c.gid];
-                const long double g = old.phase.gas_volume, l = old.phase.carrier_volume;
-                const long double rg = g - t.gas_out.value(), rl = l - t.liquid_out.value();
-                auto retained = measures(c.native_volume - t.bulk_out.value(), rg, rl);
-                trial.finite_budgets_.push_back({c.gid, measures(c.native_volume, g, l),
-                    measures(t.bulk_out.value(), t.gas_out.value(), t.liquid_out.value()), retained});
-                routes[{c.gid, c.gid}] = {c.gid, c.gid, rank, rank, retained, {}};
-            }
-            std::map<std::uint64_t, fp::SumFor<mode>> gas, liquid;
-            std::map<std::uint64_t, long double> history_g, history_l, pure_fit;
-            std::set<std::uint64_t> mixed_receipts;
-            for (auto& [pair, route] : routes)
-            {
-                route.amount = measures(route.amount.bulk.value, route.amount.gas.value, route.amount.carrier.value);
-                gas[route.recipient].add(route.amount.gas);
-                liquid[route.recipient].add(route.amount.carrier);
-                const auto& donor = data.cells.at(data.topology->by_gid.at(route.donor));
-                const auto phase_capacity =
-                    static_cast<long double>(donor.phase.gas_volume) + donor.phase.carrier_volume;
-                // The occupancy discrepancy stays local. Normalize absent-phase
-                // uncertainty with physical capacity, including the self residual.
-                const auto bulk_fraction = route.donor == route.recipient
-                                               ? 1 - totals[donor.gid].bulk_out.value() / phase_capacity
-                                               : route.amount.bulk.value / phase_capacity;
-                const long double gf = donor.phase.gas_volume > 0 ? route.amount.gas.value / donor.phase.gas_volume
-                                                                  : (homogeneous ? bulk_fraction : 0);
-                const long double lf = donor.phase.carrier_volume > 0
-                                           ? route.amount.carrier.value / donor.phase.carrier_volume
-                                           : (homogeneous ? bulk_fraction : 0);
-                if (homogeneous)
-                {
-                    const auto fraction = donor.declaration == GeneralVoFPhaseGeometry::PureGas ? lf : gf;
-                    pure_fit[route.recipient] = fp::bound_add(pure_fit[route.recipient],
-                        fp::upward(fp::upward(fraction) *
-                                   std::max(donor.occupancy.fit_bound, donor.occupancy.admitted_bound)));
-                }
-                route.inherited_error = {fp::upper_double(fp::upward(fp::upward(gf) * donor.finite_history.gas)),
-                    fp::upper_double(fp::upward(fp::upward(lf) * donor.finite_history.carrier))};
-                history_g[route.recipient] = fp::bound_add(history_g[route.recipient], route.inherited_error.gas);
-                history_l[route.recipient] = fp::bound_add(history_l[route.recipient], route.inherited_error.carrier);
-                const auto& recipient = data.cells.at(data.topology->by_gid.at(route.recipient));
-                if (route.donor != route.recipient && donor.declaration != recipient.declaration &&
-                    ((recipient.declaration == GeneralVoFPhaseGeometry::PureGas && route.amount.carrier.value > 0) ||
-                        (recipient.declaration == GeneralVoFPhaseGeometry::PureCarrier && route.amount.gas.value > 0)))
-                    mixed_receipts.insert(route.recipient);
-                trial.finite_transfers_.push_back(route);
-            }
-            for (const auto& key : data.topology->order)
-            {
-                auto& c = candidate->cells.at(key);
-                const auto& old = data.cells.at(key);
-                const auto gv = gas[c.gid].value(), lv = liquid[c.gid].value();
-                const auto pg = Math::publish(gv), pl = Math::publish(lv);
-                c.phase.gas_volume = pg.first;
-                c.phase.carrier_volume = pl.first;
-                const auto count = data.topology->cell_tiles.at(key).size();
-                const auto u = (16.L + 8.L * count) * std::numeric_limits<long double>::epsilon();
-                const auto ge = fp::upward(
-                    u * (old.phase.gas_volume + totals[c.gid].gas_in.value() + totals[c.gid].gas_out.value()));
-                const auto le = fp::upward(u * (old.phase.carrier_volume + totals[c.gid].liquid_in.value() +
-                                                   totals[c.gid].liquid_out.value()));
-                c.roundoff = {
-                    fp::upper_double(fp::bound_add(pg.second, ge)), fp::upper_double(fp::bound_add(pl.second, le))};
-                c.finite_history = {fp::upper_double(fp::bound_add(history_g[c.gid], c.roundoff.gas)),
-                    fp::upper_double(fp::bound_add(history_l[c.gid], c.roundoff.carrier))};
-                c.retained_interface.reset();
-                c.inherited = true;
-                // A pure geometric hint survives same-phase trace transport only.
-                if (mixed_receipts.contains(c.gid))
-                    c.declaration = GeneralVoFPhaseGeometry::Infer;
-                if (c.phase.gas_volume == 0)
-                    c.declaration = GeneralVoFPhaseGeometry::PureCarrier;
-                if (c.phase.carrier_volume == 0)
-                    c.declaration = GeneralVoFPhaseGeometry::PureGas;
-                const auto geometric_volume =
-                    PLIC::ConvexCellGeometry<mode>::from_dynamic(c.finite_geometry)->volume().value;
-                SimpleFluid::detail::CompensatedSum<long double> defect_sum;
-                defect_sum += pg.first;
-                defect_sum += pl.first;
-                defect_sum += -geometric_volume;
-                const long double defect = defect_sum.value();
-                const long double arithmetic = (16 + 4 * data.topology->cell_tiles.at(key).size()) *
-                                               std::numeric_limits<long double>::epsilon() * c.native_volume;
-                const auto closure = std::abs(totals[c.gid].bulk_in.value() - totals[c.gid].bulk_out.value());
-                c.occupancy.difference = double(defect);
-                c.occupancy.admitted_bound = fp::upper_double(
-                    old.occupancy.admitted_bound + closure + c.roundoff.gas + c.roundoff.carrier + arithmetic);
-                c.occupancy.transferred_bound = c.occupancy.admitted_bound;
-                if (c.declaration == GeneralVoFPhaseGeometry::Infer)
-                    c.occupancy.fit_bound = c.occupancy.fit_residual = 0;
-                else if (homogeneous)
-                {
-                    c.occupancy.fit_residual = c.declaration == GeneralVoFPhaseGeometry::PureGas ? pl.first : pg.first;
-                    const auto publication =
-                        c.declaration == GeneralVoFPhaseGeometry::PureGas ? c.roundoff.carrier : c.roundoff.gas;
-                    c.occupancy.fit_bound = fp::upper_double(fp::bound_add(pure_fit[c.gid], publication));
-                }
-                validate_cell<mode>(c, data.options);
-                prepared->diagnostics.maximum_occupancy_defect =
-                    std::max(prepared->diagnostics.maximum_occupancy_defect, std::abs(defect));
-                prepared->old_mass.push_back(density[0] * static_cast<long double>(old.phase.gas_volume) +
-                                             density[1] * static_cast<long double>(old.phase.carrier_volume));
-                prepared->new_mass.push_back(
-                    density[0] * static_cast<long double>(pg.first) + density[1] * static_cast<long double>(pl.first));
-                candidate->gas.push_back(pg.first);
-                candidate->carrier.push_back(pl.first);
-                candidate->phases.push_back({c.native_volume, pg.first, pl.first});
-                candidate->roundoff.push_back(c.roundoff);
-                candidate->phase_history.push_back(c.finite_history);
-                candidate->occupancy.push_back(c.occupancy);
-            }
+        });
+    auto admitted = admit_face_ledger(
+        data, ledger, homogeneous,
+        [&](const Cell& c)
+        {
+            const auto& old = data.cells.at(c.key);
+            candidate->cells.at(c.key) = c;
+            prepared->old_mass.push_back(density[0] * static_cast<long double>(old.phase.gas_volume) +
+                                         density[1] * static_cast<long double>(old.phase.carrier_volume));
+            prepared->new_mass.push_back(density[0] * static_cast<long double>(c.phase.gas_volume) +
+                                         density[1] * static_cast<long double>(c.phase.carrier_volume));
+            candidate->gas.push_back(c.phase.gas_volume);
+            candidate->carrier.push_back(c.phase.carrier_volume);
+            candidate->phases.push_back({c.native_volume, c.phase.gas_volume, c.phase.carrier_volume});
+            candidate->roundoff.push_back(c.roundoff);
+            candidate->phase_history.push_back(c.finite_history);
+            candidate->occupancy.push_back(c.occupancy);
+        },
+        [&](const GeneralVoFFiniteFaceContribution& face) { trial.finite_faces_.push_back(face); });
+    wire::collective(*comm,
+        [&]
+        {
+            for (const auto& [face, stream] : streams)
+                prepared->streams.push_back(stream);
+            prepared->diagnostics = ledger.diagnostics;
+            trial.finite_transfers_ = std::move(admitted.transfers);
+            trial.finite_budgets_ = std::move(admitted.budgets);
             trial.roundoff_ = candidate->roundoff;
-        });
-    // Preserve the independent global phase acceptance gate, separately from
-    // canonical stream construction and local occupancy admission.
-    std::array<double, 8> local{}, global{};
-    wire::collective(*comm,
-        [&]
-        {
-            std::array<fp::SumFor<mode>, 6> sums;
-            std::array<fp::SumFor<mode>, 2> publication;
-            for (auto& sum : sums)
-                sum = fp::SumFor<mode>(data.options.arithmetic_mode);
-            for (auto& sum : publication)
-                sum = fp::SumFor<mode>(data.options.arithmetic_mode);
-            for (std::size_t i = 0; i < data.topology->order.size(); ++i)
-            {
-                sums[0].add(Math::make_value(data.options.arithmetic_mode,
-                    static_cast<long double>(candidate->gas[i]) - data.gas[i], candidate->roundoff[i].gas));
-                sums[1].add(Math::make_value(data.options.arithmetic_mode,
-                    static_cast<long double>(candidate->carrier[i]) - data.carrier[i], candidate->roundoff[i].carrier));
-                sums[2].add({std::abs(static_cast<long double>(candidate->gas[i])) + std::abs(data.gas[i]), 0});
-                sums[3].add(Math::make_value(data.options.arithmetic_mode,
-                    std::abs(static_cast<long double>(candidate->carrier[i])) + std::abs(data.carrier[i])));
-                sums[4].add(Math::make_value(data.options.arithmetic_mode, data.gas[i]));
-                sums[5].add(Math::make_value(data.options.arithmetic_mode, data.carrier[i]));
-                publication[0].add(Math::make_value(data.options.arithmetic_mode, candidate->roundoff[i].gas));
-                publication[1].add(Math::make_value(data.options.arithmetic_mode, candidate->roundoff[i].carrier));
-            }
-            for (unsigned a = 0; a < 2; ++a)
-            {
-                const auto sum = sums[a].value();
-                local[a] = static_cast<double>(sum.value);
-                const auto narrowing = [&]
-                {
-                    if constexpr (mode == ArithmeticMode::Ordinary)
-                        return publication[a].value().value;
-                    else
-                        return sum.absolute_error;
-                }();
-                local[2 + a] = fp::upper_double(fp::upward(narrowing + std::abs(sum.value - local[a])));
-                local[4 + a] = fp::upper_double(sums[2 + a].value().value);
-                local[6 + a] = fp::upper_double(sums[4 + a].value().value);
-            }
-        });
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), global.data());
-    wire::collective(*comm,
-        [&]
-        {
-            const auto operations = 8.L * comm->getSize() + 16;
-            const auto u = operations * std::numeric_limits<double>::epsilon();
-            if (!(u < .25L))
-                throw std::invalid_argument("Finite VoF global phase reduction bound is exhausted.");
-            for (unsigned phase = 0; phase < 2; ++phase)
-            {
-                const auto physical = [&]
-                {
-                    if constexpr (mode == ArithmeticMode::Ordinary)
-                        return data.options.reconstruction.volume_tolerance * global[6 + phase];
-                    else
-                        return 0.L;
-                }();
-                const auto bound = physical + global[2 + phase] + u / (1 - u) * (global[4 + phase] + global[2 + phase]);
-                if (!std::isfinite(global[phase]) || !std::isfinite(bound) || std::abs(global[phase]) > bound)
-                    throw std::invalid_argument("Finite VoF global independent phase conservation failed.");
-            }
-            current(data);
         });
     import_phases<mode>(*candidate);
     wire::collective(*comm,

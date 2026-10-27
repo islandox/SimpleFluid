@@ -123,7 +123,6 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     const auto stage = std::bit_cast<std::uint64_t>(old.diagnostics.time);
     const auto prepared_view = trial.template prepare_transport_view<Mode>(
         {material.gas_density, material.liquid_density}, stage);
-    trial.validate_prepared_transport(prepared_view, {material.gas_density, material.liquid_density}, stage);
     const auto& phase_preparation = prepared_view.shared_ledger();
     if (!algebraic)
     {

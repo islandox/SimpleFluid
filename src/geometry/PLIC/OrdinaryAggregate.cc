@@ -152,6 +152,86 @@ template<class Function> predicates::Result predicate(Function&& function, Aggre
     represented(result.absolute_error);
     return result;
 }
+// Construction evidence has no relative-error floor: exact represented
+// operations retain zero error. Metric quality remains a separate admission.
+long double error_sum(long double a, long double b)
+{
+    if (a == 0)
+        return b;
+    if (b == 0)
+        return a;
+    return represented(std::nextafter(sum_values(a, b), std::numeric_limits<long double>::infinity()));
+}
+long double error_product(long double a, long double b)
+{
+    if (a == 0 || b == 0)
+        return 0;
+    return represented(std::nextafter(product(a, b), std::numeric_limits<long double>::infinity()));
+}
+predicates::Result construction_sum(predicates::Result a, predicates::Result b, AggregateWork& work)
+{
+    return predicate(
+        [&]
+        {
+            predicates::ResultAccumulator sum;
+            sum.add(a);
+            sum.add(b);
+            return sum.result();
+        },
+        work);
+}
+long double product_residual(long double a, long double b, long double value)
+{
+    if (a == 0 || b == 0)
+        return 0;
+    int ea = 0, eb = 0;
+    std::frexp(a, &ea);
+    std::frexp(b, &eb);
+    // An underflowed residual cannot establish exactness in this primitive.
+    if (ea + eb - 2 * std::numeric_limits<long double>::digits <
+        std::numeric_limits<long double>::min_exponent - std::numeric_limits<long double>::digits)
+        fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate construction residual exceeds its range.");
+    return represented(std::fma(a, b, -value));
+}
+predicates::Result construction_product(predicates::Result a, predicates::Result b, AggregateWork& work)
+{
+    work.op(16);
+    const auto value = product(a.value, b.value);
+    const auto error = error_sum(std::abs(product_residual(a.value, b.value, value)),
+        error_sum(error_product(std::abs(a.value), b.absolute_error),
+            error_sum(error_product(std::abs(b.value), a.absolute_error),
+                error_product(a.absolute_error, b.absolute_error))));
+    return {value, error, predicates::Sign::Unresolved};
+}
+predicates::Result construction_difference(predicates::Result a, predicates::Result b, AggregateWork& work)
+{
+    b.value = -b.value;
+    return construction_sum(a, b, work);
+}
+predicates::Result construction_quotient(predicates::Result a, predicates::Result b, AggregateWork& work)
+{
+    work.op(20);
+    if (!(std::abs(b.value) > b.absolute_error))
+        fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate crossing denominator is unresolved.");
+    const auto value = quotient(a.value, b.value);
+    // Validate FMA's residual lattice just as for a product. Unlike the
+    // product residual, this residual is a - value*b.
+    (void) product_residual(value, b.value, product(value, b.value));
+    const auto residual = represented(std::fma(-value, b.value, a.value));
+    const auto numerator_error =
+        error_sum(std::abs(residual), error_sum(a.absolute_error, error_product(std::abs(value), b.absolute_error)));
+    if (numerator_error == 0)
+        return {value, 0, predicates::Sign::Unresolved};
+    const auto denominator = std::nextafter(std::abs(b.value) - b.absolute_error, 0.L);
+    const auto error = represented(
+        std::nextafter(quotient(numerator_error, denominator), std::numeric_limits<long double>::infinity()));
+    return {value, error, predicates::Sign::Unresolved};
+}
+struct Construction
+{
+    std::size_t first = 0, second = 0;
+    predicates::Result first_cut{}, second_cut{};
+};
 struct Face
 {
     std::vector<std::size_t> vertices;
@@ -162,11 +242,15 @@ struct Poly
     std::vector<B> vertices;
     std::vector<B> errors;
     std::vector<std::vector<const void*>> supports;
+    // The first four entries are immutable source leaves. Later entries
+    // retain the edge/support expression, independent of rounded weights.
+    std::vector<Construction> constructions;
     std::vector<Face> faces;
 };
 void charge_poly_points(const Poly& p, AggregateWork& work)
 {
-    work.charge(p.vertices.size() * 2 * sizeof(B) + p.supports.size() * sizeof(std::vector<const void*>));
+    work.charge(p.vertices.size() * (2 * sizeof(B) + sizeof(Construction)) +
+                p.supports.size() * sizeof(std::vector<const void*>));
     for (const auto& support : p.supports)
         work.charge(support.size() * sizeof(const void*));
 }
@@ -181,12 +265,13 @@ constexpr std::array<std::array<unsigned, 3>, 4> tetra_faces{{{1, 2, 3}, {0, 3, 
 Poly tetra(AggregateWork& work)
 {
     work.witness();
-    work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(std::vector<const void*>) + 4 * sizeof(Face) +
-                12 * sizeof(std::size_t));
+    work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(Construction) + 4 * sizeof(std::vector<const void*>) +
+                4 * sizeof(Face) + 12 * sizeof(std::size_t));
     Poly p;
     p.vertices.resize(4);
     p.errors.resize(4);
     p.supports.resize(4);
+    p.constructions.resize(4);
     for (unsigned i = 0; i < 4; ++i)
         p.vertices[i][i] = 1;
     for (unsigned i = 0; i < 4; ++i)
@@ -209,17 +294,73 @@ struct Distances
 };
 predicates::Result distance(const B& b, const B& error, const Distances& d, AggregateWork& work)
 {
-    work.op(8);
-    Sum s;
+    std::array<predicates::Result, 4> terms;
     for (unsigned k = 0; k < 4; ++k)
-        s.add(product(b[k], d.value[k]));
-    long double e = 0;
-    for (unsigned k = 0; k < 4; ++k)
-        e += product(std::abs(b[k]), d.error[k]) + product(error[k], std::abs(d.value[k]) + d.error[k]);
-    const auto value = s.get(), estimate = e + product(8 * eps, s.absolute);
-    if (!std::isfinite(value) || !std::isfinite(estimate) || estimate < 0)
-        fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cut estimate is nonfinite.");
-    return {value, estimate, predicates::Sign::Unresolved};
+        terms[k] = construction_product({b[k], error[k]}, {d.value[k], d.error[k]}, work);
+    return predicate(
+        [&]
+        {
+            predicates::ResultAccumulator sum;
+            for (const auto& term : terms)
+                sum.add(term);
+            return sum.result();
+        },
+        work);
+}
+bool resolved(const predicates::Result& result)
+{
+    return result.absolute_error == 0 || std::abs(result.value) > result.absolute_error;
+}
+/** Replay only when rounded placement cannot establish sign/contact. The
+ * homogeneous edge numerator can establish incidence even when division
+ * made the stored barycentric coordinates inexact. Nonzero discarded/input
+ * error remains unresolved; algebraic correlation is never presumed. */
+predicates::Result replay_distance(const Poly& p, std::size_t vertex, const Distances& d, AggregateWork& work)
+{
+    work.charge((vertex + 1) * (sizeof(predicates::Result) + sizeof(unsigned char)));
+    std::vector<predicates::Result> values(vertex + 1);
+    std::vector<unsigned char> needed(vertex + 1, 0);
+    needed[vertex] = 1;
+    // Parents always precede their crossing. Walk backwards to retain only
+    // this expression's ancestors; issued incidence terminates a branch.
+    for (std::size_t i = vertex + 1; i-- > 0;)
+    {
+        work.op();
+        if (!needed[i])
+            continue;
+        for (const auto support : p.supports[i])
+        {
+            work.op();
+            if (support == d.identity)
+            {
+                needed[i] = 2;
+                break;
+            }
+        }
+        if (needed[i] == 1 && i >= 4)
+        {
+            const auto& c = p.constructions[i];
+            needed[c.first] = needed[c.second] = 1;
+            work.op(2);
+        }
+    }
+    for (std::size_t i = 0; i <= vertex; ++i)
+    {
+        work.op();
+        if (needed[i] != 1)
+            continue;
+        if (i < 4)
+            values[i] = {d.value[i], d.error[i]};
+        else
+        {
+            const auto& c = p.constructions[i];
+            const auto numerator = construction_difference(construction_product(values[c.first], c.second_cut, work),
+                construction_product(values[c.second], c.first_cut, work), work);
+            values[i] =
+                construction_quotient(numerator, construction_difference(c.second_cut, c.first_cut, work), work);
+        }
+    }
+    return values[vertex];
 }
 /** Complementary clipping retains barycentric placement at original source
  * supports. Children never undergo a metric or positivity admission. */
@@ -230,12 +371,12 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
     work.witness();
     if (!d.identity)
         fail(GeometryErrorCode::ProvenanceMismatch, "Ordinary aggregate cut has no immutable identity.");
+    work.charge(p.vertices.size() * (sizeof(predicates::Result) + sizeof(bool)));
     std::vector<predicates::Result> distances(p.vertices.size());
     std::vector<bool> active(p.vertices.size(), false);
     for (const auto& f : p.faces)
         for (auto i : f.vertices)
             active[i] = true;
-    work.charge(p.vertices.size() * (sizeof(predicates::Result) + sizeof(bool)));
     bool inside = false, outside = false;
     for (std::size_t i = 0; i < p.vertices.size(); ++i)
     {
@@ -243,6 +384,8 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
             continue;
         if (std::find(p.supports[i].begin(), p.supports[i].end(), d.identity) == p.supports[i].end())
             distances[i] = distance(p.vertices[i], p.errors[i], d, work);
+        if (!resolved(distances[i]))
+            distances[i] = replay_distance(p, i, d, work);
         if (distances[i].absolute_error > 0 && std::abs(distances[i].value) <= distances[i].absolute_error)
         {
             std::ostringstream message;
@@ -276,10 +419,11 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
         return retained;
     }
     Poly out;
+    charge_poly_points(p, work);
     out.vertices = p.vertices;
     out.errors = p.errors;
     out.supports = p.supports;
-    charge_poly_points(p, work);
+    out.constructions = p.constructions;
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> intersections;
     std::set<std::size_t> cap;
     std::map<std::size_t, std::size_t> cap_ring;
@@ -303,34 +447,28 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
                 auto [it, fresh] = intersections.try_emplace(key, out.vertices.size());
                 if (fresh)
                 {
-                    work.charge(2 * sizeof(B) + sizeof(decltype(intersections)::value_type) + 4 * sizeof(void*));
+                    work.charge(2 * sizeof(B) + sizeof(Construction) + sizeof(decltype(intersections)::value_type) +
+                                4 * sizeof(void*));
                     const auto i = std::abs(dp) <= std::abs(dc) ? previous : current,
                                j = i == previous ? current : previous;
-                    const auto denominator = distances[i].value - distances[j].value;
-                    const auto denominator_error =
-                        distances[i].absolute_error + distances[j].absolute_error + 4 * eps * std::abs(denominator);
-                    if (!(std::abs(denominator) > denominator_error))
-                        fail(GeometryErrorCode::UnresolvedArithmetic,
-                            "Ordinary aggregate crossing denominator is unresolved.");
-                    const auto t = quotient(distances[i].value, denominator);
-                    const auto ratio_error =
-                        quotient(distances[i].absolute_error + product(std::abs(t), denominator_error),
-                            std::abs(denominator) - denominator_error) +
-                        product(8 * eps, std::abs(t));
+                    const auto denominator = construction_difference(distances[i], distances[j], work);
+                    const auto t = construction_quotient(distances[i], denominator, work);
+                    const auto complement = construction_difference({1, 0}, t, work);
                     B b{}, error{};
                     for (unsigned k = 0; k < 4; ++k)
                     {
-                        b[k] = product(1 - t, p.vertices[i][k]) + product(t, p.vertices[j][k]);
-                        error[k] = product(1 - t, p.errors[i][k]) + product(t, p.errors[j][k]) +
-                                   product(ratio_error, std::abs(p.vertices[j][k] - p.vertices[i][k]) + p.errors[i][k] +
-                                                            p.errors[j][k]) +
-                                   product(8 * eps, std::abs(b[k]));
+                        const auto coordinate =
+                            construction_sum(construction_product(complement, {p.vertices[i][k], p.errors[i][k]}, work),
+                                construction_product(t, {p.vertices[j][k], p.errors[j][k]}, work), work);
+                        b[k] = coordinate.value;
+                        error[k] = coordinate.absolute_error;
                         if (!std::isfinite(b[k]) || !std::isfinite(error[k]))
                             fail(GeometryErrorCode::UnresolvedArithmetic,
                                 "Ordinary aggregate interpolation estimate is nonfinite.");
                     }
                     out.vertices.push_back(b);
                     out.errors.push_back(error);
+                    out.constructions.push_back({i, j, distances[i], distances[j]});
                     std::vector<const void*> supports{d.identity};
                     for (auto id : p.supports[i])
                         if (std::find(p.supports[j].begin(), p.supports[j].end(), id) != p.supports[j].end() &&
@@ -477,19 +615,29 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
 }
 /** Multilinear integration leaves tiny barycentric weights intact. Every
  * surviving exterior face uses the SAME physical pivot and power-of-two scale. */
-void integrate(const Poly& p, const OrdinaryAggregateTetra& t, const std::array<bool, 4>& cancelled, V pivot,
-    long double scale, Sum& sum, AggregateWork& work)
+std::array<predicates::Result, 4> integration_coefficients(
+    const OrdinaryAggregateTetra& t, V pivot, long double scale, AggregateWork& work)
 {
     const auto cube = product(product(scale, scale), scale);
-    const auto signed_det = predicate(
-        [&]
-        {
-            return predicates::orientation(
-                {t.vertices[0].value, t.vertices[1].value, t.vertices[2].value, t.vertices[3].value});
-        },
-        work)
-                                .value;
-    const auto orientation = signed_det > 0 ? 1.L : -1.L;
+    std::array<predicates::Result, 4> result;
+    for (unsigned omitted = 0; omitted < 4; ++omitted)
+    {
+        const auto j = axes(omitted);
+        const auto coefficient = predicate(
+            [&]
+            {
+                return predicates::orientation(
+                    {pivot, t.vertices[j[0]].value, t.vertices[j[1]].value, t.vertices[j[2]].value});
+            },
+            work);
+        result[omitted] = {quotient(coefficient.value, cube), quotient(coefficient.absolute_error, cube)};
+    }
+    return result;
+}
+void integrate(const Poly& p, const std::array<predicates::Result, 4>& coefficients, const predicates::Result& jacobian,
+    const std::array<bool, 4>& cancelled, Sum& sum, AggregateWork& work)
+{
+    const auto orientation = jacobian.value > 0 ? 1.L : -1.L;
     for (const auto& f : p.faces)
     {
         if (f.source >= 0 && cancelled[f.source])
@@ -525,15 +673,7 @@ void integrate(const Poly& p, const OrdinaryAggregateTetra& t, const std::array<
                                                              product(product(av, eb[j[k]]), sum_values(cv, ec[j[l]]))),
                                                   product(product(av, bv), ec[j[l]])));
                         }
-                const auto coefficient = predicate(
-                    [&]
-                    {
-                        return predicates::orientation(
-                            {pivot, t.vertices[j[0]].value, t.vertices[j[1]].value, t.vertices[j[2]].value});
-                    },
-                    work);
-                const auto value = quotient(coefficient.value, cube),
-                           error = quotient(coefficient.absolute_error, cube);
+                const auto value = coefficients[omitted].value, error = coefficients[omitted].absolute_error;
                 const auto term = quotient(product(product(orientation, value), weight.value), 6);
                 sum.add(term, sum_values(quotient(sum_values(product(std::abs(value), weight_error),
                                                       product(error, sum_values(std::abs(weight.value), weight_error))),
@@ -550,7 +690,7 @@ void integrate(const Poly& p, const OrdinaryAggregateTetra& t, const std::array<
  * of their identity-cancelled exterior boundary. No witness scalar is admitted
  * or published: every signed cone enters the final physical authority's Sum. */
 void integrate_source_reference(
-    const Poly& p, const OrdinaryAggregateTetra& source, long double scale, Sum& sum, AggregateWork& work)
+    const Poly& p, const predicates::Result& jacobian, long double scale, Sum& sum, AggregateWork& work)
 {
     if (p.faces.empty())
         return;
@@ -567,13 +707,6 @@ void integrate_source_reference(
                     reference = vertex;
                 }
     const auto chart = axes(dominant);
-    const auto jacobian = predicate(
-        [&]
-        {
-            return predicates::orientation({source.vertices[0].value, source.vertices[1].value,
-                source.vertices[2].value, source.vertices[3].value});
-        },
-        work);
     const auto cube = product(product(scale, scale), scale);
     const auto jacobian_value = quotient(std::abs(jacobian.value), cube);
     const auto jacobian_error = quotient(jacobian.absolute_error, cube);
@@ -630,6 +763,7 @@ void integrate_source_reference(
 struct OrdinaryAggregateSource::Impl
 {
     std::vector<OrdinaryAggregateTetra> tetrahedra;
+    std::vector<predicates::Result> orientations;
     std::vector<std::array<bool, 4>> cancelled;
     std::vector<std::array<std::pair<std::size_t, unsigned>, 4>> partners;
     SweepLimits sweep;
@@ -650,12 +784,14 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(std::span<const OrdinaryAggrega
         fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate source simplex cap exhausted.");
     AggregateWork work{sweep, geometry};
     work.context = &context;
-    work.charge(sizeof(Impl) + recipes.size() * (sizeof(OrdinaryAggregateTetra) + sizeof(std::array<bool, 4>) +
+    work.charge(sizeof(Impl) + recipes.size() * (sizeof(OrdinaryAggregateTetra) + sizeof(predicates::Result) +
+                                                    sizeof(std::array<bool, 4>) +
                                                     sizeof(std::array<std::pair<std::size_t, unsigned>, 4>)));
     auto impl = std::make_shared<Impl>();
     impl->sweep = sweep;
     impl->geometry = geometry;
     impl->tetrahedra.assign(recipes.begin(), recipes.end());
+    impl->orientations.reserve(recipes.size());
     impl->cancelled.resize(recipes.size());
     impl->partners.resize(recipes.size());
     std::map<std::uint64_t, Point<ArithmeticMode::Ordinary>> points;
@@ -700,6 +836,7 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(std::span<const OrdinaryAggrega
         work.op(64);
         if (!std::isfinite(d) || orientation.sign == predicates::Sign::Unresolved || d == 0)
             fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate source orientation is unresolved.");
+        impl->orientations.push_back(orientation);
         volume.add(product(t.sign, quotient(std::abs(d), 6)));
         for (unsigned f = 0; f < 4; ++f)
         {
@@ -803,6 +940,26 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     for (auto& dc : cuts)
         for (auto& c : dc)
             c.identity = root(c.identity);
+    // Source leaves and cut supports are immutable throughout this measure.
+    // Share their predicate results across coverage, phase channels and the
+    // reconstruction retry; only executed predicates consume floating work.
+    work.charge(donors.size() * sizeof(Cut));
+    std::vector<Cut> phase_cuts(donors.size());
+    for (std::size_t di = 0; di < donors.size(); ++di)
+        if (donors[di].gas)
+            phase_cuts[di] = phase_cut(*donors[di].gas);
+    std::map<std::array<std::size_t, 3>, Distances> distance_cache;
+    const auto source_values = [&](std::size_t ti, std::size_t di, std::size_t ci) -> const Distances&
+    {
+        const std::array key{ti, di, ci};
+        const auto found = distance_cache.find(key);
+        if (found != distance_cache.end())
+            return found->second;
+        const auto& cut = ci == cuts[di].size() ? phase_cuts[di] : cuts[di][ci];
+        auto values = source_distances(impl_->tetrahedra[ti], cut, work);
+        work.charge(sizeof(decltype(distance_cache)::value_type) + 4 * sizeof(void*));
+        return distance_cache.emplace(key, values).first->second;
+    };
     context.source = context.donor = context.cut = OrdinaryAggregateContext::absent;
     // Existing donor admission authenticates disjoint interiors. Only its
     // constructor is used: no computational child is materialized/measured.
@@ -845,7 +1002,6 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     for (std::size_t ordinal = 0; ordinal < impl_->tetrahedra.size(); ++ordinal)
     {
         context.source = ordinal;
-        const auto& t = impl_->tetrahedra[ordinal];
         for (unsigned retry = 0; retry < 2; ++retry)
         {
             context.retry = retry;
@@ -866,8 +1022,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             if (piece.faces.empty())
                                 break;
                             context.cut = retry ? dc.size() - 1 - cut_index : cut_index;
-                            const auto& c = dc[context.cut];
-                            auto d = source_distances(t, c, work);
+                            auto d = source_values(ordinal, donor_ordinal, context.cut);
                             auto opposite = d;
                             for (auto& x : opposite.value)
                                 x = -x;
@@ -969,6 +1124,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                     {
                         std::size_t tetra;
                         Poly bulk, gas, carrier;
+                        std::array<predicates::Result, 4> coefficients;
                     };
                     std::vector<Witness> witnesses;
                     work.charge(impl_->tetrahedra.size() * sizeof(Witness));
@@ -985,17 +1141,19 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         {
                             const auto j = retry ? cuts[di].size() - 1 - k : k;
                             context.cut = j;
-                            bulk = clipped(bulk, source_distances(t, cuts[di][j], work), work);
+                            bulk = clipped(bulk, source_values(ti, di, j), work);
                             work.pair();
                         }
                         if (bulk.faces.empty())
                             continue;
                         Witness witness;
                         witness.tetra = ti;
+                        if (!retry)
+                            witness.coefficients = integration_coefficients(t, pivot, scale, work);
                         if (!donor.pure_gas && !donor.pure_carrier)
                         {
                             context.cut = cuts[di].size(); // The phase support follows donor supports.
-                            auto d = source_distances(t, phase_cut(*donor.gas), work);
+                            auto d = source_values(ti, di, cuts[di].size());
                             // Rebuild phase witnesses from immutable source
                             // supports on the existing retry. Applying the phase
                             // first retains its small endpoint weights before
@@ -1011,7 +1169,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                                 {
                                     const auto j = cuts[di].size() - 1 - k;
                                     context.cut = j;
-                                    const auto cut = source_distances(t, cuts[di][j], work);
+                                    const auto cut = source_values(ti, di, j);
                                     if (!witness.gas.faces.empty())
                                         witness.gas = clipped(witness.gas, cut, work);
                                     if (!witness.carrier.faces.empty())
@@ -1053,9 +1211,10 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             context.source = w.tetra;
                             context.cut = OrdinaryAggregateContext::absent;
                             if (retry)
-                                integrate_source_reference(p, impl_->tetrahedra[w.tetra], scale, sums[channel], work);
+                                integrate_source_reference(p, impl_->orientations[w.tetra], scale, sums[channel], work);
                             else
-                                integrate(p, impl_->tetrahedra[w.tetra], cancelled, pivot, scale, sums[channel], work);
+                                integrate(
+                                    p, w.coefficients, impl_->orientations[w.tetra], cancelled, sums[channel], work);
                         }
                     }
                     context.source = context.cut = OrdinaryAggregateContext::absent;

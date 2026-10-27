@@ -152,6 +152,126 @@ TEST(OrdinaryAggregateTest, CornerSimplexRetainsCubicMinorityWithoutMeasuringChi
     expect_no_exact_work(before);
 }
 
+TEST(OrdinaryAggregateTest, ComplementaryDonorAndPhaseContactRetainsAnalyticTetraVolumes)
+{
+    const auto before = geometry_statistics();
+    const std::array<OrdinaryAggregateTetra, 1> recipes{
+        OrdinaryAggregateTetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
+    const OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
+    for (unsigned donor_axis : {0u, 1u})
+    {
+        // Swapping the two geometric roles exercises the reversed support
+        // construction as well as reversing the public donor enumeration.
+        GeometryPoint donor_normal{}, phase_normal{};
+        donor_normal[donor_axis] = 1;
+        phase_normal[1 - donor_axis] = 1;
+        const auto cube = Geometry::box({0, 0, 0}, {1, 1, 1});
+        const auto split = cube->clip({donor_normal, {}, .5}, false);
+        ASSERT_TRUE(split.inside);
+        ASSERT_TRUE(split.outside);
+        for (const double h : {.5, .5 - 0x1p-20, .5 + 0x1p-20})
+        {
+            SCOPED_TRACE(::testing::Message() << "donor_axis=" << donor_axis << ", phase=" << h);
+            const long double missing = 1 - static_cast<long double>(h);
+            const long double overlap = std::max(.5L - h, 0.L);
+            // Inclusion-exclusion of the two removed corner tetrahedra.
+            const long double carrier = (missing * missing * missing - overlap * overlap * overlap) / 6;
+            const long double bulk = 7.L / 48, gas = h == .5 ? 1.L / 8 : bulk - carrier;
+            if (h == .5)
+            {
+                ASSERT_EQ(gas, 1.L / 8);
+                ASSERT_EQ(carrier, 1.L / 48);
+            }
+            std::array donors{cut_donor(split.inside, {phase_normal, {}, h}, bulk, gas), OrdinaryAggregateDonor{}};
+            donors[1].id = 38;
+            donors[1].geometry = split.outside;
+            donors[1].pure_carrier = true;
+            donors[1].bulk_budget = donors[1].carrier_budget = relative_allowance / 48;
+            for (unsigned order = 0; order < 2; ++order)
+            {
+                SCOPED_TRACE(order);
+                const auto result = source.measure(donors); // Mandatory success, including exact contact.
+                ASSERT_EQ(result.groups.size(), 2u);
+                expect_amount(result.signed_source_volume, 1.L / 6);
+                for (const auto& group : result.groups)
+                {
+                    const bool left = group.donor == 37;
+                    ASSERT_TRUE(left || group.donor == 38);
+                    expect_amount(group.nominal.bulk, left ? bulk : 1.L / 48);
+                    expect_amount(group.nominal.gas, left ? gas : 0);
+                    expect_amount(group.nominal.carrier, left ? carrier : 1.L / 48);
+                    EXPECT_TRUE(group.bulk_positive);
+                    EXPECT_EQ(group.gas_positive, left);
+                    EXPECT_TRUE(group.carrier_positive);
+                    EXPECT_LE(group.numerical_error_estimate.bulk, relative_allowance * (left ? bulk : 1.L / 48));
+                    EXPECT_LE(group.numerical_error_estimate.gas, left ? relative_allowance * gas : 0);
+                    EXPECT_LE(group.numerical_error_estimate.carrier, relative_allowance * (left ? carrier : 1.L / 48));
+                    EXPECT_EQ(group.approximation_bound.bulk, 0);
+                    EXPECT_EQ(group.approximation_bound.gas, 0);
+                    EXPECT_EQ(group.approximation_bound.carrier, 0);
+                }
+                std::reverse(donors.begin(), donors.end());
+            }
+        }
+    }
+    expect_no_exact_work(before);
+}
+
+TEST(OrdinaryAggregateTest, NonbinaryCrossingReplaysSourceSupportToResolveExactContact)
+{
+    const auto before = geometry_statistics();
+    const std::array<OrdinaryAggregateTetra, 1> recipes{
+        OrdinaryAggregateTetra{{P({0, 0, 0}), P({3, 0, 0}), P({0, 3, 0}), P({0, 0, 3})}, {1, 2, 3, 4}, 1}};
+    const OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
+    for (unsigned donor_axis : {0u, 1u})
+    {
+        GeometryPoint donor_normal{}, phase_normal{};
+        donor_normal[donor_axis] = 1;
+        phase_normal[1 - donor_axis] = 1;
+        const double a = donor_axis == 0 ? 1 : 2, h = 3 - a;
+        const auto split = Geometry::box({0, 0, 0}, {3, 3, 3})->clip({donor_normal, {}, a}, false);
+        // At contact the source edge has weights 1/3 and 2/3. Rounded
+        // barycentric placement alone cannot prove the second incidence.
+        const long double removed = 3 - a;
+        const long double right = removed * removed * removed / 6, bulk = 4.5L - right;
+        for (const double delta : {0., -0x1p-20, 0x1p-20})
+        {
+            SCOPED_TRACE(::testing::Message() << "donor_axis=" << donor_axis << ", delta=" << delta);
+            const long double missing = 3.L - (h + delta), overlap = std::max(-static_cast<long double>(delta), 0.L);
+            const long double carrier = (missing * missing * missing - overlap * overlap * overlap) / 6;
+            const long double gas = delta == 0 ? 3.L : bulk - carrier;
+            std::array donors{
+                cut_donor(split.inside, {phase_normal, {}, h + delta}, bulk, gas), OrdinaryAggregateDonor{}};
+            donors[1].id = 38;
+            donors[1].geometry = split.outside;
+            donors[1].pure_carrier = true;
+            donors[1].bulk_budget = donors[1].carrier_budget = right * relative_allowance;
+            for (unsigned order = 0; order < 2; ++order)
+            {
+                const auto result = source.measure(donors);
+                ASSERT_EQ(result.groups.size(), 2u);
+                expect_amount(result.signed_source_volume, 4.5L);
+                for (const auto& group : result.groups)
+                {
+                    const bool left = group.donor == 37;
+                    ASSERT_TRUE(left || group.donor == 38);
+                    expect_amount(group.nominal.bulk, left ? bulk : right);
+                    expect_amount(group.nominal.gas, left ? gas : 0);
+                    expect_amount(group.nominal.carrier, left ? carrier : right);
+                    EXPECT_EQ(group.gas_positive, left);
+                    EXPECT_TRUE(group.bulk_positive);
+                    EXPECT_TRUE(group.carrier_positive);
+                    EXPECT_EQ(group.approximation_bound.bulk, 0);
+                    EXPECT_EQ(group.approximation_bound.gas, 0);
+                    EXPECT_EQ(group.approximation_bound.carrier, 0);
+                }
+                std::reverse(donors.begin(), donors.end());
+            }
+        }
+    }
+    expect_no_exact_work(before);
+}
+
 TEST(OrdinaryAggregateTest, VertexPermutationsAndSourceReorderingRetainAnalyticSlab)
 {
     const auto before = geometry_statistics();
@@ -298,6 +418,22 @@ TEST(OrdinaryAggregateTest, UnresolvedMinorityBudgetRejectsInsteadOfBecomingAbse
     const std::array limited{donor};
     expect_error([&] { (void) source.measure(limited); }, GeometryErrorCode::UnresolvedArithmetic);
     EXPECT_EQ(tetra.vertices[1].value[0], 1);
+}
+
+TEST(OrdinaryAggregateTest, UnrepresentedCutDistanceRemainsTypedUnresolved)
+{
+    const auto before = geometry_statistics();
+    // The source determinant is exactly one, but the positive phase distance
+    // at vertex 1 lies below the represented range. It cannot become contact.
+    const auto delta = std::ldexp(1.L, std::numeric_limits<long double>::min_exponent + 4);
+    ASSERT_EQ(std::fpclassify(delta), FP_NORMAL);
+    const std::array<OrdinaryAggregateTetra, 1> recipes{
+        OrdinaryAggregateTetra{{P({0, 0, 0}), P({1, 0, delta}), P({0, 1, -1}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
+    const OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
+    const std::array donors{
+        cut_donor(Geometry::box({0, 0, -1}, {1, 1, 1}), {{0, 0, 0x1p-300}, {}, 0}, 1.L / 6, 1.L / 12)};
+    expect_error([&] { (void) source.measure(donors); }, GeometryErrorCode::UnresolvedArithmetic);
+    expect_no_exact_work(before);
 }
 
 TEST(OrdinaryAggregateTest, RestoresCallerRoundingAndFlagsAfterSuccessAndRejection)

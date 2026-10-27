@@ -113,8 +113,14 @@ reconstruction stencil. Requests/replies bind source control, transaction,
 topology/partition generation, cell revision and owner. Ghost phase records carry
 an owner-authenticated retained-interface flag. Each geometric face cuts its
 source witnesses against its indexed candidate set, preserving overlap and
-coverage checks. No recipient overlay is constructed. Indexes are rebuilt for each trial;
-classification is never reused solely because the mesh geometry is unchanged.
+coverage checks. No recipient overlay is constructed. Immutable donor/frontier
+indexes are shared through the retained topology, with hierarchy observations and
+retained cell identities checked before reuse. The cache holds geometry and keys,
+not pointers into a previous publication's phase cells. Every trial rebuilds its
+corrected sweep bounds and classifies the current phases. Cache storage remains
+charged to the retained-state and querying-operation budgets; build/reuse counters
+distinguish index construction from actual query work. Reuse still checks the
+retained cell catalog and does not establish constant-cost preparation.
 
 ### Aggregate metric admission
 
@@ -124,6 +130,16 @@ witness; its rounded shell need not have a separately measurable positive volume
 Donor supports come from the retained geometry authority. Complementary cuts
 retain outside witnesses until donor coverage is complete. Donor overlap,
 missing coverage, inconsistent identities and exhausted construction work reject.
+
+Cut classification uses residual-based construction arithmetic separately from
+the aggregate metric quality estimate. Exact operations retain zero uncertainty.
+When rounded barycentric placement cannot resolve a later cut, the provider
+reevaluates the original source-edge construction expression. A zero numerator
+with no unresolved arithmetic establishes contact, including crossings whose
+barycentric division was inexact. Unresolved signs still reject; no coordinate
+snapping or tolerance enlargement establishes incidence. Source orientations,
+source/cut distances and per-witness integration coefficients are reused within
+their immutable dependencies, with storage and executed work accounted.
 
 Scalar integration groups only one canonical face, old donor, stream direction
 and phase at a time. Shared internal boundaries cancel by source construction
@@ -265,6 +281,11 @@ A_{cd}=M^{n+1}_c\delta_{cd}+\sum_f B_{cf}\sum_{p\in\{g,l\}}\rho_p J_{fdp}.
 $$
 
 Positive donor-cell routes are retained as explicitly named numerical support.
+An admitted low-order ledger supplies those routes, donor budgets and unpublished
+compensated endpoint capacities. Shared admission retains the original input,
+export, history, occupancy and independent global phase checks. The mixed path
+does not construct or import a discarded low-order candidate state; its final
+limited physical ledger alone produces the candidate publication.
 For `SignedFaceLedger`, GMRES solves the actual signed matrix, with positive row
 scaling `D=M_new+outgoing_low`. It does not normalize by the physical diagonal,
 which may be zero or negative, or require equality with the low-order operator.
@@ -347,6 +368,9 @@ Every right-hand side still has its own input, iteration and original physical
 residual checks. Equivalent-route families preserve their coefficient-agreement
 requirement. Interface-local signed execution uses its explicitly different
 numerical-support contract without changing the accepted physical equation.
+The freshly checked prepared view can be consumed directly; the solver retains
+its later source/publication checks without immediately repeating the factory's
+complete collective authentication.
 
 Only successful whole-step publication exposes the preparation, including its
 momentum identity and build/reuse counts, through `GeneralVoFSolver::prepared_transport()`.
@@ -403,3 +427,30 @@ no accepted inventory, history or transport declaration. Complete motion/capilla
 horizons, accuracy/convergence targets and production scaling remain separate
 qualification obligations. Focused preparation and failure tests
 cannot establish those results.
+
+### Independent prescribed-motion probe
+
+`testGeneralVoFMotionAccuracy` includes an independent polygon-area oracle and an
+opt-in eight-step skew/coarse-fine transport probe. In reference coordinates
+`X=x-y/4`, `Y=y`, its closed streamfunction is
+`psi=U*f(X)*Y*(1-Y)`, where `f=4X` below `X=1/4`, `f=1` in the central half,
+and `f=4(1-X)` above `X=3/4`. The initial interface `X=1/2` remains in the
+central shear region, so its exact evolution is `X+2UtY=1/2+Ut`.
+Canonical face fluxes follow streamfunction differences; independent polygon
+clipping and area integration supply gas and carrier reference volumes.
+
+Each accepted step reports volume-normalized phase L1 error, maximum cell-fraction
+error, conservation, passage and the final geometric-face theta histogram. Bin 0
+records zero correction, bins 1 through 8 record `floor(8*theta)+1` for
+`0<theta<1`, and bin 9 records full correction. These are canonical-owner face
+counts and can be summed across ranks. This prescribed transport reference is
+not an analytic coupled pressure/velocity solution, and no new accuracy threshold
+is inferred from its reports.
+
+The complete probe is disabled in routine discovery while its reconstruction
+optimizer rejection remains unresolved. Run it explicitly after building the
+target with `--gtest_also_run_disabled_tests` and
+`--gtest_filter=GeneralVoFMotionAccuracy.DISABLED_RepeatedClosedMotionReportsIndependentPhaseErrorAndTheta`.
+Successful preliminary steps do not qualify its complete horizon. The unchanged
+50-cell solver test and its `GeneralVoFFinitePassage_2procs`/`4procs` registrations
+remain separate qualification gates for physical residuals and repeated passage.
