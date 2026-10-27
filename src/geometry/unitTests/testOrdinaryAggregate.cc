@@ -248,14 +248,19 @@ TEST(OrdinaryAggregateTest, DonorValidationFailureRetainsOneConsistentAccounting
         cut_donor(Geometry::box({.5, 0, 0}, {1, 1, 1}), {{0, 1, 0}, {}, .5}, .5, .25)};
     donors[1].id = 38;
     OrdinaryAggregateContext context;
-    // A nested provider can finish under its caller's allowance before its
-    // actual work is handed back to the aggregate's tighter operation budget.
+    // The provider must obey the aggregate's tighter remaining allowance even
+    // while nested under a caller with ample operations and storage.
     SimpleFluid::PLIC::details::Operation caller(ordinary_limits());
     expect_error([&] { (void) limited.measure(donors, &context); }, GeometryErrorCode::ResourceLimit);
     EXPECT_EQ(context.stage, OrdinaryAggregateStage::DonorValidation);
     EXPECT_EQ(context.statistics.storage_bytes, context.bytes);
     EXPECT_EQ(context.statistics.operations, context.operations);
     EXPECT_EQ(context.statistics.pair_tests, context.pairs);
+    EXPECT_LE(context.operations, limits.maximum_operations);
+    // The ambient caller also counts the fixed FP-environment probe outside
+    // the aggregate ledger. Its total is not the provider's remaining quota.
+    EXPECT_GE(context.operations, initial.operations);
+    EXPECT_GE(caller.work.operations, context.operations - initial.operations);
     EXPECT_EQ(std::accumulate(context.statistics.stage_charged_bytes.begin(),
                   context.statistics.stage_charged_bytes.end(), std::size_t{}),
         context.bytes);

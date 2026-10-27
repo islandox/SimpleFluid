@@ -662,9 +662,11 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
             const auto ratio = options.reconstruction.minimum_optimized_phase_length_ratio;
             if (!std::isfinite(ratio) || ratio < 0 || ratio > 1)
                 throw std::invalid_argument("General VoF optimized phase length ratio must be finite in [0,1].");
-            budget.packet(21 * 8);
+            if (!options.maximum_face_geometry_operations)
+                throw std::invalid_argument("General VoF face geometry operation limit must be positive.");
+            budget.packet(22 * 8);
             wire::Writer w;
-            w.word(3); // Includes the small-phase orientation policy.
+            w.word(4); // Includes the independent per-face scalar-work guard.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
                      std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
                      std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
@@ -673,7 +675,8 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
                      std::uint64_t(options.reconstruction.maximum_stencil_cells),
                      std::uint64_t(options.reconstruction.maximum_clip_evaluations),
                      std::uint64_t(options.sweep.maximum_simplices), std::uint64_t(options.sweep.maximum_atoms),
-                     std::uint64_t(options.sweep.maximum_pair_tests)})
+                     std::uint64_t(options.sweep.maximum_pair_tests),
+                     std::uint64_t(options.maximum_face_geometry_operations)})
                 w.word(value);
             real(w, options.reconstruction.volume_tolerance);
             real(w, options.reconstruction.fit_tolerance);

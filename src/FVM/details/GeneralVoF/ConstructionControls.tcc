@@ -10,7 +10,7 @@ namespace SimpleFluid::VoF::construction_controls
 {
 using Records = std::map<std::pair<std::uint64_t, std::uint64_t>, AMR::AdaptiveBytes>;
 using FaceAuthority = GeneralVoF::Data::FaceAuthority;
-constexpr std::uint64_t version = 1;
+constexpr std::uint64_t version = 2;
 
 inline void header(wire::Writer& writer, std::uint64_t kind, std::uint64_t id,
     const PLIC::GeometryPacketContext& context, ArithmeticMode mode)
@@ -46,7 +46,7 @@ inline AMR::AdaptiveBytes algorithm(const GeneralVoFOptions& options)
              std::uint64_t(options.reconstruction.maximum_stencil_cells),
              std::uint64_t(options.reconstruction.maximum_clip_evaluations),
              std::uint64_t(options.sweep.maximum_simplices), std::uint64_t(options.sweep.maximum_atoms),
-             std::uint64_t(options.sweep.maximum_pair_tests),
+             std::uint64_t(options.sweep.maximum_pair_tests), std::uint64_t(options.maximum_face_geometry_operations),
              std::uint64_t(SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_constraints),
              std::uint64_t(SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_operations)})
         writer.word(value);

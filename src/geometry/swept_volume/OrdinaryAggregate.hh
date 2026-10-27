@@ -80,6 +80,9 @@ struct OrdinaryAggregateResult
     std::vector<OrdinaryAggregateGroup> groups;
     long double signed_source_volume = 0;
     OrdinaryAggregateStatistics statistics;
+    /** Result object and owned group capacity, included in statistics.storage_bytes.
+     * Excludes the source and temporary construction charges in that counter. */
+    [[nodiscard]] std::size_t storage_bytes() const noexcept;
 };
 /** Optional bounded progress snapshot for an exception's accounting owner.
  * Never retained by the source; absent identities are not invented on failure. */

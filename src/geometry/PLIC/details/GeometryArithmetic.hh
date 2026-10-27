@@ -2,6 +2,7 @@
  * @brief Fixed finite arithmetic policies over shared geometry storage.
  */
 #pragma once
+#include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 namespace SimpleFluid::PLIC
 {
@@ -15,8 +16,16 @@ template<ArithmeticMode Mode> struct ArithmeticPolicy
     static void scalar_operation()
     {
         static_assert(Mode == ArithmeticMode::Ordinary);
-        if (active_work && ++active_work->operations > active_work->operation_limit)
-            details::reject(Mode, "scalar operation cap exhausted.");
+        if (active_work)
+        {
+            if (active_work->operations >= active_work->operation_limit)
+            {
+                ++statistics.rejections;
+                throw GeometryError(GeometryErrorCode::ResourceLimit,
+                    "Ordinary FP geometry: scalar operation work limit exhausted.");
+            }
+            ++active_work->operations;
+        }
     }
     static void interval_operation()
     {

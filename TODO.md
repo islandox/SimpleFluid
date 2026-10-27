@@ -1699,10 +1699,11 @@ implicit-upwind specialization while retaining the general swept path.
       budget admission. Report executed index work and final geometric-face theta
       distributions; retain dynamic phase classification each trial.
 - [ ] Qualify the original 50-cell skew/coarse-fine passage case over its ten-step
-      serial/MPI horizon under the original uncertainty, resource and conservation
-      gates. Support-aware reach and defining-support predicates resolve the
-      captured wall and generated shared-edge contacts; cumulative aggregate
-      geometry storage still blocks the complete serial horizon. The conservative
+      serial/MPI horizon under the uncertainty/conservation gates and documented
+      storage-lifetime/work policies. Support-aware reach and defining-support
+      predicates resolve the captured contacts; face-local storage admits complete
+      transport steps, but unresolved phase/stencil support still blocks the
+      complete horizon. The conservative
       frontier supporting-halfspace screen remains an admission limit for other
       constructions; finite-polygon containment is separate outstanding work.
 - [x] Share authenticated original-support contact between Ordinary wall
@@ -1721,6 +1722,11 @@ implicit-upwind specialization while retaining the general swept path.
       complementary coverage and phase cuts, preserving all support evidence and
       source-face cancellation. Attribute cumulative charges by face/stage and
       report active/stored vertices and tracked live-witness capacity separately.
+- [x] Separate retained preparation storage from face-local conservative scratch.
+      Admit output while scratch remains reserved, commit only surviving output
+      capacity, and release unpublished allocations after destruction on failure.
+      Keep cumulative traffic/work diagnostics, a collectively agreed per-face
+      operation guard and independent pair/witness limits.
 - [ ] Establish a current native-cell-complex coverage certificate before replacing
       repeated donor-complement subtraction. Bind complete cavity/halo frontiers,
       source containment and complete donor queries to the same geometry/partition
