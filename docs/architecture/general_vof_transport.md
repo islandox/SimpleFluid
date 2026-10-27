@@ -93,13 +93,39 @@ hull. A second index covers the retained-domain frontier, including physical wal
 The frontier catalog is retained with immutable topology before native assembly
 consumes its construction draft.
 
-The public Ordinary orientation predicate must prove the hull remains on the
-retained side of every potentially crossed frontier tile. It uses represented
-finite coordinates, handles its floating-point environment internally, and rejects
-unresolved signs. A missing donor, uncertain contact or hull leaving the admitted
-shell rejects collectively; the path does not silently expand the halo or assume
-that unknown fluid is homogeneous. This is a conservative admission boundary,
-including for nonconvex or disconnected retained domains.
+Each frontier retains its canonical face/tile identity, physical boundary or
+retained-halo kind, retained cell incidence and owner, and the missing cell key
+and owner where applicable. Its boundary classifier binds the immutable original
+cell-face support, rather than rebuilding a plane from rounded tile vertices.
+The cache observations and retained cell identities authenticate geometry revision
+and ownership. A geometric `PlaneAuthority` key alone does not authenticate either.
+Trial-pinned construction controls rebuild the node trajectories against that
+current source authority before reach admission.
+
+`PLIC::OrdinaryBoundary` distinguishes inside, construction contact, represented
+coordinate contact, outside and unresolved arithmetic. A sealed point on the
+same original support establishes construction contact even when its stored
+coordinates have a nonzero plane residual. Wall trajectories, frontier admission,
+aggregate donor cuts and source-simplex common-support tests share sealed support
+membership. Coordinate mutation invalidates the seal; a nonzero private cap-center
+displacement drops the inherited supports. Without matching construction evidence,
+the original framed plane predicate determines the side. Numerical uncertainty
+does not establish contact, and no orientation epsilon is introduced.
+
+The supporting-halfspace screen remains a sufficient containment proof. It is
+stronger than testing intersection with finite frontier polygons and can reject
+valid reach in a nonconvex retained domain. An outside or unresolved recipe point
+still rejects collectively, with its role and frontier identity reported. Physical
+boundary crossings and missing-donor halo reach have distinct diagnostics; the
+path does not silently expand the halo or assume unknown fluid is homogeneous.
+Finite-polygon reach and constrained cap correction remain separate work.
+
+`GeneralVoFBoundaryReach.Face17ReplaysOriginalWallConstructionBeforeDonorClipping`
+reconstructs a small native source fan using the captured nodal velocities,
+timestep and canonical face control. It preserves original support identities
+through backtracing and checks the wall contact independently of donor clipping.
+Companion checks retain rejection of stale observations, foreign geometry owners,
+missing halo donors and an escaping flux-corrected cap center.
 
 Any `Infer` donor, retained mixed surface, or conflict between pure declarations
 among reachable donors/endpoints selects geometric work. Thus a face-aligned

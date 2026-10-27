@@ -600,12 +600,7 @@ DynamicConvexGeometryPtr GeometryKernel<Mode>::from_snapshot(
         const auto& bytes = shell.face_support_identities[f];
         if (bytes.empty())
             reject("empty original source support authority.");
-        PlaneAuthority authority;
-        authority.key.push_back(bytes.size());
-        authority.key.resize(1 + (bytes.size() + 7) / 8, 0);
-        for (std::size_t i = 0; i < bytes.size(); ++i)
-            authority.key[1 + i / 8] |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[i]))
-                                        << (8 * (i % 8));
+        auto authority = details::original_support_authority(bytes);
         active_work->charge(authority.key.size(), sizeof(std::uint64_t));
         for (const auto index : shell.outward_faces[f])
         {

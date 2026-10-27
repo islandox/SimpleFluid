@@ -1,5 +1,6 @@
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <algorithm>
@@ -552,11 +553,7 @@ Distances source_distances(const OrdinaryAggregateTetra& t, const Cut& cut, Aggr
     result.identity = cut.identity;
     for (unsigned i = 0; i < 4; ++i)
     {
-        bool incident = false;
-        for (const auto& authority : cut.authorities)
-            incident |= std::find(t.vertices[i].supports().begin(), t.vertices[i].supports().end(), authority) !=
-                        t.vertices[i].supports().end();
-        if (incident)
+        if (has_any_support(t.vertices[i].dynamic(), cut.authorities))
             continue;
         const auto distance = predicate(
             [&]
@@ -607,6 +604,8 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
         c.orientation = surface.orientation;
         c.authorities = plane.authorities;
         c.native_support = plane.native_support;
+        if (c.authorities.empty() && !c.native_support.empty())
+            c.authorities.push_back(::SimpleFluid::PLIC::details::original_support_authority(c.native_support));
         work.charge(c.native_support.size());
         for (const auto& authority : c.authorities)
             work.charge(sizeof(PlaneAuthority) + authority.key.size() * sizeof(std::uint64_t));

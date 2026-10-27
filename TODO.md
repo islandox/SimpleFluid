@@ -1698,10 +1698,18 @@ implicit-upwind specialization while retaining the general swept path.
       geometry indexes with identity checks, accounted storage and prepublication
       budget admission. Report executed index work and final geometric-face theta
       distributions; retain dynamic phase classification each trial.
-- [ ] Resolve retained-shell reach rejection in the original 50-cell skew/coarse-fine
-      passage case before qualifying its ten-step serial/MPI horizon. The conservative
-      frontier supporting-halfspace screen remains an admission limit; do not relax
-      its orientation test to admit uncertain reach.
+- [ ] Qualify the original 50-cell skew/coarse-fine passage case over its ten-step
+      serial/MPI horizon. Support-aware reach passes the former wall contact, but
+      unresolved aggregate cut classification still blocks coverage admission.
+      Retain the original uncertainty and conservation gates. The conservative
+      frontier supporting-halfspace screen remains an admission limit for other
+      constructions; finite-polygon containment is separate outstanding work.
+- [x] Share authenticated original-support contact between Ordinary wall
+      trajectories, reach admission, donor clipping and source-simplex tests.
+      Retain physical-wall versus halo frontier metadata, validate current source
+      ownership/revision separately, and replay the face-17 wall construction.
+      Nonzero cap corrections invalidate inherited support. This contact repair
+      does not establish finite-polygon containment or the full passage horizon.
 - [ ] Complete the opt-in eight-step analytic closed-motion accuracy probe.
       Reconstruction currently requests resolved phase/stencil support on step 4;
       retain the complete horizon, independent phase-distribution oracle and original

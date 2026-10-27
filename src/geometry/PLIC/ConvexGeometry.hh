@@ -49,8 +49,9 @@ struct DynamicGeometryValue
     template<ArithmeticMode Mode> [[nodiscard]] double as_double() const;
     [[nodiscard]] bool relative_error_at_most(long double target, double tolerance) const;
 };
-/** Collision-free opaque original support identity. Only immutable source
- * authority export can issue these keys; they are never geometric numbers. */
+/** Collision-free opaque original geometric support identity. Only immutable
+ * source authority export issues these keys; they are never geometric numbers
+ * or ownership/revision credentials. The caller authenticates those separately. */
 struct PlaneAuthority
 {
     std::vector<std::uint64_t> key;

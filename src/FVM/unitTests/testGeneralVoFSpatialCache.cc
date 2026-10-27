@@ -36,8 +36,8 @@ GeneralVoF::Data catalog()
     }
     return data;
 }
-std::vector<std::size_t> query(
-    const Cache& cache, long double x, SimpleFluid::geometry::swept_volume::Work& work, GeneralVoFTransportDiagnostics& diagnostics)
+std::vector<std::size_t> query(const Cache& cache, long double x, SimpleFluid::geometry::swept_volume::Work& work,
+    GeneralVoFTransportDiagnostics& diagnostics)
 {
     local::local_spatial_detail::Box box;
     box.add(std::array{x, .5L, .5L});
@@ -149,8 +149,13 @@ TEST(GeneralVoFSpatialCache, FrontierIndexRetainsImmutableFiniteFacetGeometry)
     auto topology = std::make_shared<GeneralVoF::Data::Topology>();
     AMR::AdaptiveTile tile;
     tile.first = data.cells.begin()->first;
+    tile.first_owner = data.cells.begin()->second.owner;
     tile.face_gid = 5;
-    tile.geometry = Geometry::box({0, 0, 0}, {1, 1, 1})->face_geometry(0);
+    tile.identity = {'w', 'a', 'l', 'l'};
+    tile.exterior = true;
+    tile.boundary = "wall";
+    const auto retained = Geometry::from_dynamic(data.cells.begin()->second.finite_geometry);
+    tile.geometry = retained->face_geometry(0);
     topology->frontier_tiles.push_back(tile);
     data.topology = topology;
     const CacheTrial first(data);
@@ -159,6 +164,18 @@ TEST(GeneralVoFSpatialCache, FrontierIndexRetainsImmutableFiniteFacetGeometry)
     ASSERT_EQ(next.cache->frontiers.size(), 1u);
     EXPECT_EQ(next.cache->frontiers[0].geometry, tile.geometry);
     EXPECT_TRUE(next.cache->frontiers[0].first);
+    const auto& frontier = next.cache->frontiers[0];
+    EXPECT_EQ(frontier.face_gid, tile.face_gid);
+    EXPECT_EQ(frontier.tile_identity, tile.identity);
+    EXPECT_EQ(frontier.boundary, "wall");
+    EXPECT_EQ(frontier.kind, local::local_spatial_detail::Frontier::Kind::PhysicalBoundary);
+    EXPECT_EQ(frontier.retained_key, data.cells.begin()->first);
+    EXPECT_EQ(frontier.retained_gid, data.cells.begin()->second.gid);
+    EXPECT_EQ(frontier.retained_owner, tile.first_owner);
+    EXPECT_EQ(frontier.retained_geometry->dynamic_geometry(), data.cells.begin()->second.finite_geometry);
+    EXPECT_EQ(frontier.support_identity, PLIC::planar_support<ArithmeticMode::Ordinary>(*retained->face_geometry(0)));
+    ASSERT_TRUE(frontier.original_boundary);
+    EXPECT_FALSE(frontier.outside_key);
     local::local_spatial_detail::Box bounds;
     const auto center = tile.geometry->centroid();
     bounds.add(std::array<long double, 3>{center.x, center.y, center.z});
@@ -166,6 +183,36 @@ TEST(GeneralVoFSpatialCache, FrontierIndexRetainsImmutableFiniteFacetGeometry)
     local::local_spatial_detail::Box far;
     far.add(std::array{40.L, .5L, .5L});
     EXPECT_TRUE(next.cache->frontier_index.query(far, next.work, next.diagnostics).empty());
+}
+TEST(GeneralVoFSpatialCache, HaloFrontierBindsRetainedSecondCellAndOutsideAuthority)
+{
+    auto data = catalog();
+    auto topology = std::make_shared<GeneralVoF::Data::Topology>();
+    AMR::AdaptiveTile tile;
+    tile.first.region = 50;
+    tile.first_owner = 7;
+    tile.second = data.cells.begin()->first;
+    tile.second_owner = data.cells.begin()->second.owner;
+    tile.face_gid = 91;
+    tile.identity = {'h', 'a', 'l', 'o'};
+    const auto retained = Geometry::from_dynamic(data.cells.begin()->second.finite_geometry);
+    tile.geometry = retained->face_geometry(1);
+    topology->frontier_tiles.push_back(tile);
+    data.topology = topology;
+    const CacheTrial trial(data);
+    ASSERT_EQ(trial.cache->frontiers.size(), 1u);
+    const auto& frontier = trial.cache->frontiers[0];
+    EXPECT_EQ(frontier.kind, local::local_spatial_detail::Frontier::Kind::RetainedHalo);
+    EXPECT_FALSE(frontier.first);
+    EXPECT_EQ(frontier.retained_key, *tile.second);
+    EXPECT_EQ(frontier.retained_owner, tile.second_owner);
+    ASSERT_TRUE(frontier.outside_key);
+    EXPECT_EQ(*frontier.outside_key, tile.first);
+    EXPECT_EQ(frontier.outside_owner, tile.first_owner);
+    EXPECT_EQ(frontier.retained_face, 1u);
+    ASSERT_TRUE(frontier.original_boundary);
+    const PLIC::Point<ArithmeticMode::Ordinary> center(std::array{.5L, .5L, .5L});
+    EXPECT_EQ(frontier.original_boundary->classify(center), PLIC::OrdinaryBoundaryClass::Inside);
 }
 TEST(GeneralVoFSpatialCache, WarmAndColdCachesHonorEachConsumersLimits)
 {

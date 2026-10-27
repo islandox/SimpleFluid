@@ -79,6 +79,7 @@ namespace SimpleFluid::PLIC
 
 namespace details SIMPLEFLUID_LOCAL
 {
+[[nodiscard]] PlaneAuthority original_support_authority(std::span<const char>);
 extern thread_local GeometryStatistics statistics;
 [[noreturn]] void reject(std::string_view reason);
 [[noreturn]] void reject(ArithmeticMode mode, std::string_view reason);
