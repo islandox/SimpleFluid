@@ -1716,6 +1716,11 @@ implicit-upwind specialization while retaining the general swept path.
       predicates, preserve complementary orientation and metric error, and reuse
       immutable evaluations under the original resource limits. Replay shared-edge
       contact, representable perturbations, both donor orders and nested budgets.
+- [x] Remove unused aggregate ancestry and retain only face-referenced child
+      vertices. Share classification, crossings and cap construction across
+      complementary coverage and phase cuts, preserving all support evidence and
+      source-face cancellation. Attribute cumulative charges by face/stage and
+      report active/stored vertices and tracked live-witness capacity separately.
 - [ ] Establish a current native-cell-complex coverage certificate before replacing
       repeated donor-complement subtraction. Bind complete cavity/halo frontiers,
       source containment and complete donor queries to the same geometry/partition

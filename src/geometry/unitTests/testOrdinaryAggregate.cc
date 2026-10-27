@@ -1,4 +1,5 @@
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
 #include <algorithm>
 #include <cfenv>
@@ -21,7 +22,8 @@ GeometryLimits ordinary_limits()
     limits.arithmetic_mode = ArithmeticMode::Ordinary;
     return limits;
 }
-std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra> cube_tetrahedra(GeometryPoint origin = {}, double scale = 1)
+std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra> cube_tetrahedra(
+    GeometryPoint origin = {}, double scale = 1)
 {
     std::array<unsigned, 3> axes{0, 1, 2};
     std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra> result;
@@ -59,7 +61,8 @@ void expect_amount(long double observed, long double expected)
 {
     EXPECT_LE(std::abs(observed - expected), relative_allowance * std::abs(expected));
 }
-void expect_split(const SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult& result, long double bulk, long double gas)
+void expect_split(
+    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult& result, long double bulk, long double gas)
 {
     ASSERT_EQ(result.groups.size(), 1u);
     const auto& group = result.groups.front();
@@ -103,6 +106,162 @@ template<class F> void expect_error(F&& action, GeometryErrorCode code)
     }
 }
 
+void expect_compact_accounting(const SimpleFluid::geometry::swept_volume::OrdinaryAggregateStatistics& statistics)
+{
+    EXPECT_EQ(
+        std::accumulate(statistics.stage_charged_bytes.begin(), statistics.stage_charged_bytes.end(), std::size_t{}),
+        statistics.storage_bytes);
+    EXPECT_EQ(statistics.failed_charge_bytes, 0u);
+    // Both counts are observed independently from actual face references.
+    EXPECT_EQ(statistics.stored_vertices_seen, statistics.active_vertices_seen);
+    EXPECT_EQ(statistics.peak_stored_vertices, statistics.peak_active_vertices);
+    EXPECT_EQ(statistics.vertices_classified, statistics.active_vertices_seen);
+    EXPECT_GT(statistics.peak_live_witnesses, 0u);
+    EXPECT_GT(statistics.peak_live_witness_bytes, 0u);
+    EXPECT_GT(statistics.peak_remainders, 0u);
+}
+
+TEST(OrdinaryAggregateTest, SharedSplitRetainsAnalyticEdgeVertexAndTangentContacts)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    OrdinaryAggregateTetra tetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1};
+    const auto donor_geometry = Geometry::box({0, 0, 0}, {1, 1, 1});
+    constexpr long double bulk = 1.L / 6;
+    struct Case
+    {
+        GeometryPoint normal;
+        long double gas;
+    };
+    // Symmetry across x=y halves the tetrahedron. The cone z>=x+y has
+    // intercepts (1/2,0,1/2),(0,1/2,1/2),(0,0,1), so volume=1/24.
+    const std::array<Case, 3> cases{{{{1, -1, 0}, 1.L / 12}, {{1, 1, -1}, 1.L / 24}, {{1, 0, 0}, 0}}};
+    for (unsigned rotation = 0; rotation < 4; ++rotation)
+    {
+        const std::array recipes{tetra};
+        const OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
+        for (const auto& example : cases)
+            for (const int direction : {1, -1})
+            {
+                auto normal = example.normal;
+                for (auto& value : normal)
+                    value *= direction;
+                const auto gas = direction > 0 ? example.gas : bulk - example.gas;
+                const std::array donors{cut_donor(donor_geometry, {normal, {}, 0}, bulk, gas)};
+                const auto result = source.measure(donors);
+                ASSERT_EQ(result.groups.size(), 1u);
+                const auto& group = result.groups.front();
+                expect_amount(group.nominal.bulk, bulk);
+                expect_amount(group.nominal.gas, gas);
+                expect_amount(group.nominal.carrier, bulk - gas);
+                EXPECT_EQ(group.gas_positive, gas > 0);
+                EXPECT_EQ(group.carrier_positive, gas < bulk);
+                EXPECT_EQ(group.approximation_bound.bulk, 0);
+                EXPECT_EQ(group.approximation_bound.gas, 0);
+                EXPECT_EQ(group.approximation_bound.carrier, 0);
+                EXPECT_LE(std::abs(group.nominal.gas + group.nominal.carrier - group.nominal.bulk),
+                    bulk * relative_allowance);
+                expect_compact_accounting(result.statistics);
+                // Six box planes for coverage, six for direct metrics, and
+                // one phase split: at most 13 classifications of four vertices.
+                // Complementary children must not classify that input twice.
+                EXPECT_LE(result.statistics.vertices_classified, 52u);
+            }
+        std::rotate(tetra.vertices.begin(), tetra.vertices.begin() + 1, tetra.vertices.end());
+        std::rotate(tetra.vertex_ids.begin(), tetra.vertex_ids.begin() + 1, tetra.vertex_ids.end());
+    }
+}
+
+TEST(OrdinaryAggregateTest, CompactRemaindersPreserveFourSlabInventoriesAndSourceFaces)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    OrdinaryAggregateTetra tetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1};
+    std::array<OrdinaryAggregateDonor, 4> donors;
+    std::array<long double, 4> expected;
+    for (unsigned i = 0; i < donors.size(); ++i)
+    {
+        const double a = i / 4., b = (i + 1) / 4.;
+        expected[i] = ((1.L - a) * (1.L - a) * (1.L - a) - (1.L - b) * (1.L - b) * (1.L - b)) / 6;
+        donors[i] = cut_donor(Geometry::box({a, 0, 0}, {b, 1, 1}), {{0, 1, -1}, {}, 0}, expected[i], expected[i] / 2);
+        donors[i].id = i;
+    }
+    for (unsigned rotation = 0; rotation < 4; ++rotation)
+    {
+        const std::array recipes{tetra};
+        const OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
+        for (unsigned order = 0; order < 2; ++order)
+        {
+            const auto result = source.measure(donors);
+            ASSERT_EQ(result.groups.size(), 4u);
+            long double bulk = 0, gas = 0, carrier = 0;
+            for (const auto& group : result.groups)
+            {
+                ASSERT_LT(group.donor, expected.size());
+                expect_amount(group.nominal.bulk, expected[group.donor]);
+                expect_amount(group.nominal.gas, expected[group.donor] / 2);
+                expect_amount(group.nominal.carrier, expected[group.donor] / 2);
+                EXPECT_TRUE(group.bulk_positive && group.gas_positive && group.carrier_positive);
+                bulk += group.nominal.bulk;
+                gas += group.nominal.gas;
+                carrier += group.nominal.carrier;
+            }
+            expect_amount(bulk, 1.L / 6);
+            expect_amount(gas, 1.L / 12);
+            expect_amount(carrier, 1.L / 12);
+            expect_compact_accounting(result.statistics);
+            std::reverse(donors.begin(), donors.end());
+        }
+        std::rotate(tetra.vertices.begin(), tetra.vertices.begin() + 1, tetra.vertices.end());
+        std::rotate(tetra.vertex_ids.begin(), tetra.vertex_ids.begin() + 1, tetra.vertex_ids.end());
+    }
+}
+
+TEST(OrdinaryAggregateTest, FailedChargeReportsUnspentRequestAndStageAttribution)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    const auto recipes = cube_tetrahedra();
+    const std::array donors{cut_donor(Geometry::box({0, 0, 0}, {1, 1, 1}), {{1, 0, 0}, {}, .5}, 1, .5)};
+    const OrdinaryAggregateSource reference(recipes, {}, ordinary_limits());
+    const auto required = reference.measure(donors).statistics.storage_bytes;
+    auto limits = ordinary_limits();
+    limits.byte_budget = required - 1;
+    OrdinaryAggregateContext context;
+    const OrdinaryAggregateSource limited(recipes, {}, limits, &context);
+    expect_error([&] { (void) limited.measure(donors, &context); }, GeometryErrorCode::ResourceLimit);
+    EXPECT_EQ(context.bytes, context.statistics.storage_bytes);
+    EXPECT_EQ(std::accumulate(context.statistics.stage_charged_bytes.begin(),
+                  context.statistics.stage_charged_bytes.end(), std::size_t{}),
+        context.bytes);
+    ASSERT_LE(context.bytes, limits.byte_budget);
+    EXPECT_GT(context.statistics.failed_charge_bytes, limits.byte_budget - context.bytes);
+}
+
+TEST(OrdinaryAggregateTest, DonorValidationFailureRetainsOneConsistentAccountingSnapshot)
+{
+    using namespace SimpleFluid::geometry::swept_volume;
+    const auto recipes = cube_tetrahedra();
+    OrdinaryAggregateContext initial;
+    const OrdinaryAggregateSource reference(recipes, {}, ordinary_limits(), &initial);
+    auto limits = ordinary_limits();
+    limits.maximum_operations = initial.operations + 1;
+    const OrdinaryAggregateSource limited(recipes, {}, limits);
+    std::array donors{cut_donor(Geometry::box({0, 0, 0}, {.5, 1, 1}), {{0, 1, 0}, {}, .5}, .5, .25),
+        cut_donor(Geometry::box({.5, 0, 0}, {1, 1, 1}), {{0, 1, 0}, {}, .5}, .5, .25)};
+    donors[1].id = 38;
+    OrdinaryAggregateContext context;
+    // A nested provider can finish under its caller's allowance before its
+    // actual work is handed back to the aggregate's tighter operation budget.
+    SimpleFluid::PLIC::details::Operation caller(ordinary_limits());
+    expect_error([&] { (void) limited.measure(donors, &context); }, GeometryErrorCode::ResourceLimit);
+    EXPECT_EQ(context.stage, OrdinaryAggregateStage::DonorValidation);
+    EXPECT_EQ(context.statistics.storage_bytes, context.bytes);
+    EXPECT_EQ(context.statistics.operations, context.operations);
+    EXPECT_EQ(context.statistics.pair_tests, context.pairs);
+    EXPECT_EQ(std::accumulate(context.statistics.stage_charged_bytes.begin(),
+                  context.statistics.stage_charged_bytes.end(), std::size_t{}),
+        context.bytes);
+    EXPECT_EQ(SimpleFluid::PLIC::details::active_work, &caller.work);
+}
+
 TEST(OrdinaryAggregateTest, SixTetraCubeRetainsAnalyticMinoritySlabsAcrossFrames)
 {
     const auto before = geometry_statistics();
@@ -138,7 +297,8 @@ TEST(OrdinaryAggregateTest, CornerSimplexRetainsCubicMinorityWithoutMeasuringChi
 {
     const auto before = geometry_statistics();
     const std::array<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra, 1> tetrahedra{
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
     const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(tetrahedra, {}, ordinary_limits());
     const auto donor_geometry = Geometry::box({0, 0, 0}, {1, 1, 1});
     for (const unsigned exponent : {1u, 12u, 30u, 50u})
@@ -156,7 +316,8 @@ TEST(OrdinaryAggregateTest, ComplementaryDonorAndPhaseContactRetainsAnalyticTetr
 {
     const auto before = geometry_statistics();
     const std::array<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra, 1> recipes{
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
     const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
     for (unsigned donor_axis : {0u, 1u})
     {
@@ -182,7 +343,8 @@ TEST(OrdinaryAggregateTest, ComplementaryDonorAndPhaseContactRetainsAnalyticTetr
                 ASSERT_EQ(gas, 1.L / 8);
                 ASSERT_EQ(carrier, 1.L / 48);
             }
-            std::array donors{cut_donor(split.inside, {phase_normal, {}, h}, bulk, gas), SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor{}};
+            std::array donors{cut_donor(split.inside, {phase_normal, {}, h}, bulk, gas),
+                SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor{}};
             donors[1].id = 38;
             donors[1].geometry = split.outside;
             donors[1].pure_carrier = true;
@@ -221,7 +383,8 @@ TEST(OrdinaryAggregateTest, NonbinaryCrossingReplaysSourceSupportToResolveExactC
 {
     const auto before = geometry_statistics();
     const std::array<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra, 1> recipes{
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, 0}), P({3, 0, 0}), P({0, 3, 0}), P({0, 0, 3})}, {1, 2, 3, 4}, 1}};
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, 0}), P({3, 0, 0}), P({0, 3, 0}), P({0, 0, 3})}, {1, 2, 3, 4}, 1}};
     const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
     for (unsigned donor_axis : {0u, 1u})
     {
@@ -240,8 +403,8 @@ TEST(OrdinaryAggregateTest, NonbinaryCrossingReplaysSourceSupportToResolveExactC
             const long double missing = 3.L - (h + delta), overlap = std::max(-static_cast<long double>(delta), 0.L);
             const long double carrier = (missing * missing * missing - overlap * overlap * overlap) / 6;
             const long double gas = delta == 0 ? 3.L : bulk - carrier;
-            std::array donors{
-                cut_donor(split.inside, {phase_normal, {}, h + delta}, bulk, gas), SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor{}};
+            std::array donors{cut_donor(split.inside, {phase_normal, {}, h + delta}, bulk, gas),
+                SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor{}};
             donors[1].id = 38;
             donors[1].geometry = split.outside;
             donors[1].pure_carrier = true;
@@ -299,8 +462,10 @@ TEST(OrdinaryAggregateTest, SharedSourceFaceRemainsExteriorWhenOtherSideBecomesC
     // Two unit-base simplices meet on OBC. Their first vertices are the
     // opposite apices, so dropping OBC changes either one-sided integral.
     std::array<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra, 2> tetrahedra{
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, 1}), P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0})}, {2, 1, 3, 4}, 1},
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, -1}), P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0})}, {5, 1, 3, 4}, 1}};
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, 1}), P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0})}, {2, 1, 3, 4}, 1},
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, -1}), P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0})}, {5, 1, 3, 4}, 1}};
     const std::array phase_donors{
         cut_donor(Geometry::box({0, 0, -1}, {1, 1, 1}), {{0, 0, -1}, {}, 0}, 1.L / 3, 1.L / 6)};
     SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor upper;
@@ -361,7 +526,12 @@ TEST(OrdinaryAggregateTest, SourceIdentitiesAndRepeatedIncidenceRejectWithoutCha
     auto changed = good;
     changed[0].vertices[0] = P({.125, 0, 0});
     SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext context;
-    expect_error([&] { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(changed, {}, ordinary_limits(), &context); },
+    expect_error(
+        [&]
+        {
+            (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(
+                changed, {}, ordinary_limits(), &context);
+        },
         GeometryErrorCode::ProvenanceMismatch);
     EXPECT_EQ(context.stage, SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext::Stage::Source);
     EXPECT_NE(context.source, SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext::absent);
@@ -369,11 +539,16 @@ TEST(OrdinaryAggregateTest, SourceIdentitiesAndRepeatedIncidenceRejectWithoutCha
     EXPECT_GT(context.bytes, 0u);
     auto repeated = good;
     repeated.push_back(good.front());
-    expect_error(
-        [&] { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(repeated, {}, ordinary_limits()); }, GeometryErrorCode::InvalidTopology);
+    expect_error([&]
+        { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(repeated, {}, ordinary_limits()); },
+        GeometryErrorCode::InvalidTopology);
     auto repeated_vertex = good;
     repeated_vertex[0].vertex_ids[1] = repeated_vertex[0].vertex_ids[0];
-    expect_error([&] { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(repeated_vertex, {}, ordinary_limits()); },
+    expect_error(
+        [&]
+        {
+            (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(repeated_vertex, {}, ordinary_limits());
+        },
         GeometryErrorCode::ProvenanceMismatch);
     const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource valid(good, {}, ordinary_limits());
     const std::array donors{cut_donor(Geometry::box({0, 0, 0}, {1, 1, 1}), {{1, 0, 0}, {}, .5}, 1, .5)};
@@ -385,11 +560,13 @@ TEST(OrdinaryAggregateTest, ExhaustedSourceAndMeasurementBudgetsRejectExplicitly
     const auto tetrahedra = cube_tetrahedra();
     auto sweep = SimpleFluid::geometry::swept_volume::SweepLimits{};
     sweep.byte_budget = 1;
-    expect_error([&] { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(tetrahedra, sweep, ordinary_limits()); },
+    expect_error([&]
+        { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(tetrahedra, sweep, ordinary_limits()); },
         GeometryErrorCode::ResourceLimit);
     sweep = {};
     sweep.maximum_pair_tests = 0;
-    expect_error([&] { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(tetrahedra, sweep, ordinary_limits()); },
+    expect_error([&]
+        { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(tetrahedra, sweep, ordinary_limits()); },
         GeometryErrorCode::ResourceLimit);
     sweep.maximum_pair_tests = 24; // Six tetrahedra contribute four authenticated source faces each.
     const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(tetrahedra, sweep, ordinary_limits());
@@ -407,8 +584,10 @@ TEST(OrdinaryAggregateTest, ExhaustedSourceAndMeasurementBudgetsRejectExplicitly
 
 TEST(OrdinaryAggregateTest, UnresolvedMinorityBudgetRejectsInsteadOfBecomingAbsent)
 {
-    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra tetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {0, 1, 2, 3}, 1};
-    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(std::span(&tetra, 1), {}, ordinary_limits());
+    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra tetra{
+        {P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({0, 0, 1})}, {0, 1, 2, 3}, 1};
+    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(
+        std::span(&tetra, 1), {}, ordinary_limits());
     // A positive corner cannot be turned into an absent phase when its
     // independent numerical accuracy budget cannot be met.
     const double height = std::numeric_limits<double>::denorm_min();
@@ -428,7 +607,8 @@ TEST(OrdinaryAggregateTest, UnrepresentedCutDistanceRemainsTypedUnresolved)
     const auto delta = std::ldexp(1.L, std::numeric_limits<long double>::min_exponent + 4);
     ASSERT_EQ(std::fpclassify(delta), FP_NORMAL);
     const std::array<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra, 1> recipes{
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, 0}), P({1, 0, delta}), P({0, 1, -1}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, 0}), P({1, 0, delta}), P({0, 1, -1}), P({0, 0, 1})}, {1, 2, 3, 4}, 1}};
     const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(recipes, {}, ordinary_limits());
     const std::array donors{
         cut_donor(Geometry::box({0, 0, -1}, {1, 1, 1}), {{0, 0, 0x1p-300}, {}, 0}, 1.L / 6, 1.L / 12)};
@@ -458,7 +638,8 @@ TEST(OrdinaryAggregateTest, RestoresCallerRoundingAndFlagsAfterSuccessAndRejecti
     EXPECT_EQ(result.groups[0].nominal.gas, .25L);
     auto limits = ordinary_limits();
     limits.byte_budget = 1;
-    expect_error([&] { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(recipes, {}, limits); }, GeometryErrorCode::ResourceLimit);
+    expect_error([&] { (void) SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource(recipes, {}, limits); },
+        GeometryErrorCode::ResourceLimit);
     EXPECT_EQ(std::fegetround(), FE_UPWARD);
     EXPECT_EQ(std::fetestexcept(FE_ALL_EXCEPT), flags);
 }
@@ -478,7 +659,8 @@ TEST(OrdinaryAggregateTest, PositiveSubnormalSimplexCannotClaimZeroErrorOrRelati
     ASSERT_GT(rounded_volume, 0);
     ASSERT_EQ(rounded_volume * relative_allowance, 0);
     const std::array<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra, 1> recipes{
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, 0}), P({edge, 0, 0}), P({0, edge, 0}), P({0, 0, edge})}, {1, 2, 3, 4}, 1}};
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, 0}), P({edge, 0, 0}), P({0, edge, 0}), P({0, 0, edge})}, {1, 2, 3, 4}, 1}};
     const auto before = geometry_statistics();
     expect_error(
         [&]
@@ -501,7 +683,8 @@ TEST(OrdinaryAggregateTest, SourceDomainRetryRetainsAnalyticFlatTetraWithDistant
     constexpr long double height = 0x1p-60L;
     constexpr double width = .25;
     const std::array<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra, 2> recipes{
-        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{{P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({1, 1, height})}, {1, 2, 3, 4}, 1},
+        SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
+            {P({0, 0, 0}), P({1, 0, 0}), P({0, 1, 0}), P({1, 1, height})}, {1, 2, 3, 4}, 1},
         SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra{
             {P({-2, -2, 1}), P({-1.5, -2, 1}), P({-2, -1.5, 1}), P({-2, -2, 1.5})}, {5, 6, 7, 8}, 1}};
     const auto original = recipes;

@@ -43,12 +43,37 @@ struct OrdinaryAggregateGroup
     /** Strict interiors observed structurally; zero publication must retain these obligations. */
     bool bulk_positive = false, gas_positive = false, carrier_positive = false;
 };
+enum class OrdinaryAggregateStage
+{
+    Source,
+    DonorValidation,
+    Coverage,
+    Metric
+};
 struct OrdinaryAggregateStatistics
 {
     /** cancelled_boundaries counts authenticated source-face partner pairs;
      * each donor/sign/phase channel removes only pairs whose two faces survive. */
+    /** witnesses counts requested construction admissions, including empty
+     * complementary children; it is not a live-object count. */
     std::size_t source_pieces = 0, witnesses = 0, cancelled_boundaries = 0, retries = 0;
+    /** Cumulative construction charges, including destroyed temporary geometry;
+     * these counters do not describe simultaneous live memory or RSS. */
     std::size_t storage_bytes = 0, pair_tests = 0, operations = 0;
+    std::array<std::size_t, 4> stage_charged_bytes{};
+    /** Requested bytes of the charge rejected by the cumulative allowance. */
+    std::size_t failed_charge_bytes = 0;
+    std::size_t vertices_classified = 0, vertices_copied = 0;
+    /** Admitted charges for copied vertex, error, and support arrays. */
+    std::size_t copied_vertex_bytes = 0;
+    /** Vertex counts summed over clipping observations, including repeated visits. */
+    std::size_t active_vertices_seen = 0, stored_vertices_seen = 0;
+    std::size_t peak_active_vertices = 0, peak_stored_vertices = 0, peak_remainders = 0;
+    /** High-water marks for tracked Poly objects and their owned vertex, error,
+     * support and face capacities, observed at allocation mutations.
+     * Excludes allocator metadata, maps, source/support caches, predicate scratch,
+     * and total RSS; this is not a whole-memory measurement. */
+    std::size_t peak_live_witnesses = 0, peak_live_witness_bytes = 0;
 };
 struct OrdinaryAggregateResult
 {
@@ -60,18 +85,13 @@ struct OrdinaryAggregateResult
  * Never retained by the source; absent identities are not invented on failure. */
 struct OrdinaryAggregateContext
 {
-    enum class Stage
-    {
-        Source,
-        DonorValidation,
-        Coverage,
-        Metric
-    };
+    using Stage = OrdinaryAggregateStage;
     static constexpr auto absent = std::numeric_limits<std::uint64_t>::max();
     Stage stage = Stage::Source;
     std::uint64_t source = absent, donor = absent, cut = absent;
     unsigned retry = 0;
     std::size_t bytes = 0, pairs = 0, operations = 0;
+    OrdinaryAggregateStatistics statistics;
 };
 /** Immutable recipes and authenticated source incidence. Only final aggregates
  * are measured. Each source-tetra coverage proof and each donor/sign physical
