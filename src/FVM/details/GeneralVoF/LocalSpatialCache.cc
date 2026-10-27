@@ -32,7 +32,7 @@ bool Box::overlaps(const Box& b) const
             return false;
     return true;
 }
-std::size_t Index::build(std::size_t begin, std::size_t end, fp::Work& work)
+std::size_t Index::build(std::size_t begin, std::size_t end, SimpleFluid::geometry::swept_volume::Work& work)
 {
     const auto here = nodes_.size();
     nodes_.push_back({});
@@ -64,7 +64,7 @@ std::size_t Index::build(std::size_t begin, std::size_t end, fp::Work& work)
     }
     return here;
 }
-void Index::visit(std::size_t i, const Box& box, std::vector<std::size_t>& result, fp::Work& work,
+void Index::visit(std::size_t i, const Box& box, std::vector<std::size_t>& result, SimpleFluid::geometry::swept_volume::Work& work,
     GeneralVoFTransportDiagnostics& diagnostics) const
 {
     work.test();
@@ -85,7 +85,7 @@ void Index::visit(std::size_t i, const Box& box, std::vector<std::size_t>& resul
                 work.push(result, order_[j]);
         }
 }
-void Index::initialize(fp::Work& work)
+void Index::initialize(SimpleFluid::geometry::swept_volume::Work& work)
 {
     const auto& boxes = boxes_;
     if (boxes.size() > std::numeric_limits<std::size_t>::max() / (2 * sizeof(Node) + sizeof(std::size_t)))
@@ -97,7 +97,7 @@ void Index::initialize(fp::Work& work)
     if (!boxes.empty())
         build(0, boxes.size(), work);
 }
-std::vector<std::size_t> Index::query(const Box& box, fp::Work& work, GeneralVoFTransportDiagnostics& diagnostics) const
+std::vector<std::size_t> Index::query(const Box& box, SimpleFluid::geometry::swept_volume::Work& work, GeneralVoFTransportDiagnostics& diagnostics) const
 {
     ++diagnostics.index_queries;
     std::vector<std::size_t> result;
@@ -112,7 +112,7 @@ std::vector<std::size_t> Index::query(const Box& box, fp::Work& work, GeneralVoF
     return result;
 }
 } // namespace local_spatial_detail
-std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF::Data& data, fp::Work& work,
+std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(const GeneralVoF::Data& data, SimpleFluid::geometry::swept_volume::Work& work,
     GeneralVoFTransportDiagnostics& diagnostics, SpatialCacheAdmission admit_retained)
 {
     using namespace local_spatial_detail;

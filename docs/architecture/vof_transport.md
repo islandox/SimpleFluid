@@ -116,8 +116,8 @@ of scalar representation. Native mesh/AMR clients use the ordinary PLIC types
 directly. The former `Meshes` geometry aliases and public `Exact*` geometry
 headers are removed; consumers must migrate and rebuild.
 
-`PlanarGeometry.hh`, `PolyhedralComplex.hh`, `ExtrudedConstruction.hh`,
-`GeometryMeasure.hh` and `SweptGeometry.hh` are public PLIC boundaries. Backend
+`PlanarGeometry.hh`, `PolyhedralComplex.hh`, `ExtrudedConstruction.hh` and
+`GeometryMeasure.hh` are public PLIC boundaries. Backend
 specializations live under `details/ordinary/`, `details/bounded/`, or
 `details/exact/`. Native source preparation, packets and AMR no longer construct
 rational geometry as a prerequisite. Exact algorithms explicitly import the
@@ -130,6 +130,23 @@ it is not a second native hierarchy implementation. Exact swept geometry is
 available through `SweptFace<Exact>` and its related public interfaces; finite
 sweep transport remains FVM-owned. Unsupported family/mode combinations do not
 silently select another backend.
+
+Swept-volume construction, correction and aggregation live under
+`src/geometry/swept_volume` in `SimpleFluid::geometry::swept_volume`.
+`SweptGeometry.hh` and `SweptGeometryTypes.hh` provide the typed sweep interfaces;
+`OrdinaryAggregate.hh` supplies ordinary signed-chain aggregation. Exact sweep,
+trajectory and departure-partition providers and their private definitions live
+in `details/exact/`. `FiniteVoFTransport.hh` and its compiled provider supply
+shared `Ordinary` and `BoundedCertification` sweeps, private departure-center
+correction and complementary overlays, with explicit instantiations for both
+modes in `FiniteVoFTransport.cc` and geometry access helpers in
+`details/FiniteGeometryAccess.hh`. Consumers must use the new include paths and
+namespace and rebuild; the old swept symbols have no compatibility aliases.
+Finite providers keep their existing `SimpleFluidFVM` compilation and export
+ownership; exact sweep and ordinary aggregate providers remain in
+`SimpleFluidMesh`. Shared geometry measures, phase measures and generic convex
+clipping stay in `SimpleFluid::PLIC`; FVM retains transport orchestration, field
+accounting and canonical face ledgers.
 
 Include `geometry/PLIC/ConvexGeometry.hh` for the finite typed API:
 

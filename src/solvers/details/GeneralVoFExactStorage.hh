@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include <array>
 #include <map>
 namespace SimpleFluid::detail

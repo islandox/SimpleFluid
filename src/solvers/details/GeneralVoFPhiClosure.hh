@@ -4,7 +4,7 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "geometry/MeshHandle.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "solvers/details/GeneralVoFProjectionArithmetic.hh"
 #include "utils/ArithmeticMode.hh"
 #include <optional>

@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::detail
 {
 /** Arithmetic uncertainty only. Represented geometry/operator/gradient inputs

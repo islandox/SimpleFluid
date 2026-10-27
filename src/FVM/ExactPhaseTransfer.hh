@@ -5,7 +5,7 @@
 #include "FVM/ExperimentalPhaseInventory.hh"
 #include "FVM/PhaseVolumes.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include <optional>
 #include <string>

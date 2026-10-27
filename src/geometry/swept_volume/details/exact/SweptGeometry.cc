@@ -1,8 +1,6 @@
-#include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
+#include "geometry/swept_volume/details/exact/SweptGeometryInternal.hh"
 
-namespace SimpleFluid::PLIC
-{
-namespace exact_geometry_detail
+namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 {
 std::vector<char> swept_point(const P& point)
 {
@@ -12,7 +10,10 @@ std::vector<char> swept_point(const P& point)
         writer.rational(q);
     return std::move(writer.data);
 }
+} // namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 
+namespace SimpleFluid::PLIC::exact_geometry_detail
+{
 P sparse_support_normal(const Poly& poly, const Face& face)
 {
     const auto& anchor = poly.vertices[face[0]];
@@ -25,7 +26,10 @@ P sparse_support_normal(const Poly& poly, const Face& face)
     }
     throw std::logic_error("Certified convex face lost its supporting plane.");
 }
+} // namespace SimpleFluid::PLIC::exact_geometry_detail
 
+namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
+{
 std::string cover_scalar(const Q& q, std::size_t maximum_bits)
 {
     const I numerator = boost::multiprecision::numerator(q), denominator = boost::multiprecision::denominator(q);
@@ -85,7 +89,10 @@ std::string sweep_cover_context(const SweptFace<ArithmeticMode::Exact>& face,
     out << ']';
     return out.str();
 }
+} // namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 
+namespace SimpleFluid::PLIC::exact_geometry_detail
+{
 // Axis bounds of admitted convex shells are attained at vertices. Equality
 // means only a zero-volume contact; any positive penetration survives exactly.
 // Fixed rational locals avoid retaining an additional per-fragment cache.
@@ -233,7 +240,10 @@ bool support_separates(
     }
     return false;
 }
+} // namespace SimpleFluid::PLIC::exact_geometry_detail
 
+namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
+{
 bool cached_pair_intersects(CertifiedPolyRef first, std::size_t first_index, CertifiedPolyRef second,
     std::size_t second_index, const SupportPlaneCache& cache, ClipScratch& scratch)
 {
@@ -506,9 +516,9 @@ PhaseMeasures<ArithmeticMode::Exact> sweep_phases(
         throw std::logic_error("Exact independent phase clips lost complementarity.");
     return result;
 }
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
+
+namespace SimpleFluid::geometry::swept_volume
 {
 ConvexFragment<ArithmeticMode::Exact>::ConvexFragment(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
 
@@ -620,36 +630,39 @@ ConvexFragmentPtr<ArithmeticMode::Exact> ConvexFragment<ArithmeticMode::Exact>::
     r.finish();
     return SweepAccess<ArithmeticMode::Exact>::fragment(std::move(poly));
 }
+} // namespace SimpleFluid::geometry::swept_volume
 
+namespace SimpleFluid::PLIC
+{
 GeometryMeasure<ArithmeticMode::Exact>::GeometryMeasure(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::from_value(double value)
 {
-    return SweepAccess<ArithmeticMode::Exact>::measure(exact(value));
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(exact(value));
 }
 
 template<>
 GeometryMeasure<ArithmeticMode::Exact> point_projection<ArithmeticMode::Exact>(
     std::span<const char> identity, GeometryPoint normal, GeometryPoint anchor)
 {
-    return SweepAccess<ArithmeticMode::Exact>::measure(
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(
         dot(point(normal), sub(authority_point(identity), point(anchor))));
 }
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::volume(
     const ConvexCellGeometry<ArithmeticMode::Exact>& cell)
 {
-    return SweepAccess<ArithmeticMode::Exact>::measure(sweep_volume(cell));
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(::SimpleFluid::geometry::swept_volume::exact_swept_detail::sweep_volume(cell));
 }
 
 GeometryValue<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::certified() const
 {
-    return measured(SweepAccess<ArithmeticMode::Exact>::value(*this));
+    return measured(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this));
 }
 
 GeometryValue<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::enclosure() const
 {
-    return measured(SweepAccess<ArithmeticMode::Exact>::value(*this), true);
+    return measured(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this), true);
 }
 
 bool GeometryMeasure<ArithmeticMode::Exact>::relative_error_at_most(
@@ -659,10 +672,10 @@ bool GeometryMeasure<ArithmeticMode::Exact>::relative_error_at_most(
     if (factor < 0)
         throw std::invalid_argument("Relative measure tolerance must be nonnegative.");
     Q difference =
-        SweepAccess<ArithmeticMode::Exact>::value(*this) - SweepAccess<ArithmeticMode::Exact>::value(reference);
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) - ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(reference);
     if (difference < 0)
         difference = -difference;
-    Q scale = SweepAccess<ArithmeticMode::Exact>::value(reference);
+    Q scale = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(reference);
     if (scale < 0)
         scale = -scale;
     return difference <= factor * scale;
@@ -671,11 +684,11 @@ bool GeometryMeasure<ArithmeticMode::Exact>::relative_error_at_most(
 double GeometryMeasure<ArithmeticMode::Exact>::log_ratio(
     const GeometryMeasure<ArithmeticMode::Exact>& denominator) const
 {
-    if (SweepAccess<ArithmeticMode::Exact>::value(*this) <= 0 ||
-        SweepAccess<ArithmeticMode::Exact>::value(denominator) <= 0)
+    if (::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) <= 0 ||
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(denominator) <= 0)
         throw std::invalid_argument("Logarithmic measure ratio requires positive operands.");
     const Q ratio =
-        SweepAccess<ArithmeticMode::Exact>::value(*this) / SweepAccess<ArithmeticMode::Exact>::value(denominator);
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) / ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(denominator);
     const auto numerator = boost::multiprecision::numerator(ratio), divisor = boost::multiprecision::denominator(ratio);
     const std::int64_t exponent = static_cast<std::int64_t>(boost::multiprecision::msb(numerator)) -
                                   static_cast<std::int64_t>(boost::multiprecision::msb(divisor));
@@ -689,7 +702,7 @@ double GeometryMeasure<ArithmeticMode::Exact>::log_ratio(
 
 std::vector<char> GeometryMeasure<ArithmeticMode::Exact>::encode(std::size_t byte_budget) const
 {
-    const auto& q = SweepAccess<ArithmeticMode::Exact>::value(*this);
+    const auto& q = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this);
     const auto limbs = q.backend().num().capacity() + q.backend().denom().capacity();
     if (byte_budget < 56 || limbs > (byte_budget - 56) / sizeof(boost::multiprecision::limb_type))
         throw std::invalid_argument("Exact measure certificate exceeds byte budget.");
@@ -712,20 +725,20 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::d
         throw std::invalid_argument("Unknown exact measure tag/version.");
     auto value = r.rational();
     r.finish();
-    return SweepAccess<ArithmeticMode::Exact>::measure(std::move(value));
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(std::move(value));
 }
 
 int GeometryMeasure<ArithmeticMode::Exact>::sign() const
 {
-    return SweepAccess<ArithmeticMode::Exact>::value(*this) > 0   ? 1
-           : SweepAccess<ArithmeticMode::Exact>::value(*this) < 0 ? -1
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) > 0   ? 1
+           : ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) < 0 ? -1
                                                                   : 0;
 }
 
 int GeometryMeasure<ArithmeticMode::Exact>::compare(const GeometryMeasure<ArithmeticMode::Exact>& other) const
 {
-    return SweepAccess<ArithmeticMode::Exact>::value(*this) > SweepAccess<ArithmeticMode::Exact>::value(other)   ? 1
-           : SweepAccess<ArithmeticMode::Exact>::value(*this) < SweepAccess<ArithmeticMode::Exact>::value(other) ? -1
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) > ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(other)   ? 1
+           : ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) < ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(other) ? -1
                                                                                                                  : 0;
 }
 
@@ -734,8 +747,8 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::o
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    return SweepAccess<ArithmeticMode::Exact>::measure(
-        SweepAccess<ArithmeticMode::Exact>::value(*this) + SweepAccess<ArithmeticMode::Exact>::value(other));
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) + ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(other));
 }
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::operator-(
@@ -743,21 +756,20 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::o
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    return SweepAccess<ArithmeticMode::Exact>::measure(
-        SweepAccess<ArithmeticMode::Exact>::value(*this) - SweepAccess<ArithmeticMode::Exact>::value(other));
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) - ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(other));
 }
 
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::scaled(double factor) const
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    return SweepAccess<ArithmeticMode::Exact>::measure(
-        SweepAccess<ArithmeticMode::Exact>::value(*this) * exact(factor));
+    return ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) * exact(factor));
 }
 } // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
-namespace exact_geometry_detail
+
+namespace SimpleFluid::PLIC::exact_geometry_detail
 {
 std::size_t exact_integer_bits(I value)
 {
@@ -800,8 +812,8 @@ void exact_scalar_storage(std::size_t& bytes, const Q& q)
     exact_storage_add(bytes, q.backend().num().capacity(), sizeof(boost::multiprecision::limb_type));
     exact_storage_add(bytes, q.backend().denom().capacity(), sizeof(boost::multiprecision::limb_type));
 }
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::PLIC::exact_geometry_detail
+
 namespace SimpleFluid::PLIC
 {
 GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::divided_by(
@@ -809,12 +821,12 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::d
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    if (SweepAccess<ArithmeticMode::Exact>::value(denominator) == 0)
+    if (::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(denominator) == 0)
         throw std::invalid_argument("Exact measure division by zero.");
-    exact_measure_arithmetic_preflight(SweepAccess<ArithmeticMode::Exact>::value(*this),
-        SweepAccess<ArithmeticMode::Exact>::value(denominator), true, byte_budget);
-    auto result = SweepAccess<ArithmeticMode::Exact>::measure(
-        SweepAccess<ArithmeticMode::Exact>::value(*this) / SweepAccess<ArithmeticMode::Exact>::value(denominator));
+    exact_measure_arithmetic_preflight(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this),
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(denominator), true, byte_budget);
+    auto result = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) / ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(denominator));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact measure quotient capacity exceeds byte budget.");
     return result;
@@ -824,10 +836,10 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::s
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.measure_arithmetic;
-    exact_measure_arithmetic_preflight(SweepAccess<ArithmeticMode::Exact>::value(*this),
-        SweepAccess<ArithmeticMode::Exact>::value(*this), false, byte_budget);
-    auto result = SweepAccess<ArithmeticMode::Exact>::measure(
-        SweepAccess<ArithmeticMode::Exact>::value(*this) * SweepAccess<ArithmeticMode::Exact>::value(*this));
+    exact_measure_arithmetic_preflight(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this),
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this), false, byte_budget);
+    auto result = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(
+        ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) * ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact measure squared capacity exceeds byte budget.");
     return result;
@@ -838,7 +850,7 @@ std::size_t GeometryMeasure<ArithmeticMode::Exact>::storage_bytes() const
     if (!impl_)
         return sizeof(*this);
     std::size_t bytes = sizeof(*this) + sizeof(Impl);
-    exact_scalar_storage(bytes, SweepAccess<ArithmeticMode::Exact>::value(*this));
+    exact_scalar_storage(bytes, ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this));
     return bytes;
 }
 
@@ -859,16 +871,16 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::c
     };
     {
         const Q fresh;
-        charge(SweepAccess<ArithmeticMode::Exact>::value(*this).backend().num(), fresh.backend().num());
-        charge(SweepAccess<ArithmeticMode::Exact>::value(*this).backend().denom(), fresh.backend().denom());
+        charge(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this).backend().num(), fresh.backend().num());
+        charge(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this).backend().denom(), fresh.backend().denom());
     }
     const auto source_bytes = storage_bytes();
     if (source_bytes > operation_byte_budget || copied > operation_byte_budget - source_bytes)
         throw std::invalid_argument("Exact measure compact copy exceeds its simultaneous storage budget.");
     auto compact = std::make_shared<Impl>();
-    compact->value = SweepAccess<ArithmeticMode::Exact>::value(*this);
+    compact->value = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this);
     GeometryMeasure<ArithmeticMode::Exact> result(std::move(compact));
-    if (SweepAccess<ArithmeticMode::Exact>::value(result) != SweepAccess<ArithmeticMode::Exact>::value(*this) ||
+    if (::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(result) != ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this) ||
         result.storage_bytes() > copied || result.storage_bytes() > operation_byte_budget - source_bytes)
         throw std::invalid_argument("Exact measure compact copy failed its exact value or capacity certificate.");
     return result;
@@ -890,11 +902,11 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::r
         throw std::length_error("Exact dyadic representation exceeds its operation lease.");
     if (!sign())
         return from_value(0);
-    I numerator = boost::multiprecision::numerator(SweepAccess<ArithmeticMode::Exact>::value(*this));
+    I numerator = boost::multiprecision::numerator(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this));
     const bool negative = numerator < 0;
     if (negative)
         numerator = -numerator;
-    I denominator = boost::multiprecision::denominator(SweepAccess<ArithmeticMode::Exact>::value(*this));
+    I denominator = boost::multiprecision::denominator(::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::value(*this));
     const auto numerator_bits = exact_integer_bits(numerator), denominator_bits = exact_integer_bits(denominator);
     if (numerator_bits > std::size_t(std::numeric_limits<std::int64_t>::max()) ||
         denominator_bits > std::size_t(std::numeric_limits<std::int64_t>::max()))
@@ -915,14 +927,17 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::r
         rounded = Q(significand, I{1} << std::size_t(shift));
     else
         rounded = Q(significand << std::size_t(-shift));
-    auto result = SweepAccess<ArithmeticMode::Exact>::measure(std::move(rounded));
+    auto result = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(std::move(rounded));
     if (result.sign() != sign())
         throw std::logic_error("Exact dyadic representation failed its nonzero sign certificate.");
     if (result.storage_bytes() > operation_byte_budget / 16)
         throw std::length_error("Exact dyadic representation exceeds its retained storage certificate.");
     return result;
 }
+} // namespace SimpleFluid::PLIC
 
+namespace SimpleFluid::geometry::swept_volume
+{
 std::size_t ConvexFragment<ArithmeticMode::Exact>::storage_bytes() const
 {
     std::size_t bytes = sizeof(*this) + sizeof(Impl);
@@ -946,10 +961,9 @@ NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::bac
     const auto back = sub(p, mul(exact_velocity, exact(timestep)));
     return {swept_point(p), swept_point(back)};
 }
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
-{
-namespace exact_geometry_detail
+} // namespace SimpleFluid::geometry::swept_volume
+
+namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 {
 bool trajectory_zero(const P& p)
 {
@@ -968,8 +982,8 @@ P bounded_polygon_vector(const Polygon& polygon, TrajectoryArithmetic& arithmeti
     }
     return arithmetic.scale(result, Q(1, 2));
 }
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
+
 namespace SimpleFluid::PLIC
 {
 GeometryMeasure<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::coplanar_area_ratio(
@@ -977,10 +991,10 @@ GeometryMeasure<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::coplan
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.face_measure_evaluations;
-    TrajectoryLimits limits;
+    ::SimpleFluid::geometry::swept_volume::TrajectoryLimits limits;
     limits.byte_budget = byte_budget;
-    TrajectoryArithmetic arithmetic(limits);
-    const auto support = bounded_polygon_vector(denominator.impl_->polygon, arithmetic);
+    ::SimpleFluid::geometry::swept_volume::exact_swept_detail::TrajectoryArithmetic arithmetic(limits);
+    const auto support = ::SimpleFluid::geometry::swept_volume::exact_swept_detail::bounded_polygon_vector(denominator.impl_->polygon, arithmetic);
     unsigned axis = 0;
     while (axis < 3 && support[axis] == 0)
         ++axis;
@@ -989,13 +1003,13 @@ GeometryMeasure<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::coplan
     for (const auto& point : impl_->polygon)
         if (arithmetic.inner(support, arithmetic.subtract(point, denominator.impl_->polygon[0])) != 0)
             throw std::invalid_argument("Exact face area ratio requires identical support planes.");
-    const auto area = bounded_polygon_vector(impl_->polygon, arithmetic);
+    const auto area = ::SimpleFluid::geometry::swept_volume::exact_swept_detail::bounded_polygon_vector(impl_->polygon, arithmetic);
     auto ratio = arithmetic.binary(area[axis], support[axis], 3);
     if (ratio < 0)
         ratio = arithmetic.binary(Q(0), ratio, 1);
     if (ratio == 0)
         throw std::invalid_argument("Exact face area numerator is degenerate.");
-    auto result = SweepAccess<ArithmeticMode::Exact>::measure(std::move(ratio));
+    auto result = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(std::move(ratio));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact face area ratio result exceeds byte budget.");
     return result;
@@ -1006,18 +1020,21 @@ GeometryMeasure<ArithmeticMode::Exact> PlanarFace<ArithmeticMode::Exact>::area_v
 {
     if (count_exact_geometry)
         ++exact_geometry_counts.face_measure_evaluations;
-    TrajectoryLimits limits;
+    ::SimpleFluid::geometry::swept_volume::TrajectoryLimits limits;
     limits.byte_budget = byte_budget;
-    TrajectoryArithmetic arithmetic(limits);
+    ::SimpleFluid::geometry::swept_volume::exact_swept_detail::TrajectoryArithmetic arithmetic(limits);
     const P represented{arithmetic.retain(exact(velocity[0])), arithmetic.retain(exact(velocity[1])),
         arithmetic.retain(exact(velocity[2]))};
-    const auto area = bounded_polygon_vector(impl_->polygon, arithmetic);
-    auto result = SweepAccess<ArithmeticMode::Exact>::measure(arithmetic.inner(area, represented));
+    const auto area = ::SimpleFluid::geometry::swept_volume::exact_swept_detail::bounded_polygon_vector(impl_->polygon, arithmetic);
+    auto result = ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>::measure(arithmetic.inner(area, represented));
     if (result.storage_bytes() > byte_budget)
         throw std::invalid_argument("Exact face area flux result exceeds byte budget.");
     return result;
 }
+} // namespace SimpleFluid::PLIC
 
+namespace SimpleFluid::geometry::swept_volume
+{
 NodeTrajectory<ArithmeticMode::Exact> NodeTrajectory<ArithmeticMode::Exact>::backtrace_constrained(
     std::span<const char> identity, GeometryPoint velocity, double timestep,
     std::span<const PlanarFacePtr<ArithmeticMode::Exact>> walls, TrajectoryLimits limits)
@@ -1345,11 +1362,9 @@ DonorExport<ArithmeticMode::Exact>::retained_atoms() const noexcept
 {
     return impl_->retained;
 }
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume
 
-namespace SimpleFluid::PLIC
-{
-namespace exact_geometry_detail
+namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 {
 SweepBudget::SweepBudget(SweepLimits l) : limits(l)
 {
@@ -1546,10 +1561,9 @@ P TrajectoryArithmetic::cross_product(const P& a, const P& b)
         result[i] = binary(binary(a[(i + 1) % 3], b[(i + 2) % 3], 2), binary(a[(i + 2) % 3], b[(i + 1) % 3], 2), 1);
     return result;
 }
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume::exact_swept_detail
 
-namespace SimpleFluid::PLIC
+namespace SimpleFluid::geometry::swept_volume
 {
 CertifiedPolyRef SweepAccess<ArithmeticMode::Exact>::certified(
     const ConvexCellGeometry<ArithmeticMode::Exact>& geometry)
@@ -1596,7 +1610,7 @@ ConvexGeometryPtr<ArithmeticMode::Exact> SweepAccess<ArithmeticMode::Exact>::ret
 {
     return ConvexGeometryPtr<ArithmeticMode::Exact>(new ConvexCellGeometry<ArithmeticMode::Exact>(cell.impl_));
 }
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume
 
 namespace SimpleFluid::PLIC
 {
@@ -1605,14 +1619,18 @@ GeometryMeasure<ArithmeticMode::Exact> GeometryMeasure<ArithmeticMode::Exact>::v
 {
     return volume(*ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(source));
 }
+} // namespace SimpleFluid::PLIC
+
+namespace SimpleFluid::geometry::swept_volume
+{
 std::shared_ptr<const ConvexFragment<ArithmeticMode::Exact>> ConvexFragment<ArithmeticMode::Exact>::from_geometry(
     const ConvexCellGeometry<ArithmeticMode::Ordinary>& source)
 {
     return from_geometry(*ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(source));
 }
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume
 
-namespace SimpleFluid::PLIC
+namespace SimpleFluid::geometry::swept_volume
 {
 SweepDonor<ArithmeticMode::Exact>::SweepDonor(
     std::uint64_t source, const ConvexGeometryPtr<ArithmeticMode::Ordinary>& cell)
@@ -1634,4 +1652,4 @@ DonorExport<ArithmeticMode::Exact> DonorExport<ArithmeticMode::Exact>::make(
 {
     return make(*ConvexCellGeometry<ArithmeticMode::Exact>::from_geometry(source), faces, limits);
 }
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume

@@ -217,7 +217,7 @@ TEST(ExactGeneralVoF, ExactSkewWallAndEdgeTrajectoriesAreOwnershipIndependentAnd
             const auto p = node->coordinate;
             const double u = (p[0] + p[2] - .5 * p[1]) / 2, w = (p[2] - p[0]) / 2;
             const double a = p[1] == 1 ? (u - 1) / 64 : 0;
-            const auto expected = SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(
+            const auto expected = SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(
                 node->coordinate_identity, {.25 * a, a, .25 * a}, 1);
             // The same analytic certificate is required under both owner
             // permutations, without receive-order or rounded-coordinate ties.

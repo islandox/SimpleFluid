@@ -2,23 +2,23 @@
  * @brief Finite signed face chains and complementary closed-cell overlays.
  */
 #pragma once
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/GeometryAllocationLedger.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
 #include <set>
 #include <span>
-namespace SimpleFluid::VoF::finite_detail
+namespace SimpleFluid::geometry::swept_volume
 {
 template<ArithmeticMode Mode> using Geometry = PLIC::ConvexCellGeometry<Mode>;
 template<ArithmeticMode Mode> using GeometryPtr = PLIC::ConvexGeometryPtr<Mode>;
 struct Work
 {
-    SimpleFluid::PLIC::SweepLimits limits;
+    SweepLimits limits;
     ArithmeticMode arithmetic_mode = ArithmeticMode::BoundedCertification;
     double volume_tolerance = 8e-15;
     std::size_t bytes = 0, pair_tests = 0;
@@ -275,4 +275,4 @@ SIMPLEFLUID_FVM_EXPORT std::vector<Atom<Mode>> recipient_partition(std::uint64_t
     const std::map<std::uint64_t, GeometryPtr<Mode>>& donors,
     const std::vector<std::pair<const Sweep<Mode>*, int>>& faces, Work& work, double physical_budget);
 
-} // namespace SimpleFluid::VoF::finite_detail
+} // namespace SimpleFluid::geometry::swept_volume

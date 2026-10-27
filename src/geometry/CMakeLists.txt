@@ -27,7 +27,7 @@ set(SIMPLEFLUID_MESH_SOURCES
     PLIC/details/ordinary/ExtrudedConstruction.cc
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/PlaneMeasure.cc
-    PLIC/OrdinaryAggregate.cc
+    swept_volume/OrdinaryAggregate.cc
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc
@@ -41,8 +41,8 @@ set(SIMPLEFLUID_MESH_SOURCES
     PLIC/details/exact/PolyhedralComplex.cc
     PLIC/details/exact/ExtrudedGeometry.cc
     PLIC/details/exact/PlanarFace.cc
-    PLIC/details/exact/SweptGeometry.cc
-    PLIC/details/exact/DepartureGeometry.cc
+    swept_volume/details/exact/SweptGeometry.cc
+    swept_volume/details/exact/DepartureGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc
@@ -100,7 +100,7 @@ set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(mesh/PredicateSigns2D.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto")
-    set_source_files_properties(PLIC/PlaneMeasure.cc PLIC/OrdinaryAggregate.cc PLIC/details/exact/ConvexCellGeometry.cc PLIC/ConvexGeometry.cc
+    set_source_files_properties(PLIC/PlaneMeasure.cc swept_volume/OrdinaryAggregate.cc PLIC/details/exact/ConvexCellGeometry.cc PLIC/ConvexGeometry.cc
         PLIC/ConstructionRegistry.cc
         PLIC/GeometryAllocationLedger.cc
         PLIC/CertifiedGeometryProperties.cc
@@ -120,8 +120,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         PLIC/details/exact/PolyhedralComplex.cc
         PLIC/details/exact/ExtrudedGeometry.cc
         PLIC/details/exact/PlanarFace.cc
-        PLIC/details/exact/SweptGeometry.cc
-        PLIC/details/exact/DepartureGeometry.cc
+        swept_volume/details/exact/SweptGeometry.cc
+        swept_volume/details/exact/DepartureGeometry.cc
         PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
@@ -129,7 +129,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         SKIP_PRECOMPILE_HEADERS TRUE)
     # Compensated predicates isolate their rounding mode and restore the
     # caller's environment; prohibit motion across those fenv boundaries.
-    set_property(SOURCE PLIC/details/ordinary/Predicates.cc PLIC/OrdinaryAggregate.cc
+    set_property(SOURCE PLIC/details/ordinary/Predicates.cc swept_volume/OrdinaryAggregate.cc
         APPEND PROPERTY COMPILE_OPTIONS -frounding-math)
 endif()
 
@@ -166,7 +166,7 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     PLIC/details/ordinary/ExtrudedConstruction.cc
     PLIC/details/ordinary/ExtrudedGeometry.cc
     PLIC/PlaneMeasure.cc
-    PLIC/OrdinaryAggregate.cc
+    swept_volume/OrdinaryAggregate.cc
     PLIC/ConvexGeometry.cc
     PLIC/ConstructionRegistry.cc
     PLIC/GeometryAllocationLedger.cc
@@ -180,8 +180,8 @@ set(SIMPLEFLUID_SHIRI_UNPROFILED_MESH_SOURCES
     PLIC/details/exact/PolyhedralComplex.cc
     PLIC/details/exact/ExtrudedGeometry.cc
     PLIC/details/exact/PlanarFace.cc
-    PLIC/details/exact/SweptGeometry.cc
-    PLIC/details/exact/DepartureGeometry.cc
+    swept_volume/details/exact/SweptGeometry.cc
+    swept_volume/details/exact/DepartureGeometry.cc
     AnnularSemiStructuredMeshFactory.cc
     BoundaryLayerMeshFactory.cc
     mesh/AMR/CartesianAMR.cc

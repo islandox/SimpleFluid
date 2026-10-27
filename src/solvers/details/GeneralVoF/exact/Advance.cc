@@ -134,7 +134,7 @@ std::shared_ptr<State> Advance<ArithmeticMode::Exact>::prepare(Resources& resour
         [&]
         {
             const auto scalar_budget = options.byte_budget / 32;
-            SimpleFluid::PLIC::TrajectoryLimits limits;
+            SimpleFluid::geometry::swept_volume::TrajectoryLimits limits;
             limits.byte_budget = scalar_budget;
             const auto displacement_limit =
                 SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(global_h)

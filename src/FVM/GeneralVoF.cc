@@ -1,7 +1,7 @@
 /** @file GeneralVoF.cc
  * @brief Accepted phase state construction, queries and reconstruction.
  */
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF
 {

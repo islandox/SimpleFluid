@@ -4,7 +4,7 @@
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/GeometryInstrumentation.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/mesh/AMR/AdaptiveOverlap.hh"
 #include "utils/testing_environment.hh"
 #include <algorithm>

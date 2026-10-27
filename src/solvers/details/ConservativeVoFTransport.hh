@@ -5,7 +5,7 @@
 
 #include "FVM/GeometricVoF.hh"
 #include "geometry/MeshHandle.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "solvers/BelosLinearSolver.hh"
 #include "utils/ArithmeticMode.hh"
 #include <memory>

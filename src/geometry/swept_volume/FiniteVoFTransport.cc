@@ -1,5 +1,5 @@
-#include "FVM/details/FiniteVoFTransport.tcc"
-namespace SimpleFluid::VoF::finite_detail
+#include "geometry/swept_volume/FiniteVoFTransport.tcc"
+namespace SimpleFluid::geometry::swept_volume
 {
 template Sweep<ArithmeticMode::Ordinary> prepare_sweep<ArithmeticMode::Ordinary>(std::uint64_t,
     std::span<const std::uint64_t>,
@@ -32,4 +32,4 @@ template std::vector<Atom<ArithmeticMode::BoundedCertification>>
 recipient_partition<ArithmeticMode::BoundedCertification>(std::uint64_t,
     const std::map<std::uint64_t, GeometryPtr<ArithmeticMode::BoundedCertification>>&,
     const std::vector<std::pair<const Sweep<ArithmeticMode::BoundedCertification>*, int>>&, Work&, double);
-} // namespace SimpleFluid::VoF::finite_detail
+} // namespace SimpleFluid::geometry::swept_volume

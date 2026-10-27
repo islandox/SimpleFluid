@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "SimpleFluidExport.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::VoF::detail
 {
 [[nodiscard]] SIMPLEFLUID_FVM_EXPORT SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>

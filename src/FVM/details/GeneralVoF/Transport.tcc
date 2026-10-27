@@ -7,8 +7,8 @@
 #include "FVM/details/GeneralVoF/Wire.hh"
 namespace SimpleFluid::VoF
 {
-using fp::runtime_phases;
-using fp::runtime_value;
+using SimpleFluid::geometry::swept_volume::runtime_phases;
+using SimpleFluid::geometry::swept_volume::runtime_value;
 namespace auth = construction_controls;
 namespace
 {
@@ -198,7 +198,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             trial.finite_trajectories_.reserve(traces.size());
             for (const auto& [id, trace] : traces)
             {
-                local_motion |= !fp::same_point(trace.first, trace.second);
+                local_motion |= !SimpleFluid::geometry::swept_volume::same_point(trace.first, trace.second);
                 trial.finite_trajectories_.push_back({id, trace.first.dynamic(), trace.second.dynamic()});
             }
             for (const auto& [face, value] : flux)
@@ -263,13 +263,13 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     auto& registry = *construction;
     const auto planes = import_planes<Mode>(data);
     std::map<Key, PhaseLabel<Mode>> labels;
-    std::map<std::uint64_t, fp::Sweep<Mode>> sweeps;
-    std::vector<fp::Atom<Mode>> local_atoms;
+    std::map<std::uint64_t, SimpleFluid::geometry::swept_volume::Sweep<Mode>> sweeps;
+    std::vector<SimpleFluid::geometry::swept_volume::Atom<Mode>> local_atoms;
     std::map<std::tuple<std::uint64_t, std::uint64_t, int>, PhaseSum<Mode>> face_amounts;
     wire::collective(*comm,
         [&]
         {
-            fp::Work work{data.options.sweep};
+            SimpleFluid::geometry::swept_volume::Work work{data.options.sweep};
             work.arithmetic_mode = data.options.arithmetic_mode;
             work.volume_tolerance = data.options.reconstruction.volume_tolerance;
             work.limits.byte_budget = std::min(limit, work.limits.byte_budget);
@@ -322,7 +322,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 face_context.record.pair_budget = work.limits.maximum_pair_tests;
                 face_context.record.mark(failure::Field::PairBudget);
                 work.pair_tests = 0; // Existing face-partition work-cap scope.
-                auto sweep = fp::make_sweep<Mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid), work,
+                auto sweep = SimpleFluid::geometry::swept_volume::make_sweep<Mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid), work,
                     face_budgets.at(tile.face_gid));
                 for (std::size_t ordinal = 0; ordinal < sweep.pieces.size(); ++ordinal)
                 {
@@ -394,14 +394,14 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 work.charge(AMR::encode_adaptive_key(key).size());
                 trial.finite_cell_closure_.push_back({key, cell.gid, cell.canonical_face_count,
                     cell.ordinary_quota_scale, r_phi, delta, combined, absolute_geometry.value().value, allowed});
-                std::vector<std::pair<const fp::Sweep<Mode>*, int>> incident;
+                std::vector<std::pair<const SimpleFluid::geometry::swept_volume::Sweep<Mode>*, int>> incident;
                 for (auto index : data.topology->cell_tiles.at(key))
                 {
                     const auto& tile = data.topology->tiles[index];
                     incident.push_back({&sweeps.at(tile.face_gid), tile.first == key ? 1 : -1});
                 }
                 work.pair_tests = 0; // Existing recipient-local partition work-cap scope.
-                auto atoms = fp::recipient_partition<Mode>(
+                auto atoms = SimpleFluid::geometry::swept_volume::recipient_partition<Mode>(
                     cell.gid, donors, incident, work, data.options.reconstruction.volume_tolerance);
                 local_atoms.insert(local_atoms.end(), atoms.begin(), atoms.end());
             }
@@ -587,7 +587,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 if (!traces.emplace(node, std::move(trace)).second)
                     throw std::invalid_argument("Finite VoF source-node trace was independently registered twice.");
             }
-            fp::Work reconstruction{data.options.sweep};
+            SimpleFluid::geometry::swept_volume::Work reconstruction{data.options.sweep};
             reconstruction.arithmetic_mode = Mode;
             reconstruction.volume_tolerance = data.options.reconstruction.volume_tolerance;
             reconstruction.limits.byte_budget = std::min(limit, reconstruction.limits.byte_budget);
@@ -597,7 +597,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 reconstruction.pair_tests = 0;
                 reconstruction.charge(sizeof(typename decltype(sweeps)::value_type) + 4 * sizeof(void*));
                 const auto& native = data.topology->construction_faces.at(face);
-                auto sweep = fp::make_sweep<Mode>(
+                auto sweep = SimpleFluid::geometry::swept_volume::make_sweep<Mode>(
                     face, native.node_gids, traces, flux.at(face), reconstruction, face_budgets.at(face));
                 for (std::size_t ordinal = 0; ordinal < sweep.pieces.size(); ++ordinal)
                 {
@@ -671,7 +671,7 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
     wire::collective(*comm,
         [&]
         {
-            fp::Work work{data.options.sweep};
+            SimpleFluid::geometry::swept_volume::Work work{data.options.sweep};
             work.arithmetic_mode = data.options.arithmetic_mode;
             work.volume_tolerance = data.options.reconstruction.volume_tolerance;
             work.limits.byte_budget = std::min(limit, work.limits.byte_budget);

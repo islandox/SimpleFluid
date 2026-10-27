@@ -2,7 +2,7 @@
  * @brief Direct passive-tracer bounds and local momentum-ledger checks before projection.
  */
 #include "FVM/AdaptiveVoF.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"

@@ -29,13 +29,13 @@ class SIMPLEFLUID_FVM_LOCAL Index
     const std::vector<Box>& boxes_;
     std::vector<std::size_t> order_;
     std::vector<Node> nodes_;
-    std::size_t build(std::size_t, std::size_t, fp::Work&);
-    void visit(std::size_t, const Box&, std::vector<std::size_t>&, fp::Work&, GeneralVoFTransportDiagnostics&) const;
+    std::size_t build(std::size_t, std::size_t, SimpleFluid::geometry::swept_volume::Work&);
+    void visit(std::size_t, const Box&, std::vector<std::size_t>&, SimpleFluid::geometry::swept_volume::Work&, GeneralVoFTransportDiagnostics&) const;
 
 public:
     explicit Index(const std::vector<Box>& boxes) : boxes_(boxes) {}
-    void initialize(fp::Work&);
-    std::vector<std::size_t> query(const Box&, fp::Work&, GeneralVoFTransportDiagnostics&) const;
+    void initialize(SimpleFluid::geometry::swept_volume::Work&);
+    std::vector<std::size_t> query(const Box&, SimpleFluid::geometry::swept_volume::Work&, GeneralVoFTransportDiagnostics&) const;
 };
 struct Frontier
 {
@@ -68,5 +68,5 @@ struct SIMPLEFLUID_FVM_LOCAL LocalSpatialCache
  * actual build pays the geometry traversal and sorting operation counts. */
 using SpatialCacheAdmission = void (*)(const GeneralVoF::Data&, std::size_t);
 SIMPLEFLUID_FVM_LOCAL std::shared_ptr<const LocalSpatialCache> retained_spatial_cache(
-    const GeneralVoF::Data&, fp::Work&, GeneralVoFTransportDiagnostics&, SpatialCacheAdmission = nullptr);
+    const GeneralVoF::Data&, SimpleFluid::geometry::swept_volume::Work&, GeneralVoFTransportDiagnostics&, SpatialCacheAdmission = nullptr);
 } // namespace SimpleFluid::VoF::general_vof_detail

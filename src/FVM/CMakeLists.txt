@@ -37,8 +37,8 @@ set(SIMPLEFLUID_ADAPTIVE_VOF_FVM_SOURCES
     DistributedAdaptiveState.cc
     details/DistributedAMROverlap.cc
 )
-# PLIC reconstruction and phase arithmetic live with geometry, while their
-# established shared-library symbols remain owned/exported by SimpleFluidFVM.
+# PLIC reconstruction, phase arithmetic and finite swept-volume construction live
+# with geometry; their existing symbols remain owned/exported by SimpleFluidFVM.
 set(SIMPLEFLUID_COMMON_VOF_FVM_SOURCES
     ExactPhaseTransfer.cc
     ExactFaceTransfer.cc
@@ -50,12 +50,12 @@ set(SIMPLEFLUID_COMMON_VOF_FVM_SOURCES
     details/ExactPhaseAccumulator.cc
     details/PhaseArithmetic.cc
     ../geometry/PLIC/details/PhaseArithmetic.cc
-    details/FiniteVoFTransport.cc
+    ../geometry/swept_volume/FiniteVoFTransport.cc
     details/ExperimentalPhaseBackend.cc
 )
 set(SIMPLEFLUID_COMMON_VOF_FVM_FRAGMENTS
     ../geometry/PLIC/details/PolyhedralReconstruction.tcc
-    details/FiniteVoFTransport.tcc
+    ../geometry/swept_volume/FiniteVoFTransport.tcc
 )
 set(SIMPLEFLUID_FVM_COMMON_SOURCES
     details/VoFFailure.cc
@@ -83,7 +83,7 @@ target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 # geometry kernel. Do not import relaxed arithmetic through LTO.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(../geometry/PLIC/PolyhedralReconstruction.cc ../geometry/PLIC/details/PhaseArithmetic.cc
-        details/FiniteVoFTransport.cc PROPERTIES
+        ../geometry/swept_volume/FiniteVoFTransport.cc PROPERTIES
         INTERPROCEDURAL_OPTIMIZATION OFF
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE

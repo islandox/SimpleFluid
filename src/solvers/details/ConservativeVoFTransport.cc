@@ -3,7 +3,7 @@
 /** @file ConservativeVoFTransport.cc
  * @brief Native conservative implicit upwind assembly and per-inventory validation.
  */
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"

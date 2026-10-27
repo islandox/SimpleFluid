@@ -8,7 +8,7 @@
 #include "FVM/details/ExactPhaseAccumulator.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
 #include "FVM/details/ExperimentalPhaseBackend.hh"
-#include "FVM/details/FiniteVoFTransport.hh"
+#include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include "FVM/details/PhaseArithmetic.hh"
 #include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
@@ -178,7 +178,7 @@ SIMPLEFLUID_FVM_LOCAL PLIC::DynamicGeometryValue finite_value(
 SIMPLEFLUID_FVM_LOCAL void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p);
 SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> mode = {});
 SIMPLEFLUID_FVM_LOCAL SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
-    const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
+    const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
     const PLIC::PolyhedralInterface& p);
 SIMPLEFLUID_FVM_LOCAL GeneralVoFPhaseEnclosure diagnostic(
     const SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact>& measures);

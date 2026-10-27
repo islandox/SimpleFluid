@@ -1,7 +1,7 @@
 /** @file Remap.tcc
  * @brief Compiled general VoF Remap operation.
  */
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "solvers/details/GeneralVoF/AdaptedFaceTransfer.hh"
@@ -79,7 +79,7 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                     item.amounts.push_back(A::multiply(A::make_value(old.finite_mass[c], old.finite_mass_error[c]),
                         A::make_value(old.velocity[c][a], 0)));
                 item.amounts.push_back(A::multiply(
-                    VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()), A::make_value(old.pressure[c], 0)));
+                    SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()), A::make_value(old.pressure[c], 0)));
                 channels.push_back(std::move(item));
             }
         });
@@ -117,7 +117,7 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                     state->velocity[c][a] = A::as_double(
                         A::divide(item.amounts[a], A::make_value(state->finite_mass[c], state->finite_mass_error[c])));
                 state->pressure[c] = A::as_double(
-                    A::divide(item.amounts[3], VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume())));
+                    A::divide(item.amounts[3], SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume())));
             }
         });
     state->curvature = Curvature<Mode>::assemble(*(*candidate).mesh, (*candidate).flow, *state->phases,

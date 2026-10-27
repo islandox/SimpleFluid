@@ -854,7 +854,7 @@ struct ColumnRecord
     SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Ordinary> geometry;
 };
 SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> raw_phases(
-    const WorkingCapsule& c, const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment)
+    const WorkingCapsule& c, const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment)
 {
     if (!c.phases.gas.sign() || c.geometry.pure_carrier)
         return {fragment.volume(), {}, fragment.volume()};
@@ -994,7 +994,7 @@ std::vector<ExactPhaseTransferCapsule> remap_capsules(
                     for (auto r : records)
                     {
                         auto phase = raw_phases(original,
-                            *SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                            *SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
                                 *r->geometry));
                         raw_minor = raw_minor + (gas ? phase.gas : phase.carrier);
                         raw_major = raw_major + (gas ? phase.carrier : phase.gas);

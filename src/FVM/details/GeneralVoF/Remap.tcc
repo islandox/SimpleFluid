@@ -5,8 +5,8 @@
 #include "FVM/details/GeneralVoF/Wire.hh"
 namespace SimpleFluid::VoF
 {
-using fp::runtime_phases;
-using fp::runtime_value;
+using SimpleFluid::geometry::swept_volume::runtime_phases;
+using SimpleFluid::geometry::swept_volume::runtime_value;
 namespace
 {
 template<ArithmeticMode Mode>

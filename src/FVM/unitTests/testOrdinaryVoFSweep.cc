@@ -1,7 +1,7 @@
 /** @file testOrdinaryVoFSweep.cc
  * @brief Ordinary signed sweep defects use independent physical cell budgets.
  */
-#include "FVM/details/FiniteVoFTransport.hh"
+#include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include <array>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -32,16 +32,16 @@ struct StationarySquare
     }
 };
 
-fp::Work ordinary_work()
+SimpleFluid::geometry::swept_volume::Work ordinary_work()
 {
-    fp::Work work;
+    SimpleFluid::geometry::swept_volume::Work work;
     work.arithmetic_mode = ArithmeticMode::Ordinary;
     return work;
 }
 
 // Allocate the unchanged physical volume tolerance equally to the six faces
 // of a unit-area box. The budget depends on cell volume, never observed defect.
-long double face_budget(long double cell_volume, const fp::Work& work)
+long double face_budget(long double cell_volume, const SimpleFluid::geometry::swept_volume::Work& work)
 {
     return cell_volume * static_cast<long double>(work.volume_tolerance) / 6;
 }
@@ -57,7 +57,7 @@ TEST(OrdinaryVoFSweep, CellBudgetRetainsQuantizedSignedDefectAndCanonicalControl
         ASSERT_LT(std::abs(control.value),
             std::nextafter(StationarySquare::height, std::numeric_limits<long double>::infinity()) -
                 StationarySquare::height);
-        const auto sweep = fp::make_sweep(7, face.nodes, face.traces, control, work, budget);
+        const auto sweep = SimpleFluid::geometry::swept_volume::make_sweep(7, face.nodes, face.traces, control, work, budget);
         EXPECT_EQ(sweep.face, 7u);
         EXPECT_EQ(sweep.backcenter.value, sweep.center.value);
         EXPECT_EQ(sweep.backcenter.value[2], StationarySquare::height);
@@ -94,7 +94,7 @@ TEST(OrdinaryVoFSweep, SmallerIndependentCellBudgetRejectsTheSameSignedDefect)
         const auto smaller_budget = face_budget(.25L, work);
         ASSERT_GT(std::abs(control.value), smaller_budget);
         EXPECT_THROW(
-            (void) fp::make_sweep(7, face.nodes, face.traces, control, work, smaller_budget), std::invalid_argument);
+            (void) SimpleFluid::geometry::swept_volume::make_sweep(7, face.nodes, face.traces, control, work, smaller_budget), std::invalid_argument);
         EXPECT_EQ(control.value, sign * face_budget(1, work) / 2);
     }
 }
@@ -107,9 +107,9 @@ TEST(OrdinaryVoFSweep, InvalidIndependentBudgetsReject)
         {0.L, -1.L, std::numeric_limits<long double>::infinity(), std::numeric_limits<long double>::quiet_NaN()})
     {
         auto work = ordinary_work();
-        EXPECT_THROW((void) fp::make_sweep(7, face.nodes, face.traces, control, work, budget), std::invalid_argument);
+        EXPECT_THROW((void) SimpleFluid::geometry::swept_volume::make_sweep(7, face.nodes, face.traces, control, work, budget), std::invalid_argument);
     }
     auto work = ordinary_work();
-    EXPECT_THROW((void) fp::make_sweep(7, face.nodes, face.traces, control, work), std::invalid_argument);
+    EXPECT_THROW((void) SimpleFluid::geometry::swept_volume::make_sweep(7, face.nodes, face.traces, control, work), std::invalid_argument);
 }
 } // namespace

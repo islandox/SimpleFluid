@@ -3,7 +3,8 @@
  */
 #pragma once
 #include "geometry/PLIC/PlanarGeometry.hh"
-namespace SimpleFluid::PLIC
+#include "geometry/swept_volume/SweptVolumeDeclarations.hh"
+namespace SimpleFluid::geometry::swept_volume
 {
 template<ArithmeticMode Mode> struct SignedSweepSimplex
 {
@@ -13,7 +14,7 @@ template<ArithmeticMode Mode> struct SignedSweepSimplex
 template<ArithmeticMode Mode> struct SweepDonor
 {
     std::uint64_t id = 0;
-    ConvexGeometryPtr<Mode> geometry;
+    PLIC::ConvexGeometryPtr<Mode> geometry;
 };
 template<ArithmeticMode Mode> struct SweepIntersection
 {
@@ -29,7 +30,7 @@ template<ArithmeticMode Mode> struct OrientedFaceSweep
 template<ArithmeticMode Mode> struct SweepRecipient
 {
     std::uint64_t id = 0;
-    ConvexGeometryPtr<Mode> geometry;
+    PLIC::ConvexGeometryPtr<Mode> geometry;
     std::vector<OrientedFaceSweep<Mode>> outward_faces;
 };
 template<ArithmeticMode Mode> struct TransportAtom
@@ -37,4 +38,4 @@ template<ArithmeticMode Mode> struct TransportAtom
     std::uint64_t donor = 0, recipient = 0;
     ConvexFragmentPtr<Mode> geometry;
 };
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume

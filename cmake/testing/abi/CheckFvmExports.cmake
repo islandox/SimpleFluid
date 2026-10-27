@@ -244,4 +244,17 @@ foreach(method IN ITEMS orthogonal_decomposition decomposed_orthogonal_topology)
     endif()
 endforeach()
 
+# Finite swept-volume providers retain FVM ownership under their geometry namespace.
+foreach(method IN ITEMS make_sweep recipient_partition)
+    if(demangled_names MATCHES "(^|\n)SimpleFluid::VoF::finite_detail::${method}<")
+        message(FATAL_ERROR "Retired swept-volume namespace exported: ${method}")
+    endif()
+    foreach(mode IN ITEMS 0 1)
+        if(NOT demangled_names MATCHES
+           "(^|\n)SimpleFluid::geometry::swept_volume::${method}<[(]SimpleFluid::ArithmeticMode[)]${mode}>")
+            message(FATAL_ERROR "Missing swept-volume provider ${method} for arithmetic mode ${mode}")
+        endif()
+    endforeach()
+endforeach()
+
 message(STATUS "FVM shared-library exports verified")

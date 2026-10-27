@@ -3,7 +3,7 @@
  */
 #include "FVM/GeometricVoF.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -112,7 +112,7 @@ TEST(ExactPolyhedralReconstruction, IndependentPhaseVolumesAreUnchangedDuringFit
             EXPECT_EQ(sample.gas_volume, original.gas_volume);
             EXPECT_EQ(sample.carrier_volume, original.carrier_volume);
             const auto fragment =
-                SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*sample.geometry);
+                SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*sample.geometry);
             const auto phases = fragment->phases(plane.gas);
             const auto minority = minority_gas ? phases.gas : phases.carrier;
             const auto requested =
@@ -128,7 +128,7 @@ TEST(ExactPolyhedralReconstruction, RationalCellFitsComplementaryPlanesAndPureEn
     // Retain nonbinary support, reversed-normal and pure-endpoint coverage
     // without requiring reconstruction of an arbitrarily thin phase layer.
     const auto cell = box->clip({{-10, 0, 0}, {}, -1}).inside;
-    const auto fragment = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
+    const auto fragment = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
     for (const double direction : {1., -1.})
         for (const bool minority_gas : {true, false})
         {

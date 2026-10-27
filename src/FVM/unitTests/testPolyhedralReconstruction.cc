@@ -5,7 +5,7 @@
 #include "FVM/GeometricVoF.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include <algorithm>
 #include <cmath>
@@ -322,7 +322,7 @@ TEST(PolyhedralReconstruction, RationalSupportFitsComplementaryOrdinaryVolumes)
             const auto measured = numerical->phases(fit.gas);
             EXPECT_TRUE((minority_gas ? measured.gas : measured.carrier).relative_error_at_most(.225, 8e-15));
             const auto reference =
-                SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*exact)->phases(
+                SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*exact)->phases(
                     fit.gas);
             EXPECT_TRUE((minority_gas ? reference.gas : reference.carrier)
                     .relative_error_at_most(

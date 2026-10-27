@@ -1,4 +1,4 @@
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/FaceRates.hh"
 #include <bit>

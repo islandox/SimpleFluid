@@ -1,8 +1,8 @@
-#include "geometry/PLIC/details/exact/ConvexCellGeometryInternal.hh"
+#include "geometry/swept_volume/details/exact/SweptGeometryInternal.hh"
 
-namespace SimpleFluid::PLIC
+namespace SimpleFluid::geometry::swept_volume
 {
-namespace exact_geometry_detail
+namespace exact_swept_detail
 {
 void target_sweep_shell(
     const SweepRecipient<ArithmeticMode::Exact>& target, SweepBudget& budget, std::map<P, P>& shared)
@@ -580,9 +580,9 @@ std::optional<std::vector<TransportAtom<ArithmeticMode::Exact>>> optional_depart
             throw std::invalid_argument("Departure fan received occupancy differs from actual recipient volume.");
     return atoms;
 }
-} // namespace exact_geometry_detail
-} // namespace SimpleFluid::PLIC
-namespace SimpleFluid::PLIC
+} // namespace exact_swept_detail
+} // namespace SimpleFluid::geometry::swept_volume
+namespace SimpleFluid::geometry::swept_volume
 {
 TransportPartition<ArithmeticMode::Exact> TransportPartition<ArithmeticMode::Exact>::local(
     std::span<const SweepDonor<ArithmeticMode::Exact>> donors,
@@ -745,6 +745,10 @@ PhaseMeasures<ArithmeticMode::Exact> TransportPartition<ArithmeticMode::Exact>::
     return sweep_phases(pieces, plane);
 }
 
+} // namespace SimpleFluid::geometry::swept_volume
+
+namespace SimpleFluid::PLIC
+{
 template<> const void* backend_statistics_domain<ArithmeticMode::Exact>()
 {
     return &exact_geometry_counts;

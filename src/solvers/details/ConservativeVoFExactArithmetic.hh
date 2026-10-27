@@ -4,7 +4,7 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "geometry/MeshHandle.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::detail::vof_exact
 {
 using Measure = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
