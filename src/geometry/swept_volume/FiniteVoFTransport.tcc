@@ -1,7 +1,8 @@
 #pragma once
-#include "FVM/details/FiniteVoFTransport.hh"
-namespace SimpleFluid::VoF::finite_detail
+#include "geometry/swept_volume/FiniteVoFTransport.hh"
+namespace SimpleFluid::geometry::swept_volume
 {
+using VoF::finite_detail::SumFor;
 template<ArithmeticMode Mode>
 Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nodes,
     const std::map<std::uint64_t, std::pair<PLIC::Point<Mode>, PLIC::Point<Mode>>>& traces, Value control, Work& work,
@@ -28,7 +29,7 @@ Sweep<Mode> prepare_sweep(std::uint64_t face, std::span<const std::uint64_t> nod
         throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Finite VoF face simplex limit is exhausted.");
     if (!std::isfinite(work.volume_tolerance) || !(work.volume_tolerance > 0))
         throw std::invalid_argument("Finite VoF sweep volume tolerance is invalid.");
-    validate(control);
+    VoF::finite_detail::validate(control);
     if (control.arithmetic_mode != work.arithmetic_mode)
         throw std::invalid_argument("Finite VoF sweep control arithmetic mode differs.");
     if constexpr (Mode == ArithmeticMode::Ordinary)
@@ -211,4 +212,4 @@ std::vector<Atom<Mode>> recipient_partition(std::uint64_t recipient,
         throw std::invalid_argument("Finite VoF recipient closure exceeds its original arithmetic/physical budget.");
     return result;
 }
-} // namespace SimpleFluid::VoF::finite_detail
+} // namespace SimpleFluid::geometry::swept_volume

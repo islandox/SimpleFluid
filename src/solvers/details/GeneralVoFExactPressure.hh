@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "geometry/MeshHandle.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::detail
 {
 struct GeneralVoFExactPressureFace

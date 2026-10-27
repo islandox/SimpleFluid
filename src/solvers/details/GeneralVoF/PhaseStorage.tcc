@@ -1,7 +1,7 @@
 /** @file PhaseStorage.tcc
  * @brief Compiled physical storage and phase-publication checks.
  */
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
@@ -40,7 +40,7 @@ typename PhaseStorage<Mode>::Result PhaseStorage<Mode>::evaluate(
                 const auto mass =
                     A::add(A::multiply(A::make_value(phases[c].gas, 0), A::make_value(material.gas_density, 0)),
                         A::multiply(A::make_value(phases[c].carrier, 0), A::make_value(material.liquid_density, 0)));
-                const auto density = A::divide(mass, VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()));
+                const auto density = A::divide(mass, SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()));
                 result.mass[c] = mass.value;
                 result.mass_error[c] = mass.absolute_error;
                 result.density[c] = A::as_double(density);

@@ -86,7 +86,7 @@ public:
     [[nodiscard]] bool equivalent(const ConvexCellGeometry& other) const;
 
 private:
-    friend class SweepAccess<ArithmeticMode::Exact>;
+    friend class ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>;
     friend class ExtrudedConstruction<ArithmeticMode::Exact>;
     friend class PolyhedralComplex<ArithmeticMode::Exact>;
     friend class PlanarFace<ArithmeticMode::Exact>;

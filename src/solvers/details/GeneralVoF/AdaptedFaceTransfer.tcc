@@ -2,7 +2,7 @@
  * @brief Compiled transfer kernel with explicit source/target execution boundaries.
  */
 #include "FVM/ExactFaceTransfer.hh"
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
@@ -36,7 +36,7 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
         "General VoF adapted handoff changed arithmetic mode.");
     namespace fp = VoF::finite_detail;
     using Point = PLIC::Point<Mode>;
-    using PA = fp::PointArithmetic<Mode>;
+    using PA = SimpleFluid::geometry::swept_volume::PointArithmetic<Mode>;
     using Value = PLIC::DynamicGeometryValue;
     using Key = VoF::GeneralVoF::Key;
     using Loop = std::vector<Point>;
@@ -164,10 +164,10 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
     const auto nonempty = [](const PLIC::PlanarFaceOverlap<Mode>& value)
     {
         if (value.overlap_projected_area.value == 0 &&
-            fp::runtime_value<Mode>(value.overlap_projected_area).absolute_error == 0)
+            SimpleFluid::geometry::swept_volume::runtime_value<Mode>(value.overlap_projected_area).absolute_error == 0)
             return false;
         if (!(value.overlap_projected_area.value >
-                fp::runtime_value<Mode>(value.overlap_projected_area).absolute_error))
+                SimpleFluid::geometry::swept_volume::runtime_value<Mode>(value.overlap_projected_area).absolute_error))
             throw std::runtime_error("Finite common-face overlap positivity is unresolved.");
         return true;
     };
@@ -179,13 +179,13 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
             const auto part = overlap(whole, pieces[i]);
             if (!nonempty(part))
                 throw std::runtime_error("Finite common-face cover contains empty piece.");
-            fraction.add(part.orientation > 0 ? fp::runtime_value<Mode>(part.overlap_over_first)
-                                              : A::negate(fp::runtime_value<Mode>(part.overlap_over_first)));
+            fraction.add(part.orientation > 0 ? SimpleFluid::geometry::swept_volume::runtime_value<Mode>(part.overlap_over_first)
+                                              : A::negate(SimpleFluid::geometry::swept_volume::runtime_value<Mode>(part.overlap_over_first)));
             for (std::size_t j = 0; j < i; ++j)
             {
                 const auto collision = overlap(pieces[i], pieces[j]);
                 if (collision.overlap_projected_area.value != 0 ||
-                    fp::runtime_value<Mode>(collision.overlap_projected_area).absolute_error != 0)
+                    SimpleFluid::geometry::swept_volume::runtime_value<Mode>(collision.overlap_projected_area).absolute_error != 0)
                     throw std::runtime_error("Finite common-face cover has overlapping or unresolved interiors.");
             }
         }
@@ -258,7 +258,7 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
                             if (local < 0)
                                 throw std::runtime_error("Finite source face rate is absent.");
                             const auto rate =
-                                A::multiply(rates[local], fp::runtime_value<Mode>(part.overlap_over_second));
+                                A::multiply(rates[local], SimpleFluid::geometry::swept_volume::runtime_value<Mode>(part.overlap_over_second));
                             facet.parts.push_back({part.overlap_vertices, rate, {}, 1});
                             old_cover[tile->face_gid].push_back(part.overlap_vertices);
                         }
@@ -392,8 +392,8 @@ FaceTransferResult transfer_adapted_faces(const FaceTransferSource& source_input
                             outputs.push_back({source_key, cell.target_key,
                                 source_input.phases.hierarchy()->owned().at(source_key).revision, tile->face_gid,
                                 proof++, tile->first_owner,
-                                A::multiply(rate, fp::runtime_value<Mode>(piece.overlap_over_first)),
-                                fp::runtime_value<Mode>(piece.overlap_over_second)});
+                                A::multiply(rate, SimpleFluid::geometry::swept_volume::runtime_value<Mode>(piece.overlap_over_first)),
+                                SimpleFluid::geometry::swept_volume::runtime_value<Mode>(piece.overlap_over_second)});
                         }
                     }
             }

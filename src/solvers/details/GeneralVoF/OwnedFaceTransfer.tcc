@@ -2,7 +2,7 @@
  * @brief Compiled transfer kernel with explicit source/target execution boundaries.
  */
 #include "FVM/ExactFaceTransfer.hh"
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"

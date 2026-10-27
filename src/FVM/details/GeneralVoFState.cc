@@ -1,7 +1,7 @@
 /** @file GeneralVoFState.cc
  * @brief Shared accepted-state validation, codecs, reconstruction and halo support.
  */
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF::general_vof_detail
@@ -55,7 +55,7 @@ template<ArithmeticMode Mode> void occupancy(Cell& cell)
     {
         using namespace finite_detail;
         const auto actual =
-            fp::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+            SimpleFluid::geometry::swept_volume::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
         const auto conversion =
             fp::Arithmetic<Mode>::subtract(fp::Arithmetic<Mode>::make_value(cell.native_volume), actual);
         const auto defect = finite_cell_defect<Mode>(cell, actual);
@@ -111,7 +111,7 @@ template<ArithmeticMode Mode> void validate_cell(const Cell& cell, const General
         if (!cell.finite_geometry || cell.finite_geometry->arithmetic_mode() != options.arithmetic_mode)
             throw std::invalid_argument("Finite General VoF is missing bounded geometry authority.");
         const auto actual =
-            fp::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
+            SimpleFluid::geometry::swept_volume::runtime_value<Mode>(PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->volume());
         const auto defect = finite_cell_defect<Mode>(cell, actual);
         const auto& e = cell.occupancy;
         bool valid = std::isfinite(cell.phase.gas_volume) && cell.phase.gas_volume >= 0 &&
@@ -275,7 +275,7 @@ PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> m
     return p;
 }
 SimpleFluid::PLIC::PhaseMeasures<SimpleFluid::ArithmeticMode::Exact> phases(
-    const SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
+    const SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>& fragment,
     const PLIC::PolyhedralInterface& p)
 {
     if (p.pure_gas)
@@ -997,7 +997,7 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
                         throw std::invalid_argument("Finite VoF imported an exact interface authority.");
                     if (!fitted.pure_gas && !fitted.pure_carrier)
                     {
-                        const auto amounts = fp::runtime_phases<Mode>(
+                        const auto amounts = SimpleFluid::geometry::swept_volume::runtime_phases<Mode>(
                             PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->phases(fitted.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                         fitted.finite_target_volume_difference =
@@ -1011,7 +1011,7 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
                 {
                     const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                     const auto measures =
-                        SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                        SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
                             *cell.phase.geometry)
                             ->phases(fitted.gas);
                     const auto residual = (gas ? measures.gas : measures.carrier) -
@@ -1121,7 +1121,7 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(
                         throw std::invalid_argument("Finite VoF imported an exact interface authority.");
                     if (!fitted.pure_gas && !fitted.pure_carrier)
                     {
-                        const auto amounts = fp::runtime_phases<Mode>(
+                        const auto amounts = SimpleFluid::geometry::swept_volume::runtime_phases<Mode>(
                             PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->phases(fitted.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
                         fitted.finite_target_volume_difference =

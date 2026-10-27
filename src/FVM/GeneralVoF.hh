@@ -9,7 +9,7 @@
 #include "geometry/GeometryStatisticsSnapshot.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
 #include "utils/ArithmeticMode.hh"
@@ -86,7 +86,7 @@ struct GeneralVoFOptions
     unsigned support_rings = 2;
     GeneralVoFTransportBackend transport_backend = GeneralVoFTransportBackend::SweptPartition;
     PLIC::PolyhedralReconstructionOptions reconstruction;
-    SimpleFluid::PLIC::SweepLimits sweep;
+    SimpleFluid::geometry::swept_volume::SweepLimits sweep;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
 };
 enum class GeneralVoFFiniteRemapCarrier
@@ -139,7 +139,7 @@ struct GeneralVoFNodeVelocity
 struct GeneralVoFNodeTrajectory
 {
     std::uint64_t node = 0;
-    SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact> trajectory;
+    SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact> trajectory;
 };
 struct GeneralVoFFaceVolume
 {

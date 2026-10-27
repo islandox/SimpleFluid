@@ -2,7 +2,7 @@
  * @brief Sparse owned-row verification of raw geometric-donor face coefficients.
  */
 #include "solvers/details/GeneralVoFTransferBinding.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"

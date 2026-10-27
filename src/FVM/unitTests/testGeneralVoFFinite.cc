@@ -1,5 +1,5 @@
 /** @file testGeneralVoFFinite.cc */
-#include "FVM/details/FiniteVoFTransport.hh"
+#include "geometry/swept_volume/FiniteVoFTransport.hh"
 #include "FVM/details/GeneralVoF/ConstructionControls.tcc"
 #include "general_vof_finite_test_helpers.hh"
 namespace
@@ -204,17 +204,17 @@ TEST(GeneralVoFFinite, OrdinaryModeRejectsInvalidPhysicalDataAndImplicitExactVie
 
 TEST(GeneralVoFFinite, SparseOverlayRetainsDisjointAndContactAtomsAndCoefficients)
 {
-    const std::vector<fp::OverlayAtom<overlay_mode>> atoms{{OverlayGeometry::box({0, 0, 0}, {1, 1, 1}), 0},
+    const std::vector<SimpleFluid::geometry::swept_volume::OverlayAtom<overlay_mode>> atoms{{OverlayGeometry::box({0, 0, 0}, {1, 1, 1}), 0},
         {OverlayGeometry::box({0, 0, 2}, {1, 1, 3}), 1}, {OverlayGeometry::box({0, 0, 4}, {1, 1, 5}), -1}};
     const std::array pieces{OverlayGeometry::box({3, 0, 0}, {4, 1, 5}), OverlayGeometry::box({1, 0, 0}, {2, 1, 5})};
     for (const auto& geometry : pieces)
         for (const int sign : {-1, 1})
             for (const int incidence : {-1, 1})
             {
-                fp::Work work;
+                SimpleFluid::geometry::swept_volume::Work work;
                 work.limits.maximum_pair_tests = atoms.size();
                 SimpleFluid::PLIC::reset_geometry_statistics();
-                const auto result = fp::overlay(atoms, {geometry, sign}, incidence, work);
+                const auto result = SimpleFluid::geometry::swept_volume::overlay(atoms, {geometry, sign}, incidence, work);
                 ASSERT_EQ(result.size(), atoms.size());
                 EXPECT_EQ(work.pair_tests, atoms.size());
                 EXPECT_GT(work.bytes, 0u);
@@ -236,12 +236,12 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsZeroCoefficientAtomsForLaterActivatio
     const auto root = OverlayGeometry::box({0, 0, 0}, {1, 1, 1});
     const auto far = OverlayGeometry::box({3, 0, 0}, {4, 1, 1});
     const auto half = OverlayGeometry::box({.5, 0, 0}, {1, 1, 1});
-    fp::Work work;
-    auto atoms = fp::overlay<overlay_mode>({{root, 0}}, {far, -1}, -1, work);
+    SimpleFluid::geometry::swept_volume::Work work;
+    auto atoms = SimpleFluid::geometry::swept_volume::overlay<overlay_mode>({{root, 0}}, {far, -1}, -1, work);
     ASSERT_EQ(atoms.size(), 1u);
     EXPECT_EQ(atoms.front().geometry.get(), root.get());
     EXPECT_EQ(atoms.front().coefficient, 0);
-    atoms = fp::overlay(std::move(atoms), {half, 1}, 1, work);
+    atoms = SimpleFluid::geometry::swept_volume::overlay(std::move(atoms), {half, 1}, 1, work);
     ASSERT_EQ(atoms.size(), 2u);
     unsigned zero = 0, one = 0;
     for (const auto& atom : atoms)
@@ -261,13 +261,13 @@ TEST(GeneralVoFFinite, SparseOverlayRetainsZeroCoefficientAtomsForLaterActivatio
 TEST(GeneralVoFFinite, SparseOverlayFastPathStillChargesPairAtomAndByteCaps)
 {
     const auto root = OverlayGeometry::box({0, 0, 0}, {1, 1, 1});
-    const fp::SignedPiece<overlay_mode> far{OverlayGeometry::box({3, 0, 0}, {4, 1, 1}), 1};
-    const std::vector<fp::OverlayAtom<overlay_mode>> atoms{{root, 0}};
-    const auto rejected = [&](fp::Work& work, const char* reason)
+    const SimpleFluid::geometry::swept_volume::SignedPiece<overlay_mode> far{OverlayGeometry::box({3, 0, 0}, {4, 1, 1}), 1};
+    const std::vector<SimpleFluid::geometry::swept_volume::OverlayAtom<overlay_mode>> atoms{{root, 0}};
+    const auto rejected = [&](SimpleFluid::geometry::swept_volume::Work& work, const char* reason)
     {
         try
         {
-            (void) fp::overlay(atoms, far, 1, work);
+            (void) SimpleFluid::geometry::swept_volume::overlay(atoms, far, 1, work);
             FAIL() << "Sparse overlay must honor the original resource caps.";
         }
         catch (const std::invalid_argument& error)
@@ -275,25 +275,25 @@ TEST(GeneralVoFFinite, SparseOverlayFastPathStillChargesPairAtomAndByteCaps)
             EXPECT_NE(std::string(error.what()).find(reason), std::string::npos);
         }
     };
-    fp::Work pair;
+    SimpleFluid::geometry::swept_volume::Work pair;
     pair.limits.maximum_pair_tests = 0;
     rejected(pair, "pair-test budget");
     EXPECT_EQ(pair.pair_tests, 1u);
-    fp::Work atom;
+    SimpleFluid::geometry::swept_volume::Work atom;
     atom.limits.maximum_atoms = 0;
     rejected(atom, "atom buffer capacity");
     EXPECT_EQ(atom.pair_tests, 1u);
-    fp::Work bytes;
-    bytes.limits.byte_budget = sizeof(fp::OverlayAtom<overlay_mode>) - 1;
+    SimpleFluid::geometry::swept_volume::Work bytes;
+    bytes.limits.byte_budget = sizeof(SimpleFluid::geometry::swept_volume::OverlayAtom<overlay_mode>) - 1;
     rejected(bytes, "byte budget");
     EXPECT_EQ(bytes.pair_tests, 1u);
-    fp::Work exact;
-    exact.limits.byte_budget = sizeof(fp::OverlayAtom<overlay_mode>);
-    const auto result = fp::overlay(atoms, far, 1, exact);
+    SimpleFluid::geometry::swept_volume::Work exact;
+    exact.limits.byte_budget = sizeof(SimpleFluid::geometry::swept_volume::OverlayAtom<overlay_mode>);
+    const auto result = SimpleFluid::geometry::swept_volume::overlay(atoms, far, 1, exact);
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result.front().geometry.get(), root.get());
     EXPECT_EQ(result.front().coefficient, 0);
-    EXPECT_EQ(exact.bytes, sizeof(fp::OverlayAtom<overlay_mode>));
+    EXPECT_EQ(exact.bytes, sizeof(SimpleFluid::geometry::swept_volume::OverlayAtom<overlay_mode>));
     EXPECT_EQ(root->volume().value, 1);
     EXPECT_EQ(root->volume().absolute_error, 0);
 }

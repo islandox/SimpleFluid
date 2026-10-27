@@ -12,7 +12,7 @@ using Cache = local::LocalSpatialCache;
 using Geometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
 struct CacheTrial
 {
-    local::fp::Work work{};
+    SimpleFluid::geometry::swept_volume::Work work{};
     GeneralVoFTransportDiagnostics diagnostics;
     std::shared_ptr<const Cache> cache;
     explicit CacheTrial(const GeneralVoF::Data& data) : cache(local::retained_spatial_cache(data, work, diagnostics)) {}
@@ -37,7 +37,7 @@ GeneralVoF::Data catalog()
     return data;
 }
 std::vector<std::size_t> query(
-    const Cache& cache, long double x, local::fp::Work& work, GeneralVoFTransportDiagnostics& diagnostics)
+    const Cache& cache, long double x, SimpleFluid::geometry::swept_volume::Work& work, GeneralVoFTransportDiagnostics& diagnostics)
 {
     local::local_spatial_detail::Box box;
     box.add(std::array{x, .5L, .5L});
@@ -172,7 +172,7 @@ TEST(GeneralVoFSpatialCache, WarmAndColdCachesHonorEachConsumersLimits)
     const auto data = catalog();
     const CacheTrial admitted(data);
     const auto cache = data.topology->spatial_cache;
-    local::fp::Work limited{};
+    SimpleFluid::geometry::swept_volume::Work limited{};
     limited.limits.byte_budget = admitted.diagnostics.spatial_index_bytes - 1;
     GeneralVoFTransportDiagnostics diagnostics;
     EXPECT_THROW((void) local::retained_spatial_cache(data, limited, diagnostics), PLIC::GeometryError);
@@ -211,7 +211,7 @@ TEST(GeneralVoFSpatialCache, CombinedRetainedAdmissionFailureLeavesTheSourceRetr
         retained.add(sizeof(source));
         retained.add(bytes);
     };
-    local::fp::Work work{};
+    SimpleFluid::geometry::swept_volume::Work work{};
     GeneralVoFTransportDiagnostics diagnostics;
     EXPECT_THROW(
         (void) local::retained_spatial_cache(cold, work, diagnostics, combined_admission), PLIC::GeometryError);

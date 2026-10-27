@@ -1,7 +1,7 @@
 /** @file testDepartureFan.cc
  * @brief Independent positive-departure and signed-overlay fallback oracles.
  */
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "utils/testing_environment.hh"
 #include <functional>
 #include <gtest/gtest.h>
@@ -30,7 +30,7 @@ M determinant(const V& a, const V& b, const V& c)
 }
 // Independent divergence integral on explicitly supplied DYADIC fixture
 // endpoints. No rounded endpoint extraction is used by the tiny-motion oracle.
-M dyadic_fixture_flux(const std::vector<SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>>& traces)
+M dyadic_fixture_flux(const std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>>& traces)
 {
     std::vector<V> a, b;
     V center{}, back{};
@@ -61,24 +61,24 @@ M dyadic_fixture_flux(const std::vector<SimpleFluid::PLIC::NodeTrajectory<Simple
     }
     return q.divided_by(M::from_value(6));
 }
-SimpleFluid::PLIC::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> recipient(std::uint64_t id,
+SimpleFluid::geometry::swept_volume::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> recipient(std::uint64_t id,
     SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact> native,
     const std::vector<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>>& faces,
     const std::function<SimpleFluid::PLIC::GeometryPoint(SimpleFluid::PLIC::GeometryPoint)>& velocity,
     const std::function<M(const SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>&,
-        const std::vector<SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>>&)>& flux = {})
+        const std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>>&)>& flux = {})
 {
-    SimpleFluid::PLIC::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> r;
+    SimpleFluid::geometry::swept_volume::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> r;
     r.id = id;
     r.geometry = native;
     for (const auto& face : faces)
     {
-        std::vector<SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> traces;
+        std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> traces;
         for (const auto& point : face->vertex_identities())
-            traces.push_back(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(
+            traces.push_back(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(
                 point, velocity(SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Exact>(point)), 1));
         const auto q = flux ? flux(*face, traces) : dyadic_fixture_flux(traces);
-        auto sweep = SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces, q);
+        auto sweep = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces, q);
         EXPECT_EQ(sweep->uncorrected_volume().compare(q), 0);
         r.outward_faces.push_back({sweep, 1});
     }
@@ -128,9 +128,9 @@ SimpleFluid::PLIC::ConvexGeometryPtr<SimpleFluid::ArithmeticMode::Exact> affine_
         {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}};
     return SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(p, f);
 }
-std::vector<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donor_grid(double shear = 0)
+std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donor_grid(double shear = 0)
 {
-    std::vector<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> d;
+    std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> d;
     for (int x = -1; x <= 1; ++x)
         for (int y = -1; y <= 1; ++y)
             for (int z = -1; z <= 1; ++z)
@@ -139,7 +139,7 @@ std::vector<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> d
                         {double(x), double(y), double(z)}, {double(x + 1), double(y + 1), double(z + 1)}, shear)});
     return d;
 }
-M donor_volume(const SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>& p, std::uint64_t id)
+M donor_volume(const SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>& p, std::uint64_t id)
 {
     M q;
     for (const auto& a : p.atoms())
@@ -156,7 +156,7 @@ TEST(DepartureFan, ConstantTranslationShearSkewAndCornerUseCertifiedPositiveFans
     auto translated = recipient(
         13, native, faces(native), [&](auto) { return u; },
         [&](const auto& f, const auto&) { return f.area_vector_dot(u); });
-    auto result = SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
+    auto result = SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
         donors, std::span(&translated, 1));
     EXPECT_TRUE(result.used_departure_fan());
     const auto own = product(product(M::from_value(.75), M::from_value(.875)), M::from_value(.9375));
@@ -167,7 +167,7 @@ TEST(DepartureFan, ConstantTranslationShearSkewAndCornerUseCertifiedPositiveFans
     EXPECT_EQ(total.compare(M::from_value(1)), 0);
     auto sheared = recipient(
         13, native, faces(native), [](auto p) { return SimpleFluid::PLIC::GeometryPoint{-.125 * p[1], 0, 0}; });
-    auto shear_result = SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
+    auto shear_result = SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
         donors, std::span(&sheared, 1));
     EXPECT_TRUE(shear_result.used_departure_fan());
     EXPECT_EQ(donor_volume(shear_result, 13).compare(M::from_value(15.0 / 16)), 0);
@@ -177,23 +177,23 @@ TEST(DepartureFan, CorrectedDepartureCentersPreserveIndependentFaceFluxWithStati
 {
     auto donors = donor_grid();
     auto native = donors[13].geometry;
-    SimpleFluid::PLIC::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> r;
+    SimpleFluid::geometry::swept_volume::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> r;
     r.id = 13;
     r.geometry = native;
     constexpr double amount = 1.0 / 64;
     for (auto f : faces(native))
     {
-        std::vector<SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> stationary;
+        std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> stationary;
         for (const auto& p : f->vertex_identities())
             stationary.push_back(
-                SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(p, {}, 1));
+                SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(p, {}, 1));
         const auto q = f->area_vector_dot({amount, 0, 0});
-        auto sweep = SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*f, stationary, q);
+        auto sweep = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*f, stationary, q);
         EXPECT_EQ(sweep->uncorrected_volume().sign(), 0);
         r.outward_faces.push_back({sweep, 1});
     }
     const auto routed =
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
     EXPECT_TRUE(routed.used_departure_fan());
     EXPECT_EQ(donor_volume(routed, 13).compare(M::from_value(1 - amount)), 0);
     EXPECT_EQ(donor_volume(routed, 4).compare(M::from_value(amount)), 0);
@@ -208,7 +208,7 @@ TEST(DepartureFan, TinyThreeDimensionalMotionRetainsSubnormalCornerAtoms)
         13, native, faces(native), [&](auto) { return u; },
         [&](const auto& f, const auto&) { return f.area_vector_dot(u); });
     auto result =
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
     EXPECT_TRUE(result.used_departure_fan());
     const auto retained = M::from_value(1) - M::from_value(eta);
     EXPECT_EQ(donor_volume(result, 13).compare(product(product(retained, retained), retained)), 0);
@@ -223,7 +223,7 @@ TEST(DepartureFan, TinyThreeDimensionalMotionRetainsSubnormalCornerAtoms)
 TEST(DepartureFan, CoarseFineCanonicalSubfacesAndEdgeNodesRouteExactDonorVolumes)
 {
     auto native = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
-    std::vector<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors{{0, native}};
+    std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors{{0, native}};
     std::vector<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>> boundary;
     std::vector<std::vector<char>> nodes;
     for (unsigned y = 0; y < 2; ++y)
@@ -248,7 +248,7 @@ TEST(DepartureFan, CoarseFineCanonicalSubfacesAndEdgeNodesRouteExactDonorVolumes
     auto r = recipient(
         0, native, boundary, [&](auto) { return u; }, [&](const auto& f, const auto&) { return f.area_vector_dot(u); });
     auto result =
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
     EXPECT_TRUE(result.used_departure_fan());
     EXPECT_EQ(donor_volume(result, 0).compare(M::from_value(.75)), 0);
     for (unsigned id = 1; id <= 4; ++id)
@@ -270,13 +270,13 @@ TEST(DepartureFan, GenuineNonStarUShapeFallsBackToOriginalSignedOverlay)
             velocity[p] = {p[0] - departure[i][0], p[1] - departure[i][1], 0};
         }
     auto r = recipient(1, native, faces(native), [&](auto p) { return velocity.at(p); });
-    const std::vector<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors{{1, native},
+    const std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors{{1, native},
         {2, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 3, 0}, {3, 4, 1})}};
     auto result =
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
     EXPECT_FALSE(result.used_departure_fan());
     // U area=3*4-1*3=9, and the x<=1 leg has area4, independently.
-    const auto phase = SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::phases(
+    const auto phase = SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::phases(
         result.atoms(), {{1, 0, 0}, {0, 0, 0}, 1});
     EXPECT_EQ(phase.bulk.compare(M::from_value(9)), 0);
     EXPECT_EQ(phase.gas.compare(M::from_value(4)), 0);
@@ -285,41 +285,41 @@ TEST(DepartureFan, GenuineNonStarUShapeFallsBackToOriginalSignedOverlay)
 TEST(DepartureFan, SourceValidationAndAttemptBudgetsRemainStrictAndRecoverable)
 {
     auto native = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
-    const std::vector<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors{{0, native}};
+    const std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors{{0, native}};
     auto r = recipient(0, native, faces(native), [](auto) { return SimpleFluid::PLIC::GeometryPoint{}; });
-    SimpleFluid::PLIC::SweepLimits limits;
+    SimpleFluid::geometry::swept_volume::SweepLimits limits;
     limits.maximum_pair_tests = 1;
-    EXPECT_THROW((void) SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
+    EXPECT_THROW((void) SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
                      donors, std::span(&r, 1), limits),
         std::invalid_argument);
     auto recovered =
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1));
     EXPECT_TRUE(recovered.used_departure_fan());
     EXPECT_EQ(recovered.atoms().size(), 24u);
     auto malformed = r;
     malformed.outward_faces[0].outward_sign = 0;
-    EXPECT_THROW((void) SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
+    EXPECT_THROW((void) SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
                      donors, std::span(&malformed, 1)),
         std::invalid_argument);
     limits = {};
     limits.byte_budget = 1;
-    EXPECT_THROW((void) SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
+    EXPECT_THROW((void) SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
                      donors, std::span(&r, 1), limits),
         std::invalid_argument);
     limits = {};
     limits.maximum_simplices = 1;
     // Each stationary original face has zero signed simplices. This limit
     // must not silently become a total departure-boundary triangle limit.
-    EXPECT_TRUE(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
+    EXPECT_TRUE(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
         donors, std::span(&r, 1), limits)
             .used_departure_fan());
     limits = {};
     limits.maximum_atoms = 1;
-    EXPECT_THROW((void) SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
+    EXPECT_THROW((void) SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(
                      donors, std::span(&r, 1), limits),
         std::invalid_argument);
     EXPECT_TRUE(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1))
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(donors, std::span(&r, 1))
             .used_departure_fan());
 }
 } // namespace

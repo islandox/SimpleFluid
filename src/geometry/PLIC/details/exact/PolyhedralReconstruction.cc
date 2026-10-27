@@ -3,7 +3,7 @@
  */
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -55,7 +55,7 @@ void validate_sample(
         throw std::invalid_argument("PLIC independent phases do not occupy actual cell.");
 }
 GeometryMeasure<ArithmeticMode::Exact> phase(
-    const ConvexFragment<ArithmeticMode::Exact>& fragment, const GeometryHalfspace& plane, bool gas)
+    const geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>& fragment, const GeometryHalfspace& plane, bool gas)
 {
     auto measures = fragment.phases(plane);
     return gas ? measures.gas : measures.carrier;
@@ -105,7 +105,7 @@ struct ReconstructionGeometry
     double volume = 0;
     GeometryMeasure<ArithmeticMode::Exact> exact_volume;
     std::vector<std::vector<char>> vertices;
-    std::shared_ptr<const ConvexFragment<ArithmeticMode::Exact>> fragment;
+    std::shared_ptr<const geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>> fragment;
 };
 ReconstructionGeometry prepare_geometry(const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, bool vertices,
     bool fragment, bool metric_volume = false)
@@ -127,7 +127,7 @@ ReconstructionGeometry prepare_geometry(const PolyhedralPhaseSample<ArithmeticMo
                 result.vertices.push_back(std::move(point));
         }
     if (fragment)
-        result.fragment = ConvexFragment<ArithmeticMode::Exact>::from_geometry(*sample.geometry);
+        result.fragment = geometry::swept_volume::ConvexFragment<ArithmeticMode::Exact>::from_geometry(*sample.geometry);
     return result;
 }
 PolyhedralInterface offset_fit(const PolyhedralPhaseSample<ArithmeticMode::Exact>& sample, Vector normal,

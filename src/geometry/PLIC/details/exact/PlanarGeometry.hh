@@ -109,7 +109,7 @@ private:
     friend std::vector<PlanarFacePtr<ArithmeticMode::Exact>> subtract_planar_faces<ArithmeticMode::Exact>(
         const PlanarFace<ArithmeticMode::Exact>&, std::span<const PlanarFacePtr<ArithmeticMode::Exact>>);
     friend class ConvexCellGeometry<ArithmeticMode::Exact>;
-    friend class SweepAccess<ArithmeticMode::Exact>;
+    friend class ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>;
     friend class ExtrudedConstruction<ArithmeticMode::Exact>;
     friend class PolyhedralComplex<ArithmeticMode::Exact>;
     explicit PlanarFace(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}

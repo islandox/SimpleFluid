@@ -1,7 +1,7 @@
 /** @file Advance.tcc
  * @brief Compiled general VoF Advance operation.
  */
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "solvers/details/GeneralVoF/Advance.hh"
 #include "solvers/details/GeneralVoF/Curvature.hh"
@@ -68,8 +68,8 @@ double Advance<Mode>::stable_timestep(
                 if (upper_rate > 0)
                 {
                     const auto lower_volume =
-                        VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()).value -
-                        (bounded_mode ? VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume()).absolute_error
+                        SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()).value -
+                        (bounded_mode ? SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()).absolute_error
                                       : 0);
                     const auto time = lower_volume * options.flow.max_courant / upper_rate;
                     double value = static_cast<double>(time);
@@ -250,7 +250,7 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
                     A::add(A::multiply(A::make_value(phases[c].gas, 0), A::make_value(material.gas_viscosity, 0)),
                         A::multiply(A::make_value(phases[c].carrier, 0), A::make_value(material.liquid_viscosity, 0)));
                 viscosity[c] =
-                    A::as_double(A::divide(weighted, VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume())));
+                    A::as_double(A::divide(weighted, SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume())));
             }
         });
     const auto viscous = flow.viscous_force(old.velocity, viscosity);

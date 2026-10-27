@@ -1,4 +1,4 @@
-#include "geometry/PLIC/OrdinaryAggregate.hh"
+#include "geometry/swept_volume/OrdinaryAggregate.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/details/ConvexGeometryInternal.hh"
 #include "geometry/PLIC/details/ordinary/Predicates.hh"
@@ -10,11 +10,12 @@
 #include <set>
 #include <sstream>
 
-namespace SimpleFluid::PLIC
+namespace SimpleFluid::geometry::swept_volume
 {
+using namespace ::SimpleFluid::PLIC;
 namespace
 {
-namespace predicates = details::ordinary_predicates;
+namespace predicates = ::SimpleFluid::PLIC::details::ordinary_predicates;
 using V = std::array<long double, 3>;
 using B = std::array<long double, 4>;
 constexpr long double eps = std::numeric_limits<long double>::epsilon();
@@ -121,7 +122,7 @@ struct AggregateWork
     void op(std::size_t n = 1)
     {
         if (!operation_limit)
-            operation_limit = details::Work(geometry).operation_limit;
+            operation_limit = ::SimpleFluid::PLIC::details::Work(geometry).operation_limit;
         const auto limit = operation_limit;
         if (n > limit || stats.operations > limit - n)
             fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate work budget exhausted.");
@@ -586,7 +587,7 @@ Cut phase_cut(const GeometryHalfspace& h)
 }
 std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work)
 {
-    const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
+    const auto storage = ::SimpleFluid::PLIC::details::checked_geometry_storage<ArithmeticMode::Ordinary>(
         DynamicGeometryAccess::implementation(*d.geometry->dynamic_geometry()));
     std::vector<Cut> result;
     work.charge(storage->surfaces.size() * sizeof(Cut));
@@ -969,12 +970,12 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         remaining.maximum_pair_tests =
             std::min(impl_->sweep.maximum_pair_tests, remaining.maximum_pair_tests) - work.stats.pair_tests;
         if (!work.operation_limit)
-            work.operation_limit = details::Work(impl_->geometry).operation_limit;
+            work.operation_limit = ::SimpleFluid::PLIC::details::Work(impl_->geometry).operation_limit;
         remaining.maximum_operations = work.operation_limit - work.stats.operations;
         if (!remaining.maximum_operations)
             fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate work budget exhausted before donor validation.");
-        details::Operation validation(remaining);
-        const auto active = details::active_work;
+        ::SimpleFluid::PLIC::details::Operation validation(remaining);
+        const auto active = ::SimpleFluid::PLIC::details::active_work;
         const auto bytes_before = active->bytes, operations_before = active->operations, pairs_before = active->pairs;
         const auto aggregate_bytes = work.bytes, aggregate_operations = work.stats.operations,
                    aggregate_pairs = work.stats.pair_tests;
@@ -1279,4 +1280,4 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     result.statistics = work.stats;
     return result;
 }
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume

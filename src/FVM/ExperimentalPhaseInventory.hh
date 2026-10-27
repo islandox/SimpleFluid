@@ -3,7 +3,7 @@
  */
 #pragma once
 #include "FVM/PhaseVolumes.hh"
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 namespace SimpleFluid::VoF
 {
 /** Allocated only under ExperimentalExact; finite mode has a null shared pointer. */

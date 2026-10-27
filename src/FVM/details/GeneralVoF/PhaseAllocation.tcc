@@ -4,8 +4,8 @@
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
-using fp::runtime_phases;
-using fp::runtime_value;
+using SimpleFluid::geometry::swept_volume::runtime_phases;
+using SimpleFluid::geometry::swept_volume::runtime_value;
 template<ArithmeticMode Mode> void PhaseSum<Mode>::add(const PhaseValues& p, int sign)
 {
     using Math = fp::Arithmetic<Mode>;

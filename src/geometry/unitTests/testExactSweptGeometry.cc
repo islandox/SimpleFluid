@@ -1,7 +1,7 @@
 /** @file testExactSweptGeometry.cc
  * @brief Independent signed sweeps, actual donor partitions and exact pullbacks.
  */
-#include "geometry/PLIC/SweptGeometry.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/PLIC/details/exact/CertifiedSupportFilter.hh"
 #include "geometry/PLIC/details/exact/SupportSign.hh"
 #include "utils/testing_environment.hh"
@@ -75,14 +75,14 @@ SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact> face_at(
     }
     throw std::logic_error("Missing oracle face.");
 }
-std::vector<SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> traces(
+std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> traces(
     const SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>& face,
     SimpleFluid::PLIC::GeometryPoint velocity, double dt)
 {
-    std::vector<SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> result;
+    std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> result;
     for (const auto& p : face->vertex_identities())
         result.push_back(
-            SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(p, velocity, dt));
+            SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(p, velocity, dt));
     return result;
 }
 template<class Callable>
@@ -159,7 +159,7 @@ TEST(ExactSweptGeometry, VolumeOnlyAndFullMomentsAgreeForTranslatedSkewWithZeroF
         const auto cell =
             SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(points, faces);
         const auto fragment =
-            SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
+            SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
         EXPECT_EQ(fragment->volume().compare(M::from_value(1)), 0);
         EXPECT_EQ(M::volume(*cell).compare(fragment->volume()), 0);
         const auto full = cell->moments();
@@ -194,7 +194,7 @@ TEST(ExactSweptGeometry, CertifiedClipsPreserveCollinearContactsSliversAndStrict
     const std::vector<std::vector<std::size_t>> faces{
         {0, 4, 6, 2}, {1, 3, 7, 5}, {0, 8, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1, 8}, {4, 5, 7, 6}};
     const auto cell = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(points, faces);
-    const auto fragment = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
+    const auto fragment = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
     const auto half = fragment->phases({{1, 0, 0}, {0, 0, 0}, .5});
     EXPECT_EQ(half.gas.compare(M::from_value(.5)), 0);
     EXPECT_EQ(half.carrier.compare(M::from_value(.5)), 0);
@@ -214,9 +214,9 @@ TEST(ExactSweptGeometry, CertifiedClipsPreserveCollinearContactsSliversAndStrict
     EXPECT_EQ((small_gas.gas + small_gas.carrier).compare(M::from_value(1)), 0);
     EXPECT_EQ((small_carrier.gas + small_carrier.carrier).compare(M::from_value(1)), 0);
     const auto side = face_at(cell, 0, 1);
-    const auto swept = SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
+    const auto swept = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
         *side, traces(side, {1, 0, 0}, .25), .25);
-    const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> donors{{{17, cell},
+    const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> donors{{{17, cell},
         {29, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({1, 0, 0}, {2, 1, 1})}}};
     const auto pieces = swept->partition(donors);
     ASSERT_FALSE(pieces.empty());
@@ -230,7 +230,7 @@ TEST(ExactSweptGeometry, CertifiedClipsPreserveCollinearContactsSliversAndStrict
         const auto admitted = piece.geometry->as_geometry();
         EXPECT_EQ(M::volume(*admitted).compare(piece.geometry->volume()), 0);
         const auto wire = piece.geometry->encode();
-        const auto decoded = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(wire);
+        const auto decoded = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(wire);
         EXPECT_EQ(decoded->encode(), wire);
         EXPECT_TRUE(decoded->as_geometry()->equivalent(*admitted));
     }
@@ -246,10 +246,10 @@ TEST(ExactSweptGeometry, CertifiedClipsPreserveCollinearContactsSliversAndStrict
     auto malformed = fragment->encode();
     ASSERT_GE(malformed.size(), 8);
     std::fill(malformed.end() - 8, malformed.end(), char(0xff));
-    EXPECT_THROW(SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(malformed),
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(malformed),
         std::invalid_argument);
     EXPECT_EQ(fragment->volume().compare(M::from_value(1)), 0);
-    SimpleFluid::PLIC::SweepLimits exhausted;
+    SimpleFluid::geometry::swept_volume::SweepLimits exhausted;
     exhausted.byte_budget = 1;
     EXPECT_THROW(swept->partition(donors, exhausted), std::invalid_argument);
     EXPECT_NO_THROW(swept->partition(donors));
@@ -260,16 +260,16 @@ TEST(ExactSweptGeometry, OptionalClipCacheCanHaveZeroLeaseWithoutWeakeningGeomet
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
     const auto face = face_at(cell, 0, 1);
     const auto identity =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {0, 0, 0}, 1), 0.);
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {0, 0, 0}, 1), 0.);
     ASSERT_TRUE(identity->simplices().empty());
-    const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> touching{{{3, cell},
+    const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> touching{{{3, cell},
         {5, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({1, 0, 0}, {2, 1, 1})}}};
-    SimpleFluid::PLIC::SweepLimits limits;
+    SimpleFluid::geometry::swept_volume::SweepLimits limits;
     // These two donor records exhaust the original admitted payload exactly;
     // the pairwise geometry proof still has one allowed operation, but there
     // are ZERO bytes available for the optional distance cache. It must use
     // the same certified constant-workspace clip, not reject a valid contact.
-    limits.byte_budget = touching.size() * sizeof(SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>);
+    limits.byte_budget = touching.size() * sizeof(SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>);
     limits.maximum_pair_tests = 1;
     EXPECT_TRUE(identity->partition(touching, limits).empty());
     auto roomy = limits;
@@ -317,21 +317,21 @@ TEST(ExactSweptGeometry, ActualDonorGasComplementAndTinyUnexportedTailRemainInde
     auto face = face_at(cube, 0, 1);
     const double t = .1;
     auto sweep =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {1, 0, 0}, t), t);
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {1, 0, 0}, t), t);
     EXPECT_EQ(
         sweep->volume().compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(t)),
         0);
-    const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{7, cube}}};
+    const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{7, cube}}};
     auto pieces = sweep->partition(donors);
     const auto p =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(pieces, {{1, 1, 0}, {0, 0, 0}, 1});
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(pieces, {{1, 1, 0}, {0, 0, 0}, 1});
     EXPECT_EQ(
         p.gas.compare(
             SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(t).scaled(t).scaled(.5)),
         0);
     EXPECT_EQ((p.gas + p.carrier).compare(p.bulk), 0);
-    const std::array<SimpleFluid::PLIC::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>, 1> faces{{{sweep, 1}}};
-    auto budget = SimpleFluid::PLIC::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cube, faces);
+    const std::array<SimpleFluid::geometry::swept_volume::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>, 1> faces{{{sweep, 1}}};
+    auto budget = SimpleFluid::geometry::swept_volume::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cube, faces);
     EXPECT_EQ((budget.exported_volume() + budget.retained_volume())
                   .compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*cube)),
         0);
@@ -348,34 +348,34 @@ TEST(ExactSweptGeometry, CrossedNormalTracesKeepBothSignsAndClipActualDonorsBefo
 {
     auto cube = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
     auto face = face_at(cube, 2, 1);
-    std::vector<SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> paths;
+    std::vector<SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>> paths;
     for (const auto& identity : face->vertex_identities())
     {
         const auto p = SimpleFluid::PLIC::point_display<SimpleFluid::ArithmeticMode::Exact>(identity);
-        paths.push_back(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(
+        paths.push_back(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(
             identity, {0, 0, p[0] < .5 ? -.2 : .2}, .25));
     }
-    auto sweep = SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, paths, 0.);
+    auto sweep = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, paths, 0.);
     unsigned positive = 0, negative = 0;
     for (const auto& piece : sweep->simplices())
         (piece.sign > 0 ? positive : negative)++;
     EXPECT_GT(positive, 0u);
     EXPECT_GT(negative, 0u);
     EXPECT_EQ(sweep->volume().sign(), 0);
-    std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> donors{
+    std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> donors{
         {{0, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({-1, -1, 0}, {.5, 2, 2})},
             {1, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
                     {.5, -1, 0}, {2, 2, 2})}}};
     auto pieces = sweep->partition(donors);
     const auto phase =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(pieces, {{1, 0, 0}, {0, 0, 0}, .5});
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(pieces, {{1, 0, 0}, {0, 0, 0}, .5});
     EXPECT_EQ(
         phase.gas.compare(
             SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(-.2).scaled(.25).scaled(
                 .25)),
         0);
     EXPECT_EQ((phase.gas + phase.carrier).sign(), 0);
-    EXPECT_THROW(sweep->partition(std::span<const SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>>(
+    EXPECT_THROW(sweep->partition(std::span<const SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>>(
                      donors.data(), 1)),
         std::invalid_argument);
 }
@@ -385,9 +385,9 @@ TEST(ExactSweptGeometry, PrivateVolumeCorrectionPreservesSharedEdgeTimeTriangles
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
     auto a = face_at(cube, 0, 1), b = face_at(cube, 1, 1);
     auto first =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*a, traces(a, {.2, .1, .05}, .3), .055);
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*a, traces(a, {.2, .1, .05}, .3), .055);
     auto other =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*b, traces(b, {.2, .1, .05}, .3), .025);
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*b, traces(b, {.2, .1, .05}, .3), .025);
     EXPECT_EQ(first->volume().compare(
                   SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(.055)),
         0);
@@ -409,24 +409,24 @@ TEST(ExactSweptGeometry, PrivateVolumeCorrectionPreservesSharedEdgeTimeTriangles
         matches += std::find(right.begin(), right.end(), t) != right.end();
     EXPECT_EQ(matches, 2u);
     auto reversed = a->reversed();
-    auto inverse = SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
+    auto inverse = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
         *reversed, traces(reversed, {.2, .1, .05}, .3), -.055);
     EXPECT_EQ(first->corrected_departure_center(), inverse->corrected_departure_center());
     auto broad =
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({-1, -1, -1}, {2, 2, 2});
-    const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{0, broad}}};
+    const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{0, broad}}};
     auto p = first->partition(donors), q = inverse->partition(donors);
     p.insert(p.end(), q.begin(), q.end());
     const auto phase =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(p, {{1, 1, 1}, {0, 0, 0}, 1.8});
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(p, {{1, 1, 1}, {0, 0, 0}, 1.8});
     EXPECT_EQ(phase.bulk.sign(), 0);
     EXPECT_EQ(phase.gas.sign(), 0);
     EXPECT_EQ(phase.carrier.sign(), 0);
 }
 struct Loop
 {
-    std::vector<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors;
-    std::vector<SimpleFluid::PLIC::SweepRecipient<SimpleFluid::ArithmeticMode::Exact>> targets;
+    std::vector<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>> donors;
+    std::vector<SimpleFluid::geometry::swept_volume::SweepRecipient<SimpleFluid::ArithmeticMode::Exact>> targets;
 };
 Loop circulation(double phi)
 {
@@ -434,7 +434,7 @@ Loop circulation(double phi)
     const std::array<SimpleFluid::PLIC::GeometryPoint, 4> lower{{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}};
     struct Shared
     {
-        std::shared_ptr<const SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>> sweep;
+        std::shared_ptr<const SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>> sweep;
         SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact> original;
     };
     std::map<std::vector<char>, Shared> shared;
@@ -444,7 +444,7 @@ Loop circulation(double phi)
         auto cell = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
             lo, {lo[0] + 1, lo[1] + 1, 1});
         result.donors.push_back({id, cell});
-        SimpleFluid::PLIC::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> target{id, cell, {}};
+        SimpleFluid::geometry::swept_volume::SweepRecipient<SimpleFluid::ArithmeticMode::Exact> target{id, cell, {}};
         for (std::size_t f = 0; f < cell->num_faces(); ++f)
         {
             auto face = cell->face_geometry(f);
@@ -463,7 +463,7 @@ Loop circulation(double phi)
                     flux = phi;
                 else if (id == 2 && p.x == 1)
                     flux = phi;
-                auto sweep = SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
+                auto sweep = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
                     *face, traces(face, {0, 0, 0}, 0), flux);
                 found = shared.emplace(key, Shared{sweep, face}).first;
             }
@@ -480,12 +480,12 @@ TEST(ExactSweptGeometry, ClosedCellPullbackProducesPositiveRoutedTransfersAndOwn
     const double amount = .01;
     auto loop = circulation(amount);
     auto routed =
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::make(loop.donors, loop.targets);
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::make(loop.donors, loop.targets);
     EXPECT_GT(routed.atoms().size(), 4u);
     for (const auto& donor : loop.donors)
     {
         SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> exported, retained;
-        std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column;
+        std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column;
         for (const auto& atom : routed.atoms())
             if (atom.donor == donor.id)
             {
@@ -505,14 +505,14 @@ TEST(ExactSweptGeometry, ClosedCellPullbackProducesPositiveRoutedTransfersAndOwn
                       .compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(
                           *donor.geometry)),
             0);
-        EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
             donor, column));
     }
-    auto local = SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(loop.donors,
-        std::span<const SimpleFluid::PLIC::SweepRecipient<SimpleFluid::ArithmeticMode::Exact>>(loop.targets.data(), 1));
+    auto local = SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(loop.donors,
+        std::span<const SimpleFluid::geometry::swept_volume::SweepRecipient<SimpleFluid::ArithmeticMode::Exact>>(loop.targets.data(), 1));
     for (const auto& atom : local.atoms())
         EXPECT_EQ(atom.recipient, 0u);
-    EXPECT_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                      loop.donors[1], local.atoms()),
         std::invalid_argument);
 }
@@ -521,23 +521,23 @@ TEST(ExactSweptGeometry, RealGapsOverlapsDuplicateExportsAndFiniteBudgetsFailAto
     auto cube = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
     auto face = face_at(cube, 0, 1);
     auto sweep =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {1, 0, 0}, .1), .1);
-    const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> overlaps{
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {1, 0, 0}, .1), .1);
+    const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> overlaps{
         {{0, cube}, {1, cube}}};
     EXPECT_THROW(sweep->partition(overlaps), std::invalid_argument);
-    const std::array<SimpleFluid::PLIC::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>, 2> doubled{
+    const std::array<SimpleFluid::geometry::swept_volume::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>, 2> doubled{
         {{sweep, 1}, {sweep, 1}}};
-    EXPECT_THROW(SimpleFluid::PLIC::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cube, doubled),
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cube, doubled),
         std::invalid_argument);
-    SimpleFluid::PLIC::SweepLimits limited;
+    SimpleFluid::geometry::swept_volume::SweepLimits limited;
     limited.byte_budget = 1;
-    EXPECT_THROW(SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
                      *face, traces(face, {1, 0, 0}, .1), .1, limited),
         std::invalid_argument);
     limited = {};
     limited.maximum_atoms = 1;
-    EXPECT_THROW(SimpleFluid::PLIC::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cube,
-                     std::span<const SimpleFluid::PLIC::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>>(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cube,
+                     std::span<const SimpleFluid::geometry::swept_volume::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>>(
                          doubled.data(), 1),
                      limited),
         std::invalid_argument);
@@ -547,7 +547,7 @@ TEST(ExactSweptGeometry, RealGapsOverlapsDuplicateExportsAndFiniteBudgetsFailAto
     auto loop = circulation(.01);
     loop.targets[0].outward_faces.clear();
     EXPECT_THROW(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(loop.donors, loop.targets),
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(loop.donors, loop.targets),
         std::invalid_argument);
 }
 TEST(ExactSweptGeometry, SubnormalAggregateDoesNotRequireRepresentableIndividualSimplices)
@@ -557,7 +557,7 @@ TEST(ExactSweptGeometry, SubnormalAggregateDoesNotRequireRepresentableIndividual
     const auto face = face_at(cube, 0, 1);
     const auto tiny = std::numeric_limits<double>::denorm_min();
     auto sweep =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {0, 0, 0}, 0), tiny);
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {0, 0, 0}, 0), tiny);
     ASSERT_GT(sweep->simplices().size(), 1u);
     SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact> total;
     for (const auto& piece : sweep->simplices())
@@ -566,14 +566,14 @@ TEST(ExactSweptGeometry, SubnormalAggregateDoesNotRequireRepresentableIndividual
         EXPECT_THROW(piece.geometry->volume().certified().as_double(), std::runtime_error);
         total = total + piece.geometry->volume().scaled(piece.sign);
         const auto copy =
-            SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(piece.geometry->encode());
+            SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(piece.geometry->encode());
         EXPECT_EQ(copy->volume().compare(piece.geometry->volume()), 0);
     }
     EXPECT_EQ(total.certified().as_double(), tiny);
-    const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{0, cube}}};
+    const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{0, cube}}};
     const auto parts = sweep->partition(donors);
     const auto phase =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(parts, {{1, 0, 0}, {0, 0, 0}, 2});
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(parts, {{1, 0, 0}, {0, 0, 0}, 2});
     EXPECT_EQ(phase.gas.certified().as_double(), tiny);
     EXPECT_EQ(phase.carrier.sign(), 0);
 }
@@ -592,11 +592,11 @@ TEST(ExactSweptGeometry, TranslatedShearUsesActualCellCoordinatesAndExactTinyRem
     auto cell = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(nodes, faces);
     auto face = face_at(cell, 0, origin[0] + 1 + shear * .5);
     auto sweep =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {1, 0, 0}, t), t);
-    const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{0, cell}}};
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(*face, traces(face, {1, 0, 0}, t), t);
+    const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 1> donors{{{0, cell}}};
     const auto parts = sweep->partition(donors);
     const auto oblique =
-        SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(parts, {{1, 1 - shear, 0}, origin, 1});
+        SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::phases(parts, {{1, 1 - shear, 0}, origin, 1});
     EXPECT_EQ(
         oblique.gas.compare(
             SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(t).scaled(t).scaled(.5)),
@@ -604,9 +604,9 @@ TEST(ExactSweptGeometry, TranslatedShearUsesActualCellCoordinatesAndExactTinyRem
     EXPECT_EQ((oblique.gas + oblique.carrier)
                   .compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(t)),
         0);
-    const std::array<SimpleFluid::PLIC::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>, 1> outgoing{
+    const std::array<SimpleFluid::geometry::swept_volume::OrientedFaceSweep<SimpleFluid::ArithmeticMode::Exact>, 1> outgoing{
         {{sweep, 1}}};
-    const auto budget = SimpleFluid::PLIC::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cell, outgoing);
+    const auto budget = SimpleFluid::geometry::swept_volume::DonorExport<SimpleFluid::ArithmeticMode::Exact>::make(*cell, outgoing);
     const auto retained = budget.retained_phases({{1, -shear, 0}, origin, 1e-200});
     EXPECT_EQ(retained.gas.compare(
                   SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(1e-200)),
@@ -668,9 +668,9 @@ TEST(ExactSweptGeometry, ExactQuotientsSquaresAndRetainedCapacityDoNotNarrowPhys
     EXPECT_EQ(copy.storage_bytes(), square.storage_bytes());
     EXPECT_GT(square.storage_bytes(), sizeof(square));
     auto cell = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
-    auto fragment = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
-    EXPECT_GT(fragment->storage_bytes(), sizeof(SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>));
-    auto decoded = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(fragment->encode());
+    auto fragment = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*cell);
+    EXPECT_GT(fragment->storage_bytes(), sizeof(SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>));
+    auto decoded = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::decode(fragment->encode());
     EXPECT_NE(decoded->storage_identity(), fragment->storage_identity());
     EXPECT_EQ(decoded->volume().compare(fragment->volume()), 0);
 }
@@ -742,18 +742,18 @@ TEST(ExactSweptGeometry, ExactWallNullspaceHandlesSlantedPlanesEdgesAndCorners)
     const auto wall = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>::make(points);
     const auto origin = wall->vertex_identities().front();
     const std::array<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>, 1> one{{wall}};
-    const auto plane = SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    const auto plane = SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
         origin, {1, 0, 0}, 1, one);
     const auto third = M::from_value(1).divided_by(M::from_value(3));
     EXPECT_EQ(plane.displacement_squared().compare(third.scaled(2)), 0);
     // Translate back by the analytic rational result, not a rounded 2/3.
     const auto x =
-        SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {1, 0, 0}, 1);
+        SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {1, 0, 0}, 1);
     EXPECT_LT(plane.displacement_squared().compare(x.displacement_squared()), 0);
     const auto other = SimpleFluid::PLIC::PlanarFace<SimpleFluid::ArithmeticMode::Exact>::make(
         std::array<SimpleFluid::PLIC::GeometryPoint, 3>{{{0, 0, 0}, {1, -1, 0}, {0, 0, 1}}});
     const std::array<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>, 2> two{{wall, other}};
-    const auto edge = SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    const auto edge = SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
         origin, {1, 0, 0}, 1, two);
     // Common tangent of x+y+z=0 and x+y=0 is (1,-1,0).
     EXPECT_EQ(edge.displacement_squared().compare(M::from_value(.5)), 0);
@@ -761,13 +761,13 @@ TEST(ExactSweptGeometry, ExactWallNullspaceHandlesSlantedPlanesEdgesAndCorners)
         std::array<SimpleFluid::PLIC::GeometryPoint, 3>{{{0, 0, 0}, {0, 1, 0}, {0, 0, 1}}});
     const std::array<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>, 3> three{
         {wall, other, third_wall}};
-    const auto corner = SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    const auto corner = SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
         origin, {1, 2, 3}, 1, three);
     EXPECT_EQ(corner.departure, corner.point);
     EXPECT_EQ(corner.displacement_squared().sign(), 0);
     const std::array<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>, 4> duplicate{
         {wall->reversed(), other, wall, other->reversed()}};
-    EXPECT_EQ(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_EQ(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                   origin, {1, 0, 0}, 1, duplicate)
                   .departure,
         edge.departure);
@@ -776,15 +776,15 @@ TEST(ExactSweptGeometry, ExactWallNullspaceHandlesSlantedPlanesEdgesAndCorners)
     const std::array<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>, 2> distinct{
         {wall, almost_parallel}};
     const auto narrow_edge =
-        SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+        SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
             origin, {1, 0, 0}, 1, distinct);
     EXPECT_EQ(narrow_edge.displacement_squared().compare(M::from_value(.5)), 0);
     EXPECT_EQ(narrow_edge.departure, edge.departure);
     const std::span<const SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>> none;
-    EXPECT_EQ(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_EQ(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                   origin, {1, 2, 3}, .25, none)
                   .departure,
-        SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {1, 2, 3}, .25)
+        SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {1, 2, 3}, .25)
             .departure);
 }
 TEST(ExactSweptGeometry, ExactWallTrajectoriesRetainSubnormalDisplacementsAndRejectInvalidProofs)
@@ -795,7 +795,7 @@ TEST(ExactSweptGeometry, ExactWallTrajectoriesRetainSubnormalDisplacementsAndRej
     const auto origin = wall->vertex_identities().front();
     const std::array<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>, 1> walls{{wall}};
     const double eta = std::numeric_limits<double>::denorm_min();
-    const auto tiny = SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    const auto tiny = SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
         origin, {eta, 0, 0}, 1, walls);
     EXPECT_NE(tiny.departure, tiny.point);
     EXPECT_EQ(
@@ -808,48 +808,48 @@ TEST(ExactSweptGeometry, ExactWallTrajectoriesRetainSubnormalDisplacementsAndRej
     const std::array<SimpleFluid::PLIC::PlanarFacePtr<SimpleFluid::ArithmeticMode::Exact>, 1> translated_walls{
         {translated_wall}};
     const auto translated =
-        SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+        SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
             translated_origin, {eta, 0, 0}, 1, translated_walls);
     EXPECT_EQ(translated.displacement_squared().compare(tiny.displacement_squared()), 0);
     EXPECT_EQ(translated.departure,
         SimpleFluid::PLIC::point_translated<SimpleFluid::ArithmeticMode::Exact>(
             tiny.departure, SimpleFluid::PLIC::displacement<SimpleFluid::ArithmeticMode::Exact>({0, 0, 0}, shift)));
     const auto off_plane =
-        SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {1e-300, 0, 0}, 1)
+        SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {1e-300, 0, 0}, 1)
             .departure;
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      off_plane, {1, 0, 0}, 1, walls),
         std::invalid_argument);
     const auto outside =
-        SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {-4, 4, 0}, 1)
+        SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace(origin, {-4, 4, 0}, 1)
             .departure;
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      outside, {1, 0, 0}, 1, walls),
         std::invalid_argument);
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      origin, {1, 0, 0}, -1, walls),
         std::invalid_argument);
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      origin, {INFINITY, 0, 0}, 1, walls),
         std::invalid_argument);
-    SimpleFluid::PLIC::TrajectoryLimits limits;
+    SimpleFluid::geometry::swept_volume::TrajectoryLimits limits;
     limits.maximum_constraints = 0;
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      origin, {1, 0, 0}, 1, walls, limits),
         std::invalid_argument);
     limits = {};
     limits.maximum_integer_bits = 8;
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      origin, {eta, 0, 0}, 1, walls, limits),
         std::invalid_argument);
     limits = {};
     limits.byte_budget = 1;
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      origin, {1, 0, 0}, 1, walls, limits),
         std::invalid_argument);
     limits = {};
     limits.maximum_operations = 1;
-    EXPECT_THROW(SimpleFluid::PLIC::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::NodeTrajectory<SimpleFluid::ArithmeticMode::Exact>::backtrace_constrained(
                      origin, {1, 0, 0}, 1, walls, limits),
         std::invalid_argument);
 }
@@ -857,8 +857,8 @@ TEST(ExactSweptGeometry, SupportingPlanesPreserveContactsOverlapAndSubnormalDono
 {
     const auto cell =
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
-    const SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{37, cell};
-    std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> octants;
+    const SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{37, cell};
+    std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> octants;
     for (unsigned z = 0; z < 2; ++z)
         for (unsigned y = 0; y < 2; ++y)
             for (unsigned x = 0; x < 2; ++x)
@@ -866,32 +866,32 @@ TEST(ExactSweptGeometry, SupportingPlanesPreserveContactsOverlapAndSubnormalDono
                 const auto part = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
                     {.5 * x, .5 * y, .5 * z}, {.5 * (x + 1), .5 * (y + 1), .5 * (z + 1)});
                 octants.push_back({37, octants.size(),
-                    SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*part)});
+                    SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*part)});
             }
     // All pairs meet along exact faces, edges, vertices, or are separated.
     EXPECT_NO_THROW(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, octants));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, octants));
     std::reverse(octants.begin(), octants.end());
     EXPECT_NO_THROW(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, octants));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, octants));
     for (const double width : {std::ldexp(1., -40), 1e-310})
     {
-        const auto tiny = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+        const auto tiny = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
             *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {width, 1, 1}));
-        const auto remainder = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+        const auto remainder = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
             *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({width, 0, 0}, {1, 1, 1}));
-        std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{
+        std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{
             {37, 0, tiny}, {37, 1, remainder}};
-        EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
             donor, column));
         column.push_back({37, 2, tiny});
         // Any strictly positive overlap, even subnormal, still falls through
         // to exact clipping and rejects; no zero-contact tolerance exists.
-        EXPECT_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                          donor, column),
             std::invalid_argument);
         column = {{37, 0, remainder}};
-        EXPECT_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                          donor, column),
             std::invalid_argument);
     }
@@ -900,8 +900,8 @@ TEST(ExactSweptGeometry, SupportPlaneCacheBoundariesPreserveProofsPairChargesAnd
 {
     const auto cell =
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
-    const SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{37, cell};
-    std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> octants;
+    const SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{37, cell};
+    std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> octants;
     for (unsigned z = 0; z < 2; ++z)
         for (unsigned y = 0; y < 2; ++y)
             for (unsigned x = 0; x < 2; ++x)
@@ -909,23 +909,23 @@ TEST(ExactSweptGeometry, SupportPlaneCacheBoundariesPreserveProofsPairChargesAnd
                 const auto part = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
                     {.5 * x, .5 * y, .5 * z}, {.5 * (x + 1), .5 * (y + 1), .5 * (z + 1)});
                 octants.push_back({37, octants.size(),
-                    SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*part)});
+                    SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*part)});
             }
 
     // The admitted piece array exactly consumes its budget, leaving zero bytes
     // for either optional cache. The cache-free path must retain every exact
     // contact proof. A roomy lease selects the cache and must be equivalent.
-    SimpleFluid::PLIC::SweepLimits fallback;
+    SimpleFluid::geometry::swept_volume::SweepLimits fallback;
     fallback.byte_budget =
-        octants.size() * sizeof(SimpleFluid::PLIC::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
+        octants.size() * sizeof(SimpleFluid::geometry::swept_volume::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
     auto cached = fallback;
     cached.byte_budget = 1 << 20;
     for (const auto& limits : {fallback, cached})
     {
-        EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
             donor, octants, limits));
         std::reverse(octants.begin(), octants.end());
-        EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
             donor, octants, limits));
         std::reverse(octants.begin(), octants.end());
     }
@@ -935,27 +935,27 @@ TEST(ExactSweptGeometry, SupportPlaneCacheBoundariesPreserveProofsPairChargesAnd
     // call nor order: 8 choose 2 = 28, doubled to 56.
     auto short_pair_budget = fallback;
     short_pair_budget.maximum_pair_tests = 55;
-    EXPECT_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+    EXPECT_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                      donor, octants, short_pair_budget),
         std::invalid_argument);
     auto exact_pair_budget = fallback;
     exact_pair_budget.maximum_pair_tests = 56;
-    EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+    EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
         donor, octants, exact_pair_budget));
 
-    const auto left = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+    const auto left = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
         *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {.5, 1, 1}));
-    const auto right = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+    const auto right = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
         *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({.5, 0, 0}, {1, 1, 1}));
-    const std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> contact{
+    const std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> contact{
         {37, 0, left}, {37, 1, right}};
-    const auto middle = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+    const auto middle = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
         *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({.25, 0, 0}, {.75, 1, 1}));
     EXPECT_EQ(
         (middle->volume() + middle->volume())
             .compare(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*donor.geometry)),
         0);
-    const std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> balanced_overlap{
+    const std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> balanced_overlap{
         {37, 0, middle}, {37, 1, middle}};
 
     // Sweep from zero optional bytes through a roomy lease. Two-piece shells
@@ -965,7 +965,7 @@ TEST(ExactSweptGeometry, SupportPlaneCacheBoundariesPreserveProofsPairChargesAnd
     // reject only in the overlap proof, whether support caching or its typed
     // fallback is active.
     const auto admitted_bytes =
-        contact.size() * sizeof(SimpleFluid::PLIC::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
+        contact.size() * sizeof(SimpleFluid::geometry::swept_volume::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
     std::vector<std::size_t> offsets;
     for (std::size_t offset = 0; offset <= 65536; offset += 256)
         offsets.push_back(offset);
@@ -978,12 +978,12 @@ TEST(ExactSweptGeometry, SupportPlaneCacheBoundariesPreserveProofsPairChargesAnd
     {
         auto limits = fallback;
         limits.byte_budget = admitted_bytes + offset;
-        EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
             donor, contact, limits));
         const auto message = invalid_argument_message(
             [&]
             {
-                SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+                SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                     donor, balanced_overlap, limits);
             });
         EXPECT_NE(message.find("Exact signed fragment cover overlaps."), std::string::npos) << message;
@@ -1023,11 +1023,11 @@ TEST(ExactSweptGeometry, SupportingPlanesRetainActualCirculationDonorFragmentCov
     using M = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>;
     auto loop = circulation(1. / 64);
     const auto routed =
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(loop.donors, loop.targets);
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::local(loop.donors, loop.targets);
     ASSERT_GT(routed.atoms().size(), loop.donors.size());
     for (const auto& donor : loop.donors)
     {
-        std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column;
+        std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column;
         M volume;
         for (const auto& atom : routed.atoms())
             if (atom.donor == donor.id)
@@ -1040,17 +1040,17 @@ TEST(ExactSweptGeometry, SupportingPlanesRetainActualCirculationDonorFragmentCov
         // These are actual signed-sweep/recipient-proof fragments, not an
         // arbitrary spatial box catalog. The unchanged cover proof checks
         // containment, pairwise overlap and independent first moments.
-        EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
             donor, column));
         std::reverse(column.begin(), column.end());
-        EXPECT_NO_THROW(SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+        EXPECT_NO_THROW(SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
             donor, column));
     }
 }
 
 TEST(ExactSweptGeometry, SupportingPlanesHandleCollinearPrefixAndMomentBalancedOverlap)
 {
-    const SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{
+    const SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{
         37, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1})};
     const std::vector<SimpleFluid::PLIC::GeometryPoint> points{
         {0, 0, 0}, {.5, 0, 0}, {0, 1, 0}, {.5, 1, 0}, {0, 0, 1}, {.5, 0, 1}, {0, 1, 1}, {.5, 1, 1}, {.5, .5, 0}};
@@ -1058,24 +1058,24 @@ TEST(ExactSweptGeometry, SupportingPlanesHandleCollinearPrefixAndMomentBalancedO
     // first fan triangle is zero; its next fan triangle fixes the outward sign.
     const std::vector<std::vector<std::size_t>> faces{
         {1, 8, 3, 7, 5}, {0, 4, 6, 2}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 8, 1}, {4, 5, 7, 6}};
-    const auto left = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+    const auto left = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
         *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(points, faces));
-    const auto right = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+    const auto right = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
         *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({.5, 0, 0}, {1, 1, 1}));
-    std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{
+    std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{
         {37, 0, right}, {37, 1, left}};
     EXPECT_NO_THROW(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column));
     std::reverse(column.begin(), column.end());
     EXPECT_NO_THROW(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column));
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column));
 
     // Two copies of the central half have exactly the donor's total volume
     // AND first moments: symmetry puts both centroids at (1/2,1/2,1/2).
     // The central overlap and the two omitted outer quarters cannot be caught
     // by aggregate moments. The independent positive-intersection proof must
     // reject them, including when the copies have different recipient IDs.
-    const auto middle = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+    const auto middle = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
         *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({.25, 0, 0}, {.75, 1, 1}));
     EXPECT_EQ(
         (middle->volume() + middle->volume())
@@ -1083,7 +1083,7 @@ TEST(ExactSweptGeometry, SupportingPlanesHandleCollinearPrefixAndMomentBalancedO
         0);
     column = {{37, 0, middle}, {37, 1, middle}};
     EXPECT_THROW(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column),
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column),
         std::invalid_argument);
 }
 
@@ -1093,20 +1093,20 @@ TEST(ExactSweptGeometry, CertifiedContainmentRetainsCollinearDonorAndSubnormalOu
         {0, 0, 0}, {.5, 0, 0}, {0, 1, 0}, {.5, 1, 0}, {0, 0, 1}, {.5, 0, 1}, {0, 1, 1}, {.5, 1, 1}, {.5, .5, 0}};
     const std::vector<std::vector<std::size_t>> faces{
         {1, 8, 3, 7, 5}, {0, 4, 6, 2}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 8, 1}, {4, 5, 7, 6}};
-    const SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{
+    const SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{
         37, SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::make(points, faces)};
     // The donor's first outward face begins with a collinear fan triangle.
-    std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{{37, 0,
-        SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+    std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{{37, 0,
+        SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
             *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {.5, 1, 1}))}};
     EXPECT_NO_THROW(
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column));
-    column[0].geometry = SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column));
+    column[0].geometry = SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
         *SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
             {-std::numeric_limits<double>::denorm_min(), 0, 0}, {.5, 1, 1}));
     try
     {
-        SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column);
+        SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, column);
         FAIL() << "A subnormal outside sliver must fail containment.";
     }
     catch (const std::invalid_argument& error)
@@ -1119,7 +1119,7 @@ TEST(ExactSweptGeometry, SupportingSignsPreserveObliqueRationalContactsAndSubnor
 {
     const auto cell =
         SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box({0, 0, 0}, {1, 1, 1});
-    const SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{37, cell};
+    const SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact> donor{37, cell};
     const auto whole = SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::volume(*cell);
     for (const SimpleFluid::PLIC::GeometryPoint normal :
         {SimpleFluid::PLIC::GeometryPoint{1, 3, 0}, SimpleFluid::PLIC::GeometryPoint{1, 3, 5}})
@@ -1131,39 +1131,39 @@ TEST(ExactSweptGeometry, SupportingSignsPreserveObliqueRationalContactsAndSubnor
             ASSERT_TRUE(left_geometry);
             ASSERT_TRUE(right_geometry);
             const auto left =
-                SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*left_geometry);
+                SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*left_geometry);
             const auto right =
-                SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*right_geometry);
+                SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*right_geometry);
             // These oblique pieces have overlapping axis bounds. Their exact
             // rational cut vertices meet on a two- or three-axis support plane;
             // supporting-plane signs, rather than axis separation, prove contact.
             EXPECT_GT(left->volume().sign(), 0);
             EXPECT_EQ((left->volume() + right->volume()).compare(whole), 0);
-            std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{
+            std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column{
                 {37, 0, left}, {37, 1, right}};
             EXPECT_NO_THROW(
-                SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+                SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                     donor, column));
             std::reverse(column.begin(), column.end());
             EXPECT_NO_THROW(
-                SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+                SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                     donor, column));
 
             const auto wider_geometry =
                 cell->clip({normal, {0, 0, 0}, std::nextafter(cut, std::numeric_limits<double>::infinity())}).inside;
             ASSERT_TRUE(wider_geometry);
             const auto wider =
-                SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*wider_geometry);
+                SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*wider_geometry);
             // One binary64 step of positive penetration must survive even when
             // the entire cut is subnormal and the overlap volume is much smaller.
             EXPECT_GT((wider->volume() + right->volume() - whole).sign(), 0);
             column = {{37, 0, wider}, {37, 1, right}};
-            SimpleFluid::PLIC::SweepLimits fallback;
+            SimpleFluid::geometry::swept_volume::SweepLimits fallback;
             fallback.byte_budget =
-                column.size() * sizeof(SimpleFluid::PLIC::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
+                column.size() * sizeof(SimpleFluid::geometry::swept_volume::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
             auto cached = fallback;
             cached.byte_budget = 1 << 20;
-            const std::array<std::pair<SimpleFluid::PLIC::SweepLimits, const char*>, 2> configurations{{
+            const std::array<std::pair<SimpleFluid::geometry::swept_volume::SweepLimits, const char*>, 2> configurations{{
                 {fallback, "support_cache=fallback"},
                 {cached, "support_cache=cached"},
             }};
@@ -1176,7 +1176,7 @@ TEST(ExactSweptGeometry, SupportingSignsPreserveObliqueRationalContactsAndSubnor
                     const auto message = invalid_argument_message(
                         [&]
                         {
-                            SimpleFluid::PLIC::TransportPartition<
+                            SimpleFluid::geometry::swept_volume::TransportPartition<
                                 SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(donor, arranged, limits);
                         });
                     // The aggregate volume exceeds the donor here, but the
@@ -1664,11 +1664,11 @@ TEST(ExactSweptGeometry, CertifiedFilterCachedConstructionsMatchUncachedExactInt
         const auto cube = SimpleFluid::PLIC::ConvexCellGeometry<SimpleFluid::ArithmeticMode::Exact>::box(
             shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1});
         const auto face = face_at(cube, 0, shift[0] + 1);
-        const auto sweep = SimpleFluid::PLIC::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
+        const auto sweep = SimpleFluid::geometry::swept_volume::SweptFace<SimpleFluid::ArithmeticMode::Exact>::make(
             *face, traces(face, {1, 0, 0}, .25), .25);
         // The split produces represented rational 1/3 cut coordinates and
         // oblique contacts inside several sweep simplices.
-        const std::array<SimpleFluid::PLIC::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> donors{{
+        const std::array<SimpleFluid::geometry::swept_volume::SweepDonor<SimpleFluid::ArithmeticMode::Exact>, 2> donors{{
             {17, cube->clip({{1, 3, 0}, shift, 1}).inside},
             {29, cube->clip({{-1, -3, 0}, shift, -1}).inside},
         }};
@@ -1711,7 +1711,7 @@ TEST(ExactSweptGeometry, CertifiedFilterCachedConstructionsMatchUncachedExactInt
                 // Apply that same public bridge to the independently clipped
                 // oracle before comparing local first-moment enclosures.
                 const auto aligned_oracle =
-                    SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*oracle)
+                    SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*oracle)
                         ->as_geometry();
                 const auto actual_moments = actual->moments(), oracle_moments = aligned_oracle->moments();
                 ASSERT_EQ(actual_moments.origin, oracle_moments.origin);
@@ -1734,7 +1734,7 @@ TEST(ExactSweptGeometry, CertifiedFilterCachedConstructionsMatchUncachedExactInt
             // bytes; the second configuration grants room for filter summaries.
             for (const auto& donor : donors)
             {
-                std::vector<SimpleFluid::PLIC::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column;
+                std::vector<SimpleFluid::geometry::swept_volume::TransportAtom<SimpleFluid::ArithmeticMode::Exact>> column;
                 for (const auto& piece : pieces)
                     if (piece.donor == donor.id)
                         column.push_back({donor.id, column.size(), piece.geometry});
@@ -1742,22 +1742,22 @@ TEST(ExactSweptGeometry, CertifiedFilterCachedConstructionsMatchUncachedExactInt
                 // unswept x<=3/4 portion via the unchanged public exact clip.
                 if (const auto unswept = donor.geometry->clip({{1, 0, 0}, shift, .75}).inside)
                     column.push_back({donor.id, column.size(),
-                        SimpleFluid::PLIC::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                        SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
                             *unswept)});
-                SimpleFluid::PLIC::SweepLimits denied;
+                SimpleFluid::geometry::swept_volume::SweepLimits denied;
                 denied.byte_budget =
-                    column.size() * sizeof(SimpleFluid::PLIC::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
+                    column.size() * sizeof(SimpleFluid::geometry::swept_volume::ConvexFragmentPtr<SimpleFluid::ArithmeticMode::Exact>);
                 auto roomy = denied;
                 roomy.byte_budget = 1 << 20;
                 EXPECT_NO_THROW(
-                    SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+                    SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                         donor, column, denied));
                 EXPECT_NO_THROW(
-                    SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+                    SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                         donor, column, roomy));
                 std::reverse(column.begin(), column.end());
                 EXPECT_NO_THROW(
-                    SimpleFluid::PLIC::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
+                    SimpleFluid::geometry::swept_volume::TransportPartition<SimpleFluid::ArithmeticMode::Exact>::certify_donor_cover(
                         donor, column, roomy));
             }
         }

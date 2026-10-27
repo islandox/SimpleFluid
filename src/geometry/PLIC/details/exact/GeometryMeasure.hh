@@ -62,10 +62,14 @@ public:
     [[nodiscard]] const void* storage_identity() const noexcept { return impl_.get(); }
 
 private:
-    friend class SweepAccess<ArithmeticMode::Exact>;
-    friend class SweptFace<ArithmeticMode::Exact>;
-    friend class DonorExport<ArithmeticMode::Exact>;
+    friend class ::SimpleFluid::geometry::swept_volume::SweepAccess<ArithmeticMode::Exact>;
+    friend class ::SimpleFluid::geometry::swept_volume::SweptFace<ArithmeticMode::Exact>;
+    friend class ::SimpleFluid::geometry::swept_volume::DonorExport<ArithmeticMode::Exact>;
     explicit GeometryMeasure(std::shared_ptr<const Impl>);
     std::shared_ptr<const Impl> impl_;
+};
+template<> struct PhaseMeasures<ArithmeticMode::Exact>
+{
+    GeometryMeasure<ArithmeticMode::Exact> bulk, gas, carrier;
 };
 } // namespace SimpleFluid::PLIC

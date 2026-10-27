@@ -5,7 +5,7 @@
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
-#include "geometry/PLIC/OrdinaryAggregate.hh"
+#include "geometry/swept_volume/OrdinaryAggregate.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 
 namespace SimpleFluid::VoF::general_vof_detail
@@ -26,7 +26,7 @@ Point represented(const Wide& p)
 {
     return Point(p);
 }
-void prove_retained(const Frontier& frontier, const fp::Sweep<mode>& recipe, fp::Work& work)
+void prove_retained(const Frontier& frontier, const SimpleFluid::geometry::swept_volume::Sweep<mode>& recipe, SimpleFluid::geometry::swept_volume::Work& work)
 {
     const auto& points = frontier.geometry->points();
     if (points.size() < 3)
@@ -84,14 +84,14 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
     operation_context.record.mark(failure::Field::ByteBudget);
     const auto comm = data.hierarchy->communicator();
     LocalGeometryResult result;
-    fp::Work work{data.options.sweep};
+    SimpleFluid::geometry::swept_volume::Work work{data.options.sweep};
     work.arithmetic_mode = mode;
     work.volume_tolerance = data.options.reconstruction.volume_tolerance;
     work.limits.byte_budget = std::min(work.limits.byte_budget, data.options.byte_budget);
     struct Pending
     {
         const AMR::AdaptiveTile* tile;
-        fp::Sweep<mode> recipe;
+        SimpleFluid::geometry::swept_volume::Sweep<mode> recipe;
         std::vector<std::size_t> candidates;
         bool geometric = false;
     };
@@ -119,7 +119,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 face_context.record.face = tile.face_gid;
                 face_context.record.mark(failure::Field::Face);
                 work.charge(2 * tile.node_gids.size() * sizeof(Point) + sizeof(Pending));
-                auto recipe = fp::prepare_sweep<mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid),
+                auto recipe = SimpleFluid::geometry::swept_volume::prepare_sweep<mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid),
                     work, face_budgets.at(tile.face_gid));
                 Box bounds;
                 for (const auto& p : recipe.current)
@@ -151,11 +151,11 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 // A zero net control can still have nonzero cancelling signed pieces.
                 bool zero_effect = true;
                 work.charge(3 * tile.node_gids.size() * sizeof(std::array<Point, 3>));
-                for (const auto& triangle : fp::sweep_boundary(
+                for (const auto& triangle : SimpleFluid::geometry::swept_volume::sweep_boundary(
                          tile.node_gids, recipe.current, recipe.departure, recipe.center, recipe.backcenter))
                 {
                     work.test();
-                    const auto v = fp::cone_determinant(recipe.center, triangle);
+                    const auto v = SimpleFluid::geometry::swept_volume::cone_determinant(recipe.center, triangle);
                     zero_effect &= v.value == 0 && v.absolute_error == 0;
                 }
                 geometric &= !zero_effect;
@@ -227,7 +227,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 // corrected center. Equal rounded coordinates never merge identities.
                 const auto& recipe = entry.recipe;
                 const auto n = tile.node_gids.size();
-                std::vector<PLIC::OrdinaryAggregateTetra> tetrahedra;
+                std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra> tetrahedra;
                 const auto append = [&](std::array<std::size_t, 3> ids)
                 {
                     const auto point = [&](std::size_t id) -> const Point&
@@ -238,7 +238,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             return recipe.backcenter;
                         return id < n + 2 ? recipe.current.at(id - 2) : recipe.departure.at(id - n - 2);
                     };
-                    PLIC::OrdinaryAggregateTetra tetra;
+                    SimpleFluid::geometry::swept_volume::OrdinaryAggregateTetra tetra;
                     tetra.vertex_ids = {0, ids[0], ids[1], ids[2]};
                     for (unsigned i = 0; i < 4; ++i)
                         tetra.vertices[i] = point(tetra.vertex_ids[i]);
@@ -265,7 +265,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         append({2 + j, n + 2 + i, n + 2 + j});
                     }
                 }
-                std::vector<PLIC::OrdinaryAggregateDonor> donors;
+                std::vector<SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor> donors;
                 std::map<std::size_t, std::array<long double, 2>> phase_quotas;
                 const auto quota =
                     face_budgets.at(tile.face_gid) / (2 * std::max<std::size_t>(1, entry.candidates.size()));
@@ -273,7 +273,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 {
                     const auto& cell = *cells[i];
                     const auto& plane = planes.at(cell.key);
-                    PLIC::OrdinaryAggregateDonor donor;
+                    SimpleFluid::geometry::swept_volume::OrdinaryAggregateDonor donor;
                     donor.id = i;
                     donor.geometry = geometries.at(cell.key);
                     donor.pure_gas = plane.pure_gas;
@@ -305,16 +305,16 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 sweep_limits.maximum_pair_tests -= std::min(work.pair_tests, sweep_limits.maximum_pair_tests);
                 auto limits = geometry_limits(mode, sweep_limits.byte_budget);
                 limits.maximum_pair_tests = sweep_limits.maximum_pair_tests;
-                PLIC::OrdinaryAggregateContext progress;
-                PLIC::OrdinaryAggregateResult aggregate;
+                SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext progress;
+                SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult aggregate;
                 try
                 {
-                    const PLIC::OrdinaryAggregateSource source(tetrahedra, sweep_limits, limits, &progress);
+                    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(tetrahedra, sweep_limits, limits, &progress);
                     aggregate = source.measure(donors, &progress);
                 }
                 catch (...)
                 {
-                    using Stage = PLIC::OrdinaryAggregateContext::Stage;
+                    using Stage = SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext::Stage;
                     const auto stage = progress.stage == Stage::Source     ? "interface_aggregate_source"
                                        : progress.stage == Stage::Coverage ? "interface_aggregate_coverage"
                                        : progress.stage == Stage::Metric   ? "interface_aggregate_metric"
@@ -341,7 +341,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                         diagnostic.record.donor = cells[progress.donor]->gid;
                         diagnostic.record.mark(failure::Field::Donor);
                     }
-                    if (progress.cut != PLIC::OrdinaryAggregateContext::absent)
+                    if (progress.cut != SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext::absent)
                     {
                         diagnostic.record.cut = progress.cut;
                         diagnostic.record.mark(failure::Field::Cut);

@@ -209,8 +209,8 @@ MeshToMeshTransfer<Pack>::MeshToMeshTransfer(
     std::vector<Geometry> source_geometry, target_geometry;
     try
     {
-        source_geometry = geometry(*d_source, conservative, valid);
-        target_geometry = geometry(*d_target, conservative, valid);
+        source_geometry = mesh_transfer_detail::geometry(*d_source, conservative, valid);
+        target_geometry = mesh_transfer_detail::geometry(*d_target, conservative, valid);
         d_source_epoch = d_source->geometry_epoch();
         d_target_epoch = d_target->geometry_epoch();
     }

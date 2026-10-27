@@ -47,8 +47,8 @@ inline AMR::AdaptiveBytes algorithm(const GeneralVoFOptions& options)
              std::uint64_t(options.reconstruction.maximum_clip_evaluations),
              std::uint64_t(options.sweep.maximum_simplices), std::uint64_t(options.sweep.maximum_atoms),
              std::uint64_t(options.sweep.maximum_pair_tests),
-             std::uint64_t(PLIC::TrajectoryLimits{}.maximum_constraints),
-             std::uint64_t(PLIC::TrajectoryLimits{}.maximum_operations)})
+             std::uint64_t(SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_constraints),
+             std::uint64_t(SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_operations)})
         writer.word(value);
     real(writer, options.reconstruction.volume_tolerance);
     real(writer, options.reconstruction.fit_tolerance);
@@ -83,12 +83,12 @@ PLIC::Point<Mode> departure(
     for (const auto& wall : data.topology->node_walls.at(node))
         walls.push_back({PLIC::ConvexCellGeometry<Mode>::from_dynamic(wall.finite_constraint.geometry),
             wall.finite_constraint.face});
-    if (walls.size() > PLIC::TrajectoryLimits{}.maximum_constraints)
+    if (walls.size() > SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_constraints)
         throw std::invalid_argument("Finite VoF construction wall catalog exceeds its constraint cap.");
     PLIC::GeometryLimits limits;
     limits.arithmetic_mode = Mode;
     limits.byte_budget = data.options.byte_budget;
-    limits.maximum_operations = PLIC::TrajectoryLimits{}.maximum_operations;
+    limits.maximum_operations = SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_operations;
     return PLIC::backtrace_constrained<Mode>(
         PLIC::Point<Mode>(data.topology->finite_nodes.at(node)), velocity, timestep, walls, limits);
 }

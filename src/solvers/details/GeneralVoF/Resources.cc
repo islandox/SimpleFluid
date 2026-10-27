@@ -2,7 +2,7 @@
  * @brief Compiled general VoF Resources operation.
  */
 #include "solvers/details/GeneralVoF/Resources.hh"
-#include "FVM/details/FiniteGeometryAccess.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
@@ -129,7 +129,7 @@ void initialize_geometry(
                         const auto square = A::dot(normal, normal);
                         area += std::sqrt(square.value) / 2;
                     }
-                    const auto v = VoF::finite_detail::runtime_value<Mode>(bounded_geometry[c]->volume());
+                    const auto v = SimpleFluid::geometry::swept_volume::runtime_value<Mode>(bounded_geometry[c]->volume());
                     volume[c] = A::as_double(v);
                     thickness[c] = static_cast<double>(2 * v.value / area);
                     if (!std::isfinite(thickness[c]) || !(thickness[c] > 0))

@@ -3,7 +3,7 @@ if(NOT DEFINED SIMPLEFLUID_SOURCE_DIR)
 endif()
 
 # Application/native clients select modes through public PLIC interfaces. Backend
-# implementations, including rational arithmetic, belong inside PLIC itself.
+# implementations, including rational arithmetic, belong inside the geometry providers.
 foreach(component IN ITEMS geometry/mesh FVM solvers)
     file(GLOB_RECURSE sources
         "${SIMPLEFLUID_SOURCE_DIR}/src/${component}/*.hh"
@@ -15,7 +15,7 @@ foreach(component IN ITEMS geometry/mesh FVM solvers)
             continue()
         endif()
         file(READ "${source}" contents)
-        if(contents MATCHES "#[ \t]*include[ \t]*[<\"]geometry/PLIC/details/(ordinary|bounded|exact)/")
+        if(contents MATCHES "#[ \t]*include[ \t]*[<\"]geometry/(PLIC|swept_volume)/details/(ordinary|bounded|exact)/")
             message(FATAL_ERROR "PLIC backend implementation included by consumer: ${source}")
         endif()
         if(contents MATCHES "#[ \t]*include[ \t]*[<\"]geometry/(PLIC/Exact|mesh/ExactExtrudedConstruction)")
@@ -54,13 +54,16 @@ file(GLOB_RECURSE plic_sources
     "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/PLIC/*.hh"
     "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/PLIC/*.cc"
     "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/PLIC/*.ipp"
-    "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/PLIC/*.tcc")
+    "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/PLIC/*.tcc"
+    "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/swept_volume/*.hh"
+    "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/swept_volume/*.cc"
+    "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/swept_volume/*.ipp"
+    "${SIMPLEFLUID_SOURCE_DIR}/src/geometry/swept_volume/*.tcc")
 foreach(source IN LISTS plic_sources)
     simplefluid_check_plic_include_order("${source}")
 endforeach()
 foreach(source IN ITEMS
     FVM/GeneralVoF.cc FVM/GeneralVoF.hh FVM/details/GeneralVoFState.cc
-    FVM/details/FiniteVoFTransport.cc FVM/details/FiniteVoFTransport.tcc
     solvers/GeneralVoFSolver.cc)
     simplefluid_check_plic_include_order("${SIMPLEFLUID_SOURCE_DIR}/src/${source}")
 endforeach()

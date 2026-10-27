@@ -3,15 +3,16 @@
  */
 #pragma once
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/swept_volume/SweptVolumeDeclarations.hh"
 #include <limits>
 #include <memory>
 #include <optional>
 
-namespace SimpleFluid::PLIC
+namespace SimpleFluid::geometry::swept_volume
 {
 struct OrdinaryAggregateTetra
 {
-    std::array<Point<ArithmeticMode::Ordinary>, 4> vertices;
+    std::array<PLIC::Point<ArithmeticMode::Ordinary>, 4> vertices;
     /** Identities belong to this source batch; equal coordinates do not issue an identity. */
     std::array<std::uint64_t, 4> vertex_ids{};
     int sign = 1;
@@ -19,9 +20,9 @@ struct OrdinaryAggregateTetra
 struct OrdinaryAggregateDonor
 {
     std::uint64_t id = 0;
-    ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
+    PLIC::ConvexGeometryPtr<ArithmeticMode::Ordinary> geometry;
     /** An absent plane requires exactly one pure declaration. */
-    std::optional<GeometryHalfspace> gas;
+    std::optional<PLIC::GeometryHalfspace> gas;
     bool pure_gas = false, pure_carrier = false;
     /** Independent physical scales, supplied by the accounting owner. */
     long double bulk_budget = 0, gas_budget = 0, carrier_budget = 0;
@@ -82,7 +83,7 @@ class OrdinaryAggregateSource
 public:
     struct Impl;
     explicit OrdinaryAggregateSource(std::span<const OrdinaryAggregateTetra>, SweepLimits = {},
-        GeometryLimits = {.arithmetic_mode = ArithmeticMode::Ordinary}, OrdinaryAggregateContext* = nullptr);
+        PLIC::GeometryLimits = {.arithmetic_mode = ArithmeticMode::Ordinary}, OrdinaryAggregateContext* = nullptr);
     [[nodiscard]] OrdinaryAggregateResult measure(
         std::span<const OrdinaryAggregateDonor>, OrdinaryAggregateContext* = nullptr) const;
     [[nodiscard]] std::size_t storage_bytes() const noexcept;
@@ -90,4 +91,4 @@ public:
 private:
     std::shared_ptr<const Impl> impl_;
 };
-} // namespace SimpleFluid::PLIC
+} // namespace SimpleFluid::geometry::swept_volume
