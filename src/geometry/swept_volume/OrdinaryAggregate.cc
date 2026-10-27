@@ -10,6 +10,7 @@
 #include <numeric>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 namespace SimpleFluid::geometry::swept_volume
 {
@@ -102,6 +103,7 @@ struct AggregateWork
     OrdinaryAggregateStatistics stats;
     std::size_t bytes = 0, operation_limit = 0;
     OrdinaryAggregateContext* context = nullptr;
+    std::size_t indirect_calls = 0, indirect_bytes = 0, indirect_reuses = 0;
     void sync() const
     {
         if (context)
@@ -115,7 +117,12 @@ struct AggregateWork
     {
         const auto limit = std::min(sweep.byte_budget, geometry.byte_budget);
         if (n > limit || bytes > limit - n)
-            fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate byte budget exhausted.");
+        {
+            std::ostringstream message;
+            message << "Ordinary aggregate byte budget exhausted: indirect_calls=" << indirect_calls
+                    << " indirect_bytes=" << indirect_bytes << " indirect_reuses=" << indirect_reuses << '.';
+            throw GeometryError(GeometryErrorCode::ResourceLimit, message.str());
+        }
         bytes += n;
         stats.storage_bytes = bytes;
         sync();
@@ -229,10 +236,39 @@ predicates::Result construction_quotient(predicates::Result a, predicates::Resul
         std::nextafter(quotient(numerator_error, denominator), std::numeric_limits<long double>::infinity()));
     return {value, error, predicates::Sign::Unresolved};
 }
+/** An immutable defining equation in the original tetrahedron's barycentric
+ * frame. The catalog outlives every witness, including complementary copies. */
+struct Support
+{
+    predicates::SupportRow expression;
+    const void* identity = nullptr;
+};
+struct SupportKeyOrder
+{
+    bool operator()(const std::array<const Support*, 4>& a, const std::array<const Support*, 4>& b) const
+    {
+        return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end(), std::less<const Support*>{});
+    }
+};
+using DefiningCache = std::map<std::array<const Support*, 4>, predicates::SupportEvaluation, SupportKeyOrder>;
+bool support_expression_less(const Support* a, const Support* b)
+{
+    const auto key = [](const Support* support)
+    {
+        const auto& row = support->expression;
+        return std::tie(row.source_face, row.normal, row.anchor.origin, row.anchor.exponent, row.anchor.local,
+            row.offset, row.source_incidence);
+    };
+    if (key(a) != key(b))
+        return key(a) < key(b);
+    // Equal represented expressions can still have distinct issued identities.
+    return std::less<const Support*>{}(a, b);
+}
 struct Construction
 {
     std::size_t first = 0, second = 0;
-    predicates::Result first_cut{}, second_cut{};
+    const Support* support = nullptr;
+    int orientation = 1;
 };
 struct Face
 {
@@ -243,7 +279,9 @@ struct Poly
 {
     std::vector<B> vertices;
     std::vector<B> errors;
-    std::vector<std::vector<const void*>> supports;
+    std::vector<std::vector<const Support*>> supports;
+    const OrdinaryAggregateTetra* source = nullptr;
+    DefiningCache* defining_cache = nullptr;
     // The first four entries are immutable source leaves. Later entries
     // retain the edge/support expression, independent of rounded weights.
     std::vector<Construction> constructions;
@@ -252,9 +290,9 @@ struct Poly
 void charge_poly_points(const Poly& p, AggregateWork& work)
 {
     work.charge(p.vertices.size() * (2 * sizeof(B) + sizeof(Construction)) +
-                p.supports.size() * sizeof(std::vector<const void*>));
+                p.supports.size() * sizeof(std::vector<const Support*>));
     for (const auto& support : p.supports)
-        work.charge(support.size() * sizeof(const void*));
+        work.charge(support.size() * sizeof(const Support*));
 }
 void charge_poly_copy(const Poly& p, AggregateWork& work)
 {
@@ -264,18 +302,27 @@ void charge_poly_copy(const Poly& p, AggregateWork& work)
         work.charge(face.vertices.size() * sizeof(std::size_t));
 }
 constexpr std::array<std::array<unsigned, 3>, 4> tetra_faces{{{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}}};
-Poly tetra(AggregateWork& work)
+Poly tetra(const OrdinaryAggregateTetra& source, const std::array<Support, 4>& supports, DefiningCache& cache,
+    AggregateWork& work)
 {
     work.witness();
-    work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(Construction) + 4 * sizeof(std::vector<const void*>) +
-                4 * sizeof(Face) + 12 * sizeof(std::size_t));
+    work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(Construction) + 4 * sizeof(std::vector<const Support*>) +
+                4 * sizeof(Face) + 12 * sizeof(std::size_t) + 12 * sizeof(const Support*));
     Poly p;
+    p.source = &source;
+    p.defining_cache = &cache;
     p.vertices.resize(4);
     p.errors.resize(4);
     p.supports.resize(4);
     p.constructions.resize(4);
     for (unsigned i = 0; i < 4; ++i)
+    {
         p.vertices[i][i] = 1;
+        p.supports[i].reserve(3);
+        for (unsigned j = 0; j < 4; ++j)
+            if (i != j)
+                p.supports[i].push_back(&supports[j]);
+    }
     for (unsigned i = 0; i < 4; ++i)
         p.faces.push_back({{tetra_faces[i].begin(), tetra_faces[i].end()}, static_cast<int>(i)});
     return p;
@@ -292,7 +339,8 @@ std::array<unsigned, 3> axes(unsigned pivot)
 struct Distances
 {
     B value{}, error{};
-    const void* identity = nullptr;
+    const Support* support = nullptr;
+    int orientation = 1;
 };
 predicates::Result distance(const B& b, const B& error, const Distances& d, AggregateWork& work)
 {
@@ -313,56 +361,112 @@ bool resolved(const predicates::Result& result)
 {
     return result.absolute_error == 0 || std::abs(result.value) > result.absolute_error;
 }
-/** Replay only when rounded placement cannot establish sign/contact. The
- * homogeneous edge numerator can establish incidence even when division
- * made the stored barycentric coordinates inexact. Nonzero discarded/input
- * error remains unresolved; algebraic correlation is never presumed. */
-predicates::Result replay_distance(const Poly& p, std::size_t vertex, const Distances& d, AggregateWork& work)
+/** Resolve from three independent defining equations, not from an ancestry of
+ * rounded edge-distance estimates. Exactly singular bases may be replaced;
+ * arithmetic/range/resource failures never establish contact. */
+std::optional<predicates::Result> defining_distance(
+    const Poly& p, std::size_t vertex, const Distances& d, AggregateWork& work)
 {
-    work.charge((vertex + 1) * (sizeof(predicates::Result) + sizeof(unsigned char)));
-    std::vector<predicates::Result> values(vertex + 1);
-    std::vector<unsigned char> needed(vertex + 1, 0);
-    needed[vertex] = 1;
-    // Parents always precede their crossing. Walk backwards to retain only
-    // this expression's ancestors; issued incidence terminates a branch.
-    for (std::size_t i = vertex + 1; i-- > 0;)
+    if (!p.source || !p.defining_cache || !d.support)
+        fail(GeometryErrorCode::ProvenanceMismatch, "Aggregate defining-support source is missing.");
+    std::array<predicates::FramedPoint, 4> source;
+    for (unsigned i = 0; i < 4; ++i)
+        source[i].local = p.source->vertices[i].value;
+    auto query = d.support->expression;
+    query.orientation = 1;
+    const auto interpret = [&](predicates::SupportEvaluation evaluation) -> std::optional<predicates::Result>
     {
-        work.op();
-        if (!needed[i])
-            continue;
-        for (const auto support : p.supports[i])
+        auto result = evaluation.distance;
+        if (result.sign == predicates::Sign::Unresolved)
+            return std::nullopt;
+        // Complementary queries share one evaluation, with identical error.
+        result.value *= d.orientation;
+        if (d.orientation < 0)
         {
-            work.op();
-            if (support == d.identity)
+            if (result.sign == predicates::Sign::Positive)
+                result.sign = predicates::Sign::Negative;
+            else if (result.sign == predicates::Sign::Negative)
+                result.sign = predicates::Sign::Positive;
+        }
+        represented(result.value);
+        represented(result.absolute_error);
+        if (result.sign != predicates::Sign::Zero &&
+            (result.value == 0 || (result.value > 0) != (result.sign == predicates::Sign::Positive)))
+            fail(GeometryErrorCode::UnresolvedArithmetic,
+                "Aggregate defining-support distance has no usable represented magnitude.");
+        return result;
+    };
+    const auto& supports = p.supports.at(vertex);
+    for (std::size_t a = 0; a < supports.size(); ++a)
+        for (std::size_t b = a + 1; b < supports.size(); ++b)
+            for (std::size_t c = b + 1; c < supports.size(); ++c)
             {
-                needed[i] = 2;
-                break;
+                work.pair();
+                std::array<const Support*, 4> key{supports[a], supports[b], supports[c], d.support};
+                std::sort(key.begin(), key.begin() + 3, support_expression_less);
+                if (const auto found = p.defining_cache->find(key); found != p.defining_cache->end())
+                {
+                    ++work.indirect_reuses;
+                    if (found->second.singular)
+                        continue;
+                    return interpret(found->second);
+                }
+                auto remaining = work.geometry;
+                remaining.byte_budget = std::min(work.sweep.byte_budget, remaining.byte_budget) - work.bytes;
+                if (!work.operation_limit)
+                    work.operation_limit = ::SimpleFluid::PLIC::details::Work(work.geometry).operation_limit;
+                remaining.maximum_operations = work.operation_limit - work.stats.operations;
+                remaining.maximum_pair_tests =
+                    std::min(work.sweep.maximum_pair_tests, remaining.maximum_pair_tests) - work.stats.pair_tests;
+                const auto caller = ::SimpleFluid::PLIC::details::active_work;
+                if (caller)
+                {
+                    remaining.byte_budget = std::min(remaining.byte_budget, caller->limits.byte_budget - caller->bytes);
+                    remaining.maximum_operations =
+                        std::min(remaining.maximum_operations, caller->operation_limit - caller->operations);
+                    remaining.maximum_pair_tests =
+                        std::min(remaining.maximum_pair_tests, caller->limits.maximum_pair_tests - caller->pairs);
+                }
+                if (!remaining.maximum_operations || !remaining.maximum_pair_tests || !remaining.byte_budget)
+                    fail(GeometryErrorCode::ResourceLimit, "Aggregate defining-support work budget exhausted.");
+                ::SimpleFluid::PLIC::details::Operation operation(remaining);
+                // A nested Operation normally shares the caller. This fallback
+                // needs its own remaining-budget guard and zero-based counters.
+                const auto active = &operation.work;
+                ::SimpleFluid::PLIC::details::active_work = active;
+                const auto account = [&]
+                {
+                    work.indirect_bytes += active->bytes;
+                    work.charge(active->bytes);
+                    work.op(active->operations);
+                    work.pairs(active->pairs);
+                    if (caller)
+                    {
+                        caller->charge(active->bytes, 1);
+                        caller->operations += active->operations;
+                        caller->pairs += active->pairs;
+                    }
+                };
+                predicates::SupportEvaluation evaluation;
+                try
+                {
+                    ++work.indirect_calls;
+                    evaluation = predicates::support_intersection_distance(
+                        source, {key[0]->expression, key[1]->expression, key[2]->expression}, query);
+                }
+                catch (...)
+                {
+                    account();
+                    throw;
+                }
+                account();
+                work.charge(sizeof(DefiningCache::value_type) + 4 * sizeof(void*));
+                p.defining_cache->emplace(key, evaluation);
+                if (evaluation.singular)
+                    continue;
+                return interpret(evaluation);
             }
-        }
-        if (needed[i] == 1 && i >= 4)
-        {
-            const auto& c = p.constructions[i];
-            needed[c.first] = needed[c.second] = 1;
-            work.op(2);
-        }
-    }
-    for (std::size_t i = 0; i <= vertex; ++i)
-    {
-        work.op();
-        if (needed[i] != 1)
-            continue;
-        if (i < 4)
-            values[i] = {d.value[i], d.error[i]};
-        else
-        {
-            const auto& c = p.constructions[i];
-            const auto numerator = construction_difference(construction_product(values[c.first], c.second_cut, work),
-                construction_product(values[c.second], c.first_cut, work), work);
-            values[i] =
-                construction_quotient(numerator, construction_difference(c.second_cut, c.first_cut, work), work);
-        }
-    }
-    return values[vertex];
+    return std::nullopt;
 }
 /** Complementary clipping retains barycentric placement at original source
  * supports. Children never undergo a metric or positivity admission. */
@@ -371,7 +475,7 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
     if (p.faces.empty())
         return {};
     work.witness();
-    if (!d.identity)
+    if (!d.support)
         fail(GeometryErrorCode::ProvenanceMismatch, "Ordinary aggregate cut has no immutable identity.");
     work.charge(p.vertices.size() * (sizeof(predicates::Result) + sizeof(bool)));
     std::vector<predicates::Result> distances(p.vertices.size());
@@ -384,14 +488,19 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
     {
         if (!active[i])
             continue;
-        if (std::find(p.supports[i].begin(), p.supports[i].end(), d.identity) == p.supports[i].end())
+        if (std::find(p.supports[i].begin(), p.supports[i].end(), d.support) == p.supports[i].end())
             distances[i] = distance(p.vertices[i], p.errors[i], d, work);
-        if (!resolved(distances[i]))
-            distances[i] = replay_distance(p, i, d, work);
-        if (distances[i].absolute_error > 0 && std::abs(distances[i].value) <= distances[i].absolute_error)
+        bool classified = resolved(distances[i]);
+        if (!classified)
+            if (const auto direct = defining_distance(p, i, d, work))
+            {
+                distances[i] = *direct;
+                classified = true;
+            }
+        if (!classified)
         {
             std::ostringstream message;
-            message.precision(18);
+            message.precision(std::numeric_limits<long double>::max_digits10);
             message << "Ordinary aggregate cut classification is unresolved: vertex=" << i
                     << " distance=" << distances[i].value << " estimate=" << distances[i].absolute_error << " weights=";
             for (auto b : p.vertices[i])
@@ -412,15 +521,17 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
         auto retained = p;
         for (std::size_t i = 0; i < p.vertices.size(); ++i)
             if (active[i] && distances[i].value == 0 &&
-                std::find(retained.supports[i].begin(), retained.supports[i].end(), d.identity) ==
+                std::find(retained.supports[i].begin(), retained.supports[i].end(), d.support) ==
                     retained.supports[i].end())
             {
-                retained.supports[i].push_back(d.identity);
+                retained.supports[i].push_back(d.support);
                 work.charge(sizeof(const void*));
             }
         return retained;
     }
     Poly out;
+    out.source = p.source;
+    out.defining_cache = p.defining_cache;
     charge_poly_points(p, work);
     out.vertices = p.vertices;
     out.errors = p.errors;
@@ -470,13 +581,13 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
                     }
                     out.vertices.push_back(b);
                     out.errors.push_back(error);
-                    out.constructions.push_back({i, j, distances[i], distances[j]});
-                    std::vector<const void*> supports{d.identity};
+                    out.constructions.push_back({i, j, d.support, d.orientation});
+                    std::vector<const Support*> supports{d.support};
                     for (auto id : p.supports[i])
                         if (std::find(p.supports[j].begin(), p.supports[j].end(), id) != p.supports[j].end() &&
-                            id != d.identity)
+                            id != d.support)
                             supports.push_back(id);
-                    work.charge(sizeof(std::vector<const void*>) + supports.size() * sizeof(const void*));
+                    work.charge(sizeof(std::vector<const Support*>) + supports.size() * sizeof(const Support*));
                     out.supports.push_back(std::move(supports));
                     work.op(20);
                 }
@@ -489,10 +600,10 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
                 if (dc == 0)
                 {
                     add_cap(current);
-                    if (std::find(out.supports[current].begin(), out.supports[current].end(), d.identity) ==
+                    if (std::find(out.supports[current].begin(), out.supports[current].end(), d.support) ==
                         out.supports[current].end())
                     {
-                        out.supports[current].push_back(d.identity);
+                        out.supports[current].push_back(d.support);
                         work.charge(sizeof(const void*));
                     }
                 }
@@ -547,22 +658,25 @@ struct Cut
     std::vector<char> native_support;
     const void* identity = nullptr;
 };
-Distances source_distances(const OrdinaryAggregateTetra& t, const Cut& cut, AggregateWork& work)
+Distances source_distances(
+    const OrdinaryAggregateTetra& t, const Support& support, int orientation, AggregateWork& work)
 {
     Distances result;
-    result.identity = cut.identity;
+    result.support = &support;
+    result.orientation = orientation;
+    const auto& expression = support.expression;
     for (unsigned i = 0; i < 4; ++i)
     {
-        if (has_any_support(t.vertices[i].dynamic(), cut.authorities))
+        if (expression.source_incidence & (1u << i))
             continue;
         const auto distance = predicate(
             [&]
             {
                 return predicates::plane_distance(predicates::FramedPoint{t.vertices[i].value, {}, 0},
-                    predicates::FramedPoint{cut.anchor, cut.origin, cut.exponent}, cut.normal, cut.offset);
+                    expression.anchor, expression.normal, expression.offset);
             },
             work);
-        result.value[i] = distance.value * cut.orientation;
+        result.value[i] = distance.value * orientation;
         result.error[i] = distance.absolute_error;
         work.op(64);
     }
@@ -940,6 +1054,45 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     for (auto& dc : cuts)
         for (auto& c : dc)
             c.identity = root(c.identity);
+    // One original expression per issued support identity, independent of donor
+    // traversal order. Authority establishes equality; rounded coefficients do
+    // not create an identity. Incidence orientation remains separate.
+    std::map<const void*, Cut> canonical;
+    const auto expression_order = [](const Cut& c)
+    { return std::tie(c.normal, c.origin, c.exponent, c.anchor, c.offset); };
+    for (const auto& dc : cuts)
+        for (const auto& c : dc)
+        {
+            auto [it, fresh] = canonical.try_emplace(c.identity, c);
+            auto& selected = it->second;
+            if (fresh)
+            {
+                work.charge(sizeof(decltype(canonical)::value_type) + 4 * sizeof(void*) +
+                            selected.native_support.capacity() +
+                            selected.authorities.capacity() * sizeof(PlaneAuthority));
+                for (const auto& authority : selected.authorities)
+                    work.charge(authority.key.capacity() * sizeof(std::uint64_t));
+            }
+            else
+            {
+                if (expression_order(c) < expression_order(selected))
+                {
+                    selected.normal = c.normal;
+                    selected.origin = c.origin;
+                    selected.exponent = c.exponent;
+                    selected.anchor = c.anchor;
+                    selected.offset = c.offset;
+                }
+                for (const auto& authority : c.authorities)
+                    if (std::find(selected.authorities.begin(), selected.authorities.end(), authority) ==
+                        selected.authorities.end())
+                    {
+                        work.charge(2 * sizeof(PlaneAuthority) + authority.key.size() * sizeof(std::uint64_t));
+                        selected.authorities.push_back(authority);
+                    }
+            }
+            selected.orientation = 1;
+        }
     // Source leaves and cut supports are immutable throughout this measure.
     // Share their predicate results across coverage, phase channels and the
     // reconstruction retry; only executed predicates consume floating work.
@@ -948,6 +1101,17 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     for (std::size_t di = 0; di < donors.size(); ++di)
         if (donors[di].gas)
             phase_cuts[di] = phase_cut(*donors[di].gas);
+    work.charge(impl_->tetrahedra.size() *
+                (sizeof(std::array<Support, 4>) + sizeof(std::map<const void*, Support>) + sizeof(DefiningCache)));
+    std::vector<std::array<Support, 4>> source_faces(impl_->tetrahedra.size());
+    std::vector<DefiningCache> defining_caches(impl_->tetrahedra.size());
+    std::vector<std::map<const void*, Support>> support_catalogs(impl_->tetrahedra.size());
+    for (auto& faces : source_faces)
+        for (unsigned j = 0; j < 4; ++j)
+        {
+            faces[j].expression.source_face = j;
+            faces[j].identity = &faces[j];
+        }
     std::map<std::array<std::size_t, 3>, Distances> distance_cache;
     const auto source_values = [&](std::size_t ti, std::size_t di, std::size_t ci) -> const Distances&
     {
@@ -955,8 +1119,31 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         const auto found = distance_cache.find(key);
         if (found != distance_cache.end())
             return found->second;
-        const auto& cut = ci == cuts[di].size() ? phase_cuts[di] : cuts[di][ci];
-        auto values = source_distances(impl_->tetrahedra[ti], cut, work);
+        const bool phase = ci == cuts[di].size();
+        const auto& cut = phase ? phase_cuts[di] : cuts[di][ci];
+        const auto& original = phase ? cut : canonical.at(cut.identity);
+        auto& catalog = support_catalogs[ti];
+        auto [position, fresh] = catalog.try_emplace(cut.identity);
+        auto& support = position->second;
+        if (fresh)
+        {
+            work.charge(sizeof(std::map<const void*, Support>::value_type) + 4 * sizeof(void*));
+            support.identity = cut.identity;
+            support.expression.anchor = {original.anchor, original.origin, original.exponent};
+            support.expression.normal = original.normal;
+            support.expression.offset = original.offset;
+            for (unsigned i = 0; i < 4; ++i)
+                if (has_any_support(impl_->tetrahedra[ti].vertices[i].dynamic(), original.authorities))
+                    support.expression.source_incidence |= 1u << i;
+        }
+        unsigned pivot = 0;
+        for (unsigned k = 1; k < 3; ++k)
+            if (std::abs(original.normal[k]) > std::abs(original.normal[pivot]))
+                pivot = k;
+        if (original.normal[pivot] == 0 || cut.normal[pivot] == 0)
+            fail(GeometryErrorCode::UnresolvedArithmetic, "Aggregate original support orientation is unresolved.");
+        const auto orientation = cut.orientation * ((original.normal[pivot] > 0) == (cut.normal[pivot] > 0) ? 1 : -1);
+        auto values = source_distances(impl_->tetrahedra[ti], support, orientation, work);
         work.charge(sizeof(decltype(distance_cache)::value_type) + 4 * sizeof(void*));
         return distance_cache.emplace(key, values).first->second;
     };
@@ -1007,7 +1194,8 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             context.retry = retry;
             try
             {
-                std::vector<Poly> remainder{tetra(work)};
+                std::vector<Poly> remainder{
+                    tetra(impl_->tetrahedra[ordinal], source_faces[ordinal], defining_caches[ordinal], work)};
                 for (std::size_t donor_index = 0; donor_index < cuts.size(); ++donor_index)
                 {
                     const auto donor_ordinal = retry ? cuts.size() - 1 - donor_index : donor_index;
@@ -1024,6 +1212,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             context.cut = retry ? dc.size() - 1 - cut_index : cut_index;
                             auto d = source_values(ordinal, donor_ordinal, context.cut);
                             auto opposite = d;
+                            opposite.orientation = -opposite.orientation;
                             for (auto& x : opposite.value)
                                 x = -x;
                             auto outside = clipped(piece, opposite, work);
@@ -1134,7 +1323,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         const auto& t = impl_->tetrahedra[ti];
                         if (t.sign != sign)
                             continue;
-                        auto bulk = tetra(work);
+                        auto bulk = tetra(t, source_faces[ti], defining_caches[ti], work);
                         // Replay immutable supports in reverse order on the single
                         // reconstruction retry; rounded child coordinates are not inputs.
                         for (std::size_t k = 0; k < cuts[di].size() && !bulk.faces.empty(); ++k)
@@ -1158,9 +1347,10 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                             // supports on the existing retry. Applying the phase
                             // first retains its small endpoint weights before
                             // donor intersections introduce dependent crossings.
-                            auto phase_source = retry ? tetra(work) : Poly{};
+                            auto phase_source = retry ? tetra(t, source_faces[ti], defining_caches[ti], work) : Poly{};
                             const auto& phase_parent = retry ? phase_source : bulk;
                             witness.gas = clipped(phase_parent, d, work);
+                            d.orientation = -d.orientation;
                             for (auto& x : d.value)
                                 x = -x;
                             witness.carrier = clipped(phase_parent, d, work);
@@ -1237,7 +1427,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         if (!channel_resolved)
                         {
                             std::ostringstream message;
-                            message.precision(18);
+                            message.precision(std::numeric_limits<long double>::max_digits10);
                             message << "donor=" << donor.id << " sign=" << sign << " retry=" << retry
                                     << " channel=" << k << " nominal=" << *output[k] << " estimate=" << *errors[k]
                                     << " allowance=" << allowance;
@@ -1253,7 +1443,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                     if (closure > donor.bulk_budget)
                     {
                         std::ostringstream message;
-                        message.precision(18);
+                        message.precision(std::numeric_limits<long double>::max_digits10);
                         message << "donor=" << donor.id << " sign=" << sign << " retry=" << retry
                                 << " bulk closure=" << closure << " allowance=" << donor.bulk_budget;
                         quality_detail = message.str();

@@ -1699,9 +1699,10 @@ implicit-upwind specialization while retaining the general swept path.
       budget admission. Report executed index work and final geometric-face theta
       distributions; retain dynamic phase classification each trial.
 - [ ] Qualify the original 50-cell skew/coarse-fine passage case over its ten-step
-      serial/MPI horizon. Support-aware reach passes the former wall contact, but
-      unresolved aggregate cut classification still blocks coverage admission.
-      Retain the original uncertainty and conservation gates. The conservative
+      serial/MPI horizon under the original uncertainty, resource and conservation
+      gates. Support-aware reach and defining-support predicates resolve the
+      captured wall and generated shared-edge contacts; cumulative aggregate
+      geometry storage still blocks the complete serial horizon. The conservative
       frontier supporting-halfspace screen remains an admission limit for other
       constructions; finite-polygon containment is separate outstanding work.
 - [x] Share authenticated original-support contact between Ordinary wall
@@ -1710,6 +1711,15 @@ implicit-upwind specialization while retaining the general swept path.
       ownership/revision separately, and replay the face-17 wall construction.
       Nonzero cap corrections invalidate inherited support. This contact repair
       does not establish finite-polygon containment or the full passage horizon.
+- [x] Retain source-tetrahedron and original donor support equations for generated
+      aggregate vertices. Resolve ambiguous cuts with bounded defining-support
+      predicates, preserve complementary orientation and metric error, and reuse
+      immutable evaluations under the original resource limits. Replay shared-edge
+      contact, representable perturbations, both donor orders and nested budgets.
+- [ ] Establish a current native-cell-complex coverage certificate before replacing
+      repeated donor-complement subtraction. Bind complete cavity/halo frontiers,
+      source containment and complete donor queries to the same geometry/partition
+      observations; retain structural coverage for arbitrary public donor sets.
 - [ ] Complete the opt-in eight-step analytic closed-motion accuracy probe.
       Reconstruction currently requests resolved phase/stencil support on step 4;
       retain the complete horizon, independent phase-distribution oracle and original

@@ -58,6 +58,35 @@ private:
  * Construction error of a supplied plane normal remains separate evidence. */
 [[nodiscard]] Result plane_distance(
     const FramedPoint& point, const FramedPoint& anchor, const Point& normal, long double offset);
+/** Original support expression in a source tetrahedron's barycentric chart.
+ * source_face < 4 denotes lambda[source_face]; otherwise the framed plane is
+ * normal.(point-anchor)-offset, in anchor-frame units. source_incidence is a
+ * mask of independently proven original source contacts, not rounded zeros.
+ * Orientation reverses the expression without changing support identity. */
+struct SupportRow
+{
+    unsigned source_face = 4;
+    FramedPoint anchor{};
+    Point normal{};
+    long double offset = 0;
+    unsigned source_incidence = 0;
+    int orientation = 1;
+};
+struct SupportEvaluation
+{
+    Result distance{};
+    bool singular = false;
+};
+/** Bounded indirect predicate for three defining supports and an original
+ * query. Coefficients and determinant signs are evaluated from input leaves,
+ * with error-free floating expansions capped at 2048 components each. The
+ * metric is the actual query distance, with a residual-derived absolute error.
+ * An exactly singular basis is reported separately so another can be tried.
+ * Unsupported finite range/underflow rejects with UnresolvedArithmetic;
+ * expansion capacity, allocation and scalar work obey ResourceLimit guards.
+ * No rational geometry or arithmetic-policy fallback is invoked. */
+[[nodiscard]] SupportEvaluation support_intersection_distance(
+    const std::array<FramedPoint, 4>& source, const std::array<SupportRow, 3>& basis, const SupportRow& query);
 /** Require a resolved sign without reinterpreting an uncertain zero as contact. */
 [[nodiscard]] int require_sign(const Result&);
 } // namespace ordinary_predicates SIMPLEFLUID_LOCAL
