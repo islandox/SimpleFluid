@@ -2,6 +2,7 @@
  * @brief Shared accepted-state validation, codecs, reconstruction and halo support.
  */
 #include "FVM/details/FiniteGeometryAccess.hh"
+#include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -337,7 +338,8 @@ void current(const GeneralVoF::Data& data)
         data.supplied_hierarchy->observation() != data.supplied_observation)
         throw std::invalid_argument("General VoF source geometry/control is stale.");
 }
-template<ArithmeticMode Mode> void retained_budget(const GeneralVoF::Data& data)
+template<ArithmeticMode Mode>
+void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes)
 {
     wire::Budget budget{data.options.byte_budget};
     std::set<const void*> geometry;
@@ -346,6 +348,14 @@ template<ArithmeticMode Mode> void retained_budget(const GeneralVoF::Data& data)
                data.phases.capacity() * sizeof(PhaseVolumes) +
                (data.roundoff.capacity() + data.phase_history.capacity()) * sizeof(PhaseRoundoff) +
                data.occupancy.capacity() * sizeof(PhaseError));
+    if (proposed_spatial_bytes)
+        budget.add(*proposed_spatial_bytes);
+    else
+    {
+        std::lock_guard lock(data.topology->spatial_cache_mutex);
+        if (data.topology->spatial_cache)
+            budget.add(data.topology->spatial_cache->bytes);
+    }
     std::set<const void*> exact_payloads;
     const auto charge_exact = [&](const SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>& value)
     {
@@ -1172,7 +1182,8 @@ template long double phase_allowance<ArithmeticMode::Ordinary>(PLIC::DynamicGeom
 template void import_phases<ArithmeticMode::BoundedCertification>(GeneralVoF::Data&);
 template long double phase_allowance<ArithmeticMode::BoundedCertification>(PLIC::DynamicGeometryValue, double);
 template void import_phases<ArithmeticMode::Exact>(GeneralVoF::Data&);
-template void retained_budget<ArithmeticMode::Ordinary>(const GeneralVoF::Data&);
-template void retained_budget<ArithmeticMode::BoundedCertification>(const GeneralVoF::Data&);
-template void retained_budget<ArithmeticMode::Exact>(const GeneralVoF::Data&);
+template void retained_budget<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, std::optional<std::size_t>);
+template void retained_budget<ArithmeticMode::BoundedCertification>(
+    const GeneralVoF::Data&, std::optional<std::size_t>);
+template void retained_budget<ArithmeticMode::Exact>(const GeneralVoF::Data&, std::optional<std::size_t>);
 } // namespace SimpleFluid::VoF::general_vof_detail

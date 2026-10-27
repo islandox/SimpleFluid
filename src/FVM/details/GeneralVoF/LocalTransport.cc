@@ -2,6 +2,7 @@
  * @brief Conservative source-resolved signed canonical face transport.
  */
 #include "FVM/details/GeneralVoF/LocalTransport.hh"
+#include "FVM/details/GeneralVoF/FaceTransport.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
 #include <Teuchos_Array.hpp>
@@ -179,16 +180,13 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
     const int rank = comm->getRank();
     const auto limit = data.options.byte_budget;
     const auto safe = [&](auto&& work) { wire::collective(*comm, std::forward<decltype(work)>(work)); };
-    // This private purpose accepts mixed SweptPartition sources but executes
-    // the identical donor-cell admission and positive numerical support core.
-    auto low =
-        plan_face_transport_impl(controls.face_volume, trial.timestep_, {1, 1}, 0, true, trial.transaction_, true);
+    // Admit the donor-cell support without constructing a discarded candidate.
+    auto low = admit_low_order_ledger(data, controls.face_volume, trial.timestep_);
     auto geometry =
         prepare_local_sweeps(data, controls.traces, controls.flux, controls.face_budgets, controls.packet_context);
     std::map<std::uint64_t, const AMR::AdaptiveTile*> tiles;
     std::map<std::uint64_t, Face> faces;
     std::map<std::uint64_t, Triple> low_export;
-    std::map<std::uint64_t, TripleSum> low_endpoint;
     std::map<std::uint64_t, Demand> demands;
     std::vector<Request> requests;
     std::vector<OwnerPacket> packets;
@@ -197,22 +195,19 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
         [&]
         {
             trial.interface_local_ = true;
-            trial.numerical_support_transfers_ = std::move(low.finite_transfers_);
-            trial.numerical_support_budgets_ = std::move(low.finite_budgets_);
+            trial.numerical_support_transfers_ = std::move(low.transfers);
+            trial.numerical_support_budgets_ = std::move(low.budgets);
             trial.unbound_diagnostics_ = geometry.diagnostics;
-            trial.unbound_diagnostics_.maximum_outgoing_courant = low.unbound_diagnostics_.maximum_outgoing_courant;
-            trial.unbound_diagnostics_.maximum_continuity_defect = low.unbound_diagnostics_.maximum_continuity_defect;
+            trial.unbound_diagnostics_.maximum_outgoing_courant = low.diagnostics.maximum_outgoing_courant;
+            trial.unbound_diagnostics_.maximum_continuity_defect = low.diagnostics.maximum_continuity_defect;
             for (const auto& b : trial.numerical_support_budgets_)
                 low_export.emplace(b.donor, values(b.exported));
             for (const auto& tile : data.topology->tiles)
                 tiles.emplace(tile.face_gid, &tile);
             std::map<std::uint64_t, const GeneralVoFDirectedStream*> low_faces;
-            for (const auto& s : low.unbound_streams_)
+            for (const auto& s : low.streams)
                 low_faces.emplace(s.face, &s);
             wire::Budget budget{limit};
-            budget.add(data.topology->order.size() * (sizeof(decltype(low_endpoint)::value_type) + 4 * sizeof(void*)));
-            for (const auto& route : trial.numerical_support_transfers_)
-                low_endpoint[route.recipient].add(values(route.amount));
             for (auto& entry : geometry.owned_faces)
             {
                 const auto& tile = *tiles.at(entry.face);
@@ -431,7 +426,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 const auto old = source_record(c).old;
                 // Use the unrounded positive ledger. Binary64 publication can
                 // round an endpoint capacity upward before a limiting correction.
-                const auto baseline = low_endpoint.at(c.gid).value();
+                const auto baseline = low.endpoint_capacity.at(c.gid);
                 const Triple available{old[0] + canonical.value(), baseline[1], baseline[2]};
                 long double er = 1, dr = 1;
                 for (unsigned p = 0; p < 3; ++p)
@@ -486,6 +481,11 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
                 auto& diagnostic = trial.unbound_diagnostics_;
                 diagnostic.minimum_theta = std::min(diagnostic.minimum_theta, f.theta);
                 diagnostic.limited_faces += f.theta < 1;
+                if (f.geometric)
+                {
+                    const auto bin = f.theta == 0 ? 0u : f.theta == 1 ? 9u : unsigned(8 * f.theta) + 1;
+                    ++diagnostic.geometric_theta_histogram[bin];
+                }
                 TripleSum signed_amount;
                 for (const auto& [key, g] : f.groups)
                 {

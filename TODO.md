@@ -1689,6 +1689,23 @@ implicit-upwind specialization while retaining the general swept path.
       representation providers with existing library ownership and feature gates.
       See [implementation boundaries](docs/architecture/general_vof_implementation.md)
       and the [prepared interface](docs/architecture/general_vof_transport.md#checked-controls-and-prepared-views).
+- [x] Resolve aggregate cut contacts from actual arithmetic residuals and
+      ancestral source-edge expressions, independently of metric quality estimates.
+      Cover dyadic and nonbinary contacts, swapped cuts, signed perturbations and
+      unresolved range rejection; retain zero explicit approximation allowances.
+- [x] Admit a dedicated low-order ledger without discarded candidate publication
+      or ghost import. Reuse immutable source predicates and retained-domain
+      geometry indexes with identity checks, accounted storage and prepublication
+      budget admission. Report executed index work and final geometric-face theta
+      distributions; retain dynamic phase classification each trial.
+- [ ] Resolve retained-shell reach rejection in the original 50-cell skew/coarse-fine
+      passage case before qualifying its ten-step serial/MPI horizon. The conservative
+      frontier supporting-halfspace screen remains an admission limit; do not relax
+      its orientation test to admit uncertain reach.
+- [ ] Complete the opt-in eight-step analytic closed-motion accuracy probe.
+      Reconstruction currently exhausts its angular optimizer budget on step 3;
+      retain the complete horizon, independent phase-distribution oracle and original
+      gates rather than truncating the case or increasing numerical budgets.
 - [ ] Exercise complete homogeneous/hydrostatic, interface-passage,
       translation/rotation/deformation and curved-capillary horizons in serial
       and MPI, including empty owners and mixed/face transitions. Keep existing

@@ -3,10 +3,10 @@
  */
 #include "FVM/details/GeneralVoF/LocalGeometry.hh"
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
+#include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "geometry/PLIC/OrdinaryAggregate.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
-#include <numeric>
 
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -16,132 +16,9 @@ constexpr auto mode = ArithmeticMode::Ordinary;
 using Point = PLIC::Point<mode>;
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Math = fp::Arithmetic<mode>;
+using local_spatial_detail::Box;
+using local_spatial_detail::Frontier;
 using Wide = std::array<long double, 3>;
-constexpr auto infinity = std::numeric_limits<long double>::infinity();
-struct Box
-{
-    Wide low{infinity, infinity, infinity}, high{-infinity, -infinity, -infinity};
-    void add(const Wide& p)
-    {
-        for (unsigned axis = 0; axis < 3; ++axis)
-        {
-            if (!std::isfinite(p[axis]))
-                throw std::invalid_argument("Local VoF index coordinate is nonfinite.");
-            low[axis] = std::min(low[axis], std::nextafter(p[axis], -infinity));
-            high[axis] = std::max(high[axis], std::nextafter(p[axis], infinity));
-        }
-    }
-    void add(const Box& b)
-    {
-        for (unsigned axis = 0; axis < 3; ++axis)
-        {
-            low[axis] = std::min(low[axis], b.low[axis]);
-            high[axis] = std::max(high[axis], b.high[axis]);
-        }
-    }
-    bool overlaps(const Box& b) const
-    {
-        for (unsigned axis = 0; axis < 3; ++axis)
-            if (high[axis] < b.low[axis] || b.high[axis] < low[axis])
-                return false;
-        return true;
-    }
-};
-/** Balanced median index. Spatial ordering only schedules conservative AABB tests;
- * every returned list is restored to its canonical source order. */
-class Index
-{
-    struct Node
-    {
-        Box box;
-        std::size_t begin = 0, end = 0, left = 0, right = 0;
-    };
-    const std::vector<Box>& boxes_;
-    fp::Work& work_;
-    GeneralVoFTransportDiagnostics& diagnostics_;
-    std::vector<std::size_t> order_;
-    std::vector<Node> nodes_;
-    std::size_t build(std::size_t begin, std::size_t end)
-    {
-        const auto here = nodes_.size();
-        nodes_.push_back({});
-        Box box;
-        for (auto i = begin; i < end; ++i)
-        {
-            work_.test();
-            box.add(boxes_[order_[i]]);
-        }
-        nodes_[here] = {box, begin, end, 0, 0};
-        if (end - begin > 4)
-        {
-            unsigned axis = 0;
-            for (unsigned a = 1; a < 3; ++a)
-                if (box.high[a] - box.low[a] > box.high[axis] - box.low[axis])
-                    axis = a;
-            const auto middle = begin + (end - begin) / 2;
-            std::nth_element(order_.begin() + begin, order_.begin() + middle, order_.begin() + end,
-                [&](auto a, auto b)
-                {
-                    work_.test();
-                    const auto x = boxes_[a].low[axis] / 2 + boxes_[a].high[axis] / 2;
-                    const auto y = boxes_[b].low[axis] / 2 + boxes_[b].high[axis] / 2;
-                    return x != y ? x < y : a < b;
-                });
-            const auto left = build(begin, middle), right = build(middle, end);
-            nodes_[here].left = left;
-            nodes_[here].right = right;
-        }
-        return here;
-    }
-    void visit(std::size_t i, const Box& box, std::vector<std::size_t>& result)
-    {
-        work_.test();
-        ++diagnostics_.index_node_visits;
-        const auto& node = nodes_[i];
-        if (!node.box.overlaps(box))
-            return;
-        if (node.left)
-        {
-            visit(node.left, box, result);
-            visit(node.right, box, result);
-        }
-        else
-            for (auto j = node.begin; j < node.end; ++j)
-            {
-                work_.test();
-                if (boxes_[order_[j]].overlaps(box))
-                    work_.push(result, order_[j]);
-            }
-    }
-
-public:
-    Index(const std::vector<Box>& boxes, fp::Work& work, GeneralVoFTransportDiagnostics& diagnostics)
-        : boxes_(boxes), work_(work), diagnostics_(diagnostics)
-    {
-        if (boxes.size() > std::numeric_limits<std::size_t>::max() / (2 * sizeof(Node) + sizeof(std::size_t)))
-            throw std::invalid_argument("Local VoF index capacity overflows.");
-        work_.charge(boxes.size() * (2 * sizeof(Node) + sizeof(std::size_t)));
-        order_.resize(boxes.size());
-        std::iota(order_.begin(), order_.end(), 0);
-        nodes_.reserve(2 * boxes.size());
-        if (!boxes.empty())
-            build(0, boxes.size());
-    }
-    std::vector<std::size_t> query(const Box& box)
-    {
-        ++diagnostics_.index_queries;
-        std::vector<std::size_t> result;
-        if (!nodes_.empty())
-            visit(0, box, result);
-        std::sort(result.begin(), result.end(),
-            [&](auto a, auto b)
-            {
-                work_.test();
-                return a < b;
-            });
-        return result;
-    }
-};
 // Reuse the public Ordinary predicate: it bounds represented-coordinate
 // evaluation, handles underflow, and scopes/restores the caller's FP environment.
 // Plain points intentionally carry no borrowed incidence certificates.
@@ -149,14 +26,9 @@ Point represented(const Wide& p)
 {
     return Point(p);
 }
-struct Frontier
-{
-    const AMR::AdaptiveTile* tile;
-    bool first;
-};
 void prove_retained(const Frontier& frontier, const fp::Sweep<mode>& recipe, fp::Work& work)
 {
-    const auto& points = frontier.tile->geometry->points();
+    const auto& points = frontier.geometry->points();
     if (points.size() < 3)
         throw std::invalid_argument("Local VoF malformed frontier polygon.");
     std::size_t third = 2;
@@ -226,8 +98,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
     std::vector<Pending> pending;
     std::map<std::uint64_t, std::size_t> local_authorities;
     std::vector<const Cell*> cells;
-    std::vector<Box> cell_boxes, frontier_boxes;
-    std::vector<Frontier> frontiers;
+    std::shared_ptr<const LocalSpatialCache> spatial;
     std::set<Key> requested;
     wire::collective(*comm,
         [&]
@@ -235,63 +106,11 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
             current(data);
             if (data.options.arithmetic_mode != mode)
                 throw std::invalid_argument("Local VoF geometry requires Ordinary arithmetic.");
-            for (const auto& [key, cell] : data.cells)
-            {
-                work.test();
-                if (!cell.finite_geometry || cell.finite_geometry->arithmetic_mode() != mode)
-                    throw std::invalid_argument("Local VoF retained native geometry is missing or has another mode.");
-                work.push(cells, &cell);
-            }
-            if (!data.topology->order.empty() && cells.empty())
-                throw std::invalid_argument("Local VoF owned cells have no retained native geometry.");
-            std::sort(cells.begin(), cells.end(),
-                [&](auto a, auto b)
-                {
-                    work.test();
-                    return a->key != b->key ? a->key < b->key : a->gid < b->gid;
-                });
-            for (const auto* cell : cells)
-            {
-                Box box;
-                for (const auto& p : cell->finite_geometry->points())
-                {
-                    work.test();
-                    box.add(p.value);
-                }
-                work.push(cell_boxes, box);
-            }
+            spatial = retained_spatial_cache(data, work, result.diagnostics,
+                [](const GeneralVoF::Data& source, std::size_t bytes) { retained_budget<mode>(source, bytes); });
+            for (const auto& identity : spatial->cells)
+                work.push(cells, &data.cells.at(identity.key));
             result.diagnostics.indexed_cells = cells.size();
-            std::vector<const AMR::AdaptiveTile*> frontier_tiles;
-            for (const auto& tile : data.topology->frontier_tiles)
-            {
-                work.test();
-                const bool first = data.cells.contains(tile.first),
-                           second = tile.second && data.cells.contains(*tile.second);
-                if (first != second)
-                    work.push(frontier_tiles, &tile);
-            }
-            std::sort(frontier_tiles.begin(), frontier_tiles.end(),
-                [&](auto a, auto b)
-                {
-                    work.test();
-                    return a->face_gid < b->face_gid;
-                });
-            for (const auto* tile : frontier_tiles)
-            {
-                // Periodic images require a separate authenticated spatial index.
-                if (!tile->second_image_identity.empty())
-                    throw std::invalid_argument("Local VoF retained frontier has an unsupported periodic image.");
-                Box box;
-                for (const auto& p : tile->geometry->points())
-                {
-                    work.test();
-                    box.add(p);
-                }
-                work.push(frontier_boxes, box);
-                work.push(frontiers, Frontier{tile, data.cells.contains(tile->first)});
-            }
-            Index donor_index(cell_boxes, work, result.diagnostics);
-            Index frontier_index(frontier_boxes, work, result.diagnostics);
             for (const auto& tile : data.topology->tiles)
             {
                 if (tile.exterior || !tile.second || tile.first_owner != comm->getRank())
@@ -309,9 +128,9 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                     bounds.add(p.value);
                 bounds.add(recipe.center.value);
                 bounds.add(recipe.backcenter.value);
-                for (const auto index : frontier_index.query(bounds))
-                    prove_retained(frontiers[index], recipe, work);
-                auto candidates = donor_index.query(bounds);
+                for (const auto index : spatial->frontier_index.query(bounds, work, result.diagnostics))
+                    prove_retained(spatial->frontiers[index], recipe, work);
+                auto candidates = spatial->donor_index.query(bounds, work, result.diagnostics);
                 result.diagnostics.donor_candidates += candidates.size();
                 bool geometric = false;
                 std::optional<GeneralVoFPhaseGeometry> pure;
