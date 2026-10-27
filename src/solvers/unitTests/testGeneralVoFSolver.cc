@@ -176,12 +176,19 @@ TEST(GeneralVoFSolverTest, IndependentMixedPlaneRetainsBothPhaseMassesInSourceFr
         EXPECT_EQ(after.maximum_velocity, 0);
     }
 }
-TEST(GeneralVoFSolverTest, BinaryInterfaceCannotSilentlyBecomeZeroCurvatureCapillarySuccess)
+TEST(GeneralVoFSolverTest, SweptPlanarBinaryInterfaceAdmitsPhysicalZeroCurvature)
 {
-    auto source = phases(1);
+    const auto source = phases(1);
     auto material = inviscid();
     material.surface_tension = .07;
-    EXPECT_THROW((void) GeneralVoFSolver(source, material), std::runtime_error);
+    GeneralVoFSolver solver(source, material);
+    for (const auto curvature : solver.curvature())
+        EXPECT_EQ(curvature, 0);
+    const auto before = solver.diagnostics();
+    const auto after = solver.step(.01);
+    EXPECT_EQ(after.maximum_velocity, 0);
+    EXPECT_EQ(after.gas_mass, before.gas_mass);
+    EXPECT_EQ(after.liquid_mass, before.liquid_mass);
 }
 TEST(GeneralVoFSolverTest, SymmetricNativeRegridRetainsAcceptedPhysicalMomentumAtFixedClock)
 {

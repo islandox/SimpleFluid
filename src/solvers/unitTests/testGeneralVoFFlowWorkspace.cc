@@ -439,3 +439,156 @@ TEST(GeneralVoFFlowWorkspaceTest, StaticProjectionArithmeticPreservesModeAndNarr
     EXPECT_EQ(adapter.absolute_error, bounded.absolute_error);
 }
 } // namespace
+
+namespace
+{
+SP<const MeshHandle<>> capillary_dependency_native(bool skew)
+{
+    // Five columns separate a constant cell adjacent to a nonconstant stencil
+    // (column 2) from a cell whose entire two-ring neighborhood is constant (1).
+    AMR::ExtrudedAMRGrid grid;
+    for (unsigned j = 0; j < 4; ++j)
+        for (unsigned i = 0; i < 6; ++i)
+            grid.xy_nodes.push_back({double(i) + (skew ? .3 * j : 0), double(j), 0});
+    for (unsigned j = 0; j < 3; ++j)
+        for (unsigned i = 0; i < 5; ++i)
+        {
+            const auto a = j * 6 + i;
+            grid.base_cells.push_back({a, a + 1, a + 7, a + 6});
+        }
+    for (unsigned i = 0; i < 5; ++i)
+    {
+        grid.boundaries.push_back({i, i + 1, "wall"});
+        grid.boundaries.push_back({18 + i, 19 + i, "wall"});
+    }
+    for (unsigned j = 0; j < 3; ++j)
+    {
+        grid.boundaries.push_back({6 * j, 6 * (j + 1), "wall"});
+        grid.boundaries.push_back({6 * j + 5, 6 * (j + 1) + 5, "wall"});
+    }
+    grid.z_edges = {0, 1, 2, 3};
+    AMR::ExtrudedAMR source(grid);
+    std::vector<std::uint64_t> owned;
+    if (Tpetra::getDefaultComm()->getRank() == 0)
+        for (std::uint64_t c = 0; c < 45; ++c)
+            owned.push_back(c);
+    auto bootstrap = source.detach_owned(owned, {'c', 'a', 'p', 'i', 'l', 'l', 'a', 'r', 'y'});
+    const auto schema = bootstrap.kernel->descriptor();
+    const AMR::DistributedAdaptiveHierarchy hierarchy(
+        std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, Tpetra::getDefaultComm());
+    return AMR::assemble_adaptive_native(hierarchy, schema).mesh;
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CapillaryExtensionMatchesOrthogonalAndSkewSupportIncludingEmptyOwners)
+{
+    constexpr std::size_t budget = 64 * 1024 * 1024;
+    for (const bool skew : {false, true})
+    {
+        SCOPED_TRACE(::testing::Message() << "skew=" << skew);
+        const auto mesh = capillary_dependency_native(skew);
+        detail::GeneralVoFFlowWorkspace flow(mesh);
+        std::vector<double> fraction(mesh->num_owned_cells());
+        std::vector<unsigned char> expected(fraction.size());
+        for (std::size_t c = 0; c < fraction.size(); ++c)
+        {
+            const auto center = mesh->cell_centroid(LO(c));
+            const double logical_x = center.x - (skew ? .3 * center.y : 0);
+            fraction[c] = logical_x > 4 ? 1 : 0;
+            // Orthogonal reconstructions have no neighbor gradient correction.
+            // Sheared column faces transmit that correction one column farther.
+            expected[c] = logical_x > (skew ? 2 : 3);
+        }
+        const auto original = fraction;
+        EXPECT_EQ(flow.capillary_extension_required(fraction, budget), expected);
+        EXPECT_EQ(fraction, original);
+        for (auto& value : fraction)
+            value = 1 - value;
+        EXPECT_EQ(flow.capillary_extension_required(fraction, budget), expected);
+        const int local_empty = fraction.empty();
+        int empty = 0;
+        const auto comm = mesh->owned_cell_map()->getComm();
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+        EXPECT_EQ(empty, comm->getSize() - 1);
+    }
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CapillaryExtensionRetainsTracesAndRejectsInvalidInputsCollectively)
+{
+    constexpr std::size_t budget = 64 * 1024 * 1024;
+    const auto mesh = skew_native(1);
+    detail::GeneralVoFFlowWorkspace flow(mesh);
+    const auto count = mesh->num_owned_cells();
+    for (const double value : {0., 1.})
+        EXPECT_EQ(flow.capillary_extension_required(std::vector<double>(count, value), budget),
+            std::vector<unsigned char>(count, 0));
+    for (const double trace : {std::numeric_limits<double>::denorm_min(), 1e-25, .5})
+    {
+        const std::vector<double> fraction(count, trace);
+        EXPECT_EQ(flow.capillary_extension_required(fraction, budget), std::vector<unsigned char>(count, 1));
+        for (auto value : fraction)
+            EXPECT_EQ(value, trace);
+    }
+    std::vector<double> fraction(count);
+    EXPECT_THROW((void) flow.capillary_extension_required(fraction, 1), std::runtime_error);
+    auto invalid_shape = fraction;
+    if (!invalid_shape.empty())
+        invalid_shape.pop_back();
+    EXPECT_THROW((void) flow.capillary_extension_required(invalid_shape, budget), std::runtime_error);
+    for (const double invalid :
+        {-1., 1.1, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
+    {
+        auto bad = fraction;
+        if (!bad.empty())
+            bad[0] = invalid;
+        EXPECT_THROW((void) flow.capillary_extension_required(bad, budget), std::runtime_error);
+    }
+    detail::GeneralVoFFlowWorkspace bounded(mesh, ArithmeticMode::BoundedCertification);
+    EXPECT_THROW((void) bounded.capillary_extension_required(fraction, budget), std::runtime_error);
+    EXPECT_EQ(flow.capillary_extension_required(fraction, budget), std::vector<unsigned char>(count, 0));
+}
+
+TEST(GeneralVoFFlowWorkspaceTest, CapillaryExtensionInactiveCurvatureLeavesPhysicalProjectionIdentical)
+{
+    constexpr std::size_t budget = 64 * 1024 * 1024;
+    const auto mesh = capillary_dependency_native(false);
+    const auto count = mesh->num_owned_cells();
+    detail::GeneralVoFFlowWorkspace baseline(mesh), changed(mesh);
+    std::vector<double> fraction(count), density(count), curvature(count, 1), changed_curvature;
+    for (std::size_t c = 0; c < count; ++c)
+    {
+        const auto center = mesh->cell_centroid(LO(c));
+        fraction[c] = center.x > 4 ? 1 : 0;
+        density[c] = 1 + center.x;
+    }
+    const auto required = baseline.capillary_extension_required(fraction, budget);
+    changed_curvature = curvature;
+    int local_changed = 0, global_changed = 0;
+    for (std::size_t c = 0; c < count; ++c)
+    {
+        const auto center = mesh->cell_centroid(LO(c));
+        // This column is locally constant but adjacent to a cell with a
+        // nonconstant fraction stencil. Its orthogonal operator still has no
+        // coefficient for this curvature, even with unequal adjacent densities.
+        if (center.x > 2 && center.x < 3)
+        {
+            EXPECT_EQ(required[c], 0);
+            changed_curvature[c] = 37;
+            ++local_changed;
+        }
+    }
+    Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 1, &local_changed, &global_changed);
+    EXPECT_EQ(global_changed, 9);
+    std::vector<double> base_face(mesh->num_faces()), changed_face = base_face, base_pressure, changed_pressure;
+    std::vector<VoF::Vector> base_velocity(count), changed_velocity = base_velocity;
+    VoFSolverOptions options;
+    VoFStepDiagnostics base_diagnostics, changed_diagnostics;
+    ASSERT_NO_THROW(baseline.project(
+        base_face, base_velocity, base_pressure, density, fraction, curvature, .01, .05, options, base_diagnostics));
+    ASSERT_NO_THROW(changed.project(changed_face, changed_velocity, changed_pressure, density, fraction,
+        changed_curvature, .01, .05, options, changed_diagnostics));
+    EXPECT_EQ(changed_face, base_face);
+    EXPECT_EQ(changed_pressure, base_pressure);
+    EXPECT_EQ(changed_velocity, base_velocity);
+    EXPECT_EQ(changed_diagnostics.maximum_divergence, base_diagnostics.maximum_divergence);
+}
+} // namespace

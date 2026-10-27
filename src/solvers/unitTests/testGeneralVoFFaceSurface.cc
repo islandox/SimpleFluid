@@ -57,22 +57,52 @@ TEST(GeneralVoFFaceSurface, NativeOppositePureFacesExposeSurfaceWithoutChangingT
     EXPECT_EQ(state->gas_volumes(), gas);
     EXPECT_EQ(state->carrier_volumes(), liquid);
 }
-TEST(GeneralVoFFaceSurface, SupportedPlanarAlignedInterfaceRetainsStaticSurfaceTensionEquilibrium)
+TEST(GeneralVoFFaceSurface, EveryOrdinaryBackendRetainsPlanarCapillaryEquilibriumAndPhysicalTraces)
 {
-    auto material = inviscid();
-    material.surface_tension = .07;
-    const auto state = face_surface();
-    GeneralVoFSolver solver(state, material);
-    for (const auto k : solver.curvature())
-        EXPECT_EQ(k, 0);
-    const auto before = solver.diagnostics();
-    for (unsigned step = 0; step < 3; ++step)
+    for (const auto backend : {VoF::GeneralVoFTransportBackend::SweptPartition,
+             VoF::GeneralVoFTransportBackend::DonorCell, VoF::GeneralVoFTransportBackend::GeometricFace})
     {
-        const auto after = solver.step(.01);
-        EXPECT_EQ(after.maximum_velocity, 0);
-        EXPECT_EQ(after.gas_volume, before.gas_volume);
-        EXPECT_EQ(after.gas_mass, before.gas_mass);
-        EXPECT_EQ(after.liquid_mass, before.liquid_mass);
+        SCOPED_TRACE(static_cast<int>(backend));
+        auto material = inviscid();
+        material.surface_tension = .07;
+        const auto state = face_surface(false, true, false, backend);
+        const auto gas = state->gas_volumes(), liquid = state->carrier_volumes();
+        const auto declarations = state->phase_geometry_declarations();
+        const auto history = state->accumulated_phase_errors();
+        const auto source_identity = state->accepted_identity();
+        const auto catalog = state->capillary_surface();
+        EXPECT_EQ(catalog.source_control, state->accepted_control());
+        for (const auto& patch : catalog.patches)
+        {
+            EXPECT_EQ(patch.key.kind, VoF::GeneralVoFSurfaceKind::AlignedFace);
+            EXPECT_EQ(patch.centroid[0], 1);
+            EXPECT_EQ(patch.normal, (PLIC::GeometryPoint{1, 0, 0}));
+        }
+        GeneralVoFSolver solver(state, material);
+        for (const auto k : solver.curvature())
+            EXPECT_EQ(k, 0);
+        const auto before = solver.diagnostics();
+        for (unsigned step = 0; step < 3; ++step)
+        {
+            const auto after = solver.step(.01);
+            EXPECT_EQ(after.maximum_velocity, 0);
+            EXPECT_EQ(after.gas_volume, before.gas_volume);
+            EXPECT_EQ(after.gas_mass, before.gas_mass);
+            EXPECT_EQ(after.liquid_mass, before.liquid_mass);
+        }
+        EXPECT_EQ(state->accepted_identity(), source_identity);
+        EXPECT_EQ(state->gas_volumes(), gas);
+        EXPECT_EQ(state->carrier_volumes(), liquid);
+        EXPECT_EQ(state->phase_geometry_declarations(), declarations);
+        EXPECT_EQ(state->accumulated_phase_errors().size(), history.size());
+        for (std::size_t i = 0; i < history.size(); ++i)
+        {
+            EXPECT_EQ(state->accumulated_phase_errors()[i].gas, history[i].gas);
+            EXPECT_EQ(state->accumulated_phase_errors()[i].carrier, history[i].carrier);
+        }
+        EXPECT_EQ(solver.phases()->gas_volumes(), gas);
+        EXPECT_EQ(solver.phases()->carrier_volumes(), liquid);
+        EXPECT_EQ(solver.phases()->phase_geometry_declarations(), declarations);
     }
 }
 TEST(GeneralVoFFaceSurface, BinaryStaircaseAndDeficientPlanarSupportRejectCapillaryAdmission)
@@ -81,8 +111,6 @@ TEST(GeneralVoFFaceSurface, BinaryStaircaseAndDeficientPlanarSupportRejectCapill
     material.surface_tension = .07;
     EXPECT_THROW((void) GeneralVoFSolver(face_surface(true), material), std::runtime_error);
     EXPECT_THROW((void) GeneralVoFSolver(face_surface(false, false, true), material), std::runtime_error);
-    // The legacy backend retains its existing pure-interface rejection.
-    EXPECT_THROW((void) GeneralVoFSolver(phases(1), material), std::runtime_error);
 }
 std::shared_ptr<const VoF::GeneralVoF> striped_surface(unsigned owners)
 {

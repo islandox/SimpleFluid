@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 namespace SimpleFluid::detail
 {
@@ -98,6 +99,7 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch<ArithmeticMod
     require(std::isfinite(total) && total > 0, "General VoF PLIC polygon has no representable physical area.");
     GeneralVoFCurvaturePatch result;
     result.cell = cell;
+    result.key = VoF::GeneralVoFSurfaceKey{VoF::GeneralVoFSurfaceKind::MixedCell, cell};
     result.area = section.area.as_double();
     for (unsigned a = 0; a < 3; ++a)
     {
@@ -134,6 +136,7 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
     require(section.area.value > area_error, "Finite general VoF PLIC polygon area has unresolved positivity.");
     GeneralVoFCurvaturePatch result;
     result.cell = cell;
+    result.key = VoF::GeneralVoFSurfaceKey{VoF::GeneralVoFSurfaceKind::MixedCell, cell};
     result.area = section.area.as_double();
     for (unsigned a = 0; a < 3; ++a)
     {
@@ -154,7 +157,8 @@ std::optional<GeneralVoFCurvaturePatch> GeneralVoFCurvature::patch(
         {
             const auto triangle = cross(difference(points[face[i]].value, points[face[0]].value),
                 difference(points[face[i + 1]].value, points[face[0]].value));
-            for (unsigned a = 0; a < 3; ++a) area[a] += triangle[a] / 2;
+            for (unsigned a = 0; a < 3; ++a)
+                area[a] += triangle[a] / 2;
         }
         surface += std::sqrt(dot(area, area));
     }
@@ -198,9 +202,12 @@ GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatc
     {
         std::array<long double, 6> row;
         long double value, weight;
+        Point normal;
     };
     std::vector<Sample> samples;
-    std::set<std::uint64_t> seen;
+    const auto identity = [](const GeneralVoFCurvaturePatch& patch)
+    { return patch.key.value_or(VoF::GeneralVoFSurfaceKey{VoF::GeneralVoFSurfaceKind::MixedCell, patch.cell}); };
+    std::set<VoF::GeneralVoFSurfaceKey> seen;
     const auto append = [&](const GeneralVoFCurvaturePatch& p)
     {
         require(std::isfinite(p.area) && p.area > 0, "Invalid general VoF curvature patch area.");
@@ -208,6 +215,7 @@ GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatc
         const auto distance_squared = dot(r, r) / (h * h);
         require(std::isfinite(distance_squared), "Nonfinite general VoF curvature patch position.");
         bool outside = distance_squared > options.support_radius * options.support_radius;
+        auto weight_distance = distance_squared;
         if (physical_support)
         {
             // Tangential geometry controls reconstruction support; stability
@@ -216,69 +224,139 @@ GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatc
             const long double ry = (options.support_radius / 3) * tangent_span[1];
             const auto sx = dot(r, basis[0]) / rx, sy = dot(r, basis[1]) / ry;
             outside = sx * sx + sy * sy > 1;
+            weight_distance =
+                std::pow(dot(r, basis[0]) / tangent_span[0], 2) + std::pow(dot(r, basis[1]) / tangent_span[1], 2);
         }
-        if (outside || dot(unit(point(p.normal)), basis[2]) < options.minimum_normal_cosine)
+        const auto normal = unit(point(p.normal));
+        if (outside || dot(normal, basis[2]) < options.minimum_normal_cosine)
             return;
-        require(seen.insert(p.cell).second, "Duplicate general VoF curvature support cell.");
         const auto x = dot(r, basis[0]) / h, y = dot(r, basis[1]) / h, z = dot(r, basis[2]) / h;
         samples.push_back({{1, x, y, .5 * x * x, x * y, .5 * y * y}, z,
-            static_cast<long double>(p.area) / (h * h * (1 + distance_squared))});
+            static_cast<long double>(p.area) / (h * h * (1 + weight_distance)),
+            {dot(normal, basis[0]), dot(normal, basis[1]), dot(normal, basis[2])}});
     };
     append(target);
     for (const auto& p : support)
-        if (p.cell != target.cell)
-            append(p);
+    {
+        require(seen.insert(identity(p)).second, "Duplicate general VoF curvature support patch.");
+        if (identity(p) == identity(target))
+        {
+            require(p.centroid == target.centroid && p.normal == target.normal && p.area == target.area &&
+                        p.cell_scale == target.cell_scale && p.physical_spans == target.physical_spans,
+                "General VoF curvature target identity has contradictory patch geometry.");
+            continue;
+        }
+        append(p);
+    }
     require(
         samples.size() >= options.minimum_samples, "General VoF curvature has insufficient coherent physical patches.");
-    std::array<std::array<long double, 13>, 6> matrix{};
+    // Resolve each tangential direction independently before forming polynomial
+    // columns. Stability thickness h can be orders of magnitude smaller than
+    // the two physical surface lengths on anisotropic cells.
+    std::array<long double, 2> coordinate_scale{};
+    long double maximum_weight = 0;
     for (const auto& sample : samples)
-        for (unsigned a = 0; a < 6; ++a)
+    {
+        coordinate_scale[0] = std::max(coordinate_scale[0], std::abs(sample.row[1]));
+        coordinate_scale[1] = std::max(coordinate_scale[1], std::abs(sample.row[2]));
+        maximum_weight = std::max(maximum_weight, sample.weight);
+    }
+    require(coordinate_scale[0] > 0 && coordinate_scale[1] > 0 && std::isfinite(maximum_weight) && maximum_weight > 0,
+        "General VoF curvature surface stencil is rank deficient.");
+    const std::array<long double, 6> column_scale{1, coordinate_scale[0], coordinate_scale[1],
+        coordinate_scale[0] * coordinate_scale[0], coordinate_scale[0] * coordinate_scale[1],
+        coordinate_scale[1] * coordinate_scale[1]};
+    std::vector<std::array<long double, 7>> matrix(samples.size());
+    for (std::size_t row = 0; row < samples.size(); ++row)
+    {
+        const auto weight = std::sqrt(samples[row].weight / maximum_weight);
+        for (unsigned column = 0; column < 6; ++column)
+            matrix[row][column] = weight * samples[row].row[column] / column_scale[column];
+        matrix[row][6] = weight * samples[row].value;
+    }
+    // Column-pivoted Householder QR avoids squaring the stencil's condition in
+    // the solve. All numerical decisions use the conditioned rectangular data.
+    std::array<unsigned, 6> permutation{0, 1, 2, 3, 4, 5};
+    long double first_pivot = 0;
+    for (unsigned column = 0; column < 6; ++column)
+    {
+        unsigned pivot = column;
+        long double pivot_norm = 0;
+        for (unsigned candidate = column; candidate < 6; ++candidate)
         {
-            matrix[a][6] += sample.weight * sample.row[a] * sample.value;
-            for (unsigned b = 0; b < 6; ++b)
-                matrix[a][b] += sample.weight * sample.row[a] * sample.row[b];
-        }
-    long double norm = 0;
-    for (unsigned a = 0; a < 6; ++a)
-    {
-        long double sum = 0;
-        for (unsigned b = 0; b < 6; ++b)
-            sum += std::abs(matrix[a][b]);
-        norm = std::max(norm, sum);
-        matrix[a][7 + a] = 1;
-    }
-    for (unsigned a = 0; a < 6; ++a)
-    {
-        unsigned pivot = a;
-        for (unsigned b = a + 1; b < 6; ++b)
-            if (std::abs(matrix[b][a]) > std::abs(matrix[pivot][a]))
-                pivot = b;
-        require(std::isfinite(matrix[pivot][a]) &&
-                    std::abs(matrix[pivot][a]) > 64 * std::numeric_limits<long double>::epsilon() * norm,
-            "General VoF curvature surface stencil is rank deficient.");
-        std::swap(matrix[a], matrix[pivot]);
-        const auto diagonal = matrix[a][a];
-        for (unsigned b = a; b < 13; ++b)
-            matrix[a][b] /= diagonal;
-        for (unsigned row = 0; row < 6; ++row)
-            if (row != a)
+            long double norm = 0;
+            for (std::size_t row = column; row < matrix.size(); ++row)
+                norm = std::hypot(norm, matrix[row][candidate]);
+            if (norm > pivot_norm)
             {
-                const auto factor = matrix[row][a];
-                for (unsigned b = a; b < 13; ++b)
-                    matrix[row][b] -= factor * matrix[a][b];
+                pivot = candidate;
+                pivot_norm = norm;
             }
+        }
+        if (column == 0)
+            first_pivot = pivot_norm;
+        require(
+            std::isfinite(pivot_norm) && pivot_norm > 64 * std::numeric_limits<long double>::epsilon() * first_pivot,
+            "General VoF curvature surface stencil is rank deficient.");
+        if (pivot != column)
+        {
+            for (auto& row : matrix)
+                std::swap(row[column], row[pivot]);
+            std::swap(permutation[column], permutation[pivot]);
+        }
+        const auto diagonal = -std::copysign(pivot_norm, matrix[column][column]);
+        std::vector<long double> reflector(matrix.size() - column);
+        for (std::size_t row = column; row < matrix.size(); ++row)
+            reflector[row - column] = matrix[row][column] / pivot_norm;
+        reflector[0] -= diagonal / pivot_norm;
+        long double denominator = 0;
+        for (auto value : reflector)
+            denominator += value * value;
+        for (unsigned other = column + 1; other < 7; ++other)
+        {
+            long double projection = 0;
+            for (std::size_t row = column; row < matrix.size(); ++row)
+                projection += reflector[row - column] * matrix[row][other];
+            projection *= 2 / denominator;
+            for (std::size_t row = column; row < matrix.size(); ++row)
+                matrix[row][other] -= projection * reflector[row - column];
+        }
+        matrix[column][column] = diagonal;
+        for (std::size_t row = column + 1; row < matrix.size(); ++row)
+            matrix[row][column] = 0;
     }
-    long double inverse_norm = 0;
-    for (unsigned a = 0; a < 6; ++a)
+    std::array<long double, 6> pivoted{}, coefficients{};
+    std::array<std::array<long double, 6>, 6> inverse{};
+    for (int row = 5; row >= 0; --row)
     {
-        long double sum = 0;
-        for (unsigned b = 7; b < 13; ++b)
-            sum += std::abs(matrix[a][b]);
-        inverse_norm = std::max(inverse_norm, sum);
+        long double value = matrix[row][6];
+        for (unsigned column = row + 1; column < 6; ++column)
+            value -= matrix[row][column] * pivoted[column];
+        pivoted[row] = value / matrix[row][row];
+        for (unsigned rhs = 0; rhs < 6; ++rhs)
+        {
+            value = row == static_cast<int>(rhs) ? 1 : 0;
+            for (unsigned column = row + 1; column < 6; ++column)
+                value -= matrix[row][column] * inverse[column][rhs];
+            inverse[row][rhs] = value / matrix[row][row];
+        }
+    }
+    long double norm = 0, inverse_norm = 0;
+    for (unsigned row = 0; row < 6; ++row)
+    {
+        coefficients[permutation[row]] = pivoted[row] / column_scale[permutation[row]];
+        long double sum = 0, inverse_sum = 0;
+        for (unsigned column = 0; column < 6; ++column)
+        {
+            sum += std::abs(matrix[row][column]);
+            inverse_sum += std::abs(inverse[row][column]);
+        }
+        norm = std::max(norm, sum);
+        inverse_norm = std::max(inverse_norm, inverse_sum);
     }
     GeneralVoFCurvatureResult result;
     result.samples = samples.size();
-    result.condition = static_cast<double>(norm * inverse_norm);
+    result.condition = static_cast<double>(std::pow(norm * inverse_norm, 2));
     require(std::isfinite(result.condition) && result.condition <= options.maximum_condition,
         "General VoF curvature surface stencil is ill-conditioned.");
     long double residual = 0, weight = 0;
@@ -286,18 +364,32 @@ GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatc
     {
         long double predicted = 0;
         for (unsigned a = 0; a < 6; ++a)
-            predicted += sample.row[a] * matrix[a][6];
+            predicted += sample.row[a] * coefficients[a];
         const auto defect = predicted - sample.value;
         residual += sample.weight * defect * defect;
         weight += sample.weight;
     }
     result.normalized_residual = static_cast<double>(std::sqrt(residual / weight));
-    require(
-        std::isfinite(result.normalized_residual) && result.normalized_residual <= options.maximum_normalized_residual,
-        "General VoF curvature surface fit exceeds its physical residual gate.");
-    const auto x = matrix[1][6], y = matrix[2][6], xx = matrix[3][6] / h, xy = matrix[4][6] / h, yy = matrix[5][6] / h;
+    if (!std::isfinite(result.normalized_residual) || result.normalized_residual > options.maximum_normalized_residual)
+    {
+        std::ostringstream message;
+        message << "General VoF curvature surface fit exceeds its physical residual gate: residual="
+                << result.normalized_residual << " limit=" << options.maximum_normalized_residual
+                << " samples=" << result.samples << " condition=" << result.condition;
+        throw std::runtime_error(message.str());
+    }
+    const auto x = coefficients[1], y = coefficients[2], xx = coefficients[3] / h, xy = coefficients[4] / h,
+               yy = coefficients[5] / h;
     require(std::hypot(x, y) <= options.maximum_slope,
         "General VoF curvature fit disagrees with its reconstructed target normal.");
+    for (const auto& sample : samples)
+    {
+        const auto slope_x = coefficients[1] + coefficients[3] * sample.row[1] + coefficients[4] * sample.row[2];
+        const auto slope_y = coefficients[2] + coefficients[4] * sample.row[1] + coefficients[5] * sample.row[2];
+        const auto fitted_normal = unit(Point{-slope_x, -slope_y, 1});
+        require(dot(fitted_normal, sample.normal) >= options.minimum_normal_cosine,
+            "General VoF curvature surface fit contradicts its patch normals.");
+    }
     result.curvature = static_cast<double>(
         -((1 + y * y) * xx - 2 * x * y * xy + (1 + x * x) * yy) / std::pow(1 + x * x + y * y, 1.5L));
     require(std::isfinite(result.curvature), "General VoF curvature is nonfinite.");

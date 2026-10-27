@@ -60,6 +60,17 @@ public:
     [[nodiscard]] std::vector<Vector> gradient(const std::vector<double>& owned) const;
     /** Divergence of unit interface normals using the gradient support contract. */
     [[nodiscard]] std::vector<double> curvature(const std::vector<Vector>& owned_normals) const;
+    /** Ordinary-only collective dependency query for the existing balanced
+     * pressure/capillary operator. False proves this owned cell's curvature has
+     * no coefficient: its raw fraction is exactly zero/one, its gradient is
+     * structurally zero, and every neighbor correction is zero by its own
+     * constant stencil or the cached exact-zero tangential displacement.
+     * Nonbinary values, including represented traces, remain required.
+     * The budget bounds explicit query buffers; existing import storage is owned
+     * by this workspace. Empty owners perform the same two scalar imports.
+     */
+    [[nodiscard]] std::vector<unsigned char> capillary_extension_required(
+        const std::vector<double>& fraction, std::size_t byte_budget) const;
     [[nodiscard]] std::vector<double> interpolate(const std::vector<Vector>& owned_velocity) const;
     [[nodiscard]] std::vector<Vector> viscous_force(
         const std::vector<Vector>& velocity, const std::vector<double>& viscosity) const;

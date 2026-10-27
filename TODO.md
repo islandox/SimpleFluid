@@ -1669,10 +1669,17 @@ implicit-upwind specialization while retaining the general swept path.
 
 #### Shared surfaces, interfaces and qualification — repair Stages 5–6
 
-- [ ] Unify mixed-cell and face-aligned patches in a backend-independent surface
-      catalog and conditioned curvature fit. Add an explicit mesh-scale filtered
-      capillary surface for binary staircases, preserving component geometric
-      volume without changing stored cell inventories; reject unresolved topology.
+- [x] **Repair Stage 5 — capillary surfaces:** unify Ordinary mixed sections,
+      aligned faces and filtered patches with canonical identities and connected
+      owner fits, independent of transport backend. Admit coherent native-plane
+      witnesses through independent source-volume checks. Provide explicit
+      `FilteredBinary` geometry with conservative smoothing and per-component
+      extraction/publication volume constraints; preserve inventories, histories
+      and transport declarations. Reject deficient fits, incomplete support,
+      merging, cavities, plateaus and unrepresentable publication. Retain accepted
+      model/width/volume/fit diagnostics atomically. See the
+      [capillary model](docs/modeling/general_vof_capillarity.md); complete
+      capillary-time horizons and quantitative accuracy thresholds remain open.
 - [ ] Complete checked policy views and source-provider boundaries while retaining
       compatible public adapters and the existing library ownership.
 - [ ] Exercise complete homogeneous/hydrostatic, interface-passage,

@@ -83,8 +83,9 @@ std::shared_ptr<State> Initialization<Mode>::prepare(Resources& resources,
         next->finite_mass_error = std::move(storage.mass_error);
         next->physical_mass.clear();
     }
-    next->curvature = Curvature<Mode>::assemble(
-        *resources.mesh, *next->phases, resources.material.surface_tension, resources.options.byte_budget);
+    next->curvature = Curvature<Mode>::assemble(*resources.mesh, resources.flow, *next->phases,
+        resources.material.surface_tension, resources.options.byte_budget, resources.options.capillary,
+        &next->capillary);
     next->face_velocity = supplied_faces ? flow.faces(face_velocity) : flow.interpolate(next->velocity);
     next->projection_arithmetic.byte_budget = options.byte_budget;
     if constexpr (Mode != ArithmeticMode::Exact)

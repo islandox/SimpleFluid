@@ -273,8 +273,9 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
     const auto face_change = flow.interpolate(change);
     for (std::size_t f = 0; f < next->face_velocity.size(); ++f)
         next->face_velocity[f] += face_change[f];
-    next->curvature = Curvature<Mode>::assemble(
-        *resources.mesh, *next->phases, resources.material.surface_tension, resources.options.byte_budget);
+    next->curvature = Curvature<Mode>::assemble(*resources.mesh, resources.flow, *next->phases,
+        resources.material.surface_tension, resources.options.byte_budget, resources.options.capillary,
+        &next->capillary);
     next->finite_projection.byte_budget = options.byte_budget;
     const auto closure_topology =
         projection_topology<detail::GeneralVoFFiniteProjectionClosureTopology>(*mesh, *next->phases);

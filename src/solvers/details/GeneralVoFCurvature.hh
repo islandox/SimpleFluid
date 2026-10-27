@@ -2,8 +2,9 @@
  * @brief Conditioned physical surface fits from actual reconstructed PLIC sections.
  */
 #pragma once
-#include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include "FVM/GeneralVoFSurface.hh"
 #include "SimpleFluidExport.hh"
+#include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <optional>
 #include <span>
 namespace SimpleFluid::detail
@@ -16,6 +17,7 @@ struct GeneralVoFCurvaturePatch
     double area = 0, cell_scale = 0;
     SimpleFluid::PLIC::GeometryPoint
         physical_spans{}; ///< Actual AABB spans; zero only for manufactured compatibility samples.
+    std::optional<VoF::GeneralVoFSurfaceKey> key; ///< Unkeyed compatibility samples use their mixed-cell identity.
 };
 struct GeneralVoFCurvatureOptions
 {
@@ -25,12 +27,15 @@ struct GeneralVoFCurvatureOptions
 };
 struct GeneralVoFCurvatureResult
 {
-    double curvature = 0, condition = 0, normalized_residual = 0;
+    double curvature = 0;
+    double condition = 0; ///< Squared infinity-norm condition estimate of the coordinate-scaled QR factor.
+    double normalized_residual = 0;
     std::size_t samples = 0;
 };
 /** Compiled numerical fit; source patch geometry/planes must be authenticated by
- * the transport authority before MPI support is supplied. Missing or deficient
- * local support rejects; no pure-cell zero-normal fallback is introduced.
+ * the surface authority before MPI support is supplied. The caller supplies a
+ * connected, topology-authenticated neighborhood.
+ * Missing or deficient local support rejects; no pure-cell zero-normal fallback is introduced.
  */
 class SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFCurvature
 {

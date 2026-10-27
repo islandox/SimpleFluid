@@ -38,6 +38,7 @@ set(SIMPLEFLUID_VOF_SOLVER_SOURCES
     details/GeneralVoFExactProjection.cc
     details/GeneralVoFFiniteProjectionArithmetic.hh
     details/GeneralVoFCurvature.cc
+    details/GeneralVoF/OrdinaryCurvature.cc
     details/GeneralVoFExactStorage.cc
     details/ConservativeVoFExactArithmetic.cc
     details/GeneralVoFTransferBinding.cc
@@ -110,7 +111,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     simplefluid_exclude_from_pgo_sources(details/ConservativeVoFTransport.cc)
     simplefluid_exclude_from_pgo_sources(details/VoFProjectionWorkspace.cc)
     simplefluid_exclude_from_pgo_sources(details/GeneralVoFFlowWorkspace.cc)
-    simplefluid_exclude_from_pgo_sources(details/GeneralVoFCurvature.cc)
+    simplefluid_exclude_from_pgo_sources(details/GeneralVoFCurvature.cc details/GeneralVoF/OrdinaryCurvature.cc)
     simplefluid_exclude_from_pgo_sources(details/ConservativeVoFExactArithmetic.cc)
     simplefluid_exclude_from_pgo_sources(details/GeneralVoFTransferBinding.cc)
     simplefluid_exclude_from_pgo_sources(AdaptiveVoFSolver.cc)
@@ -135,6 +136,7 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
             details/GeneralVoFFlowWorkspace.cc
             details/GeneralVoFPhiClosure.cc
             details/GeneralVoFCurvature.cc
+    details/GeneralVoF/OrdinaryCurvature.cc
             PROPERTIES
             COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
             SKIP_UNITY_BUILD_INCLUSION TRUE

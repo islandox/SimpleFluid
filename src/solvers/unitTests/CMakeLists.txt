@@ -845,3 +845,37 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
       LABELS "mpi;vof;interface;conservation;transaction;empty_rank" TIMEOUT 300)
   endforeach()
 endif()
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+  foreach(PROCS 2 4)
+    simplefluid_add_mpi_test(NAME GeneralVoFCapillaryCatalog_${PROCS}procs
+      TARGET testGeneralVoFCapillarySurface PROCS ${PROCS}
+      ARGS "--gtest_filter=GeneralVoFCapillarySurface.DefaultFilterPreservesCubeVolumeAndRejectsUnderresolvedCurvature:GeneralVoFCapillarySurface.FilteringPreservesEachOfTwoDistinctEnclosedComponentVolumes:GeneralVoFCapillarySurface.FilteredEnclosedComponentCoexistsWithUnrelatedMixedPlane:GeneralVoFCapillarySurface.UnequalCellVolumesRetainVolumeWeightedFilteredConservation"
+      LABELS "mpi;vof;capillary;surface;conservation;empty_rank" TIMEOUT 600)
+    simplefluid_add_mpi_test(NAME GeneralVoFCapillaryTopology_${PROCS}procs
+      TARGET testGeneralVoFCapillarySurface PROCS ${PROCS}
+      ARGS "--gtest_filter=GeneralVoFCapillarySurface.SingleCellPlateauRequestsResolutionWithoutChangingInventories:GeneralVoFCapillarySurface.FilterRejectsEdgeAndVertexContactsAsAmbiguousTopology:GeneralVoFCapillarySurface.FilterRejectsMergingCavitiesAndIncompleteSupport:GeneralVoFCapillarySurface.SpatialPartitionIncompleteHaloRejectsWithResolutionRecordOnEveryRank:GeneralVoFCapillarySurface.DivergentRankModelControlsRejectBeforeAnyConditionalCollective"
+      LABELS "mpi;vof;capillary;topology;collective;empty_rank" TIMEOUT 600)
+    simplefluid_add_mpi_test(NAME GeneralVoFCapillaryFlow_${PROCS}procs
+      TARGET testGeneralVoFCapillarySurface PROCS ${PROCS}
+      ARGS "--gtest_filter=GeneralVoFCapillarySurface.ResolvedFilteredBinaryDropHasInspectibleCurvature:GeneralVoFCapillarySurface.MixedAndAlignedPlanarSectionsShareOneImmutableSourceCatalog:GeneralVoFCapillarySurface.RejectedInvalidInputsRetainAcceptedCapillaryDiagnostics"
+      LABELS "mpi;vof;capillary;flow;transaction;empty_rank" TIMEOUT 600)
+    simplefluid_add_mpi_test(NAME GeneralVoFCapillaryRollback_${PROCS}procs
+      TARGET testGeneralVoFCapillarySurface PROCS ${PROCS}
+      ARGS "--gtest_filter=GeneralVoFCapillarySurface.MpiCapillaryFailureDuringRepartitionRetainsCompleteAcceptedPublication"
+      LABELS "mpi;vof;capillary;transaction;empty_rank" TIMEOUT 600)
+  endforeach()
+endif()
+
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+  foreach(PROCS 2 4)
+    simplefluid_add_mpi_test(NAME GeneralVoFCapillaryDependencySupport_${PROCS}procs
+      TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
+      ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.CapillaryExtensionMatchesOrthogonalAndSkewSupportIncludingEmptyOwners:GeneralVoFFlowWorkspaceTest.CapillaryExtensionRetainsTracesAndRejectsInvalidInputsCollectively"
+      LABELS "mpi;vof;capillary;operator;collective;empty_rank" TIMEOUT 180)
+    simplefluid_add_mpi_test(NAME GeneralVoFCapillaryDependencyProjection_${PROCS}procs
+      TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
+      ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.CapillaryExtensionInactiveCurvatureLeavesPhysicalProjectionIdentical"
+      LABELS "mpi;vof;capillary;operator;collective;empty_rank" TIMEOUT 180)
+  endforeach()
+endif()

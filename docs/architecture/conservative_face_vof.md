@@ -162,13 +162,15 @@ transport operator as physical state.
 centroid, area, and gas-to-liquid normal. It preserves trace inventories and
 never manufactures mixed cells. Its bounded halo catalog includes interface
 faces incident only to neighboring halo cells; deduplicate replicas by face ID
-for global counts. The API requires a face backend.
+for global counts. The Ordinary API is independent of the transport backend.
 
-The initial capillary consumer admits an all-pure planar face surface only with
-coherent normals, coplanarity, and two independent tangential support directions.
-This admits a supported planar zero-curvature equilibrium. Curved binary
-staircases, deficient support, and unresolved combinations of mixed sections and
-face-aligned patches reject. A general unified curved surface fit remains open.
+The shared capillary catalog combines mixed sections and face-aligned patches
+using canonical patch identities and connected support. Represented planar
+surfaces require coherent normals, coplanarity and two independent tangent
+directions. Curved binary surfaces use the explicitly selected, component-volume
+preserving `FilteredBinary` model. Deficient support and unresolved topology still
+reject. See the [capillary geometry model](../modeling/general_vof_capillarity.md)
+for filtering, volume publication, diagnostics and support limits.
 
 ## Migration and qualification
 
@@ -184,7 +186,6 @@ current commands/results belong in local build logs.
 The default must remain `SweptPartition` until relevant coupled physical gates
 are met. A short conservative passage or robust geometry query does not establish
 drop-translation accuracy, rotation/deformation convergence, curved capillary
-equilibrium, or production scaling. Open boundaries, counterflow, unified curved
-surface fitting, and broader physical accuracy qualification remain migration
+equilibrium, or production scaling. Open boundaries, counterflow, and broader physical accuracy qualification remain migration
 gates. Geometry operation counts and momentum preparation counts are not
 whole-solver timing claims.

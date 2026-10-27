@@ -141,8 +141,9 @@ PreparedRemap Remap<ArithmeticMode::Exact>::prepare(const Resources& resources, 
                 mapped_pressure[c] = pressure.sign() ? pressure.certified().as_double() : 0;
             }
         });
-    state->curvature = Curvature<ArithmeticMode::Exact>::assemble(
-        *(*candidate).mesh, *state->phases, (*candidate).material.surface_tension, (*candidate).options.byte_budget);
+    state->curvature = Curvature<ArithmeticMode::Exact>::assemble(*(*candidate).mesh, (*candidate).flow,
+        *state->phases, (*candidate).material.surface_tension, (*candidate).options.byte_budget,
+        (*candidate).options.capillary, &state->capillary);
     // Cell momentum/pV and face q are independent accepted degrees of
     // freedom. A fixed-clock handoff must not apply a physical dt=1 impulse.
     using Domain = detail::GeneralVoFStorageDomain;
