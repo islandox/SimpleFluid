@@ -4,6 +4,7 @@
  */
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
+#include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoFExactPressure.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
@@ -184,6 +185,131 @@ std::vector<double> GeneralVoFFlowWorkspace::cells(const std::vector<double>& ow
     cell_overlap_.doImport(cell_owned_, cell_import_, Tpetra::INSERT);
     auto d = cell_overlap_.getData();
     return {d.begin(), d.end()};
+}
+std::vector<unsigned char> GeneralVoFFlowWorkspace::capillary_extension_required(
+    const std::vector<double>& fraction, std::size_t byte_budget) const
+{
+    const general_vof::Execution execution(*mesh_);
+    const auto owned_count = mesh_->num_owned_cells(), overlap_count = mesh_->num_cells();
+    std::vector<double> fraction_halo, flat_owned, flat_halo;
+    std::vector<unsigned char> required;
+    execution.collective(
+        [&]
+        {
+            if (arithmetic_mode_ != ArithmeticMode::Ordinary || !current_geometry() || fraction.size() != owned_count ||
+                geometry_.size() != mesh_->num_faces() || !byte_budget)
+                throw std::runtime_error(
+                    "Capillary dependency query requires current Ordinary geometry and owned fractions.");
+            for (double value : fraction)
+                if (!std::isfinite(value) || value < 0 || value > 1)
+                    throw std::runtime_error("Capillary dependency query fractions must be finite and in [0,1].");
+            auto remaining = byte_budget;
+            const auto charge = [&](std::size_t count, std::size_t bytes)
+            {
+                if (count > remaining / bytes)
+                    throw std::length_error("Capillary dependency query exceeds its byte budget.");
+                remaining -= count * bytes;
+            };
+            // Two overlap imports, one owned binary marker and the returned mask.
+            // Preflight all counts before allocating or starting either import.
+            charge(overlap_count, 2 * sizeof(double));
+            charge(owned_count, sizeof(double) + sizeof(unsigned char));
+            fraction_halo.assign(overlap_count, 0);
+            flat_halo.assign(overlap_count, 0);
+            flat_owned.assign(owned_count, 0);
+            required.assign(owned_count, 1);
+        },
+        "capillary_dependency_preflight");
+    // Use the same cached scalar import as cells(), with explicit local
+    // preparation/publication boundaries on either side of the MPI operation.
+    // A host-view allocation failure must be reduced before any rank imports.
+    const auto import_scalar = [&](const std::vector<double>& owned, std::vector<double>& overlap)
+    {
+        execution.collective(
+            [&]
+            {
+                if (!current_geometry())
+                    throw std::runtime_error("Capillary dependency geometry changed before scalar import.");
+                auto data = cell_owned_.getDataNonConst();
+                if (static_cast<std::size_t>(data.size()) != owned.size())
+                    throw std::runtime_error("Capillary dependency source differs from its cached scalar map.");
+                std::copy(owned.begin(), owned.end(), data.begin());
+            },
+            "capillary_dependency_import_prepare");
+        cell_overlap_.doImport(cell_owned_, cell_import_, Tpetra::INSERT);
+        execution.collective(
+            [&]
+            {
+                const auto data = cell_overlap_.getData();
+                if (static_cast<std::size_t>(data.size()) != overlap.size())
+                    throw std::runtime_error("Capillary dependency target differs from its cached scalar map.");
+                std::copy(data.begin(), data.end(), overlap.begin());
+            },
+            "capillary_dependency_import_publish");
+    };
+    import_scalar(fraction, fraction_halo);
+    execution.collective(
+        [&]
+        {
+            if (fraction_halo.size() != overlap_count)
+                throw std::runtime_error("Capillary dependency query imported an invalid scalar shape.");
+            const auto lease = mesh_->acquire_execution_view();
+            for (std::size_t c = 0; c < owned_count; ++c)
+            {
+                // Equality is structural. In particular, no phase-fraction cutoff
+                // can turn a positive physical trace into an inactive pure cell.
+                bool flat = fraction[c] == 0 || fraction[c] == 1;
+                for (const auto face : mesh_->faces(LO(c)))
+                {
+                    const auto& geometry = geometry_.at(face);
+                    if (geometry.boundary)
+                        continue;
+                    if (geometry.owner != LO(c) && geometry.neighbor != LO(c))
+                        throw std::runtime_error("Capillary dependency face has inconsistent cached cell incidence.");
+                    const auto neighbor = geometry.owner == LO(c) ? geometry.neighbor : geometry.owner;
+                    if (neighbor < 0 || std::size_t(neighbor) >= fraction_halo.size())
+                        throw std::runtime_error("Capillary dependency neighbor is outside the imported scalar map.");
+                    flat = flat && fraction_halo[neighbor] == fraction[c];
+                }
+                flat_owned[c] = flat ? 1 : 0;
+            }
+        },
+        "capillary_dependency_flat_stencil");
+    import_scalar(flat_owned, flat_halo);
+    execution.collective(
+        [&]
+        {
+            if (flat_halo.size() != overlap_count)
+                throw std::runtime_error("Capillary dependency query imported an invalid marker shape.");
+            const auto lease = mesh_->acquire_execution_view();
+            for (std::size_t c = 0; c < owned_count; ++c)
+            {
+                if (flat_owned[c] == 0)
+                    continue;
+                required[c] = 0;
+                for (const auto face : mesh_->faces(LO(c)))
+                {
+                    const auto& geometry = geometry_.at(face);
+                    if (geometry.boundary)
+                        continue;
+                    const auto neighbor = geometry.owner == LO(c) ? geometry.neighbor : geometry.owner;
+                    if (flat_halo.at(neighbor) == 1)
+                        continue;
+                    // This is the NEIGHBOR'S reconstruction displacement used
+                    // by project_finite, not the current cell's displacement.
+                    const auto& tangent = geometry.owner == LO(c) ? geometry.tangent_right : geometry.tangent_left;
+                    if (std::any_of(tangent.begin(), tangent.end(), [](double value) { return value != 0; }))
+                    {
+                        required[c] = 1;
+                        break;
+                    }
+                }
+            }
+            if (!current_geometry())
+                throw std::runtime_error("Capillary dependency query geometry changed during the operation.");
+        },
+        "capillary_dependency_operator_support");
+    return required;
 }
 std::vector<double> GeneralVoFFlowWorkspace::faces(const std::vector<double>& overlap) const
 {

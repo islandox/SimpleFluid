@@ -77,6 +77,10 @@ const std::vector<double>& GeneralVoFSolver::pressure() const noexcept
 {
     return impl_->accepted->pressure;
 }
+const VoF::GeneralVoFCapillaryDiagnostics& GeneralVoFSolver::capillary_diagnostics() const noexcept
+{
+    return impl_->accepted->capillary;
+}
 const std::vector<double>& GeneralVoFSolver::curvature() const noexcept
 {
     return impl_->accepted->curvature;

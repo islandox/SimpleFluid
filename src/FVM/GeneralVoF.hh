@@ -2,6 +2,7 @@
  * @brief Source-pinned unsplit phase transport on authority-certified native cells.
  */
 #pragma once
+#include "FVM/GeneralVoFSurface.hh"
 #include "FVM/ExactPhaseTransfer.hh"
 #include "FVM/ExperimentalPhaseInventory.hh"
 #include "FVM/PhaseVolumes.hh"
@@ -392,8 +393,11 @@ public:
     [[nodiscard]] std::vector<PLIC::PolyhedralInterface> reconstruct() const;
     [[nodiscard]] std::vector<GeneralVoFReconstructionPatch> reconstruction_patches() const;
     /** Explicit opposite-pure interfaces on bounded halo canonical fine subfaces.
-     * Requires a face backend. Replicas must be deduplicated by face ID. */
+     * Ordinary arithmetic, independent of backend. Deduplicate replicas by face ID. */
     [[nodiscard]] std::vector<GeneralVoFFaceInterface> face_interfaces() const;
+    /** Collective, detached capillary geometry. Never changes phase inventories,
+     * histories or transport declarations. Incomplete support requests resolution. */
+    [[nodiscard]] GeneralVoFSurfaceCatalog capillary_surface(GeneralVoFSurfaceOptions = {}) const;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveNode>& nodes() const noexcept;
     [[nodiscard]] const std::vector<Meshes::AMR::AdaptiveTile>& tiles() const noexcept;
     /** Retained tile ordinals incident to a canonical node, in tiles() order.

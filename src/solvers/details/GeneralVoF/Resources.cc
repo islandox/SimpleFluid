@@ -89,6 +89,19 @@ void initialize_geometry(
     Teuchos::broadcast(
         *mesh->owned_cell_map()->getComm(), 0, int(sizeof(agreed)), reinterpret_cast<char*>(agreed.data()));
     execution.require(controls == agreed, "General VoF material/numerical controls differ across ranks.");
+    const auto capillary_model = o.capillary.model;
+    execution.require((capillary_model == VoF::GeneralVoFCapillaryModel::Reconstructed ||
+                          capillary_model == VoF::GeneralVoFCapillaryModel::FilteredBinary) &&
+                          std::isfinite(o.capillary.filter_width) && o.capillary.filter_width > 0 &&
+                          (arithmetic_mode_ == ArithmeticMode::Ordinary ||
+                              capillary_model == VoF::GeneralVoFCapillaryModel::Reconstructed),
+        "General VoF capillary model or filter width is invalid for its arithmetic mode.");
+    std::array<std::uint64_t, 2> capillary_controls{
+        std::uint64_t(capillary_model), std::bit_cast<std::uint64_t>(o.capillary.filter_width)};
+    auto agreed_capillary = capillary_controls;
+    Teuchos::broadcast(*mesh->owned_cell_map()->getComm(), 0, int(sizeof(agreed_capillary)),
+        reinterpret_cast<char*>(agreed_capillary.data()));
+    execution.require(capillary_controls == agreed_capillary, "General VoF capillary controls differ across ranks.");
     execution.require(phases->hierarchy()->geometry_unchanged(), "General VoF source geometry is stale.");
     const auto geometry = phases->owned_geometry();
     const auto bounded_geometry = arithmetic_mode_ != ArithmeticMode::Exact

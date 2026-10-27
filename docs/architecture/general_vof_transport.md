@@ -359,8 +359,10 @@ not qualify complete interface-motion or capillary cycles. Uncertain or uncovere
 corrected reach still rejects. Index/candidate counts measure local work, not wall
 time, RSS or production scaling.
 
-Binary-staircase filtering is a later explicit capillary model; it must preserve
-component geometric volume without changing accepted cell inventories. Complete
-motion/capillary horizons, accuracy/convergence targets and production scaling
-remain separate qualification obligations. Focused preparation and failure tests
+The shared [capillary geometry model](../modeling/general_vof_capillarity.md)
+provides mixed/aligned patch identities and explicit binary filtering with
+component-volume constraints, independent of the transport backend. It changes
+no accepted inventory, history or transport declaration. Complete motion/capillary
+horizons, accuracy/convergence targets and production scaling remain separate
+qualification obligations. Focused preparation and failure tests
 cannot establish those results.

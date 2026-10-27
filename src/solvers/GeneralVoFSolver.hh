@@ -13,6 +13,7 @@ namespace SimpleFluid
 struct GeneralVoFSolverOptions
 {
     VoFSolverOptions flow;
+    VoF::GeneralVoFSurfaceOptions capillary;
     int maximum_momentum_iterations = 3000;
     double momentum_relative_tolerance = 1e-12;
     /** Momentum exact Input/Scratch/Result buffers and retained payloads use
@@ -99,6 +100,7 @@ public:
     [[nodiscard]] const std::vector<double>& face_velocity() const noexcept;
     [[nodiscard]] const std::vector<double>& pressure() const noexcept;
     [[nodiscard]] const std::vector<double>& curvature() const noexcept;
+    [[nodiscard]] const VoF::GeneralVoFCapillaryDiagnostics& capillary_diagnostics() const noexcept;
     [[nodiscard]] const VoFStepDiagnostics& diagnostics() const noexcept;
 
 private:

@@ -120,8 +120,9 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                     A::divide(item.amounts[3], VoF::finite_detail::runtime_value<Mode>(geometry[c]->volume())));
             }
         });
-    state->curvature = Curvature<Mode>::assemble(
-        *(*candidate).mesh, *state->phases, (*candidate).material.surface_tension, (*candidate).options.byte_budget);
+    state->curvature = Curvature<Mode>::assemble(*(*candidate).mesh, (*candidate).flow, *state->phases,
+        (*candidate).material.surface_tension, (*candidate).options.byte_budget, (*candidate).options.capillary,
+        &state->capillary);
     const FaceTransferSource face_source{
         *mesh, *old.phases, old.velocity, old.finite_projection, flow, arithmetic_mode_};
     const FaceTransferTarget face_target{

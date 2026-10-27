@@ -24,6 +24,7 @@ struct SIMPLEFLUID_SOLVERS_LOCAL State
     detail::GeneralVoFFiniteProjectionProvenance finite_projection;
     detail::GeneralVoFProjectionProvenance projection_arithmetic;
     VoFStepDiagnostics diagnostics;
+    VoF::GeneralVoFCapillaryDiagnostics capillary;
     std::array<GeneralVoFMomentumDiagnostics, 3> momentum_transport;
 };
 } // namespace SimpleFluid::detail::general_vof

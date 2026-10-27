@@ -255,8 +255,9 @@ std::shared_ptr<State> Advance<ArithmeticMode::Exact>::prepare(Resources& resour
     const auto face_change = flow.interpolate(change);
     for (std::size_t f = 0; f < next->face_velocity.size(); ++f)
         next->face_velocity[f] += face_change[f];
-    next->curvature = Curvature<ArithmeticMode::Exact>::assemble(
-        *resources.mesh, *next->phases, resources.material.surface_tension, resources.options.byte_budget);
+    next->curvature = Curvature<ArithmeticMode::Exact>::assemble(*resources.mesh, resources.flow, *next->phases,
+        resources.material.surface_tension, resources.options.byte_budget, resources.options.capillary,
+        &next->capillary);
     next->projection_arithmetic.byte_budget = options.byte_budget;
     const auto closure_topology =
         projection_topology<detail::Exact::GeneralVoFProjectionClosureTopology>(*mesh, *next->phases);

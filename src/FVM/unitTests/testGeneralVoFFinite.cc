@@ -162,13 +162,18 @@ TEST(GeneralVoFFinite, OrdinaryDefaultAndBoundedOptInKeepSeparateAcceptancePolic
     EXPECT_EQ(certified.arithmetic_mode(), ArithmeticMode::BoundedCertification);
     auto controls = circulation(ordinary);
     for (auto& face : controls)
-        face.bounded_integrated_volume = SimpleFluid::PLIC::DynamicGeometryValue{face.integrated_volume, 1e-3L};
-    // An Ordinary state explicitly consumes nominal controls. Opt-in interval
-    // certification must still reject these unresolved source-cell controls.
+        face.bounded_integrated_volume =
+            SimpleFluid::PLIC::DynamicGeometryValue{face.integrated_volume, 1e-3L, ArithmeticMode::Ordinary};
+    auto bounded_controls = controls;
+    for (auto& face : bounded_controls)
+        face.bounded_integrated_volume->arithmetic_mode = ArithmeticMode::BoundedCertification;
+    // Each runtime adapter must carry the selected policy. Ordinary consumes
+    // nominal values; bounded certification rejects the same unresolved widths.
+    EXPECT_THROW((void) ordinary.plan_transport(stationary(ordinary), bounded_controls, 1), std::invalid_argument);
     const auto trial = ordinary.plan_transport(stationary(ordinary), controls, 1);
     const auto moved = ordinary.apply(trial);
     EXPECT_EQ(moved->arithmetic_mode(), ArithmeticMode::Ordinary);
-    EXPECT_THROW((void) certified.plan_transport(stationary(certified), controls, 1), std::invalid_argument);
+    EXPECT_THROW((void) certified.plan_transport(stationary(certified), bounded_controls, 1), std::invalid_argument);
     EXPECT_THROW((void) certified.apply(trial), std::invalid_argument);
     EXPECT_EQ(certified.gas_volumes(), input.gas);
     EXPECT_EQ(certified.carrier_volumes(), input.carrier);
