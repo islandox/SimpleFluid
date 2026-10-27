@@ -126,6 +126,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                 packets.push_back({tile.first_owner, std::move(w.data)});
             }
         });
+    agree_transaction(comm, data.control);
     // Scalar stage controls also agree on empty ranks.
     std::array<double, 3> settings{dt, density[0], density[1]}, low{}, high{};
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 3, settings.data(), low.data());
