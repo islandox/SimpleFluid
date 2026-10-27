@@ -104,6 +104,8 @@ struct AggregateWork
     std::size_t bytes = 0, operation_limit = 0;
     OrdinaryAggregateContext* context = nullptr;
     std::size_t indirect_calls = 0, indirect_bytes = 0, indirect_reuses = 0;
+    OrdinaryAggregateStage stage = OrdinaryAggregateStage::Source;
+    std::size_t live_witnesses = 0, live_witness_bytes = 0;
     void sync() const
     {
         if (context)
@@ -111,6 +113,7 @@ struct AggregateWork
             context->bytes = bytes;
             context->pairs = stats.pair_tests;
             context->operations = stats.operations;
+            context->statistics = stats;
         }
     }
     void charge(std::size_t n)
@@ -118,12 +121,15 @@ struct AggregateWork
         const auto limit = std::min(sweep.byte_budget, geometry.byte_budget);
         if (n > limit || bytes > limit - n)
         {
+            stats.failed_charge_bytes = n;
+            sync();
             std::ostringstream message;
             message << "Ordinary aggregate byte budget exhausted: indirect_calls=" << indirect_calls
                     << " indirect_bytes=" << indirect_bytes << " indirect_reuses=" << indirect_reuses << '.';
             throw GeometryError(GeometryErrorCode::ResourceLimit, message.str());
         }
         bytes += n;
+        stats.stage_charged_bytes[static_cast<unsigned>(stage)] += n;
         stats.storage_bytes = bytes;
         sync();
     }
@@ -264,12 +270,6 @@ bool support_expression_less(const Support* a, const Support* b)
     // Equal represented expressions can still have distinct issued identities.
     return std::less<const Support*>{}(a, b);
 }
-struct Construction
-{
-    std::size_t first = 0, second = 0;
-    const Support* support = nullptr;
-    int orientation = 1;
-};
 struct Face
 {
     std::vector<std::size_t> vertices;
@@ -282,17 +282,81 @@ struct Poly
     std::vector<std::vector<const Support*>> supports;
     const OrdinaryAggregateTetra* source = nullptr;
     DefiningCache* defining_cache = nullptr;
-    // The first four entries are immutable source leaves. Later entries
-    // retain the edge/support expression, independent of rounded weights.
-    std::vector<Construction> constructions;
+    // Only face-referenced vertices are stored. Defining support evidence and
+    // the immutable source recipe do not depend on a source-leaf index prefix.
     std::vector<Face> faces;
+    AggregateWork* tracking = nullptr;
+    std::size_t tracked_bytes = 0;
+
+    Poly() = default;
+    Poly(const Poly& p)
+        : vertices(p.vertices), errors(p.errors), supports(p.supports), source(p.source),
+          defining_cache(p.defining_cache), faces(p.faces)
+    {
+        if (p.tracking)
+            watch(*p.tracking);
+    }
+    Poly(Poly&& p) noexcept { swap(p); }
+    Poly& operator=(Poly p) noexcept
+    {
+        swap(p);
+        return *this;
+    }
+    ~Poly()
+    {
+        if (tracking)
+        {
+            --tracking->live_witnesses;
+            tracking->live_witness_bytes -= tracked_bytes;
+        }
+    }
+    void swap(Poly& p) noexcept
+    {
+        vertices.swap(p.vertices);
+        errors.swap(p.errors);
+        supports.swap(p.supports);
+        faces.swap(p.faces);
+        std::swap(source, p.source);
+        std::swap(defining_cache, p.defining_cache);
+        std::swap(tracking, p.tracking);
+        std::swap(tracked_bytes, p.tracked_bytes);
+    }
+    void watch(AggregateWork& work)
+    {
+        tracking = &work;
+        ++tracking->live_witnesses;
+        observe();
+    }
+    /** Owned witness object/buffer capacities only, excluding allocator metadata,
+     * split maps, expression caches and native geometry. Never an admission cap. */
+    void observe()
+    {
+        if (!tracking)
+            return;
+        auto bytes = sizeof(Poly) + (vertices.capacity() + errors.capacity()) * sizeof(B) +
+                     supports.capacity() * sizeof(std::vector<const Support*>) + faces.capacity() * sizeof(Face);
+        for (const auto& support : supports)
+            bytes += support.capacity() * sizeof(const Support*);
+        for (const auto& face : faces)
+            bytes += face.vertices.capacity() * sizeof(std::size_t);
+        tracking->live_witness_bytes -= tracked_bytes;
+        tracking->live_witness_bytes += bytes;
+        tracked_bytes = bytes;
+        tracking->stats.peak_live_witnesses = std::max(tracking->stats.peak_live_witnesses, tracking->live_witnesses);
+        tracking->stats.peak_live_witness_bytes =
+            std::max(tracking->stats.peak_live_witness_bytes, tracking->live_witness_bytes);
+        tracking->sync();
+    }
 };
 void charge_poly_points(const Poly& p, AggregateWork& work)
 {
-    work.charge(p.vertices.size() * (2 * sizeof(B) + sizeof(Construction)) +
-                p.supports.size() * sizeof(std::vector<const Support*>));
+    const auto before = work.bytes;
+    work.charge(p.vertices.size() * 2 * sizeof(B) + p.supports.size() * sizeof(std::vector<const Support*>));
     for (const auto& support : p.supports)
         work.charge(support.size() * sizeof(const Support*));
+    work.stats.vertices_copied += p.vertices.size();
+    work.stats.copied_vertex_bytes += work.bytes - before;
+    work.sync();
 }
 void charge_poly_copy(const Poly& p, AggregateWork& work)
 {
@@ -306,15 +370,15 @@ Poly tetra(const OrdinaryAggregateTetra& source, const std::array<Support, 4>& s
     AggregateWork& work)
 {
     work.witness();
-    work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(Construction) + 4 * sizeof(std::vector<const Support*>) +
-                4 * sizeof(Face) + 12 * sizeof(std::size_t) + 12 * sizeof(const Support*));
+    work.charge(sizeof(Poly) + 8 * sizeof(B) + 4 * sizeof(std::vector<const Support*>) + 4 * sizeof(Face) +
+                12 * sizeof(std::size_t) + 12 * sizeof(const Support*));
     Poly p;
+    p.watch(work);
     p.source = &source;
     p.defining_cache = &cache;
     p.vertices.resize(4);
     p.errors.resize(4);
     p.supports.resize(4);
-    p.constructions.resize(4);
     for (unsigned i = 0; i < 4; ++i)
     {
         p.vertices[i][i] = 1;
@@ -325,6 +389,7 @@ Poly tetra(const OrdinaryAggregateTetra& source, const std::array<Support, 4>& s
     }
     for (unsigned i = 0; i < 4; ++i)
         p.faces.push_back({{tetra_faces[i].begin(), tetra_faces[i].end()}, static_cast<int>(i)});
+    p.observe();
     return p;
 }
 std::array<unsigned, 3> axes(unsigned pivot)
@@ -468,26 +533,40 @@ std::optional<predicates::Result> defining_distance(
             }
     return std::nullopt;
 }
-/** Complementary clipping retains barycentric placement at original source
- * supports. Children never undergo a metric or positivity admission. */
-Poly clipped(const Poly& p, Distances d, AggregateWork& work)
+struct Split
+{
+    Poly inside, outside;
+};
+/** Classify and construct each crossing once. Both children retain exactly the
+ * same point/error/support evidence; only their cap winding differs. Metric
+ * clipping requests only the inside child and allocates no outside witness. */
+Split split(Poly p, Distances d, AggregateWork& work, bool complementary)
 {
     if (p.faces.empty())
         return {};
     work.witness();
+    if (complementary)
+        work.witness();
     if (!d.support)
         fail(GeometryErrorCode::ProvenanceMismatch, "Ordinary aggregate cut has no immutable identity.");
     work.charge(p.vertices.size() * (sizeof(predicates::Result) + sizeof(bool)));
     std::vector<predicates::Result> distances(p.vertices.size());
     std::vector<bool> active(p.vertices.size(), false);
-    for (const auto& f : p.faces)
-        for (auto i : f.vertices)
-            active[i] = true;
+    for (const auto& face : p.faces)
+        for (auto id : face.vertices)
+            active[id] = true;
+    const auto active_count = std::count(active.begin(), active.end(), true);
+    work.stats.stored_vertices_seen += p.vertices.size();
+    work.stats.active_vertices_seen += active_count;
+    work.stats.peak_stored_vertices = std::max(work.stats.peak_stored_vertices, p.vertices.size());
+    work.stats.peak_active_vertices = std::max(work.stats.peak_active_vertices, std::size_t(active_count));
+    work.sync();
     bool inside = false, outside = false;
     for (std::size_t i = 0; i < p.vertices.size(); ++i)
     {
         if (!active[i])
             continue;
+        ++work.stats.vertices_classified;
         if (std::find(p.supports[i].begin(), p.supports[i].end(), d.support) == p.supports[i].end())
             distances[i] = distance(p.vertices[i], p.errors[i], d, work);
         bool classified = resolved(distances[i]);
@@ -513,30 +592,40 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
     if (!inside && !outside)
         fail(GeometryErrorCode::UnresolvedArithmetic,
             "Ordinary aggregate full-dimensional witness collapsed onto a cut.");
-    if (!inside)
+    if (!inside && !complementary)
         return {};
-    if (!outside)
+    if (!inside || !outside)
     {
-        charge_poly_copy(p, work);
-        auto retained = p;
         for (std::size_t i = 0; i < p.vertices.size(); ++i)
             if (active[i] && distances[i].value == 0 &&
-                std::find(retained.supports[i].begin(), retained.supports[i].end(), d.support) ==
-                    retained.supports[i].end())
+                std::find(p.supports[i].begin(), p.supports[i].end(), d.support) == p.supports[i].end())
             {
-                retained.supports[i].push_back(d.support);
-                work.charge(sizeof(const void*));
+                work.charge(sizeof(const Support*));
+                p.supports[i].push_back(d.support);
+                p.observe();
             }
-        return retained;
+        p.observe();
+        Split result;
+        (inside ? result.inside : result.outside) = std::move(p);
+        return result;
     }
-    Poly out;
-    out.source = p.source;
-    out.defining_cache = p.defining_cache;
-    charge_poly_points(p, work);
-    out.vertices = p.vertices;
-    out.errors = p.errors;
-    out.supports = p.supports;
-    out.constructions = p.constructions;
+    Split result;
+    auto& negative = result.inside;
+    auto& positive = result.outside;
+    const auto initialize = [&](Poly& child)
+    {
+        child.watch(work);
+        child.source = p.source;
+        child.defining_cache = p.defining_cache;
+    };
+    initialize(negative);
+    if (complementary)
+        initialize(positive);
+    constexpr auto absent = std::numeric_limits<std::size_t>::max();
+    const auto count = p.vertices.size();
+    work.charge(count * sizeof(std::size_t) * (complementary ? 2 : 1));
+    std::vector<std::size_t> negative_indices(count, absent);
+    std::vector<std::size_t> positive_indices(complementary ? count : 0, absent);
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> intersections;
     std::set<std::size_t> cap;
     std::map<std::size_t, std::size_t> cap_ring;
@@ -545,10 +634,53 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
         if (cap.insert(i).second)
             work.charge(sizeof(std::size_t) + 4 * sizeof(void*));
     };
+    const auto append_point =
+        [&](Poly& child, const B& b, const B& error, const std::vector<const Support*>& supports, bool copied)
+    {
+        const auto bytes =
+            2 * sizeof(B) + sizeof(std::vector<const Support*>) + supports.size() * sizeof(const Support*);
+        work.charge(bytes);
+        if (copied)
+        {
+            ++work.stats.vertices_copied;
+            work.stats.copied_vertex_bytes += bytes;
+        }
+        const auto index = child.vertices.size();
+        child.vertices.push_back(b);
+        child.errors.push_back(error);
+        child.supports.push_back(supports);
+        child.observe();
+        return index;
+    };
+    // Faces use shared source/crossing IDs until accepted, so discarded contact
+    // edges cannot leave an unreferenced point in either compact child.
+    const auto retain_face = [&](Poly& child, std::vector<std::size_t>& indices, Face face)
+    {
+        if (face.vertices.size() < 3)
+            return;
+        work.charge(sizeof(Face) + face.vertices.size() * sizeof(std::size_t));
+        for (auto& id : face.vertices)
+        {
+            if (indices[id] == absent)
+            {
+                indices[id] = append_point(child, p.vertices[id], p.errors[id], p.supports[id], true);
+                if (distances[id].value == 0 && std::find(child.supports.back().begin(), child.supports.back().end(),
+                                                    d.support) == child.supports.back().end())
+                {
+                    work.charge(sizeof(const Support*));
+                    child.supports.back().push_back(d.support);
+                    child.observe();
+                }
+            }
+            id = indices[id];
+        }
+        child.faces.push_back(std::move(face));
+        child.observe();
+    };
     for (const auto& face : p.faces)
     {
-        Face f;
-        f.source = face.source;
+        Face below, above;
+        below.source = above.source = face.source;
         auto previous = face.vertices.back();
         for (auto current : face.vertices)
         {
@@ -557,11 +689,11 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
             if ((dp < 0 && dc > 0) || (dp > 0 && dc < 0))
             {
                 const auto key = std::minmax(previous, current);
-                auto [it, fresh] = intersections.try_emplace(key, out.vertices.size());
+                auto [it, fresh] = intersections.try_emplace(key, count + intersections.size());
                 if (fresh)
                 {
-                    work.charge(2 * sizeof(B) + sizeof(Construction) + sizeof(decltype(intersections)::value_type) +
-                                4 * sizeof(void*));
+                    work.charge(sizeof(decltype(intersections)::value_type) + 4 * sizeof(void*) +
+                                sizeof(std::size_t) * (complementary ? 2 : 1));
                     const auto i = std::abs(dp) <= std::abs(dc) ? previous : current,
                                j = i == previous ? current : previous;
                     const auto denominator = construction_difference(distances[i], distances[j], work);
@@ -579,42 +711,36 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
                             fail(GeometryErrorCode::UnresolvedArithmetic,
                                 "Ordinary aggregate interpolation estimate is nonfinite.");
                     }
-                    out.vertices.push_back(b);
-                    out.errors.push_back(error);
-                    out.constructions.push_back({i, j, d.support, d.orientation});
+                    // This list is the defining evidence, independent of rounded
+                    // barycentric weights and of which complementary child owns it.
                     std::vector<const Support*> supports{d.support};
                     for (auto id : p.supports[i])
                         if (std::find(p.supports[j].begin(), p.supports[j].end(), id) != p.supports[j].end() &&
                             id != d.support)
                             supports.push_back(id);
-                    work.charge(sizeof(std::vector<const Support*>) + supports.size() * sizeof(const Support*));
-                    out.supports.push_back(std::move(supports));
+                    work.charge(supports.size() * sizeof(const Support*));
+                    negative_indices.push_back(append_point(negative, b, error, supports, false));
+                    if (complementary)
+                        positive_indices.push_back(append_point(positive, b, error, supports, true));
                     work.op(20);
                 }
-                f.vertices.push_back(it->second);
+                below.vertices.push_back(it->second);
+                if (complementary)
+                    above.vertices.push_back(it->second);
                 add_cap(it->second);
             }
             if (dc <= 0)
-            {
-                f.vertices.push_back(current);
-                if (dc == 0)
-                {
-                    add_cap(current);
-                    if (std::find(out.supports[current].begin(), out.supports[current].end(), d.support) ==
-                        out.supports[current].end())
-                    {
-                        out.supports[current].push_back(d.support);
-                        work.charge(sizeof(const void*));
-                    }
-                }
-            }
+                below.vertices.push_back(current);
+            if (complementary && dc >= 0)
+                above.vertices.push_back(current);
+            if (dc == 0)
+                add_cap(current);
             previous = current;
         }
-        if (f.vertices.size() >= 3)
-        {
-            for (std::size_t k = 0; k < f.vertices.size(); ++k)
+        if (below.vertices.size() >= 3)
+            for (std::size_t k = 0; k < below.vertices.size(); ++k)
             {
-                const auto a = f.vertices[k], b = f.vertices[(k + 1) % f.vertices.size()];
+                const auto a = below.vertices[k], b = below.vertices[(k + 1) % below.vertices.size()];
                 if (a != b && cap.contains(a) && cap.contains(b))
                     if (!cap_ring.emplace(b, a).second)
                         fail(GeometryErrorCode::UnresolvedArithmetic,
@@ -622,32 +748,44 @@ Poly clipped(const Poly& p, Distances d, AggregateWork& work)
                     else
                         work.charge(sizeof(decltype(cap_ring)::value_type) + 4 * sizeof(void*));
             }
-            work.charge(sizeof(Face) + f.vertices.size() * sizeof(std::size_t));
-            out.faces.push_back(std::move(f));
-        }
+        retain_face(negative, negative_indices, std::move(below));
+        if (complementary)
+            retain_face(positive, positive_indices, std::move(above));
     }
     if (cap.size() < 3)
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cut lost its retained boundary.");
-    Face f;
     if (cap_ring.size() != cap.size())
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is incomplete.");
+    Face boundary;
     auto current = cap_ring.begin()->first;
     do
     {
-        f.vertices.push_back(current);
+        boundary.vertices.push_back(current);
         auto it = cap_ring.find(current);
         if (it == cap_ring.end())
             fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is open.");
         current = it->second;
-    } while (current != f.vertices.front() && f.vertices.size() <= cap_ring.size());
-    if (f.vertices.size() != cap_ring.size())
+    } while (current != boundary.vertices.front() && boundary.vertices.size() <= cap_ring.size());
+    if (boundary.vertices.size() != cap_ring.size())
         fail(GeometryErrorCode::UnresolvedArithmetic, "Ordinary aggregate cap ring is disconnected.");
-    work.charge(sizeof(Face) + f.vertices.size() * sizeof(std::size_t));
-    out.faces.push_back(std::move(f));
-    if (out.vertices.size() > work.geometry.maximum_vertices || out.faces.size() > work.geometry.maximum_faces)
-        fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate V/F cap exhausted.");
-    return out;
+    if (complementary)
+    {
+        auto opposite = boundary;
+        std::reverse(opposite.vertices.begin() + 1, opposite.vertices.end());
+        retain_face(positive, positive_indices, std::move(opposite));
+    }
+    retain_face(negative, negative_indices, std::move(boundary));
+    for (const auto* child : {&negative, &positive})
+        if (child->vertices.size() > work.geometry.maximum_vertices ||
+            child->faces.size() > work.geometry.maximum_faces)
+            fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate V/F cap exhausted.");
+    return result;
 }
+Poly clipped(Poly p, Distances d, AggregateWork& work)
+{
+    return split(std::move(p), d, work, false).inside;
+}
+
 struct Cut
 {
     V normal{}, anchor{};
@@ -980,6 +1118,7 @@ OrdinaryAggregateSource::OrdinaryAggregateSource(std::span<const OrdinaryAggrega
     }
     impl->signed_volume = volume.get();
     work.stats.source_pieces = recipes.size();
+    work.sync();
     impl->initial = work.stats;
     impl_ = std::move(impl);
 }
@@ -997,6 +1136,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     const ScopedAggregateEnvironment environment;
     AggregateWork work{impl_->sweep, impl_->geometry, impl_->initial, impl_->initial.storage_bytes};
     work.context = &context;
+    work.stage = context.stage;
     work.sync();
     std::vector<ConvexGeometryPtr<ArithmeticMode::Ordinary>> geometries;
     std::vector<std::vector<Cut>> cuts;
@@ -1165,10 +1305,13 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         const auto bytes_before = active->bytes, operations_before = active->operations, pairs_before = active->pairs;
         const auto aggregate_bytes = work.bytes, aggregate_operations = work.stats.operations,
                    aggregate_pairs = work.stats.pair_tests;
+        const auto aggregate_statistics = work.stats;
+        bool provider_charged = false;
         try
         {
             const ConvexPartition<ArithmeticMode::Ordinary> disjoint(geometries, remaining);
             work.charge(active->bytes - bytes_before + sizeof(disjoint));
+            provider_charged = true;
             work.op(active->operations - operations_before);
             work.pairs(active->pairs - pairs_before);
         }
@@ -1176,9 +1319,20 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         {
             // Preserve partial provider work even when validation fails before
             // its normal accounting handoff. Do not mask the original cause.
-            context.bytes = aggregate_bytes + active->bytes - bytes_before;
+            // A completed byte handoff remains charged even if the operation or
+            // pair handoff fails. A denied aggregate charge is never added.
+            context.bytes = provider_charged || work.stats.failed_charge_bytes
+                                ? work.bytes
+                                : aggregate_bytes + active->bytes - bytes_before;
             context.operations = aggregate_operations + active->operations - operations_before;
             context.pairs = aggregate_pairs + active->pairs - pairs_before;
+            context.statistics = aggregate_statistics;
+            context.statistics.stage_charged_bytes[static_cast<unsigned>(work.stage)] +=
+                context.bytes - aggregate_bytes;
+            context.statistics.storage_bytes = context.bytes;
+            context.statistics.operations = context.operations;
+            context.statistics.pair_tests = context.pairs;
+            context.statistics.failed_charge_bytes = work.stats.failed_charge_bytes;
             throw;
         }
     }
@@ -1186,6 +1340,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     // child remains a witness until a later donor consumes it. No volume closure
     // tolerance substitutes for this structural coverage proof.
     context.stage = OrdinaryAggregateContext::Stage::Coverage;
+    work.stage = context.stage;
     for (std::size_t ordinal = 0; ordinal < impl_->tetrahedra.size(); ++ordinal)
     {
         context.source = ordinal;
@@ -1194,31 +1349,33 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             context.retry = retry;
             try
             {
-                std::vector<Poly> remainder{
-                    tetra(impl_->tetrahedra[ordinal], source_faces[ordinal], defining_caches[ordinal], work)};
+                std::vector<Poly> remainder;
+                remainder.push_back(
+                    tetra(impl_->tetrahedra[ordinal], source_faces[ordinal], defining_caches[ordinal], work));
+                work.stats.peak_remainders = std::max(work.stats.peak_remainders, remainder.size());
                 for (std::size_t donor_index = 0; donor_index < cuts.size(); ++donor_index)
                 {
                     const auto donor_ordinal = retry ? cuts.size() - 1 - donor_index : donor_index;
                     context.donor = donors[donor_ordinal].id;
                     const auto& dc = cuts[donor_ordinal];
                     std::vector<Poly> next;
+                    auto unprocessed = remainder.size();
                     for (auto& retained : remainder)
                     {
+                        --unprocessed;
                         auto piece = std::move(retained);
                         for (std::size_t cut_index = 0; cut_index < dc.size(); ++cut_index)
                         {
                             if (piece.faces.empty())
                                 break;
                             context.cut = retry ? dc.size() - 1 - cut_index : cut_index;
-                            auto d = source_values(ordinal, donor_ordinal, context.cut);
-                            auto opposite = d;
-                            opposite.orientation = -opposite.orientation;
-                            for (auto& x : opposite.value)
-                                x = -x;
-                            auto outside = clipped(piece, opposite, work);
-                            if (!outside.faces.empty())
-                                next.push_back(std::move(outside));
-                            piece = clipped(piece, d, work);
+                            const auto d = source_values(ordinal, donor_ordinal, context.cut);
+                            auto children = split(std::move(piece), d, work, true);
+                            if (!children.outside.faces.empty())
+                                next.push_back(std::move(children.outside));
+                            work.stats.peak_remainders =
+                                std::max(work.stats.peak_remainders, next.size() + unprocessed);
+                            piece = std::move(children.inside);
                             work.pair();
                         }
                     }
@@ -1241,6 +1398,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     }
     context = {};
     context.stage = OrdinaryAggregateContext::Stage::Metric;
+    work.stage = context.stage;
     work.sync();
     OrdinaryAggregateResult result;
     result.signed_source_volume = impl_->signed_volume;
@@ -1330,7 +1488,7 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         {
                             const auto j = retry ? cuts[di].size() - 1 - k : k;
                             context.cut = j;
-                            bulk = clipped(bulk, source_values(ti, di, j), work);
+                            bulk = clipped(std::move(bulk), source_values(ti, di, j), work);
                             work.pair();
                         }
                         if (bulk.faces.empty())
@@ -1342,18 +1500,24 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                         if (!donor.pure_gas && !donor.pure_carrier)
                         {
                             context.cut = cuts[di].size(); // The phase support follows donor supports.
-                            auto d = source_values(ti, di, cuts[di].size());
+                            const auto d = source_values(ti, di, cuts[di].size());
                             // Rebuild phase witnesses from immutable source
                             // supports on the existing retry. Applying the phase
                             // first retains its small endpoint weights before
                             // donor intersections introduce dependent crossings.
-                            auto phase_source = retry ? tetra(t, source_faces[ti], defining_caches[ti], work) : Poly{};
-                            const auto& phase_parent = retry ? phase_source : bulk;
-                            witness.gas = clipped(phase_parent, d, work);
-                            d.orientation = -d.orientation;
-                            for (auto& x : d.value)
-                                x = -x;
-                            witness.carrier = clipped(phase_parent, d, work);
+                            Poly phase_source;
+                            if (retry)
+                                phase_source = tetra(t, source_faces[ti], defining_caches[ti], work);
+                            else
+                            {
+                                // Bulk remains immutable for its own channel.
+                                // The consuming split shares all phase work.
+                                charge_poly_copy(bulk, work);
+                                phase_source = bulk;
+                            }
+                            auto phases = split(std::move(phase_source), d, work, true);
+                            witness.gas = std::move(phases.inside);
+                            witness.carrier = std::move(phases.outside);
                             if (retry)
                                 for (std::size_t k = 0; k < cuts[di].size(); ++k)
                                 {
@@ -1361,9 +1525,9 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
                                     context.cut = j;
                                     const auto cut = source_values(ti, di, j);
                                     if (!witness.gas.faces.empty())
-                                        witness.gas = clipped(witness.gas, cut, work);
+                                        witness.gas = clipped(std::move(witness.gas), cut, work);
                                     if (!witness.carrier.faces.empty())
-                                        witness.carrier = clipped(witness.carrier, cut, work);
+                                        witness.carrier = clipped(std::move(witness.carrier), cut, work);
                                     work.pair();
                                 }
                         }

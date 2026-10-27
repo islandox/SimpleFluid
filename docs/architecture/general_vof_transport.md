@@ -170,9 +170,9 @@ their immutable dependencies, with storage and executed work accounted.
 Generated vertices retain their defining supports separately from cached
 barycentric coordinates and numerical estimates. Original vertex `i` carries
 the three source-face equations `lambda[j]=0` for `j!=i`; crossings retain the
-new cutter and supports common to both endpoints. Their parent records also
-retain parent indices and the original cutter expression; redundant cached
-endpoint evaluations are not copied through descendant histories. Issued donor support identities select
+new cutter and supports common to both endpoints. The original tetrahedron and
+defining-support catalog supply the construction authority; no edge-parent
+history is retained. Issued donor support identities select
 one deterministic original framed expression, independent of donor order, while
 the complementary side retains its own orientation. Authenticated original
 source incidences remain structural zeros in the coefficient rows.
@@ -199,6 +199,41 @@ by the three defining support identities and queried support. Coverage, metric
 cuts and complementary queries can reuse that result; complements reverse the
 value and sign while retaining the same error. Cache entries remain charged to
 the original budget. Reuse does not reduce the count of work already executed.
+
+### Compact complementary witnesses and construction cost
+
+Each child stores only vertices referenced by its surviving face loops. Compaction
+preserves all four barycentric components, their numerical errors, every support
+incidence, inherited source-face tags and the immutable source/cache references.
+Child indices no longer identify original source leaves; the source tetrahedron
+remains available independently for predicates and integration.
+
+Coverage and gas/carrier cuts use one complementary split. It classifies each
+active input vertex once and constructs each crossed edge once, publishing the
+same crossing coordinates, errors and support evidence to both children. One cap
+loop supplies opposite windings. An unchanged child moves its existing storage;
+direct metric clipping requests only the inside child. Phase integration retains
+the bulk witness and accounts for the copy needed before consuming its phase
+split. Source-face cancellation and the structural donor-cover proof are unchanged.
+
+The byte cap remains a **cumulative construction allowance**, including charged
+temporary buffers that have been destroyed. Successful face charges consume the
+remaining preparation allowance. It is not a peak-live-memory or RSS limit.
+`OrdinaryAggregateStatistics::stage_charged_bytes` attributes admitted charges to
+source setup, donor validation, coverage and metrics; their sum equals
+`storage_bytes`. A rejected aggregate charge is reported separately and is not
+added to that sum. Copy, active/stored-vertex and pending-remainder counters expose
+representation cost without changing numerical acceptance.
+
+Set `SIMPLEFLUID_VOF_AGGREGATE_TRACE=1` to emit one local JSON record for each owned
+geometric face, including failures. Records distinguish outer entry charges,
+face setup, aggregate increments, stage attribution and a rejected aggregate
+request. `witness_admissions` retains the resource guard's requested-child count,
+including empty children. The live-witness high-water mark tracks Poly objects
+and their owned buffer capacities, including concurrent parent/child and metric
+witnesses. It excludes allocator metadata, maps, predicate scratch, source/support
+caches and other retained geometry, so it must not be interpreted as total memory.
+Tracing adds no collectives and leaves the original rejection path intact.
 
 ### Retained-domain coverage proof boundary
 

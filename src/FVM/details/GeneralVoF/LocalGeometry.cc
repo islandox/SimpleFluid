@@ -5,8 +5,11 @@
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
-#include "geometry/swept_volume/OrdinaryAggregate.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/swept_volume/OrdinaryAggregate.hh"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -18,6 +21,62 @@ using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Math = fp::Arithmetic<mode>;
 using local_spatial_detail::Box;
 using Wide = std::array<long double, 3>;
+/** Local diagnostic only: no collective, allocation, or exception may hide the
+ * original geometry failure. Witness capacity is deliberately not called RSS. */
+struct AggregateFaceTrace
+{
+    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext& progress;
+    const std::size_t& outer_bytes;
+    std::size_t outer_entry, original_budget, aggregate_entry, initial_remaining_budget;
+    int rank;
+    std::uint64_t face;
+    bool enabled = false, aggregate_started = false, aggregate_charged = false, completed = false;
+
+    AggregateFaceTrace(const SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext& snapshot,
+        const std::size_t& bytes, std::size_t budget, int owner, std::uint64_t identity) noexcept
+        : progress(snapshot), outer_bytes(bytes), outer_entry(bytes), original_budget(budget), aggregate_entry(bytes),
+          initial_remaining_budget(budget - std::min(bytes, budget)), rank(owner), face(identity)
+    {
+        const auto* value = std::getenv("SIMPLEFLUID_VOF_AGGREGATE_TRACE");
+        enabled = value && std::strcmp(value, "1") == 0;
+    }
+
+    ~AggregateFaceTrace() noexcept
+    {
+        if (!enabled)
+            return;
+        const auto& stats = progress.statistics;
+        const auto aggregate_bytes = progress.bytes;
+        const auto reported_total = outer_bytes + (aggregate_charged ? 0 : aggregate_bytes);
+        const auto preparation_bytes = (aggregate_started ? aggregate_entry : outer_bytes) - outer_entry;
+        using Stage = SimpleFluid::geometry::swept_volume::OrdinaryAggregateStage;
+        const auto* stage = progress.stage == Stage::Source            ? "source"
+                            : progress.stage == Stage::DonorValidation ? "donor_validation"
+                            : progress.stage == Stage::Coverage        ? "coverage"
+                                                                       : "metric";
+        (void) std::fprintf(stderr,
+            "{\"event\":\"vof_aggregate_face\",\"rank\":%d,\"face\":%llu,\"status\":\"%s\",\"stage\":\"%s\","
+            "\"outer_charged_bytes_at_entry\":%zu,\"aggregate_outer_bytes_at_entry\":%zu,"
+            "\"face_charged_bytes\":%zu,\"aggregate_charged_bytes\":%zu,\"outer_reported_total\":%zu,"
+            "\"face_preparation_charged_bytes\":%zu,"
+            "\"original_overall_budget\":%zu,\"face_initial_remaining_budget\":%zu,"
+            "\"stage_charged_bytes\":{\"source\":%zu,\"donor_validation\":%zu,\"coverage\":%zu,\"metric\":%zu},"
+            "\"aggregate_requested_failed_charge_bytes\":%zu,\"vertices_classified\":%zu,\"vertices_copied\":%zu,"
+            "\"copied_vertex_bytes\":%zu,"
+            "\"active_vertices_seen\":%zu,\"stored_vertices_seen\":%zu,\"peak_active_vertices\":%zu,"
+            "\"peak_stored_vertices\":%zu,\"peak_remainders\":%zu,\"witness_admissions\":%zu,"
+            "\"peak_live_witnesses\":%zu,\"peak_live_witness_capacity_bytes\":%zu,"
+            "\"source_pieces\":%zu,\"pair_tests\":%zu,\"operations\":%zu}\n",
+            rank, static_cast<unsigned long long>(face), completed ? "success" : "failure", stage, outer_entry,
+            aggregate_entry, reported_total - outer_entry, aggregate_bytes, reported_total, preparation_bytes,
+            original_budget, initial_remaining_budget, stats.stage_charged_bytes[0], stats.stage_charged_bytes[1],
+            stats.stage_charged_bytes[2], stats.stage_charged_bytes[3], stats.failed_charge_bytes,
+            stats.vertices_classified, stats.vertices_copied, stats.copied_vertex_bytes, stats.active_vertices_seen,
+            stats.stored_vertices_seen, stats.peak_active_vertices, stats.peak_stored_vertices, stats.peak_remainders,
+            stats.witnesses, stats.peak_live_witnesses, stats.peak_live_witness_bytes, stats.source_pieces,
+            stats.pair_tests, stats.operations);
+    }
+};
 bool needs_interface(const Cell& cell)
 {
     return cell.declaration == GeneralVoFPhaseGeometry::Infer || cell.requires_interface ||
@@ -71,8 +130,8 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 face_context.record.face = tile.face_gid;
                 face_context.record.mark(failure::Field::Face);
                 work.charge(2 * tile.node_gids.size() * sizeof(Point) + sizeof(Pending));
-                auto recipe = SimpleFluid::geometry::swept_volume::prepare_sweep<mode>(tile.face_gid, tile.node_gids, traces, flux.at(tile.face_gid),
-                    work, face_budgets.at(tile.face_gid));
+                auto recipe = SimpleFluid::geometry::swept_volume::prepare_sweep<mode>(tile.face_gid, tile.node_gids,
+                    traces, flux.at(tile.face_gid), work, face_budgets.at(tile.face_gid));
                 Box bounds;
                 for (const auto& p : recipe.current)
                     bounds.add(p.value);
@@ -175,6 +234,9 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                     continue;
                 }
                 ++result.diagnostics.geometric_faces;
+                SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext progress;
+                AggregateFaceTrace aggregate_trace(
+                    progress, work.bytes, work.limits.byte_budget, comm->getRank(), tile.face_gid);
                 // Source identities follow the face recipe, including its private
                 // corrected center. Equal rounded coordinates never merge identities.
                 const auto& recipe = entry.recipe;
@@ -254,14 +316,17 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 }
                 auto sweep_limits = work.limits;
                 sweep_limits.byte_budget -= std::min(work.bytes, sweep_limits.byte_budget);
+                aggregate_trace.aggregate_entry = work.bytes;
+                aggregate_trace.aggregate_started = true;
+                aggregate_trace.initial_remaining_budget = sweep_limits.byte_budget;
                 sweep_limits.maximum_pair_tests -= std::min(work.pair_tests, sweep_limits.maximum_pair_tests);
                 auto limits = geometry_limits(mode, sweep_limits.byte_budget);
                 limits.maximum_pair_tests = sweep_limits.maximum_pair_tests;
-                SimpleFluid::geometry::swept_volume::OrdinaryAggregateContext progress;
                 SimpleFluid::geometry::swept_volume::OrdinaryAggregateResult aggregate;
                 try
                 {
-                    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(tetrahedra, sweep_limits, limits, &progress);
+                    const SimpleFluid::geometry::swept_volume::OrdinaryAggregateSource source(
+                        tetrahedra, sweep_limits, limits, &progress);
                     aggregate = source.measure(donors, &progress);
                 }
                 catch (...)
@@ -301,6 +366,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                     throw;
                 }
                 work.charge(aggregate.statistics.storage_bytes);
+                aggregate_trace.aggregate_charged = true;
                 work.pair_tests += aggregate.statistics.pair_tests;
                 result.diagnostics.swept_pieces += aggregate.statistics.source_pieces;
                 result.diagnostics.aggregate_groups += aggregate.groups.size();
@@ -363,6 +429,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                                          history.carrier.value, group.gas_positive, group.carrier_positive});
                 }
                 work.push(result.owned_faces, std::move(face));
+                aggregate_trace.completed = true;
             }
             std::sort(result.owned_faces.begin(), result.owned_faces.end(),
                 [&](const auto& a, const auto& b)
