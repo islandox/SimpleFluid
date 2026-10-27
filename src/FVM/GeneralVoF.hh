@@ -88,6 +88,10 @@ struct GeneralVoFOptions
     PLIC::PolyhedralReconstructionOptions reconstruction;
     SimpleFluid::geometry::swept_volume::SweepLimits sweep;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
+    /** Counted scalar-operation work per Ordinary interface-local swept face,
+     * including source preparation, donor validation, and aggregate retries.
+     * Independent of storage and witness/pair guards; must be positive. */
+    std::size_t maximum_face_geometry_operations = 64 * 1024 * 1024;
 };
 enum class GeneralVoFFiniteRemapCarrier
 {

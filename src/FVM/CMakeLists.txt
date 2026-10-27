@@ -10,6 +10,7 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_SOURCES
     details/GeneralVoFState.cc
     details/GeneralVoF/Transport.cc
     details/GeneralVoF/LocalGeometry.cc
+    details/GeneralVoF/FaceWorkspaceBudget.cc
     details/GeneralVoF/LocalSpatialCache.cc
     details/GeneralVoF/AggregateBudgets.cc
     details/GeneralVoF/LocalTransport.cc

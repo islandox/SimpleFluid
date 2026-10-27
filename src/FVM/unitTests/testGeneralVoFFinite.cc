@@ -172,6 +172,40 @@ TEST(GeneralVoFFinite, ConstructionAlgorithmBindsSmallPhasePolicy)
     EXPECT_EQ(gradient_only, controls::algorithm(options));
 }
 
+TEST(GeneralVoFFinite, FaceWorkLimitIsPositiveAndAgreedIncludingEmptyOwners)
+{
+    const auto input = fixture();
+    const auto comm = Tpetra::getDefaultComm();
+    const bool changed_rank = comm->getRank() == comm->getSize() - 1;
+    if (comm->getSize() > 2 && changed_rank)
+        EXPECT_TRUE(input.order.empty());
+    GeneralVoFOptions options;
+    EXPECT_EQ(options.maximum_face_geometry_operations, 64u * 1024 * 1024);
+    options.maximum_face_geometry_operations = changed_rank ? 0 : 64u * 1024 * 1024;
+    EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    options.maximum_face_geometry_operations = 1;
+    EXPECT_NO_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options));
+    if (comm->getSize() > 1)
+    {
+        options.maximum_face_geometry_operations = changed_rank ? 2 : 1;
+        EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options),
+            std::invalid_argument);
+    }
+}
+
+TEST(GeneralVoFFinite, ConstructionAlgorithmBindsFaceWorkLimit)
+{
+    namespace controls = SimpleFluid::VoF::construction_controls;
+    GeneralVoFOptions options;
+    const auto original = controls::algorithm(options);
+    --options.maximum_face_geometry_operations;
+    const auto changed = controls::algorithm(options);
+    EXPECT_NE(original, changed);
+    options.byte_budget /= 2;
+    options.sweep.byte_budget /= 2;
+    EXPECT_EQ(changed, controls::algorithm(options));
+}
+
 TEST(GeneralVoFFinite, OrientationWirePreservesEveryMethodAndRejectsUnknownWords)
 {
     namespace codec = SimpleFluid::VoF::plane_wire_detail;

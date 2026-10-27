@@ -216,9 +216,35 @@ direct metric clipping requests only the inside child. Phase integration retains
 the bulk witness and accounts for the copy needed before consuming its phase
 split. Source-face cancellation and the structural donor-cover proof are unchanged.
 
-The byte cap remains a **cumulative construction allowance**, including charged
-temporary buffers that have been destroyed. Successful face charges consume the
-remaining preparation allowance. It is not a peak-live-memory or RSS limit.
+Ordinary interface-local preparation gives storage two lifetimes. Spatial indexes,
+pending recipes and candidate lists, imported planes/shared geometry and completed
+face contributions remain charged throughout preparation. Current-face setup,
+source bookkeeping, donor validation, support/distance/predicate caches, coverage
+remainders, metric witnesses and temporary aggregate results have a face-local
+scope. The default 64 MiB admission condition covers the retained preparation
+allowance plus the current face's conservative scratch allowance.
+
+Within that face, aggregate charges remain cumulative, including temporaries
+already destroyed. This conservatively bounds the complete face workspace rather
+than substituting the narrower live-witness counter. Both aggregate results and
+their copied output are charged while they coexist. Successful publication retains
+only the output groups' surviving capacity and growth of the retained face vector.
+On exceptions, unpublished output is destroyed before its pending charge is
+released. The scratch reservation expires only after all its owning containers.
+Short-lived reach-query and sweep-boundary buffers use the same lifetime discipline.
+This is a preparation-storage allowance, not a bound on total process RSS or
+the combined memory of every source, candidate, MPI runtime and caller.
+
+Construction traffic remains monotone across faces, including retired capacity
+and work admitted before a rejected trial. `maximum_face_geometry_operations` defaults to 67,108,864
+counted aggregate scalar operations per geometric face, including source
+construction, retries and nested providers. Zero rejects; this shared control
+must agree across ranks and is bound into the construction-control identity.
+The existing preparation pair limit and aggregate witness/complexity limits remain
+independent guards. Total aggregate operations are reported separately from storage;
+reach and setup predicate operations are outside that particular counter.
+Storage rejection identifies retained/setup/aggregate bytes and the storage limit;
+work rejection identifies its exhausted scalar, pair or witness allowance.
 `OrdinaryAggregateStatistics::stage_charged_bytes` attributes admitted charges to
 source setup, donor validation, coverage and metrics; their sum equals
 `storage_bytes`. A rejected aggregate charge is reported separately and is not
@@ -226,9 +252,11 @@ added to that sum. Copy, active/stored-vertex and pending-remainder counters exp
 representation cost without changing numerical acceptance.
 
 Set `SIMPLEFLUID_VOF_AGGREGATE_TRACE=1` to emit one local JSON record for each owned
-geometric face, including failures. Records distinguish outer entry charges,
-face setup, aggregate increments, stage attribution and a rejected aggregate
-request. `witness_admissions` retains the resource guard's requested-child count,
+geometric face, including failures. Records distinguish retained entry/exit storage,
+face scratch, combined reservation high-water, cumulative construction traffic,
+total aggregate operations, stage attribution and a rejected aggregate request.
+Counters saturate instead of wrapping if their representation is exhausted.
+`witness_admissions` retains the resource guard's requested-child count,
 including empty children. The live-witness high-water mark tracks Poly objects
 and their owned buffer capacities, including concurrent parent/child and metric
 witnesses. It excludes allocator metadata, maps, predicate scratch, source/support
@@ -515,9 +543,9 @@ rejects atomically; a computational witness is not itself a measured output.
 The [Stage 7 roadmap](../../TODO.md#stage-7--general-vof-and-flow-qualification)
 separates the shared foundation, homogeneous specialization, interface-local signed
 ledger and aggregate metric admission from unified capillary surfaces and checked
-preparation interfaces. The
-configured default backend and resource caps are unchanged. Aggregate transport
-does not change strict measured geometry required by other consumers.
+preparation interfaces. The configured default backend remains unchanged. Ordinary
+interface-local preparation uses the storage-lifetime and explicit work policies
+above; strict measured geometry required by other consumers is unchanged.
 
 Focused checks cover analytic phase transfer, competing exports, zero-net signed
 counterflow and correlated histories, native-owner agreement, empty owners and

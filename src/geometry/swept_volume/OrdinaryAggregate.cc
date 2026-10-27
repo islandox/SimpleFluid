@@ -25,6 +25,13 @@ constexpr long double eps = std::numeric_limits<long double>::epsilon();
 {
     throw GeometryError(code, message);
 }
+[[noreturn]] void work_limit(const char* kind, std::size_t charged, std::size_t requested, std::size_t limit)
+{
+    std::ostringstream message;
+    message << "Ordinary aggregate work limit exhausted: kind=" << kind << " charged=" << charged
+            << " requested=" << requested << " limit=" << limit << '.';
+    throw GeometryError(GeometryErrorCode::ResourceLimit, message.str());
+}
 /** Ordinary quality estimates assume full relative precision. A subnormal
  * result cannot satisfy that model, even when it remains positive. */
 long double represented(long double value)
@@ -116,18 +123,21 @@ struct AggregateWork
             context->statistics = stats;
         }
     }
+    [[noreturn]] void storage_limit(std::size_t charged, std::size_t requested, std::size_t limit)
+    {
+        stats.failed_charge_bytes = requested;
+        sync();
+        std::ostringstream message;
+        message << "Ordinary aggregate face workspace/storage allowance exhausted: charged=" << charged
+                << " requested=" << requested << " limit=" << limit << " indirect_calls=" << indirect_calls
+                << " indirect_bytes=" << indirect_bytes << " indirect_reuses=" << indirect_reuses << '.';
+        throw GeometryError(GeometryErrorCode::ResourceLimit, message.str());
+    }
     void charge(std::size_t n)
     {
         const auto limit = std::min(sweep.byte_budget, geometry.byte_budget);
         if (n > limit || bytes > limit - n)
-        {
-            stats.failed_charge_bytes = n;
-            sync();
-            std::ostringstream message;
-            message << "Ordinary aggregate byte budget exhausted: indirect_calls=" << indirect_calls
-                    << " indirect_bytes=" << indirect_bytes << " indirect_reuses=" << indirect_reuses << '.';
-            throw GeometryError(GeometryErrorCode::ResourceLimit, message.str());
-        }
+            storage_limit(bytes, n, limit);
         bytes += n;
         stats.stage_charged_bytes[static_cast<unsigned>(stage)] += n;
         stats.storage_bytes = bytes;
@@ -139,23 +149,57 @@ struct AggregateWork
             operation_limit = ::SimpleFluid::PLIC::details::Work(geometry).operation_limit;
         const auto limit = operation_limit;
         if (n > limit || stats.operations > limit - n)
-            fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate work budget exhausted.");
+            work_limit("scalar_operations", stats.operations, n, limit);
         stats.operations += n;
         sync();
     }
     void pairs(std::size_t count)
     {
         const auto limit = std::min(sweep.maximum_pair_tests, geometry.maximum_pair_tests);
-        if (count > limit - stats.pair_tests)
-            fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate pair budget exhausted.");
+        if (count > limit || stats.pair_tests > limit - count)
+            work_limit("pair_tests", stats.pair_tests, count, limit);
         stats.pair_tests += count;
         sync();
     }
     void pair() { pairs(1); }
     void witness()
     {
-        if (++stats.witnesses > sweep.maximum_atoms)
-            fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate witness cap exhausted.");
+        if (stats.witnesses >= sweep.maximum_atoms)
+            work_limit("witnesses", stats.witnesses, 1, sweep.maximum_atoms);
+        ++stats.witnesses;
+        sync();
+    }
+    GeometryLimits remaining_geometry()
+    {
+        if (!operation_limit)
+            operation_limit = ::SimpleFluid::PLIC::details::Work(geometry).operation_limit;
+        auto remaining = geometry;
+        const auto storage = std::min(sweep.byte_budget, geometry.byte_budget);
+        const auto pair_limit = std::min(sweep.maximum_pair_tests, geometry.maximum_pair_tests);
+        if (bytes >= storage)
+            storage_limit(bytes, 1, storage);
+        if (stats.operations >= operation_limit)
+            work_limit("scalar_operations", stats.operations, 1, operation_limit);
+        if (stats.pair_tests >= pair_limit)
+            work_limit("pair_tests", stats.pair_tests, 1, pair_limit);
+        remaining.byte_budget = storage - bytes;
+        remaining.maximum_operations = operation_limit - stats.operations;
+        remaining.maximum_pair_tests = pair_limit - stats.pair_tests;
+        if (const auto caller = ::SimpleFluid::PLIC::details::active_work)
+        {
+            if (caller->bytes >= caller->limits.byte_budget)
+                storage_limit(caller->bytes, 1, caller->limits.byte_budget);
+            if (caller->operations >= caller->operation_limit)
+                work_limit("scalar_operations", caller->operations, 1, caller->operation_limit);
+            if (caller->pairs >= caller->limits.maximum_pair_tests)
+                work_limit("pair_tests", caller->pairs, 1, caller->limits.maximum_pair_tests);
+            remaining.byte_budget = std::min(remaining.byte_budget, caller->limits.byte_budget - caller->bytes);
+            remaining.maximum_operations =
+                std::min(remaining.maximum_operations, caller->operation_limit - caller->operations);
+            remaining.maximum_pair_tests =
+                std::min(remaining.maximum_pair_tests, caller->limits.maximum_pair_tests - caller->pairs);
+        }
+        return remaining;
     }
 };
 template<class Function> predicates::Result predicate(Function&& function, AggregateWork& work)
@@ -476,24 +520,8 @@ std::optional<predicates::Result> defining_distance(
                         continue;
                     return interpret(found->second);
                 }
-                auto remaining = work.geometry;
-                remaining.byte_budget = std::min(work.sweep.byte_budget, remaining.byte_budget) - work.bytes;
-                if (!work.operation_limit)
-                    work.operation_limit = ::SimpleFluid::PLIC::details::Work(work.geometry).operation_limit;
-                remaining.maximum_operations = work.operation_limit - work.stats.operations;
-                remaining.maximum_pair_tests =
-                    std::min(work.sweep.maximum_pair_tests, remaining.maximum_pair_tests) - work.stats.pair_tests;
+                const auto remaining = work.remaining_geometry();
                 const auto caller = ::SimpleFluid::PLIC::details::active_work;
-                if (caller)
-                {
-                    remaining.byte_budget = std::min(remaining.byte_budget, caller->limits.byte_budget - caller->bytes);
-                    remaining.maximum_operations =
-                        std::min(remaining.maximum_operations, caller->operation_limit - caller->operations);
-                    remaining.maximum_pair_tests =
-                        std::min(remaining.maximum_pair_tests, caller->limits.maximum_pair_tests - caller->pairs);
-                }
-                if (!remaining.maximum_operations || !remaining.maximum_pair_tests || !remaining.byte_budget)
-                    fail(GeometryErrorCode::ResourceLimit, "Aggregate defining-support work budget exhausted.");
                 ::SimpleFluid::PLIC::details::Operation operation(remaining);
                 // A nested Operation normally shares the caller. This fallback
                 // needs its own remaining-budget guard and zero-based counters.
@@ -840,6 +868,8 @@ std::vector<Cut> donor_cuts(const OrdinaryAggregateDonor& d, AggregateWork& work
         DynamicGeometryAccess::implementation(*d.geometry->dynamic_geometry()));
     std::vector<Cut> result;
     work.charge(storage->surfaces.size() * sizeof(Cut));
+    result.reserve(storage->surfaces.size());
+    work.charge((result.capacity() - storage->surfaces.size()) * sizeof(Cut));
     for (const auto& surface : storage->surfaces)
     {
         Cut c;
@@ -1126,6 +1156,10 @@ std::size_t OrdinaryAggregateSource::storage_bytes() const noexcept
 {
     return impl_->initial.storage_bytes;
 }
+std::size_t OrdinaryAggregateResult::storage_bytes() const noexcept
+{
+    return sizeof(*this) + groups.capacity() * sizeof(OrdinaryAggregateGroup);
+}
 OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     std::span<const OrdinaryAggregateDonor> donors, OrdinaryAggregateContext* progress) const
 {
@@ -1138,16 +1172,32 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     work.context = &context;
     work.stage = context.stage;
     work.sync();
+    OrdinaryAggregateResult result;
+    if (donors.size() > result.groups.max_size() / 2)
+        work_limit("result_groups", 0, donors.size(), result.groups.max_size() / 2);
+    const auto reserved_groups = donors.size() * 2;
+    work.charge(sizeof(result) + reserved_groups * sizeof(OrdinaryAggregateGroup));
+    result.groups.reserve(reserved_groups);
+    // reserve may grant more than requested. Charge actual owned capacity so
+    // the returned allocation remains covered while the caller copies groups.
+    work.charge((result.groups.capacity() - reserved_groups) * sizeof(OrdinaryAggregateGroup));
     std::vector<ConvexGeometryPtr<ArithmeticMode::Ordinary>> geometries;
     std::vector<std::vector<Cut>> cuts;
     std::set<std::uint64_t> ids;
-    work.charge(donors.size() * (sizeof(ConvexGeometryPtr<ArithmeticMode::Ordinary>) + sizeof(std::vector<Cut>) +
-                                    sizeof(OrdinaryAggregateGroup) * 2));
+    work.charge(donors.size() * (sizeof(ConvexGeometryPtr<ArithmeticMode::Ordinary>) + sizeof(std::vector<Cut>)));
+    geometries.reserve(donors.size());
+    cuts.reserve(donors.size());
+    work.charge((geometries.capacity() - donors.size()) * sizeof(ConvexGeometryPtr<ArithmeticMode::Ordinary>) +
+                (cuts.capacity() - donors.size()) * sizeof(std::vector<Cut>));
     for (const auto& d : donors)
     {
         context.donor = d.id;
-        if (!d.geometry || !ids.insert(d.id).second || bool(d.gas) == (d.pure_gas || d.pure_carrier) ||
-            d.pure_gas && d.pure_carrier)
+        if (!d.geometry)
+            fail(GeometryErrorCode::InvalidInput, "Invalid Ordinary aggregate donor declaration.");
+        const auto fresh = ids.insert(d.id).second;
+        if (fresh)
+            work.charge(sizeof(decltype(ids)::value_type) + 4 * sizeof(void*));
+        if (!fresh || bool(d.gas) == (d.pure_gas || d.pure_carrier) || d.pure_gas && d.pure_carrier)
             fail(GeometryErrorCode::InvalidInput, "Invalid Ordinary aggregate donor declaration.");
         for (auto b : {d.bulk_budget, d.gas_budget, d.carrier_budget})
             if (!std::isfinite(b) || b < 0)
@@ -1291,18 +1341,22 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     // Existing donor admission authenticates disjoint interiors. Only its
     // constructor is used: no computational child is materialized/measured.
     {
-        auto remaining = impl_->geometry;
-        remaining.byte_budget = std::min(impl_->sweep.byte_budget, remaining.byte_budget) - work.bytes;
-        remaining.maximum_pair_tests =
-            std::min(impl_->sweep.maximum_pair_tests, remaining.maximum_pair_tests) - work.stats.pair_tests;
-        if (!work.operation_limit)
-            work.operation_limit = ::SimpleFluid::PLIC::details::Work(impl_->geometry).operation_limit;
-        remaining.maximum_operations = work.operation_limit - work.stats.operations;
-        if (!remaining.maximum_operations)
-            fail(GeometryErrorCode::ResourceLimit, "Ordinary aggregate work budget exhausted before donor validation.");
+        const auto remaining = work.remaining_geometry();
+        const auto caller = ::SimpleFluid::PLIC::details::active_work;
         ::SimpleFluid::PLIC::details::Operation validation(remaining);
-        const auto active = ::SimpleFluid::PLIC::details::active_work;
-        const auto bytes_before = active->bytes, operations_before = active->operations, pairs_before = active->pairs;
+        // Operation normally reuses a parent. Enforce this provider's tighter
+        // remaining allowance during validation, before a costly handoff.
+        const auto active = &validation.work;
+        ::SimpleFluid::PLIC::details::active_work = active;
+        const auto account_caller = [&]
+        {
+            if (caller)
+            {
+                caller->charge(active->bytes, 1);
+                caller->operations += active->operations;
+                caller->pairs += active->pairs;
+            }
+        };
         const auto aggregate_bytes = work.bytes, aggregate_operations = work.stats.operations,
                    aggregate_pairs = work.stats.pair_tests;
         const auto aggregate_statistics = work.stats;
@@ -1310,10 +1364,10 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
         try
         {
             const ConvexPartition<ArithmeticMode::Ordinary> disjoint(geometries, remaining);
-            work.charge(active->bytes - bytes_before + sizeof(disjoint));
+            work.charge(active->bytes + sizeof(disjoint));
             provider_charged = true;
-            work.op(active->operations - operations_before);
-            work.pairs(active->pairs - pairs_before);
+            work.op(active->operations);
+            work.pairs(active->pairs);
         }
         catch (...)
         {
@@ -1321,11 +1375,10 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             // its normal accounting handoff. Do not mask the original cause.
             // A completed byte handoff remains charged even if the operation or
             // pair handoff fails. A denied aggregate charge is never added.
-            context.bytes = provider_charged || work.stats.failed_charge_bytes
-                                ? work.bytes
-                                : aggregate_bytes + active->bytes - bytes_before;
-            context.operations = aggregate_operations + active->operations - operations_before;
-            context.pairs = aggregate_pairs + active->pairs - pairs_before;
+            context.bytes =
+                provider_charged || work.stats.failed_charge_bytes ? work.bytes : aggregate_bytes + active->bytes;
+            context.operations = aggregate_operations + active->operations;
+            context.pairs = aggregate_pairs + active->pairs;
             context.statistics = aggregate_statistics;
             context.statistics.stage_charged_bytes[static_cast<unsigned>(work.stage)] +=
                 context.bytes - aggregate_bytes;
@@ -1333,8 +1386,10 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
             context.statistics.operations = context.operations;
             context.statistics.pair_tests = context.pairs;
             context.statistics.failed_charge_bytes = work.stats.failed_charge_bytes;
+            account_caller();
             throw;
         }
+        account_caller();
     }
     // Subtract every donor through retained complementary cuts. Every outside
     // child remains a witness until a later donor consumes it. No volume closure
@@ -1400,7 +1455,6 @@ OrdinaryAggregateResult OrdinaryAggregateSource::measure(
     context.stage = OrdinaryAggregateContext::Stage::Metric;
     work.stage = context.stage;
     work.sync();
-    OrdinaryAggregateResult result;
     result.signed_source_volume = impl_->signed_volume;
     for (std::size_t di = 0; di < donors.size(); ++di)
         for (int sign : {-1, 1})
