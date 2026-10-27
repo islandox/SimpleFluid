@@ -38,12 +38,7 @@ DynamicPoint source_point_fan(std::span<const ConvexCellGeometry<ArithmeticMode:
             if (!face->contains_point(identity))
                 continue;
             const auto bytes = planar_support<ArithmeticMode::Ordinary>(*face);
-            PlaneAuthority authority;
-            authority.key.push_back(bytes.size());
-            authority.key.resize(1 + (bytes.size() + 7) / 8, 0);
-            for (std::size_t i = 0; i < bytes.size(); ++i)
-                authority.key[1 + i / 8] |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[i]))
-                                            << (8 * (i % 8));
+            auto authority = details::original_support_authority(bytes);
             active_work->charge(authority.key.size(), sizeof(std::uint64_t));
             supports.push_back(std::move(authority));
         }
@@ -147,25 +142,42 @@ DynamicPoint GeometryKernel<Mode>::backtrace(const DynamicPoint& source, Geometr
             reject("invalid wall support constraint.");
         require_mode(source.arithmetic_mode, wall.geometry->arithmetic_mode());
         const auto& plane = checked_geometry_storage<Mode>(wall.geometry->impl_)->surfaces[wall.face].plane;
+        PlaneAuthority native_authority;
+        std::span<const PlaneAuthority> authorities = plane->authorities;
+        if (authorities.empty() && !plane->native_support.empty())
+        {
+            native_authority = details::original_support_authority(plane->native_support);
+            active_work->charge(native_authority.key.size(), sizeof(std::uint64_t));
+            authorities = {&native_authority, 1};
+        }
         bool authenticated = false;
-        for (const auto& key : plane->authorities)
-            if (std::find(source.supports().begin(), source.supports().end(), key) != source.supports().end())
+        for (const auto& key : authorities)
+            if (has_support(source, key))
             {
                 authenticated = true;
                 retained.push_back(key);
             }
         if (!authenticated)
         {
-            const auto local = scaled<Mode>(input - point<Mode>(plane->frame.origin), -plane->frame.exponent);
-            if (!(dot<Mode>(plane->normal, local - plane->anchor) - plane->offset).zero())
+            std::array<long double, 3> normal{}, anchor{};
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                normal[axis] = plane->normal[axis].value;
+                anchor[axis] = plane->anchor[axis].value;
+            }
+            const auto distance = ordinary_predicates::plane_distance(
+                ordinary_predicates::FramedPoint{source.value, {}, 0},
+                ordinary_predicates::FramedPoint{anchor, plane->frame.origin, plane->frame.exponent}, normal,
+                plane->offset.value);
+            if (distance.sign != ordinary_predicates::Sign::Zero)
                 reject("wall constraint lacks original point/support incidence.");
         }
         // Every catalog entry is authenticated above, including duplicates.
         // A collision-free original support identity proves equal planes even
         // when independently scaled normals have different numerical bounds.
-        const bool repeated_support = std::any_of(plane->authorities.begin(), plane->authorities.end(),
+        const bool repeated_support = std::any_of(authorities.begin(), authorities.end(),
             [&](const auto& key) { return independent_supports.contains(key); });
-        independent_supports.insert(plane->authorities.begin(), plane->authorities.end());
+        independent_supports.insert(authorities.begin(), authorities.end());
         if (zero_motion || repeated_support || rank == 3)
             continue; // Every catalog incidence is still authenticated above.
         const auto& normal = plane->normal;

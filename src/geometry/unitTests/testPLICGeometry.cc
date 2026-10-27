@@ -1,9 +1,11 @@
 /** @file testPLICGeometry.cc
  * @brief Typed PLIC geometry, arithmetic separation, and checked publication contracts.
  */
-#include "geometry/unitTests/plic_analytic_test_geometry.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
 #include "geometry/PLIC/PlanarFace.hh"
+#include "geometry/PLIC/SupportClassification.hh"
+#include "geometry/unitTests/plic_analytic_test_geometry.hh"
+#include <cfenv>
 #include <cmath>
 #include <concepts>
 #include <gtest/gtest.h>
@@ -20,6 +22,155 @@ using OrdinaryValue = PLIC::GeometryValue<ArithmeticMode::Ordinary>;
 using BoundedValue = PLIC::GeometryValue<ArithmeticMode::BoundedCertification>;
 using OrdinaryGeometry = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
 using BoundedGeometry = PLIC::ConvexCellGeometry<ArithmeticMode::BoundedCertification>;
+
+struct SkewBoundaryFixture
+{
+    static constexpr auto mode = ArithmeticMode::Ordinary;
+    using Point = PLIC::Point<mode>;
+    PLIC::ConvexGeometryPtr<mode> geometry;
+
+    SkewBoundaryFixture(SimpleFluid::PLIC::GeometryPoint origin, double scale)
+    {
+        std::array<SimpleFluid::PLIC::GeometryPoint, 8> vertices;
+        for (std::size_t i = 0; i < vertices.size(); ++i)
+            vertices[i] = {origin[0] + scale * ((i & 1 ? 1. : 0.) + (i & 2 ? .2 : 0.)),
+                origin[1] + scale * (i & 2 ? 1. : 0.), origin[2] + scale * (i & 4 ? 1. : 0.)};
+        geometry = OrdinaryGeometry::from_native_shell(
+            vertices, {{0, 4, 6, 2}, {1, 3, 7, 5}, {0, 1, 5, 4}, {2, 6, 7, 3}, {0, 2, 3, 1}, {4, 5, 7, 6}});
+    }
+
+    std::vector<Point> wall_points(std::size_t face) const
+    {
+        std::vector<Point> points;
+        for (const auto& identity : geometry->face_geometry(face)->vertex_identities())
+            points.push_back(PLIC::source_point<mode>(*geometry, identity));
+        return points;
+    }
+};
+
+TEST(PLICGeometryTest, OriginalSupportClassifiesSkewWallTangencyAcrossScalesAndTranslations)
+{
+    using Fixture = SkewBoundaryFixture;
+    using Class = PLIC::OrdinaryBoundaryClass;
+    const std::array<double, 3> scales{1. / 1024, 1., 1024.};
+    for (const double scale : scales)
+        for (const SimpleFluid::PLIC::GeometryPoint origin :
+            {SimpleFluid::PLIC::GeometryPoint{0, 0, 0}, SimpleFluid::PLIC::GeometryPoint{2, -4, 8}})
+        {
+            SCOPED_TRACE(scale);
+            const Fixture fixture(origin, scale);
+            const PLIC::OrdinaryBoundary wall({fixture.geometry, 0});
+            const auto points = fixture.wall_points(0);
+            const auto center = PLIC::point_average<Fixture::mode>(points);
+            const std::array walls{PLIC::FaceConstraint<Fixture::mode>{fixture.geometry, 0}};
+            const auto departure =
+                PLIC::backtrace_constrained<Fixture::mode>(center, {.7 * scale, -.3 * scale, .2 * scale}, .031, walls);
+            EXPECT_EQ(wall.classify(departure), Class::ConstructionContact);
+            EXPECT_TRUE(PLIC::has_any_support(departure.dynamic(), wall.authorities()));
+            // The wall equation is x-origin_x = slope*(y-origin_y); the
+            // trajectory may round its metric coordinates but preserves incidence.
+            const auto wall_vertices = fixture.geometry->face_geometry(0)->points();
+            const long double slope =
+                (wall_vertices[2][0] - wall_vertices[0][0]) / (wall_vertices[2][1] - wall_vertices[0][1]);
+            EXPECT_NEAR(departure.value[0] - origin[0], slope * (departure.value[1] - origin[1]),
+                64 * std::numeric_limits<long double>::epsilon() * (scale + std::abs(origin[0])));
+            EXPECT_EQ(PLIC::original_support_authority(*fixture.geometry->face_geometry(0)), wall.authorities()[0]);
+        }
+}
+
+TEST(PLICGeometryTest, OriginalSupportRetainsBothIntersectingWallConstraints)
+{
+    using Fixture = SkewBoundaryFixture;
+    using Class = PLIC::OrdinaryBoundaryClass;
+    const Fixture fixture({0, 0, 0}, 1);
+    const PLIC::OrdinaryBoundary left({fixture.geometry, 0}), bottom({fixture.geometry, 4});
+    const auto points = fixture.wall_points(0);
+    std::vector<Fixture::Point> edge;
+    for (const auto& point : points)
+        if (bottom.classify(point) == Class::ConstructionContact)
+            edge.push_back(point);
+    ASSERT_EQ(edge.size(), 2u);
+    const auto source = PLIC::point_average<Fixture::mode>(edge);
+    const std::array walls{PLIC::FaceConstraint<Fixture::mode>{fixture.geometry, 0},
+        PLIC::FaceConstraint<Fixture::mode>{fixture.geometry, 4}};
+    const auto departure = PLIC::backtrace_constrained<Fixture::mode>(source, {.7, -.3, .2}, .031, walls);
+    EXPECT_EQ(left.classify(departure), Class::ConstructionContact);
+    EXPECT_EQ(bottom.classify(departure), Class::ConstructionContact);
+    EXPECT_EQ(departure.value[2], 0);
+}
+
+TEST(PLICGeometryTest, OriginalSupportRejectsCrossingWrongSupportMutationAndFreeCenterDisplacement)
+{
+    using Fixture = SkewBoundaryFixture;
+    using Class = PLIC::OrdinaryBoundaryClass;
+    const Fixture fixture({0, 0, 0}, 1);
+    const PLIC::OrdinaryBoundary left({fixture.geometry, 0});
+    const auto source = PLIC::point_average<Fixture::mode>(fixture.wall_points(0));
+    EXPECT_EQ(left.classify(Fixture::Point({-.25, .5, .5})), Class::Outside);
+    EXPECT_EQ(left.classify(Fixture::Point({.5, .5, .5})), Class::Inside);
+    EXPECT_EQ(left.classify(Fixture::Point({0, 0, .5})), Class::CoordinateContact);
+    const auto wrong = PLIC::point_average<Fixture::mode>(fixture.wall_points(1));
+    EXPECT_FALSE(PLIC::has_any_support(wrong.dynamic(), left.authorities()));
+    EXPECT_EQ(left.classify(wrong), Class::Inside);
+    const std::array walls{PLIC::FaceConstraint<Fixture::mode>{fixture.geometry, 0}};
+    EXPECT_THROW(
+        (void) PLIC::backtrace_constrained<Fixture::mode>(wrong, {0, 0, 0}, .031, walls), std::invalid_argument);
+    auto mutated = source;
+    mutated.value[0] -= .01L;
+    EXPECT_TRUE(mutated.supports().empty());
+    EXPECT_EQ(left.classify(mutated), Class::Outside);
+    const auto corrected = PLIC::point_displaced<Fixture::mode>(source, Fixture::Point({-.01, 0, 0}));
+    EXPECT_TRUE(corrected.supports().empty());
+    EXPECT_EQ(left.classify(corrected), Class::Outside);
+    const std::array simplex{source, source, source, corrected};
+    EXPECT_TRUE(PLIC::common_supports<Fixture::mode>(simplex).empty());
+}
+
+TEST(PLICGeometryTest, OriginalBoundaryCoordinateFallbackPreservesFloatingPointEnvironment)
+{
+    const auto geometry = OrdinaryGeometry::box({0, 0, 0}, {1, 1, 1});
+    const PLIC::OrdinaryBoundary boundary({geometry, 0});
+    const PLIC::OrdinaryBoundary upper({geometry, 1});
+    EXPECT_EQ(upper.classify(PLIC::Point<ArithmeticMode::Ordinary>({std::nextafter(1.L, 2.L), .5L, .5L})),
+        PLIC::OrdinaryBoundaryClass::Outside);
+    const int rounding = std::fegetround();
+    const int flags = std::fetestexcept(FE_ALL_EXCEPT);
+    ASSERT_EQ(std::fesetround(FE_DOWNWARD), 0);
+    const auto inside = boundary.classify(PLIC::Point<ArithmeticMode::Ordinary>({.5, .5, .5}));
+    const int after = std::fegetround();
+    const int after_flags = std::fetestexcept(FE_ALL_EXCEPT);
+    EXPECT_EQ(std::fesetround(rounding), 0);
+    EXPECT_EQ(inside, PLIC::OrdinaryBoundaryClass::Inside);
+    EXPECT_EQ(after, FE_DOWNWARD);
+    EXPECT_EQ(after_flags, flags);
+    // Scaling this smallest positive coordinate into the stored cell frame
+    // loses representability. Arithmetic uncertainty cannot prove wall contact.
+    EXPECT_EQ(boundary.classify(
+                  PLIC::Point<ArithmeticMode::Ordinary>({std::numeric_limits<long double>::denorm_min(), .5, .5})),
+        PLIC::OrdinaryBoundaryClass::Unresolved);
+    EXPECT_THROW((void) PLIC::OrdinaryBoundary({{}, 0}), std::invalid_argument);
+    EXPECT_THROW((void) PLIC::OrdinaryBoundary({geometry, geometry->num_faces()}), std::invalid_argument);
+}
+
+TEST(PLICGeometryTest, CoordinateWallContactDoesNotAcquireOriginalConstructionSupport)
+{
+    constexpr auto mode = ArithmeticMode::Ordinary;
+    using Point = PLIC::Point<mode>;
+    const auto geometry = OrdinaryGeometry::box({0, 0, 0}, {1, 1, 1});
+    const PLIC::OrdinaryBoundary boundary({geometry, 0});
+    const std::array walls{PLIC::FaceConstraint<mode>{geometry, 0}};
+    const auto represented = PLIC::backtrace_constrained<mode>(Point({0, .5, .5}), {0, 1, 0}, .125, walls);
+    EXPECT_TRUE(represented.supports().empty());
+    EXPECT_EQ(boundary.classify(represented), PLIC::OrdinaryBoundaryClass::CoordinateContact);
+
+    std::vector<Point> authenticated;
+    for (const auto& identity : geometry->face_geometry(0)->vertex_identities())
+        authenticated.push_back(PLIC::source_point<mode>(*geometry, identity));
+    const auto source = PLIC::point_average<mode>(authenticated);
+    const auto constructed = PLIC::backtrace_constrained<mode>(source, {0, 1, 0}, .125, walls);
+    EXPECT_FALSE(constructed.supports().empty());
+    EXPECT_EQ(boundary.classify(constructed), PLIC::OrdinaryBoundaryClass::ConstructionContact);
+}
 
 template<class T>
 concept HasErrorField = requires(T value) { value.absolute_error; };

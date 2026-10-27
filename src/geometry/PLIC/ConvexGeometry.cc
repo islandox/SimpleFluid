@@ -1,11 +1,100 @@
-#include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/SupportClassification.hh"
+#include "geometry/PLIC/details/GeometryKernels.hh"
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
 
 #include "geometry/PLIC/details/bounded/ConvexGeometry.tcc"
 #include "geometry/PLIC/details/ordinary/ConvexGeometry.tcc"
 
 namespace SimpleFluid::PLIC
 {
+bool has_support(const DynamicPoint& point, const PlaneAuthority& authority)
+{
+    if (authority.key.empty())
+        return false;
+    const auto& supports = point.supports();
+    return std::find(supports.begin(), supports.end(), authority) != supports.end();
+}
+
+bool has_any_support(const DynamicPoint& point, std::span<const PlaneAuthority> authorities)
+{
+    return std::any_of(
+        authorities.begin(), authorities.end(), [&](const auto& authority) { return has_support(point, authority); });
+}
+
+PlaneAuthority details::original_support_authority(std::span<const char> bytes)
+{
+    if (bytes.empty())
+        throw GeometryError(GeometryErrorCode::ProvenanceMismatch, "Empty original support identity.");
+    PlaneAuthority authority;
+    authority.key.push_back(bytes.size());
+    authority.key.resize(1 + (bytes.size() + 7) / 8, 0);
+    for (std::size_t i = 0; i < bytes.size(); ++i)
+        authority.key[1 + i / 8] |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[i])) << (8 * (i % 8));
+    return authority;
+}
+
+PlaneAuthority original_support_authority(const PlanarFace<ArithmeticMode::Ordinary>& face)
+{
+    return details::original_support_authority(planar_support<ArithmeticMode::Ordinary>(face));
+}
+
+OrdinaryBoundary::OrdinaryBoundary(FaceConstraint<ArithmeticMode::Ordinary> boundary) : boundary_(std::move(boundary))
+{
+    if (!boundary_.geometry || boundary_.face >= boundary_.geometry->num_faces())
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Invalid Ordinary original boundary constraint.");
+    const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
+        DynamicGeometryAccess::implementation(*boundary_.geometry->dynamic_geometry()));
+    const auto& plane = *storage->surfaces.at(boundary_.face).plane;
+    if (plane.authorities.empty() && !plane.native_support.empty())
+        native_authority_ = details::original_support_authority(plane.native_support);
+}
+
+std::span<const PlaneAuthority> OrdinaryBoundary::authorities() const
+{
+    const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
+        DynamicGeometryAccess::implementation(*boundary_.geometry->dynamic_geometry()));
+    const auto& keys = storage->surfaces.at(boundary_.face).plane->authorities;
+    if (keys.empty() && !native_authority_.key.empty())
+        return {&native_authority_, 1};
+    return keys;
+}
+
+OrdinaryBoundaryClass OrdinaryBoundary::classify(const Point<ArithmeticMode::Ordinary>& point) const
+{
+    namespace predicates = details::ordinary_predicates;
+    const auto storage = details::checked_geometry_storage<ArithmeticMode::Ordinary>(
+        DynamicGeometryAccess::implementation(*boundary_.geometry->dynamic_geometry()));
+    const auto& surface = storage->surfaces.at(boundary_.face);
+    const auto& plane = *surface.plane;
+    if (has_any_support(point.dynamic(), authorities()))
+        return OrdinaryBoundaryClass::ConstructionContact;
+    std::array<long double, 3> normal{}, anchor{};
+    for (std::size_t axis = 0; axis < 3; ++axis)
+    {
+        normal[axis] = plane.normal[axis].value;
+        anchor[axis] = plane.anchor[axis].value;
+    }
+    predicates::Result distance;
+    try
+    {
+        distance = predicates::plane_distance(predicates::FramedPoint{point.value, {}, 0},
+            predicates::FramedPoint{anchor, plane.frame.origin, plane.frame.exponent}, normal, plane.offset.value);
+    }
+    catch (const GeometryError& error)
+    {
+        if (error.code() == GeometryErrorCode::UnresolvedArithmetic)
+            return OrdinaryBoundaryClass::Unresolved;
+        throw;
+    }
+    if (distance.sign == predicates::Sign::Unresolved)
+        return OrdinaryBoundaryClass::Unresolved;
+    if (distance.sign == predicates::Sign::Zero)
+        return OrdinaryBoundaryClass::CoordinateContact;
+    return static_cast<int>(distance.sign) * surface.orientation < 0 ? OrdinaryBoundaryClass::Inside
+                                                                     : OrdinaryBoundaryClass::Outside;
+}
+
 const std::vector<PlaneAuthority>& DynamicPoint::supports() const
 {
     static const std::vector<PlaneAuthority> empty;

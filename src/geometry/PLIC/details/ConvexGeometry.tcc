@@ -401,7 +401,7 @@ template<ArithmeticMode Mode> std::vector<PlaneAuthority> common_supports(std::s
     for (const auto& key : points.front().supports())
         if (!key.key.empty() &&
             std::all_of(points.begin() + 1, points.end(), [&](const auto& point)
-                { return std::find(point.supports().begin(), point.supports().end(), key) != point.supports().end(); }))
+                { return has_support(point.dynamic(), key); }))
             result.push_back(key);
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());

@@ -1,4 +1,5 @@
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include "geometry/PLIC/SupportClassification.hh"
 #include "geometry/PLIC/details/GeometryKernels.hh"
 #include "geometry/PLIC/details/ordinary/NativeGeometrySupport.hh"
 #include "geometry/mesh/MultiRegionMesh.hh"
@@ -22,7 +23,7 @@ std::vector<PlaneAuthority> dynamic_common_supports(std::span<const DynamicPoint
     for (const auto& key : points.front().supports())
         if (!key.key.empty() &&
             std::all_of(points.begin() + 1, points.end(), [&](const auto& p)
-                { return std::find(p.supports().begin(), p.supports().end(), key) != p.supports().end(); }))
+                { return has_support(p, key); }))
             result.push_back(key);
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());

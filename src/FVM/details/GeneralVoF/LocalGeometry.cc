@@ -17,55 +17,7 @@ using Point = PLIC::Point<mode>;
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Math = fp::Arithmetic<mode>;
 using local_spatial_detail::Box;
-using local_spatial_detail::Frontier;
 using Wide = std::array<long double, 3>;
-// Reuse the public Ordinary predicate: it bounds represented-coordinate
-// evaluation, handles underflow, and scopes/restores the caller's FP environment.
-// Plain points intentionally carry no borrowed incidence certificates.
-Point represented(const Wide& p)
-{
-    return Point(p);
-}
-void prove_retained(const Frontier& frontier, const SimpleFluid::geometry::swept_volume::Sweep<mode>& recipe, SimpleFluid::geometry::swept_volume::Work& work)
-{
-    const auto& points = frontier.geometry->points();
-    if (points.size() < 3)
-        throw std::invalid_argument("Local VoF malformed frontier polygon.");
-    std::size_t third = 2;
-    // A probe differing in one coordinate resolves a projected cross component.
-    // Its displacement is at least one, avoiding an artificial subnormal probe.
-    const auto a = represented(points[0]);
-    for (; third < points.size(); ++third)
-    {
-        const auto b = represented(points[third - 1]), c = represented(points[third]);
-        bool nonzero = false;
-        for (unsigned axis = 0; axis < 3 && !nonzero; ++axis)
-        {
-            work.test();
-            auto probe = a.value;
-            probe[axis] = std::abs(probe[axis]) >= 1 ? 0 : probe[axis] >= 0 ? -1 : 1;
-            nonzero = PLIC::orientation<mode>({a, b, c, Point(probe)}).value != 0;
-        }
-        if (nonzero)
-            break;
-    }
-    if (third == points.size())
-        throw std::invalid_argument("Local VoF frontier support is unresolved.");
-    const auto b = represented(points[third - 1]), c = represented(points[third]);
-    const auto check = [&](const Point& p)
-    {
-        work.test();
-        const auto distance = PLIC::orientation<mode>({a, b, c, Point(p.value)}).value;
-        if ((frontier.first ? distance : -distance) > 0)
-            throw std::invalid_argument("Local VoF corrected sweep may leave the authenticated retained shell.");
-    };
-    for (const auto& p : recipe.current)
-        check(p);
-    for (const auto& p : recipe.departure)
-        check(p);
-    check(recipe.center);
-    check(recipe.backcenter);
-}
 bool needs_interface(const Cell& cell)
 {
     return cell.declaration == GeneralVoFPhaseGeometry::Infer || cell.requires_interface ||
@@ -129,7 +81,7 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 bounds.add(recipe.center.value);
                 bounds.add(recipe.backcenter.value);
                 for (const auto index : spatial->frontier_index.query(bounds, work, result.diagnostics))
-                    prove_retained(spatial->frontiers[index], recipe, work);
+                    prove_retained(data, *spatial, spatial->frontiers[index], recipe, work);
                 auto candidates = spatial->donor_index.query(bounds, work, result.diagnostics);
                 result.diagnostics.donor_candidates += candidates.size();
                 bool geometric = false;
