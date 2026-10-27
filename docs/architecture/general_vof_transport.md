@@ -160,12 +160,60 @@ missing coverage, inconsistent identities and exhausted construction work reject
 Cut classification uses residual-based construction arithmetic separately from
 the aggregate metric quality estimate. Exact operations retain zero uncertainty.
 When rounded barycentric placement cannot resolve a later cut, the provider
-reevaluates the original source-edge construction expression. A zero numerator
-with no unresolved arithmetic establishes contact, including crossings whose
-barycentric division was inexact. Unresolved signs still reject; no coordinate
+reevaluates its original defining supports. A zero numerator with no unresolved
+arithmetic establishes contact, including crossings whose barycentric division
+was inexact. Unresolved signs still reject; no coordinate
 snapping or tolerance enlargement establishes incidence. Source orientations,
 source/cut distances and per-witness integration coefficients are reused within
 their immutable dependencies, with storage and executed work accounted.
+
+Generated vertices retain their defining supports separately from cached
+barycentric coordinates and numerical estimates. Original vertex `i` carries
+the three source-face equations `lambda[j]=0` for `j!=i`; crossings retain the
+new cutter and supports common to both endpoints. Their parent records also
+retain parent indices and the original cutter expression; redundant cached
+endpoint evaluations are not copied through descendant histories. Issued donor support identities select
+one deterministic original framed expression, independent of donor order, while
+the complementary side retains its own orientation. Authenticated original
+source incidences remain structural zeros in the coefficient rows.
+
+If coordinate evaluation remains ambiguous, the classifier selects
+three independent defining supports and evaluates the queried distance as a ratio
+of four-by-four determinants in the original source frame. Coefficients are
+reevaluated from original framed points, normals, anchors and offsets, rather
+than treating cached rounded distances as exact input. Error-free floating
+expansions retain correlated residuals, with a cap of 2048 components per
+expansion and the existing byte/operation limits. An exactly singular basis can
+be replaced by another defining triple; exhausted capacity, range loss or an
+unresolved predicate rejects. This is a bounded Ordinary predicate, with no
+arithmetic-mode change or rational transport geometry.
+
+The indirect sign and its metric distance have distinct obligations. The sign
+can establish contact or a side, but interpolation still consumes the returned
+distance and residual-derived error estimate. A resolved sign never authorizes
+discarding metric uncertainty or changing the physical volume allowances.
+Fallback storage and executed work are charged on success and failure, including
+when a caller already has an active geometry budget.
+Evaluations are cached only within one immutable source/measure operation, keyed
+by the three defining support identities and queried support. Coverage, metric
+cuts and complementary queries can reuse that result; complements reverse the
+value and sign while retaining the same error. Cache entries remain charged to
+the original budget. Reuse does not reduce the count of work already executed.
+
+### Retained-domain coverage proof boundary
+
+The aggregate API accepts arbitrary donor sets, so disjoint donor interiors do
+not prove that their union covers a source. Complement subtraction remains
+mandatory. A future internal alternative could use the native mesh complex,
+but it must authenticate complete cell shells and cavity/halo frontiers, current
+geometry/topology/partition observations, an in-domain source seed and containment
+of every corrected source tetrahedron, complete conservative spatial queries,
+and exact correspondence between queried cells and supplied donor geometry.
+An approximate donor-volume sum cannot replace these obligations: gaps and
+overlaps can cancel in that sum. The existing reach/index metadata supplies
+ingredients for such a certificate, not a currently admitted coverage shortcut.
+
+### Aggregate volume integration
 
 Scalar integration groups only one canonical face, old donor, stream direction
 and phase at a time. Shared internal boundaries cancel by source construction

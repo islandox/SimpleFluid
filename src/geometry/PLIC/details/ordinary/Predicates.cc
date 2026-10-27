@@ -15,6 +15,7 @@
 #include <cmath>
 #include <limits>
 #include <utility>
+#include <vector>
 
 namespace SimpleFluid::PLIC::details::ordinary_predicates
 {
@@ -286,7 +287,270 @@ template<std::size_t N> int normalize_edges(std::array<CompensatedPoint, N>& edg
             x = scaled(x, -exponent);
     return exponent;
 }
+
+// Grow-expansion with zero elimination (TwoSum) keeps nonoverlapping,
+// increasing-magnitude components. Its last component determines the exact
+// sign. Every capacity increase is bounded and charged, including copies.
+class Expansion
+{
+public:
+    Expansion() = default;
+    explicit Expansion(long double x)
+    {
+        if (x != 0)
+            push(x);
+    }
+    Expansion(const Expansion& other)
+    {
+        reserve(other.values_.size());
+        values_.assign(other.values_.begin(), other.values_.end());
+    }
+    Expansion(Expansion&&) noexcept = default;
+    Expansion& operator=(Expansion&&) noexcept = default;
+    Expansion& operator=(const Expansion&) = delete;
+    [[nodiscard]] bool empty() const { return values_.empty(); }
+    [[nodiscard]] long double leading() const { return empty() ? 0 : values_.back(); }
+    [[nodiscard]] const std::vector<long double>& values() const { return values_; }
+    void append(long double x)
+    {
+        if (x == 0)
+            return;
+        std::size_t count = 0;
+        for (const auto component : values_)
+        {
+            const auto [sum, residual] = two_sum(x, component);
+            if (residual != 0)
+                values_[count++] = residual;
+            x = sum;
+        }
+        values_.resize(count);
+        if (x != 0)
+            push(x);
+    }
+
+private:
+    void reserve(std::size_t count)
+    {
+        constexpr std::size_t capacity = 2048;
+        if (count > capacity)
+        {
+            ++statistics.rejections;
+            throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary support expansion capacity exhausted.");
+        }
+        if (count <= values_.capacity())
+            return;
+        const auto requested = std::min(capacity, std::max(count, 2 * values_.capacity()));
+        if (active_work)
+            active_work->charge(requested - values_.capacity(), sizeof(long double));
+        values_.reserve(requested);
+    }
+    void push(long double x)
+    {
+        reserve(values_.size() + 1);
+        values_.push_back(x);
+    }
+    std::vector<long double> values_;
+};
+Expansion expansion_sum(Expansion a, const Expansion& b, int sign = 1)
+{
+    for (const auto x : b.values())
+        a.append(sign < 0 ? -x : x);
+    return a;
+}
+Expansion expansion_product(const Expansion& a, const Expansion& b)
+{
+    Expansion result;
+    for (const auto x : a.values())
+        for (const auto y : b.values())
+        {
+            int ex, ey;
+            charge(2);
+            std::frexp(x, &ex);
+            std::frexp(y, &ey);
+            // The product's exact binary lattice must fit, including its FMA
+            // residual. A rounded-to-zero residual alone proves no contact.
+            if (ex + ey - 2 * Limits::digits < Limits::min_exponent - Limits::digits)
+                unresolved("Ordinary support expansion product exceeds its exact underflow lattice.");
+            const auto product = mul(x, y);
+            charge();
+            const auto residual = finite(std::fma(x, y, -product));
+            result.append(product);
+            result.append(residual);
+        }
+    return result;
+}
+Expansion expansion_scaled(const Expansion& a, int exponent)
+{
+    if (exponent == std::numeric_limits<int>::min())
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary support scaling exponent is invalid.");
+    Expansion result;
+    for (const auto x : a.values())
+    {
+        const auto shifted = scale(x, exponent);
+        charge();
+        if (std::scalbn(shifted, -exponent) != x)
+            unresolved("Ordinary support expansion scaling loses represented input bits.");
+        result.append(shifted);
+    }
+    return result;
+}
+int exponent_difference(int a, int b)
+{
+    const auto difference = static_cast<long long>(a) - b;
+    if (difference <= std::numeric_limits<int>::min() || difference > std::numeric_limits<int>::max())
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary support frame exponent is invalid.");
+    return static_cast<int>(difference);
+}
+Expansion support_coefficient(const FramedPoint& point, const SupportRow& row)
+{
+    finite_input(row.offset);
+    Expansion result(-row.offset);
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        finite_input(point.local[axis]);
+        finite_input(point.origin[axis]);
+        finite_input(row.anchor.local[axis]);
+        finite_input(row.anchor.origin[axis]);
+        finite_input(row.normal[axis]);
+        int origin_exponent = 0;
+        charge();
+        std::frexp(std::max(std::abs(static_cast<long double>(point.origin[axis])),
+                       std::abs(static_cast<long double>(row.anchor.origin[axis]))),
+            &origin_exponent);
+        auto origin = expansion_sum(expansion_scaled(Expansion(point.origin[axis]), -origin_exponent),
+            expansion_scaled(Expansion(row.anchor.origin[axis]), -origin_exponent), -1);
+        origin = expansion_scaled(origin, exponent_difference(origin_exponent, row.anchor.exponent));
+        auto local = expansion_sum(
+            expansion_scaled(Expansion(point.local[axis]), exponent_difference(point.exponent, row.anchor.exponent)),
+            Expansion(row.anchor.local[axis]), -1);
+        result = expansion_sum(
+            std::move(result), expansion_product(expansion_sum(std::move(origin), local), Expansion(row.normal[axis])));
+    }
+    return result;
+}
+using ExpansionRow = std::array<Expansion, 4>;
+struct NormalizedSupportRow
+{
+    ExpansionRow coefficients;
+    int exponent = 0;
+};
+NormalizedSupportRow support_row(const std::array<FramedPoint, 4>& source, const SupportRow& row)
+{
+    if ((row.orientation != 1 && row.orientation != -1) || row.source_incidence > 15 || row.source_face > 4)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary support row has invalid structural metadata.");
+    if (row.source_face == 4)
+    {
+        finite_input(row.offset);
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            finite_input(row.anchor.local[axis]);
+            finite_input(row.anchor.origin[axis]);
+            finite_input(row.normal[axis]);
+        }
+    }
+    NormalizedSupportRow result;
+    long double extent = 0;
+    for (unsigned j = 0; j < 4; ++j)
+    {
+        if (row.source_face < 4)
+            result.coefficients[j] = Expansion(j == row.source_face ? row.orientation : 0);
+        else if ((row.source_incidence & (1u << j)) == 0)
+        {
+            result.coefficients[j] = support_coefficient(source[j], row);
+            if (row.orientation < 0)
+                result.coefficients[j] = expansion_sum(Expansion{}, result.coefficients[j], -1);
+        }
+        extent = std::max(extent, std::abs(result.coefficients[j].leading()));
+    }
+    charge();
+    std::frexp(extent, &result.exponent);
+    for (auto& coefficient : result.coefficients)
+        coefficient = expansion_scaled(coefficient, -result.exponent);
+    return result;
+}
+Expansion support_determinant(const std::array<NormalizedSupportRow, 3>& basis, const ExpansionRow& last)
+{
+    Expansion result;
+    std::array<unsigned, 4> permutation{0, 1, 2, 3};
+    do
+    {
+        unsigned inversions = 0;
+        for (unsigned i = 0; i < 4; ++i)
+            for (unsigned j = i + 1; j < 4; ++j)
+                inversions += permutation[i] > permutation[j];
+        auto term = expansion_product(basis[0].coefficients[permutation[0]], basis[1].coefficients[permutation[1]]);
+        term = expansion_product(term, basis[2].coefficients[permutation[2]]);
+        term = expansion_product(term, last[permutation[3]]);
+        result = expansion_sum(std::move(result), term, inversions % 2 ? -1 : 1);
+    } while (std::next_permutation(permutation.begin(), permutation.end()));
+    return result;
+}
+long double expansion_magnitude(const Expansion& value, bool tail_only = false)
+{
+    long double result = 0;
+    const auto count = value.values().size() - (tail_only && !value.empty() ? 1 : 0);
+    for (std::size_t i = 0; i < count; ++i)
+        result = bound_add(result, std::abs(value.values()[i]));
+    return result;
+}
 } // namespace
+
+SupportEvaluation support_intersection_distance(
+    const std::array<FramedPoint, 4>& source, const std::array<SupportRow, 3>& supports, const SupportRow& query)
+{
+    const ScopedPredicateEnvironment scope;
+    environment();
+    for (const auto& point : source)
+        for (unsigned axis = 0; axis < 3; ++axis)
+        {
+            finite_input(point.local[axis]);
+            finite_input(point.origin[axis]);
+        }
+    std::array<NormalizedSupportRow, 3> basis;
+    for (unsigned i = 0; i < 3; ++i)
+        basis[i] = support_row(source, supports[i]);
+    ExpansionRow ones{Expansion(1), Expansion(1), Expansion(1), Expansion(1)};
+    auto denominator = support_determinant(basis, ones);
+    if (denominator.empty())
+        return {{}, true};
+    const auto q = support_row(source, query);
+    auto numerator = support_determinant(basis, q.coefficients);
+    if (numerator.empty())
+        return {};
+    const auto sign = (numerator.leading() > 0) == (denominator.leading() > 0) ? Sign::Positive : Sign::Negative;
+    int ne, de;
+    charge(2);
+    std::frexp(numerator.leading(), &ne);
+    std::frexp(denominator.leading(), &de);
+    numerator = expansion_scaled(numerator, -ne);
+    denominator = expansion_scaled(denominator, -de);
+    charge();
+    const auto candidate = finite(numerator.leading() / denominator.leading());
+    const auto residual = expansion_sum(numerator, expansion_product(Expansion(candidate), denominator), -1);
+    const auto tail = expansion_magnitude(denominator, true);
+    const auto lower = add(std::abs(denominator.leading()), -tail);
+    charge();
+    const auto denominator_lower = std::nextafter(lower, 0.L);
+    if (denominator_lower <= 0)
+        unresolved("Ordinary support expansion has no usable metric denominator bound.");
+    auto error = expansion_magnitude(residual);
+    if (error != 0)
+    {
+        charge();
+        error = next_up(finite(error / denominator_lower));
+    }
+    const auto scale_exponent = static_cast<long long>(ne) - de + q.exponent;
+    if (scale_exponent <= std::numeric_limits<int>::min() || scale_exponent > std::numeric_limits<int>::max())
+        unresolved("Ordinary support quotient exceeds its finite scaling range.");
+    const auto exponent = static_cast<int>(scale_exponent);
+    const auto value = scale(candidate, exponent);
+    charge();
+    if (value == 0 || std::scalbn(value, -exponent) != candidate)
+        unresolved("Ordinary support quotient loses represented metric bits.");
+    if (error != 0)
+        error = next_up(scale(error, exponent));
+    return {{value, error, sign}, false};
+}
 
 void ResultAccumulator::add(const Result& term)
 {
