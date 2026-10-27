@@ -65,11 +65,26 @@ struct PolyhedralReconstructionOptions
      * support; it never erases or clips a smaller target-cell phase amount.
      * The default requires majority support on both sides of an interface. */
     double minimum_phase_support_fraction = .5;
+    /** Retain the supported weighted-gradient normal when the
+     * volume-equivalent minority/cell length ratio cbrt(min(G,L))/cbrt(Vcell)
+     * is strictly below this value. Only the target offset is then fitted;
+     * angular/model-residual gates do not run. Zero disables this exclusion.
+     * This provisional scale criterion never changes either phase inventory. */
+    double minimum_optimized_phase_length_ratio = .05;
+};
+enum class PolyhedralOrientationMethod
+{
+    SuppliedNormal,
+    Gradient,
+    AngularVolumeFit
 };
 struct PolyhedralInterface
 {
     GeometryHalfspace gas;
-    double target_volume_residual = 0, stencil_volume_residual = 0;
+    double target_volume_residual = 0;
+    /** Kernel angular-model residual. Gradient results leave it zero and
+     * unmeasured; callers admitting supplied planes may publish their own RMS. */
+    double stencil_volume_residual = 0;
     GeometryValue<ArithmeticMode::Exact> target_volume_difference; ///< Exact-mode signed minority residual.
     DynamicGeometryValue finite_target_volume_difference;          ///< Finite construction/arithmetic enclosure.
     /** Ordinary-only roundoff indicator; this is not a certified enclosure. */
@@ -78,13 +93,16 @@ struct PolyhedralInterface
     PolyhedralResolutionAssessment resolution;
     double stencil_condition = 0, orientation_step = 0;
     unsigned fit_iterations = 0;
+    PolyhedralOrientationMethod orientation_method = PolyhedralOrientationMethod::SuppliedNormal;
+    /** Angular optimizer convergence only. Gradient/supplied-normal results
+     * leave this false; their target offset still passes its strict gate. */
     bool fit_converged = false;
     bool pure_gas = false, pure_carrier = false;
 };
-/** Stateless compiled kernel. The LS gradient supplies only an initial normal;
- * the accepted normal minimizes actual clipped-volume residuals with the target
- * offset solved anew at every angular evaluation. Curved stencils may have a
- * nonzero reported model residual; angular optimizer convergence and the explicit
+/** Stateless compiled kernel. The supported LS gradient supplies the normal for
+ * subthreshold phases; otherwise it initializes the angular volume fit,
+ * with the target offset solved anew at every angular evaluation. Curved
+ * stencils may have a nonzero reported model residual; angular optimizer convergence and the explicit
  * model-defect bound are distinct from the strict planar-volume oracle.
  * Insufficient or ill-conditioned
  * three-dimensional stencils reject rather than silently selecting an axis. */
@@ -105,9 +123,9 @@ public:
     [[nodiscard]] static PolyhedralInterface reconstruct(const PolyhedralPhaseSample<Mode>&,
         std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
 };
-/** Explicit optional exact backend. This retains its existing exact arithmetic
- * and model-fit contracts; the finite spatial-resolution preflight is not an
- * exact-backend admission gate. */
+/** Explicit optional exact backend. The same small-phase orientation policy
+ * retains its strict exact offset arithmetic. The finite spatial-resolution
+ * preflight is not an exact-backend admission gate. */
 template<> class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruction<ArithmeticMode::Exact>
 {
 public:

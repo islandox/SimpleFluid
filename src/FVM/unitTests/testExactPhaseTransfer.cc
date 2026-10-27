@@ -244,6 +244,130 @@ TEST(ExactPhaseTransfer, RetainedExactInventoriesMigrateSplitAndCoarsenWithinPub
     EXPECT_THROW((void) initial.adopt_transfer(coarse), std::invalid_argument);
     EXPECT_THROW((void) ExactPhaseTransfer::prepare(source, coarsening, coarse_h), std::invalid_argument);
 }
+
+TEST(ExactPhaseTransfer, SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners)
+{
+    AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {2, 2, 2};
+    CartesianAMR root(grid);
+    const auto hierarchy = bootstrap(root, 8);
+    const auto comm = hierarchy->communicator();
+    std::vector<AdaptiveCellKey> keys;
+    std::vector<double> gas, carrier;
+    for (const auto& [key, leaf] : hierarchy->owned())
+    {
+        keys.push_back(key);
+        gas.push_back(0);
+        carrier.push_back(hierarchy->metrics(leaf).volume);
+    }
+    const bool changed_rank = comm->getRank() == comm->getSize() - 1;
+    if (comm->getSize() > 2 && changed_rank)
+        EXPECT_TRUE(keys.empty());
+    auto options = exact_options();
+    for (const double invalid : {-1., 1.01, std::numeric_limits<double>::infinity(),
+             std::numeric_limits<double>::quiet_NaN()})
+    {
+        options.reconstruction.minimum_optimized_phase_length_ratio = changed_rank ? invalid : .05;
+        EXPECT_THROW((void) GeneralVoF(hierarchy, keys, gas, carrier, options), std::invalid_argument);
+    }
+    for (const double valid : {0., 1.})
+    {
+        options.reconstruction.minimum_optimized_phase_length_ratio = valid;
+        EXPECT_NO_THROW((void) GeneralVoF(hierarchy, keys, gas, carrier, options));
+    }
+    if (comm->getSize() > 1)
+    {
+        options.reconstruction.minimum_optimized_phase_length_ratio = changed_rank ? .1 : .05;
+        EXPECT_THROW((void) GeneralVoF(hierarchy, keys, gas, carrier, options), std::invalid_argument);
+    }
+}
+
+TEST(ExactPhaseTransfer, OwnershipMigrationPreservesOrientationAndFitDiagnostics)
+{
+    AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {2, 2, 2};
+    CartesianAMR root(grid);
+    const auto hierarchy = bootstrap(root, 8);
+    const auto comm = hierarchy->communicator();
+    const auto diagnostics = [](const PLIC::PolyhedralInterface& plane)
+    {
+        return std::array{plane.gas.normal[0], plane.gas.normal[1], plane.gas.normal[2],
+            plane.gas.anchor[0], plane.gas.anchor[1], plane.gas.anchor[2], plane.gas.offset,
+            plane.target_volume_residual, plane.stencil_volume_residual, plane.stencil_condition,
+            plane.orientation_step, double(plane.fit_iterations), double(plane.fit_converged),
+            double(plane.orientation_method), double(plane.pure_gas), double(plane.pure_carrier),
+            double(plane.target_volume_difference.value), double(plane.target_volume_difference.absolute_error),
+            double(plane.target_volume_difference.exact_nonzero)};
+    };
+    for (const double minority : {1e-6, .5})
+    {
+        SCOPED_TRACE(minority);
+        std::vector<AdaptiveCellKey> keys;
+        std::vector<double> gas, carrier;
+        for (const auto& [key, leaf] : hierarchy->owned())
+        {
+            keys.push_back(key);
+            const auto x = std::get<CartesianCellAncestry>(key.ancestry).index[0];
+            gas.push_back(x == 0 ? 1 : minority);
+            carrier.push_back(x == 0 ? 0 : 1 - minority);
+        }
+        GeneralVoF initial(hierarchy, keys, gas, carrier, exact_options());
+        const auto source = initial.export_transfer_source(true);
+        constexpr std::size_t width = 19;
+        std::array<double, 8 * width> local{}, expected{};
+        int local_mixed = 0, global_mixed = 0;
+        const auto ordinal = [](const AdaptiveCellKey& key)
+        {
+            const auto index = std::get<CartesianCellAncestry>(key.ancestry).index;
+            return std::size_t(index[0] + 2 * index[1] + 4 * index[2]);
+        };
+        for (const auto& capsule : source.owned())
+        {
+            EXPECT_TRUE(capsule.geometry_ready);
+            const auto values = diagnostics(capsule.geometry);
+            std::copy(values.begin(), values.end(), local.begin() + width * ordinal(capsule.key));
+            if (!capsule.geometry.pure_gas && !capsule.geometry.pure_carrier)
+            {
+                ++local_mixed;
+                EXPECT_EQ(capsule.geometry.orientation_method, minority < .01 ?
+                    PLIC::PolyhedralOrientationMethod::Gradient : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+                if (minority < .01)
+                {
+                    EXPECT_EQ(capsule.geometry.fit_iterations, 0u);
+                    EXPECT_FALSE(capsule.geometry.fit_converged);
+                }
+            }
+        }
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_mixed, &global_mixed);
+        EXPECT_EQ(global_mixed, 4);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), expected.data());
+        const std::vector<int> destinations(keys.size(), (comm->getRank() + 1) % std::min(2, comm->getSize()));
+        const auto plan = source.hierarchy()->plan_migration(destinations);
+        const auto target = bind(*source.hierarchy(), plan);
+        const auto moved = ExactPhaseTransfer::prepare(source, plan, target);
+        ASSERT_TRUE(moved.ownership_only());
+        const auto adopted = initial.adopt_transfer(moved);
+        const auto reconstructed = adopted->reconstruct();
+        ASSERT_EQ(reconstructed.size(), moved.owned().size());
+        for (std::size_t i = 0; i < moved.owned().size(); ++i)
+        {
+            const auto& capsule = moved.owned()[i];
+            const auto values = diagnostics(capsule.geometry);
+            const auto retained = diagnostics(reconstructed[i]);
+            for (std::size_t field = 0; field < width; ++field)
+            {
+                EXPECT_EQ(values[field], expected[width * ordinal(capsule.key) + field]);
+                EXPECT_EQ(retained[field], values[field]);
+            }
+            const bool pure = std::get<CartesianCellAncestry>(capsule.key.ancestry).index[0] == 0;
+            EXPECT_EQ(capsule.phases.gas, pure ? 1 : minority);
+            EXPECT_EQ(capsule.phases.carrier, pure ? 0 : 1 - minority);
+        }
+        empty_owners(*target);
+    }
+}
 TEST(ExactPhaseTransfer, InheritedExactDefectAndPublicationRoundingAreNotResetByAdoption)
 {
     AMRGrid grid;

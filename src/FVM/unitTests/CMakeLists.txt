@@ -308,6 +308,14 @@ endforeach()
 foreach(PROCS IN ITEMS 2 4)
   simplefluid_add_mpi_test(NAME GeneralVoFFinite_${PROCS}procs TARGET testGeneralVoFFinite PROCS ${PROCS}
     LABELS "vof;geometry;conservation;collective;finite" TIMEOUT 300)
+  simplefluid_add_mpi_test(NAME GeneralVoFSmallPhasePolicy_${PROCS}procs
+    TARGET testGeneralVoFFinite PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFinite.SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners:GeneralVoFFinite.ConstructionAlgorithmBindsSmallPhasePolicy:GeneralVoFFinite.OrientationWirePreservesEveryMethodAndRejectsUnknownWords"
+    LABELS "vof;geometry;reconstruction;collective;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME ExactPhaseTransferOrientation_${PROCS}procs
+    TARGET testExactPhaseTransfer PROCS ${PROCS}
+    ARGS "--gtest_filter=ExactPhaseTransfer.OwnershipMigrationPreservesOrientationAndFitDiagnostics:ExactPhaseTransfer.SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners"
+    LABELS "vof;exact;reconstruction;collective;empty_rank" TIMEOUT 180)
 endforeach()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

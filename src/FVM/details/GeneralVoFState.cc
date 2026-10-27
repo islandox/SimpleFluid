@@ -3,6 +3,7 @@
  */
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
+#include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
@@ -247,6 +248,7 @@ void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
     real(w, p.stencil_condition);
     real(w, p.orientation_step);
     w.word(p.fit_iterations);
+    plane_wire_detail::orientation(w, p.orientation_method);
     w.word(p.fit_converged);
     finite_real(w, p.target_volume_numerical_error_estimate);
     w.word(p.finite_geometry);
@@ -267,6 +269,7 @@ PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> m
     p.stencil_condition = real(r);
     p.orientation_step = real(r);
     p.fit_iterations = r.word();
+    p.orientation_method = plane_wire_detail::orientation(r);
     p.fit_converged = r.word();
     p.target_volume_numerical_error_estimate = finite_real(r);
     p.finite_geometry = r.word();
@@ -656,9 +659,12 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
                 (options.transport_backend != GeneralVoFTransportBackend::SweptPartition &&
                     options.arithmetic_mode != ArithmeticMode::Ordinary))
                 throw std::invalid_argument("Face transport currently supports Ordinary arithmetic only.");
-            budget.packet(20 * 8);
+            const auto ratio = options.reconstruction.minimum_optimized_phase_length_ratio;
+            if (!std::isfinite(ratio) || ratio < 0 || ratio > 1)
+                throw std::invalid_argument("General VoF optimized phase length ratio must be finite in [0,1].");
+            budget.packet(21 * 8);
             wire::Writer w;
-            w.word(2); // Full arithmetic-mode protocol, distinct from legacy inventory policy.
+            w.word(3); // Includes the small-phase orientation policy.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
                      std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
                      std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
@@ -675,6 +681,7 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
             real(w, options.reconstruction.orientation_tolerance);
             real(w, options.reconstruction.maximum_model_residual);
             real(w, options.reconstruction.minimum_phase_support_fraction);
+            real(w, options.reconstruction.minimum_optimized_phase_length_ratio);
             packets.push_back({0, std::move(w.data)});
         });
     const auto received = exchange_owner_packets(packets, comm, options.byte_budget);
@@ -967,11 +974,11 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
                 const auto& cell = data.cells.at(key);
                 if (cell.owner != comm->getRank() || cell.revision != revision)
                     throw std::invalid_argument("General VoF stale plane request.");
-                budget.packet(bytes.size() + 128);
                 wire::Writer w;
                 w.bytes(bytes);
                 w.word(revision);
                 plane(w, result.at(key));
+                budget.packet(w.data.size());
                 replies.push_back({packet.peer, std::move(w.data)});
             }
         });

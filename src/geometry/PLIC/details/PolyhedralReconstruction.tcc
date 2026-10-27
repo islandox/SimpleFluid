@@ -148,7 +148,9 @@ void validate_sample(const PolyhedralPhaseSample<Mode>& sample, const Polyhedral
         !(options.maximum_model_residual > 0 && options.maximum_model_residual <= .5) ||
         !(options.volume_tolerance > 0) || !(options.fit_tolerance > 0) || !(options.maximum_condition >= 1) ||
         !std::isfinite(options.minimum_phase_support_fraction) ||
-        !(options.minimum_phase_support_fraction > 0 && options.minimum_phase_support_fraction <= .5))
+        !(options.minimum_phase_support_fraction > 0 && options.minimum_phase_support_fraction <= .5) ||
+        !std::isfinite(options.minimum_optimized_phase_length_ratio) ||
+        !(options.minimum_optimized_phase_length_ratio >= 0 && options.minimum_optimized_phase_length_ratio <= 1))
         throw std::invalid_argument("Invalid finite polyhedral PLIC sample/options.");
     const auto volume = sample.geometry->volume();
     if (!(lower<Mode>(volume) > 0))
@@ -513,10 +515,6 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     Vector rhs{};
     std::vector<double> volumes;
     volumes.reserve(stencil.size());
-    std::vector<OrdinaryPlaneMeasure> ordinary_stencil;
-    if constexpr (Mode == ArithmeticMode::Ordinary)
-        if (options.measure_only)
-            ordinary_stencil.reserve(stencil.size());
     for (const auto& sample : stencil)
     {
         const auto d = minus(sample.geometry->centroid(), center);
@@ -525,9 +523,6 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
             throw std::invalid_argument("Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
         const double v = sample.geometry->volume().as_double();
         volumes.push_back(v);
-        if constexpr (Mode == ArithmeticMode::Ordinary)
-            if (options.measure_only)
-                ordinary_stencil.emplace_back(*sample.geometry);
         const double delta = sample.gas_volume / v - alpha;
         for (unsigned i = 0; i < 3; ++i)
         {
@@ -547,6 +542,29 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
         resolution.reason = PolyhedralResolutionAssessment::Reason::InsufficientStencil;
         throw PolyhedralResolutionRequired(resolution);
     }
+    std::size_t evaluations = 0;
+    const auto phase_length_ratio =
+        std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
+        std::cbrt(target.geometry->volume().value);
+    if (phase_length_ratio < options.minimum_optimized_phase_length_ratio)
+    {
+        // The stencil establishes the gradient and its support; tiny target
+        // phases do not supply an angular volume-model objective. No neighbor
+        // clipping, angular qualification or model-RMS gate runs on this path.
+        auto result = offset_fit<Mode>(target, normal, options, evaluations);
+        result.orientation_method = PolyhedralOrientationMethod::Gradient;
+        result.stencil_condition = condition;
+        result.resolution = resolution;
+        return result;
+    }
+    std::vector<OrdinaryPlaneMeasure> ordinary_stencil;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (options.measure_only)
+        {
+            ordinary_stencil.reserve(stencil.size());
+            for (const auto& sample : stencil)
+                ordinary_stencil.emplace_back(*sample.geometry);
+        }
     struct Evaluation
     {
         PolyhedralInterface plane;
@@ -554,7 +572,6 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
         double objective = 0;
         long double objective_upper = 0;
     };
-    std::size_t evaluations = 0;
     const auto evaluate = [&](Vector n)
     {
         Evaluation value;
@@ -632,6 +649,7 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     current.plane.stencil_condition = condition;
     current.plane.orientation_step = last_step;
     current.plane.fit_iterations = iterations;
+    current.plane.orientation_method = PolyhedralOrientationMethod::AngularVolumeFit;
     current.plane.fit_converged = converged;
     if (!converged)
         throw GeometryError(

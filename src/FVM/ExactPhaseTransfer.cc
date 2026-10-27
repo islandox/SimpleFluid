@@ -4,6 +4,7 @@
 #include "FVM/ExactPhaseTransfer.hh"
 #include "FVM/details/DistributedAMROverlap.hh"
 #include "FVM/details/ExactPhaseLabelMap.hh"
+#include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "FVM/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <algorithm>
@@ -186,6 +187,7 @@ void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
     wide(w, p.target_volume_difference.absolute_error);
     w.word(p.target_volume_difference.exact_nonzero);
     w.word(p.fit_iterations);
+    plane_wire_detail::orientation(w, p.orientation_method);
     w.word(p.fit_converged);
     w.word(p.pure_gas);
     w.word(p.pure_carrier);
@@ -218,6 +220,7 @@ PLIC::PolyhedralInterface plane(wire::Reader& r)
     if (count > std::numeric_limits<unsigned>::max())
         throw std::invalid_argument("Exact transfer iteration count overflow.");
     p.fit_iterations = unsigned(count);
+    p.orientation_method = plane_wire_detail::orientation(r);
     p.fit_converged = boolean(r);
     p.pure_gas = boolean(r);
     p.pure_carrier = boolean(r);
@@ -227,10 +230,10 @@ AMR::AdaptiveBytes encode_work(const WorkingCapsule& c, std::size_t limit)
 {
     wire::Budget budget{limit};
     const auto key_bytes = AMR::encode_adaptive_key(c.key);
-    budget.add(272 + key_bytes.size());
+    budget.add(280 + key_bytes.size());
     wire::Writer w;
     w.word(0x5346455054523731ULL);
-    w.word(3);
+    w.word(4);
     w.word(std::uint64_t(c.policy));
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
@@ -272,7 +275,7 @@ WorkingCapsule decode_work(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Exact phase capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346455054523731ULL || r.word() != 3)
+    if (r.word() != 0x5346455054523731ULL || r.word() != 4)
         throw std::invalid_argument("Unknown policy-pinned working capsule format.");
     const auto policy = r.word();
     if (policy > 1)
@@ -393,10 +396,10 @@ AMR::AdaptiveBytes encode(const ExactPhaseTransferCapsule& c, std::size_t limit)
 {
     wire::Budget capacity{limit};
     const auto key_bytes = AMR::encode_adaptive_key(c.key);
-    capacity.add(528 + key_bytes.size());
+    capacity.add(536 + key_bytes.size());
     wire::Writer w;
     w.word(0x5346465054523731ULL);
-    w.word(3);
+    w.word(4);
     w.word(std::uint64_t(c.policy));
     w.word(sizeof(long double));
     w.word(std::numeric_limits<long double>::digits);
@@ -445,7 +448,7 @@ ExactPhaseTransferCapsule decode(std::span<const char> bytes, std::size_t limit)
     if (bytes.size() > limit)
         throw std::invalid_argument("Finite source capsule exceeds byte budget.");
     wire::Reader r{bytes};
-    if (r.word() != 0x5346465054523731ULL || r.word() != 3)
+    if (r.word() != 0x5346465054523731ULL || r.word() != 4)
         throw std::invalid_argument("Unknown policy-pinned source capsule format.");
     const auto policy = r.word();
     if (policy > 1)

@@ -50,12 +50,11 @@ inline AMR::AdaptiveBytes algorithm(const GeneralVoFOptions& options)
              std::uint64_t(SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_constraints),
              std::uint64_t(SimpleFluid::geometry::swept_volume::TrajectoryLimits{}.maximum_operations)})
         writer.word(value);
-    real(writer, options.reconstruction.volume_tolerance);
-    real(writer, options.reconstruction.fit_tolerance);
-    real(writer, options.reconstruction.maximum_condition);
-    real(writer, options.reconstruction.orientation_tolerance);
-    real(writer, options.reconstruction.maximum_model_residual);
-    real(writer, options.reconstruction.minimum_phase_support_fraction);
+    for (const auto value : {options.reconstruction.volume_tolerance, options.reconstruction.fit_tolerance,
+             options.reconstruction.maximum_condition, options.reconstruction.orientation_tolerance,
+             options.reconstruction.maximum_model_residual, options.reconstruction.minimum_phase_support_fraction,
+             options.reconstruction.minimum_optimized_phase_length_ratio})
+        writer.word(std::bit_cast<std::uint64_t>(value));
     return std::move(writer.data);
 }
 inline void point(wire::Writer& writer, const PLIC::DynamicPoint& value)

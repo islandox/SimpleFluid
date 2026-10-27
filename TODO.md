@@ -1703,9 +1703,14 @@ implicit-upwind specialization while retaining the general swept path.
       frontier supporting-halfspace screen remains an admission limit; do not relax
       its orientation test to admit uncertain reach.
 - [ ] Complete the opt-in eight-step analytic closed-motion accuracy probe.
-      Reconstruction currently exhausts its angular optimizer budget on step 3;
+      Reconstruction currently requests resolved phase/stencil support on step 4;
       retain the complete horizon, independent phase-distribution oracle and original
       gates rather than truncating the case or increasing numerical budgets.
+- [x] Exclude phases below the provisional 5% volume-equivalent cell-length ratio
+      from angular normal optimization. Use the supported gradient normal and
+      strict target-offset fit without altering phase inventories or pure geometry
+      declarations. Authenticate the configurable threshold and preserve explicit
+      orientation-method diagnostics through halo exchange and transfer.
 - [ ] Exercise complete homogeneous/hydrostatic, interface-passage,
       translation/rotation/deformation and curved-capillary horizons in serial
       and MPI, including empty owners and mixed/face transitions. Keep existing

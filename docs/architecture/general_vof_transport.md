@@ -447,8 +447,12 @@ counts and can be summed across ranks. This prescribed transport reference is
 not an analytic coupled pressure/velocity solution, and no new accuracy threshold
 is inferred from its reports.
 
-The complete probe is disabled in routine discovery while its reconstruction
-optimizer rejection remains unresolved. Run it explicitly after building the
+The complete probe is disabled in routine discovery while its reconstructed phase
+neighborhood lacks sufficient support. The provisional small-phase policy in
+[PLIC reconstruction](../modeling/plic.md#initial-normal-and-angular-objective)
+uses a supported gradient normal without angular optimization below its configured
+length ratio; it retains the phase-support and target-volume gates. Run the probe
+explicitly after building the
 target with `--gtest_also_run_disabled_tests` and
 `--gtest_filter=GeneralVoFMotionAccuracy.DISABLED_RepeatedClosedMotionReportsIndependentPhaseErrorAndTheta`.
 Successful preliminary steps do not qualify its complete horizon. The unchanged
