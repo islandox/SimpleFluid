@@ -22,16 +22,6 @@ using Vector = SimpleFluid::PLIC::GeometryPoint;
 template<ArithmeticMode Mode> using Value = PLIC::GeometryValue<Mode>;
 constexpr long double infinity = std::numeric_limits<long double>::infinity();
 
-double dot(Vector a, Vector b)
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-Vector minus(Vector a, Vector b)
-{
-    for (unsigned i = 0; i < 3; ++i)
-        a[i] -= b[i];
-    return a;
-}
 Vector unit(Vector a)
 {
     const double norm = std::hypot(a[0], a[1], a[2]);
@@ -183,6 +173,15 @@ std::string resolution_message(const PolyhedralResolutionAssessment& assessment)
         case PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel:
             message << ": the local plane model exceeds the unchanged defect bound";
             break;
+        case PolyhedralResolutionAssessment::Reason::RankDeficientStencil:
+            message << ": centroid directions do not span three dimensions";
+            break;
+        case PolyhedralResolutionAssessment::Reason::IllConditionedStencil:
+            message << ": physical normal support is ill-conditioned";
+            break;
+        case PolyhedralResolutionAssessment::Reason::NoDirectionalSignal:
+            message << ": phase differences do not establish a meaningful direction";
+            break;
         default:
             message << ": invalid resolution assessment";
             break;
@@ -226,6 +225,195 @@ Vector solve(std::array<Vector, 3> matrix, Vector rhs, double limit, double& con
         result[i] = x / matrix[i][i];
     }
     return result;
+}
+struct DirectionAnalysis
+{
+    PolyhedralResolutionAssessment resolution;
+    Vector normal{};
+    std::vector<double> volumes;
+};
+long double roundoff_factor(std::size_t operations)
+{
+    const auto product = operations * static_cast<long double>(std::numeric_limits<double>::epsilon());
+    return product / (1 - product);
+}
+template<ArithmeticMode Mode>
+DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
+    std::span<const PolyhedralPhaseSample<Mode>> stencil, const PolyhedralReconstructionOptions& options)
+{
+    validate_sample<Mode>(target, options);
+    if (stencil.size() > options.maximum_stencil_cells)
+        throw std::invalid_argument("Finite PLIC physical stencil budget exhausted.");
+    DirectionAnalysis analysis;
+    auto& result = analysis.resolution;
+    result.stencil_cells = stencil.size();
+    for (const auto& span : target.geometry->axis_spans())
+        result.local_cell_span = std::max(result.local_cell_span, outward(upper<Mode>(span), true));
+    result.requested_cell_span = result.local_cell_span * .5;
+    const auto examine = [&](const PolyhedralPhaseSample<Mode>& sample)
+    {
+        validate_sample<Mode>(sample, options);
+        const long double total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
+        if (!(total > 0))
+            throw std::invalid_argument("Finite PLIC phase support has zero inventory.");
+        result.gas_support_fraction =
+            std::max(result.gas_support_fraction, double(static_cast<long double>(sample.gas_volume) / total));
+        result.carrier_support_fraction =
+            std::max(result.carrier_support_fraction, double(static_cast<long double>(sample.carrier_volume) / total));
+    };
+    examine(target);
+    if (target.gas_volume == 0 || target.carrier_volume == 0)
+        return analysis;
+    for (const auto& sample : stencil)
+        examine(sample);
+    if (stencil.size() < 4)
+    {
+        result.reason = PolyhedralResolutionAssessment::Reason::InsufficientStencil;
+        return analysis;
+    }
+    // Select one independent phase channel throughout the solve. In particular,
+    // a carrier minority is never recovered by subtracting gas fractions near 1.
+    const bool gas = target.gas_volume <= target.carrier_volume;
+    const auto fraction = [&](const PolyhedralPhaseSample<Mode>& sample)
+    {
+        const long double total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
+        return static_cast<long double>(gas ? sample.gas_volume : sample.carrier_volume) / total;
+    };
+    const auto alpha = fraction(target);
+    const auto center = target.geometry->centroid();
+    using LongVector = std::array<long double, 3>;
+    std::array<LongVector, 3> assembled{}, matrix_magnitude{}, matrix_error{};
+    LongVector assembled_rhs{}, rhs_magnitude{}, rhs_error{};
+    analysis.volumes.reserve(stencil.size());
+    const auto assembly_roundoff = roundoff_factor(8 + stencil.size());
+    const auto fraction_roundoff = roundoff_factor(3);
+    for (const auto& sample : stencil)
+    {
+        const auto sample_center = sample.geometry->centroid();
+        LongVector d{};
+        long double d2 = 0;
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            d[i] = (static_cast<long double>(sample_center[i]) - center[i]) / result.local_cell_span;
+            d2 += d[i] * d[i];
+        }
+        if (d2 == 0 || !std::isfinite(d2))
+            throw std::invalid_argument("Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
+        analysis.volumes.push_back(sample.geometry->volume().as_double());
+        const auto sample_fraction = fraction(sample);
+        const auto delta = sample_fraction - alpha;
+        // Relative input/ratio roundoff scales with the chosen phase itself,
+        // so a resolvable dilute signal has no arbitrary absolute epsilon floor.
+        const auto delta_error = fraction_roundoff * (std::abs(sample_fraction) + std::abs(alpha)) +
+                                 std::numeric_limits<long double>::epsilon() * std::abs(delta);
+        for (unsigned i = 0; i < 3; ++i)
+        {
+            const auto coefficient = d[i] / d2;
+            const auto term = (gas ? -1 : 1) * coefficient * delta;
+            assembled_rhs[i] += term;
+            rhs_magnitude[i] += std::abs(term);
+            rhs_error[i] += std::abs(coefficient) * delta_error;
+            for (unsigned j = 0; j < 3; ++j)
+            {
+                const auto entry = d[i] * d[j] / d2;
+                assembled[i][j] += entry;
+                matrix_magnitude[i][j] += std::abs(entry);
+            }
+        }
+    }
+    std::array<Vector, 3> matrix{}, inverse{};
+    Vector rhs{};
+    long double matrix_norm = 0, matrix_error_norm = 0;
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        rhs[i] = static_cast<double>(assembled_rhs[i]);
+        rhs_error[i] += assembly_roundoff * rhs_magnitude[i] + std::abs(assembled_rhs[i] - rhs[i]);
+        long double row_norm = 0, row_error = 0;
+        for (unsigned j = 0; j < 3; ++j)
+        {
+            matrix[i][j] = static_cast<double>(assembled[i][j]);
+            matrix_error[i][j] = assembly_roundoff * matrix_magnitude[i][j] + std::abs(assembled[i][j] - matrix[i][j]);
+            row_norm += std::abs(matrix[i][j]);
+            row_error += matrix_error[i][j];
+        }
+        matrix_norm = std::max(matrix_norm, row_norm);
+        matrix_error_norm = std::max(matrix_error_norm, row_error);
+    }
+    double pivot_condition = 0;
+    Vector gradient{};
+    try
+    {
+        gradient = solve(matrix, rhs, std::numeric_limits<double>::infinity(), pivot_condition);
+        for (unsigned j = 0; j < 3; ++j)
+        {
+            Vector basis{};
+            basis[j] = 1;
+            const auto column = solve(matrix, basis, std::numeric_limits<double>::infinity(), pivot_condition);
+            for (unsigned i = 0; i < 3; ++i)
+                inverse[i][j] = column[i];
+        }
+    }
+    catch (const std::invalid_argument&)
+    {
+        result.reason = PolyhedralResolutionAssessment::Reason::RankDeficientStencil;
+        return analysis;
+    }
+    long double inverse_norm = 0;
+    for (const auto& row : inverse)
+    {
+        long double row_norm = 0;
+        for (const auto entry : row)
+            row_norm += std::abs(entry);
+        inverse_norm = std::max(inverse_norm, row_norm);
+    }
+    const auto condition = matrix_norm * inverse_norm;
+    if (!std::isfinite(condition) || condition > options.maximum_condition)
+    {
+        result.stencil_condition =
+            static_cast<double>(std::min(condition, static_cast<long double>(std::numeric_limits<double>::max())));
+        result.reason = PolyhedralResolutionAssessment::Reason::IllConditionedStencil;
+        return analysis;
+    }
+    result.stencil_condition = static_cast<double>(condition);
+    LongVector perturbation{}, gradient_error{};
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        long double residual = rhs[i];
+        perturbation[i] = rhs_error[i];
+        for (unsigned j = 0; j < 3; ++j)
+        {
+            residual -= static_cast<long double>(matrix[i][j]) * gradient[j];
+            perturbation[i] += matrix_error[i][j] * std::abs(gradient[j]);
+        }
+        perturbation[i] += std::abs(residual);
+    }
+    const auto denominator = 1 - inverse_norm * matrix_error_norm;
+    if (!(denominator > 0))
+    {
+        result.reason = PolyhedralResolutionAssessment::Reason::IllConditionedStencil;
+        return analysis;
+    }
+    for (unsigned i = 0; i < 3; ++i)
+        for (unsigned j = 0; j < 3; ++j)
+            gradient_error[i] += std::abs(inverse[i][j]) * perturbation[j];
+    const auto strength = std::hypot(gradient[0], gradient[1], gradient[2]);
+    // The perturbation denominator uses infinity norms. Convert that uniform
+    // component bound to a Euclidean bound before comparing with the strength.
+    const auto uncertainty =
+        std::sqrt(3.L) * *std::max_element(gradient_error.begin(), gradient_error.end()) / denominator;
+    if (!std::isfinite(strength) || !std::isfinite(uncertainty) || uncertainty > std::numeric_limits<double>::max())
+        throw std::invalid_argument("Finite PLIC directional arithmetic exceeds representable range.");
+    result.directional_strength = strength;
+    result.directional_uncertainty = static_cast<double>(uncertainty);
+    if (!(strength > uncertainty))
+    {
+        result.reason = PolyhedralResolutionAssessment::Reason::NoDirectionalSignal;
+        return analysis;
+    }
+    analysis.normal = unit(gradient);
+    result.angular_fit_eligible = result.gas_support_fraction >= options.minimum_phase_support_fraction &&
+                                  result.carrier_support_fraction >= options.minimum_phase_support_fraction;
+    return analysis;
 }
 template<ArithmeticMode Mode>
 PolyhedralInterface offset_fit(const PolyhedralPhaseSample<Mode>& sample, Vector normal,
@@ -422,70 +610,7 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_resolution
     const PolyhedralPhaseSample<Mode>& target, std::span<const PolyhedralPhaseSample<Mode>> stencil,
     PolyhedralReconstructionOptions options)
 {
-    validate_sample<Mode>(target, options);
-    if (stencil.size() > options.maximum_stencil_cells)
-        throw std::invalid_argument("Finite PLIC physical stencil budget exhausted.");
-    PolyhedralResolutionAssessment result;
-    result.stencil_cells = stencil.size();
-    for (const auto& span : target.geometry->axis_spans())
-        result.local_cell_span = std::max(result.local_cell_span, outward(upper<Mode>(span), true));
-    result.requested_cell_span = result.local_cell_span * .5;
-    const auto examine = [&](const PolyhedralPhaseSample<Mode>& sample)
-    {
-        validate_sample<Mode>(sample, options);
-        const long double total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
-        if (!(total > 0))
-            throw std::invalid_argument("Finite PLIC phase support has zero inventory.");
-        // Independent inventories supply the support fractions. No threshold
-        // changes their stored amounts or converts a mixed target to a pure one.
-        result.gas_support_fraction =
-            std::max(result.gas_support_fraction, double(static_cast<long double>(sample.gas_volume) / total));
-        result.carrier_support_fraction =
-            std::max(result.carrier_support_fraction, double(static_cast<long double>(sample.carrier_volume) / total));
-    };
-    examine(target);
-    if (target.gas_volume == 0 || target.carrier_volume == 0)
-        return result;
-    for (const auto& sample : stencil)
-        examine(sample);
-    if (stencil.size() < 4)
-        result.reason = PolyhedralResolutionAssessment::Reason::InsufficientStencil;
-    else if (result.gas_support_fraction < options.minimum_phase_support_fraction ||
-             result.carrier_support_fraction < options.minimum_phase_support_fraction)
-        result.reason = PolyhedralResolutionAssessment::Reason::InsufficientPhaseSupport;
-    if (result.admitted())
-    {
-        const auto center = target.geometry->centroid();
-        const auto volume = target.geometry->volume().as_double();
-        const double alpha = target.gas_volume / volume;
-        std::array<Vector, 3> matrix{};
-        Vector rhs{};
-        for (const auto& sample : stencil)
-        {
-            const auto d = minus(sample.geometry->centroid(), center);
-            const auto d2 = dot(d, d);
-            if (d2 == 0 || !std::isfinite(d2))
-                throw std::invalid_argument(
-                    "Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
-            const double delta = sample.gas_volume / sample.geometry->volume().as_double() - alpha;
-            for (unsigned i = 0; i < 3; ++i)
-            {
-                rhs[i] -= d[i] * delta / d2;
-                for (unsigned j = 0; j < 3; ++j)
-                    matrix[i][j] += d[i] * d[j] / d2;
-            }
-        }
-        double condition = 0;
-        try
-        {
-            (void) unit(solve(matrix, rhs, options.maximum_condition, condition));
-        }
-        catch (const std::invalid_argument&)
-        {
-            result.reason = PolyhedralResolutionAssessment::Reason::InsufficientStencil;
-        }
-    }
-    return result;
+    return analyze_direction<Mode>(target, stencil, options).resolution;
 }
 template<ArithmeticMode Mode>
 PolyhedralInterface PolyhedralReconstruction<Mode>::solve_offset(
@@ -499,7 +624,8 @@ template<ArithmeticMode Mode>
 PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const PolyhedralPhaseSample<Mode>& target,
     std::span<const PolyhedralPhaseSample<Mode>> stencil, PolyhedralReconstructionOptions options)
 {
-    auto resolution = assess_resolution(target, stencil, options);
+    auto direction = analyze_direction<Mode>(target, stencil, options);
+    auto resolution = direction.resolution;
     if (!resolution.admitted())
         throw PolyhedralResolutionRequired(resolution);
     if (target.gas_volume == 0 || target.carrier_volume == 0)
@@ -508,40 +634,9 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
         result.resolution = resolution;
         return result;
     }
-    const auto center = target.geometry->centroid();
-    const double volume = target.geometry->volume().as_double();
-    const double alpha = target.gas_volume / volume;
-    std::array<Vector, 3> matrix{};
-    Vector rhs{};
-    std::vector<double> volumes;
-    volumes.reserve(stencil.size());
-    for (const auto& sample : stencil)
-    {
-        const auto d = minus(sample.geometry->centroid(), center);
-        const double d2 = dot(d, d);
-        if (d2 == 0 || !std::isfinite(d2))
-            throw std::invalid_argument("Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
-        const double v = sample.geometry->volume().as_double();
-        volumes.push_back(v);
-        const double delta = sample.gas_volume / v - alpha;
-        for (unsigned i = 0; i < 3; ++i)
-        {
-            rhs[i] -= d[i] * delta / d2;
-            for (unsigned j = 0; j < 3; ++j)
-                matrix[i][j] += d[i] * d[j] / d2;
-        }
-    }
-    double condition = 0;
-    Vector normal;
-    try
-    {
-        normal = unit(solve(matrix, rhs, options.maximum_condition, condition));
-    }
-    catch (const std::invalid_argument&)
-    {
-        resolution.reason = PolyhedralResolutionAssessment::Reason::InsufficientStencil;
-        throw PolyhedralResolutionRequired(resolution);
-    }
+    auto normal = direction.normal;
+    auto& volumes = direction.volumes;
+    double condition = resolution.stencil_condition;
     std::size_t evaluations = 0;
     const auto phase_length_ratio =
         std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
@@ -625,6 +720,21 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
         return value;
     };
     auto current = evaluate(normal);
+    if (!resolution.angular_fit_eligible)
+    {
+        current.plane.stencil_volume_residual =
+            static_cast<double>(std::sqrt(current.objective_upper / stencil.size()));
+        current.plane.stencil_volume_residual_measured = true;
+        current.plane.stencil_condition = condition;
+        current.plane.orientation_method = PolyhedralOrientationMethod::Gradient;
+        if (current.plane.stencil_volume_residual > options.maximum_model_residual)
+        {
+            resolution.reason = PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel;
+            throw PolyhedralResolutionRequired(resolution);
+        }
+        current.plane.resolution = resolution;
+        return current.plane;
+    }
     bool converged = false;
     unsigned iterations = 0;
     double last_step = std::numeric_limits<double>::infinity();
@@ -646,6 +756,7 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
             throw std::invalid_argument("PLIC angular volume optimizer did not reach stationarity.");
     }
     current.plane.stencil_volume_residual = static_cast<double>(std::sqrt(current.objective_upper / stencil.size()));
+    current.plane.stencil_volume_residual_measured = true;
     current.plane.stencil_condition = condition;
     current.plane.orientation_step = last_step;
     current.plane.fit_iterations = iterations;

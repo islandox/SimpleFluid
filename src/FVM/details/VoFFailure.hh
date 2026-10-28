@@ -5,6 +5,7 @@
 #include "FVM/GeneralVoFSurface.hh"
 #include "SimpleFluidExport.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "utils/ArithmeticMode.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <algorithm>
@@ -199,6 +200,13 @@ inline void classify(Record& record, const std::exception_ptr& error) noexcept
     {
         record.category = Category::Resolution;
         record.resolution_reason = int(failure.reason());
+        record.mark(Field::Resolution);
+        copy(record.message, failure.what());
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& failure)
+    {
+        record.category = Category::Resolution;
+        record.resolution_reason = int(failure.assessment().reason);
         record.mark(Field::Resolution);
         copy(record.message, failure.what());
     }

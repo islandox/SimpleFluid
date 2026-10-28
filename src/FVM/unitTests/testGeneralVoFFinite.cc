@@ -233,6 +233,31 @@ TEST(GeneralVoFFinite, OrientationWirePreservesEveryMethodAndRejectsUnknownWords
     }
 }
 
+TEST(GeneralVoFFinite, StencilResidualMeasurementWirePreservesBothValuesAndRejectsUnknownWords)
+{
+    namespace codec = SimpleFluid::VoF::plane_wire_detail;
+    namespace wire = SimpleFluid::VoF::general_vof_detail::wire;
+    EXPECT_FALSE(PLIC::PolyhedralInterface{}.stencil_volume_residual_measured);
+    for (const bool measured : {false, true})
+    {
+        wire::Writer writer;
+        codec::boolean(writer, measured);
+        EXPECT_EQ(writer.data.size(), sizeof(std::uint64_t));
+        wire::Reader reader{writer.data};
+        PLIC::PolyhedralInterface decoded;
+        decoded.stencil_volume_residual_measured = codec::boolean(reader);
+        EXPECT_EQ(decoded.stencil_volume_residual_measured, measured);
+        EXPECT_NO_THROW(reader.done());
+    }
+    for (const auto invalid : {std::uint64_t(2), std::numeric_limits<std::uint64_t>::max()})
+    {
+        wire::Writer writer;
+        writer.word(invalid);
+        wire::Reader reader{writer.data};
+        EXPECT_THROW((void) codec::boolean(reader), std::invalid_argument);
+    }
+}
+
 TEST(GeneralVoFFinite, SelectedGeometryModeStaysStaticThroughConstructionAndReconstruction)
 {
     auto input = fixture();

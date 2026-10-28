@@ -1702,8 +1702,9 @@ implicit-upwind specialization while retaining the general swept path.
       serial/MPI horizon under the uncertainty/conservation gates and documented
       storage-lifetime/work policies. Support-aware reach and defining-support
       predicates resolve the captured contacts; face-local storage admits complete
-      transport steps, but unresolved phase/stencil support still blocks the
-      complete horizon. The conservative
+      transport steps, and directional PLIC admission completes the serial
+      horizon. Strict offset representability for microscopic minorities still
+      blocks the full MPI horizon; retain the original volume tolerance. The conservative
       frontier supporting-halfspace screen remains an admission limit for other
       constructions; finite-polygon containment is separate outstanding work.
 - [x] Share authenticated original-support contact between Ordinary wall
@@ -1727,14 +1728,18 @@ implicit-upwind specialization while retaining the general swept path.
       capacity, and release unpublished allocations after destruction on failure.
       Keep cumulative traffic/work diagnostics, a collectively agreed per-face
       operation guard and independent pair/witness limits.
+- [x] Separate PLIC directional admission from majority-phase eligibility for
+      angular improvement. Retain explicit rank/conditioning/signal failures,
+      strict current-volume offsets and model bounds, the existing tiny-phase
+      orientation policy, measured-RMS diagnostics and actual failing cell IDs.
 - [ ] Establish a current native-cell-complex coverage certificate before replacing
       repeated donor-complement subtraction. Bind complete cavity/halo frontiers,
       source containment and complete donor queries to the same geometry/partition
       observations; retain structural coverage for arbitrary public donor sets.
 - [ ] Complete the opt-in eight-step analytic closed-motion accuracy probe.
-      Reconstruction currently requests resolved phase/stencil support on step 4;
-      retain the complete horizon, independent phase-distribution oracle and original
-      gates rather than truncating the case or increasing numerical budgets.
+      Reassess it under the current directional-admission policy, retaining the
+      complete horizon, independent phase-distribution oracle and original gates
+      rather than truncating the case or increasing numerical budgets.
 - [x] Exclude phases below the provisional 5% volume-equivalent cell-length ratio
       from angular normal optimization. Use the supported gradient normal and
       strict target-offset fit without altering phase inventories or pure geometry
