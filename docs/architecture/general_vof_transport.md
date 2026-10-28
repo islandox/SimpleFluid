@@ -144,7 +144,17 @@ admitted donor-cell stream model.
 Only requested donor planes are reconstructed, at their owners with the existing
 reconstruction stencil. Requests/replies bind source control, transaction,
 topology/partition generation, cell revision and owner. Ghost phase records carry
-an owner-authenticated retained-interface flag. Each geometric face cuts its
+an owner-authenticated retained-interface flag. Within one sparse import, an
+owner first reuses its locally requested result, then an invocation-local map of
+peer-only results. Every incoming request completes packet/context and
+owner/revision validation before either lookup. A miss performs the unchanged
+reconstruction; every request still produces a separately serialized, charged
+reply. Peer-only entries never enlarge the returned local request set and are
+destroyed before reply exchange. No fitted plane persists between invocations:
+neighbor phase changes can change a normal even when target geometry is unchanged.
+Receivers retain their independent binding checks and mixed-plane remeasurement.
+
+Each geometric face cuts its
 source witnesses against its indexed candidate set, preserving overlap and
 coverage checks. No recipient overlay is constructed. Immutable donor/frontier
 indexes are shared through the retained topology, with hierarchy observations and
@@ -230,6 +240,17 @@ source bookkeeping, donor validation, support/distance/predicate caches, coverag
 remainders, metric witnesses and temporary aggregate results have a face-local
 scope. The default 64 MiB admission condition covers the retained preparation
 allowance plus the current face's conservative scratch allowance.
+
+Sparse plane import also uses a scoped reservation on that preparation allowance.
+Authority-count storage and the complete requested result map, including adaptive
+key storage, are reserved before import. Live request/receive packet capacities,
+decoded-key scratch and the full mandatory reply envelope remain charged while
+peer-only entries are admitted from the remainder. Exchanges receive only the
+remaining allowance after caller-owned input storage. Optional admission failure
+reconstructs and serializes without retaining the plane; it neither raises limits
+nor suppresses original reconstruction or packet checks. All peer entries are
+destroyed before their reservation is released. The scoped import reservation
+expires after its packet containers, leaving the returned planes charged.
 
 Within that face, aggregate charges remain cumulative, including temporaries
 already destroyed. This conservatively bounds the complete face workspace rather
@@ -489,6 +510,21 @@ cell-closure diagnostics and local transport work counters. These records share
 the ledger's lifetime and allocation admission. Face-chain records may include
 replicated retained tiles: deduplicate canonical face IDs before global diagnostic
 sums. Counters describe local work, not physical accuracy or runtime scaling.
+
+`diagnostics.owner_plane_requests` reports rank-local sparse-import demand,
+local-result and peer-cache hits, admissions/denials, actual owner calls and their
+elapsed duration. Branch counters distinguish mixed-cell fits, retained
+interfaces, pure declarations and zero-phase offset calls. Geometry-volume and
+intersection deltas measure kernel operations executed within these owner calls;
+they are not offset/clip iteration counts. Peer-cache peak bytes describe its map
+nodes and adaptive keys; workspace peak bytes include overlapping preparation and
+import allowances, rather than process RSS. With zero admission denials,
+`owner_reconstruction_calls == local_owned_requests + peer_cache_admissions`
+counts the exact union of requested owned keys. Denied entries can be fitted
+again; the diagnostic does not claim a distinct-key count on that path. Aggregate
+counts and elapsed durations across ranks outside a timing region when comparing
+work or imbalance. Serial request sets already deduplicate local donors, so reuse
+primarily removes MPI owner fan-out work.
 
 Canonical signed physical face contributions and positive donor-to-recipient
 route support have different meanings. Swept contributions can name nonincident

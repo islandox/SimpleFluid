@@ -46,6 +46,21 @@ struct GeneralVoFDirectedStream
     long double gas_low = 0, gas_high = 0, liquid_low = 0, liquid_high = 0, theta = 1;
     bool lower_order = false;
 };
+/** Rank-local work performed during one interface-local sparse plane import.
+ * Calls count actual owner reconstructions, including cheap branches. When no
+ * cache admission is denied, local_owned_requests + peer_cache_admissions is
+ * the distinct owner key count. Geometry deltas count executed kernel work,
+ * not offset iterations or a hardware FLOP count. */
+struct GeneralVoFOwnerPlaneRequestDiagnostics
+{
+    std::size_t local_owned_requests = 0, incoming_peer_requests = 0;
+    std::size_t local_result_hits = 0, peer_cache_hits = 0, peer_cache_admissions = 0, cache_admission_denials = 0;
+    std::size_t owner_reconstruction_calls = 0, mixed_cell_fits = 0, retained_interface_returns = 0;
+    std::size_t pure_declaration_returns = 0, zero_phase_offset_returns = 0;
+    std::uint64_t geometry_volume_evaluations = 0, geometry_intersections = 0;
+    std::size_t peer_cache_peak_bytes = 0, workspace_peak_bytes = 0;
+    double reconstruction_seconds = 0;
+};
 struct GeneralVoFTransportDiagnostics
 {
     std::size_t streams = 0, limited_streams = 0, fallback_streams = 0, plane_measurements = 0;
@@ -56,6 +71,7 @@ struct GeneralVoFTransportDiagnostics
      * preparation; bytes describes charged retained cache storage. */
     std::size_t spatial_index_builds = 0, spatial_index_reuses = 0, spatial_index_bytes = 0;
     std::size_t geometric_faces = 0, algebraic_faces = 0, swept_pieces = 0, plane_requests = 0;
+    GeneralVoFOwnerPlaneRequestDiagnostics owner_plane_requests;
     /** Ordinary interface-local scalar geometry; swept_pieces counts immutable
      * source tetrahedra, not individually measured closed solids. */
     std::size_t aggregate_groups = 0, aggregate_witnesses = 0, cancelled_boundaries = 0, aggregate_retries = 0;

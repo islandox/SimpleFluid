@@ -5,6 +5,7 @@
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
 #include "FVM/details/GeneralVoF/FaceWorkspaceBudget.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
+#include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/swept_volume/OrdinaryAggregate.hh"
@@ -235,15 +236,22 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
             result.diagnostics.plane_requests = requested.size();
         });
     const auto authority_counts = aggregate_authority_counts(data, local_authorities, context);
-    const auto planes = import_requested_planes(data, requested, context);
+    // These retained owners coexist with import buffers and optional peer-only
+    // reconstructions. Reserve their entire returned set before cache admission.
     wire::collective(*comm,
         [&]
         {
             work.charge(authority_counts.size() * (sizeof(decltype(authority_counts)::value_type) + 4 * sizeof(void*)));
+            for (const auto& key : requested)
+                work.charge(owner_plane_cache_entry_bytes(key));
+        });
+    const auto planes =
+        import_requested_planes(data, requested, context, work, result.diagnostics.owner_plane_requests);
+    wire::collective(*comm,
+        [&]
+        {
             std::map<Key, PLIC::ConvexGeometryPtr<mode>> geometries;
             std::map<Key, PhaseLabel<mode>> labels;
-            work.charge(
-                planes.size() * (sizeof(std::map<Key, PLIC::PolyhedralInterface>::value_type) + 4 * sizeof(void*)));
             for (const auto& key : requested)
             {
                 const auto& cell = data.cells.at(key);

@@ -3,9 +3,11 @@
  */
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
+#include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include <chrono>
 namespace SimpleFluid::VoF::general_vof_detail
 {
 PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode)
@@ -884,8 +886,39 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(const Gene
     }
     return result;
 }
-template<ArithmeticMode Mode> PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key)
+namespace
 {
+struct OwnerReconstructionObservation
+{
+    GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics;
+    std::chrono::steady_clock::time_point started{};
+    PLIC::GeometryStatistics before{};
+    explicit OwnerReconstructionObservation(GeneralVoFOwnerPlaneRequestDiagnostics* value) : diagnostics(value)
+    {
+        if (diagnostics)
+        {
+            ++diagnostics->owner_reconstruction_calls;
+            before = PLIC::geometry_statistics();
+            started = std::chrono::steady_clock::now();
+        }
+    }
+    ~OwnerReconstructionObservation() noexcept
+    {
+        if (diagnostics)
+        {
+            diagnostics->reconstruction_seconds +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            const auto after = PLIC::geometry_statistics();
+            diagnostics->geometry_volume_evaluations += after.volume_evaluations - before.volume_evaluations;
+            diagnostics->geometry_intersections += after.intersections - before.intersections;
+        }
+    }
+};
+template<ArithmeticMode Mode>
+PLIC::PolyhedralInterface reconstruct_cell_impl(
+    const GeneralVoF::Data& data, const Key& key, GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics)
+{
+    OwnerReconstructionObservation observation(diagnostics);
     const auto& cell = data.cells.at(key);
     ::SimpleFluid::detail::vof_failure::Scope scope("general_vof_reconstruct_cell");
     scope.record.cell = cell.gid;
@@ -898,12 +931,18 @@ template<ArithmeticMode Mode> PLIC::PolyhedralInterface reconstruct_cell(const G
         if constexpr (Mode == ArithmeticMode::Exact)
         {
             if (!cell.retained_interface->finite_geometry)
+            {
+                if (diagnostics)
+                    ++diagnostics->retained_interface_returns;
                 return *cell.retained_interface;
+            }
         }
         else
         {
             if (!cell.retained_interface->finite_geometry)
                 throw std::invalid_argument("Finite VoF cannot adopt an exact-policy interface capsule.");
+            if (diagnostics)
+                ++diagnostics->retained_interface_returns;
             return *cell.retained_interface;
         }
     }
@@ -926,13 +965,27 @@ template<ArithmeticMode Mode> PLIC::PolyhedralInterface reconstruct_cell(const G
             result.finite_target_volume_difference =
                 fp::Arithmetic<Mode>::make_value(-static_cast<long double>(minority));
         }
+        if (diagnostics)
+            ++diagnostics->pure_declaration_returns;
         return result;
     }
     if (cell.phase.gas_volume == 0 || cell.phase.carrier_volume == 0)
-        return PLIC::PolyhedralReconstruction<Mode>::solve_offset(
+    {
+        auto result = PLIC::PolyhedralReconstruction<Mode>::solve_offset(
             reconstruction_sample<Mode>(cell), {1, 0, 0}, data.options.reconstruction);
+        if (diagnostics)
+            ++diagnostics->zero_phase_offset_returns;
+        return result;
+    }
+    if (diagnostics)
+        ++diagnostics->mixed_cell_fits;
     return PLIC::PolyhedralReconstruction<Mode>::reconstruct(
         reconstruction_sample<Mode>(cell), reconstruction_stencil<Mode>(data, key), data.options.reconstruction);
+}
+} // namespace
+template<ArithmeticMode Mode> PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key)
+{
+    return reconstruct_cell_impl<Mode>(data, key, nullptr);
 }
 template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data)
 {
@@ -1053,12 +1106,14 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
     return result;
 }
 
-std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(
-    const GeneralVoF::Data& data, const std::set<Key>& requested, const PLIC::GeometryPacketContext& context)
+std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVoF::Data& data,
+    const std::set<Key>& requested, const PLIC::GeometryPacketContext& context, geometry::swept_volume::Work& work,
+    GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics)
 {
     constexpr auto Mode = ArithmeticMode::Ordinary;
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
+    PlaneImportStorage storage(work, diagnostics);
     std::map<Key, PLIC::PolyhedralInterface> result;
     wire::collective(*comm,
         [&]
@@ -1070,73 +1125,129 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(
                 throw std::invalid_argument("General VoF sparse plane source context is stale.");
             for (const auto& key : requested)
                 if (data.cells.at(key).owner == comm->getRank())
-                    result.emplace(key, reconstruct_cell<Mode>(data, key));
+                {
+                    ++diagnostics.local_owned_requests;
+                    result.emplace(key, reconstruct_cell_impl<Mode>(data, key, &diagnostics));
+                }
         });
     std::vector<OwnerPacket> requests;
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{limit};
+            std::size_t count = 0;
+            for (const auto& key : requested)
+                count += data.cells.at(key).owner != comm->getRank();
+            if (count > std::numeric_limits<std::size_t>::max() / sizeof(OwnerPacket))
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "Sparse plane requests overflow.");
+            storage.charge(count * sizeof(OwnerPacket));
+            requests.reserve(count);
+            if (requests.capacity() > count)
+                storage.charge((requests.capacity() - count) * sizeof(OwnerPacket));
             for (const auto& key : requested)
                 if (const auto& cell = data.cells.at(key); cell.owner != comm->getRank())
                 {
-                    auto bytes = AMR::encode_adaptive_key(key);
-                    budget.packet(bytes.size() + 48);
-                    wire::Writer w;
-                    w.bytes(bytes);
-                    w.word(cell.revision);
-                    for (auto word : context.publication)
-                        w.word(word);
-                    requests.push_back({cell.owner, std::move(w.data)});
+                    const auto wire_bytes = owner_plane_key_wire_bytes(key);
+                    if (wire_bytes > (std::numeric_limits<std::size_t>::max() - 48) / 3)
+                        throw PLIC::GeometryError(
+                            PLIC::GeometryErrorCode::ResourceLimit, "Sparse plane key overflows.");
+                    const auto scratch = 3 * wire_bytes;
+                    storage.charge(scratch);
+                    {
+                        auto bytes = AMR::encode_adaptive_key(key);
+                        if (bytes.size() != wire_bytes)
+                            throw std::invalid_argument("Sparse plane key differs from its wire envelope.");
+                        const auto payload = wire_bytes + 48;
+                        budget.packet(payload);
+                        storage.charge(payload);
+                        wire::Writer w;
+                        w.data.reserve(payload);
+                        if (w.data.capacity() > payload)
+                            storage.charge(w.data.capacity() - payload);
+                        w.bytes(bytes);
+                        w.word(cell.revision);
+                        for (auto word : context.publication)
+                            w.word(word);
+                        requests.push_back({cell.owner, std::move(w.data)});
+                    }
+                    storage.release(scratch);
                 }
         });
-    auto incoming = exchange_owner_packets(requests, comm, limit);
+    const auto remote_requests = requests.size();
+    auto incoming = exchange_owner_packets(requests, comm, storage.remaining_bytes());
+    wire::collective(*comm,
+        [&]
+        {
+            storage.observe_exchange_peak(incoming.stats.peak_scratch_bytes);
+            const auto request_bytes = owner_plane_packet_storage_bytes(requests) +
+                                       (requests.capacity() - requests.size()) * sizeof(OwnerPacket);
+            std::vector<OwnerPacket>().swap(requests);
+            storage.release(request_bytes);
+            storage.charge(owner_plane_packet_storage_bytes(incoming.packets) +
+                           (incoming.packets.capacity() - incoming.packets.size()) * sizeof(OwnerPacket));
+        });
     std::vector<OwnerPacket> replies;
     wire::collective(*comm,
         [&]
         {
             wire::Budget budget{limit};
-            for (const auto& packet : incoming.packets)
-            {
-                wire::Reader r{packet.bytes};
-                auto bytes = r.bytes();
-                auto key = AMR::decode_adaptive_key(bytes);
-                auto revision = r.word();
-                for (auto word : context.publication)
-                    if (r.word() != word)
-                        throw std::invalid_argument("General VoF sparse plane context mismatch.");
-                r.done();
-                const auto& cell = data.cells.at(key);
-                if (cell.owner != comm->getRank() || cell.revision != revision)
-                    throw std::invalid_argument("General VoF stale plane request.");
-
-                wire::Writer w;
-                w.bytes(bytes);
-                w.word(revision);
-                for (auto word : context.publication)
-                    w.word(word);
-                plane(w, reconstruct_cell<Mode>(data, key));
-                budget.packet(w.data.size());
-                replies.push_back({packet.peer, std::move(w.data)});
-            }
+            replies = owner_plane_replies(
+                result, incoming.packets, context, comm->getRank(), comm->getSize(), storage, diagnostics,
+                [&](const Key& key, std::uint64_t revision, int)
+                {
+                    const auto& cell = data.cells.at(key);
+                    if (cell.owner != comm->getRank() || cell.revision != revision)
+                        throw std::invalid_argument("General VoF stale plane request.");
+                },
+                [&](const Key& key) { return reconstruct_cell_impl<Mode>(data, key, &diagnostics); },
+                [&](wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
+                {
+                    plane(writer, fitted);
+                    budget.packet(writer.data.size());
+                });
+            const auto incoming_bytes = owner_plane_packet_storage_bytes(incoming.packets) +
+                                        (incoming.packets.capacity() - incoming.packets.size()) * sizeof(OwnerPacket);
+            std::vector<OwnerPacket>().swap(incoming.packets);
+            storage.release(incoming_bytes);
         });
-    auto received = exchange_owner_packets(replies, comm, limit);
+    auto received = exchange_owner_packets(replies, comm, storage.remaining_bytes());
     wire::collective(*comm,
         [&]
         {
+            storage.observe_exchange_peak(received.stats.peak_scratch_bytes);
+            // The peer-only map is already gone. Keep replies charged until
+            // exchange and their destruction; account the received owners too.
+            storage.charge(owner_plane_packet_storage_bytes(received.packets) +
+                           (received.packets.capacity() - received.packets.size()) * sizeof(OwnerPacket));
+            std::size_t key_scratch = 0;
+            for (const auto& packet : received.packets)
+            {
+                if (packet.bytes.size() > (std::numeric_limits<std::size_t>::max() - sizeof(Key)) / 3)
+                    throw PLIC::GeometryError(
+                        PLIC::GeometryErrorCode::ResourceLimit, "Sparse plane reply key overflows.");
+                key_scratch = std::max(key_scratch, sizeof(Key) + 3 * packet.bytes.size());
+            }
+            storage.charge(key_scratch);
             std::set<Key> seen;
             for (const auto& packet : received.packets)
             {
                 wire::Reader r{packet.bytes};
-                auto key = AMR::decode_adaptive_key(r.bytes());
+                const auto size = r.word();
+                if (size > r.data.size() - r.offset)
+                    throw std::invalid_argument("Invalid sparse plane reply key length.");
+                auto key = AMR::decode_adaptive_key(r.data.subspan(r.offset, static_cast<std::size_t>(size)));
+                r.offset += static_cast<std::size_t>(size);
                 auto revision = r.word();
                 for (auto word : context.publication)
                     if (r.word() != word)
                         throw std::invalid_argument("General VoF sparse plane context mismatch.");
                 const auto& cell = data.cells.at(key);
                 if (cell.owner != packet.peer || cell.owner == comm->getRank() || cell.revision != revision ||
-                    !requested.contains(key) || !seen.insert(key).second)
+                    !requested.contains(key) || seen.contains(key))
                     throw std::invalid_argument("General VoF unauthenticated plane reply.");
+                storage.charge(
+                    sizeof(decltype(seen)::value_type) + 4 * sizeof(void*) + owner_plane_key_storage_bytes(key));
+                seen.insert(key);
                 auto fitted =
                     plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
                                                                                    : data.options.arithmetic_mode);
@@ -1159,7 +1270,8 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(
                 result.emplace(key, std::move(fitted));
                 r.done();
             }
-            if (seen.size() != requests.size())
+            storage.release(key_scratch);
+            if (seen.size() != remote_requests)
                 throw std::invalid_argument("General VoF incomplete plane replies.");
         });
     return result;
