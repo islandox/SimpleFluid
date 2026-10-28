@@ -40,6 +40,7 @@ if(NOT simplefluid_if97_version_line MATCHES "v([0-9]+\\.[0-9]+\\.[0-9]+)"
 endif()
 
 add_library(SimpleFluidIF97 STATIC IF97Water.cc)
+simplefluid_debug_symbols_target(SimpleFluidIF97 "IF97;MATERIALS")
 add_library(SimpleFluid::IF97 ALIAS SimpleFluidIF97)
 target_include_directories(SimpleFluidIF97 PUBLIC "${PROJECT_SOURCE_DIR}/src")
 target_include_directories(SimpleFluidIF97 SYSTEM PRIVATE "${simplefluid_if97_headers}")

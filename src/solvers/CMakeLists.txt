@@ -106,6 +106,9 @@ add_library(SimpleFluidSolvers SHARED
 )
 add_library(SimpleFluid::Solvers ALIAS SimpleFluidSolvers)
 simplefluid_configure_component(SimpleFluidSolvers)
+simplefluid_debug_symbols_target(SimpleFluidSolvers SOLVERS)
+simplefluid_debug_symbols_sources("NOX;SOLVERS" NoxNonlinearSolver.cc)
+simplefluid_debug_symbols_sources("EXPERIMENTAL_VOF;SOLVERS" ${SIMPLEFLUID_VOF_SOLVER_SOURCES})
 target_compile_definitions(SimpleFluidSolvers PRIVATE
     SimpleFluidEquations_EXPORTS)
 target_link_libraries(SimpleFluidSolvers PUBLIC SimpleFluidFVM)

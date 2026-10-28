@@ -79,6 +79,14 @@ add_library(SimpleFluidFVM SHARED
 )
 add_library(SimpleFluid::FVM ALIAS SimpleFluidFVM)
 simplefluid_configure_component(SimpleFluidFVM)
+simplefluid_debug_symbols_target(SimpleFluidFVM FVM)
+foreach(source IN LISTS SIMPLEFLUID_COMMON_VOF_FVM_SOURCES)
+    if(source MATCHES "/PLIC/")
+        simplefluid_debug_symbols_sources("PLIC;FVM" "${source}")
+    elseif(source MATCHES "/swept_volume/")
+        simplefluid_debug_symbols_sources("SWEPT_VOLUME;FVM" "${source}")
+    endif()
+endforeach()
 target_link_libraries(SimpleFluidFVM PUBLIC SimpleFluidFields)
 
 # Forward-error bounds require the same strict arithmetic used by the numerical

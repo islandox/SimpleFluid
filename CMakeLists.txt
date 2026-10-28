@@ -253,3 +253,5 @@ if(BUILD_TESTING)
 endif()
 
 add_subdirectory(src)
+
+simplefluid_finalize_debug_symbols("${CMAKE_CURRENT_SOURCE_DIR}")

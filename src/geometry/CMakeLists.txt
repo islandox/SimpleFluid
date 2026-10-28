@@ -83,6 +83,13 @@ set(SIMPLEFLUID_MESH_SOURCES
 )
 
 simplefluid_absolute_sources(SIMPLEFLUID_MESH_SOURCES)
+foreach(source IN LISTS SIMPLEFLUID_MESH_SOURCES)
+    if(source MATCHES "/PLIC/")
+        simplefluid_debug_symbols_sources("PLIC;MESH" "${source}")
+    elseif(source MATCHES "/swept_volume/")
+        simplefluid_debug_symbols_sources("SWEPT_VOLUME;MESH" "${source}")
+    endif()
+endforeach()
 list(APPEND SIMPLEFLUID_MESH_SOURCES ${SIMPLEFLUID_IO_SOURCES} ${SIMPLEFLUID_PARALLEL_SOURCES})
 
 # Geometry, partitioning and mesh output retain one archive and type identity.
@@ -90,6 +97,7 @@ find_package(Boost CONFIG REQUIRED)
 add_library(SimpleFluidMesh STATIC ${SIMPLEFLUID_MESH_SOURCES})
 add_library(SimpleFluid::Mesh ALIAS SimpleFluidMesh)
 simplefluid_configure_component(SimpleFluidMesh)
+simplefluid_debug_symbols_target(SimpleFluidMesh MESH)
 target_link_libraries(SimpleFluidMesh PUBLIC SimpleFluidCore PRIVATE Boost::headers)
 
 # The certified predicate filter requires ordinary IEEE binary64 arithmetic.

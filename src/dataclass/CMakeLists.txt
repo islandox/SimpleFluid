@@ -2,3 +2,4 @@
 add_library(SimpleFluidCore STATIC Database.cc)
 add_library(SimpleFluid::Core ALIAS SimpleFluidCore)
 simplefluid_configure_component(SimpleFluidCore)
+simplefluid_debug_symbols_target(SimpleFluidCore CORE)
