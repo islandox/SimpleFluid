@@ -105,17 +105,16 @@ provenance, so existing profiles require fresh training.
 | `CORE` | Database and project runtime/ABI bridge objects |
 | `MESH` | Mesh archive sources |
 | `IO`, `PARALLEL` | Their sources inside the mesh archive; then `MESH` |
+| `PLIC`, `SWEPT_VOLUME` | Their geometry source paths, across Mesh and FVM; then the owning `MESH` or `FVM` |
 | `FIELDS`, `FVM` | Remaining sources in those components |
 | `EQUATIONS` | Equation sources inside the solver DSO; then `SOLVERS` |
 | `SOLVERS` | Remaining solver sources |
 | `NOX` | The `NoxNonlinearSolver.cc` adapter, including its disabled-feature fallback; then `SOLVERS` |
+| `EXPERIMENTAL_VOF` | The optional VoF solver source groups; then `SOLVERS` |
 | `IF97` | Optional `IF97Water.cc`; then `MATERIALS` |
 | `MATERIALS` | Material implementations (currently IF97); header-only material interfaces emit symbols in their consumers |
 | `TESTS` | Translation units compiled by unit-test targets |
 | `BENCHMARKS`, `EXAMPLES` | Benchmark and example targets, including the optional main application |
-
-The `PLIC`, `SWEPT_VOLUME`, and `EXPERIMENTAL_VOF` cache entries are reserved
-for the VoF branches; this branch has no compiled sources in those scopes.
 
 The first non-`INHERIT` setting wins: explicit source module, its fallback
 component from the table, target module, then global. Tests that compile a
