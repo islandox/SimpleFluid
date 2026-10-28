@@ -62,8 +62,17 @@ public:
     static void seal_represented_source(DynamicPoint&, std::vector<PlaneAuthority>);
     static bool same_represented_source(
         const std::shared_ptr<const DynamicPointProvenance>&, const std::shared_ptr<const DynamicPointProvenance>&);
+    /** Borrow an immutable ancestor owner slot. The named input owner must
+     * remain alive and unchanged while the reference is used. Rvalues cannot
+     * pin that lifetime. Use original_source when retaining ownership. */
+    static const std::shared_ptr<const DynamicPointProvenance>& borrowed_original_source(
+        const std::shared_ptr<const DynamicPointProvenance>&);
+    static const std::shared_ptr<const DynamicPointProvenance>& borrowed_original_source(
+        std::shared_ptr<const DynamicPointProvenance>&&) = delete;
+    static const std::shared_ptr<const DynamicPointProvenance>& borrowed_original_source(
+        const std::shared_ptr<const DynamicPointProvenance>&&) = delete;
     static std::shared_ptr<const DynamicPointProvenance> original_source(
-        std::shared_ptr<const DynamicPointProvenance>);
+        const std::shared_ptr<const DynamicPointProvenance>&);
     static void seal_export(DynamicPoint&, const std::shared_ptr<const DynamicPointProvenance>&,
         std::vector<PlaneAuthority>, bool numerical_only = false);
     static void seal_generated(DynamicPoint&,

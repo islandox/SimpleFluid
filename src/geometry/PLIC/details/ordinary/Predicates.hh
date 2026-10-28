@@ -4,6 +4,7 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include <array>
+#include <span>
 
 namespace SimpleFluid::PLIC::details
 {
@@ -46,6 +47,10 @@ public:
 private:
     long double high_ = 0, low_ = 0, error_ = 0;
 };
+/** Sum a closed sequence of already computed contributions in input order.
+ * Validation and addition are interleaved under one protected FP environment;
+ * only the compensated total is classified. No caller arithmetic runs here. */
+[[nodiscard]] Result sum_results(std::span<const Result>, int binary_scale = 0);
 /** det(b-a,c-a,d-a). Uses one deterministic minimax-edge anchor, with
  * coordinate-lexicographic ties; input permutation parity is preserved. */
 [[nodiscard]] Result orientation(const std::array<Point, 4>&);

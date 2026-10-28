@@ -22,25 +22,31 @@ namespace SimpleFluid::PLIC::details::ordinary_predicates
 namespace
 {
 using Limits = std::numeric_limits<long double>;
-[[noreturn]] void unresolved(const char* message)
+struct AccountingContext
 {
-    ++statistics.rejections;
+    Work* work;
+    GeometryStatistics& stats;
+
+    void charge(std::size_t count = 1) const
+    {
+        if (work)
+        {
+            if (count > work->operation_limit - std::min(work->operations, work->operation_limit))
+            {
+                ++stats.rejections;
+                throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary predicate scalar-work cap exhausted.");
+            }
+            work->operations += count;
+        }
+        stats.floating_operations += count;
+    }
+};
+[[noreturn]] void unresolved(const AccountingContext& context, const char* message)
+{
+    ++context.stats.rejections;
     throw GeometryError(GeometryErrorCode::UnresolvedArithmetic, message);
 }
-void charge(std::size_t count = 1)
-{
-    if (active_work)
-    {
-        if (count > active_work->operation_limit - std::min(active_work->operations, active_work->operation_limit))
-        {
-            ++statistics.rejections;
-            throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary predicate scalar-work cap exhausted.");
-        }
-        active_work->operations += count;
-    }
-    statistics.floating_operations += count;
-}
-void environment()
+void environment(const AccountingContext& context)
 {
     bool supported = Limits::is_iec559 && Limits::radix == 2 && Limits::has_denorm == std::denorm_present &&
                      std::fegetround() == FE_TONEAREST;
@@ -59,18 +65,18 @@ void environment()
     // gradual underflow in the arithmetic format actually used by this kernel.
     if (!supported)
     {
-        ++statistics.rejections;
+        ++context.stats.rejections;
         throw GeometryError(GeometryErrorCode::InvalidInput,
             "Ordinary predicate requires a supported IEEE floating-point environment.");
     }
     volatile long double smallest_normal = Limits::min();
     volatile long double half = .5L;
-    charge(2);
+    context.charge(2);
     const auto subnormal = smallest_normal * half;
     supported = supported && subnormal > 0 && subnormal + subnormal == smallest_normal;
     if (!supported)
     {
-        ++statistics.rejections;
+        ++context.stats.rejections;
         throw GeometryError(GeometryErrorCode::InvalidInput,
             "Ordinary predicate requires round-to-nearest IEEE arithmetic with gradual underflow.");
     }
@@ -107,115 +113,124 @@ void finite_input(long double x)
     if (!std::isfinite(x))
         throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary predicate received a nonfinite coordinate.");
 }
-long double finite(long double x)
+long double finite(const AccountingContext& context, long double x)
 {
     if (!std::isfinite(x))
-        unresolved("Ordinary predicate arithmetic exceeds the finite range.");
+        unresolved(context, "Ordinary predicate arithmetic exceeds the finite range.");
     return x;
 }
-long double add(long double a, long double b)
+long double add(const AccountingContext& context, long double a, long double b)
 {
-    charge();
-    return finite(a + b);
+    context.charge();
+    return finite(context, a + b);
 }
-long double mul(long double a, long double b)
+long double mul(const AccountingContext& context, long double a, long double b)
 {
-    charge();
-    return finite(a * b);
+    context.charge();
+    return finite(context, a * b);
 }
-long double scale(long double a, int exponent)
+long double scale(const AccountingContext& context, long double a, int exponent)
 {
-    charge();
-    return finite(std::scalbn(a, exponent));
+    context.charge();
+    return finite(context, std::scalbn(a, exponent));
 }
-long double next_up(long double a)
+long double next_up(const AccountingContext& context, long double a)
 {
-    charge();
-    return finite(std::nextafter(a, Limits::infinity()));
+    context.charge();
+    return finite(context, std::nextafter(a, Limits::infinity()));
 }
-long double bound_add(long double a, long double b)
+long double bound_add(const AccountingContext& context, long double a, long double b)
 {
-    return a == 0 ? b : b == 0 ? a : next_up(add(a, b));
+    return a == 0 ? b : b == 0 ? a : next_up(context, add(context, a, b));
 }
-long double bound_mul(long double a, long double b)
+long double bound_mul(const AccountingContext& context, long double a, long double b)
 {
-    return a == 0 || b == 0 ? 0 : next_up(mul(a, b));
+    return a == 0 || b == 0 ? 0 : next_up(context, mul(context, a, b));
 }
-long double gap(long double a)
+long double gap(const AccountingContext& context, long double a)
 {
-    charge(2);
-    const auto upper = finite(std::nextafter(a, Limits::infinity()));
-    const auto lower = finite(std::nextafter(a, -Limits::infinity()));
-    return std::max(add(upper, -a), add(a, -lower));
+    context.charge(2);
+    const auto upper = finite(context, std::nextafter(a, Limits::infinity()));
+    const auto lower = finite(context, std::nextafter(a, -Limits::infinity()));
+    return std::max(add(context, upper, -a), add(context, a, -lower));
 }
-std::pair<long double, long double> two_sum(long double a, long double b)
+std::pair<long double, long double> two_sum(const AccountingContext& context, long double a, long double b)
 {
     // Knuth TwoSum is an error-free transform with round-to-nearest and
     // gradual underflow, provided its intermediate sums do not overflow.
-    const auto s = add(a, b), z = add(s, -a);
-    return {s, add(add(a, -add(s, -z)), add(b, -z))};
+    const auto s = add(context, a, b), z = add(context, s, -a);
+    return {s, add(context, add(context, a, -add(context, s, -z)), add(context, b, -z))};
 }
 struct Twofold
 {
     long double high = 0, low = 0, error = 0;
-    void append(long double x)
+    void append(const AccountingContext& context, long double x)
     {
-        const auto [s, e] = two_sum(high, x);
-        const auto [t, discarded] = two_sum(low, e);
-        const auto [h, l] = two_sum(s, t);
+        const auto [s, e] = two_sum(context, high, x);
+        const auto [t, discarded] = two_sum(context, low, e);
+        const auto [h, l] = two_sum(context, s, t);
         high = h;
         low = l;
-        error = bound_add(error, std::abs(discarded));
+        error = bound_add(context, error, std::abs(discarded));
     }
 };
 Twofold negate(Twofold a)
 {
     return {-a.high, -a.low, a.error};
 }
-Twofold sum(Twofold a, const Twofold& b)
+Twofold sum(const AccountingContext& context, Twofold a, const Twofold& b)
 {
-    a.append(b.high);
-    a.append(b.low);
-    a.error = bound_add(a.error, b.error);
+    a.append(context, b.high);
+    a.append(context, b.low);
+    a.error = bound_add(context, a.error, b.error);
     return a;
 }
-long double magnitude(const Twofold& a)
+Twofold add_term(const AccountingContext& context, Twofold total, const Result& term)
 {
-    return bound_add(std::abs(a.high), std::abs(a.low));
+    finite_input(term.value);
+    if (!std::isfinite(term.absolute_error) || term.absolute_error < 0)
+        throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary predicate contribution has an invalid error.");
+    return sum(context, total, Twofold{term.value, 0, term.absolute_error});
 }
-void product(Twofold& result, long double a, long double b)
+long double magnitude(const AccountingContext& context, const Twofold& a)
+{
+    return bound_add(context, std::abs(a.high), std::abs(a.low));
+}
+void product(const AccountingContext& context, Twofold& result, long double a, long double b)
 {
     if (a == 0 || b == 0)
         return;
-    const auto p = mul(a, b);
-    charge();
-    const auto r = finite(std::fma(a, b, -p));
-    result.append(p);
-    result.append(r);
+    const auto p = mul(context, a, b);
+    context.charge();
+    const auto r = finite(context, std::fma(a, b, -p));
+    result.append(context, p);
+    result.append(context, r);
     // FMA recovers the product residual exactly except possibly at underflow.
     // Each input has lattice exponent >= frexp_exponent - digits. If their
     // product lattice reaches below denorm_min, one denorm_min safely bounds
     // the only possible residual rounding loss (including a rounded zero).
     int ea, eb;
-    charge(2);
+    context.charge(2);
     std::frexp(a, &ea);
     std::frexp(b, &eb);
     if (ea + eb - 2 * Limits::digits < Limits::min_exponent - Limits::digits)
-        result.error = bound_add(result.error, Limits::denorm_min());
+        result.error = bound_add(context, result.error, Limits::denorm_min());
 }
-Twofold multiply(const Twofold& a, const Twofold& b)
+Twofold multiply(const AccountingContext& context, const Twofold& a, const Twofold& b)
 {
     Twofold result;
-    product(result, a.high, b.high);
-    product(result, a.high, b.low);
-    product(result, a.low, b.high);
-    product(result, a.low, b.low);
-    result.error =
-        bound_add(result.error, bound_add(bound_add(bound_mul(magnitude(a), b.error), bound_mul(magnitude(b), a.error)),
-                                    bound_mul(a.error, b.error)));
+    product(context, result, a.high, b.high);
+    product(context, result, a.high, b.low);
+    product(context, result, a.low, b.high);
+    product(context, result, a.low, b.low);
+    result.error = bound_add(context, result.error,
+        bound_add(context,
+            bound_add(context, bound_mul(context, magnitude(context, a), b.error),
+                bound_mul(context, magnitude(context, b), a.error)),
+            bound_mul(context, a.error, b.error)));
     return result;
 }
-Twofold scaled(Twofold a, int exponent)
+Twofold scaled(const AccountingContext& context, Twofold a, int exponent)
 {
     if (exponent == std::numeric_limits<int>::min())
         throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary predicate scaling exponent is invalid.");
@@ -224,24 +239,24 @@ Twofold scaled(Twofold a, int exponent)
     {
         if (component == 0)
             continue;
-        const auto shifted = scale(component, exponent);
+        const auto shifted = scale(context, component, exponent);
         // Reverse scaling is exact unless scaling discarded significand bits.
         // Check it only when it cannot overflow; the original was finite.
-        charge();
+        context.charge();
         const auto restored = std::scalbn(shifted, -exponent);
         if (restored != component)
-            result.error = bound_add(result.error, gap(shifted));
-        result.append(shifted);
+            result.error = bound_add(context, result.error, gap(context, shifted));
+        result.append(context, shifted);
     }
     if (a.error != 0)
-        result.error = bound_add(result.error, next_up(scale(a.error, exponent)));
+        result.error = bound_add(context, result.error, next_up(context, scale(context, a.error, exponent)));
     return result;
 }
-Result finish(Twofold a, int exponent)
+Result finish(const AccountingContext& context, Twofold a, int exponent)
 {
-    a = scaled(a, exponent);
-    const auto [value, residual] = two_sum(a.high, a.low);
-    Result result{value, bound_add(a.error, std::abs(residual)), Sign::Unresolved};
+    a = scaled(context, a, exponent);
+    const auto [value, residual] = two_sum(context, a.high, a.low);
+    Result result{value, bound_add(context, a.error, std::abs(residual)), Sign::Unresolved};
     if (value > result.absolute_error)
         result.sign = Sign::Positive;
     else if (value < -result.absolute_error)
@@ -251,7 +266,7 @@ Result finish(Twofold a, int exponent)
     return result;
 }
 using CompensatedPoint = std::array<Twofold, 3>;
-template<std::size_t N> int coordinate_exponent(const std::array<Point, N>& points)
+template<std::size_t N> int coordinate_exponent(const AccountingContext& context, const std::array<Point, N>& points)
 {
     long double extent = 0;
     for (const auto& p : points)
@@ -261,30 +276,32 @@ template<std::size_t N> int coordinate_exponent(const std::array<Point, N>& poin
             extent = std::max(extent, std::abs(x));
         }
     int exponent = 0;
-    charge();
+    context.charge();
     std::frexp(extent, &exponent);
     return exponent;
 }
-template<std::size_t N> std::array<CompensatedPoint, N> normalized(const std::array<Point, N>& points, int exponent)
+template<std::size_t N>
+std::array<CompensatedPoint, N> normalized(
+    const AccountingContext& context, const std::array<Point, N>& points, int exponent)
 {
     std::array<CompensatedPoint, N> result;
     for (std::size_t i = 0; i < N; ++i)
         for (unsigned a = 0; a < 3; ++a)
-            result[i][a] = scaled({points[i][a]}, -exponent);
+            result[i][a] = scaled(context, {points[i][a]}, -exponent);
     return result;
 }
-template<std::size_t N> int normalize_edges(std::array<CompensatedPoint, N>& edges)
+template<std::size_t N> int normalize_edges(const AccountingContext& context, std::array<CompensatedPoint, N>& edges)
 {
     long double extent = 0;
     for (const auto& edge : edges)
         for (const auto& x : edge)
-            extent = std::max(extent, magnitude(x));
+            extent = std::max(extent, magnitude(context, x));
     int exponent = 0;
-    charge();
+    context.charge();
     std::frexp(extent, &exponent);
     for (auto& edge : edges)
         for (auto& x : edge)
-            x = scaled(x, -exponent);
+            x = scaled(context, x, -exponent);
     return exponent;
 }
 
@@ -295,15 +312,18 @@ class Expansion
 {
 public:
     Expansion() = default;
-    explicit Expansion(long double x)
+    explicit Expansion(const AccountingContext& context, long double x)
     {
         if (x != 0)
-            push(x);
+            push(context, x);
     }
-    Expansion(const Expansion& other)
+    Expansion(const Expansion&) = delete;
+    [[nodiscard]] static Expansion clone(const AccountingContext& context, const Expansion& other)
     {
-        reserve(other.values_.size());
-        values_.assign(other.values_.begin(), other.values_.end());
+        Expansion result;
+        result.reserve(context, other.values_.size());
+        result.values_.assign(other.values_.begin(), other.values_.end());
+        return result;
     }
     Expansion(Expansion&&) noexcept = default;
     Expansion& operator=(Expansion&&) noexcept = default;
@@ -311,86 +331,86 @@ public:
     [[nodiscard]] bool empty() const { return values_.empty(); }
     [[nodiscard]] long double leading() const { return empty() ? 0 : values_.back(); }
     [[nodiscard]] const std::vector<long double>& values() const { return values_; }
-    void append(long double x)
+    void append(const AccountingContext& context, long double x)
     {
         if (x == 0)
             return;
         std::size_t count = 0;
         for (const auto component : values_)
         {
-            const auto [sum, residual] = two_sum(x, component);
+            const auto [sum, residual] = two_sum(context, x, component);
             if (residual != 0)
                 values_[count++] = residual;
             x = sum;
         }
         values_.resize(count);
         if (x != 0)
-            push(x);
+            push(context, x);
     }
 
 private:
-    void reserve(std::size_t count)
+    void reserve(const AccountingContext& context, std::size_t count)
     {
         constexpr std::size_t capacity = 2048;
         if (count > capacity)
         {
-            ++statistics.rejections;
+            ++context.stats.rejections;
             throw GeometryError(GeometryErrorCode::ResourceLimit, "Ordinary support expansion capacity exhausted.");
         }
         if (count <= values_.capacity())
             return;
         const auto requested = std::min(capacity, std::max(count, 2 * values_.capacity()));
-        if (active_work)
-            active_work->charge(requested - values_.capacity(), sizeof(long double));
+        if (context.work)
+            context.work->charge(requested - values_.capacity(), sizeof(long double));
         values_.reserve(requested);
     }
-    void push(long double x)
+    void push(const AccountingContext& context, long double x)
     {
-        reserve(values_.size() + 1);
+        reserve(context, values_.size() + 1);
         values_.push_back(x);
     }
     std::vector<long double> values_;
 };
-Expansion expansion_sum(Expansion a, const Expansion& b, int sign = 1)
+Expansion expansion_sum(const AccountingContext& context, Expansion a, const Expansion& b, int sign = 1)
 {
     for (const auto x : b.values())
-        a.append(sign < 0 ? -x : x);
+        a.append(context, sign < 0 ? -x : x);
     return a;
 }
-Expansion expansion_product(const Expansion& a, const Expansion& b)
+Expansion expansion_product(const AccountingContext& context, const Expansion& a, const Expansion& b)
 {
     Expansion result;
     for (const auto x : a.values())
         for (const auto y : b.values())
         {
             int ex, ey;
-            charge(2);
+            context.charge(2);
             std::frexp(x, &ex);
             std::frexp(y, &ey);
             // The product's exact binary lattice must fit, including its FMA
             // residual. A rounded-to-zero residual alone proves no contact.
             if (ex + ey - 2 * Limits::digits < Limits::min_exponent - Limits::digits)
-                unresolved("Ordinary support expansion product exceeds its exact underflow lattice.");
-            const auto product = mul(x, y);
-            charge();
-            const auto residual = finite(std::fma(x, y, -product));
-            result.append(product);
-            result.append(residual);
+                unresolved(context, "Ordinary support expansion product exceeds its exact underflow lattice.");
+            const auto product = mul(context, x, y);
+            context.charge();
+            const auto residual = finite(context, std::fma(x, y, -product));
+            result.append(context, product);
+            result.append(context, residual);
         }
     return result;
 }
-Expansion expansion_scaled(const Expansion& a, int exponent)
+Expansion expansion_scaled(const AccountingContext& context, const Expansion& a, int exponent)
 {
     if (exponent == std::numeric_limits<int>::min())
         throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary support scaling exponent is invalid.");
     Expansion result;
     for (const auto x : a.values())
     {
-        const auto shifted = scale(x, exponent);
-        charge();
+        const auto shifted = scale(context, x, exponent);
+        context.charge();
         if (std::scalbn(shifted, -exponent) != x)
-            unresolved("Ordinary support expansion scaling loses represented input bits.");
-        result.append(shifted);
+            unresolved(context, "Ordinary support expansion scaling loses represented input bits.");
+        result.append(context, shifted);
     }
     return result;
 }
@@ -401,10 +421,10 @@ int exponent_difference(int a, int b)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary support frame exponent is invalid.");
     return static_cast<int>(difference);
 }
-Expansion support_coefficient(const FramedPoint& point, const SupportRow& row)
+Expansion support_coefficient(const AccountingContext& context, const FramedPoint& point, const SupportRow& row)
 {
     finite_input(row.offset);
-    Expansion result(-row.offset);
+    Expansion result(context, -row.offset);
     for (unsigned axis = 0; axis < 3; ++axis)
     {
         finite_input(point.local[axis]);
@@ -413,18 +433,21 @@ Expansion support_coefficient(const FramedPoint& point, const SupportRow& row)
         finite_input(row.anchor.origin[axis]);
         finite_input(row.normal[axis]);
         int origin_exponent = 0;
-        charge();
+        context.charge();
         std::frexp(std::max(std::abs(static_cast<long double>(point.origin[axis])),
                        std::abs(static_cast<long double>(row.anchor.origin[axis]))),
             &origin_exponent);
-        auto origin = expansion_sum(expansion_scaled(Expansion(point.origin[axis]), -origin_exponent),
-            expansion_scaled(Expansion(row.anchor.origin[axis]), -origin_exponent), -1);
-        origin = expansion_scaled(origin, exponent_difference(origin_exponent, row.anchor.exponent));
-        auto local = expansion_sum(
-            expansion_scaled(Expansion(point.local[axis]), exponent_difference(point.exponent, row.anchor.exponent)),
-            Expansion(row.anchor.local[axis]), -1);
-        result = expansion_sum(
-            std::move(result), expansion_product(expansion_sum(std::move(origin), local), Expansion(row.normal[axis])));
+        auto origin = expansion_sum(context,
+            expansion_scaled(context, Expansion(context, point.origin[axis]), -origin_exponent),
+            expansion_scaled(context, Expansion(context, row.anchor.origin[axis]), -origin_exponent), -1);
+        origin = expansion_scaled(context, origin, exponent_difference(origin_exponent, row.anchor.exponent));
+        auto local = expansion_sum(context,
+            expansion_scaled(context, Expansion(context, point.local[axis]),
+                exponent_difference(point.exponent, row.anchor.exponent)),
+            Expansion(context, row.anchor.local[axis]), -1);
+        result = expansion_sum(context, std::move(result),
+            expansion_product(
+                context, expansion_sum(context, std::move(origin), local), Expansion(context, row.normal[axis])));
     }
     return result;
 }
@@ -434,7 +457,8 @@ struct NormalizedSupportRow
     ExpansionRow coefficients;
     int exponent = 0;
 };
-NormalizedSupportRow support_row(const std::array<FramedPoint, 4>& source, const SupportRow& row)
+NormalizedSupportRow support_row(
+    const AccountingContext& context, const std::array<FramedPoint, 4>& source, const SupportRow& row)
 {
     if ((row.orientation != 1 && row.orientation != -1) || row.source_incidence > 15 || row.source_face > 4)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary support row has invalid structural metadata.");
@@ -453,22 +477,23 @@ NormalizedSupportRow support_row(const std::array<FramedPoint, 4>& source, const
     for (unsigned j = 0; j < 4; ++j)
     {
         if (row.source_face < 4)
-            result.coefficients[j] = Expansion(j == row.source_face ? row.orientation : 0);
+            result.coefficients[j] = Expansion(context, j == row.source_face ? row.orientation : 0);
         else if ((row.source_incidence & (1u << j)) == 0)
         {
-            result.coefficients[j] = support_coefficient(source[j], row);
+            result.coefficients[j] = support_coefficient(context, source[j], row);
             if (row.orientation < 0)
-                result.coefficients[j] = expansion_sum(Expansion{}, result.coefficients[j], -1);
+                result.coefficients[j] = expansion_sum(context, Expansion{}, result.coefficients[j], -1);
         }
         extent = std::max(extent, std::abs(result.coefficients[j].leading()));
     }
-    charge();
+    context.charge();
     std::frexp(extent, &result.exponent);
     for (auto& coefficient : result.coefficients)
-        coefficient = expansion_scaled(coefficient, -result.exponent);
+        coefficient = expansion_scaled(context, coefficient, -result.exponent);
     return result;
 }
-Expansion support_determinant(const std::array<NormalizedSupportRow, 3>& basis, const ExpansionRow& last)
+Expansion support_determinant(
+    const AccountingContext& context, const std::array<NormalizedSupportRow, 3>& basis, const ExpansionRow& last)
 {
     Expansion result;
     std::array<unsigned, 4> permutation{0, 1, 2, 3};
@@ -478,19 +503,20 @@ Expansion support_determinant(const std::array<NormalizedSupportRow, 3>& basis, 
         for (unsigned i = 0; i < 4; ++i)
             for (unsigned j = i + 1; j < 4; ++j)
                 inversions += permutation[i] > permutation[j];
-        auto term = expansion_product(basis[0].coefficients[permutation[0]], basis[1].coefficients[permutation[1]]);
-        term = expansion_product(term, basis[2].coefficients[permutation[2]]);
-        term = expansion_product(term, last[permutation[3]]);
-        result = expansion_sum(std::move(result), term, inversions % 2 ? -1 : 1);
+        auto term =
+            expansion_product(context, basis[0].coefficients[permutation[0]], basis[1].coefficients[permutation[1]]);
+        term = expansion_product(context, term, basis[2].coefficients[permutation[2]]);
+        term = expansion_product(context, term, last[permutation[3]]);
+        result = expansion_sum(context, std::move(result), term, inversions % 2 ? -1 : 1);
     } while (std::next_permutation(permutation.begin(), permutation.end()));
     return result;
 }
-long double expansion_magnitude(const Expansion& value, bool tail_only = false)
+long double expansion_magnitude(const AccountingContext& context, const Expansion& value, bool tail_only = false)
 {
     long double result = 0;
     const auto count = value.values().size() - (tail_only && !value.empty() ? 1 : 0);
     for (std::size_t i = 0; i < count; ++i)
-        result = bound_add(result, std::abs(value.values()[i]));
+        result = bound_add(context, result, std::abs(value.values()[i]));
     return result;
 }
 } // namespace
@@ -499,7 +525,8 @@ SupportEvaluation support_intersection_distance(
     const std::array<FramedPoint, 4>& source, const std::array<SupportRow, 3>& supports, const SupportRow& query)
 {
     const ScopedPredicateEnvironment scope;
-    environment();
+    const AccountingContext context{active_work, statistics};
+    environment(context);
     for (const auto& point : source)
         for (unsigned axis = 0; axis < 3; ++axis)
         {
@@ -508,58 +535,57 @@ SupportEvaluation support_intersection_distance(
         }
     std::array<NormalizedSupportRow, 3> basis;
     for (unsigned i = 0; i < 3; ++i)
-        basis[i] = support_row(source, supports[i]);
-    ExpansionRow ones{Expansion(1), Expansion(1), Expansion(1), Expansion(1)};
-    auto denominator = support_determinant(basis, ones);
+        basis[i] = support_row(context, source, supports[i]);
+    ExpansionRow ones{Expansion(context, 1), Expansion(context, 1), Expansion(context, 1), Expansion(context, 1)};
+    auto denominator = support_determinant(context, basis, ones);
     if (denominator.empty())
         return {{}, true};
-    const auto q = support_row(source, query);
-    auto numerator = support_determinant(basis, q.coefficients);
+    const auto q = support_row(context, source, query);
+    auto numerator = support_determinant(context, basis, q.coefficients);
     if (numerator.empty())
         return {};
     const auto sign = (numerator.leading() > 0) == (denominator.leading() > 0) ? Sign::Positive : Sign::Negative;
     int ne, de;
-    charge(2);
+    context.charge(2);
     std::frexp(numerator.leading(), &ne);
     std::frexp(denominator.leading(), &de);
-    numerator = expansion_scaled(numerator, -ne);
-    denominator = expansion_scaled(denominator, -de);
-    charge();
-    const auto candidate = finite(numerator.leading() / denominator.leading());
-    const auto residual = expansion_sum(numerator, expansion_product(Expansion(candidate), denominator), -1);
-    const auto tail = expansion_magnitude(denominator, true);
-    const auto lower = add(std::abs(denominator.leading()), -tail);
-    charge();
+    numerator = expansion_scaled(context, numerator, -ne);
+    denominator = expansion_scaled(context, denominator, -de);
+    context.charge();
+    const auto candidate = finite(context, numerator.leading() / denominator.leading());
+    const auto residual = expansion_sum(context, Expansion::clone(context, numerator),
+        expansion_product(context, Expansion(context, candidate), denominator), -1);
+    const auto tail = expansion_magnitude(context, denominator, true);
+    const auto lower = add(context, std::abs(denominator.leading()), -tail);
+    context.charge();
     const auto denominator_lower = std::nextafter(lower, 0.L);
     if (denominator_lower <= 0)
-        unresolved("Ordinary support expansion has no usable metric denominator bound.");
-    auto error = expansion_magnitude(residual);
+        unresolved(context, "Ordinary support expansion has no usable metric denominator bound.");
+    auto error = expansion_magnitude(context, residual);
     if (error != 0)
     {
-        charge();
-        error = next_up(finite(error / denominator_lower));
+        context.charge();
+        error = next_up(context, finite(context, error / denominator_lower));
     }
     const auto scale_exponent = static_cast<long long>(ne) - de + q.exponent;
     if (scale_exponent <= std::numeric_limits<int>::min() || scale_exponent > std::numeric_limits<int>::max())
-        unresolved("Ordinary support quotient exceeds its finite scaling range.");
+        unresolved(context, "Ordinary support quotient exceeds its finite scaling range.");
     const auto exponent = static_cast<int>(scale_exponent);
-    const auto value = scale(candidate, exponent);
-    charge();
+    const auto value = scale(context, candidate, exponent);
+    context.charge();
     if (value == 0 || std::scalbn(value, -exponent) != candidate)
-        unresolved("Ordinary support quotient loses represented metric bits.");
+        unresolved(context, "Ordinary support quotient loses represented metric bits.");
     if (error != 0)
-        error = next_up(scale(error, exponent));
+        error = next_up(context, scale(context, error, exponent));
     return {{value, error, sign}, false};
 }
 
 void ResultAccumulator::add(const Result& term)
 {
     const ScopedPredicateEnvironment scope;
-    environment();
-    finite_input(term.value);
-    if (!std::isfinite(term.absolute_error) || term.absolute_error < 0)
-        throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary predicate contribution has an invalid error.");
-    auto total = sum(Twofold{high_, low_, error_}, Twofold{term.value, 0, term.absolute_error});
+    const AccountingContext context{active_work, statistics};
+    environment(context);
+    auto total = add_term(context, {high_, low_, error_}, term);
     high_ = total.high;
     low_ = total.low;
     error_ = total.error;
@@ -567,16 +593,29 @@ void ResultAccumulator::add(const Result& term)
 Result ResultAccumulator::result(int binary_scale) const
 {
     const ScopedPredicateEnvironment scope;
-    environment();
-    return finish({high_, low_, error_}, binary_scale);
+    const AccountingContext context{active_work, statistics};
+    environment(context);
+    return finish(context, {high_, low_, error_}, binary_scale);
+}
+
+Result sum_results(std::span<const Result> terms, int binary_scale)
+{
+    const ScopedPredicateEnvironment scope;
+    const AccountingContext context{active_work, statistics};
+    environment(context);
+    Twofold total;
+    for (const auto& term : terms)
+        total = add_term(context, total, term);
+    return finish(context, total, binary_scale);
 }
 
 Result orientation(const std::array<Point, 4>& points)
 {
     const ScopedPredicateEnvironment scope;
-    environment();
-    const auto exponent = coordinate_exponent(points);
-    const auto p = normalized(points, exponent);
+    const AccountingContext context{active_work, statistics};
+    environment(context);
+    const auto exponent = coordinate_exponent(context, points);
+    const auto p = normalized(context, points, exponent);
     for (std::size_t i = 0; i < points.size(); ++i)
         for (std::size_t j = 0; j < i; ++j)
             if (points[i] == points[j])
@@ -590,7 +629,7 @@ Result orientation(const std::array<Point, 4>& points)
         long double extent = 0;
         for (std::size_t j = 0; j < 4; ++j)
             for (unsigned a = 0; a < 3; ++a)
-                extent = std::max(extent, std::abs(add(p[j][a].high, -p[i][a].high)));
+                extent = std::max(extent, std::abs(add(context, p[j][a].high, -p[i][a].high)));
         if (extent < best || (extent == best && points[i] < points[anchor]))
         {
             anchor = i;
@@ -611,60 +650,64 @@ Result orientation(const std::array<Point, 4>& points)
     std::array<CompensatedPoint, 3> edges;
     for (unsigned row = 0; row < 3; ++row)
         for (unsigned a = 0; a < 3; ++a)
-            edges[row][a] = sum(p[order[row + 1]][a], negate(p[anchor][a]));
-    const auto edge_exponent = normalize_edges(edges);
+            edges[row][a] = sum(context, p[order[row + 1]][a], negate(p[anchor][a]));
+    const auto edge_exponent = normalize_edges(context, edges);
     Twofold determinant;
     constexpr std::array<std::array<unsigned, 3>, 6> terms{
         {{0, 1, 2}, {1, 2, 0}, {2, 0, 1}, {0, 2, 1}, {1, 0, 2}, {2, 1, 0}}};
     for (unsigned t = 0; t < terms.size(); ++t)
     {
         const auto& term = terms[t];
-        auto value = multiply(multiply(edges[0][term[0]], edges[1][term[1]]), edges[2][term[2]]);
-        determinant = sum(determinant, t < 3 ? value : negate(value));
+        auto value = multiply(context, multiply(context, edges[0][term[0]], edges[1][term[1]]), edges[2][term[2]]);
+        determinant = sum(context, determinant, t < 3 ? value : negate(value));
     }
     if (inversions % 2)
         determinant = negate(determinant);
-    return finish(determinant, 3 * (exponent + edge_exponent));
+    return finish(context, determinant, 3 * (exponent + edge_exponent));
 }
 Result projected_orientation(const Point& a, const Point& b, const Point& c, unsigned drop)
 {
     if (drop >= 3)
         throw GeometryError(GeometryErrorCode::InvalidInput, "Ordinary predicate has an invalid projection axis.");
     const ScopedPredicateEnvironment scope;
-    environment();
+    const AccountingContext context{active_work, statistics};
+    environment(context);
     const std::array<Point, 3> points{a, b, c};
-    const auto exponent = coordinate_exponent(points);
-    const auto p = normalized(points, exponent);
+    const auto exponent = coordinate_exponent(context, points);
+    const auto p = normalized(context, points, exponent);
     std::array<CompensatedPoint, 2> edges;
     for (unsigned i = 0; i < 2; ++i)
         for (unsigned axis = 0; axis < 3; ++axis)
-            edges[i][axis] = sum(p[i + 1][axis], negate(p[0][axis]));
-    const auto edge_exponent = normalize_edges(edges);
+            edges[i][axis] = sum(context, p[i + 1][axis], negate(p[0][axis]));
+    const auto edge_exponent = normalize_edges(context, edges);
     const auto j = (drop + 1) % 3, k = (drop + 2) % 3;
-    const auto determinant = sum(multiply(edges[0][j], edges[1][k]), negate(multiply(edges[0][k], edges[1][j])));
-    return finish(determinant, 2 * (exponent + edge_exponent));
+    const auto determinant = sum(context, multiply(context, edges[0][j], edges[1][k]),
+        negate(multiply(context, edges[0][k], edges[1][j])));
+    return finish(context, determinant, 2 * (exponent + edge_exponent));
 }
 Result plane_distance(const Point& point, const Point& normal, const Point& anchor, long double offset)
 {
     const ScopedPredicateEnvironment scope;
-    environment();
+    const AccountingContext context{active_work, statistics};
+    environment(context);
     finite_input(offset);
     const std::array<Point, 2> points{point, anchor};
-    const auto exponent = coordinate_exponent(points);
-    const auto p = normalized(points, exponent);
+    const auto exponent = coordinate_exponent(context, points);
+    const auto p = normalized(context, points, exponent);
     Twofold result;
     for (unsigned a = 0; a < 3; ++a)
     {
         finite_input(normal[a]);
-        result = sum(result, multiply(sum(p[0][a], negate(p[1][a])), Twofold{normal[a]}));
+        result = sum(context, result, multiply(context, sum(context, p[0][a], negate(p[1][a])), Twofold{normal[a]}));
     }
-    result = sum(scaled(result, exponent), Twofold{-offset});
-    return finish(result, 0);
+    result = sum(context, scaled(context, result, exponent), Twofold{-offset});
+    return finish(context, result, 0);
 }
 Result plane_distance(const FramedPoint& point, const FramedPoint& anchor, const Point& normal, long double offset)
 {
     const ScopedPredicateEnvironment scope;
-    environment();
+    const AccountingContext context{active_work, statistics};
+    environment(context);
     finite_input(offset);
     const auto difference_exponent = [](int first, int second)
     {
@@ -686,25 +729,29 @@ Result plane_distance(const FramedPoint& point, const FramedPoint& anchor, const
     // Subtract normalized original origins before combining with local terms.
     // This retains cancellation without either a rounded global point or an
     // overflowing difference of opposite binary64 origins on narrow platforms.
-    const auto origin_exponent = coordinate_exponent(origins);
-    const auto normalized_origins = normalized(origins, origin_exponent);
+    const auto origin_exponent = coordinate_exponent(context, origins);
+    const auto normalized_origins = normalized(context, origins, origin_exponent);
     const auto local_scale = difference_exponent(point.exponent, anchor.exponent);
     const auto origin_scale = difference_exponent(origin_exponent, anchor.exponent);
     Twofold result;
     for (unsigned a = 0; a < 3; ++a)
     {
         const auto origin_difference =
-            scaled(sum(normalized_origins[0][a], negate(normalized_origins[1][a])), origin_scale);
-        const auto local_difference = sum(scaled(Twofold{point.local[a]}, local_scale), Twofold{-anchor.local[a]});
-        const auto relative = sum(origin_difference, local_difference);
-        result = sum(result, multiply(relative, Twofold{normal[a]}));
+            scaled(context, sum(context, normalized_origins[0][a], negate(normalized_origins[1][a])), origin_scale);
+        const auto local_difference =
+            sum(context, scaled(context, Twofold{point.local[a]}, local_scale), Twofold{-anchor.local[a]});
+        const auto relative = sum(context, origin_difference, local_difference);
+        result = sum(context, result, multiply(context, relative, Twofold{normal[a]}));
     }
-    return finish(sum(result, Twofold{-offset}), 0);
+    return finish(context, sum(context, result, Twofold{-offset}), 0);
 }
 int require_sign(const Result& result)
 {
     if (result.sign == Sign::Unresolved)
-        unresolved("Ordinary predicate sign remains unresolved after fixed-width compensation.");
+    {
+        const AccountingContext context{active_work, statistics};
+        unresolved(context, "Ordinary predicate sign remains unresolved after fixed-width compensation.");
+    }
     return static_cast<int>(result.sign);
 }
 } // namespace SimpleFluid::PLIC::details::ordinary_predicates

@@ -23,6 +23,16 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   endif()
   target_link_libraries(${TEST_NAME} SimpleFluid::Mesh GTest::gtest_main)
   simplefluid_configure_test_executable(${TEST_NAME})
+  if((TEST_NAME STREQUAL "testOrdinaryPredicateAccounting" OR TEST_NAME STREQUAL "testGeometryProvenanceBorrow"
+      OR TEST_NAME STREQUAL "testOrdinaryPredicateBatch")
+     AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${TEST_NAME} PRIVATE -fno-fast-math -ffp-contract=off -frounding-math -fno-lto)
+    set_target_properties(${TEST_NAME} PROPERTIES
+      INTERPROCEDURAL_OPTIMIZATION OFF
+      INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF
+      INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO OFF
+      DISABLE_PRECOMPILE_HEADERS ON)
+  endif()
   if(TEST_NAME STREQUAL "testMeshQualityAccess")
     simplefluid_discover_tests(${TEST_NAME}
         TEST_FILTER "QualityAccessTest.*"

@@ -91,14 +91,17 @@ DynamicPoint derived_point_authority(DynamicPoint result, std::span<const Dynami
         {
             std::vector<std::array<std::shared_ptr<const DynamicPointProvenance>, 2>> edges;
             if (affine && !inputs.empty())
-                if (const auto first = DynamicGeometryAccess::original_source(DynamicGeometryAccess::identity(inputs[0])))
+            {
+                const auto first_owner = DynamicGeometryAccess::identity(inputs[0]);
+                if (const auto& first = DynamicGeometryAccess::borrowed_original_source(first_owner))
                     for (const auto& edge : first->source_edges)
                     {
                         bool common = true;
                         for (const auto& input : inputs)
                         {
                             details::active_work->pair();
-                            const auto source = DynamicGeometryAccess::original_source(DynamicGeometryAccess::identity(input));
+                            const auto owner = DynamicGeometryAccess::identity(input);
+                            const auto& source = DynamicGeometryAccess::borrowed_original_source(owner);
                             bool incident = DynamicGeometryAccess::same_represented_source(source, edge[0]) ||
                                             DynamicGeometryAccess::same_represented_source(source, edge[1]);
                             if (source)
@@ -126,6 +129,7 @@ DynamicPoint derived_point_authority(DynamicPoint result, std::span<const Dynami
                             edges.push_back(edge);
                         }
                     }
+            }
             DynamicGeometryAccess::seal_generated(result, std::move(edges), result.supports());
         }
     }

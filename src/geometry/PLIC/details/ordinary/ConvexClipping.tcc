@@ -114,7 +114,8 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
         for (const auto& weak : plane->source_vertices)
         {
             active_work->pair();
-            if (DynamicGeometryAccess::same_represented_source(weak.lock(), candidate))
+            const auto owner = weak.lock();
+            if (DynamicGeometryAccess::same_represented_source(owner, candidate))
                 return true;
         }
         for (const auto& key : plane->authorities)
@@ -166,7 +167,7 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
             }
     if (!independent)
         return false;
-    const auto source_point = DynamicGeometryAccess::original_source(unique);
+    const auto& source_point = DynamicGeometryAccess::borrowed_original_source(unique);
     if (!source_point)
     {
         ++statistics.rejections;
@@ -241,7 +242,8 @@ bool recover_source_identity(Vertex& vertex, const Frame& frame, const StoredGeo
                 if (!support->normal_error || *support->normal_error != 0 || support->offset.value != 0 ||
                     support->source_vertices.empty())
                     return false;
-                const auto token = DynamicGeometryAccess::original_source(support->source_vertices.front().lock());
+                const auto owner = support->source_vertices.front().lock();
+                const auto& token = DynamicGeometryAccess::borrowed_original_source(owner);
                 if (!token || token->constructed || token->arithmetic_mode != ArithmeticMode::Ordinary ||
                     token->absolute_error != std::array<long double, 3>{})
                     return false;
