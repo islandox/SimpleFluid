@@ -1453,6 +1453,30 @@ identity. Ordinary compensated predicates bound evaluation on represented inputs
 they do not certify that rounded construction coordinates represent the intended
 intersection. A resolved negative measured volume therefore still rejects.
 
+Each Ordinary predicate captures the current thread's work owner and statistics
+at entry. Every charged operation keeps its capacity check and counter update;
+there is no speculative block precharge. An accumulator retains only its sum,
+so separate calls observe the current owner, including an explicitly substituted
+nested provider scope. Allocation and pair-work guards retain their existing
+boundaries.
+
+Read-only provenance comparisons borrow immutable ancestor owner slots while a
+named strong owner pins the chain. Weak sources are locked into an owner before
+borrowing; retained candidates, edges and ownership-returning APIs still acquire
+strong ownership. Numerical-only, arithmetic-mode and represented-native-source
+checks remain unchanged. Borrowing does not turn matching rounded coordinates
+into construction authority.
+
+The fixed two-term construction sum and four-term barycentric distance sum in
+Ordinary swept aggregation accept already computed contributions under one
+checked round-to-nearest scope. Terms are validated and added in order, and the
+caller's complete floating-point environment is restored on return or exception.
+Standalone predicate and accumulator entries still validate independently;
+validation is never cached across calls. The scope contains no callback or
+unrelated caller arithmetic. Removed environment probes reduce actual executed
+work counts; no fictitious charges replace them. Existing byte, operation and
+pair caps, strict compilation and numerical acceptance gates remain in force.
+
 Immutable geometry allocation accounting counts shared owners and their buffers
 once per construction work scope. Strong pins prevent address reuse from hiding
 later allocations. Charges for distinct owners, bookkeeping and temporary buffers

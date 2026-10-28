@@ -232,10 +232,8 @@ predicates::Result construction_sum(predicates::Result a, predicates::Result b, 
     return predicate(
         [&]
         {
-            predicates::ResultAccumulator sum;
-            sum.add(a);
-            sum.add(b);
-            return sum.result();
+            const std::array terms{a, b};
+            return predicates::sum_results(terms);
         },
         work);
 }
@@ -459,10 +457,7 @@ predicates::Result distance(const B& b, const B& error, const Distances& d, Aggr
     return predicate(
         [&]
         {
-            predicates::ResultAccumulator sum;
-            for (const auto& term : terms)
-                sum.add(term);
-            return sum.result();
+            return predicates::sum_results(terms);
         },
         work);
 }

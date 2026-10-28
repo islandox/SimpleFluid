@@ -44,7 +44,8 @@ void retain_edge(std::vector<Edge>& result, const Edge& edge)
 
 template<ArithmeticMode Mode> bool distinct(const Identity& first, const Identity& second)
 {
-    const auto a = DynamicGeometryAccess::original_source(first), b = DynamicGeometryAccess::original_source(second);
+    const auto& a = DynamicGeometryAccess::borrowed_original_source(first);
+    const auto& b = DynamicGeometryAccess::borrowed_original_source(second);
     if (!a || !b || a->constructed || b->constructed || a->numerical_only || b->numerical_only ||
         a->arithmetic_mode != Mode || b->arithmetic_mode != Mode ||
         DynamicGeometryAccess::same_represented_source(a, b) || !certification_environment())
@@ -103,10 +104,11 @@ template<ArithmeticMode Mode> bool directly_on(const Identity& token, const Stor
     for (const auto& weak : plane.source_vertices)
     {
         active_work->pair();
-        if (DynamicGeometryAccess::same_represented_source(token, weak.lock()))
+        const auto owner = weak.lock();
+        if (DynamicGeometryAccess::same_represented_source(token, owner))
             return true;
     }
-    for (auto point = token; point; point = point->source_origin)
+    for (const auto* point = token.get(); point; point = point->source_origin.get())
         for (const auto& key : plane.authorities)
             if (!key.key.empty())
                 for (const auto& support : point->supports)
@@ -122,7 +124,7 @@ template<ArithmeticMode Mode> bool point_on(const Identity& token, const StoredP
 {
     if (directly_on<Mode>(token, plane))
         return true;
-    const auto point = DynamicGeometryAccess::original_source(token);
+    const auto& point = DynamicGeometryAccess::borrowed_original_source(token);
     if (!point || point->numerical_only || point->arithmetic_mode != Mode)
         return false;
     // Retained edge records already passed distinctness and rank admission;
@@ -141,7 +143,7 @@ bool point_on_edge(const Identity& token, const Edge& edge)
     if (DynamicGeometryAccess::same_represented_source(token, edge[0]) ||
         DynamicGeometryAccess::same_represented_source(token, edge[1]))
         return true;
-    const auto point = DynamicGeometryAccess::original_source(token);
+    const auto& point = DynamicGeometryAccess::borrowed_original_source(token);
     if (point && !point->numerical_only)
         for (const auto& other : point->source_edges)
             if (same_edge(other, edge))
@@ -162,7 +164,8 @@ std::vector<Edge> infer_edges(const StoredVertex<Mode>& vertex, const StoredPlan
         for (const auto& weak : plane.source_vertices)
         {
             active_work->pair();
-            const auto point = DynamicGeometryAccess::original_source(weak.lock());
+            const auto owner = weak.lock();
+            const auto& point = DynamicGeometryAccess::borrowed_original_source(owner);
             if (!point || point->constructed || point->numerical_only || point->arithmetic_mode != Mode)
                 continue;
             bool duplicate = false;
@@ -241,7 +244,7 @@ void preserve_crossing_incidence(StoredVertex<Mode>& vertex, const StoredVertex<
         return;
     auto edges = numerical_only ? std::vector<Edge>{} : infer_edges<Mode>(vertex, nullptr);
     if (!numerical_only)
-        if (const auto first = DynamicGeometryAccess::original_source(a.source_identity))
+        if (const auto& first = DynamicGeometryAccess::borrowed_original_source(a.source_identity))
             for (const auto& edge : first->source_edges)
                 if (point_on_edge(b.source_identity, edge))
                     retain_edge(edges, edge);

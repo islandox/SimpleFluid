@@ -238,20 +238,28 @@ void DynamicGeometryAccess::seal(DynamicPoint& point, std::vector<PlaneAuthority
         DynamicPointProvenance{point.value, point.absolute_error, std::move(supports), point.arithmetic_mode});
 }
 
-std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::original_source(
-    std::shared_ptr<const DynamicPointProvenance> point)
+const std::shared_ptr<const DynamicPointProvenance>& DynamicGeometryAccess::borrowed_original_source(
+    const std::shared_ptr<const DynamicPointProvenance>& point)
 {
-    // Immutable exports point only to an earlier construction. Packet replay
+    static const std::shared_ptr<const DynamicPointProvenance> empty;
+    // The caller's owner pins every immutable source_origin slot. Packet replay
     // validates dependency order before any such links are created.
-    while (point && point->source_origin)
+    const auto* current = &point;
+    while (*current && (*current)->source_origin)
     {
-        if (point->numerical_only || point->source_origin->arithmetic_mode != point->arithmetic_mode)
-            return {};
+        if ((*current)->numerical_only || (*current)->source_origin->arithmetic_mode != (*current)->arithmetic_mode)
+            return empty;
         if (active_work)
             active_work->pair();
-        point = point->source_origin;
+        current = &(*current)->source_origin;
     }
-    return point && !point->numerical_only ? point : nullptr;
+    return *current && !(*current)->numerical_only ? *current : empty;
+}
+
+std::shared_ptr<const DynamicPointProvenance> DynamicGeometryAccess::original_source(
+    const std::shared_ptr<const DynamicPointProvenance>& point)
+{
+    return borrowed_original_source(point);
 }
 
 void DynamicGeometryAccess::seal_export(DynamicPoint& point,
@@ -406,7 +414,8 @@ bool DynamicGeometryAccess::same_represented_source(
     if ((a && a->numerical_only) || (b && b->numerical_only) ||
         (a && b && a->arithmetic_mode != b->arithmetic_mode))
         return false;
-    const auto first = original_source(a), second = original_source(b);
+    const auto& first = borrowed_original_source(a);
+    const auto& second = borrowed_original_source(b);
     return first && second &&
            (first == second || (first->represented_native_source && second->represented_native_source &&
                                    !first->constructed && !second->constructed &&
