@@ -29,6 +29,7 @@ set(SIMPLEFLUID_EQUATION_SOURCES
     turbulence/WallDistanceEquation.cc
 )
 simplefluid_absolute_sources(SIMPLEFLUID_EQUATION_SOURCES)
+simplefluid_debug_symbols_sources("EQUATIONS;SOLVERS" ${SIMPLEFLUID_EQUATION_SOURCES})
 set(SIMPLEFLUID_EQUATION_SOURCES "${SIMPLEFLUID_EQUATION_SOURCES}" PARENT_SCOPE)
 
 # Equations and solvers share one physical DSO; retain the logical facade.

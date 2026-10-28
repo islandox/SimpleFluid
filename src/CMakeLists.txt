@@ -47,6 +47,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cc")
     file(SIZE "${CMAKE_CURRENT_SOURCE_DIR}/main.cc" SIMPLEFLUID_MAIN_SIZE)
     if(SIMPLEFLUID_MAIN_SIZE GREATER 0)
         add_executable(SimpleFluid_app main.cc)
+        simplefluid_debug_symbols_target(SimpleFluid_app EXAMPLES)
         target_link_libraries(SimpleFluid_app PRIVATE SimpleFluid)
         target_precompile_headers(
             SimpleFluid_app REUSE_FROM SimpleFluidExecutablePch)
