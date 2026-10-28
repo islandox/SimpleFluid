@@ -1698,13 +1698,28 @@ implicit-upwind specialization while retaining the general swept path.
       geometry indexes with identity checks, accounted storage and prepublication
       budget admission. Report executed index work and final geometric-face theta
       distributions; retain dynamic phase classification each trial.
-- [ ] Qualify the original 50-cell skew/coarse-fine passage case over its ten-step
+- [x] Add opt-in, cell-relative Ordinary phase cleanup with cumulative global
+      absolute budgets, signed actual endpoint corrections, transactional owner
+      admission, policy-bound cleanup checkpoints and phase-only remap history.
+      Keep raw transport/physical drift gates and strict PLIC unchanged; expose
+      cleaned mass and declared cleanup momentum separately from arithmetic error.
+      See [phase cleanup](docs/modeling/phase_cleanup.md). Coupled remap channels
+      and complete solver restart serialization remain outside this policy.
+- [x] Exercise the original 50-cell ten-step passage horizon in serial and MPI
+      2/4 with cleanup explicitly enabled at a `1e-14` cell-relative cutoff and
+      cumulative caps of `1e-13` times each initial global phase inventory.
+      Retain the original raw drift, boundedness, momentum, divergence and passage
+      checks, and report actual signed/absolute cleanup and momentum corrections.
+- [ ] Qualify the original 50-cell skew/coarse-fine passage case with cleanup
+      disabled over its ten-step
       serial/MPI horizon under the uncertainty/conservation gates and documented
       storage-lifetime/work policies. Support-aware reach and defining-support
       predicates resolve the captured contacts; face-local storage admits complete
       transport steps, and directional PLIC admission completes the serial
       horizon. Strict offset representability for microscopic minorities still
-      blocks the full MPI horizon; retain the original volume tolerance. The conservative
+      blocks that MPI configuration; retain the original volume tolerance.
+      Budgeted cleanup is a distinct explicit policy; wider plane representation
+      remains optional robustness work for uncleaned inputs. The conservative
       frontier supporting-halfspace screen remains an admission limit for other
       constructions; finite-polygon containment is separate outstanding work.
 - [x] Share authenticated original-support contact between Ordinary wall

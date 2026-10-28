@@ -3,6 +3,7 @@
  */
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 namespace SimpleFluid::VoF
 {
 using SimpleFluid::geometry::swept_volume::runtime_phases;
@@ -74,6 +75,8 @@ void prepare_remap_schema(const GeneralVoF::Data& data, const GeneralVoF::Hierar
         !(options.maximum_relative_target_defect > 0) || !std::isfinite(options.maximum_relative_target_fit) ||
         !(options.maximum_relative_target_fit > 0))
         throw std::invalid_argument("Finite remap requires compatible source, actual native target and options.");
+    if (data.options.phase_cleanup.relative_cutoff > 0 && !options.channels.empty())
+        throw std::invalid_argument("Phase cleanup remap with coupled channels is unsupported.");
     wire::Budget budget{limit};
     wire::Writer w;
     w.word(data.control);
@@ -687,6 +690,8 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
         });
     const auto placeholder = std::make_shared<const GeneralVoF>(target, order, zero, native_volume, data.options);
     auto candidate = std::make_shared<Data>(*placeholder->data_);
+    candidate->phase_cleanup = data.phase_cleanup;
+    candidate->latest_phase_cleanup.clear();
     wire::collective(*comm,
         [&]
         {
@@ -792,6 +797,7 @@ GeneralVoF::FiniteRemapTrial GeneralVoF::plan_remap_finite(const Hierarchy::Plan
             if (!target->geometry_unchanged() || target->observation() != target_observation)
                 throw std::invalid_argument("Finite remap target observation changed during preparation.");
         });
+    apply_phase_cleanup(*candidate);
     import_phases<Mode>(*candidate);
     wire::collective(*comm, [&] { retained_budget<Mode>(*candidate); });
     result.candidate_ = std::move(candidate);

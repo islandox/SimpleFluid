@@ -36,14 +36,42 @@ void capacities(const GeneralVoF::Data& source, const GeneralVoF::Data& candidat
     result.new_mass.reserve(source.phases.size());
     result.old_mass_error.reserve(source.phases.size());
     result.new_mass_error.reserve(source.phases.size());
+    result.raw_new_mass.reserve(source.phases.size());
+    result.raw_new_mass_error.reserve(source.phases.size());
+    result.cleanup_mass.assign(source.phases.size(), 0);
+    std::map<std::uint64_t, const GeneralVoFPhaseCleanupDelta*> cleanup;
+    for (const auto& delta : result.phase_cleanup)
+        if (!cleanup.emplace(delta.gid, &delta).second)
+            throw std::invalid_argument("Prepared VoF cleanup has duplicate owned cells.");
     for (std::size_t c = 0; c < source.phases.size(); ++c)
     {
         const auto old = mass(source.phases[c]), next = mass(candidate.phases[c]);
+        auto raw = next;
+        const auto gid = source.topology->native.mesh->owned_cell_map()->getGlobalElement(c);
+        if (const auto found = cleanup.find(gid); found != cleanup.end())
+        {
+            const auto& delta = *found->second;
+            if (delta.key != source.topology->order[c] || delta.after[0] != candidate.phases[c].gas ||
+                delta.after[1] != candidate.phases[c].carrier ||
+                delta.volume[0] != static_cast<long double>(delta.after[0]) - delta.before[0] ||
+                delta.volume[1] != static_cast<long double>(delta.after[1]) - delta.before[1])
+                throw std::invalid_argument("Prepared VoF cleanup differs from its published phases.");
+            raw = mass(PhaseVolumes{candidate.phases[c].bulk, delta.before[0], delta.before[1]});
+            result.cleanup_mass[c] =
+                A::add(A::multiply(A::make_value(delta.volume[0], 0), A::make_value(result.density[0], 0)),
+                    A::multiply(A::make_value(delta.volume[1], 0), A::make_value(result.density[1], 0)))
+                    .value;
+            cleanup.erase(found);
+        }
         result.old_mass.push_back(old.value);
         result.new_mass.push_back(next.value);
         result.old_mass_error.push_back(old.absolute_error);
         result.new_mass_error.push_back(next.absolute_error);
+        result.raw_new_mass.push_back(raw.value);
+        result.raw_new_mass_error.push_back(raw.absolute_error);
     }
+    if (!cleanup.empty())
+        throw std::invalid_argument("Prepared VoF cleanup contains foreign owned cells.");
 }
 } // namespace
 void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) const
@@ -74,6 +102,10 @@ void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) co
     reserve(cell_closure_diagnostics.capacity(), sizeof(GeneralVoFCellClosureDiagnostic));
     for (const auto& closure : cell_closure_diagnostics)
         reserve_key_storage(closure.key, reserve);
+    reserve(phase_cleanup.capacity(), sizeof(GeneralVoFPhaseCleanupDelta));
+    for (const auto& delta : phase_cleanup)
+        reserve_key_storage(delta.key, reserve);
+    reserve(cleanup_momentum.capacity(), sizeof(std::array<long double, 3>));
     reserve(node_trajectories.capacity(), sizeof(GeneralVoFFiniteNodeTrajectory));
     for (const auto& trace : node_trajectories)
     {
@@ -82,7 +114,8 @@ void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) co
     }
     for (const auto* history : {&phase_roundoff, &old_phase_history, &new_phase_history})
         reserve(history->capacity(), sizeof(PhaseRoundoff));
-    for (const auto* mass : {&old_mass, &new_mass, &old_mass_error, &new_mass_error})
+    for (const auto* mass :
+        {&old_mass, &new_mass, &old_mass_error, &new_mass_error, &raw_new_mass, &raw_new_mass_error, &cleanup_mass})
         reserve(mass->capacity(), sizeof(long double));
 }
 void GeneralVoF::Trial::validate_prepared_transport(
@@ -101,6 +134,9 @@ void GeneralVoF::Trial::validate_prepared_transport(
                 prepared.new_mass.size() != source_->phases.size() ||
                 prepared.old_mass_error.size() != source_->phases.size() ||
                 prepared.new_mass_error.size() != source_->phases.size() ||
+                prepared.raw_new_mass.size() != source_->phases.size() ||
+                prepared.raw_new_mass_error.size() != source_->phases.size() ||
+                prepared.cleanup_mass.size() != source_->phases.size() ||
                 prepared.family != (interface_local_ ? GeneralVoFTransportFamily::InterfaceLocalSwept
                                        : homogeneous_algebraic_ || source_->options.transport_backend !=
                                                                        GeneralVoFTransportBackend::SweptPartition
@@ -244,7 +280,13 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
                 reserve_key_storage(closure.key, reserve);
             reserve(roundoff_.size() + source_->phase_history.size() + candidate_->phase_history.size(),
                 sizeof(PhaseRoundoff));
-            reserve(source_->phases.size(), 4 * sizeof(long double));
+            reserve(source_->phases.size(), 7 * sizeof(long double));
+            if (candidate_ != source_)
+            {
+                reserve(candidate_->latest_phase_cleanup.size(), sizeof(GeneralVoFPhaseCleanupDelta));
+                for (const auto& delta : candidate_->latest_phase_cleanup)
+                    reserve_key_storage(delta.key, reserve);
+            }
             result = std::make_shared<GeneralVoFPreparedTransport>();
             result->source_identity = source_;
             result->candidate_identity = candidate_;
@@ -298,6 +340,12 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
             result->phase_roundoff = roundoff_;
             result->old_phase_history = source_->phase_history;
             result->new_phase_history = candidate_->phase_history;
+            // A no-op trial can retain the source publication, whose latest
+            // cleanup belongs to an earlier step rather than this transport.
+            if (candidate_ != source_)
+                result->phase_cleanup = candidate_->latest_phase_cleanup;
+            result->old_phase_cleanup = source_->phase_cleanup;
+            result->new_phase_cleanup = candidate_->phase_cleanup;
             if (result->arithmetic_mode == ArithmeticMode::Ordinary)
                 capacities<ArithmeticMode::Ordinary>(*source_, *candidate_, *result);
             else

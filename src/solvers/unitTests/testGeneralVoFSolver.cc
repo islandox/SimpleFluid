@@ -1,5 +1,6 @@
 /** @file testGeneralVoFSolver.cc */
 #include "general_vof_solver_test_helpers.hh"
+#include <iostream>
 namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
@@ -449,6 +450,8 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         std::ostringstream text;
         text << std::setprecision(20) << value;
         RecordProperty(name, text.str());
+        if (std::getenv("SIMPLEFLUID_VOF_TEST_PROGRESS") && Tpetra::getDefaultComm()->getRank() == 0)
+            std::cerr << name << '=' << text.str() << std::endl;
     };
     const auto* exact_setting = std::getenv("SIMPLEFLUID_VOF_EXACT_STATS");
     const bool exact_enabled = exact_setting && std::string(exact_setting) == "1";
@@ -499,7 +502,7 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     material.gas_density = .1;
     material.liquid_density = 1;
     const auto fixture_started = Clock::now();
-    const auto initial_phases = skew_coarse_fine_plane();
+    const auto initial_phases = skew_coarse_fine_plane(true);
     const auto fixture_finished = Clock::now();
     GeneralVoFSolver solver(initial_phases, material);
     const auto constructor_finished = Clock::now();
@@ -595,6 +598,7 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         {
             momentum_residual = std::max(momentum_residual, ledger.physical_relative_residual);
             EXPECT_LE(ledger.physical_relative_residual, 1e-12);
+            EXPECT_LE(ledger.physical_relative_residual + ledger.cleanup_identity_relative_residual, 1e-12);
         }
         EXPECT_LT(after.maximum_divergence, 1e-8);
         for (std::size_t c = 0; c < solver.phases()->gas_volumes().size(); ++c)
@@ -611,6 +615,23 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         ++accepted_steps;
         record("accepted_steps", accepted_steps);
         record("accepted_time", solver.time());
+        const auto& cleanup = solver.phases()->phase_cleanup_state();
+        record("cleanup_cells", cleanup.cleaned_cells);
+        record("cleanup_signed_gas_volume", cleanup.signed_volume[0]);
+        record("cleanup_signed_carrier_volume", cleanup.signed_volume[1]);
+        record("cleanup_absolute_gas_volume", cleanup.absolute_volume[0]);
+        record("cleanup_absolute_carrier_volume", cleanup.absolute_volume[1]);
+        record("cleanup_largest_gas_volume", cleanup.largest_absolute_volume[0]);
+        record("cleanup_largest_carrier_volume", cleanup.largest_absolute_volume[1]);
+        record("cleanup_relative_cutoff", initial_phases->options().phase_cleanup.relative_cutoff);
+        record("cleanup_gas_budget", initial_phases->options().phase_cleanup.maximum_absolute_volume[0]);
+        record("cleanup_carrier_budget", initial_phases->options().phase_cleanup.maximum_absolute_volume[1]);
+        for (unsigned axis = 0; axis < 3; ++axis)
+            record("cleanup_momentum_" + std::to_string(axis),
+                solver.momentum_transport_diagnostics()[axis].accumulated_cleanup_momentum);
+        for (unsigned phase = 0; phase < 2; ++phase)
+            EXPECT_LE(
+                cleanup.absolute_volume[phase], initial_phases->options().phase_cleanup.maximum_absolute_volume[phase]);
     }
     // The region's only open internal boundary is the actual refined stripe
     // interface xi=.5; external walls are impermeable. The initial analytic

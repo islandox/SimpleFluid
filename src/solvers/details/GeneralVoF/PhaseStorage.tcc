@@ -8,6 +8,7 @@
 #include "utils/CompensatedSum.hh"
 #include <cmath>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <tuple>
 
@@ -68,8 +69,34 @@ void PhaseStorage<Mode>::validate(const MeshHandle<>& mesh_view, const VoF::Gene
         {
             if (candidate.arithmetic_mode() != Mode || candidate.arithmetic_mode() != source.arithmetic_mode())
                 throw std::runtime_error("Finite VoF candidate changed inventory policy.");
+            const auto same_cleanup = [](const auto& first, const auto& second)
+            {
+                return first.signed_volume == second.signed_volume && first.absolute_volume == second.absolute_volume &&
+                       first.largest_absolute_volume == second.largest_absolute_volume &&
+                       first.cleaned_cells == second.cleaned_cells && first.policy_bound == second.policy_bound &&
+                       first.policy.relative_cutoff == second.policy.relative_cutoff &&
+                       first.policy.maximum_absolute_volume == second.policy.maximum_absolute_volume;
+            };
+            if (!same_cleanup(prepared.old_phase_cleanup, source.phase_cleanup_state()) ||
+                !same_cleanup(prepared.new_phase_cleanup, candidate.phase_cleanup_state()))
+                throw std::runtime_error("Finite phase cleanup cumulative publication differs.");
             if (candidate.accepted_identity() == source.accepted_identity())
+            {
+                if (!prepared.phase_cleanup.empty())
+                    throw std::runtime_error("Unchanged finite phase publication repeats cleanup.");
                 return;
+            }
+            const auto latest_cleanup = candidate.latest_phase_cleanup();
+            if (latest_cleanup.size() != prepared.phase_cleanup.size())
+                throw std::runtime_error("Finite phase cleanup ledger is incomplete.");
+            for (std::size_t c = 0; c < latest_cleanup.size(); ++c)
+            {
+                const auto& first = latest_cleanup[c];
+                const auto& second = prepared.phase_cleanup[c];
+                if (first.key != second.key || first.gid != second.gid || first.before != second.before ||
+                    first.after != second.after || first.volume != second.volume)
+                    throw std::runtime_error("Finite phase cleanup ledger differs from its authority.");
+            }
             std::vector<VoF::finite_detail::SumFor<Mode>> gas(owned_count, VoF::finite_detail::SumFor<Mode>(Mode)),
                 carrier(owned_count, VoF::finite_detail::SumFor<Mode>(Mode));
             std::vector<CompensatedSum<>> gas_magnitude(owned_count), carrier_magnitude(owned_count);
@@ -98,11 +125,25 @@ void PhaseStorage<Mode>::validate(const MeshHandle<>& mesh_view, const VoF::Gene
             const auto& bounds = prepared.phase_roundoff;
             if (phases.size() != owned_count || bounds.size() != owned_count)
                 throw std::runtime_error("Finite phase publication has incompatible shape.");
+            auto raw_phases = phases;
+            std::set<GO> cleaned;
+            for (const auto& delta : prepared.phase_cleanup)
+            {
+                const auto row = mesh->owned_cell_map()->getLocalElement(GO(delta.gid));
+                if (Mode != ArithmeticMode::Ordinary || row < 0 || !cleaned.insert(GO(delta.gid)).second ||
+                    delta.key != candidate.owned_order()[row] || delta.after[0] != phases[row].gas ||
+                    delta.after[1] != phases[row].carrier ||
+                    delta.volume[0] != static_cast<long double>(delta.after[0]) - delta.before[0] ||
+                    delta.volume[1] != static_cast<long double>(delta.after[1]) - delta.before[1])
+                    throw std::runtime_error("Finite phase cleanup differs from its declared publication.");
+                raw_phases[row].gas = delta.before[0];
+                raw_phases[row].carrier = delta.before[1];
+            }
             for (std::size_t c = 0; c < owned_count; ++c)
                 for (const auto& item :
-                    {std::tuple{phases[c].gas, bounds[c].gas, gas[c].value(), gas_magnitude[c].value()},
-                        std::tuple{
-                            phases[c].carrier, bounds[c].carrier, carrier[c].value(), carrier_magnitude[c].value()}})
+                    {std::tuple{raw_phases[c].gas, bounds[c].gas, gas[c].value(), gas_magnitude[c].value()},
+                        std::tuple{raw_phases[c].carrier, bounds[c].carrier, carrier[c].value(),
+                            carrier_magnitude[c].value()}})
                 {
                     const auto expected = std::get<2>(item);
                     const auto difference = std::abs(static_cast<long double>(std::get<0>(item)) - expected.value);

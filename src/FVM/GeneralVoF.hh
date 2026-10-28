@@ -75,6 +75,29 @@ struct GeneralVoFFaceInterface
     PLIC::GeometryPoint centroid{}, normal{};
     double area = 0;
 };
+/** Explicit physical phase relabeling. Volumes and budgets are m^3; zero cutoff disables cleanup. */
+struct GeneralVoFPhaseCleanupOptions
+{
+    double relative_cutoff = 0;
+    std::array<double, 2> maximum_absolute_volume{};
+};
+/** Replicated global cumulative ledger. Absolute spends never cancel signed corrections. */
+struct GeneralVoFPhaseCleanupState
+{
+    /** Absolute volume is a conservative upper debit, separate from signed nominal sums. */
+    std::array<long double, 2> signed_volume{}, absolute_volume{}, largest_absolute_volume{};
+    GeneralVoFPhaseCleanupOptions policy;
+    bool policy_bound = false;
+    std::uint64_t cleaned_cells = 0;
+};
+/** Actual binary64 endpoint changes on one owned cell, gas then carrier. */
+struct GeneralVoFPhaseCleanupDelta
+{
+    Meshes::AMR::AdaptiveCellKey key;
+    std::uint64_t gid = 0;
+    std::array<double, 2> before{}, after{};
+    std::array<long double, 2> volume{};
+};
 struct GeneralVoFOptions
 {
     /** Rank-local application allocation bound, checked at each construction /
@@ -85,6 +108,7 @@ struct GeneralVoFOptions
     std::size_t byte_budget = 64 * 1024 * 1024, maximum_stencil_cells = 128, maximum_halo_cells = 65536;
     unsigned support_rings = 2;
     GeneralVoFTransportBackend transport_backend = GeneralVoFTransportBackend::SweptPartition;
+    GeneralVoFPhaseCleanupOptions phase_cleanup;
     PLIC::PolyhedralReconstructionOptions reconstruction;
     SimpleFluid::geometry::swept_volume::SweepLimits sweep;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
@@ -334,6 +358,10 @@ struct GeneralVoFPreparedTransport
     std::vector<GeneralVoFFiniteNodeTrajectory> node_trajectories;
     std::vector<PhaseRoundoff> phase_roundoff, old_phase_history, new_phase_history;
     std::vector<long double> old_mass, new_mass, old_mass_error, new_mass_error;
+    std::vector<GeneralVoFPhaseCleanupDelta> phase_cleanup;
+    GeneralVoFPhaseCleanupState old_phase_cleanup, new_phase_cleanup;
+    std::vector<long double> raw_new_mass, raw_new_mass_error, cleanup_mass;
+    std::vector<std::array<long double, 3>> cleanup_momentum;
     GeneralVoFTransportDiagnostics diagnostics;
     std::vector<GeneralVoFFaceChainDiagnostic> face_chain_diagnostics;
     std::vector<GeneralVoFCellClosureDiagnostic> cell_closure_diagnostics;
@@ -418,11 +446,16 @@ public:
      * With omitted declarations, a fresh exactly absent phase proves pure
      * geometry. Transport retains that hint only while no positive minority
      * geometry arrives; independent trace inventory carried by same-phase pure
-     * geometry does not itself assert a new interface. Nonzero fresh-input
-     * minorities remain Infer regardless of magnitude; explicit declarations
-     * (including Infer) and adopted capsule geometry remain authoritative. */
+     * geometry does not itself assert a new interface. With cleanup disabled,
+     * nonzero fresh-input minorities remain Infer regardless of magnitude;
+     * explicit declarations (including Infer) and adopted capsule geometry
+     * remain authoritative. Opt-in budgeted cleanup may relabel an admitted
+     * minority to zero and publish the corresponding pure declaration. */
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key> input_keys, std::vector<double> gas,
         std::vector<double> carrier, GeneralVoFOptions = {}, std::vector<GeneralVoFPhaseGeometry> declarations = {});
+    GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key> input_keys, std::vector<double> gas,
+        std::vector<double> carrier, GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry> declarations,
+        GeneralVoFPhaseCleanupState cleanup_state);
     [[nodiscard]] const std::shared_ptr<const MeshHandle<>>& mesh() const noexcept;
     [[nodiscard]] const std::shared_ptr<const Hierarchy>& hierarchy() const noexcept;
     [[nodiscard]] const std::vector<Key>& owned_order() const noexcept;
@@ -457,6 +490,12 @@ public:
      * never phase-presence, transport or mass authority; use phase_volumes(). */
     [[nodiscard]] std::vector<double> geometric_gas_fractions() const;
     [[nodiscard]] const GeneralVoFOptions& options() const noexcept;
+    [[nodiscard]] const GeneralVoFPhaseCleanupState& phase_cleanup_state() const noexcept;
+    [[nodiscard]] std::span<const GeneralVoFPhaseCleanupDelta> latest_phase_cleanup() const noexcept;
+    /** Versioned ledger-only checkpoint; restore together with accepted phases and options. */
+    [[nodiscard]] std::vector<char> phase_cleanup_checkpoint() const;
+    [[nodiscard]] static GeneralVoFPhaseCleanupState decode_phase_cleanup_checkpoint(std::span<const char>);
+
     /** Finite current provenance seeded by input admission and enlarged only
      * by explicitly derived publication/remap arithmetic uncertainty. */
     [[nodiscard]] const std::vector<PhaseError>& initial_occupancy_errors() const noexcept;
@@ -635,7 +674,10 @@ public:
      * Donor/bulk amounts and historical error cannot supply this allowance;
      * final narrowing and accumulated temporal history remain separate evidence.
      * Exhaustion is an arithmetic rejection, not a spatial-resolution diagnosis.
-     * No cell/source correction is invented. Mixed finite interfaces
+     * The raw update introduces no cell/source correction. Explicit opt-in
+     * phase cleanup runs only after these raw acceptance gates and records its
+     * actual endpoint changes against its separate cumulative absolute budget.
+     * Mixed finite interfaces
      * require neighborhood resolution admission before expensive fitting;
      * unavailable refinement rejects with a request and preserves accepted state.
      * Unsupported periodic images reject until image-qualified sweeps exist. */
@@ -703,10 +745,12 @@ private:
     SIMPLEFLUID_FVM_LOCAL FiniteRemapTrial plan_remap_finite(const Hierarchy::Plan&, std::shared_ptr<const Hierarchy>,
         std::span<const GeneralVoFFiniteOwnedChannels>, GeneralVoFFiniteRemapOptions) const;
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key>, std::vector<double>, std::vector<double>,
-        GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*);
+        GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*,
+        GeneralVoFPhaseCleanupState = {});
     template<ArithmeticMode Mode>
     SIMPLEFLUID_FVM_LOCAL void construct_mode(std::shared_ptr<const Hierarchy>, std::vector<Key>, std::vector<double>,
-        std::vector<double>, GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*);
+        std::vector<double>, GeneralVoFOptions, std::vector<GeneralVoFPhaseGeometry>, const ExactPhaseTransferResult*,
+        GeneralVoFPhaseCleanupState = {});
     explicit GeneralVoF(std::shared_ptr<const Data> data) : data_(std::move(data)) {}
     std::shared_ptr<const Data> data_;
 };

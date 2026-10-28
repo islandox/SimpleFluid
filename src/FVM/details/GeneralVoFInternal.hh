@@ -145,6 +145,8 @@ struct GeneralVoF::Data
     std::shared_ptr<const Hierarchy> supplied_hierarchy;
     AMR::HierarchyObservation supplied_observation;
     GeneralVoFOptions options;
+    GeneralVoFPhaseCleanupState phase_cleanup;
+    std::vector<GeneralVoFPhaseCleanupDelta> latest_phase_cleanup;
     std::uint64_t control = 0;
     std::weak_ptr<const void> adopted_source;
     std::uint64_t adopted_source_control = 0, adopted_transaction = 0, adopted_target_control = 0;

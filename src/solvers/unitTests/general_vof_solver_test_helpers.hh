@@ -196,7 +196,7 @@ std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(unsigned nx, unsign
     }
     return std::make_shared<const VoF::GeneralVoF>(hierarchy, std::move(order), std::move(gas), std::move(carrier));
 }
-std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
+std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool cleanup = false)
 {
     PLIC::GeometryLimits limits;
     limits.arithmetic_mode = ArithmeticMode::Ordinary;
@@ -266,7 +266,21 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane()
         gas.push_back(amounts.gas.as_double());
         carrier.push_back(amounts.carrier.as_double());
     }
-    return std::make_shared<const VoF::GeneralVoF>(refined, std::move(order), std::move(gas), std::move(carrier));
+    VoF::GeneralVoFOptions options;
+    if (cleanup)
+    {
+        double local[2]{}, global[2]{};
+        for (auto value : gas)
+            local[0] += value;
+        for (auto value : carrier)
+            local[1] += value;
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local, global);
+        options.phase_cleanup.relative_cutoff = 1e-14;
+        // Global extensive allowances: 0.5% of the unchanged 2e-11 drift gate.
+        options.phase_cleanup.maximum_absolute_volume = {1e-13 * global[0], 1e-13 * global[1]};
+    }
+    return std::make_shared<const VoF::GeneralVoF>(
+        refined, std::move(order), std::move(gas), std::move(carrier), options);
 }
 VoFMaterial inviscid()
 {
