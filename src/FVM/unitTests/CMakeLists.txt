@@ -10,6 +10,9 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   if(TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/FaceWorkspaceBudget.cc)
   endif()
+  if(TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/OwnerPlaneRequests.cc)
+  endif()
   if(TEST_NAME STREQUAL "testFilteredSurfaceGeometry")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/FilteredSurfaceGeometry.cc)
   endif()
@@ -25,6 +28,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/OnePassCases.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFPhaseCleanup" OR TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach" OR TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy" OR TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testFilteredSurfaceGeometry" OR TEST_NAME STREQUAL "testGeneralVoFInterfaceTransport" OR TEST_NAME STREQUAL "testGeneralVoFHomogeneousTransport" OR TEST_NAME STREQUAL "testGeneralVoFPreparedTransport" OR TEST_NAME STREQUAL "testGeneralVoFFaceTransport" OR TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testOrdinaryVoFSweep" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
+      OR TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
       OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     # Catch dependencies from FVM back into the higher-level solver DSO.
@@ -49,6 +53,13 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
   else()
     simplefluid_discover_tests(${TEST_NAME})
   endif()
+endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFOwnerPlaneRequests_${PROCS}procs
+    TARGET testGeneralVoFOwnerPlaneRequests PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFOwnerPlaneRequests.ExchangedOwnerCacheAndCollectiveRejectIncludeIdleRank"
+    LABELS "vof;geometry;reconstruction;resource;collective;empty_rank" TIMEOUT 180)
 endforeach()
 
 simplefluid_add_mpi_test(
@@ -326,7 +337,7 @@ foreach(PROCS IN ITEMS 2 4)
 endforeach()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set_source_files_properties(testGeneralVoFPhaseCleanup.cc testGeneralVoFFaceWorkspace.cc ../details/GeneralVoF/FaceWorkspaceBudget.cc testGeneralVoFBoundaryReach.cc testGeneralVoFMotionAccuracy.cc testGeneralVoFSpatialCache.cc ../details/GeneralVoF/LocalSpatialCache.cc testFilteredSurfaceGeometry.cc ../details/GeneralVoF/FilteredSurfaceGeometry.cc testGeneralVoFInterfaceTransport.cc testGeneralVoFHomogeneousTransport.cc testGeneralVoFPreparedTransport.cc testFiniteVoFRemap.cc testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc testOrdinaryVoFSweep.cc
+    set_source_files_properties(testGeneralVoFPhaseCleanup.cc testGeneralVoFFaceWorkspace.cc ../details/GeneralVoF/FaceWorkspaceBudget.cc testGeneralVoFOwnerPlaneRequests.cc ../details/GeneralVoF/OwnerPlaneRequests.cc testGeneralVoFBoundaryReach.cc testGeneralVoFMotionAccuracy.cc testGeneralVoFSpatialCache.cc ../details/GeneralVoF/LocalSpatialCache.cc testFilteredSurfaceGeometry.cc ../details/GeneralVoF/FilteredSurfaceGeometry.cc testGeneralVoFInterfaceTransport.cc testGeneralVoFHomogeneousTransport.cc testGeneralVoFPreparedTransport.cc testFiniteVoFRemap.cc testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc testOrdinaryVoFSweep.cc
         testExactGeneralVoF.cc exact/GeneralVoFRoundtrip.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE

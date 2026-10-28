@@ -568,6 +568,8 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     double gas_minimum = std::numeric_limits<double>::infinity(), carrier_minimum = gas_minimum;
     double fraction_minimum = 1, fraction_maximum = 0;
     unsigned accepted_steps = 0;
+    std::array<unsigned long long, 15> owner_request_counts{};
+    double owner_reconstruction_seconds = 0;
     record_exact("before_loop");
     for (unsigned step = 0; step < 10; ++step)
     {
@@ -589,6 +591,32 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         }
         record("step_" + std::to_string(step) + "_seconds",
             std::chrono::duration<double>(Clock::now() - step_started).count());
+        const auto& prepared = solver.prepared_transport();
+        EXPECT_TRUE(prepared);
+        if (prepared)
+        {
+            const auto& requests = prepared->diagnostics.owner_plane_requests;
+            EXPECT_EQ(requests.owner_reconstruction_calls,
+                requests.mixed_cell_fits + requests.retained_interface_returns + requests.pure_declaration_returns +
+                    requests.zero_phase_offset_returns);
+            EXPECT_EQ(requests.owner_reconstruction_calls + requests.local_result_hits + requests.peer_cache_hits,
+                requests.local_owned_requests + requests.incoming_peer_requests);
+            if (requests.cache_admission_denials == 0)
+                EXPECT_EQ(requests.owner_reconstruction_calls,
+                    requests.local_owned_requests + requests.peer_cache_admissions);
+            EXPECT_LE(requests.workspace_peak_bytes, initial_phases->options().byte_budget);
+            const std::array<unsigned long long, 15> counts{requests.local_owned_requests,
+                requests.incoming_peer_requests, requests.local_result_hits, requests.peer_cache_hits,
+                requests.peer_cache_admissions, requests.cache_admission_denials, requests.owner_reconstruction_calls,
+                requests.mixed_cell_fits, requests.retained_interface_returns, requests.pure_declaration_returns,
+                requests.zero_phase_offset_returns, requests.geometry_volume_evaluations,
+                requests.geometry_intersections, requests.peer_cache_peak_bytes, requests.workspace_peak_bytes};
+            for (std::size_t i = 0; i < 13; ++i)
+                owner_request_counts[i] += counts[i];
+            for (std::size_t i = 13; i < counts.size(); ++i)
+                owner_request_counts[i] = std::max(owner_request_counts[i], counts[i]);
+            owner_reconstruction_seconds += requests.reconstruction_seconds;
+        }
         gas_drift = std::max(gas_drift, std::abs(after.gas_mass - before.gas_mass) / before.gas_mass);
         liquid_drift = std::max(liquid_drift, std::abs(after.liquid_mass - before.liquid_mass) / before.liquid_mass);
         maximum_divergence = std::max(maximum_divergence, after.maximum_divergence);
@@ -656,6 +684,27 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     record("maximum_gas_fraction", global_fraction_maximum);
     record("regional_gas_passage", passage);
     record("complete_case_seconds", std::chrono::duration<double>(Clock::now() - started).count());
+    // Gather rank-local work only after the timed physical horizon. Work counters
+    // may decrease with reuse; physical and cleanup receipts remain the parity oracle.
+    const auto comm = Tpetra::getDefaultComm();
+    std::vector<unsigned long long> all_owner_counts(owner_request_counts.size() * comm->getSize());
+    std::vector<double> all_owner_seconds(comm->getSize());
+    Teuchos::gatherAll(*comm, int(owner_request_counts.size()), owner_request_counts.data(),
+        int(all_owner_counts.size()), all_owner_counts.data());
+    Teuchos::gatherAll(
+        *comm, 1, &owner_reconstruction_seconds, int(all_owner_seconds.size()), all_owner_seconds.data());
+    constexpr std::array<const char*, 15> owner_count_names{"local_owned_requests", "incoming_peer_requests",
+        "local_result_hits", "peer_cache_hits", "peer_cache_admissions", "cache_admission_denials",
+        "owner_reconstruction_calls", "mixed_cell_fits", "retained_interface_returns", "pure_declaration_returns",
+        "zero_phase_offset_returns", "geometry_volume_evaluations", "geometry_intersections", "peer_cache_peak_bytes",
+        "workspace_peak_bytes"};
+    for (int rank = 0; rank < comm->getSize(); ++rank)
+    {
+        const auto prefix = "owner_requests_rank_" + std::to_string(rank) + "_";
+        for (std::size_t i = 0; i < owner_count_names.size(); ++i)
+            record(prefix + owner_count_names[i], all_owner_counts[rank * owner_count_names.size() + i]);
+        record(prefix + "reconstruction_seconds", all_owner_seconds[rank]);
+    }
     const auto operations = observed_geometry_statistics().bounded;
     // These are bounded-kernel counters. A zero here alone is not a global
     // proof that other infrastructure performed no rational operation.

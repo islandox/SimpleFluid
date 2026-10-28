@@ -213,8 +213,9 @@ SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> reconstruct_local(const GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
-SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(
-    const GeneralVoF::Data& data, const std::set<Key>& requested, const PLIC::GeometryPacketContext& context);
+SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVoF::Data& data,
+    const std::set<Key>& requested, const PLIC::GeometryPacketContext& context, geometry::swept_volume::Work& work,
+    GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
 } // namespace general_vof_detail
 } // namespace SimpleFluid::VoF
