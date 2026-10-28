@@ -18,9 +18,8 @@ template<ArithmeticMode Mode> struct PolyhedralPhaseSample
     ConvexGeometryPtr<Mode> geometry;
     double gas_volume = 0, carrier_volume = 0;
 };
-/** A necessary interface-support screen, separate from arithmetic acceptance and
- * spatial convergence qualification. Small cuts use their whole neighborhood.
- * A failed assessment requests one refinement level and a fresh assessment. */
+/** Directional admission, separate from arithmetic acceptance and spatial
+ * convergence qualification. A failed assessment requests fresh support. */
 struct PolyhedralResolutionAssessment
 {
     enum class Reason
@@ -28,11 +27,19 @@ struct PolyhedralResolutionAssessment
         Admitted,
         InsufficientStencil,
         InsufficientPhaseSupport,
-        UnresolvedPlaneModel
+        UnresolvedPlaneModel,
+        RankDeficientStencil,
+        IllConditionedStencil,
+        NoDirectionalSignal
     };
     Reason reason = Reason::Admitted;
     double local_cell_span = 0, requested_cell_span = 0;
     double gas_support_fraction = 0, carrier_support_fraction = 0;
+    /** Dimensionless LS conditioning and direction strength. Uncertainty is a
+     * propagated roundoff estimate, not a certified enclosure. */
+    double stencil_condition = 0, directional_strength = 0, directional_uncertainty = 0;
+    /** True only after directional admission and sufficient phase support. */
+    bool angular_fit_eligible = false;
     std::size_t stencil_cells = 0;
     [[nodiscard]] bool admitted() const noexcept { return reason == Reason::Admitted; }
 };
@@ -61,9 +68,9 @@ struct PolyhedralReconstructionOptions
     double maximum_condition = 1e8;
     double orientation_tolerance = 2e-8, maximum_model_residual = .2;
     /** Each phase must occupy at least this fraction of some target/stencil
-     * cell before a mixed finite reconstruction. This requests more spatial
-     * support; it never erases or clips a smaller target-cell phase amount.
-     * The default requires majority support on both sides of an interface. */
+     * cell for angular fitting. A usable gradient remains admissible below
+     * this support threshold. The plane-model bound applies unless the
+     * existing small-phase exclusion below suppresses neighbor fitting. */
     double minimum_phase_support_fraction = .5;
     /** Retain the supported weighted-gradient normal when the
      * volume-equivalent minority/cell length ratio cbrt(min(G,L))/cbrt(Vcell)
@@ -82,9 +89,10 @@ struct PolyhedralInterface
 {
     GeometryHalfspace gas;
     double target_volume_residual = 0;
-    /** Kernel angular-model residual. Gradient results leave it zero and
-     * unmeasured; callers admitting supplied planes may publish their own RMS. */
+    /** Neighbor-volume RMS when measured. The supported small-phase gradient
+     * exclusion leaves it zero and unmeasured. */
     double stencil_volume_residual = 0;
+    bool stencil_volume_residual_measured = false;
     GeometryValue<ArithmeticMode::Exact> target_volume_difference; ///< Exact-mode signed minority residual.
     DynamicGeometryValue finite_target_volume_difference;          ///< Finite construction/arithmetic enclosure.
     /** Ordinary-only roundoff indicator; this is not a certified enclosure. */
@@ -100,7 +108,7 @@ struct PolyhedralInterface
     bool pure_gas = false, pure_carrier = false;
 };
 /** Stateless compiled kernel. The supported LS gradient supplies the normal for
- * subthreshold phases; otherwise it initializes the angular volume fit,
+ * weak angular support and supported subthreshold phases; otherwise it initializes the angular volume fit,
  * with the target offset solved anew at every angular evaluation. Curved
  * stencils may have a nonzero reported model residual; angular optimizer convergence and the explicit
  * model-defect bound are distinct from the strict planar-volume oracle.
@@ -112,8 +120,8 @@ template<ArithmeticMode Mode> class SIMPLEFLUID_FVM_EXPORT PolyhedralReconstruct
 
 public:
     static void validate(const PolyhedralPhaseSample<Mode>&, PolyhedralReconstructionOptions = {});
-    /** Read-only preflight. Missing/dilute support requests refinement; the
-     * angular model gate remains independent of arithmetic admission. */
+    /** Read-only preflight of rank, conditioning and meaningful direction.
+     * Majority-phase support selects angular eligibility rather than admission. */
     [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution(const PolyhedralPhaseSample<Mode>&,
         std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
     /** Offset utility for a supplied normal. Physical interface admission

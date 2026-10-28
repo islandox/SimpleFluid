@@ -11,7 +11,7 @@ namespace
 {
 constexpr auto mode = ArithmeticMode::Ordinary;
 constexpr auto original_face = std::numeric_limits<std::uint64_t>::max();
-constexpr std::uint64_t protocol = 0x5346434150504c01ULL;
+constexpr std::uint64_t protocol = 0x5346434150504c02ULL;
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Wide = std::array<long double, 3>;
 using Planes = std::map<Key, PLIC::PolyhedralInterface>;
@@ -297,6 +297,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
     result.resolution = initial.resolution;
     result.gas = selected->gas;
     result.stencil_volume_residual = static_cast<double>(selected_stencil_residual);
+    result.stencil_volume_residual_measured = true;
     result.finite_geometry = true;
     result.finite_target_volume_difference = {target_evidence.difference, 0, mode};
     result.target_volume_residual = static_cast<double>(target_evidence.difference);

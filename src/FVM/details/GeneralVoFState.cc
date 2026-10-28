@@ -245,6 +245,7 @@ void plane(wire::Writer& w, const PLIC::PolyhedralInterface& p)
     w.word(p.pure_gas);
     w.word(p.pure_carrier);
     real(w, p.stencil_volume_residual);
+    plane_wire_detail::boolean(w, p.stencil_volume_residual_measured);
     real(w, p.stencil_condition);
     real(w, p.orientation_step);
     w.word(p.fit_iterations);
@@ -263,16 +264,17 @@ PLIC::PolyhedralInterface plane(wire::Reader& r, std::optional<ArithmeticMode> m
     for (auto& v : p.gas.anchor)
         v = real(r);
     p.gas.offset = real(r);
-    p.pure_gas = r.word();
-    p.pure_carrier = r.word();
+    p.pure_gas = plane_wire_detail::boolean(r);
+    p.pure_carrier = plane_wire_detail::boolean(r);
     p.stencil_volume_residual = real(r);
+    p.stencil_volume_residual_measured = plane_wire_detail::boolean(r);
     p.stencil_condition = real(r);
     p.orientation_step = real(r);
     p.fit_iterations = r.word();
     p.orientation_method = plane_wire_detail::orientation(r);
-    p.fit_converged = r.word();
+    p.fit_converged = plane_wire_detail::boolean(r);
     p.target_volume_numerical_error_estimate = finite_real(r);
-    p.finite_geometry = r.word();
+    p.finite_geometry = plane_wire_detail::boolean(r);
     if (p.finite_geometry)
         p.finite_target_volume_difference = finite_value(r, mode);
     return p;
@@ -666,7 +668,7 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
                 throw std::invalid_argument("General VoF face geometry operation limit must be positive.");
             budget.packet(22 * 8);
             wire::Writer w;
-            w.word(4); // Includes the independent per-face scalar-work guard.
+            w.word(5); // Includes the measured finite gradient-fit policy.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
                      std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
                      std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
@@ -877,6 +879,11 @@ std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(const Gene
 template<ArithmeticMode Mode> PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key)
 {
     const auto& cell = data.cells.at(key);
+    ::SimpleFluid::detail::vof_failure::Scope scope("general_vof_reconstruct_cell");
+    scope.record.cell = cell.gid;
+    scope.record.mark(::SimpleFluid::detail::vof_failure::Field::Cell);
+    scope.record.arithmetic_mode = Mode;
+    scope.record.mark(::SimpleFluid::detail::vof_failure::Field::Arithmetic);
     validate_cell<Mode>(cell, data.options);
     if (cell.retained_interface)
     {

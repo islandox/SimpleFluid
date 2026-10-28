@@ -63,19 +63,24 @@ configured topology support rings and enters reconstruction.
 
 Mixed-cell admission checks the target and stencil before selecting an orientation method:
 
-- At least four stencil cells are required, with a nonzero, sufficiently
-  conditioned three-dimensional least-squares normal estimate.
-- Each phase must reach `minimum_phase_support_fraction` in at least one cell
-  of the target-plus-stencil neighborhood. These can be different cells. The
-  default is `0.5`; a small cut in the target can be admitted when neighboring
-  cells provide support for both phases.
+- At least four stencil cells and a full-rank, sufficiently conditioned
+  three-dimensional centroid arrangement are required.
+- The phase differences must supply a directional signal larger than its
+  propagated numerical uncertainty estimate. A well-conditioned arrangement of
+  identical fractions supplies no direction; normalizing roundoff is insufficient.
+- Majority support is assessed only after directional validity. Each phase
+  reaching `minimum_phase_support_fraction` somewhere in the target-plus-stencil
+  neighborhood makes angular improvement eligible. The default remains `0.5`;
+  absence of a majority sample does not by itself reject a usable gradient.
 - Sample validity, arithmetic compatibility, and stencil-size limits apply.
 
-Insufficient stencil or phase support raises `PolyhedralResolutionRequired`.
+Insufficient sample count, rank deficiency, excessive conditioning, absent
+directional signal and a rejected selected plane model have distinct assessment
+reasons. They raise `PolyhedralResolutionRequired` without changing the amounts.
 The assessment requests a maximum cell span of half the target's current
 maximum axis span. The caller must refine or recover missing initial geometry
 and reassess; reconstruction does not run an adaptation controller. This is a
-necessary support screen, not proof of resolved interface thickness or spatial
+generic refinement hint, not a measured resolution requirement or proof of resolved interface thickness or spatial
 convergence. It never converts a mixed inventory to pure by applying a cutoff.
 
 ## Reconstruction flow
@@ -90,11 +95,13 @@ flowchart TD
     B["Validate sample and controls"]
     C{"Pure cell?"}
     P["Return pure-phase support plane"]
-    D{"Sufficient phase support<br/>and conditioned 3D stencil?"}
+    D{"Complete usable 3D stencil<br/>and meaningful direction?"}
     R["Request refinement / reassessment<br/>Preserve accepted inventories"]
     E["Weighted least-squares gradient<br/>Supported gas-outward unit normal"]
     S{"Minority equivalent length<br/>below optimization threshold?"}
     O["Keep gradient normal<br/>Fit only the target offset"]
+    M{"Majority support permits<br/>angular improvement?"}
+    W["Keep gradient normal<br/>Fit offset and measure neighbor RMS"]
     F["Fit target offset for current normal<br/>Clip stencil cells and form residuals"]
     G["Perturb normal in two tangent directions<br/>Refit offset at every evaluation"]
     H["Build angular Gauss-Newton system<br/>Check conditioning and observability"]
@@ -110,7 +117,9 @@ flowchart TD
     D -- No --> R
     D -- Yes --> E --> S
     S -- Yes --> O --> L
-    S -- No --> F --> G --> H --> I
+    S -- No --> M
+    M -- No --> W --> K
+    M -- Yes --> F --> G --> H --> I
     H -- Singular or unobservable --> X
     I -- No --> J
     J -- Improved normal --> F
@@ -122,9 +131,9 @@ flowchart TD
 
 ### Initial normal and angular objective
 
-Let $\alpha_i=V_{g,i}/V_i$ be the geometric sample fraction and
-$\mathbf{r}_i=\mathbf{x}_i-\mathbf{x}_0$ the displacement between physical
-cell centroids. The initial direction solves
+Let $\alpha_i=V_{g,i}/(V_{g,i}+V_{l,i})$ be the independently supplied sample
+fraction and $\mathbf{r}_i=(\mathbf{x}_i-\mathbf{x}_0)/h$ the centroid displacement
+normalized by the target's largest span. The initial direction solves
 
 $$
 \left(\sum_i\frac{\mathbf{r}_i\mathbf{r}_i^T}{|\mathbf{r}_i|^2}\right)\mathbf{q}
@@ -132,8 +141,14 @@ $$
 \qquad \mathbf{n}_0=\frac{\mathbf{q}}{|\mathbf{q}|}.
 $$
 
-The minus sign gives the gas-outward convention. There is no arbitrary-axis
-fallback for an unsupported mixed three-dimensional stencil.
+The minus sign gives the gas-outward convention. The finite implementation selects the
+target's smaller phase for the whole solve, reversing the carrier-gradient sign
+so it never recovers a tiny carrier signal by subtracting gas fractions near one.
+It assembles in wider finite arithmetic and estimates fraction, assembly and solve
+roundoff. The matrix infinity-norm condition and propagated gradient uncertainty
+are separate diagnostics; the dimensionless Euclidean gradient strength must
+exceed the uncertainty estimate. These estimates are not geometric certificates
+or bounds on interface-orientation accuracy. There is no arbitrary-axis fallback.
 
 The provisional small-phase policy uses volume-equivalent characteristic lengths:
 
@@ -145,7 +160,8 @@ $$
 The default ratio is `0.05`; it is a configurable modeling choice, not a measured
 interface thickness or a certified resolution bound. It is invariant under unit
 scaling and exchanging the phase labels. Values in `[0,1]` are accepted; zero
-explicitly disables this exclusion. Equality remains eligible for angular fitting.
+explicitly disables this exclusion. Equality receives no small-phase exclusion;
+angular improvement still requires the finite majority-support eligibility.
 
 Below the threshold, the supported gradient determines the orientation. Only the
 target-cell offset is fitted: no neighboring-cell volume objective, angular
@@ -154,12 +170,23 @@ volume accuracy and offset-work limits still apply. An unresolved offset rejects
 the policy neither deletes a phase inventory nor declares a mixed cell pure.
 Ordinary, BoundedCertification and explicit Exact reconstruction share this
 orientation-selection policy while retaining their separate arithmetic and support
-contracts. For other mixed cells, the gradient initializes the angular fit below.
+contracts. The finite tiny-phase branch depends on directional validity and the
+existing size threshold, not on majority eligibility. It does not claim that the
+neighborhood is accurately represented by its plane. Other finite mixed cells
+with weak majority support retain the gradient, strictly fit the target offset,
+and evaluate neighboring-volume RMS against `maximum_model_residual`. Eligible
+cells initialize the angular fit below. A later angular or arithmetic failure
+never automatically selects the gradient fallback.
 
 `PolyhedralInterface::orientation_method` distinguishes `Gradient`,
 `AngularVolumeFit` and `SuppliedNormal`. Gradient results report zero angular
 iterations and leave `fit_converged` false because no angular optimizer ran.
-Their zero stencil residual is unmeasured, not evidence of a zero model mismatch.
+`stencil_volume_residual_measured` distinguishes an evaluated residual from the
+unmeasured zero on the tiny-phase branch. Moderate weak-support gradients publish
+their measured RMS; angular fits and measured supplied-plane paths set the same
+flag. The flag survives plane exchange and transfer. A large RMS for a gradient
+plane shows poor agreement for that selected plane, not that every possible
+orientation is incompatible.
 Target-volume residual diagnostics remain available on every fitted-offset path.
 
 For each candidate normal, the inner solve fits the target offset anew. That
@@ -266,7 +293,7 @@ Defaults in `PolyhedralReconstructionOptions` are:
 | `fit_tolerance` | `2e-9` | Dimensionless stencil RMS convergence threshold |
 | `orientation_tolerance` | `2e-8` | Tangent-step norm convergence threshold |
 | `maximum_model_residual` | `0.2` | Maximum accepted dimensionless stencil RMS defect |
-| `minimum_phase_support_fraction` | `0.5` | Required neighborhood support for each phase |
+| `minimum_phase_support_fraction` | `0.5` | Majority-support eligibility for angular improvement after directional admission |
 | `minimum_optimized_phase_length_ratio` | `0.05` | Below this volume-equivalent length ratio, use the supported gradient without angular fitting |
 | `maximum_condition` | `1e8` | Conditioning limit for normal estimation and angular fitting |
 | `maximum_offset_iterations` | `192` | Iteration cap per target-offset fit |
@@ -274,8 +301,9 @@ Defaults in `PolyhedralReconstructionOptions` are:
 | `maximum_stencil_cells` | `128` | Reconstruction stencil-size cap |
 | `maximum_clip_evaluations` | `32768` | Shared target/stencil evaluation cap for one reconstruction |
 
-The initial linear solve uses a pivot-ratio conditioning check; the angular
-system uses its eigenvalue ratio and a separate observability check. Geometry
+The finite initial linear solve uses `||A||inf * ||inverse(A)||inf` and a
+directional-signal uncertainty check; the angular system uses its eigenvalue
+ratio and separate observability check. Geometry
 operations and the enclosing `GeneralVoF` transaction also impose their own
 resource limits. These caps are failure conditions, not permissions to discard
 phase amounts or return an unconverged fit.
@@ -284,10 +312,12 @@ phase amounts or return an unconverged fit.
 
 `PolyhedralInterface` returns the gas halfspace, pure-phase flags, signed target
 volume residual, finite residual evidence, stencil RMS residual, condition
-diagnostic, orientation method, angular step, iteration count, convergence flag, and resolution
+diagnostic, orientation method, angular step, iteration count, convergence flag, RMS-measured flag, and resolution
 assessment. The signed target residual refers to the selected minority phase,
 which need not be gas. Pure or reused geometry does not necessarily carry a
-fresh angular-fit convergence record.
+fresh angular-fit convergence record. Local assessments retain directional strength,
+uncertainty and eligibility; existing plane exchange/transfer formats carry the
+plane's method, condition and measured-RMS flag, rather than the full assessment.
 
 `solve_offset` validates a supplied normal's numerical volume fit; it does not
 perform the neighborhood support and angular-model admission of `reconstruct`.

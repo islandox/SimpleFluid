@@ -5,8 +5,9 @@
 #include "FVM/GeometricVoF.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
-#include "geometry/swept_volume/SweptGeometry.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
+#include "geometry/swept_volume/SweptGeometry.hh"
+#include "plic_full50_step3_fixture.hh"
 #include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
@@ -143,7 +144,7 @@ TEST(PolyhedralReconstruction, OrdinarySupportAndModelGatesRemainIndependentOfCe
     for (const auto index : neighbors())
         insufficient.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, .01));
     EXPECT_EQ(PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::assess_resolution(dilute, insufficient).reason,
-        PLIC::PolyhedralResolutionAssessment::Reason::InsufficientPhaseSupport);
+        PLIC::PolyhedralResolutionAssessment::Reason::NoDirectionalSignal);
     EXPECT_THROW((void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::reconstruct(dilute, insufficient),
         PLIC::PolyhedralResolutionRequired);
 
@@ -212,6 +213,7 @@ template<ArithmeticMode Mode> void small_phase_gradient_orientation()
             EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
             EXPECT_FALSE(fit.fit_converged);
             EXPECT_EQ(fit.fit_iterations, 0u);
+            EXPECT_FALSE(fit.stencil_volume_residual_measured);
             EXPECT_EQ(fit.orientation_step, 0);
             EXPECT_FALSE(fit.pure_gas);
             EXPECT_FALSE(fit.pure_carrier);
@@ -221,8 +223,7 @@ template<ArithmeticMode Mode> void small_phase_gradient_orientation()
                 EXPECT_NEAR(fit.gas.normal[axis], (gas ? 1. : -1.) * (3. - axis) / std::sqrt(14.), 2e-15);
             // Independent tetrahedron volume: 3*x+2*y+z <= q has V=q^3/36.
             const auto minority = gas ? target.gas_volume : target.carrier_volume;
-            EXPECT_NEAR(fit.gas.offset, (gas ? 1 : -1) * std::cbrt(36 * minority) / std::sqrt(14.),
-                2e-15 * scale);
+            EXPECT_NEAR(fit.gas.offset, (gas ? 1 : -1) * std::cbrt(36 * minority) / std::sqrt(14.), 2e-15 * scale);
             EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) +
                           fit.finite_target_volume_difference.absolute_error,
                 static_cast<long double>(minority) * options.volume_tolerance);
@@ -261,15 +262,15 @@ template<ArithmeticMode Mode> void small_phase_policy_boundaries()
         options.minimum_optimized_phase_length_ratio = .125;
         const auto fit = PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, options);
         const bool gradient = fraction < 1. / 512;
-        EXPECT_EQ(fit.orientation_method,
-            gradient ? PLIC::PolyhedralOrientationMethod::Gradient : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+        EXPECT_EQ(fit.orientation_method, gradient ? PLIC::PolyhedralOrientationMethod::Gradient
+                                                   : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
         EXPECT_EQ(fit.fit_converged, !gradient);
         if (fraction == .0001 || fraction == .0002)
         {
             const auto default_fit = PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil);
-            EXPECT_EQ(default_fit.orientation_method,
-                fraction == .0001 ? PLIC::PolyhedralOrientationMethod::Gradient
-                                  : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+            EXPECT_EQ(default_fit.orientation_method, fraction == .0001
+                                                          ? PLIC::PolyhedralOrientationMethod::Gradient
+                                                          : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
         }
         options.minimum_optimized_phase_length_ratio = 0;
         const auto angular = PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, options);
@@ -277,8 +278,8 @@ template<ArithmeticMode Mode> void small_phase_policy_boundaries()
         EXPECT_TRUE(angular.fit_converged);
     }
     const auto target = uniform_sample<Mode>({0, 0, 0}, 1, std::ldexp(1., -20));
-    for (const double invalid : {-1., 1.01, std::numeric_limits<double>::infinity(),
-             std::numeric_limits<double>::quiet_NaN()})
+    for (const double invalid :
+        {-1., 1.01, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()})
     {
         PLIC::PolyhedralReconstructionOptions options;
         options.minimum_optimized_phase_length_ratio = invalid;
@@ -300,6 +301,236 @@ TEST(PolyhedralReconstruction, SmallPhaseExclusionRetainsThresholdSupportAndOffs
 {
     small_phase_policy_boundaries<ArithmeticMode::Ordinary>();
     small_phase_policy_boundaries<ArithmeticMode::BoundedCertification>();
+}
+
+template<ArithmeticMode Mode> void weak_planar_layer(bool corner)
+{
+    using Sample = PLIC::PolyhedralPhaseSample<Mode>;
+    using Kernel = PLIC::PolyhedralReconstruction<Mode>;
+    for (const double h : {.5, 1., 2.})
+        for (const bool complement : {false, true})
+        {
+            const double fraction = corner ? .125 : .25;
+            auto target = uniform_sample<Mode>({0, 0, 0}, h, fraction);
+            std::vector<Sample> stencil;
+            // The wall layer is x<h/4. The corner layer x+y<h/2 has
+            // triangular cross-section area h^2/8. All volumes are analytic.
+            for (const auto index :
+                (corner ? std::vector<std::array<int, 3>>{{1, 0, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}}
+                        : std::vector<std::array<int, 3>>{{1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}}))
+            {
+                const bool inward = index[0] != 0 || (corner && index[1] != 0);
+                stencil.push_back(uniform_sample<Mode>(index, h, inward ? 0 : fraction));
+            }
+            if (complement)
+            {
+                std::swap(target.gas_volume, target.carrier_volume);
+                for (auto& sample : stencil)
+                    std::swap(sample.gas_volume, sample.carrier_volume);
+            }
+            const auto original = target;
+            const auto assessment = Kernel::assess_resolution(target, stencil);
+            ASSERT_TRUE(assessment.admitted());
+            EXPECT_FALSE(assessment.angular_fit_eligible);
+            EXPECT_GT(assessment.directional_strength, assessment.directional_uncertainty);
+            EXPECT_NEAR(assessment.stencil_condition, 2, 1e-12);
+            EXPECT_NEAR(
+                complement ? assessment.carrier_support_fraction : assessment.gas_support_fraction, fraction, 1e-15);
+            const auto fit = Kernel::reconstruct(target, stencil);
+            EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+            EXPECT_FALSE(fit.fit_converged);
+            EXPECT_EQ(fit.fit_iterations, 0u);
+            EXPECT_TRUE(fit.stencil_volume_residual_measured);
+            EXPECT_LE(fit.stencil_volume_residual, PLIC::PolyhedralReconstructionOptions{}.fit_tolerance);
+            const auto sign = complement ? -1 : 1;
+            const double nx = corner ? 1 / std::sqrt(2.) : 1;
+            EXPECT_NEAR(fit.gas.normal[0], sign * nx, 1e-12);
+            EXPECT_NEAR(fit.gas.normal[1], corner ? sign * nx : 0, 1e-12);
+            EXPECT_NEAR(fit.gas.normal[2], 0, 1e-12);
+            const PLIC::GeometryPoint point{h / 4, corner ? h / 4 : h / 2, h / 2};
+            double distance = -fit.gas.offset;
+            for (unsigned axis = 0; axis < 3; ++axis)
+                distance += fit.gas.normal[axis] * (point[axis] - fit.gas.anchor[axis]);
+            EXPECT_NEAR(distance, 0, 2e-12 * h);
+            const auto minority = std::min(target.gas_volume, target.carrier_volume);
+            EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) +
+                          fit.finite_target_volume_difference.absolute_error +
+                          fit.target_volume_numerical_error_estimate,
+                static_cast<long double>(minority) * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
+            EXPECT_EQ(target.gas_volume, original.gas_volume);
+            EXPECT_EQ(target.carrier_volume, original.carrier_volume);
+        }
+}
+
+TEST(PolyhedralReconstruction, WallAdjacentQuarterLayerAdmitsGradientWithoutMajoritySupport)
+{
+    weak_planar_layer<ArithmeticMode::Ordinary>(false);
+    weak_planar_layer<ArithmeticMode::BoundedCertification>(false);
+}
+
+TEST(PolyhedralReconstruction, ObliqueCornerLayerUsesDirectionalInformationInsteadOfAnAxisFallback)
+{
+    weak_planar_layer<ArithmeticMode::Ordinary>(true);
+    weak_planar_layer<ArithmeticMode::BoundedCertification>(true);
+}
+
+TEST(PolyhedralReconstruction, RoundoffOnlyDiluteVariationDoesNotEstablishDirection)
+{
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .01);
+    std::vector<OrdinarySample> stencil;
+    for (const auto index : neighbors())
+        stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, .01));
+    stencil.front().gas_volume = std::nextafter(.01, 1.);
+    stencil.front().carrier_volume = 1 - stencil.front().gas_volume;
+    const auto assessment =
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::assess_resolution(target, stencil);
+    EXPECT_EQ(assessment.reason, PLIC::PolyhedralResolutionAssessment::Reason::NoDirectionalSignal);
+    EXPECT_GT(assessment.stencil_condition, 0);
+    EXPECT_LE(assessment.directional_strength, assessment.directional_uncertainty);
+    EXPECT_THROW((void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::reconstruct(target, stencil),
+        PLIC::PolyhedralResolutionRequired);
+}
+
+TEST(PolyhedralReconstruction, GeometryCoverageAndConditionRemainIndependentAdmissionGates)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .25);
+    std::vector<OrdinarySample> planar;
+    for (const auto index : std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}})
+        planar.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] < 0 ? 1 : 0));
+    EXPECT_EQ(Kernel::assess_resolution(target, planar).reason, Reason::RankDeficientStencil);
+    EXPECT_THROW((void) Kernel::reconstruct(target, planar), PLIC::PolyhedralResolutionRequired);
+    auto incomplete = planar;
+    incomplete.resize(3);
+    EXPECT_EQ(Kernel::assess_resolution(target, incomplete).reason, Reason::InsufficientStencil);
+    planar.front().geometry.reset();
+    EXPECT_THROW((void) Kernel::assess_resolution(target, planar), std::invalid_argument);
+
+    constexpr double d = 1e-6;
+    std::vector<OrdinarySample> nearly_collinear;
+    for (const PLIC::GeometryPoint shift : {PLIC::GeometryPoint{-2, -d, 0}, {-1, d, d}, {1, -d, d}, {2, d, -d}})
+    {
+        const auto geometry =
+            PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::box(shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1});
+        const auto volume = geometry->volume().as_double();
+        nearly_collinear.push_back({geometry, shift[0] < 0 ? volume : 0, shift[0] < 0 ? 0 : volume});
+    }
+    const auto assessment = Kernel::assess_resolution(target, nearly_collinear);
+    EXPECT_EQ(assessment.reason, Reason::IllConditionedStencil);
+    EXPECT_GT(assessment.stencil_condition, PLIC::PolyhedralReconstructionOptions{}.maximum_condition);
+}
+
+TEST(PolyhedralReconstruction, OppositeNeighborPairsPreserveKnownOnePlaneContradiction)
+{
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .5);
+    std::vector<OrdinarySample> stencil;
+    for (const auto index :
+        std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] == 1 ? 0 : 1));
+    const auto assessment =
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::assess_resolution(target, stencil);
+    ASSERT_TRUE(assessment.admitted());
+    EXPECT_TRUE(assessment.angular_fit_eligible);
+    // A plane bisecting the centrally symmetric target predicts fractions
+    // summing to one on each opposite neighbor pair. Actual y/z pairs each
+    // sum to two, forcing RMS >= sqrt(1/6), independently of its normal.
+    ASSERT_GT(std::sqrt(1. / 6), PLIC::PolyhedralReconstructionOptions{}.maximum_model_residual);
+    try
+    {
+        (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::reconstruct(target, stencil);
+        FAIL() << "A strict target fit cannot repair this one-plane contradiction.";
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+    }
+}
+
+TEST(PolyhedralReconstruction, ModerateWeakGradientRetainsItsConfiguredModelBound)
+{
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .25);
+    std::vector<OrdinarySample> stencil;
+    for (const auto index :
+        std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}})
+        stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1,
+            index[0] < 0   ? 0
+            : index[0] > 0 ? .2
+                           : .25));
+    const auto assessment =
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::assess_resolution(target, stencil);
+    ASSERT_TRUE(assessment.admitted());
+    EXPECT_FALSE(assessment.angular_fit_eligible);
+    // The selected gradient normal is -x; its offset predicts gas=1 in the
+    // right cell instead of .2. This is a bound on that selected gradient fit,
+    // not a proof about every possible orientation.
+    try
+    {
+        (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::reconstruct(target, stencil);
+        FAIL();
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedFull50Step3AdmitsSupportedTinyPhaseWithoutClaimingModelAccuracy)
+{
+    if constexpr (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Lossless native certificates capture the 64-bit-significand source geometry.";
+    const auto cells = captured_full50::cells();
+    ASSERT_EQ(cells.size(), 16u);
+    ASSERT_EQ(cells.front().gid, 21u);
+    const auto target = cells.front().sample;
+    std::vector<OrdinarySample> stencil;
+    for (std::size_t i = 1; i < cells.size(); ++i)
+        stencil.push_back(cells[i].sample);
+    const auto assessment =
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::assess_resolution(target, stencil);
+    ASSERT_TRUE(assessment.admitted());
+    EXPECT_FALSE(assessment.angular_fit_eligible);
+    EXPECT_NEAR(assessment.gas_support_fraction, .2891142723056233, 1e-15);
+    EXPECT_GT(assessment.directional_strength, assessment.directional_uncertainty);
+    EXPECT_LT(assessment.stencil_condition, 3);
+    const auto fit = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::reconstruct(target, stencil);
+    EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
+    EXPECT_FALSE(fit.fit_converged);
+    EXPECT_FALSE(fit.stencil_volume_residual_measured);
+    EXPECT_FALSE(fit.pure_gas);
+    EXPECT_FALSE(fit.pure_carrier);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        static_cast<long double>(target.gas_volume) * PLIC::PolyhedralReconstructionOptions{}.volume_tolerance);
+    EXPECT_EQ(target.gas_volume, cells.front().sample.gas_volume);
+    EXPECT_EQ(target.carrier_volume, cells.front().sample.carrier_volume);
+    long double sum = 0;
+    for (const auto& sample : stencil)
+    {
+        const auto residual =
+            (sample.geometry->phases(fit.gas).gas.value - sample.gas_volume) / sample.geometry->volume().value;
+        sum += residual * residual;
+    }
+    const auto rms = std::sqrt(sum / stencil.size());
+    EXPECT_GT(rms, PLIC::PolyhedralReconstructionOptions{}.maximum_model_residual);
+    EXPECT_NEAR(rms, .5689145923321345, 1e-12);
+    RecordProperty("stencil_condition", assessment.stencil_condition);
+    RecordProperty("directional_strength", assessment.directional_strength);
+    RecordProperty("directional_uncertainty", assessment.directional_uncertainty);
+    RecordProperty("target_gas_volume", target.gas_volume);
+    RecordProperty("strict_offset_residual", double(fit.finite_target_volume_difference.value));
+    RecordProperty("frozen_neighbor_rms", double(rms));
+    auto without_small_phase_exclusion = PLIC::PolyhedralReconstructionOptions{};
+    without_small_phase_exclusion.minimum_optimized_phase_length_ratio = 0;
+    try
+    {
+        (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::reconstruct(
+            target, stencil, without_small_phase_exclusion);
+        FAIL() << "Disabling the existing small-phase policy restores the selected-model gate.";
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+    }
 }
 
 BoundedSample plane_sample(
@@ -326,7 +557,7 @@ TEST(PolyhedralReconstruction, DiluteFeatureRequestsRefinementBeforeClippingAndP
     SimpleFluid::PLIC::reset_geometry_statistics();
     const auto assessment =
         PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::assess_resolution(target, stencil);
-    EXPECT_EQ(assessment.reason, PLIC::PolyhedralResolutionAssessment::Reason::InsufficientPhaseSupport);
+    EXPECT_EQ(assessment.reason, PLIC::PolyhedralResolutionAssessment::Reason::NoDirectionalSignal);
     EXPECT_EQ(assessment.local_cell_span, 1);
     EXPECT_EQ(assessment.requested_cell_span, .5);
     EXPECT_THROW(
@@ -347,7 +578,7 @@ TEST(PolyhedralReconstruction, ResolutionAdmissionIsInvariantUnderUnitScaling)
             stencil.push_back(uniform_sample(index, scale, .01));
         const auto assessment =
             PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::assess_resolution(target, stencil);
-        EXPECT_EQ(assessment.reason, PLIC::PolyhedralResolutionAssessment::Reason::InsufficientPhaseSupport);
+        EXPECT_EQ(assessment.reason, PLIC::PolyhedralResolutionAssessment::Reason::NoDirectionalSignal);
         EXPECT_NEAR(assessment.requested_cell_span / scale, .5, 2e-15);
         EXPECT_NEAR(assessment.gas_support_fraction, .01, 2e-17);
     }
@@ -419,13 +650,13 @@ TEST(PolyhedralReconstruction, DeficientAndUnobservableStencilsRequestMoreSuppor
         deficient.push_back(uniform_sample({i, 0, 0}, 1, i < 0 ? 1 : 0));
     EXPECT_EQ(PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::assess_resolution(target, deficient)
                   .reason,
-        PLIC::PolyhedralResolutionAssessment::Reason::InsufficientStencil);
+        PLIC::PolyhedralResolutionAssessment::Reason::RankDeficientStencil);
     std::vector<BoundedSample> constant;
     for (const auto index : neighbors())
         constant.push_back(uniform_sample(index, 1, .5));
     EXPECT_EQ(PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::assess_resolution(target, constant)
                   .reason,
-        PLIC::PolyhedralResolutionAssessment::Reason::InsufficientStencil);
+        PLIC::PolyhedralResolutionAssessment::Reason::NoDirectionalSignal);
     EXPECT_THROW(
         (void) PLIC::PolyhedralReconstruction<ArithmeticMode::BoundedCertification>::reconstruct(target, deficient),
         PLIC::PolyhedralResolutionRequired);
@@ -447,8 +678,9 @@ TEST(PolyhedralReconstruction, RationalSupportFitsComplementaryOrdinaryVolumes)
             const auto measured = numerical->phases(fit.gas);
             EXPECT_TRUE((minority_gas ? measured.gas : measured.carrier).relative_error_at_most(.225, 8e-15));
             const auto reference =
-                SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(*exact)->phases(
-                    fit.gas);
+                SimpleFluid::geometry::swept_volume::ConvexFragment<SimpleFluid::ArithmeticMode::Exact>::from_geometry(
+                    *exact)
+                    ->phases(fit.gas);
             EXPECT_TRUE((minority_gas ? reference.gas : reference.carrier)
                     .relative_error_at_most(
                         SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>::from_value(.225),

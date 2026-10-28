@@ -10,7 +10,7 @@ namespace SimpleFluid::VoF::construction_controls
 {
 using Records = std::map<std::pair<std::uint64_t, std::uint64_t>, AMR::AdaptiveBytes>;
 using FaceAuthority = GeneralVoF::Data::FaceAuthority;
-constexpr std::uint64_t version = 2;
+constexpr std::uint64_t version = 3; // Directional admission is independent of angular eligibility.
 
 inline void header(wire::Writer& writer, std::uint64_t kind, std::uint64_t id,
     const PLIC::GeometryPacketContext& context, ArithmeticMode mode)

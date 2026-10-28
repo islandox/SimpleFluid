@@ -422,6 +422,7 @@ PolyhedralInterface PolyhedralReconstruction<ArithmeticMode::Exact>::reconstruct
             throw std::invalid_argument("PLIC angular volume optimizer did not reach stationarity.");
     }
     current.plane.stencil_volume_residual = std::sqrt(current.objective / stencil.size());
+    current.plane.stencil_volume_residual_measured = true;
     current.plane.stencil_condition = condition;
     current.plane.orientation_step = last_step;
     current.plane.fit_iterations = iterations;

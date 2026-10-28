@@ -427,7 +427,10 @@ TEST(GeneralVoFInterfaceTransport, CorrectedCenterBeyondStationaryNodesRejectsUn
     {
         cause = error.what();
     }
-    EXPECT_NE(cause.find("authenticated retained shell"), std::string::npos) << cause;
+    EXPECT_NE(cause.find("stage=interface_local_reach"), std::string::npos) << cause;
+    EXPECT_NE(cause.find("point_role=corrected-departure-center"), std::string::npos) << cause;
+    EXPECT_NE(cause.find("classifier=Outside"), std::string::npos) << cause;
+    EXPECT_NE(cause.find("kind=PhysicalBoundary"), std::string::npos) << cause;
     EXPECT_EQ(source.accepted_identity(), identity);
     EXPECT_EQ(source.gas_volumes(), input.gas);
     EXPECT_NO_THROW((void) source.plan_transport(stationary(source), circulation(source), 1));
