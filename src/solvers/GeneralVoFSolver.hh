@@ -30,8 +30,14 @@ struct GeneralVoFSolverOptions
 };
 struct GeneralVoFMomentumDiagnostics
 {
+    /** Original raw transport equation, before declared phase relabeling. */
     double physical_relative_residual = 0;
     int implicit_iterations = 0, defect_corrections = 0;
+    /** Global signed kg m/s added by this step's phase relabeling, at the
+     * implicit transported velocity before forces/projection. Kept separate
+     * from arithmetic uncertainty and the raw transport physical residual. */
+    long double cleanup_momentum = 0, accumulated_cleanup_momentum = 0;
+    double cleanup_identity_relative_residual = 0;
 };
 /** Independent general-mesh backend; Cartesian specialized solvers are retained.
  *
@@ -49,11 +55,16 @@ struct GeneralVoFMomentumDiagnostics
  * viscosity and curvature use actual physical geometry. Source-free compatible
  * momentum uses positive authenticated donor transfers and the original raw face
  * donor equation; material-volume sources, species sources and drift are absent.
+ * Explicit phase cleanup is a separately budgeted relabeling: raw momentum
+ * transport passes its original residual before the actual mass correction
+ * adds momentum at the implicit transported velocity. Cleaned mass supplies
+ * density, force acceleration and projection; cleanup momentum is reported
+ * separately from the physical transport residual and arithmetic uncertainty.
  *
  * A failed step leaves the complete accepted publication and clock unchanged.
  * Source-free occupancy, reconstruction/support, donor-capacity, physical linear
- * residual and conditioning failures reject; they never normalize a cell or
- * invent a material source. References are invalidated by successful mutation.
+ * residual and conditioning failures reject. Only the authority's explicit
+ * cleanup policy can relabel phase inventory. References are invalidated by successful mutation.
  */
 class SIMPLEFLUID_SOLVERS_EXPORT GeneralVoFSolver
 {
@@ -81,10 +92,12 @@ public:
     /** Conservative fixed-clock adaptation of phases and physical momentum.
      * Source keys are persistent hierarchy keys; rejected plans preserve all
      * accepted state. Geometry-dependent operators are rebuilt on the candidate.
+     * Enabled phase cleanup rejects this coupled momentum/pressure remap.
      */
     void regrid(
         std::span<const Meshes::AMR::AdaptiveMark> refine, std::span<const Meshes::AMR::AdaptiveBytes> coarsen = {});
-    /** Ownership-only conservative native migration in current owned-key order. */
+    /** Ownership-only conservative native migration in current owned-key order.
+     * Enabled phase cleanup rejects this coupled momentum/pressure remap. */
     void repartition(std::span<const int> destinations);
     [[nodiscard]] double time() const noexcept;
     [[nodiscard]] const std::shared_ptr<const VoF::GeneralVoF>& phases() const noexcept;

@@ -10,6 +10,7 @@
 #include "solvers/details/GeneralVoF/FaceRates.hh"
 #include "solvers/details/GeneralVoF/NodeVelocity.hh"
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
+#include "utils/CompensatedSum.hh"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -214,6 +215,18 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         });
     old.phases->validate_prepared_transport_source(*phase_preparation);
     const auto preparation_before = transport.preparation_statistics();
+    const bool cleanup_enabled = old.phases->options().phase_cleanup.relative_cutoff > 0;
+    std::vector<std::array<long double, 3>> cleanup_momentum;
+    if (cleanup_enabled)
+        execution.collective(
+            [&]
+            {
+                if (volume.size() > options.byte_budget / sizeof(std::array<long double, 3>))
+                    throw std::runtime_error("Finite VoF cleanup momentum exceeds its retained byte budget.");
+                phase_preparation->validate_byte_budget(
+                    options.byte_budget - volume.size() * sizeof(std::array<long double, 3>));
+                cleanup_momentum.resize(volume.size());
+            });
     next->velocity.resize(volume.size());
     for (unsigned a = 0; a < 3; ++a)
     {
@@ -227,16 +240,127 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
             momentum_error[c] = value.absolute_error;
         }
         const auto carried =
-            transport.solve(momentum, source, phase_preparation->new_mass, outgoing, incoming, face_contributions,
+            transport.solve(momentum, source, phase_preparation->raw_new_mass, outgoing, incoming, face_contributions,
                 false, options.maximum_momentum_iterations, options.momentum_relative_tolerance, options.byte_budget,
-                momentum_error, {}, phase_preparation->new_mass_error, outgoing_error, arithmetic_mode_,
+                momentum_error, {}, phase_preparation->raw_new_mass_error, outgoing_error, arithmetic_mode_,
                 phase_preparation->family == VoF::GeneralVoFTransportFamily::InterfaceLocalSwept
                     ? detail::ConservativeVoFTransport::FiniteOperatorMode::SignedFaceLedger
                     : detail::ConservativeVoFTransport::FiniteOperatorMode::EquivalentRoutes);
         next->momentum_transport[a] = {
             carried.physical_relative_residual, carried.iterations, carried.physical_refinements};
-        for (std::size_t c = 0; c < volume.size(); ++c)
-            next->velocity[c][a] = carried.cell_trace[c];
+        if (!cleanup_enabled)
+        {
+            for (std::size_t c = 0; c < volume.size(); ++c)
+                next->velocity[c][a] = carried.cell_trace[c];
+            continue;
+        }
+        VoF::finite_detail::SumFor<Mode> cleanup_sum(arithmetic_mode_);
+        int local_exponent = std::numeric_limits<int>::min(), exponent = 0;
+        for (const auto value : momentum)
+            if (value != 0)
+            {
+                int item_exponent = 0;
+                (void) std::frexp(std::abs(value), &item_exponent);
+                local_exponent = std::max(local_exponent, item_exponent);
+            }
+        Teuchos::reduceAll(*mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_MAX, 1, &local_exponent, &exponent);
+        const auto reference_scale = exponent == std::numeric_limits<int>::min() ? 1.L : std::scalbn(1.L, exponent - 1);
+        CompensatedSum<> identity_squared, reference_squared;
+        execution.collective(
+            [&]
+            {
+                for (std::size_t c = 0; c < volume.size(); ++c)
+                {
+                    next->velocity[c][a] = carried.cell_trace[c];
+                    // Transport uses the unmodified raw mass/face equation.
+                    // Relabeling then changes mass and momentum together at
+                    // this velocity; forces and projection see cleaned mass.
+                    const auto delta = A::multiply(
+                        A::make_value(phase_preparation->cleanup_mass[c], 0), A::make_value(carried.cell_trace[c], 0));
+                    cleanup_momentum[c][a] = delta.value;
+                    cleanup_sum.add(delta);
+                    if (!std::isfinite(delta.value))
+                        throw std::runtime_error("Finite VoF cleanup momentum is not representable.");
+                    const auto velocity = A::make_value(carried.cell_trace[c], 0);
+                    const auto cleaned = A::multiply(A::make_value(phase_preparation->new_mass[c], 0), velocity);
+                    const auto raw = A::multiply(A::make_value(phase_preparation->raw_new_mass[c], 0), velocity);
+                    const auto defect = A::subtract(A::subtract(cleaned, raw), delta).value;
+                    if (!std::isfinite(cleaned.value) || !std::isfinite(raw.value) || !std::isfinite(defect))
+                        throw std::runtime_error("Finite VoF cleaned/raw momentum identity is not representable.");
+                    // Audit each declared local correction on the original
+                    // momentum RHS scale. Neither correction magnitude nor a
+                    // new numerical allowance enters the physical tolerance.
+                    const auto normalized = defect / reference_scale;
+                    const auto reference = momentum[c] / reference_scale;
+                    identity_squared += normalized * normalized;
+                    reference_squared += reference * reference;
+                }
+            });
+        const auto local_cleanup = cleanup_sum.value().value;
+        // Teuchos does not provide a long-double serializer on every supported
+        // backend. Preserve the finite wide value as two binary64 mantissas
+        // and an exact exponent, then accumulate all owners in rank order.
+        const auto ranks = mesh->owned_cell_map()->getComm()->getSize();
+        std::array<double, 3> cleanup_wire{};
+        std::vector<double> cleanup_owners;
+        execution.collective(
+            [&]
+            {
+                if (!std::isfinite(local_cleanup) || ranks > std::numeric_limits<int>::max() / 3 ||
+                    std::size_t(ranks) > options.byte_budget / (3 * sizeof(double)))
+                    throw std::runtime_error("Finite VoF cleanup momentum reduction exceeds its admitted range.");
+                int cleanup_exponent = 0;
+                const auto mantissa = std::frexp(local_cleanup, &cleanup_exponent);
+                cleanup_wire[0] = static_cast<double>(mantissa);
+                cleanup_wire[1] = static_cast<double>(mantissa - cleanup_wire[0]);
+                cleanup_wire[2] = cleanup_exponent;
+                if (std::ldexp(static_cast<long double>(cleanup_wire[0]) + cleanup_wire[1], cleanup_exponent) !=
+                    local_cleanup)
+                    throw std::runtime_error("Finite VoF cleanup momentum wire conversion loses precision.");
+                cleanup_owners.resize(3 * std::size_t(ranks));
+            });
+        Teuchos::gatherAll(
+            *mesh->owned_cell_map()->getComm(), 3, cleanup_wire.data(), 3 * ranks, cleanup_owners.data());
+        CompensatedSum<> cleanup_global_sum;
+        for (int rank = 0; rank < ranks; ++rank)
+        {
+            const auto offset = 3 * std::size_t(rank);
+            cleanup_global_sum +=
+                std::ldexp(static_cast<long double>(cleanup_owners[offset]) + cleanup_owners[offset + 1],
+                    int(cleanup_owners[offset + 2]));
+        }
+        const auto global_cleanup = cleanup_global_sum.value();
+        const std::array<double, 2> local_norm{
+            static_cast<double>(identity_squared.value()), static_cast<double>(reference_squared.value())};
+        std::array<double, 2> global_norm{};
+        Teuchos::reduceAll(
+            *mesh->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 2, local_norm.data(), global_norm.data());
+        execution.collective(
+            [&]
+            {
+                auto& diagnostic = next->momentum_transport[a];
+                diagnostic.cleanup_momentum = global_cleanup;
+                diagnostic.accumulated_cleanup_momentum =
+                    old.momentum_transport[a].accumulated_cleanup_momentum + global_cleanup;
+                const auto reduction_u =
+                    (mesh->owned_cell_map()->getComm()->getSize() + 8.L) * std::numeric_limits<double>::epsilon();
+                if (!(reduction_u < .25L))
+                    throw std::runtime_error("Finite VoF cleanup identity reduction bound is exhausted.");
+                const auto residual_upper = global_norm[0] * (1 + reduction_u);
+                const auto reference_lower = std::max(0.L, global_norm[1] * (1 - reduction_u));
+                diagnostic.cleanup_identity_relative_residual =
+                    std::sqrt(residual_upper / (reference_lower > 0 ? reference_lower : 1));
+                if (!std::isfinite(global_cleanup) || !std::isfinite(diagnostic.accumulated_cleanup_momentum))
+                    throw std::runtime_error("Finite VoF cumulative cleanup momentum is not representable.");
+                // The triangle bound keeps the cleaned equation within the
+                // same original tolerance after its explicit momentum source.
+                if (!std::isfinite(global_norm[0]) || !std::isfinite(global_norm[1]) ||
+                    !std::isfinite(diagnostic.cleanup_identity_relative_residual) ||
+                    (global_norm[1] == 0 && global_norm[0] != 0) ||
+                    diagnostic.physical_relative_residual + diagnostic.cleanup_identity_relative_residual >
+                        options.momentum_relative_tolerance)
+                    throw std::runtime_error("Finite VoF declared cleanup exceeds the original momentum residual.");
+            });
     }
     std::vector<double> viscosity(volume.size());
     execution.collective(
@@ -299,6 +423,11 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         prepared->momentum_preparation = transport.finite_preparation_identity();
         prepared->momentum_builds = after.finite_builds - preparation_before.finite_builds;
         prepared->momentum_reuses = after.finite_hits - preparation_before.finite_hits;
+        if (cleanup_enabled)
+        {
+            prepared->cleanup_momentum = std::move(cleanup_momentum);
+            prepared->validate_byte_budget(options.byte_budget);
+        }
         next->prepared_transport = std::move(prepared);
     });
     return next;

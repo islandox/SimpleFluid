@@ -5,6 +5,7 @@
 #include "FVM/details/GeneralVoF/FaceTransport.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include <Teuchos_Array.hpp>
 namespace SimpleFluid::VoF
 {
@@ -1006,6 +1007,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
             }
             current(data);
         });
+    apply_phase_cleanup(*candidate);
     import_phases<local_mode>(*candidate);
     safe(
         [&]

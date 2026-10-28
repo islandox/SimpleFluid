@@ -10,7 +10,7 @@ namespace SimpleFluid::VoF::construction_controls
 {
 using Records = std::map<std::pair<std::uint64_t, std::uint64_t>, AMR::AdaptiveBytes>;
 using FaceAuthority = GeneralVoF::Data::FaceAuthority;
-constexpr std::uint64_t version = 3; // Directional admission is independent of angular eligibility.
+constexpr std::uint64_t version = 4; // Includes explicit physical phase cleanup controls.
 
 inline void header(wire::Writer& writer, std::uint64_t kind, std::uint64_t id,
     const PLIC::GeometryPacketContext& context, ArithmeticMode mode)
@@ -54,6 +54,9 @@ inline AMR::AdaptiveBytes algorithm(const GeneralVoFOptions& options)
              options.reconstruction.maximum_condition, options.reconstruction.orientation_tolerance,
              options.reconstruction.maximum_model_residual, options.reconstruction.minimum_phase_support_fraction,
              options.reconstruction.minimum_optimized_phase_length_ratio})
+        writer.word(std::bit_cast<std::uint64_t>(value));
+    for (double value : {options.phase_cleanup.relative_cutoff, options.phase_cleanup.maximum_absolute_volume[0],
+             options.phase_cleanup.maximum_absolute_volume[1]})
         writer.word(std::bit_cast<std::uint64_t>(value));
     return std::move(writer.data);
 }

@@ -1,0 +1,279 @@
+#include "general_vof_finite_test_helpers.hh"
+#include "geometry/PLIC/GeometryError.hh"
+#include "plic_cleanup_capture.hh"
+#include <limits>
+namespace
+{
+testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
+using Declaration = GeneralVoFPhaseGeometry;
+GeneralVoFOptions cleanup_options(double cutoff = 1e-14, double budget = 1e-12)
+{
+    GeneralVoFOptions result;
+    result.phase_cleanup = {cutoff, {budget, budget}};
+    return result;
+}
+auto cycle(const GeneralVoF& source, double q)
+{
+    auto result = circulation(source);
+    for (auto& face : result)
+        face.integrated_volume *= q * 64;
+    return result;
+}
+TEST(GeneralVoFPhaseCleanup, CapturedTailChargesActualChangeAndBypassesMixedFit)
+{
+    if (std::numeric_limits<long double>::digits != 64)
+        GTEST_SKIP() << "Captured Ordinary certificate uses a 64-bit long-double significand.";
+    constexpr double tail = 0x1.45693118ee60cp-184;
+    auto geometry = cleanup_captured_geometry();
+    const PLIC::GeometryPoint normal{0x1.f7ee8d4364952p-1, 0x1.a119432b4a1dcp-4, -0x1.2810933c9e17ap-3};
+    // The untouched raw fixed-normal problem must retain its strict rejection.
+    EXPECT_THROW(
+        (void) PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset({geometry, tail, 0x1p-7}, normal),
+        PLIC::GeometryError);
+    auto input = fixture();
+    std::fill(input.gas.begin(), input.gas.end(), tail);
+    std::fill(input.carrier.begin(), input.carrier.end(), 1);
+    auto options = cleanup_options(1e-14, 16 * tail);
+    options.phase_cleanup.maximum_absolute_volume[1] = 0;
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+    EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 8u);
+    EXPECT_EQ(source.phase_cleanup_state().signed_volume[0], -8.L * tail);
+    EXPECT_EQ(source.phase_cleanup_state().absolute_volume[0], 8.L * tail);
+    EXPECT_EQ(source.phase_cleanup_state().absolute_volume[1], 0);
+    for (const auto& delta : source.latest_phase_cleanup())
+    {
+        EXPECT_EQ(delta.before[0], tail);
+        EXPECT_EQ(delta.after[0], 0);
+        EXPECT_EQ(delta.volume[0], -static_cast<long double>(tail));
+        EXPECT_EQ(delta.before[1], delta.after[1]);
+        EXPECT_EQ(delta.volume[1], 0);
+    }
+    for (auto declaration : source.phase_geometry_declarations())
+        EXPECT_EQ(declaration, Declaration::PureCarrier);
+    auto trial = source.plan_transport(stationary(source), circulation(source, true), 1);
+    const auto prepared = trial.prepare_transport({.1, 1});
+    EXPECT_TRUE(prepared->phase_cleanup.empty());
+    EXPECT_EQ(prepared->diagnostics.plane_requests, 0u);
+    EXPECT_EQ(trial.candidate()->phase_cleanup_state().cleaned_cells, 8u);
+    EXPECT_TRUE(trial.candidate()->latest_phase_cleanup().empty());
+    const auto pure =
+        PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset({geometry, 0, 0x1p-7}, normal);
+    EXPECT_TRUE(pure.pure_carrier);
+}
+TEST(GeneralVoFPhaseCleanup, SymmetricChargesUsePublishedEndpoints)
+{
+    const auto input = fixture();
+    for (bool minority_gas : {false, true})
+        for (const double small : {0x1p-48, 0x1p-60})
+        {
+            // At 2^-60 the represented dominant is already one; no credit is representable.
+            const double dominant = 1 - small;
+            std::vector<double> gas(input.order.size(), minority_gas ? small : dominant);
+            std::vector<double> carrier(input.order.size(), minority_gas ? dominant : small);
+            GeneralVoF source(input.hierarchy, input.order, gas, carrier, cleanup_options());
+            const unsigned m = minority_gas ? 0 : 1, d = 1 - m;
+            EXPECT_EQ(source.phase_cleanup_state().signed_volume[m], -8.L * small);
+            EXPECT_EQ(source.phase_cleanup_state().absolute_volume[m], 8.L * small);
+            const auto credit = small == 0x1p-48 ? 8.L * small : 0.L;
+            EXPECT_EQ(source.phase_cleanup_state().signed_volume[d], credit);
+            EXPECT_EQ(source.phase_cleanup_state().absolute_volume[d], credit);
+            EXPECT_EQ(source.phase_cleanup_state().largest_absolute_volume[m], small);
+            EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 8u);
+        }
+}
+TEST(GeneralVoFPhaseCleanup, DisabledAndAboveCutoffPreserveInventory)
+{
+    auto input = fixture();
+    constexpr double small = 0x1p-40;
+    std::fill(input.gas.begin(), input.gas.end(), small);
+    std::fill(input.carrier.begin(), input.carrier.end(), 1 - small);
+    for (const auto options : {GeneralVoFOptions{}, cleanup_options()})
+    {
+        GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+        EXPECT_EQ(source.gas_volumes(), input.gas);
+        EXPECT_EQ(source.carrier_volumes(), input.carrier);
+        EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 0u);
+        const auto geometry = source.owned_finite_geometry<ArithmeticMode::Ordinary>();
+        for (std::size_t i = 0; i < geometry.size(); ++i)
+        {
+            const auto plane = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>::solve_offset(
+                {geometry[i], small, 1 - small}, {1, 0, 0});
+            EXPECT_FALSE(plane.pure_carrier);
+            EXPECT_FALSE(plane.pure_gas);
+            EXPECT_LE(std::abs(plane.target_volume_residual), 8e-15 * small);
+        }
+    }
+}
+TEST(GeneralVoFPhaseCleanup, DisabledTinyPhaseRemainsIndependentAndUncertaintyIsNotUsedForCleanup)
+{
+    auto input = fixture();
+    std::fill(input.gas.begin(), input.gas.end(), 0x1p-60);
+    std::fill(input.carrier.begin(), input.carrier.end(), 1);
+    GeneralVoF raw(input.hierarchy, input.order, input.gas, input.carrier);
+    GeneralVoF clean(input.hierarchy, input.order, input.gas, input.carrier, cleanup_options());
+    EXPECT_EQ(raw.gas_volumes(), input.gas);
+    EXPECT_EQ(raw.carrier_volumes(), input.carrier);
+    EXPECT_EQ(raw.phase_cleanup_state().cleaned_cells, 0u);
+    for (std::size_t c = 0; c < input.order.size(); ++c)
+    {
+        EXPECT_EQ(raw.phase_geometry_declarations()[c], Declaration::Infer);
+        EXPECT_EQ(raw.phase_roundoff_bounds()[c].gas, clean.phase_roundoff_bounds()[c].gas);
+        EXPECT_EQ(raw.phase_roundoff_bounds()[c].carrier, clean.phase_roundoff_bounds()[c].carrier);
+        EXPECT_EQ(raw.accumulated_phase_errors()[c].gas, clean.accumulated_phase_errors()[c].gas);
+        EXPECT_EQ(raw.accumulated_phase_errors()[c].carrier, clean.accumulated_phase_errors()[c].carrier);
+        EXPECT_EQ(raw.initial_occupancy_errors()[c].admitted_bound, clean.initial_occupancy_errors()[c].admitted_bound);
+    }
+}
+TEST(GeneralVoFPhaseCleanup, AbsoluteBudgetDoesNotCancelOppositeRepairs)
+{
+    auto input = fixture();
+    constexpr double small = 0x1p-48;
+    for (std::size_t i = 0; i < input.order.size(); ++i)
+    {
+        const auto c = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
+        input.gas[i] = c[0] < 1 ? small : 1 - small;
+        input.carrier[i] = c[0] < 1 ? 1 - small : small;
+    }
+    EXPECT_THROW(
+        (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, cleanup_options(1e-14, 6 * small)),
+        std::invalid_argument);
+    GeneralVoF accepted(input.hierarchy, input.order, input.gas, input.carrier, cleanup_options(1e-14, 8 * small));
+    for (unsigned p = 0; p < 2; ++p)
+    {
+        EXPECT_EQ(accepted.phase_cleanup_state().signed_volume[p], 0);
+        EXPECT_EQ(accepted.phase_cleanup_state().absolute_volume[p], 8.L * small);
+    }
+}
+TEST(GeneralVoFPhaseCleanup, CumulativeBudgetAndCheckpointSurviveTrialsAndRestart)
+{
+    const auto input = fixture();
+    constexpr double q = 0x1p-48;
+    const auto options = cleanup_options(1e-14, 3 * q);
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto identity = source.accepted_identity();
+    const auto first = source.plan_transport(stationary(source), cycle(source, q), 1);
+    const auto sibling = source.plan_transport(stationary(source), cycle(source, q), 1);
+    EXPECT_EQ(source.accepted_identity(), identity);
+    EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 0u);
+    const auto next = source.apply(first);
+    EXPECT_EQ(next->gas_volumes(), source.gas_volumes());
+    EXPECT_EQ(next->carrier_volumes(), source.carrier_volumes());
+    EXPECT_EQ(next->phase_cleanup_state().cleaned_cells, 2u);
+    EXPECT_EQ(next->phase_cleanup_state().absolute_volume, (std::array<long double, 2>{2 * q, 2 * q}));
+    EXPECT_EQ(sibling.candidate()->phase_cleanup_state().absolute_volume, next->phase_cleanup_state().absolute_volume);
+    const auto prepared = first.prepare_transport({.1, 1000}, 42);
+    EXPECT_EQ(prepared->new_phase_cleanup.absolute_volume, next->phase_cleanup_state().absolute_volume);
+    for (const auto& delta : prepared->phase_cleanup)
+    {
+        const auto row = next->mesh()->owned_cell_map()->getLocalElement(delta.gid);
+        ASSERT_GE(row, 0);
+        // Use the represented density, not the decimal real .1.
+        EXPECT_EQ(
+            prepared->raw_new_mass[row], static_cast<long double>(.1) * delta.before[0] + 1000.L * delta.before[1]);
+        EXPECT_EQ(prepared->new_mass[row], static_cast<long double>(.1) * delta.after[0] + 1000.L * delta.after[1]);
+        EXPECT_EQ(
+            prepared->cleanup_mass[row], static_cast<long double>(.1) * delta.volume[0] + 1000.L * delta.volume[1]);
+    }
+    EXPECT_THROW((void) next->plan_transport(stationary(*next), cycle(*next, q), 1), std::invalid_argument);
+    EXPECT_EQ(next->phase_cleanup_state().cleaned_cells, 2u);
+    const auto packet = next->phase_cleanup_checkpoint();
+    const auto checkpoint = GeneralVoF::decode_phase_cleanup_checkpoint(packet);
+    GeneralVoF restored(next->hierarchy(), next->owned_order(), next->gas_volumes(), next->carrier_volumes(), options,
+        next->phase_geometry_declarations(), checkpoint);
+    EXPECT_EQ(restored.phase_cleanup_state().absolute_volume, next->phase_cleanup_state().absolute_volume);
+    EXPECT_THROW((void) restored.plan_transport(stationary(restored), cycle(restored, q), 1), std::invalid_argument);
+    auto changed = options;
+    changed.phase_cleanup.maximum_absolute_volume[0] *= 2;
+    EXPECT_THROW((void) GeneralVoF(next->hierarchy(), next->owned_order(), next->gas_volumes(), next->carrier_volumes(),
+                     changed, next->phase_geometry_declarations(), checkpoint),
+        std::invalid_argument);
+    auto malformed = packet;
+    malformed.push_back(0);
+    EXPECT_THROW((void) GeneralVoF::decode_phase_cleanup_checkpoint(malformed), std::invalid_argument);
+}
+TEST(GeneralVoFPhaseCleanup, PolicyIsCollectivelyValidatedIncludingEmptyOwners)
+{
+    const auto input = fixture();
+    auto options = cleanup_options();
+    options.phase_cleanup.relative_cutoff = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(
+        (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() > 1)
+    {
+        options = cleanup_options();
+        if (comm->getRank() == comm->getSize() - 1)
+            options.phase_cleanup.maximum_absolute_volume[0] *= 2;
+        EXPECT_THROW(
+            (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    }
+}
+TEST(GeneralVoFPhaseCleanup, OwnershipMigrationRetainsLedgerAndRejectsCoupledChannels)
+{
+    auto input = fixture();
+    constexpr double small = 0x1p-60;
+    std::fill(input.gas.begin(), input.gas.end(), small);
+    std::fill(input.carrier.begin(), input.carrier.end(), 1);
+    const auto options = cleanup_options();
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto before = source.phase_cleanup_state();
+    const auto identity = source.accepted_identity();
+    EXPECT_EQ(before.cleaned_cells, 8u);
+    EXPECT_EQ(before.signed_volume, (std::array<long double, 2>{-8.L * small, 0}));
+    EXPECT_EQ(before.absolute_volume, (std::array<long double, 2>{8.L * small, 0}));
+    const auto comm = Tpetra::getDefaultComm();
+    std::vector<int> destinations(source.owned_order().size(), (comm->getRank() + 1) % comm->getSize());
+    const auto migration = source.hierarchy()->plan_migration(destinations);
+    // Bind the actual migrated hierarchy through the same native publication
+    // seam used by the independent finite-remap tests.
+    const auto raw = source.hierarchy()->apply(migration);
+    const auto native = assemble_adaptive_native(*raw, raw->configuration_descriptor());
+    const auto target =
+        source.hierarchy()->apply(migration, raw->with_partition(native.partition, native.mesh->owned_cell_map()));
+    const auto trial = source.plan_remap(migration, target);
+    EXPECT_TRUE(trial.ownership_only());
+    const auto migrated = trial.candidate();
+    const auto& after = migrated->phase_cleanup_state();
+    EXPECT_EQ(after.cleaned_cells, before.cleaned_cells);
+    EXPECT_EQ(after.signed_volume, before.signed_volume);
+    EXPECT_EQ(after.absolute_volume, before.absolute_volume);
+    EXPECT_EQ(after.largest_absolute_volume, before.largest_absolute_volume);
+    EXPECT_EQ(after.policy_bound, before.policy_bound);
+    EXPECT_EQ(after.policy.relative_cutoff, before.policy.relative_cutoff);
+    EXPECT_EQ(after.policy.maximum_absolute_volume, before.policy.maximum_absolute_volume);
+    EXPECT_TRUE(migrated->latest_phase_cleanup().empty());
+    std::uint64_t local_cells = migrated->owned_order().size(), global_cells = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_cells, &global_cells);
+    EXPECT_EQ(global_cells, 8u);
+    const auto declarations = migrated->phase_geometry_declarations();
+    for (std::size_t i = 0; i < migrated->owned_order().size(); ++i)
+    {
+        EXPECT_EQ(migrated->gas_volumes()[i], 0);
+        EXPECT_EQ(migrated->carrier_volumes()[i], 1);
+        EXPECT_EQ(declarations[i], Declaration::PureCarrier);
+    }
+    GeneralVoFFiniteRemapOptions coupled;
+    coupled.channels.push_back({"carrier_tracer", GeneralVoFFiniteRemapCarrier::CarrierVolume, true});
+    EXPECT_THROW((void) source.plan_remap(migration, target, {}, coupled), std::invalid_argument);
+    EXPECT_EQ(source.accepted_identity(), identity);
+    EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, before.cleaned_cells);
+    EXPECT_EQ(source.phase_cleanup_state().signed_volume, before.signed_volume);
+    EXPECT_EQ(source.phase_cleanup_state().absolute_volume, before.absolute_volume);
+    auto malformed = source.phase_cleanup_checkpoint();
+    ASSERT_FALSE(malformed.empty());
+    malformed.front() ^= 1;
+    EXPECT_THROW((void) GeneralVoF::decode_phase_cleanup_checkpoint(malformed), std::invalid_argument);
+    if (comm->getSize() > 1)
+    {
+        auto disagreement = before;
+        // This remains a locally valid ledger; only the last rank disagrees.
+        // With >=3 ranks the fixture leaves that rank empty.
+        if (comm->getRank() == comm->getSize() - 1)
+            ++disagreement.cleaned_cells;
+        EXPECT_THROW((void) GeneralVoF(source.hierarchy(), source.owned_order(), source.gas_volumes(),
+                         source.carrier_volumes(), options, source.phase_geometry_declarations(), disagreement),
+            std::invalid_argument);
+    }
+}
+
+} // namespace

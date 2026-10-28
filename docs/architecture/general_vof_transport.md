@@ -22,6 +22,13 @@ arithmetic only; the swept path retains its
 explicit finite and Exact providers. See the [face-volume contract](conservative_face_vof.md)
 and [floating-point ownership contract](vof_transport.md).
 
+Ordinary `SweptPartition` also offers explicit, disabled-by-default
+[budgeted phase cleanup](../modeling/phase_cleanup.md). It runs after raw
+transport acceptance and before candidate halo publication, carries cumulative
+global signed/absolute corrections, and exposes raw versus cleaned prepared
+mass and declared cleanup momentum. It is a physical numerical correction,
+separate from geometry quality, roundoff and the strict PLIC fit gate.
+
 ## Homogeneous specialization
 
 `homogeneous_transport_eligible()` collectively checks the current source.

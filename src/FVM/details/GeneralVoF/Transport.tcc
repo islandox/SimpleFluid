@@ -5,6 +5,7 @@
 #include "FVM/details/GeneralVoF/LocalTransport.hh"
 #include "FVM/details/GeneralVoF/PhaseAllocation.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 namespace SimpleFluid::VoF
 {
 using SimpleFluid::geometry::swept_volume::runtime_phases;
@@ -216,7 +217,14 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
                 budget.add(data.topology->order.size() * sizeof(GeneralVoFCellClosureDiagnostic));
                 trial.finite_face_chain_.reserve(data.topology->tiles.size());
                 trial.finite_cell_closure_.reserve(data.topology->order.size());
-                trial.candidate_ = data_;
+                if (data.latest_phase_cleanup.empty())
+                    trial.candidate_ = data_;
+                else
+                {
+                    auto identity = std::make_shared<Data>(data);
+                    identity->latest_phase_cleanup.clear();
+                    trial.candidate_ = std::move(identity);
+                }
                 const auto zero = Math::make_value(data.options.arithmetic_mode, 0);
                 for (const auto& tile : data.topology->tiles)
                     trial.finite_face_chain_.push_back({tile.face_gid, flux.at(tile.face_gid), zero,
@@ -980,6 +988,12 @@ GeneralVoF::Trial GeneralVoF::plan_transport_finite(std::span<const GeneralVoFNo
             }
             current(data);
         });
+    apply_phase_cleanup(*candidate);
+    if (data.options.phase_cleanup.relative_cutoff > 0)
+    {
+        import_phases<Mode>(*candidate);
+        wire::collective(*comm, [&] { retained_budget<Mode>(*candidate); });
+    }
     trial.candidate_ = std::move(candidate);
     return trial;
 }

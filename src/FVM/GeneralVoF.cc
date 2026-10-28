@@ -1,36 +1,45 @@
 /** @file GeneralVoF.cc
  * @brief Accepted phase state construction, queries and reconstruction.
  */
-#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
+#include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 namespace SimpleFluid::VoF
 {
 GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<Key> order, std::vector<double> gas,
     std::vector<double> carrier, GeneralVoFOptions options, std::vector<GeneralVoFPhaseGeometry> declarations)
     : GeneralVoF(std::move(hierarchy), std::move(order), std::move(gas), std::move(carrier), options,
-          std::move(declarations), nullptr)
+          std::move(declarations), GeneralVoFPhaseCleanupState{})
 {
 }
 GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<Key> order, std::vector<double> gas,
     std::vector<double> carrier, GeneralVoFOptions options, std::vector<GeneralVoFPhaseGeometry> declarations,
-    const ExactPhaseTransferResult* transfer)
+    GeneralVoFPhaseCleanupState cleanup_state)
+    : GeneralVoF(std::move(hierarchy), std::move(order), std::move(gas), std::move(carrier), options,
+          std::move(declarations), nullptr, cleanup_state)
+{
+}
+GeneralVoF::GeneralVoF(std::shared_ptr<const Hierarchy> hierarchy, std::vector<Key> order, std::vector<double> gas,
+    std::vector<double> carrier, GeneralVoFOptions options, std::vector<GeneralVoFPhaseGeometry> declarations,
+    const ExactPhaseTransferResult* transfer, GeneralVoFPhaseCleanupState cleanup_state)
 {
     if (options.transport_backend == GeneralVoFTransportBackend::GeometricFace)
         options.reconstruction.measure_only = true;
     if (options.arithmetic_mode == ArithmeticMode::Exact)
         construct_mode<ArithmeticMode::Exact>(std::move(hierarchy), std::move(order), std::move(gas),
-            std::move(carrier), options, std::move(declarations), transfer);
+            std::move(carrier), options, std::move(declarations), transfer, cleanup_state);
     else if (options.arithmetic_mode == ArithmeticMode::Ordinary)
         construct_mode<ArithmeticMode::Ordinary>(std::move(hierarchy), std::move(order), std::move(gas),
-            std::move(carrier), options, std::move(declarations), transfer);
+            std::move(carrier), options, std::move(declarations), transfer, cleanup_state);
     else
         construct_mode<ArithmeticMode::BoundedCertification>(std::move(hierarchy), std::move(order), std::move(gas),
-            std::move(carrier), options, std::move(declarations), transfer);
+            std::move(carrier), options, std::move(declarations), transfer, cleanup_state);
 }
 template<ArithmeticMode Mode>
 void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std::vector<Key> order,
     std::vector<double> gas, std::vector<double> carrier, GeneralVoFOptions options,
-    std::vector<GeneralVoFPhaseGeometry> declarations, const ExactPhaseTransferResult* transfer)
+    std::vector<GeneralVoFPhaseGeometry> declarations, const ExactPhaseTransferResult* transfer,
+    GeneralVoFPhaseCleanupState cleanup_state)
 {
     const auto* capsules = transfer ? &transfer->owned() : nullptr;
     auto comm = hierarchy ? hierarchy->communicator() : Tpetra::getDefaultComm();
@@ -55,6 +64,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             data->supplied_hierarchy = hierarchy;
             data->supplied_observation = data->observation;
             data->options = options;
+            data->phase_cleanup = cleanup_state;
             current(*data);
             std::set<Key> seen;
             for (std::size_t i = 0; i < order.size(); ++i)
@@ -465,6 +475,7 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
                 data->carrier.push_back(data->cells.at(key).phase.carrier_volume);
             }
         });
+    apply_phase_cleanup(*data);
     import_phases<Mode>(*data);
     AMR::AdaptiveBytes schema;
     wire::collective(*comm,

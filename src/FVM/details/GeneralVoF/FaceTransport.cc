@@ -3,6 +3,7 @@
  */
 #include "FVM/details/GeneralVoF/FaceTransport.hh"
 #include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "utils/CompensatedSum.hh"
@@ -592,7 +593,14 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
             wire::collective(*comm,
                 [&]
                 {
-                    trial.candidate_ = data_;
+                    if (data.latest_phase_cleanup.empty())
+                        trial.candidate_ = data_;
+                    else
+                    {
+                        auto identity = std::make_shared<Data>(data);
+                        identity->latest_phase_cleanup.clear();
+                        trial.candidate_ = std::move(identity);
+                    }
                     trial.roundoff_.resize(data.topology->order.size());
                     for (const auto& key : data.topology->order)
                     {
@@ -984,6 +992,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
             trial.finite_budgets_ = std::move(admitted.budgets);
             trial.roundoff_ = candidate->roundoff;
         });
+    apply_phase_cleanup(*candidate);
     import_phases<mode>(*candidate);
     wire::collective(*comm,
         [&]

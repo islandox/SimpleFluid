@@ -115,4 +115,98 @@ TEST(GeneralVoFInterfaceFlow, ThreeStepAlignedAndMixedPassageUsesSignedMomentumA
         EXPECT_EQ(solver.time(), 3. / 64);
     }
 }
+TEST(GeneralVoFInterfaceFlow, CleanupUsesRawMassAndExplicitMomentumAndRejectsWithoutSpending)
+{
+    constexpr double dt = 0x1p-44, q = dt / 16;
+    const auto initial = interface_phases(1);
+    VoF::GeneralVoFOptions options;
+    options.phase_cleanup = {1e-14, {6 * q, 6 * q}};
+    auto cleaned = std::make_shared<const VoF::GeneralVoF>(
+        initial->hierarchy(), initial->owned_order(), initial->gas_volumes(), initial->carrier_volumes(), options);
+    auto material = inviscid();
+    material.gas_density = 1;
+    material.liquid_density = 1000;
+    GeneralVoFSolver raw(initial, material), solver(cleaned, material);
+    std::vector<double> faces(solver.mesh()->num_faces());
+    for (const auto& tile : solver.phases()->tiles())
+    {
+        if (tile.exterior)
+            continue;
+        const auto local = solver.mesh()->overlap_face_map()->getLocalElement(tile.face_gid);
+        const auto c = tile.geometry->centroid(), n = tile.geometry->area_vector();
+        if (c.x == 1 && n.x != 0)
+            faces[local] = (c.y < 1 ? 1 : -1) * (n.x > 0 ? 1 : -1) / 16.;
+        if (c.y == 1 && n.y != 0)
+            faces[local] = (c.x > 1 ? 1 : -1) * (n.y > 0 ? 1 : -1) / 16.;
+    }
+    std::vector<VoF::Vector> velocity(solver.mesh()->num_owned_cells());
+    for (std::size_t c = 0; c < velocity.size(); ++c)
+    {
+        const auto x = solver.mesh()->cell_centroid(int(c));
+        velocity[c] = {(1 - x.y) / 8, (x.x - 1) / 8, 0};
+    }
+    raw.initialize(velocity, faces);
+    solver.initialize(velocity, faces);
+    ASSERT_NO_THROW((void) raw.step(dt));
+    ASSERT_NO_THROW((void) solver.step(dt));
+    const auto prepared = solver.prepared_transport();
+    ASSERT_TRUE(prepared);
+    EXPECT_GT(solver.phases()->phase_cleanup_state().cleaned_cells, 0u);
+    double local_nonzero = 0, global_nonzero = 0;
+    std::array<double, 3> local_momentum{}, global_momentum{};
+    for (std::size_t c = 0; c < velocity.size(); ++c)
+    {
+        const long double dg =
+            static_cast<long double>(solver.phases()->gas_volumes()[c]) - raw.phases()->gas_volumes()[c];
+        const long double dl =
+            static_cast<long double>(solver.phases()->carrier_volumes()[c]) - raw.phases()->carrier_volumes()[c];
+        const long double dm = dg + 1000 * dl;
+        EXPECT_EQ(prepared->cleanup_mass[c], dm);
+        EXPECT_EQ(prepared->raw_new_mass[c], raw.prepared_transport()->new_mass[c]);
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            const auto expected = dm * raw.velocity()[c][a];
+            // The independent raw solve includes its pressure projection; its
+            // O(q) difference from the transported trace is below this relative oracle tolerance.
+            if (a == 2)
+                EXPECT_EQ(prepared->cleanup_momentum[c][a], 0); // The raw transported axial momentum is exactly zero.
+            else
+                EXPECT_NEAR(prepared->cleanup_momentum[c][a], expected, 1e-10L * std::abs(expected));
+            local_nonzero += prepared->cleanup_momentum[c][a] != 0;
+            local_momentum[a] += static_cast<double>(prepared->cleanup_momentum[c][a]);
+        }
+    }
+    const auto comm = Tpetra::getDefaultComm();
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_nonzero, &global_nonzero);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 3, local_momentum.data(), global_momentum.data());
+    EXPECT_GT(global_nonzero, 0);
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        const auto& diagnostic = solver.momentum_transport_diagnostics()[a];
+        EXPECT_LE(diagnostic.physical_relative_residual + diagnostic.cleanup_identity_relative_residual, 1e-12);
+        EXPECT_NEAR(diagnostic.cleanup_momentum, global_momentum[a], 1e-14L * std::abs(diagnostic.cleanup_momentum));
+        EXPECT_EQ(diagnostic.accumulated_cleanup_momentum, diagnostic.cleanup_momentum);
+    }
+    const auto accepted = solver.phases();
+    const auto accepted_velocity = solver.velocity();
+    const auto accepted_pressure = solver.pressure();
+    const auto ledger = solver.phases()->phase_cleanup_checkpoint();
+    std::string rejection;
+    try
+    {
+        (void) solver.step(dt);
+        ADD_FAILURE() << "The second cleanup batch must exceed the cumulative cap.";
+    }
+    catch (const std::exception& error)
+    {
+        rejection = error.what();
+    }
+    EXPECT_NE(rejection.find("phase cleanup"), std::string::npos) << rejection;
+    EXPECT_EQ(solver.time(), dt);
+    EXPECT_EQ(solver.phases(), accepted);
+    EXPECT_EQ(solver.prepared_transport(), prepared);
+    EXPECT_EQ(solver.velocity(), accepted_velocity);
+    EXPECT_EQ(solver.pressure(), accepted_pressure);
+    EXPECT_EQ(solver.phases()->phase_cleanup_checkpoint(), ledger);
+}
 } // namespace

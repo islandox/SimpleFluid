@@ -5,6 +5,7 @@
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "FVM/details/GeneralVoF/PhaseCleanup.hh"
 namespace SimpleFluid::VoF::general_vof_detail
 {
 PhaseInventoryPolicy inventory_policy_for(ArithmeticMode mode)
@@ -348,6 +349,9 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
 {
     wire::Budget budget{data.options.byte_budget};
     std::set<const void*> geometry;
+    budget.add(data.latest_phase_cleanup.capacity() * sizeof(GeneralVoFPhaseCleanupDelta));
+    for (const auto& delta : data.latest_phase_cleanup)
+        phase_cleanup_key_storage(delta.key, budget);
     budget.add(sizeof(data) + sizeof(GeneralVoF::Data::Topology) + data.topology->order.capacity() * sizeof(Key) +
                (data.gas.capacity() + data.carrier.capacity()) * sizeof(double) +
                data.phases.capacity() * sizeof(PhaseVolumes) +
@@ -666,9 +670,10 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
                 throw std::invalid_argument("General VoF optimized phase length ratio must be finite in [0,1].");
             if (!options.maximum_face_geometry_operations)
                 throw std::invalid_argument("General VoF face geometry operation limit must be positive.");
-            budget.packet(22 * 8);
+            validate_phase_cleanup_options(options);
+            budget.packet(25 * 8);
             wire::Writer w;
-            w.word(5); // Includes the measured finite gradient-fit policy.
+            w.word(6); // Includes explicit physical phase cleanup controls.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
                      std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
                      std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
@@ -680,6 +685,9 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
                      std::uint64_t(options.sweep.maximum_pair_tests),
                      std::uint64_t(options.maximum_face_geometry_operations)})
                 w.word(value);
+            real(w, options.phase_cleanup.relative_cutoff);
+            for (double value : options.phase_cleanup.maximum_absolute_volume)
+                real(w, value);
             real(w, options.reconstruction.volume_tolerance);
             real(w, options.reconstruction.fit_tolerance);
             real(w, options.reconstruction.maximum_condition);
