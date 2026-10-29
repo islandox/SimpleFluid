@@ -45,6 +45,83 @@ TEST(GeneralVoF, CanonicalNodeFanUsesAllIncidentOwnersBeforeFixedPhysicalSupport
             EXPECT_EQ(actual.size(), 8);
     }
 }
+TEST(GeneralVoF, ScatteredInteriorOwnerRetainsTwoCompleteRingsAroundRemoteNodeFan)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    AMRGrid grid;
+    grid.block_cells = {4, 4, 4};
+    grid.extent = {4, 4, 4};
+    CartesianAMR source(grid);
+    constexpr std::uint64_t isolated = 1 + 4 + 16; // Unit cell [1,2]^3.
+    std::vector<std::uint64_t> owned;
+    for (std::uint64_t gid = 0; gid < 64; ++gid)
+        if ((comm->getSize() == 1 || gid == isolated ? 0 : 1) == comm->getRank())
+            owned.push_back(gid);
+    auto boot = source.detach_owned(owned, {'n', 'o', 'd', 'e', '_', 'f', 'a', 'n', '_', 'r', 'i', 'n', 'g', 's'});
+    const auto hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
+        std::move(boot.owned), std::move(boot.families), boot.kernel, comm);
+    std::vector<AdaptiveCellKey> order;
+    for (const auto& [key, leaf] : hierarchy->owned())
+    {
+        order.push_back(key);
+        EXPECT_DOUBLE_EQ(hierarchy->metrics(leaf).volume, 1);
+    }
+    GeneralVoF state(hierarchy, order, std::vector<double>(order.size(), 0), std::vector<double>(order.size(), 1));
+    EXPECT_EQ(state.options().support_rings, 2u);
+    EXPECT_EQ(state.owned_order().size(), comm->getSize() == 1   ? 64u
+                                          : comm->getRank() == 0 ? 1u
+                                          : comm->getRank() == 1 ? 63u
+                                                                 : 0u);
+    const int local_empty = state.owned_order().empty();
+    int empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+    EXPECT_EQ(empty, std::max(0, comm->getSize() - 2));
+
+    const auto selected = std::find_if(state.nodes().begin(), state.nodes().end(),
+        [](const auto& node) { return node.coordinate == SimpleFluid::PLIC::GeometryPoint{2, 2, 2}; });
+    const int local_selected = selected != state.nodes().end();
+    int selected_owners = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_selected, &selected_owners);
+    EXPECT_EQ(selected_owners, std::min(2, comm->getSize()));
+    EXPECT_EQ(bool(local_selected), comm->getRank() < 2);
+
+    // The node's eight incident cells have indices {1,2}^3. Face adjacency
+    // adds one unit of Manhattan distance per ring. Enumerate the original
+    // physical grid, rather than deriving the oracle from the retained halo.
+    std::set<AdaptiveCellKey> expected;
+    for (std::uint64_t gid = 0; gid < 64; ++gid)
+    {
+        const std::array<std::uint64_t, 3> index{gid % 4, gid / 4 % 4, gid / 16};
+        unsigned distance = 0;
+        for (const auto coordinate : index)
+            distance += coordinate == 0 || coordinate == 3;
+        if (distance <= 2)
+            expected.insert(source.cell_key(gid));
+    }
+    ASSERT_EQ(expected.size(), 56u);
+    EXPECT_TRUE(expected.contains(source.cell_key(3 + 4 * 3 + 16 * 2)));
+    EXPECT_FALSE(expected.contains(source.cell_key(3 + 4 * 3 + 16 * 3)));
+    if (selected != state.nodes().end())
+    {
+        // On rank 0 the diagonal fan member (2,2,2) is absent from the
+        // initial face halo. Its full shell must precede both support rounds;
+        // otherwise (3,3,2) remains only an outer metric neighbor.
+        std::vector<std::uint64_t> actual_ids;
+        EXPECT_NO_THROW(actual_ids = state.node_cells(selected->gid));
+        std::map<std::uint64_t, AdaptiveCellKey> retained_keys;
+        for (const auto& cell : state.support_cells())
+            retained_keys.emplace(cell.cell, cell.key);
+        std::set<AdaptiveCellKey> actual;
+        for (const auto gid : actual_ids)
+        {
+            const auto found = retained_keys.find(gid);
+            EXPECT_NE(found, retained_keys.end());
+            if (found != retained_keys.end())
+                EXPECT_TRUE(actual.insert(found->second).second);
+        }
+        EXPECT_EQ(actual, expected);
+    }
+}
 TEST(GeneralVoF, GeometricFractionPreservesPhysicalInventoriesNativeConversionAndSubnormalPresence)
 {
     const auto comm = Tpetra::getDefaultComm();

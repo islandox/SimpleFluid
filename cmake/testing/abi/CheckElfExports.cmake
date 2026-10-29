@@ -1072,6 +1072,11 @@ simplefluid_require_exact_api(
     "^SimpleFluid::PressureProjectionEquation<.*SimpleFluid::MeshHandle<.*>[ ]*::project_reusing_cached_predictor[(].*, SimpleFluid::VolumeContinuityTarget<.*> const&[)]$"
     1)
 
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    simplefluid_require_exact_api(
+        "^SimpleFluid::GeneralVoFSolver::rebalance[(]SimpleFluid::VoF::GeneralVoFBalanceOptions const&[)]$" 1)
+endif()
+
 set(simplefluid_missing_exact_api_patterns)
 list(LENGTH simplefluid_required_exact_api_patterns
      simplefluid_required_exact_api_pattern_count)
@@ -1320,8 +1325,10 @@ set(simplefluid_final_species_cleanup_symbol_delta -35)
 set(simplefluid_preexisting_api_symbol_upper_bound 1408)
 # The feature adds 142 reviewed solver/controller/caloric definitions when enabled.
 set(simplefluid_experimental_vof_symbol_budget 0)
+set(simplefluid_live_vof_balance_symbol_budget 0)
 if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_experimental_vof_symbol_budget 142)
+    set(simplefluid_live_vof_balance_symbol_budget 1)
 endif()
 # The compiled DIC preconditioner retains nine reviewed definitions: two
 # constructors, apply, getDomainMap/getRangeMap, RTTI and its vtable/VTT.
@@ -1338,9 +1345,9 @@ set(simplefluid_retired_mesh_exact_symbol_budget 61)
 math(EXPR simplefluid_retired_mesh_total_symbol_budget
     "19 + 4 + 4 + 1 + 4 + ${simplefluid_retired_mesh_exact_symbol_budget} + 6")
 math(EXPR simplefluid_api_symbol_lower_bound
-    "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget} + ${simplefluid_experimental_vof_symbol_budget}")
+    "${simplefluid_pre_retirement_api_symbol_lower_bound} - ${simplefluid_retired_mesh_total_symbol_budget} + ${simplefluid_experimental_vof_symbol_budget} + ${simplefluid_live_vof_balance_symbol_budget}")
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget} + ${simplefluid_experimental_vof_symbol_budget}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_relocated_fvm_solve_symbol_budget} - ${simplefluid_retired_mesh_exact_symbol_budget} + ${simplefluid_experimental_vof_symbol_budget} + ${simplefluid_live_vof_balance_symbol_budget}")
 math(EXPR simplefluid_api_symbol_reviewed_maximum
     "${simplefluid_api_symbol_upper_bound} - 3")
 math(EXPR simplefluid_api_symbol_upper_bound

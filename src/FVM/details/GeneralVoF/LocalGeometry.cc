@@ -2,6 +2,7 @@
  * @brief Indexed conservative interface reach and owner-authenticated local cuts.
  */
 #include "FVM/details/GeneralVoF/LocalGeometry.hh"
+#include "FVM/details/GeneralVoF/WorkCapture.hh"
 #include "FVM/details/GeneralVoF/AggregateBudgets.hh"
 #include "FVM/details/GeneralVoF/FaceWorkspaceBudget.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
@@ -119,6 +120,16 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
     std::vector<const Cell*> cells;
     std::shared_ptr<const LocalSpatialCache> spatial;
     std::set<Key> requested;
+    std::size_t capture_bytes = 0, source_capture_remaining = 0;
+    const auto charge_capture = [&](std::size_t bytes)
+    {
+        work.charge(bytes);
+        if (bytes > source_capture_remaining)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit,
+                "General VoF work capture exceeds the source retained byte budget.");
+        source_capture_remaining -= bytes;
+        capture_bytes += bytes;
+    };
     wire::collective(*comm,
         [&]
         {
@@ -130,10 +141,49 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
             for (const auto& identity : spatial->cells)
                 work.push(cells, &data.cells.at(identity.key));
             result.diagnostics.indexed_cells = cells.size();
+            if (data.options.record_balance_work)
+            {
+                retained_budget<mode>(data, {}, 0, &source_capture_remaining);
+                charge_capture(sizeof(GeneralVoFWorkSample) + 2 * sizeof(void*));
+                result.balance_work = std::make_shared<GeneralVoFWorkSample>();
+                auto& capture = *result.balance_work;
+                charge_capture(data.topology->order.size() * sizeof(GeneralVoFWorkCell));
+                capture.cells.reserve(data.topology->order.size());
+                if (capture.cells.capacity() > data.topology->order.size())
+                    charge_capture(
+                        (capture.cells.capacity() - data.topology->order.size()) * sizeof(GeneralVoFWorkCell));
+                for (const auto& key : data.topology->order)
+                {
+                    const auto& cell = data.cells.at(key);
+                    charge_capture(owner_plane_key_storage_bytes(key));
+                    capture.cells.push_back({key, cell.revision, cell.owner});
+                }
+                std::sort(capture.cells.begin(), capture.cells.end(),
+                    [](const auto& a, const auto& b) { return a.key < b.key; });
+                const auto count = std::count_if(data.topology->tiles.begin(), data.topology->tiles.end(),
+                    [&](const auto& tile)
+                    { return !tile.exterior && tile.second && tile.first_owner == comm->getRank(); });
+                charge_capture(count * sizeof(GeneralVoFWorkFace));
+                capture.faces.reserve(count);
+                if (capture.faces.capacity() > static_cast<std::size_t>(count))
+                    charge_capture((capture.faces.capacity() - count) * sizeof(GeneralVoFWorkFace));
+                for (const auto& tile : data.topology->tiles)
+                    if (!tile.exterior && tile.second && tile.first_owner == comm->getRank())
+                    {
+                        charge_capture(tile.identity.size() + owner_plane_key_storage_bytes(tile.first) +
+                            owner_plane_key_storage_bytes(*tile.second));
+                        capture.faces.push_back({tile.identity,
+                            {tile.first, data.cells.at(tile.first).revision, tile.first_owner},
+                            {*tile.second, data.cells.at(*tile.second).revision, tile.second_owner}});
+                    }
+            }
+            std::size_t capture_face = 0;
             for (const auto& tile : data.topology->tiles)
             {
                 if (tile.exterior || !tile.second || tile.first_owner != comm->getRank())
                     continue;
+                auto* face_sample = result.balance_work ? &result.balance_work->faces[capture_face++] : nullptr;
+                WorkObservation setup_observation(face_sample ? &face_sample->setup : nullptr);
                 failure::Scope face_context("interface_local_reach");
                 face_context.record.face = tile.face_gid;
                 face_context.record.mark(failure::Field::Face);
@@ -231,9 +281,49 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                             throw std::invalid_argument("Aggregate source authority count overflows.");
                         count += 2; // A face may retain both signed source groups.
                     }
+                setup_observation.finish();
+                if (face_sample)
+                {
+                    face_sample->geometric = geometric;
+                    if (geometric)
+                    {
+                        charge_capture(candidates.size() * sizeof(GeneralVoFWorkDonor));
+                        face_sample->donors.reserve(candidates.size());
+                        if (face_sample->donors.capacity() > candidates.size())
+                            charge_capture(
+                                (face_sample->donors.capacity() - candidates.size()) * sizeof(GeneralVoFWorkDonor));
+                        for (auto candidate : candidates)
+                        {
+                            const auto& cell = *cells[candidate];
+                            charge_capture(owner_plane_key_storage_bytes(cell.key));
+                            face_sample->donors.push_back({cell.key, cell.revision, cell.owner});
+                        }
+                    }
+                }
                 work.push(pending, Pending{&tile, std::move(recipe), std::move(candidates), geometric});
             }
             result.diagnostics.plane_requests = requested.size();
+            if (result.balance_work)
+            {
+                std::size_t remote = 0;
+                for (const auto& key : requested)
+                    remote += data.cells.at(key).owner != comm->getRank();
+                charge_capture(remote * sizeof(GeneralVoFWorkReceiver));
+                auto& receivers = result.balance_work->receivers;
+                receivers.reserve(remote);
+                if (receivers.capacity() > remote)
+                    charge_capture((receivers.capacity() - remote) * sizeof(GeneralVoFWorkReceiver));
+                for (const auto& key : requested)
+                    if (const auto& cell = data.cells.at(key); cell.owner != comm->getRank())
+                    {
+                        charge_capture(owner_plane_key_storage_bytes(key));
+                        receivers.push_back({{key, cell.revision, cell.owner}, comm->getRank()});
+                    }
+                const auto actual = balance_work_storage_bytes(*result.balance_work);
+                if (actual > capture_bytes)
+                    charge_capture(actual - capture_bytes);
+                result.balance_work->retained_bytes = actual;
+            }
         });
     const auto authority_counts = aggregate_authority_counts(data, local_authorities, context);
     // These retained owners coexist with import buffers and optional peer-only
@@ -245,8 +335,8 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
             for (const auto& key : requested)
                 work.charge(owner_plane_cache_entry_bytes(key));
         });
-    const auto planes =
-        import_requested_planes(data, requested, context, work, result.diagnostics.owner_plane_requests);
+    const auto planes = import_requested_planes(
+        data, requested, context, work, result.diagnostics.owner_plane_requests, result.balance_work.get());
     wire::collective(*comm,
         [&]
         {
@@ -266,8 +356,11 @@ LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data& data, const Ord
                 labels.emplace(key, phase_label<mode>(cell, *geometry, plane, work.volume_tolerance));
                 geometries.emplace(key, std::move(geometry));
             }
+            std::size_t capture_face = 0;
             for (auto& entry : pending)
             {
+                auto* face_sample = result.balance_work ? &result.balance_work->faces[capture_face++] : nullptr;
+                WorkObservation aggregate_observation(face_sample ? &face_sample->aggregate : nullptr);
                 const auto& tile = *entry.tile;
                 failure::Scope face_context("interface_local_partition");
                 face_context.record.face = tile.face_gid;

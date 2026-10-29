@@ -17,6 +17,9 @@ struct FaceTransferSource
     const GeneralVoFFiniteProjectionProvenance& projection;
     const GeneralVoFFlowWorkspace& flow;
     ArithmeticMode arithmetic_mode;
+    /** Ownership migration copies accepted face diagnostics without division. */
+    bool preserve_accepted_fields = false;
+    std::span<const double> accepted_face_velocity;
 };
 struct FaceTransferTarget
 {

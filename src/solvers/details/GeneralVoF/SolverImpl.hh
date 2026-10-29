@@ -18,6 +18,7 @@ struct GeneralVoFSolver::Impl
     void initialize(const std::vector<VoF::Vector>& owned_velocity, const std::vector<double>& face_velocity);
     [[nodiscard]] VoFStepDiagnostics step(double dt);
     [[nodiscard]] double stable_timestep() const;
+    [[nodiscard]] GeneralVoFRebalanceResult rebalance(const VoF::GeneralVoFBalanceOptions&);
     void remap(bool migration, std::span<const int> destinations, std::span<const Meshes::AMR::AdaptiveMark> refine,
         std::span<const Meshes::AMR::AdaptiveBytes> coarsen);
 };

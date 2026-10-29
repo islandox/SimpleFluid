@@ -7,6 +7,7 @@ struct SIMPLEFLUID_SOLVERS_LOCAL PreparedRemap
 {
     std::unique_ptr<Resources> resources;
     std::shared_ptr<State> state;
+    bool unchanged = false;
 };
 template<ArithmeticMode Mode> struct SIMPLEFLUID_SOLVERS_LOCAL Remap
 {

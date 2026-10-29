@@ -157,6 +157,8 @@ void GeneralVoF::Trial::validate_retained_algebraic_payload() const
         {
             wire::Budget budget{limit};
             budget.add(sizeof(Trial));
+            if (unbound_balance_work_)
+                budget.add(unbound_balance_work_->retained_bytes);
             const auto retain = [&](const auto& records)
             {
                 using Record = typename std::remove_reference_t<decltype(records)>::value_type;

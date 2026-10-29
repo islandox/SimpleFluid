@@ -179,12 +179,14 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
     const auto& data = *data_;
     const auto comm = data.hierarchy->communicator();
     const int rank = comm->getRank();
-    const auto limit = data.options.byte_budget;
     const auto safe = [&](auto&& work) { wire::collective(*comm, std::forward<decltype(work)>(work)); };
     // Admit the donor-cell support without constructing a discarded candidate.
     auto low = admit_low_order_ledger(data, controls.face_volume, trial.timestep_);
     auto geometry =
         prepare_local_sweeps(data, controls.traces, controls.flux, controls.face_budgets, controls.packet_context);
+    const auto capture_bytes = geometry.balance_work ? geometry.balance_work->retained_bytes : 0;
+    // Capture remains alive through every packet exchange and ledger construction.
+    const auto limit = data.options.byte_budget - capture_bytes;
     std::map<std::uint64_t, const AMR::AdaptiveTile*> tiles;
     std::map<std::uint64_t, Face> faces;
     std::map<std::uint64_t, Triple> low_export;
@@ -198,6 +200,7 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
             trial.interface_local_ = true;
             trial.numerical_support_transfers_ = std::move(low.transfers);
             trial.numerical_support_budgets_ = std::move(low.budgets);
+            trial.unbound_balance_work_ = std::move(geometry.balance_work);
             trial.unbound_diagnostics_ = geometry.diagnostics;
             trial.unbound_diagnostics_.maximum_outgoing_courant = low.diagnostics.maximum_outgoing_courant;
             trial.unbound_diagnostics_.maximum_continuity_defect = low.diagnostics.maximum_continuity_defect;
@@ -1013,7 +1016,8 @@ GeneralVoF::Trial GeneralVoF::plan_interface_transport(Trial trial, const LocalT
         [&]
         {
             current(data);
-            retained_budget<local_mode>(*candidate);
+            retained_budget<local_mode>(*candidate, {},
+                trial.unbound_balance_work_ ? trial.unbound_balance_work_->retained_bytes : 0);
         });
     trial.candidate_ = std::move(candidate);
     trial.validate_retained_algebraic_payload();

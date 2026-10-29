@@ -12,6 +12,9 @@ set(SIMPLEFLUID_GENERAL_NATIVE_VOF_FVM_SOURCES
     details/GeneralVoF/LocalGeometry.cc
     details/GeneralVoF/FaceWorkspaceBudget.cc
     details/GeneralVoF/OwnerPlaneRequests.cc
+    details/GeneralVoF/WorkCapture.cc
+    details/GeneralVoF/Balance.cc
+    details/GeneralVoF/BalanceForecast.cc
     details/GeneralVoF/LocalSpatialCache.cc
     details/GeneralVoF/AggregateBudgets.cc
     details/GeneralVoF/PhaseCleanup.cc

@@ -142,6 +142,14 @@ if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::detail::vof_failure::context_s
     message(FATAL_ERROR "Missing shared VoF diagnostic context bridge in FVM")
 endif()
 
+if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::plan_initial_partition[(]")
+    message(FATAL_ERROR "Missing compiled measured initial VoF partition API in FVM")
+endif()
+if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::plan_partition_proposal[(]"
+   OR NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::GeneralVoF::validate_prepared_transport_candidate[(]")
+    message(FATAL_ERROR "Missing compiled accepted-successor work forecast API in FVM")
+endif()
+
 
 # These functions have declarations in public headers and definitions in the
 # compiled FVM library. A hidden instantiation breaks downstream linking.

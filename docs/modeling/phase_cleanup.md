@@ -102,8 +102,13 @@ Phase-only finite remap inherits the original ledger and can admit further
 cleanup on the new candidate after raw remap checks. Ownership migration retains
 spending without charging ghosts or copied inventories. Cleanup-enabled remaps
 with coupled channels reject explicitly: correction of transported auxiliary
-fields has no implemented contract. Consequently solver regrid/repartition,
-which carry momentum channels, remain unsupported with cleanup enabled.
+fields has no implemented contract. Solver regrid therefore remains unsupported
+with cleanup enabled. Ordinary solver ownership-only repartition instead uses
+phase-only migration and a separate keyed copy of accepted flow fields. It keeps
+the cleanup checkpoint, current and cumulative cleanup momentum, and clock
+unchanged; it neither performs a new cleanup transaction nor recovers velocity
+by dividing transferred momentum by mass. Failed migration leaves the complete
+accepted publication unchanged. See [measured live balancing](../architecture/general_vof_balancing.md).
 BoundedCertification, Exact, DonorCell and GeometricFace do not support this
 policy and reject an enabled cutoff.
 

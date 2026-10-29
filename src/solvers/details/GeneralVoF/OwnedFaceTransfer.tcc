@@ -2,11 +2,11 @@
  * @brief Compiled transfer kernel with explicit source/target execution boundaries.
  */
 #include "FVM/ExactFaceTransfer.hh"
-#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/PlanarFace.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/FaceRates.hh"
@@ -90,11 +90,14 @@ FaceTransferResult transfer_owned_faces(
         const auto exponent = std::bit_cast<std::int64_t>(word(in, offset));
         if (exponent < std::numeric_limits<int>::min() || exponent > std::numeric_limits<int>::max())
             throw std::runtime_error("Finite face handoff exponent is malformed.");
-        const auto value = std::scalbn(static_cast<long double>(high) + low, int(exponent));
+        const auto mantissa = high == 0 && low == 0 ? std::copysign(0.L, high) : static_cast<long double>(high) + low;
+        const auto value = std::scalbn(mantissa, int(exponent));
         if (!std::isfinite(value))
             throw std::runtime_error("Finite face handoff scalar is nonfinite.");
         return value;
     };
+    int local_offset = !source_input.projection.wall_pressure_offset.empty(), has_offset = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_offset, &has_offset);
     std::map<GO, const Meshes::AMR::AdaptiveTile*> target_tiles;
     std::vector<OwnerPacket> packets;
     source_execution.collective(
@@ -103,6 +106,11 @@ FaceTransferResult transfer_owned_faces(
             if (source_input.projection.face_rate.size() != source_input.mesh.num_owned_faces() ||
                 source_input.projection.face_radius.size() != source_input.mesh.num_owned_faces())
                 throw std::runtime_error("Finite ownership handoff lacks source rate authority.");
+            if (source_input.preserve_accepted_fields &&
+                (source_input.accepted_face_velocity.size() != source_input.mesh.num_faces() ||
+                    (has_offset &&
+                        source_input.projection.wall_pressure_offset.size() != source_input.mesh.num_owned_faces())))
+                throw std::runtime_error("Ownership face preservation has incomplete accepted fields.");
             std::size_t used = 0;
             for (const auto& tile : source_input.phases.tiles())
             {
@@ -110,6 +118,17 @@ FaceTransferResult transfer_owned_faces(
                 if (face < 0)
                     continue;
                 auto key = identity(tile);
+                if (source_input.preserve_accepted_fields)
+                {
+                    const auto first_size = Meshes::AMR::encode_adaptive_key(tile.first).size();
+                    const auto second_size = tile.second ? Meshes::AMR::encode_adaptive_key(*tile.second).size() : 0;
+                    const auto packet_bytes =
+                        16 + 3 * 8 + key.size() + first_size + second_size + 48 + 8 + (has_offset ? 24 : 0);
+                    // Include doubled vector capacities and both directory/result lifetimes before growth.
+                    const auto admission = 4 * (packet_bytes + sizeof(OwnerPacket));
+                    if (admission > controls.byte_budget / 2 - std::min(used, controls.byte_budget / 2))
+                        throw std::runtime_error("Ownership face source packet capacity exceeds budget.");
+                }
                 OwnerPacket packet;
                 packet.peer = authority(key);
                 append_face_word(packet.bytes, 0);
@@ -119,7 +138,14 @@ FaceTransferResult transfer_owned_faces(
                 bytes(packet.bytes, tile.second ? Meshes::AMR::encode_adaptive_key(*tile.second) : std::vector<char>{});
                 scalar(packet.bytes, source_input.projection.face_rate[face]);
                 scalar(packet.bytes, source_input.projection.face_radius[face]);
-                used += packet.bytes.size() + sizeof(OwnerPacket);
+                if (source_input.preserve_accepted_fields)
+                {
+                    append_face_word(
+                        packet.bytes, std::bit_cast<std::uint64_t>(source_input.accepted_face_velocity[face]));
+                    if (has_offset)
+                        scalar(packet.bytes, source_input.projection.wall_pressure_offset[face]);
+                }
+                used += (source_input.preserve_accepted_fields ? 4 : 1) * (packet.bytes.size() + sizeof(OwnerPacket));
                 if (used > controls.byte_budget / 2)
                     throw std::runtime_error("Finite face source directory exceeds budget.");
                 packets.push_back(std::move(packet));
@@ -131,6 +157,14 @@ FaceTransferResult transfer_owned_faces(
                     continue;
                 target_tiles.emplace(GO(tile.face_gid), &tile);
                 auto key = identity(tile);
+                if (source_input.preserve_accepted_fields)
+                {
+                    const auto first_size = Meshes::AMR::encode_adaptive_key(tile.first).size();
+                    const auto packet_bytes = 24 + 2 * 8 + key.size() + first_size;
+                    const auto admission = 4 * (packet_bytes + sizeof(OwnerPacket));
+                    if (admission > controls.byte_budget / 2 - std::min(used, controls.byte_budget / 2))
+                        throw std::runtime_error("Ownership face target packet capacity exceeds budget.");
+                }
                 OwnerPacket packet;
                 packet.peer = authority(key);
                 append_face_word(packet.bytes, 1);
@@ -138,7 +172,7 @@ FaceTransferResult transfer_owned_faces(
                 bytes(packet.bytes, key);
                 append_face_word(packet.bytes, tile.face_gid);
                 bytes(packet.bytes, Meshes::AMR::encode_adaptive_key(tile.first));
-                used += packet.bytes.size() + sizeof(OwnerPacket);
+                used += (source_input.preserve_accepted_fields ? 4 : 1) * (packet.bytes.size() + sizeof(OwnerPacket));
                 if (used > controls.byte_budget / 2)
                     throw std::runtime_error("Finite face target directory exceeds budget.");
                 packets.push_back(std::move(packet));
@@ -148,7 +182,9 @@ FaceTransferResult transfer_owned_faces(
     struct SourceFace
     {
         std::vector<char> first, second;
-        long double rate, radius;
+        long double rate, radius, offset = 0;
+        double velocity = 0;
+        int owner = -1;
     };
     struct Request
     {
@@ -173,7 +209,17 @@ FaceTransferResult transfer_owned_faces(
                 {
                     auto first = read_bytes(packet.bytes, offset), second = read_bytes(packet.bytes, offset);
                     const auto rate = read_scalar(packet.bytes, offset), radius = read_scalar(packet.bytes, offset);
-                    if (radius < 0 || !sources.emplace(key, SourceFace{first, second, rate, radius}).second)
+                    SourceFace entry{first, second, rate, radius};
+                    entry.owner = packet.peer;
+                    if (source_input.preserve_accepted_fields)
+                    {
+                        entry.velocity = std::bit_cast<double>(word(packet.bytes, offset));
+                        if (!std::isfinite(entry.velocity))
+                            throw std::runtime_error("Ownership accepted face velocity is nonfinite.");
+                        if (has_offset)
+                            entry.offset = read_scalar(packet.bytes, offset);
+                    }
+                    if (radius < 0 || !sources.emplace(key, entry).second)
                         throw std::runtime_error("Finite canonical source face is duplicated.");
                 }
                 else if (type == 1)
@@ -186,8 +232,36 @@ FaceTransferResult transfer_owned_faces(
                 if (offset != packet.bytes.size())
                     throw std::runtime_error("Finite face directory has trailing payload.");
             }
+        });
+    std::vector<Meshes::AMR::AdaptiveOwner> source_owners, request_owners;
+    if (source_input.preserve_accepted_fields)
+    {
+        std::vector<VoF::GeneralVoF::Key> source_keys, request_keys;
+        source_execution.collective(
+            [&]
+            {
+                for (const auto& [key, face] : sources)
+                    source_keys.push_back(Meshes::AMR::decode_adaptive_key(face.first));
+                for (const auto& request : requests)
+                    request_keys.push_back(Meshes::AMR::decode_adaptive_key(request.first));
+            });
+        source_owners = source_input.phases.hierarchy()->lookup_cells(source_keys, true,
+            std::min(controls.byte_budget / 8, source_input.phases.hierarchy()->options().byte_budget));
+        request_owners = target.phases.hierarchy()->lookup_cells(
+            request_keys, true, std::min(controls.byte_budget / 8, target.phases.hierarchy()->options().byte_budget));
+    }
+    source_execution.collective(
+        [&]
+        {
+            std::size_t index = 0;
+            for (const auto& [key, face] : sources)
+                if (source_input.preserve_accepted_fields && source_owners[index++].owner != face.owner)
+                    throw std::runtime_error("Finite canonical face has a foreign source owner.");
+            index = 0;
             for (const auto& request : requests)
             {
+                if (source_input.preserve_accepted_fields && request_owners[index++].owner != request.owner)
+                    throw std::runtime_error("Finite canonical face has a foreign target owner.");
                 const auto found = sources.find(request.identity);
                 if (found == sources.end())
                     throw std::runtime_error(
@@ -202,6 +276,17 @@ FaceTransferResult transfer_owned_faces(
                 bytes(reply.bytes, request.identity);
                 scalar(reply.bytes, sign * source.rate);
                 scalar(reply.bytes, source.radius);
+                if (source_input.preserve_accepted_fields)
+                {
+                    append_face_word(
+                        reply.bytes, std::bit_cast<std::uint64_t>(sign == 1 ? source.velocity : -source.velocity));
+                    if (has_offset)
+                    {
+                        if (source.second.empty() && sign != 1)
+                            throw std::runtime_error("Ownership boundary pressure offset changed incident cell.");
+                        scalar(reply.bytes, source.offset);
+                    }
+                }
                 packets.push_back(std::move(reply));
             }
         });
@@ -215,6 +300,12 @@ FaceTransferResult transfer_owned_faces(
             transfer.projection.face_radius.resize(target.mesh.num_owned_faces());
             transfer.projection.cell_radius.resize(target.volume.size());
             transfer.face_velocity.resize(target.mesh.num_faces());
+            if (source_input.preserve_accepted_fields && has_offset)
+                transfer.projection.wall_pressure_offset.resize(target.mesh.num_owned_faces());
+            if (source_input.preserve_accepted_fields)
+                transfer.projection.maximum_wall_normal_residual = source_input.projection.maximum_wall_normal_residual;
+            // Partition-local scratch accounting is rebuilt by the next projection.
+            transfer.projection.closure_storage_bytes = 0;
             std::set<GO> seen;
             for (const auto& packet : result.packets)
             {
@@ -222,6 +313,14 @@ FaceTransferResult transfer_owned_faces(
                 const auto gid = GO(word(packet.bytes, offset));
                 const auto key = read_bytes(packet.bytes, offset);
                 const auto rate = read_scalar(packet.bytes, offset), radius = read_scalar(packet.bytes, offset);
+                double accepted_velocity = 0;
+                long double wall_offset = 0;
+                if (source_input.preserve_accepted_fields)
+                {
+                    accepted_velocity = std::bit_cast<double>(word(packet.bytes, offset));
+                    if (has_offset)
+                        wall_offset = read_scalar(packet.bytes, offset);
+                }
                 const auto local = target.mesh.owned_face_map()->getLocalElement(gid);
                 if (local < 0 || !seen.insert(gid).second || !target_tiles.contains(gid) ||
                     identity(*target_tiles.at(gid)) != key || packet.peer != authority(key) ||
@@ -229,9 +328,13 @@ FaceTransferResult transfer_owned_faces(
                     throw std::runtime_error("Finite ownership face handoff has foreign or duplicate target.");
                 if (target.mesh.is_geometry_exterior_face(local) && rate != 0)
                     throw std::runtime_error("Finite ownership handoff changes a closed wall.");
-                const auto velocity =
-                    A::divide(A::make_value(rate, radius), A::make_value(target.mesh.face_area(local), 0));
-                transfer.face_velocity[local] = static_cast<double>(velocity.value);
+                if (source_input.preserve_accepted_fields)
+                    transfer.face_velocity[local] = accepted_velocity;
+                else
+                    transfer.face_velocity[local] = static_cast<double>(
+                        A::divide(A::make_value(rate, radius), A::make_value(target.mesh.face_area(local), 0)).value);
+                if (source_input.preserve_accepted_fields && has_offset)
+                    transfer.projection.wall_pressure_offset[local] = wall_offset;
                 if (!std::isfinite(transfer.face_velocity[local]))
                     throw std::runtime_error("Finite ownership face velocity diagnostic overflows.");
                 transfer.projection.face_rate[local] = rate;

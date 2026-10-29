@@ -191,7 +191,8 @@ SIMPLEFLUID_FVM_LOCAL void refresh_experimental_catalog(GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL void current(const GeneralVoF::Data& data);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL void retained_budget(
-    const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes = {});
+    const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes = {},
+    std::size_t extra_retained_bytes = 0, std::size_t* remaining_bytes = nullptr);
 // Every incident owner registers its actual cell once. The node authority
 // authenticates those registrations and returns the complete canonical fan;
 // geometric coincidence and whichever ghost rows happen to be resident play no
@@ -215,7 +216,7 @@ template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVoF::Data& data,
     const std::set<Key>& requested, const PLIC::GeometryPacketContext& context, geometry::swept_volume::Work& work,
-    GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics);
+    GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics, GeneralVoFWorkSample* balance_work = nullptr);
 SIMPLEFLUID_FVM_LOCAL std::map<Key, PLIC::PolyhedralInterface> import_planes(const GeneralVoF::Data& data);
 } // namespace general_vof_detail
 } // namespace SimpleFluid::VoF
