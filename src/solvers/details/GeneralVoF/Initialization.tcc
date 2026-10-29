@@ -6,6 +6,7 @@
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/FaceRates.hh"
 #include "solvers/details/GeneralVoF/Initialization.hh"
+#include "solvers/details/GeneralVoF/OccupancyReadiness.hh"
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
 #include <cmath>
 #include <utility>
@@ -99,8 +100,7 @@ std::shared_ptr<State> Initialization<Mode>::prepare(Resources& resources,
                 next->phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition;
             if (face_backend || next->phases->homogeneous_transport_eligible())
                 next->finite_projection.transport_readiness =
-                    detail::GeneralVoFFiniteProjectionProvenance::TransportReadiness{
-                        next->phases->options().reconstruction.volume_tolerance, options.flow.max_courant};
+                    occupancy_readiness(*next->phases, options.flow.max_courant, options.byte_budget);
         }
         flow.project(next->face_velocity, next->velocity, next->pressure, next->density, next->fraction,
             next->curvature, 1, 0, options.flow, next->diagnostics, &next->finite_projection,

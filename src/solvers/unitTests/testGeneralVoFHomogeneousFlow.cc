@@ -34,6 +34,15 @@ TEST(GeneralVoFHomogeneousFlow, MovingGasAndLiquidReuseMomentumWithoutSweptParti
             material.gas_density = 1;
             material.liquid_density = 1000;
             GeneralVoFSolver solver(homogeneous_phases(gas, trace), material);
+            const auto pinned_cleanup = solver.phases()->phase_cleanup_checkpoint();
+            const auto pinned_caps = solver.phases()->options().phase_cleanup.maximum_absolute_volume;
+            EXPECT_EQ(solver.phases()->options().phase_cleanup.relative_cutoff, 1e-14);
+            EXPECT_EQ(pinned_caps[0], 0); // Inherited from the original all-carrier source.
+            EXPECT_EQ(solver.phases()->phase_cleanup_state().cleaned_cells, 0u);
+            EXPECT_TRUE(solver.phases()->latest_phase_cleanup().empty());
+            const auto raw_minority = gas ? solver.phases()->carrier_volumes() : solver.phases()->gas_volumes();
+            for (const auto amount : raw_minority)
+                EXPECT_EQ(amount, trace ? 1e-25 : 0);
             std::vector<double> face_velocity(solver.mesh()->num_faces());
             for (const auto& tile : solver.phases()->tiles())
             {
@@ -75,6 +84,14 @@ TEST(GeneralVoFHomogeneousFlow, MovingGasAndLiquidReuseMomentumWithoutSweptParti
                 ASSERT_TRUE(p->momentum_preparation);
                 EXPECT_EQ(p->momentum_builds, 1u);
                 EXPECT_EQ(p->momentum_reuses, 2u);
+                EXPECT_TRUE(p->phase_cleanup.empty());
+                EXPECT_EQ(solver.phases()->phase_cleanup_checkpoint(), pinned_cleanup);
+                EXPECT_EQ(solver.phases()->options().phase_cleanup.maximum_absolute_volume, pinned_caps);
+                EXPECT_EQ(solver.phases()->phase_cleanup_state().cleaned_cells, 0u);
+                EXPECT_TRUE(solver.phases()->latest_phase_cleanup().empty());
+                for (const auto& delta : p->cleanup_momentum)
+                    for (const auto component : delta)
+                        EXPECT_EQ(component, 0);
                 for (const auto& m : solver.momentum_transport_diagnostics())
                     EXPECT_LE(m.physical_relative_residual, 1e-12);
             }

@@ -208,6 +208,7 @@ GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatc
     const auto identity = [](const GeneralVoFCurvaturePatch& patch)
     { return patch.key.value_or(VoF::GeneralVoFSurfaceKey{VoF::GeneralVoFSurfaceKind::MixedCell, patch.cell}); };
     std::set<VoF::GeneralVoFSurfaceKey> seen;
+    std::size_t outside_count = 0, incoherent_count = 0;
     const auto append = [&](const GeneralVoFCurvaturePatch& p)
     {
         require(std::isfinite(p.area) && p.area > 0, "Invalid general VoF curvature patch area.");
@@ -228,8 +229,16 @@ GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatc
                 std::pow(dot(r, basis[0]) / tangent_span[0], 2) + std::pow(dot(r, basis[1]) / tangent_span[1], 2);
         }
         const auto normal = unit(point(p.normal));
-        if (outside || dot(normal, basis[2]) < options.minimum_normal_cosine)
+        if (outside)
+        {
+            ++outside_count;
             return;
+        }
+        if (dot(normal, basis[2]) < options.minimum_normal_cosine)
+        {
+            ++incoherent_count;
+            return;
+        }
         const auto x = dot(r, basis[0]) / h, y = dot(r, basis[1]) / h, z = dot(r, basis[2]) / h;
         samples.push_back({{1, x, y, .5 * x * x, x * y, .5 * y * y}, z,
             static_cast<long double>(p.area) / (h * h * (1 + weight_distance)),
@@ -248,8 +257,14 @@ GeneralVoFCurvatureResult GeneralVoFCurvature::fit(const GeneralVoFCurvaturePatc
         }
         append(p);
     }
-    require(
-        samples.size() >= options.minimum_samples, "General VoF curvature has insufficient coherent physical patches.");
+    if (samples.size() < options.minimum_samples)
+    {
+        std::ostringstream message;
+        message << "General VoF curvature has insufficient coherent physical patches: samples=" << samples.size()
+                << " required=" << options.minimum_samples << " outside_radius=" << outside_count
+                << " incoherent=" << incoherent_count << " supplied=" << support.size();
+        throw std::runtime_error(message.str());
+    }
     // Resolve each tangential direction independently before forming polynomial
     // columns. Stability thickness h can be orders of magnitude smaller than
     // the two physical surface lengths on anisotropic cells.

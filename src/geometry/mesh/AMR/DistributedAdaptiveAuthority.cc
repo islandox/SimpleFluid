@@ -4,6 +4,8 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveAuthority.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <set>
@@ -12,6 +14,23 @@ namespace SimpleFluid::Meshes::AMR
 using namespace adaptive_detail;
 namespace
 {
+struct AuthorityDiagnostics
+{
+    int rank;
+    const char* stage = "support_requests";
+    std::size_t cells = 0, faces = 0, face_bytes = 0, requests = 0;
+    std::size_t edge_subscriptions = 0, endpoint_events = 0, unique_endpoints = 0, endpoint_bytes = 0, edge_work = 0;
+    ~AuthorityDiagnostics()
+    {
+        if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
+            std::fprintf(stderr,
+                "ADAPTIVE_AUTHORITY rank=%d stage=%s cells=%zu face_occurrences=%zu "
+                "geometry_record_bytes=%zu requests=%zu edge_subscriptions=%zu "
+                "endpoint_events=%zu unique_line_endpoints=%zu unique_endpoint_bytes=%zu edge_work=%zu\n",
+                rank, stage, cells, faces, face_bytes, requests, edge_subscriptions, endpoint_events, unique_endpoints,
+                endpoint_bytes, edge_work);
+    }
+};
 std::pair<std::uint64_t, std::uint64_t> entity_range(std::uint64_t local, const Teuchos::Comm<int>& comm)
 {
     collective(comm,
@@ -115,6 +134,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
         *statistics = {};
     if (comm.is_null())
         throw std::invalid_argument("Surface authority needs communicator.");
+    AuthorityDiagnostics diagnostics{comm->getRank()};
+    diagnostics.cells = owned.size();
     std::vector<OwnerPacket> requests;
     collective(*comm,
         [&]
@@ -133,10 +154,15 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         throw std::invalid_argument(
                             "Periodic authority images require canonical Cartesian interior provenance.");
                     auto face = surface.geometry->encode_incidence();
+                    ++diagnostics.faces;
+                    diagnostics.face_bytes += face.size();
                     auto key = encode_adaptive_key(leaf.key);
-                    const auto whole = surface.native_whole_geometry ? surface.native_whole_geometry->encode_incidence()
-                                                                     : AdaptiveBytes{};
-                    if (surface.require_native_whole_tile && whole.empty())
+                    const bool shared_whole = surface.require_native_whole_tile && surface.native_whole_geometry &&
+                                              surface.native_whole_geometry == surface.geometry;
+                    const auto whole = surface.native_whole_geometry && !shared_whole
+                                           ? surface.native_whole_geometry->encode_incidence()
+                                           : AdaptiveBytes{};
+                    if (surface.require_native_whole_tile && !shared_whole && whole.empty())
                         throw std::invalid_argument("Missing actual native face nesting certificate.");
                     allocation.packet(88);
                     allocation.add(whole.size());
@@ -152,16 +178,19 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     w.bytes(key);
                     w.word(surface.native_face);
                     w.bytes(surface.authority_image);
-                    w.word(surface.require_native_whole_tile);
+                    w.word(shared_whole ? 2 : std::uint64_t(surface.require_native_whole_tile));
                     w.bytes(whole);
                     w.word(surface.orientation == 1);
                     w.word(surface.exterior);
                     w.bytes(std::span(surface.boundary));
                     w.bytes(face);
                     requests.push_back({authority(surface.key, comm->getSize()), std::move(w.data)});
+                    ++diagnostics.requests;
                 }
         });
-    auto incoming = exchange_owner_packets(requests, comm, budget);
+    diagnostics.stage = "support_exchange";
+    auto incoming = consume_owner_packets(std::move(requests), comm, budget);
+    diagnostics.stage = "support_decode_overlay";
     std::map<AdaptiveBytes, std::vector<Occurrence>> groups;
     std::vector<OwnerPacket> replies;
     std::uint64_t authority_faces = 0;
@@ -170,9 +199,12 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
         [&]
         {
             Budget allocation{budget};
+            allocation.add(incoming.packets.capacity() * sizeof(OwnerPacket));
             for (const auto& packet : incoming.packets)
+                allocation.add(packet.bytes.capacity());
+            for (auto& packet : incoming.packets)
             {
-                allocation.add(packet.bytes.size());
+                const auto encoded_capacity = packet.bytes.capacity();
                 allocation.add(sizeof(Occurrence));
                 Reader r{packet.bytes};
                 auto support = r.bytes();
@@ -182,15 +214,15 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 entry.native_face = r.word();
                 entry.image = r.bytes();
                 auto nesting = r.word();
-                if (nesting > 1)
+                if (nesting > 2)
                     throw std::invalid_argument("Invalid native face nesting policy.");
                 entry.native_whole = nesting;
                 auto whole = r.bytes();
+                if (nesting == 2 && !whole.empty())
+                    throw std::invalid_argument("Shared native whole-face proof has a duplicate payload.");
                 if (!whole.empty())
                     entry.whole_geometry =
                         PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(whole)->translated_packet(entry.image);
-                if (entry.native_whole && !entry.whole_geometry)
-                    throw std::invalid_argument("Missing native whole-face authority proof.");
                 entry.rank = packet.peer;
                 auto orientation = r.word(), exterior = r.word();
                 if (orientation > 1 || exterior > 1 || authority(support, comm->getSize()) != comm->getRank())
@@ -201,10 +233,26 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 entry.boundary.assign(name.begin(), name.end());
                 entry.face =
                     PLIC::PlanarFace<ArithmeticMode::Ordinary>::decode(r.bytes())->translated_packet(entry.image);
+                if (nesting == 2)
+                    entry.whole_geometry = entry.face;
+                if (entry.native_whole && !entry.whole_geometry)
+                    throw std::invalid_argument("Missing native whole-face authority proof.");
                 if (entry.whole_geometry && !entry.whole_geometry->contains(*entry.face))
                     throw std::invalid_argument("Rewritten join lies outside its actual native face.");
                 r.done();
-                groups[std::move(support)].push_back(std::move(entry));
+                allocation.add(entry.face->storage_bytes());
+                if (entry.whole_geometry && entry.whole_geometry != entry.face)
+                    allocation.add(entry.whole_geometry->storage_bytes());
+                allocation.add(entry.domain.capacity() + entry.image.capacity() + entry.boundary.capacity() +
+                               encode_adaptive_key(entry.cell).size());
+                auto [position, inserted] = groups.try_emplace(std::move(support));
+                if (inserted)
+                    allocation.add(
+                        sizeof(decltype(groups)::value_type) + position->first.capacity() + 4 * sizeof(void*));
+                allocation.append_capacity(position->second);
+                position->second.push_back(std::move(entry));
+                std::vector<char>().swap(packet.bytes);
+                allocation.used -= encoded_capacity;
             }
             std::size_t tiles = 0;
             for (const auto& [support, entries] : groups)
@@ -324,6 +372,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 }
             }
         });
+    // Overlay occurrences are dead once their complete canonical tiles exist.
+    decltype(groups)().swap(groups);
+    std::vector<OwnerPacket>().swap(incoming.packets);
     std::vector<std::uint64_t> sorted_face_ordinals;
     collective(*comm,
         [&]
@@ -354,7 +405,8 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     packet.bytes[i] = char(gid >> (8 * i));
             }
         });
-    auto returned = exchange_owner_packets(replies, comm, budget);
+    diagnostics.stage = "tile_exchange";
+    auto returned = consume_owner_packets(std::move(replies), comm, budget);
     std::vector<AdaptiveTile> result;
     collective(*comm,
         [&]
@@ -373,6 +425,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 result.push_back(std::move(tile));
             }
         });
+    std::vector<OwnerPacket>().swap(returned.packets);
+    decltype(face_identity_order)().swap(face_identity_order);
+    std::vector<std::uint64_t>().swap(sorted_face_ordinals);
     collective(*comm,
         [&]
         {
@@ -472,6 +527,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                             support.bytes(lines[e]);
                             auto key = std::move(support.data);
                             Writer w;
+                            w.data.reserve(32 + key.size() + points[e].size() + points[(e + 1) % points.size()].size());
                             w.bytes(key);
                             w.word(expected.size());
                             w.bytes(points[e]);
@@ -492,7 +548,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
         if (statistics)
             for (const auto& packet : requests)
                 statistics->edge_request_bytes += packet.bytes.size();
-        incoming = exchange_owner_packets(requests, comm, budget);
+        diagnostics.stage = "edge_exchange";
+        incoming = consume_owner_packets(std::move(requests), comm, budget);
+        diagnostics.stage = "edge_decode";
         replies.clear();
         collective(*comm,
             [&]
@@ -501,41 +559,79 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 {
                     int rank;
                     std::uint64_t ordinal;
-                    AdaptiveBytes first, last;
+                    const AdaptiveBytes* first;
+                    const AdaptiveBytes* last;
                 };
                 struct Line
                 {
-                    std::vector<AdaptiveBytes> points;
+                    std::set<AdaptiveBytes> points;
+                    std::vector<const AdaptiveBytes*> point_order;
                     std::vector<Subscriber> subscribers;
                 };
                 std::map<AdaptiveBytes, Line> lines;
                 Budget allocation{budget};
-                std::set<std::pair<int, std::uint64_t>> unique;
+                allocation.add(incoming.packets.capacity() * sizeof(OwnerPacket));
                 for (const auto& packet : incoming.packets)
+                    allocation.add(packet.bytes.capacity());
+                std::set<std::pair<int, std::uint64_t>> unique;
+                for (auto& packet : incoming.packets)
                 {
-                    allocation.add(packet.bytes.size() + sizeof(Line) + sizeof(Subscriber) + 2 * sizeof(AdaptiveBytes));
+                    const auto encoded_capacity = packet.bytes.capacity();
                     Reader r{packet.bytes};
                     auto key = r.bytes();
                     auto ordinal = r.word();
+                    allocation.add(sizeof(decltype(unique)::value_type) + 4 * sizeof(void*));
                     if (authority(key, comm->getSize()) != comm->getRank() ||
                         !unique.emplace(packet.peer, ordinal).second)
                         throw std::invalid_argument("Invalid edge authority request.");
                     auto first = r.bytes(), last = r.bytes();
                     r.done();
-                    allocation.add(key.size() + 2 * (first.size() + last.size()));
-                    auto& line = lines[key];
-                    line.points.push_back(first);
-                    line.points.push_back(last);
-                    line.subscribers.push_back({packet.peer, ordinal, std::move(first), std::move(last)});
+                    auto [position, inserted] = lines.try_emplace(std::move(key));
+                    if (inserted)
+                        allocation.add(sizeof(Line) + position->first.capacity() + 4 * sizeof(void*));
+                    auto& line = position->second;
+                    auto intern = [&](AdaptiveBytes point)
+                    {
+                        auto [it, added] = line.points.insert(std::move(point));
+                        if (added)
+                        {
+                            allocation.add(sizeof(AdaptiveBytes) + it->capacity() + 4 * sizeof(void*));
+                            allocation.append_capacity(line.point_order);
+                            line.point_order.push_back(&*it);
+                            ++diagnostics.unique_endpoints;
+                            diagnostics.endpoint_bytes += it->capacity();
+                        }
+                        return &*it;
+                    };
+                    const auto* a = intern(std::move(first));
+                    const auto* b = intern(std::move(last));
+                    allocation.append_capacity(line.subscribers);
+                    line.subscribers.push_back({packet.peer, ordinal, a, b});
+                    ++diagnostics.edge_subscriptions;
+                    diagnostics.endpoint_events += 2;
+                    // Reader and all endpoint values have detached from the
+                    // packet. Release its charge only after its allocation.
+                    std::vector<char>().swap(packet.bytes);
+                    allocation.used -= encoded_capacity;
                 }
                 for (const auto& [key, line] : lines)
                 {
+                    // The immutable endpoint index contains each actual point
+                    // once. Subscriber references above retain no endpoint copy.
+                    allocation.add(line.points.size() * sizeof(AdaptiveBytes));
                     for (const auto& point : line.points)
-                        allocation.add(4 * point.size() + 256);
-                    PLIC::EdgePointIndex<ArithmeticMode::Ordinary> index(line.points);
+                        allocation.add(point.capacity() + 4 * point.size() + 256);
+                    // Preserve first-arrival identity selection if the geometry
+                    // index recognizes equivalent encodings of the same point.
+                    std::vector<AdaptiveBytes> indexed_points;
+                    indexed_points.reserve(line.point_order.size());
+                    for (const auto* point : line.point_order)
+                        indexed_points.push_back(*point);
+                    PLIC::EdgePointIndex<ArithmeticMode::Ordinary> index(indexed_points);
                     for (const auto& subscriber : line.subscribers)
                     {
-                        auto points = index.closed_segment(subscriber.first, subscriber.last);
+                        diagnostics.edge_work += line.points.size();
+                        auto points = index.closed_segment(*subscriber.first, *subscriber.last);
                         std::size_t size = 24 + key.size();
                         for (const auto& point : points)
                         {
@@ -544,16 +640,21 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         }
                         allocation.packet(size);
                         Writer w;
+                        w.data.reserve(size);
                         w.bytes(key);
                         w.word(subscriber.ordinal);
                         w.word(points.size());
                         for (const auto& point : points)
                             w.bytes(point);
+                        allocation.append_capacity(replies);
                         replies.push_back({subscriber.rank, std::move(w.data)});
                     }
                 }
             });
-        returned = exchange_owner_packets(replies, comm, budget);
+        std::vector<OwnerPacket>().swap(incoming.packets);
+        diagnostics.stage = "edge_reply_exchange";
+        returned = consume_owner_packets(std::move(replies), comm, budget);
+        diagnostics.stage = "edge_reply_decode";
         collective(*comm,
             [&]
             {
@@ -597,6 +698,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                     local_changed |= result[i].geometry->vertex_identities().size() != before;
                 }
             });
+        std::vector<OwnerPacket>().swap(returned.packets);
         if (!periodic)
             break;
         Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_changed, &changed);
@@ -662,7 +764,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                         tile.second_node_gids);
             }
         });
-    incoming = exchange_owner_packets(requests, comm, budget);
+    diagnostics.stage = "node_exchange";
+    incoming = consume_owner_packets(std::move(requests), comm, budget);
+    diagnostics.stage = "node_decode";
     struct NodeAuthority
     {
         PLIC::GeometryPoint coordinate;
@@ -720,7 +824,9 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
                 }
             }
         });
-    returned = exchange_owner_packets(replies, comm, budget);
+    diagnostics.stage = "node_reply_exchange";
+    returned = consume_owner_packets(std::move(replies), comm, budget);
+    diagnostics.stage = "node_reply_decode";
     collective(*comm,
         [&]
         {
@@ -760,6 +866,7 @@ std::vector<AdaptiveTile> decide_adaptive_tiles(std::span<const AdaptiveLeaf> ow
             if (node_catalog)
                 *node_catalog = std::move(catalog);
         });
+    diagnostics.stage = "complete";
     return result;
 }
 } // namespace SimpleFluid::Meshes::AMR

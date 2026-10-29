@@ -3,8 +3,11 @@
  */
 #include "FVM/GeneralVoF.hh"
 #include "FVM/GeometricVoF.hh"
+#include "FVM/details/VoFFailure.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
+#include <iomanip>
+#include <iostream>
 #include "plic_algebraic_planar_corner_fixture.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/swept_volume/SweptGeometry.hh"
@@ -13,6 +16,7 @@
 #include <cmath>
 #include <gtest/gtest.h>
 #include <limits>
+#include <sstream>
 #include <type_traits>
 
 namespace
@@ -183,6 +187,47 @@ TEST(PolyhedralReconstruction, OrdinarySupportAndModelGatesRemainIndependentOfCe
     EXPECT_EQ(target.carrier_volume, .75);
 }
 
+TEST(PolyhedralReconstruction, WeakPhaseSupportModelRejectionRetainsMeasuredEvidence)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .1);
+    std::vector<OrdinarySample> stencil;
+    const std::array<std::array<int, 3>, 6> indices{{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0},
+        {0, 1, 0}, {0, 0, -1}, {0, 0, 1}}};
+    for (std::size_t i = 0; i < indices.size(); ++i)
+    {
+        auto sample = uniform_sample<ArithmeticMode::Ordinary>(indices[i], 1, i == 0 ? .05 : i == 1 ? .2 : .1);
+        sample.id = 10 + i;
+        stencil.push_back(sample);
+    }
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    options.maximum_model_residual = .01;
+    const auto assessment = Kernel::assess_resolution(target, stencil, options);
+    ASSERT_TRUE(assessment.admitted());
+    ASSERT_FALSE(assessment.angular_fit_eligible);
+    try
+    {
+        (void) Kernel::reconstruct(target, stencil, options);
+        FAIL() << "Excessive gradient plane-model residual was accepted.";
+    }
+    catch (const PLIC::PolyhedralResolutionRequired& error)
+    {
+        EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+        ASSERT_TRUE(error.has_fit_diagnostics());
+        const auto& evidence = error.diagnostics();
+        EXPECT_GT(evidence.rms, options.maximum_model_residual);
+        EXPECT_EQ(evidence.rms, evidence.best_rms);
+        EXPECT_EQ(evidence.normal, evidence.best_normal);
+        EXPECT_GT(evidence.condition, 0);
+        EXPECT_EQ(evidence.iterations, 0u);
+        EXPECT_EQ(evidence.finite_difference_scale, 0);
+        EXPECT_TRUE(std::isinf(evidence.angular_step));
+        EXPECT_GT(evidence.clip_evaluations, 0u);
+        EXPECT_EQ(evidence.stencil_ids, (std::vector<std::uint64_t>{10, 11, 12, 13, 14, 15}));
+    }
+}
+
 template<ArithmeticMode Mode> void small_phase_gradient_orientation()
 {
     using Sample = PLIC::PolyhedralPhaseSample<Mode>;
@@ -210,6 +255,10 @@ template<ArithmeticMode Mode> void small_phase_gradient_orientation()
             PLIC::PolyhedralReconstructionOptions options;
             options.maximum_model_residual = 1e-12;
             options.maximum_fit_iterations = 1;
+            const auto transport =
+                PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(target, stencil, options);
+            EXPECT_TRUE(transport.admitted());
+            EXPECT_EQ(transport.angular_support_cells, 0u);
             const auto fit = PLIC::PolyhedralReconstruction<Mode>::reconstruct(target, stencil, options);
             EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::Gradient);
             EXPECT_FALSE(fit.fit_converged);
@@ -419,6 +468,11 @@ TEST(PolyhedralReconstruction, GeometryCoverageAndConditionRemainIndependentAdmi
     using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
     using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
     const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .25);
+    std::vector<OrdinarySample> constant_geometry;
+    for (const auto index : neighbors())
+        constant_geometry.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, .25));
+    EXPECT_TRUE(Kernel::assess_stencil_geometry(target, constant_geometry).admitted());
+    EXPECT_EQ(Kernel::assess_resolution(target, constant_geometry).reason, Reason::NoDirectionalSignal);
     std::vector<OrdinarySample> planar;
     for (const auto index : std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}})
         planar.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] < 0 ? 1 : 0));
@@ -831,6 +885,314 @@ AngularEvaluation angular_model(AngularVector normal, double target_y, double ta
     return result;
 }
 
+TEST(PolyhedralReconstruction, AngularNonlinearNonzeroResidualOptimumUsesBoundedRefinement)
+{
+    namespace angular = PLIC::angular_detail;
+    // The exact minimum has y = 1/80 and z = 0: the derivative of the
+    // squared objective with respect to y is zero there, despite nonzero RMS.
+    constexpr double optimum_y = 1. / 80.;
+    constexpr double initial_z = 1e-5;
+    AngularVector normal{std::sqrt(1 - optimum_y * optimum_y - initial_z * initial_z), optimum_y, initial_z};
+    unsigned evaluations = 0;
+    const auto evaluate = [&](AngularVector candidate)
+    {
+        if (++evaluations > 32768)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+        candidate = angular_unit(candidate);
+        const double y = candidate[1];
+        AngularEvaluation result{{y - 9. / 80., 6400 * y * y * y + 1. / 48., candidate[2]}};
+        for (const auto value : result.residual)
+            result.objective += value * value;
+        result.objective_upper = result.objective;
+        return result;
+    };
+    auto current = evaluate(normal);
+    angular::Qualification qualification;
+    ASSERT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+        angular::IterationResult::Advanced);
+    // Removing z should not introduce a substantial displacement from the
+    // independently known optimum in y through a biased derivative.
+    EXPECT_NEAR(normal[1], optimum_y, 5e-8);
+    EXPECT_LT(std::abs(normal[2]), initial_z / 10);
+    bool converged = false;
+    for (unsigned iteration = 1; iteration < 24; ++iteration)
+    {
+        const auto status = angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+        ASSERT_NE(status, angular::IterationResult::Stalled);
+        if (status == angular::IterationResult::Converged)
+        {
+            converged = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(converged);
+    EXPECT_LE(evaluations, 32768u);
+    EXPECT_NEAR(normal[1], optimum_y, 5e-8);
+    EXPECT_NEAR(normal[2], 0., 2e-8);
+    EXPECT_NEAR(std::sqrt(current.objective / 3), std::sqrt((.1 * .1 + (1. / 30) * (1. / 30)) / 3), 1e-11);
+}
+
+TEST(PolyhedralReconstruction, AngularOptionalFinerArithmeticFailureRetainsValidCoarseSearch)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const auto scenario : {0, 1, 2, 3})
+    {
+        SCOPED_TRACE(scenario);
+        AngularVector normal{1, 0, 0};
+        auto current = angular_model(normal, 5e-5, 0, 0);
+        const auto initial_objective = current.objective;
+        unsigned evaluations = 0;
+        const auto evaluate = [&](AngularVector trial)
+        {
+            ++evaluations;
+            if (scenario == 2 && evaluations == 5)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "fatal finer probe");
+            if (scenario == 3 && evaluations >= 5)
+                return AngularEvaluation{{0, 0}}; // Finer qualification is unobservable.
+            if (evaluations == 5 || evaluations == 6)
+                throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic, "unavailable finer probe");
+            auto result = angular_model(trial, 5e-5, 0, evaluations);
+            if (scenario == 1 && evaluations > 6)
+                result.objective = initial_objective + 1;
+            return result;
+        };
+        angular::Qualification qualification;
+        if (scenario == 0)
+        {
+            EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+                angular::IterationResult::Advanced);
+            EXPECT_EQ(evaluations, 11u); // Includes qualification of the accepted trial.
+            EXPECT_LT(current.objective, initial_objective);
+            EXPECT_NEAR(normal[1], 5e-5, 1e-12);
+            EXPECT_EQ(qualification.probe_step, 1e-4);
+        }
+        else
+        {
+            try
+            {
+                (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+                FAIL() << "A failed finer qualification must not be reported as convergence.";
+            }
+            catch (const angular::Unobservable&)
+            {
+                EXPECT_EQ(scenario, 3);
+                EXPECT_EQ(evaluations, 8u);
+            }
+            catch (const PLIC::GeometryError& error)
+            {
+                EXPECT_NE(scenario, 3);
+                EXPECT_EQ(error.code(), scenario == 1 ? PLIC::GeometryErrorCode::UnresolvedArithmetic
+                                                     : PLIC::GeometryErrorCode::ResourceLimit);
+                EXPECT_EQ(evaluations, scenario == 1 ? 14u : 5u);
+            }
+            EXPECT_EQ(normal, (AngularVector{1, 0, 0}));
+            EXPECT_EQ(current.objective, initial_objective);
+        }
+    }
+}
+
+AngularEvaluation angular_curvature_model(AngularVector normal)
+{
+    const double x = normal[1] / normal[0], y = normal[2] / normal[0];
+    AngularEvaluation result{{x, y, .3 + .5 * (x + y) * (x + y)}};
+    for (const auto value : result.residual)
+        result.objective += value * value;
+    result.objective_upper = result.objective;
+    return result;
+}
+
+TEST(PolyhedralReconstruction, AngularResidualCurvatureReachesAnalyticNonzeroMinimumWithinBudget)
+{
+    namespace angular = PLIC::angular_detail;
+    AngularVector normal = angular_unit({1, .01, .01});
+    auto current = angular_curvature_model(normal);
+    unsigned evaluations = 1;
+    const auto evaluate = [&](AngularVector candidate)
+    {
+        if (++evaluations > 32768)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+        return angular_curvature_model(candidate);
+    };
+    angular::Qualification qualification;
+    bool converged = false;
+    for (unsigned iteration = 0; iteration < 24; ++iteration)
+    {
+        const auto status = angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+        ASSERT_NE(status, angular::IterationResult::Stalled);
+        if (status == angular::IterationResult::Converged)
+        {
+            converged = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(converged);
+    EXPECT_LE(qualification.step, 2e-8);
+    EXPECT_LE(evaluations, 32768u);
+    EXPECT_NEAR(normal[1], 0., 4e-8);
+    EXPECT_NEAR(normal[2], 0., 4e-8);
+    EXPECT_NEAR(std::sqrt(current.objective / 3), .3 / std::sqrt(3.), 1e-12);
+}
+
+TEST(PolyhedralReconstruction, AngularStrongResidualCurvatureConvergesWithinOriginalIterationCap)
+{
+    namespace angular = PLIC::angular_detail;
+    AngularVector normal = angular_unit({1, 1e-4, 1e-4});
+    unsigned evaluations = 0;
+    const auto evaluate = [&](AngularVector value)
+    {
+        if (++evaluations > 32768)
+            throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "evaluation budget exhausted");
+        const double x = value[1] / value[0], y = value[2] / value[0];
+        AngularEvaluation result{{x, y, .3 + 50 * (x + y) * (x + y)}};
+        for (const double r : result.residual)
+            result.objective += r * r;
+        result.objective_upper = result.objective;
+        return result;
+    };
+    auto current = evaluate(normal);
+    angular::Qualification qualification;
+    bool converged = false;
+    for (unsigned i = 0; i < 24; ++i)
+    {
+        const auto status = angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+        ASSERT_NE(status, angular::IterationResult::Stalled);
+        if (status == angular::IterationResult::Converged)
+        {
+            converged = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(converged);
+    EXPECT_LE(qualification.step, 2e-8);
+    EXPECT_LE(evaluations, 32768u);
+    EXPECT_NEAR(normal[1], 0., 3e-8);
+    EXPECT_NEAR(normal[2], 0., 3e-8);
+    EXPECT_NEAR(std::sqrt(current.objective / 3), .3 / std::sqrt(3.), 1e-12);
+}
+
+TEST(PolyhedralReconstruction, AngularCurvatureTrialsPreserveFailureAndAccountingContracts)
+{
+    namespace angular = PLIC::angular_detail;
+    // The first twelve calls are the three axial quartets. Calls 13-16
+    // sample mixed curvature and call 17 evaluates the Newton candidate.
+    for (unsigned failed_call = 13; failed_call <= 17; ++failed_call)
+        for (const bool fatal : {false, true})
+        {
+            SCOPED_TRACE(failed_call);
+            SCOPED_TRACE(fatal);
+            AngularVector normal = angular_unit({1, 1e-5, 1e-5});
+            const auto initial_normal = normal;
+            auto current = angular_curvature_model(normal);
+            const auto initial_objective = current.objective;
+            unsigned evaluations = 0;
+            const auto evaluate = [&](AngularVector candidate)
+            {
+                ++evaluations;
+                EXPECT_EQ(normal, initial_normal);
+                EXPECT_EQ(current.objective, initial_objective);
+                if (evaluations == failed_call)
+                    throw PLIC::GeometryError(fatal ? PLIC::GeometryErrorCode::ResourceLimit
+                                                   : PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                        "optional curvature evaluation");
+                return angular_curvature_model(candidate);
+            };
+            angular::Qualification qualification;
+            if (fatal)
+            {
+                try
+                {
+                    (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+                    FAIL() << "Fatal optional evaluation was swallowed.";
+                }
+                catch (const PLIC::GeometryError& error)
+                {
+                    EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+                }
+                EXPECT_EQ(evaluations, failed_call);
+                EXPECT_EQ(normal, initial_normal);
+                EXPECT_EQ(current.objective, initial_objective);
+            }
+            else
+            {
+                EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+                    angular::IterationResult::Advanced);
+                EXPECT_EQ(evaluations, failed_call + 5); // GN trial and its four qualification probes.
+                EXPECT_LT(current.objective, initial_objective);
+            }
+        }
+}
+
+TEST(PolyhedralReconstruction, AngularCurvatureRejectsMalformedOrNondecreasingOptionalTrials)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const bool malformed : {false, true})
+    {
+        AngularVector normal = angular_unit({1, 1e-5, 1e-5});
+        auto current = angular_curvature_model(normal);
+        const auto original = current.objective;
+        unsigned calls = 0;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            ++calls;
+            auto result = angular_curvature_model(candidate);
+            if (malformed && calls == 13)
+                result.residual.pop_back();
+            if (!malformed && calls == 17)
+                result.objective = original;
+            return result;
+        };
+        angular::Qualification qualification;
+        if (malformed)
+        {
+            try
+            {
+                (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+                FAIL() << "Malformed optional probe was accepted.";
+            }
+            catch (const PLIC::GeometryError& error)
+            {
+                EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::InvalidInput);
+            }
+            EXPECT_EQ(calls, 13u);
+            EXPECT_EQ(current.objective, original);
+        }
+        else
+        {
+            EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+                angular::IterationResult::Advanced);
+            EXPECT_EQ(calls, 22u);
+            EXPECT_LT(current.objective, original);
+        }
+    }
+}
+
+TEST(PolyhedralReconstruction, AngularIndefiniteOptionalCurvatureUsesQualifiedGaussNewtonSearch)
+{
+    namespace angular = PLIC::angular_detail;
+    AngularVector normal = angular_unit({1, 1e-5, 1e-5});
+    unsigned calls = 0;
+    const auto evaluate = [&](AngularVector candidate)
+    {
+        ++calls;
+        const double x = candidate[1] / candidate[0], y = candidate[2] / candidate[0];
+        AngularEvaluation value{{x, y, -1 + .5 * (x + y) * (x + y)}};
+        for (const double r : value.residual)
+            value.objective += r * r;
+        value.objective_upper = value.objective;
+        return value;
+    };
+    auto current = evaluate(normal);
+    const auto objective = current.objective;
+    calls = 0;
+    angular::Qualification qualification;
+    EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+        angular::IterationResult::Advanced);
+    EXPECT_EQ(calls, 21u); // Twelve axial, four mixed, GN trial and its qualification.
+    EXPECT_LT(current.objective, objective);
+    EXPECT_GT(normal[1], 1e-5);
+    EXPECT_GT(normal[2], 1e-5);
+}
+
 TEST(PolyhedralReconstruction, AngularOptionalUnresolvedTrialUsesSmallerStepWithoutChangingCurrent)
 {
     namespace angular = PLIC::angular_detail;
@@ -852,11 +1214,283 @@ TEST(PolyhedralReconstruction, AngularOptionalUnresolvedTrialUsesSmallerStepWith
     angular::Qualification qualification;
     EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
         angular::IterationResult::Advanced);
-    EXPECT_EQ(evaluations, 6u);
+    EXPECT_EQ(evaluations, 10u);
     EXPECT_EQ(current.stamp, 6u);
     EXPECT_LT(current.objective, .04);
     EXPECT_GT(normal[1], .09);
     EXPECT_LT(normal[1], .11); // The half step, not the failed full step.
+}
+
+TEST(PolyhedralReconstruction, AngularImprovingUnobservableTrialBacktracksAndFatalProbePropagates)
+{
+    namespace angular = PLIC::angular_detail;
+    for (const bool fatal : {false, true})
+    {
+        AngularVector normal{1, 0, 0};
+        auto current = angular_model(normal, .2, 0, 0);
+        unsigned evaluations = 0;
+        const auto evaluate = [&](AngularVector candidate)
+        {
+            ++evaluations;
+            if (evaluations >= 6 && evaluations <= 9)
+            {
+                if (fatal)
+                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::ResourceLimit, "trial qualification budget");
+                return AngularEvaluation{{0, 0}};
+            }
+            return angular_model(candidate, .2, 0, evaluations);
+        };
+        angular::Qualification qualification;
+        if (fatal)
+        {
+            try
+            {
+                (void) angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification);
+                FAIL() << "Fatal trial qualification was swallowed.";
+            }
+            catch (const PLIC::GeometryError& error)
+            {
+                EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+            }
+            EXPECT_EQ(evaluations, 6u);
+            EXPECT_EQ(normal, (AngularVector{1, 0, 0}));
+            EXPECT_EQ(current.stamp, 0u);
+        }
+        else
+        {
+            EXPECT_EQ(angular::advance(normal, current, 1e8, 2e-9, 2e-8, evaluate, angular_unit, qualification),
+                angular::IterationResult::Advanced);
+            EXPECT_EQ(evaluations, 14u);
+            EXPECT_GT(normal[1], .09);
+            EXPECT_LT(normal[1], .11);
+            EXPECT_EQ(current.stamp, 10u);
+        }
+    }
+}
+
+OrdinarySample captured_sheared_sample(PLIC::GeometryPoint lower, PLIC::GeometryPoint upper, double shear,
+    double gas, double carrier, std::uint64_t id)
+{
+    using Cell = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+    std::array<PLIC::Point<ArithmeticMode::Ordinary>, 8> points;
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        const auto x = i & 1 ? upper[0] : lower[0];
+        const auto y = i & 2 ? upper[1] : lower[1];
+        points[i].value = {x + shear * y, y, i & 4 ? upper[2] : lower[2]};
+    }
+    return {Cell::make_points(points,
+                {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {1, 3, 7, 5}, {3, 2, 6, 7}, {2, 0, 4, 6}}),
+        gas, carrier, id};
+}
+
+void record_captured_fit(const PLIC::PolyhedralInterface& fit, const PLIC::PolyhedralReconstructionOptions& options,
+    const std::string& prefix = "")
+{
+    const auto record = [&](const std::string& name, long double value)
+    {
+        std::ostringstream text;
+        text << std::setprecision(std::numeric_limits<long double>::max_digits10) << value;
+        ::testing::Test::RecordProperty(prefix + name, text.str());
+    };
+    record("normal_x", fit.gas.normal[0]);
+    record("normal_y", fit.gas.normal[1]);
+    record("normal_z", fit.gas.normal[2]);
+    record("stencil_rms", fit.stencil_volume_residual);
+    record("fit_iterations", fit.fit_iterations);
+    record("qualified_step", fit.orientation_step);
+    record("stencil_condition", fit.stencil_condition);
+    record("target_difference", fit.finite_target_volume_difference.value);
+    record("target_error_estimate", fit.target_volume_numerical_error_estimate);
+    record("clip_evaluation_cap", options.maximum_clip_evaluations);
+    // Statistics are local to the calling image; they may not include work
+    // performed by a separately linked FVM image.
+    const auto statistics = PLIC::geometry_statistics();
+    record("calling_image_geometry_volume_evaluations", statistics.volume_evaluations);
+    record("calling_image_geometry_constructions", statistics.constructions);
+}
+
+TEST(PolyhedralReconstruction, CapturedClosedShearPlaneConvergesWithLargeGaussNewtonStep)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    // Independently integrated plane X + Y/256 <= 257/512 in logical
+    // coordinates, with physical x = X + Y/4. All inventories are dyadic.
+    const auto target = captured_sheared_sample({.5, 0, 0}, {.625, .25, .25}, .25, 3. / 32768, 253. / 32768, 4);
+    const std::vector<OrdinarySample> stencil{
+        captured_sheared_sample({.25, 0, 0}, {.5, .5, .5}, .25, 1. / 16, 0, 2),
+        captured_sheared_sample({.5, 0, .25}, {.625, .25, .5}, .25, 3. / 32768, 253. / 32768, 5),
+        captured_sheared_sample({.625, 0, 0}, {.75, .25, .25}, .25, 0, 1. / 128, 8),
+        captured_sheared_sample({.5, .25, 0}, {.625, .5, .25}, .25, 1. / 32768, 255. / 32768, 16)};
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    PLIC::reset_geometry_statistics();
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    record_captured_fit(fit, options);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_LE(fit.fit_iterations, 24u);
+    EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+    EXPECT_LT(fit.stencil_volume_residual, 2e-8);
+    EXPECT_NEAR(fit.gas.normal[0], .9710284210662322, 3e-8);
+    EXPECT_NEAR(fit.gas.normal[1], -.2389640254967681, 3e-8);
+    EXPECT_NEAR(fit.gas.normal[2], 0., 3e-8);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        static_cast<long double>(target.gas_volume) * options.volume_tolerance);
+    EXPECT_EQ(target.gas_volume, 3. / 32768);
+    EXPECT_EQ(stencil[3].carrier_volume, 255. / 32768);
+}
+
+TEST(PolyhedralReconstruction, ClosedShearDyadicPlanesRetainObservableAcceptedNormals)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    for (int k = 1; k <= 7; ++k)
+    {
+        SCOPED_TRACE(k);
+        // Exact plane X + kY/512 = .5 + k/1024, independently integrated.
+        const auto target = captured_sheared_sample({.5, 0, 0}, {.625, .25, .25}, .25,
+            3. * k / 65536, (512. - 3 * k) / 65536, 4);
+        const std::vector<OrdinarySample> stencil{
+            captured_sheared_sample({.25, 0, 0}, {.5, .5, .5}, .25, 1. / 16, 0, 2),
+            captured_sheared_sample({.5, 0, .25}, {.625, .25, .5}, .25,
+                3. * k / 65536, (512. - 3 * k) / 65536, 5),
+            captured_sheared_sample({.625, 0, 0}, {.75, .25, .25}, .25, 0, 1. / 128, 8),
+            captured_sheared_sample({.5, .25, 0}, {.625, .5, .25}, .25,
+                k / 65536., (512. - k) / 65536, 16)};
+        PLIC::PolyhedralReconstructionOptions options;
+        options.measure_only = true;
+        PLIC::reset_geometry_statistics();
+        const auto fit = Kernel::reconstruct(target, stencil, options);
+        record_captured_fit(fit, options, "k" + std::to_string(k) + "_");
+        const auto expected = angular_unit({1, k / 512. - .25, 0});
+        EXPECT_TRUE(fit.fit_converged);
+        EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+        EXPECT_TRUE(fit.orientation_step <= options.orientation_tolerance ||
+                    fit.stencil_volume_residual <= options.fit_tolerance);
+        EXPECT_LT(fit.stencil_volume_residual, 2e-8);
+        for (unsigned a = 0; a < 3; ++a)
+            EXPECT_NEAR(fit.gas.normal[a], expected[a], 3e-8);
+        EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+            static_cast<long double>(target.gas_volume) * options.volume_tolerance);
+    }
+}
+
+TEST(PolyhedralReconstruction, CapturedEarlyQ3CellEightRetainsGaussNewtonForLinearizedFit)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const double shear = (.6 - .5) / .5;
+    const auto target = captured_sheared_sample({.625, 0, 0}, {.75, .25, .25}, shear,
+        9.007588474508093e-5, .007722424115254919, 8);
+    const std::vector<OrdinarySample> stencil{
+        captured_sheared_sample({.5, 0, 0}, {.625, .25, .25}, shear, .005742064867932311, .0020704351320676895, 4),
+        captured_sheared_sample({.625, 0, .25}, {.75, .25, .5}, shear, 1.616359666623214e-9, .007812498383640333, 9),
+        captured_sheared_sample({.625, .25, 0}, {.75, .5, .25}, shear, 0, 1. / 128, 12),
+        captured_sheared_sample({.75, 0, 0}, {.875, .25, .5}, shear, 0, 1. / 64, 20)};
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    PLIC::reset_geometry_statistics();
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    record_captured_fit(fit, options);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+    EXPECT_TRUE(fit.orientation_step <= options.orientation_tolerance ||
+                fit.stencil_volume_residual <= options.fit_tolerance);
+    EXPECT_LT(fit.stencil_volume_residual, 2e-9);
+    EXPECT_NEAR(fit.gas.normal[0], .9806444064005432, 3e-6);
+    EXPECT_NEAR(fit.gas.normal[1], .1644431456403562, 3e-6);
+    EXPECT_NEAR(fit.gas.normal[2], .1062779377257141, 3e-6);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        static_cast<long double>(target.gas_volume) * options.volume_tolerance);
+}
+
+TEST(PolyhedralReconstruction, CapturedQ3CellFourCurvedStencilConvergesWithinOriginalBudgets)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const double shear = (.6 - .5) / .5;
+    const auto target = captured_sheared_sample({.5, 0, 0}, {.625, .25, .25}, shear,
+        .0077713999221395, 4.110007786049872e-05, 4);
+    const std::vector<OrdinarySample> stencil{
+        captured_sheared_sample({.25, 0, 0}, {.5, .5, .5}, shear, .061714713926021986, .0007852860739780131, 2),
+        captured_sheared_sample({.5, 0, .25}, {.625, .25, .5}, shear, .007319919423482418, .0004925805765175818, 5),
+        captured_sheared_sample({.625, 0, 0}, {.75, .25, .25}, shear, .001971454065631996, .005841045934368003, 8),
+        captured_sheared_sample({.5, .25, 0}, {.625, .5, .25}, shear, .004123109780909433, .003689390219090566, 16)};
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    PLIC::reset_geometry_statistics();
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    record_captured_fit(fit, options);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_LE(fit.fit_iterations, 24u);
+    EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+    EXPECT_NEAR(fit.stencil_volume_residual, .029432749204890543, 2e-9);
+    EXPECT_NEAR(fit.gas.normal[0], .9850548959227791, 3e-7);
+    EXPECT_NEAR(fit.gas.normal[1], .1608351886840540, 3e-7);
+    EXPECT_NEAR(fit.gas.normal[2], .06163516933965175, 3e-7);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        static_cast<long double>(target.carrier_volume) * options.volume_tolerance);
+    EXPECT_EQ(target.carrier_volume, 4.110007786049872e-05);
+    EXPECT_EQ(stencil[3].gas_volume, .004123109780909433);
+}
+
+TEST(PolyhedralReconstruction, CapturedLaterQ3CellFourStrongCurvatureConvergesWithinOriginalBudgets)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const double shear = (.6 - .5) / .5;
+    const auto target = captured_sheared_sample({.5, 0, 0}, {.625, .25, .25}, shear,
+        .007809676726198759, 2.823273801241972e-6, 4);
+    const std::vector<OrdinarySample> stencil{
+        captured_sheared_sample({.25, 0, 0}, {.5, .5, .5}, shear, .061671228173875846, .0008287718261241534, 2),
+        captured_sheared_sample({.5, 0, .25}, {.625, .25, .5}, shear, .0075185713757188345, .00029392862428116414, 5),
+        captured_sheared_sample({.625, 0, 0}, {.75, .25, .25}, shear, .0023952111507156357, .0054172888492843635, 8),
+        captured_sheared_sample({.5, .25, 0}, {.625, .5, .25}, shear, .004602632779987267, .0032098672200127332, 16)};
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    PLIC::reset_geometry_statistics();
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    record_captured_fit(fit, options);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_LE(fit.fit_iterations, 24u);
+    EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+    EXPECT_NEAR(fit.stencil_volume_residual, .028726766961985669, 2e-11);
+    EXPECT_NEAR(fit.gas.normal[0], .987514804442455656, 2e-7);
+    EXPECT_NEAR(fit.gas.normal[1], .157488413593679930, 2e-7);
+    EXPECT_NEAR(fit.gas.normal[2], .003451172369582950, 2e-7);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        static_cast<long double>(target.carrier_volume) * options.volume_tolerance);
+    EXPECT_EQ(target.carrier_volume, 2.823273801241972e-6);
+    EXPECT_EQ(stencil[3].gas_volume, .004602632779987267);
+}
+
+TEST(PolyhedralReconstruction, CapturedQ3CellSeventeenRetainsSubDoubleUlpMeritDecrease)
+{
+    if constexpr (std::numeric_limits<long double>::digits <= std::numeric_limits<double>::digits)
+        GTEST_SKIP() << "This captured sub-double-ulp case requires a wider long double significand.";
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const double shear = (.6 - .5) / .5;
+    const auto target = captured_sheared_sample({.5, .25, .25}, {.625, .5, .5}, shear,
+        .003822596826635398, .003989903173364601, 17);
+    const std::vector<OrdinarySample> stencil{
+        captured_sheared_sample({.25, 0, 0}, {.5, .5, .5}, shear, .060042218710596756, .002457781289403253, 2),
+        captured_sheared_sample({.5, 0, .25}, {.625, .25, .5}, shear, .007783506533361226, 2.899346663877486e-05, 5),
+        captured_sheared_sample({.625, .25, .25}, {.75, .5, .5}, shear, .00018364609720851683, .007628853902791483, 13),
+        captured_sheared_sample({.5, .25, 0}, {.625, .5, .25}, shear, .006020009765737339, .0017924902342626602, 16),
+        captured_sheared_sample({.5, .25, .5}, {.625, .5, .75}, shear, .0036594846563424662, .004153015343657532, 18),
+        captured_sheared_sample({.5, .5, .25}, {.625, .75, .5}, shear, 8.605053223371048e-06, .00780389494677663, 33)};
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    PLIC::reset_geometry_statistics();
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    record_captured_fit(fit, options);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_LE(fit.fit_iterations, options.maximum_fit_iterations);
+    EXPECT_TRUE(fit.orientation_step <= options.orientation_tolerance ||
+                fit.stencil_volume_residual <= options.fit_tolerance);
+    EXPECT_NEAR(fit.stencil_volume_residual, .0766444845050065432, 2e-11);
+    EXPECT_NEAR(fit.gas.normal[0], .944569482657690743, 2e-7);
+    EXPECT_NEAR(fit.gas.normal[1], .317770032152553390, 2e-7);
+    EXPECT_NEAR(fit.gas.normal[2], .082526959822518921, 2e-7);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        static_cast<long double>(target.gas_volume) * options.volume_tolerance);
+    EXPECT_EQ(target.carrier_volume, .003989903173364601);
+    EXPECT_EQ(stencil[5].gas_volume, 8.605053223371048e-06);
 }
 
 TEST(PolyhedralReconstruction, AngularFatalTrialsPropagateWithoutChangingCurrentOrTryingSmallerSteps)
@@ -965,6 +1599,79 @@ TEST(PolyhedralReconstruction, AngularQualificationRetriesOnlyArithmeticAndUsesA
     };
     EXPECT_THROW((void) angular::qualify_normal(normal, tangent, second, residual, 1e8, fatal), PLIC::GeometryError);
     EXPECT_EQ(evaluations, 2u);
+}
+
+TEST(PolyhedralReconstruction, AngularUnobservableQualificationRetainsProbeEvidence)
+{
+    namespace angular = PLIC::angular_detail;
+    const AngularVector normal{1, 0, 0}, tangent{0, 1, 0}, second{0, 0, 1};
+    const std::array residual{.2, .4};
+    for (const bool rank_deficient : {true, false})
+    {
+        unsigned calls = 0;
+        const auto evaluate = [&](AngularVector trial)
+        {
+            ++calls;
+            return AngularEvaluation{{trial[1], rank_deficient ? 0. : 1e-3 * trial[2]}};
+        };
+        angular::Qualification evidence;
+        try
+        {
+            (void) angular::qualify_normal(normal, tangent, second, residual, 100., evaluate, 1e-4, &evidence);
+            FAIL() << "An unobservable angular system was accepted.";
+        }
+        catch (const angular::Unobservable&)
+        {
+            EXPECT_EQ(calls, 4u);
+            EXPECT_EQ(evidence.probe_step, 1e-4);
+            EXPECT_TRUE(std::isinf(evidence.step));
+            if (rank_deficient)
+                EXPECT_TRUE(std::isinf(evidence.condition));
+            else
+                EXPECT_NEAR(evidence.condition, 1e6, 1e-6);
+        }
+    }
+}
+
+TEST(PolyhedralReconstruction, FitFailureAndModelRejectionRetainDistinctCollectiveEvidence)
+{
+    namespace failure = SimpleFluid::detail::vof_failure;
+    PLIC::PolyhedralFitDiagnostics d;
+    d.normal = d.best_normal = {1, 0, 0};
+    d.rms = d.best_rms = .3;
+    d.angular_step = std::numeric_limits<double>::infinity();
+    d.finite_difference_scale = 1e-4;
+    d.condition = 1e9;
+    d.iterations = 2;
+    d.clip_evaluations = 31;
+    d.stencil_ids = {8, 17};
+    const PLIC::GeometryError cause(PLIC::GeometryErrorCode::InvalidInput, "unobservable");
+    const PLIC::PolyhedralFitFailure fit(PLIC::PolyhedralFitFailure::Reason::Unobservable, cause, d);
+    EXPECT_EQ(fit.code(), PLIC::GeometryErrorCode::InvalidInput);
+    EXPECT_FALSE(fit.recoverable_trial());
+    failure::Record record;
+    failure::classify(record, std::make_exception_ptr(fit));
+    EXPECT_EQ(record.category, failure::Category::Optimizer);
+    EXPECT_EQ(record.geometry_code, int(PLIC::GeometryErrorCode::InvalidInput));
+    EXPECT_TRUE(record.has(failure::Field::AngularFit));
+    EXPECT_EQ(record.fit_normal, d.normal);
+    EXPECT_EQ(record.fit_rms, d.rms);
+    EXPECT_EQ(record.fit_difference_scale, d.finite_difference_scale);
+    EXPECT_EQ(record.fit_condition, d.condition);
+    EXPECT_EQ(record.fit_iterations, d.iterations);
+    EXPECT_EQ(record.fit_clip_evaluations, d.clip_evaluations);
+    EXPECT_EQ(record.fit_stencil_ids[0], 8u);
+    const failure::CollectiveFailure<std::invalid_argument> formatted(record, std::make_exception_ptr(fit));
+    EXPECT_NE(std::string(formatted.what()).find("stencil_ids=[8,17]"), std::string::npos);
+    PLIC::PolyhedralResolutionAssessment assessment;
+    assessment.reason = PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel;
+    record = {};
+    failure::classify(record, std::make_exception_ptr(PLIC::PolyhedralResolutionRequired(assessment, d)));
+    EXPECT_EQ(record.category, failure::Category::Resolution);
+    EXPECT_TRUE(record.has(failure::Field::Resolution));
+    EXPECT_TRUE(record.has(failure::Field::AngularFit));
+    EXPECT_EQ(record.fit_rms, d.rms);
+    EXPECT_EQ(record.fit_stencil_ids[1], 17u);
 }
 
 TEST(PolyhedralReconstruction, AngularConvergenceStillRequiresObservableCurrentNormal)
@@ -1136,9 +1843,8 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
     const auto diagnostic_rms = std::sqrt(squared / stencil.size());
     EXPECT_GT(diagnostic_rms, options.maximum_model_residual);
     EXPECT_NEAR(diagnostic_rms, .3695449733143106L, 2e-12L);
-    // Today's optimizer rejects nonstationarity. An improved optimizer must
-    // still satisfy the original resource/model gates, without returning a
-    // gradient fallback or claiming angular convergence for this captured case.
+    // Accurate optimization of the original broad halo must remain distinct
+    // from the selected first-ring result and retain the unchanged model gate.
     try
     {
         (void) Kernel::reconstruct(target, stencil, options);
@@ -1147,14 +1853,30 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
     catch (const PLIC::PolyhedralResolutionRequired& error)
     {
         EXPECT_EQ(error.assessment().reason, PLIC::PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel);
+        EXPECT_NEAR(error.diagnostics().rms, .354736006697614L, 2e-12L);
+        EXPECT_LE(error.diagnostics().angular_step, options.orientation_tolerance);
+        EXPECT_EQ(error.diagnostics().stencil_ids.size(), 17u);
+        RecordProperty("optimized_original_halo_rms", error.diagnostics().rms);
+        RecordProperty("optimized_original_halo_step", error.diagnostics().angular_step);
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        ADD_FAILURE() << "The original halo requires accurate optimization before model rejection: " << error.what();
+        EXPECT_STREQ(error.what(), "PLIC angular volume optimizer did not reach stationarity.");
+        const auto& d = error.diagnostics();
+        EXPECT_EQ(d.stencil_ids.size(), 17u);
+        EXPECT_GT(d.rms, options.maximum_model_residual);
+        RecordProperty("optimizer_rms", d.rms);
+        RecordProperty("optimizer_step", d.angular_step);
+        RecordProperty("optimizer_fd", d.finite_difference_scale);
+        RecordProperty("optimizer_iterations", d.iterations);
+        std::cout << "CAPTURED17 rms=" << std::setprecision(17) << d.rms << " step=" << d.angular_step
+                  << " n=" << d.normal[0] << ',' << d.normal[1] << ',' << d.normal[2]
+                  << " iterations=" << d.iterations << '\n';
     }
     catch (const PLIC::GeometryError& error)
     {
         ADD_FAILURE() << "Unexpected arithmetic/resource failure in the captured model case: " << error.what();
-    }
-    catch (const std::invalid_argument& error)
-    {
-        EXPECT_STREQ(error.what(), "PLIC angular volume optimizer did not reach stationarity.");
     }
     for (std::size_t i = 0; i < samples.size(); ++i)
     {
@@ -1163,6 +1885,242 @@ TEST(PolyhedralReconstruction, CapturedAlgebraicCornerHasDirectionButRetainsPlan
         EXPECT_EQ(fixture::rows[i].physical_gas, physical_inventories[i].physical_gas);
         EXPECT_EQ(fixture::rows[i].physical_liquid, physical_inventories[i].physical_liquid);
     }
+}
+
+TEST(PolyhedralReconstruction, CapturedSinglePlaneTargetUsesCompleteFiveFaceNeighborSupport)
+{
+    namespace fixture = captured_algebraic_corner;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = fixture::fit_sample(fixture::rows.front());
+    EXPECT_NEAR(target.gas_volume / target.geometry->volume().value, .4535127712971186L, 1e-16L);
+    EXPECT_NEAR(fixture::physical_fraction(fixture::rows.front()), .4535127712971186L, 3.4e-16L);
+    std::vector<OrdinarySample> stencil;
+    for (const auto& row : fixture::rows)
+        if (row.ring == 1)
+            stencil.push_back(fixture::fit_sample(row));
+    ASSERT_EQ(stencil.size(), 5u);
+    for (unsigned i = 0; i < 5; ++i)
+        EXPECT_EQ(stencil[i].id, (std::array<std::uint64_t, 5>{74, 104, 107, 108, 138})[i]);
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    const auto geometry = Kernel::assess_stencil_geometry(target, stencil, options);
+    ASSERT_TRUE(geometry.admitted());
+    EXPECT_NEAR(geometry.stencil_condition, 2., 2e-15);
+    const auto transport = Kernel::assess_transport_support(target, stencil, options);
+    EXPECT_TRUE(transport.admitted());
+    EXPECT_EQ(transport.angular_support_cells, 4u);
+    EXPECT_LT(transport.angular_support_condition, 2);
+    const auto gradient = Kernel::solve_offset(target, {-.9262719001, -.3768558970, 0}, options);
+    const auto physical = Kernel::solve_offset(target, {-std::cos(.37), -std::sin(.37), 0}, options);
+    const auto rms = [&](const PLIC::GeometryHalfspace& plane)
+    {
+        long double sum = 0;
+        for (const auto& sample : stencil)
+        {
+            const auto residual = (PLIC::OrdinaryPlaneMeasure(*sample.geometry).below(plane).volume -
+                                     sample.gas_volume) / sample.geometry->volume().value;
+            sum += residual * residual;
+        }
+        return std::sqrt(sum / stencil.size());
+    };
+    EXPECT_NEAR(rms(gradient.gas), .1953453825474781L, 2e-11L);
+    EXPECT_NEAR(rms(physical.gas), .1888730906986648L, 2e-12L);
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_LE(fit.orientation_step, options.orientation_tolerance);
+    EXPECT_LE(fit.stencil_volume_residual, options.maximum_model_residual);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        static_cast<long double>(target.gas_volume) * options.volume_tolerance);
+    RecordProperty("fitted_rms", fit.stencil_volume_residual);
+    RecordProperty("fitted_step", fit.orientation_step);
+    auto capped = options;
+    capped.maximum_fit_iterations = 1;
+    try
+    {
+        (void) Kernel::reconstruct(target, stencil, capped);
+        FAIL() << "A nonstationary first iterate cannot be accepted.";
+    }
+    catch (const PLIC::PolyhedralFitFailure& error)
+    {
+        EXPECT_EQ(error.reason(), PLIC::PolyhedralFitFailure::Reason::IterationLimit);
+        const auto& d = error.diagnostics();
+        EXPECT_EQ(d.iterations, 1u);
+        EXPECT_EQ(d.stencil_ids.size(), 5u);
+        EXPECT_GT(d.clip_evaluations, 0u);
+        EXPECT_LE(d.clip_evaluations, capped.maximum_clip_evaluations);
+        EXPECT_GT(d.angular_step, capped.orientation_tolerance);
+        EXPECT_GT(d.finite_difference_scale, 0);
+        EXPECT_EQ(d.normal, d.best_normal);
+        EXPECT_EQ(d.rms, d.best_rms);
+    }
+    bool saw_optimizer_budget = false;
+    for (std::size_t budget = 16; budget <= 8192 && !saw_optimizer_budget; budget *= 2)
+    {
+        auto limited = options;
+        limited.maximum_clip_evaluations = budget;
+        try
+        {
+            (void) Kernel::reconstruct(target, stencil, limited);
+        }
+        catch (const PLIC::PolyhedralFitFailure& error)
+        {
+            ASSERT_EQ(error.reason(), PLIC::PolyhedralFitFailure::Reason::Geometry);
+            ASSERT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+            EXPECT_FALSE(error.recoverable_trial());
+            const auto& d = error.diagnostics();
+            EXPECT_GE(d.iterations, 1u);
+            EXPECT_EQ(d.clip_evaluations, budget + 1);
+            EXPECT_EQ(d.stencil_ids.size(), 5u);
+            EXPECT_EQ(d.normal, d.best_normal);
+            EXPECT_EQ(d.rms, d.best_rms);
+            EXPECT_TRUE(std::isfinite(d.rms));
+            SimpleFluid::detail::vof_failure::Record record;
+            SimpleFluid::detail::vof_failure::classify(record, std::current_exception());
+            EXPECT_EQ(record.category, SimpleFluid::detail::vof_failure::Category::ResourceLimit);
+            EXPECT_EQ(record.geometry_code, int(PLIC::GeometryErrorCode::ResourceLimit));
+            EXPECT_TRUE(record.has(SimpleFluid::detail::vof_failure::Field::AngularFit));
+            EXPECT_EQ(record.fit_clip_evaluations, budget + 1);
+            EXPECT_EQ(record.fit_stencil_ids[0], stencil[0].id);
+            saw_optimizer_budget = true;
+        }
+        catch (const PLIC::GeometryError& error)
+        {
+            ASSERT_EQ(error.code(), PLIC::GeometryErrorCode::ResourceLimit);
+        }
+    }
+    EXPECT_TRUE(saw_optimizer_budget);
+}
+
+TEST(PolyhedralReconstruction, TransportAngularSupportExpandsBeforeResidualOnSkewCornerPlane)
+{
+    using Cell = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    using Reason = PLIC::PolyhedralResolutionAssessment::Reason;
+    // Independently defined local cells reproduce the Q0 target8 phase amounts
+    // and one-mixed-neighbor pattern, with the right neighbor coarse in z.
+    // Logical x+.37*y+.11*z<=.025, physical x=X+.2*Y. The target
+    // and its left neighbor are mixed, while the other first-ring cells are
+    // saturated. An independent positive-part cubic integrates the phases.
+    const auto sample = [](PLIC::GeometryPoint lower, PLIC::GeometryPoint upper, std::uint64_t id)
+    {
+        std::array<PLIC::Point<ArithmeticMode::Ordinary>, 8> points;
+        for (unsigned i = 0; i < 8; ++i)
+        {
+            const auto x = i & 1 ? upper[0] : lower[0];
+            const auto y = i & 2 ? upper[1] : lower[1];
+            points[i].value = {x + .2 * y, y, i & 4 ? upper[2] : lower[2]};
+        }
+        const auto geometry = Cell::make_points(points,
+            {{0, 2, 3, 1}, {4, 5, 7, 6}, {0, 1, 5, 4}, {1, 3, 7, 5}, {3, 2, 6, 7}, {2, 0, 4, 6}});
+        constexpr std::array<long double, 3> normal{1, .37L, .11L};
+        long double threshold = .025L, span = 0, volume = 1;
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            threshold -= normal[a] * lower[a];
+            span += normal[a] * (upper[a] - lower[a]);
+            volume *= upper[a] - lower[a];
+        }
+        long double gas = 0;
+        if (threshold >= span)
+            gas = volume;
+        else if (threshold > 0)
+        {
+            for (unsigned corner = 0; corner < 8; ++corner)
+            {
+                auto distance = threshold;
+                unsigned parity = 0;
+                for (unsigned a = 0; a < 3; ++a)
+                    if (corner & (1u << a))
+                    {
+                        distance -= normal[a] * (upper[a] - lower[a]);
+                        ++parity;
+                    }
+                if (distance > 0)
+                    gas += (parity % 2 ? -1 : 1) * distance * distance * distance;
+            }
+            gas /= 6 * normal[0] * normal[1] * normal[2];
+        }
+        return OrdinarySample{geometry, double(gas), double(volume - gas), id};
+    };
+    const auto target = sample({0, 0, 0}, {.125, .25, .25}, 8);
+    std::vector<OrdinarySample> stencil{
+        sample({-.125, 0, 0}, {0, .25, .25}, 4), sample({0, 0, .25}, {.125, .25, .5}, 9),
+        sample({0, .25, 0}, {.125, .5, .25}, 12), sample({.125, 0, 0}, {.25, .25, .5}, 20)};
+    EXPECT_NEAR(target.gas_volume, 6.3984438984439161e-5, 2e-18);
+    EXPECT_NEAR(stencil.front().gas_volume, .005561015561015563, 2e-17);
+    const auto centroid = Kernel::assess_stencil_geometry(target, stencil);
+    ASSERT_TRUE(centroid.admitted());
+    EXPECT_NEAR(centroid.stencil_condition, 2.833076923076922, 2e-14);
+    PLIC::reset_geometry_statistics();
+    const auto first = Kernel::assess_transport_support(target, stencil);
+    EXPECT_EQ(first.reason, Reason::RankDeficientAngularSupport);
+    EXPECT_TRUE(first.angular_fit_eligible);
+    EXPECT_EQ(first.angular_support_cells, 1u);
+    EXPECT_EQ(PLIC::geometry_statistics().constructions, 0u);
+    EXPECT_EQ(PLIC::geometry_statistics().intersections, 0u);
+    // Add every second-ring neighbor of this local four-face configuration.
+    for (const auto& [lower, upper] : std::vector<std::pair<PLIC::GeometryPoint, PLIC::GeometryPoint>>{
+             {{-.25, 0, 0}, {-.125, .25, .25}}, {{-.125, .25, 0}, {0, .5, .25}},
+             {{-.125, 0, .25}, {0, .25, .5}}, {{0, .25, .25}, {.125, .5, .5}},
+             {{.125, 0, .5}, {.25, .25, 1}}, {{0, 0, .5}, {.125, .25, .75}},
+             {{.125, .25, 0}, {.25, .5, .5}}, {{0, .5, 0}, {.125, .75, .25}},
+             {{.25, 0, 0}, {.375, .25, .5}}})
+        stencil.push_back(sample(lower, upper, 100 + stencil.size()));
+    const auto expanded = Kernel::assess_transport_support(target, stencil);
+    ASSERT_TRUE(expanded.admitted());
+    EXPECT_EQ(expanded.angular_support_cells, 3u);
+    EXPECT_LT(expanded.angular_support_condition, 10);
+    PLIC::PolyhedralReconstructionOptions options;
+    options.measure_only = true;
+    const auto fit = Kernel::reconstruct(target, stencil, options);
+    EXPECT_TRUE(fit.fit_converged);
+    EXPECT_EQ(fit.orientation_method, PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+    EXPECT_LE(fit.stencil_volume_residual, options.fit_tolerance);
+    EXPECT_LE(std::abs(fit.finite_target_volume_difference.value) + fit.target_volume_numerical_error_estimate,
+        target.gas_volume * options.volume_tolerance);
+}
+
+TEST(PolyhedralReconstruction, TransportAngularSupportRejectsIllConditionedMixedDirectionsBeforeClipping)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    using Cell = PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>;
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .5);
+    std::vector<OrdinarySample> stencil;
+    for (const auto index : std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, 0, -1}, {0, 0, 1}})
+        stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] == 1 ? 0 : 1));
+    for (const PLIC::GeometryPoint shift : {PLIC::GeometryPoint{0, 1, 0}, {0, 2, 1e-6}})
+        stencil.push_back({Cell::box(shift, {shift[0] + 1, shift[1] + 1, shift[2] + 1}), .5, .5});
+    ASSERT_TRUE(Kernel::assess_stencil_geometry(target, stencil).admitted());
+    PLIC::reset_geometry_statistics();
+    const auto support = Kernel::assess_transport_support(target, stencil);
+    EXPECT_EQ(support.reason, PLIC::PolyhedralResolutionAssessment::Reason::IllConditionedAngularSupport);
+    EXPECT_EQ(support.angular_support_cells, 2u);
+    EXPECT_GT(support.angular_support_condition, PLIC::PolyhedralReconstructionOptions{}.maximum_condition);
+    EXPECT_EQ(PLIC::geometry_statistics().constructions, 0u);
+    EXPECT_EQ(PLIC::geometry_statistics().intersections, 0u);
+}
+
+TEST(PolyhedralReconstruction, TransportAngularSupportDoesNotInventMixedGeometryFromIndependentPureTraces)
+{
+    using Kernel = PLIC::PolyhedralReconstruction<ArithmeticMode::Ordinary>;
+    const auto target = uniform_sample<ArithmeticMode::Ordinary>({0, 0, 0}, 1, .5);
+    std::vector<OrdinarySample> stencil;
+    for (const auto index : std::vector<std::array<int, 3>>{{-1, 0, 0}, {1, 0, 0}, {0, 0, -1}, {0, 0, 1}})
+    {
+        auto sample = uniform_sample<ArithmeticMode::Ordinary>(index, 1, index[0] == 1 ? 0 : 1);
+        if (index[2] == 1)
+        {
+            sample.carrier_volume = 1e-25;
+            sample.observed_mixed = false; // Validated pure-gas geometry with independent carrier inventory.
+        }
+        stencil.push_back(sample);
+    }
+    stencil.push_back(uniform_sample<ArithmeticMode::Ordinary>({0, 1, 0}, 1, .5));
+    const auto support = Kernel::assess_transport_support(target, stencil);
+    EXPECT_EQ(support.reason, PLIC::PolyhedralResolutionAssessment::Reason::RankDeficientAngularSupport);
+    EXPECT_EQ(support.angular_support_cells, 1u);
+    EXPECT_EQ(stencil[3].carrier_volume, 1e-25);
 }
 
 TEST(PolyhedralReconstruction, OrdinaryMeasureRejectsToleranceBelowItsReportedAccuracyFloor)

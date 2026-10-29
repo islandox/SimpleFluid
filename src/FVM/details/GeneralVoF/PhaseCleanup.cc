@@ -283,6 +283,12 @@ void apply_phase_cleanup(GeneralVoF::Data& data)
                 for (const auto& [key, source] : data.cells)
                     if (source.owner == comm->getRank())
                     {
+                        // A validated pure declaration already supplies its
+                        // geometry. Its independent minority is transported
+                        // inventory, not an unresolved mixed-cell tail needing
+                        // relabeling. Do not spend cleanup budget or erase it.
+                        if (source.declaration != GeneralVoFPhaseGeometry::Infer)
+                            continue;
                         const auto gas = source.phase.gas_volume, carrier = source.phase.carrier_volume;
                         const auto actual =
                             PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(source.finite_geometry)

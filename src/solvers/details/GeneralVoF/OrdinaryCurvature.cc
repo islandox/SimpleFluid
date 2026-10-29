@@ -10,6 +10,8 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <optional>
@@ -354,6 +356,30 @@ std::vector<double> assemble_ordinary_curvature(const MeshHandle<>& mesh, const 
                     continue;
                 std::vector<unsigned char> admitted, visited;
                 auto selected = connected(patch.first_cell, p, admitted, visited);
+                if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
+                {
+                    const auto basis = frame(patch);
+                    std::size_t absent = 0, disconnected = 0, radius = 0, incoherent = 0, retained = 0;
+                    for (std::size_t q = 0; q < catalog.patches.size(); ++q)
+                        if (!admitted[q])
+                            ++absent;
+                        else if (!visited[q])
+                            ++disconnected;
+                        else if (!radius_admitted(patch, catalog.patches[q], basis))
+                            ++radius;
+                        else if (dot(unit(wide(catalog.patches[q].normal)), basis[2]) <
+                                 GeneralVoFCurvatureOptions{}.minimum_normal_cosine)
+                            ++incoherent;
+                        else
+                            ++retained;
+                    std::cerr << "CAP_FIT control=" << control << " rank=" << rank << " cell=" << patch.first_cell
+                              << " catalog=" << catalog.patches.size() << " absent=" << absent
+                              << " disconnected=" << disconnected << " radius=" << radius
+                              << " incoherent=" << incoherent << " retained=" << retained << " connected=";
+                    for (auto q : selected)
+                        std::cerr << catalog.patches[q].first_cell << ';';
+                    std::cerr << '\n';
+                }
                 vof_failure::Scope context("ordinary_capillary_fit");
                 context.record.cell = patch.first_cell;
                 context.record.scale = patch.cell_scale;
@@ -406,6 +432,11 @@ std::vector<double> assemble_ordinary_curvature(const MeshHandle<>& mesh, const 
                             VoF::GeneralVoFSurfaceResolutionReason::DeficientFit, error.what());
                     }
                 }();
+                if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
+                    std::cerr << "CAP_RESULT control=" << control << " rank=" << rank << " cell=" << patch.first_cell
+                              << " curvature=" << result.curvature << " samples=" << result.samples
+                              << " condition=" << result.condition << " residual=" << result.normalized_residual
+                              << '\n';
                 values[p] = result.curvature;
                 if (diagnostics)
                     candidate.fits.push_back(

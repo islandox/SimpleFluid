@@ -6,6 +6,9 @@
 #include "FVM/details/GeneralVoF/FilteredSurface.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 
 namespace SimpleFluid::VoF
 {
@@ -215,10 +218,9 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
     GeneralVoFSurfaceCatalog result;
     result.source_control = data_->control;
     result.model = options.model;
-    // Owner-reconstructed planes are authenticated by source key and revision.
-    // This collective import precedes the purely local catalog construction.
-    auto planes = import_planes<ArithmeticMode::Ordinary>(*data_);
-    planes = import_capillary_planes(*data_, planes);
+    // The catalog reconstructs its own owner-authenticated physical support;
+    // it does not request unused transport planes as a numerical prerequisite.
+    auto planes = import_capillary_planes(*data_);
     wire::collective(*comm,
         [&]
         {
@@ -272,6 +274,34 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
             for (const auto& [key, cell] : data_->cells)
             {
                 const auto& plane = planes.at(key);
+                if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
+                {
+                    std::cerr << std::setprecision(21) << "CAP_CELL control=" << data_->control
+                              << " rank=" << comm->getRank() << " id=" << cell.gid
+                              << " declaration=" << int(cell.declaration) << " gas=" << cell.phase.gas_volume
+                              << " carrier=" << cell.phase.carrier_volume << " pure=" << plane.pure_gas << ','
+                              << plane.pure_carrier << " normal=" << plane.gas.normal[0] << ',' << plane.gas.normal[1]
+                              << ',' << plane.gas.normal[2] << " anchor=" << plane.gas.anchor[0] << ','
+                              << plane.gas.anchor[1] << ',' << plane.gas.anchor[2] << " offset=" << plane.gas.offset
+                              << " method=" << int(plane.orientation_method) << " iterations=" << plane.fit_iterations
+                              << " converged=" << plane.fit_converged << " residual=" << plane.target_volume_residual
+                              << " numerical_error=" << plane.target_volume_numerical_error_estimate << '\n';
+                    const auto geometry =
+                        PLIC::ConvexCellGeometry<ArithmeticMode::Ordinary>::from_dynamic(cell.finite_geometry);
+                    std::cerr << "CAP_GEOMETRY control=" << data_->control << " rank=" << comm->getRank()
+                              << " id=" << cell.gid << " centroid=" << cell.centroid[0] << ',' << cell.centroid[1]
+                              << ',' << cell.centroid[2] << " volume=" << geometry->volume().value << " points=";
+                    for (const auto& point : geometry->points())
+                        std::cerr << point.value[0] << ',' << point.value[1] << ',' << point.value[2] << ';';
+                    std::cerr << " faces=";
+                    for (const auto& face : geometry->faces())
+                    {
+                        for (auto vertex : face)
+                            std::cerr << vertex << ',';
+                        std::cerr << ';';
+                    }
+                    std::cerr << '\n';
+                }
                 if (plane.pure_gas || plane.pure_carrier)
                     continue;
                 const auto geometry =
@@ -403,6 +433,24 @@ GeneralVoFSurfaceCatalog GeneralVoF::capillary_surface(GeneralVoFSurfaceOptions 
                 [](const auto& a, const auto& b) { return a.key < b.key; });
             for (auto& [key, neighbors] : result.adjacency)
                 std::sort(neighbors.begin(), neighbors.end());
+            if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
+                for (const auto& patch : result.patches)
+                {
+                    std::cerr << std::setprecision(21) << "CAP_PATCH control=" << data_->control
+                              << " rank=" << comm->getRank() << " id=" << int(patch.key.kind) << ':'
+                              << patch.key.identity << " cell=" << patch.first_cell << " area=" << patch.area
+                              << " cell_scale=" << patch.cell_scale << " spans=" << patch.physical_spans[0] << ','
+                              << patch.physical_spans[1] << ',' << patch.physical_spans[2]
+                              << " normal=" << patch.normal[0] << ',' << patch.normal[1] << ',' << patch.normal[2]
+                              << " centroid=" << patch.centroid[0] << ',' << patch.centroid[1] << ','
+                              << patch.centroid[2] << " adjacency=";
+                    for (const auto& neighbor : result.adjacency.at(patch.key))
+                        std::cerr << int(neighbor.kind) << ':' << neighbor.identity << ';';
+                    std::cerr << " vertices=";
+                    for (const auto& vertex : patch.vertices)
+                        std::cerr << vertex[0] << ',' << vertex[1] << ',' << vertex[2] << ';';
+                    std::cerr << '\n';
+                }
             result.allocation_bytes = budget.used;
         });
     planes.clear();

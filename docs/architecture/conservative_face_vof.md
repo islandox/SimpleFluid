@@ -83,6 +83,20 @@ against the existing volume tolerance. Continuity and occupancy have separate
 diagnostics and gates. Invalid low-order data reject before geometric candidates
 are attempted. No inventory clipping, phase source, or fraction repair is used.
 
+Publication also enforces a fixed cumulative occupancy gate. With
+`delta = G + L - geometric_volume`, the candidate must satisfy
+`delta_new = delta_old - signed_canonical_bulk_transfer + publication_error`.
+Admission uses the existing signed discrepancy and an independently calculated
+publication uncertainty; it does not grant a fresh physical allowance each step.
+Accumulated arithmetic provenance remains recorded separately and cannot enlarge
+the fixed physical limit of `1e-13` times geometric cell volume. This physical
+limit is separate from the PLIC target-volume tolerance and the per-increment
+canonical continuity tolerance. Infeasible candidates reject before publication,
+including when each individual transfer increment would pass by itself.
+The nominal wide geometry, native bulk volume and actual binary64 published
+sum each retain their own unchanged physical check. A conversion discrepancy
+or rounding of the public sum cannot borrow the other reference's allowance.
+
 Pure geometric hints never establish physical absence. A hinted pure cell with
 a positive minority trace transports that trace using its physical composition.
 Pure cells require no PLIC cut, swept solid, or overlay. Opposite pure neighbors
@@ -123,8 +137,17 @@ arithmetic fallback. Its temporary cache is charged to the existing byte budget.
 For spatially varying flow this is a local predictor, not an exact trajectory or
 a claim of second-order accuracy.
 
-Both phase-covered areas are measured
-directly: the cell minority need not be the outflow-face minority. Time intervals
+A strict swept-face extremum proof handles wholly covered faces first. It uses
+compensated signs at every original native vertex and outward endpoint bounds
+covering both wide plane translation and represented sample offsets. Only
+unanimous strict signs establish an empty phase and assign the full phase its
+canonical bulk amount. This avoids comparing two rounded area representations
+for a geometrically full face. Contacts, crossings and unresolved signs continue
+through measurement; no positive measured receipt is clipped. The proof does
+not establish arbitrary sub-ULP crossing accuracy for the area integrator.
+
+Otherwise both phase-covered areas are measured directly: the cell minority
+need not be the outflow-face minority. Time intervals
 are split at original face-vertex crossings. Two interior Gauss points integrate
 the quadratic area on each interval and avoid assigning finite weight to a
 face-parallel contact instant. Bulk `q` remains authoritative.
@@ -136,6 +159,24 @@ resource exhaustion retain their failures. A fallback is a loss of local order,
 not evidence of geometric or physical qualification.
 
 ## Shared limiting and compatible histories
+
+The final represented streams must still satisfy both old-phase export budgets.
+If a donor fails only by a witnessed arithmetic discrepancy, a bounded local
+replay may reduce coefficients on its adverse faces. The replay uses exactly
+the production convex blend, minority preservation and bulk completion. It
+retains only candidates passing both strict donor budgets and bounds the sum of
+absolute per-face changes independently for gas and carrier by pointwise
+operation-error evidence. It never publishes a newly zero coefficient or erases
+a previously positive phase transfer, changes inventories, or damps unrelated
+donors. The search has one
+precision-derived attempt bound; it need not find a feasible correction or the
+globally largest coefficient. Failure remains collective rejection.
+
+Donor proposals are authenticated and completed at canonical face owners, which
+re-evaluate the same blend and mass before redistribution. All original final
+admission checks still run. This scalar arithmetic witness does not select
+BoundedCertification or certify geometric accuracy; the actual final streams
+remain the sole phase, mass and momentum authority.
 
 The limiter blends low and high phase candidates with one `theta` per canonical
 stream. It budgets all corrections before choosing coefficients. Endpoint gas
@@ -195,6 +236,62 @@ the original absolute-face-rate, viscous and capillary limits and cannot turn an
 incomplete physical horizon into a pass. Projection and linear iteration caps
 are unchanged.
 
+Solver-owned readiness additionally checks the prospective cumulative occupancy
+against the fixed physical occupancy limit, including publication uncertainty. Timestep
+selection retains its existing physical and canonical restrictions; the final
+transport admission checks the actual signed cumulative update. A reversing
+canonical transfer can restore capacity, so a cumulative allowance must not be
+treated as an unsigned, monotonically shrinking timestep cap. Exact zero-flow
+identity publication incurs no new narrowing. Absolute history magnitudes cannot
+replace the signed physical discrepancy or qualify an incomplete endpoint.
+
+After a provisional physical projection, cumulative occupancy uses a compatible
+pressure-rate target. Let `r=delta/V`, `S=sum(abs(Q))`, physical occupancy limit
+`epsilon=1e-13`, and the unchanged physical divergence threshold be `P`. Each
+cell reserves half of its original admissible rate capacity:
+
+```
+L = 0.5 * min(tau*S/(2*C), P*V, 2*epsilon*S/C)
+mean = sum(L*r)/sum(L)
+b = L*(r-mean)/(2*epsilon)
+```
+
+Zero total capacity gives a zero target. The weighted mean makes the target
+closed-domain compatible; its reduction discrepancy is checked against derived
+arithmetic error. The pressure solver then corrects `net-b` through the same
+canonical rates and pressure forces, within the existing shared correction and
+iteration budgets. A separate target-defect check prevents the original loose
+physical threshold from skipping this correction. All original tests on raw
+divergence, pressure residual, relative-or-finite-step readiness and final phase
+publication remain mandatory. Gas, carrier, mass and momentum use the resulting
+single canonical transport authority. No inventory is overwritten and no error
+history is reset. A uniform global occupancy discrepancy cannot be removed by
+closed conservative transfers. Actual timestep admission remains authoritative;
+the target construction is not a universal guarantee of timestep growth.
+
+Interior nonorthogonal pressure reconstruction retains its cell-center stencil.
+Wall pressure and capillary traction instead use a separate conditioned linear
+fit of shared internal-face values minus cell values at the actual face-centroid
+displacements. This gives a one-sided pressure gradient across a density jump
+and uses every canonical fine subface. The same linear response acts on the
+density-weighted face fraction, preserving constant-curvature pressure balance.
+Deficient nonconstant support rejects collectively; a structurally constant
+response is zero. Unsampled slab pressure reactions remain explicit. Finite
+certification propagates face-value uncertainty, and cache and temporary storage
+remain inside the existing budgets.
+
+Canonical continuity and cell pressure momentum still use distinct discrete
+operators. The compact face correction is not the interpolation of the cell
+pressure impulse, and the force map is not the adjoint of that interpolation.
+Small canonical divergence therefore does not establish an energy-bounded cell
+velocity. Long high-density-ratio flow remains unsupported where this mismatch
+amplifies pressure work and reduces the stable timestep. A common projection
+formulation must match the cell/face constraint, mass metric, pressure force,
+wall reactions and stabilization while retaining the existing wall-pressure and
+capillary contracts. Resetting face velocities or omitting wall traction does
+not establish that formulation. The transport momentum residual and occupancy
+admission remain necessary checks, distinct from this projection limitation.
+
 ## Explicit face-aligned surfaces
 
 `face_interfaces()` returns canonical opposite-pure geometric faces with
@@ -230,9 +327,16 @@ stream theta statistics. It reports affected bulk volume separately from discard
 high-order correction. `DonorCell` is the conservative low-order comparison;
 the sharper-interface accuracy gates apply to `GeometricFace`.
 
-The default must remain `SweptPartition` until relevant coupled physical gates
-are met. A short conservative passage or robust geometry query does not establish
-drop-translation accuracy, rotation/deformation convergence, curved capillary
-equilibrium, or production scaling. Open boundaries, counterflow, and broader physical accuracy qualification remain migration
-gates. Geometry operation counts and momentum preparation counts are not
-whole-solver timing claims.
+The configured default remains `SweptPartition`; promoting a different backend
+would require an explicit decision and its relevant coupled accuracy/physical
+gates. The [scoped matrix](../verification/vof_solver_contracts.md#stage-7-scope-and-priorities)
+treats this opt-in backend as a capability extension, not a prerequisite for
+qualifying the swept default. Raw controlled-study results do not establish
+GeometricFace's cleanup-enabled default-policy accuracy or sensitivity.
+
+A short passage does not qualify translation/rotation/deformation convergence or
+curved-capillary equilibrium. Cleanup-enabled coupled AMR/remap, open boundaries
+and counterstreams remain separate extensions; existing rejection remains required
+until each is implemented and qualified. Matched whole-solver timing/RSS/scaling
+is required only for performance claims, after numerical qualification. Geometry
+and momentum preparation counts alone do not establish those claims.

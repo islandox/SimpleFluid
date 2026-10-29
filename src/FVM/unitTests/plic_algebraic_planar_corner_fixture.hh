@@ -7,13 +7,15 @@
  * Dyadic .0625 x .0625 x .5 boxes reproduce the represented source geometry;
  * lossless native certificates remain in build verification artifacts.
  *
- * This coarse polygon-corner stencil is a negative plane-model qualification
- * case. It does not establish a resolved-interface positive support claim.
+ * The target is cut by a single physical rectangle edge. The two-ring halo
+ * reaches other edges; a model rejection on that halo is not a target-cell
+ * geometric incompatibility certificate.
  */
 #pragma once
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include <array>
 #include <cstdint>
+#include <cmath>
 
 namespace captured_algebraic_corner
 {
@@ -89,6 +91,20 @@ inline PLIC::PolyhedralPhaseSample<ArithmeticMode::Ordinary> fit_sample(const Ro
     const bool gas = row.physical_gas <= row.physical_liquid;
     const double minority = gas ? row.physical_gas : row.physical_liquid;
     const double dominant = static_cast<double>(geometry->volume().value - minority);
-    return {geometry, gas ? minority : dominant, gas ? dominant : minority};
+    return {geometry, gas ? minority : dominant, gas ? dominant : minority, row.gid};
+}
+// Independent analytic rectangle/half-plane area: integrate the positive part
+// quadratic CDF of a*x+b*y. No production PLIC offset or clipped measure enters.
+inline long double physical_fraction(const Row& row)
+{
+    const auto a = std::cos(.37L), b = std::sin(.37L);
+    const auto cut = a * .35L + b * .4L - .14L;
+    const auto t = cut - a * row.lower[0] - b * row.lower[1];
+    const auto dx = static_cast<long double>(row.upper[0]) - row.lower[0];
+    const auto dy = static_cast<long double>(row.upper[1]) - row.lower[1];
+    const auto positive_square = [](long double x) { return x > 0 ? x * x : 0.L; };
+    const auto below = (positive_square(t) - positive_square(t - a * dx) - positive_square(t - b * dy) +
+                          positive_square(t - a * dx - b * dy)) / (2 * a * b);
+    return 1 - below / (dx * dy);
 }
 } // namespace captured_algebraic_corner

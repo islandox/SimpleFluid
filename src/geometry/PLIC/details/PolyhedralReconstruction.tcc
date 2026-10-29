@@ -5,6 +5,7 @@
 #include "geometry/PLIC/PolyhedralReconstruction.hh"
 #include "geometry/PLIC/details/AngularFit.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
+#include "utils/CompensatedSum.hh"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -182,6 +183,12 @@ std::string resolution_message(const PolyhedralResolutionAssessment& assessment)
         case PolyhedralResolutionAssessment::Reason::NoDirectionalSignal:
             message << ": phase differences do not establish a meaningful direction";
             break;
+        case PolyhedralResolutionAssessment::Reason::RankDeficientAngularSupport:
+            message << ": observed mixed neighbors do not span both angular directions";
+            break;
+        case PolyhedralResolutionAssessment::Reason::IllConditionedAngularSupport:
+            message << ": observed mixed-neighbor angular support is ill-conditioned";
+            break;
         default:
             message << ": invalid resolution assessment";
             break;
@@ -239,7 +246,8 @@ long double roundoff_factor(std::size_t operations)
 }
 template<ArithmeticMode Mode>
 DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
-    std::span<const PolyhedralPhaseSample<Mode>> stencil, const PolyhedralReconstructionOptions& options)
+    std::span<const PolyhedralPhaseSample<Mode>> stencil, const PolyhedralReconstructionOptions& options,
+    bool geometry_only = false)
 {
     validate_sample<Mode>(target, options);
     if (stencil.size() > options.maximum_stencil_cells)
@@ -261,11 +269,15 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
         result.carrier_support_fraction =
             std::max(result.carrier_support_fraction, double(static_cast<long double>(sample.carrier_volume) / total));
     };
-    examine(target);
-    if (target.gas_volume == 0 || target.carrier_volume == 0)
+    if (!geometry_only)
+        examine(target);
+    if (!geometry_only && (target.gas_volume == 0 || target.carrier_volume == 0))
         return analysis;
     for (const auto& sample : stencil)
-        examine(sample);
+        if (geometry_only)
+            validate_sample<Mode>(sample, options);
+        else
+            examine(sample);
     if (stencil.size() < 4)
     {
         result.reason = PolyhedralResolutionAssessment::Reason::InsufficientStencil;
@@ -279,7 +291,7 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
         const long double total = static_cast<long double>(sample.gas_volume) + sample.carrier_volume;
         return static_cast<long double>(gas ? sample.gas_volume : sample.carrier_volume) / total;
     };
-    const auto alpha = fraction(target);
+    const auto alpha = geometry_only ? 0 : fraction(target);
     const auto center = target.geometry->centroid();
     using LongVector = std::array<long double, 3>;
     std::array<LongVector, 3> assembled{}, matrix_magnitude{}, matrix_error{};
@@ -300,7 +312,7 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
         if (d2 == 0 || !std::isfinite(d2))
             throw std::invalid_argument("Finite PLIC stencil repeats the target center or exceeds arithmetic range.");
         analysis.volumes.push_back(sample.geometry->volume().as_double());
-        const auto sample_fraction = fraction(sample);
+        const auto sample_fraction = geometry_only ? 0 : fraction(sample);
         const auto delta = sample_fraction - alpha;
         // Relative input/ratio roundoff scales with the chosen phase itself,
         // so a resolvable dilute signal has no arbitrary absolute epsilon floor.
@@ -375,6 +387,8 @@ DirectionAnalysis analyze_direction(const PolyhedralPhaseSample<Mode>& target,
         return analysis;
     }
     result.stencil_condition = static_cast<double>(condition);
+    if (geometry_only)
+        return analysis;
     LongVector perturbation{}, gradient_error{};
     for (unsigned i = 0; i < 3; ++i)
     {
@@ -598,6 +612,23 @@ PolyhedralResolutionRequired::PolyhedralResolutionRequired(PolyhedralResolutionA
     : std::invalid_argument(resolution_message(assessment)), assessment_(assessment)
 {
 }
+PolyhedralResolutionRequired::PolyhedralResolutionRequired(
+    PolyhedralResolutionAssessment assessment, PolyhedralFitDiagnostics diagnostics)
+    : std::invalid_argument(resolution_message(assessment)), assessment_(assessment), diagnostics_(std::move(diagnostics)),
+      has_fit_diagnostics_(true)
+{
+}
+PolyhedralFitFailure::PolyhedralFitFailure(Reason reason, PolyhedralFitDiagnostics diagnostics)
+    : GeometryError(reason == Reason::IterationLimit ? GeometryErrorCode::ResourceLimit : GeometryErrorCode::InvalidInput,
+          reason == Reason::IterationLimit ? "PLIC angular volume optimizer iteration budget exhausted."
+                                           : "PLIC angular volume optimizer did not reach stationarity."),
+      reason_(reason), diagnostics_(std::move(diagnostics))
+{
+}
+PolyhedralFitFailure::PolyhedralFitFailure(Reason reason, const GeometryError& cause, PolyhedralFitDiagnostics diagnostics)
+    : GeometryError(cause.code(), cause.what()), reason_(reason), diagnostics_(std::move(diagnostics))
+{
+}
 
 template<ArithmeticMode Mode>
 void PolyhedralReconstruction<Mode>::validate(
@@ -611,6 +642,69 @@ PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_resolution
     PolyhedralReconstructionOptions options)
 {
     return analyze_direction<Mode>(target, stencil, options).resolution;
+}
+template<ArithmeticMode Mode>
+PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_stencil_geometry(
+    const PolyhedralPhaseSample<Mode>& target, std::span<const PolyhedralPhaseSample<Mode>> stencil,
+    PolyhedralReconstructionOptions options)
+{
+    return analyze_direction<Mode>(target, stencil, options, true).resolution;
+}
+template<ArithmeticMode Mode>
+PolyhedralResolutionAssessment PolyhedralReconstruction<Mode>::assess_transport_support(
+    const PolyhedralPhaseSample<Mode>& target, std::span<const PolyhedralPhaseSample<Mode>> stencil,
+    PolyhedralReconstructionOptions options)
+{
+    const auto direction = analyze_direction<Mode>(target, stencil, options);
+    auto result = direction.resolution;
+    if (!result.admitted() || !result.angular_fit_eligible || target.gas_volume == 0 || target.carrier_volume == 0)
+        return result;
+    const auto phase_length_ratio =
+        std::cbrt(static_cast<long double>(std::min(target.gas_volume, target.carrier_volume))) /
+        std::cbrt(target.geometry->volume().value);
+    if (phase_length_ratio < options.minimum_optimized_phase_length_ratio)
+        return result; // Preserve the existing target-only small-phase gradient policy.
+    const auto& normal = direction.normal;
+    const Vector axis = std::abs(normal[0]) < .8 ? Vector{1, 0, 0} : Vector{0, 1, 0};
+    const auto projection = std::inner_product(axis.begin(), axis.end(), normal.begin(), 0.);
+    Vector tangent{};
+    for (unsigned a = 0; a < 3; ++a)
+        tangent[a] = axis[a] - projection * normal[a];
+    tangent = unit(tangent);
+    const Vector second{normal[1] * tangent[2] - normal[2] * tangent[1],
+        normal[2] * tangent[0] - normal[0] * tangent[2], normal[0] * tangent[1] - normal[1] * tangent[0]};
+    const auto center = target.geometry->centroid();
+    double aa = 0, ab = 0, bb = 0;
+    for (const auto& sample : stencil)
+    {
+        if (!sample.observed_mixed || sample.gas_volume == 0 || sample.carrier_volume == 0)
+            continue;
+        auto displacement = sample.geometry->centroid();
+        for (unsigned a = 0; a < 3; ++a)
+            displacement[a] -= center[a];
+        displacement = unit(displacement);
+        const auto first = std::inner_product(displacement.begin(), displacement.end(), tangent.begin(), 0.);
+        const auto other = std::inner_product(displacement.begin(), displacement.end(), second.begin(), 0.);
+        aa += first * first;
+        ab += first * other;
+        bb += other * other;
+        ++result.angular_support_cells;
+    }
+    // The target fixes the offset; only neighbor directions can identify its
+    // two angular degrees of freedom. Pure-geometry neighbors cannot prove
+    // that observed interface support, even if a trial plane cuts them.
+    const auto determinant = aa * bb - ab * ab;
+    if (result.angular_support_cells < 2 || !(determinant > std::numeric_limits<double>::epsilon() * aa * bb))
+    {
+        result.reason = PolyhedralResolutionAssessment::Reason::RankDeficientAngularSupport;
+        return result;
+    }
+    const auto largest = .5 * (aa + bb + std::hypot(aa - bb, 2 * ab));
+    result.angular_support_condition = largest * largest / determinant;
+    if (!std::isfinite(result.angular_support_condition) ||
+        result.angular_support_condition > options.maximum_condition)
+        result.reason = PolyhedralResolutionAssessment::Reason::IllConditionedAngularSupport;
+    return result;
 }
 template<ArithmeticMode Mode>
 PolyhedralInterface PolyhedralReconstruction<Mode>::solve_offset(
@@ -664,12 +758,13 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     {
         PolyhedralInterface plane;
         std::vector<double> residual;
-        double objective = 0;
+        long double objective = 0;
         long double objective_upper = 0;
     };
     const auto evaluate = [&](Vector n)
     {
         Evaluation value;
+        SimpleFluid::detail::CompensatedSum<long double> objective;
         value.plane = offset_fit<Mode>(target, unit(n), options, evaluations);
         value.residual.reserve(stencil.size());
         for (std::size_t i = 0; i < stencil.size(); ++i)
@@ -703,9 +798,9 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
                 }
             }();
             const auto residual = difference<Mode>(measured, gas ? sample.gas_volume : sample.carrier_volume);
-            const double normalized = static_cast<double>(residual.value / volumes[i]);
-            value.residual.push_back(normalized);
-            value.objective += normalized * normalized;
+            const long double normalized = residual.value / volumes[i];
+            value.residual.push_back(static_cast<double>(normalized));
+            objective += normalized * normalized;
             if constexpr (Mode == ArithmeticMode::Ordinary)
             {
                 const auto magnitude = std::abs(residual.value) / volumes[i];
@@ -717,9 +812,27 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
                 value.objective_upper = certified_upward(value.objective_upper + certified_upward(upper * upper));
             }
         }
+        value.objective = objective.value();
         return value;
     };
     auto current = evaluate(normal);
+    unsigned iterations = 0;
+    double last_step = std::numeric_limits<double>::infinity();
+    double probe_step = 0;
+    const auto evidence = [&]
+    {
+        PolyhedralFitDiagnostics result;
+        result.normal = result.best_normal = normal;
+        result.rms = result.best_rms = static_cast<double>(std::sqrt(current.objective_upper / stencil.size()));
+        result.angular_step = last_step;
+        result.finite_difference_scale = probe_step;
+        result.condition = condition;
+        result.iterations = iterations;
+        result.clip_evaluations = evaluations;
+        for (const auto& sample : stencil)
+            result.stencil_ids.push_back(sample.id);
+        return result;
+    };
     if (!resolution.angular_fit_eligible)
     {
         current.plane.stencil_volume_residual =
@@ -730,30 +843,61 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
         if (current.plane.stencil_volume_residual > options.maximum_model_residual)
         {
             resolution.reason = PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel;
-            throw PolyhedralResolutionRequired(resolution);
+            throw PolyhedralResolutionRequired(resolution, evidence());
         }
         current.plane.resolution = resolution;
         return current.plane;
     }
     bool converged = false;
-    unsigned iterations = 0;
-    double last_step = std::numeric_limits<double>::infinity();
     for (unsigned iteration = 0; iteration < options.maximum_fit_iterations; ++iteration)
     {
         iterations = iteration + 1;
         angular_detail::Qualification qualification;
-        const auto status = angular_detail::advance(
-            normal, current, options.maximum_condition, options.fit_tolerance, options.orientation_tolerance, evaluate,
-            [](Vector value) { return unit(value); }, qualification);
+        angular_detail::IterationResult status;
+        try
+        {
+            status = angular_detail::advance(normal, current, options.maximum_condition, options.fit_tolerance,
+                options.orientation_tolerance, evaluate, [](Vector value) { return unit(value); }, qualification);
+        }
+        catch (const angular_detail::Unobservable& failure)
+        {
+            condition = std::max(condition, qualification.condition);
+            last_step = qualification.step;
+            probe_step = qualification.probe_step;
+            const GeometryError cause(GeometryErrorCode::InvalidInput, failure.what());
+            throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::Unobservable, cause, evidence());
+        }
+        catch (const GeometryError& failure)
+        {
+            if (qualification.probe_step != 0)
+            {
+                condition = std::max(condition, qualification.condition);
+                last_step = qualification.step;
+                probe_step = qualification.probe_step;
+            }
+            throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::Geometry, failure, evidence());
+        }
+        catch (const std::invalid_argument& failure)
+        {
+            if (qualification.probe_step != 0)
+            {
+                condition = std::max(condition, qualification.condition);
+                last_step = qualification.step;
+                probe_step = qualification.probe_step;
+            }
+            const GeometryError cause(GeometryErrorCode::InvalidInput, failure.what());
+            throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::Geometry, cause, evidence());
+        }
         condition = std::max(condition, qualification.condition);
         last_step = qualification.step;
+        probe_step = qualification.probe_step;
         if (status == angular_detail::IterationResult::Converged)
         {
             converged = true;
             break;
         }
         if (status == angular_detail::IterationResult::Stalled)
-            throw std::invalid_argument("PLIC angular volume optimizer did not reach stationarity.");
+            throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::Nonstationary, evidence());
     }
     current.plane.stencil_volume_residual = static_cast<double>(std::sqrt(current.objective_upper / stencil.size()));
     current.plane.stencil_volume_residual_measured = true;
@@ -763,12 +907,11 @@ PolyhedralInterface PolyhedralReconstruction<Mode>::reconstruct(const Polyhedral
     current.plane.orientation_method = PolyhedralOrientationMethod::AngularVolumeFit;
     current.plane.fit_converged = converged;
     if (!converged)
-        throw GeometryError(
-            GeometryErrorCode::ResourceLimit, "PLIC angular volume optimizer iteration budget exhausted.");
+        throw PolyhedralFitFailure(PolyhedralFitFailure::Reason::IterationLimit, evidence());
     if (current.plane.stencil_volume_residual > options.maximum_model_residual)
     {
         resolution.reason = PolyhedralResolutionAssessment::Reason::UnresolvedPlaneModel;
-        throw PolyhedralResolutionRequired(resolution);
+        throw PolyhedralResolutionRequired(resolution, evidence());
     }
     current.plane.resolution = resolution;
     return current.plane;

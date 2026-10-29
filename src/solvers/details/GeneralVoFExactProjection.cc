@@ -97,6 +97,7 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
             storage.capacity(Domain::Input, self.geometry_.capacity(), sizeof(Face));
             storage.capacity(Domain::Input, self.volumes_.capacity(), sizeof(double));
             storage.capacity(Domain::Input, self.spans_.capacity(), sizeof(Vector));
+            storage.capacity(Domain::Input, self.boundary_gradient_storage_bytes(), 1);
             storage.capacity(Domain::Input, self.exact_volumes_.capacity(),
                 sizeof(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>));
             for (const auto& value : self.exact_volumes_)
@@ -113,7 +114,7 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
             storage.capacity(Domain::Input, pressure.capacity(), sizeof(double));
             storage.capacity(Domain::Scratch, nc, 8 * sizeof(Vector) + 8 * sizeof(double));
             storage.capacity(Domain::Scratch, nf, 8 * sizeof(double));
-            storage.capacity(Domain::Scratch, n, 12 * sizeof(double) + 2 * sizeof(Vector));
+            storage.capacity(Domain::Scratch, n, 12 * sizeof(double) + 4 * sizeof(Vector));
             storage.capacity(Domain::Result, owned_faces, sizeof(GeneralVoFRoundedValue));
             if (closure_topology)
             {
@@ -140,11 +141,11 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
             // physical-impulse normalization and scalar publication temporaries.
             // Sixteen additional slots form a separate synchronous operation
             // workspace, never borrowed from pending corner/intermediate slots.
-            storage.capacity(Domain::Scratch, 2 * owned_faces + 6 * n,
+            storage.capacity(Domain::Scratch, 2 * owned_faces + 9 * n,
                 sizeof(SimpleFluid::PLIC::GeometryMeasure<SimpleFluid::ArithmeticMode::Exact>));
             storage.capacity(Domain::Scratch, owned_faces, sizeof(GeneralVoFExactPressureFace));
             const auto result_slots = (closure_topology ? 3 : 2) * owned_faces;
-            const auto temporary_slots = std::size_t(48) + 3 * owned_faces + 6 * n;
+            const auto temporary_slots = std::size_t(48) + 3 * owned_faces + 9 * n;
             scalar_budget = storage.remaining() / (result_slots + temporary_slots);
             if (scalar_budget < 1024 || (provenance && admission_budget < 1024))
                 throw std::runtime_error("Projection cumulative exact resource reserve exhausted.");
@@ -397,6 +398,37 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
     fraction_face = self.faces(fraction_face);
     curvature_face = self.faces(curvature_face);
     face_velocity = self.faces(face_velocity);
+    const auto face_response = [&](const std::vector<double>& owned, const std::vector<double>& face,
+                                   bool fraction_response = false)
+    {
+        return self.boundary_gradient(0.,
+            [&](std::size_t c, LO fid)
+            {
+                const auto& g = self.geometry_[fid];
+                const auto zero_tangent = [](const Vector& gradient, const Vector& tangent)
+                {
+                    for (unsigned a = 0; a < 3; ++a)
+                        if (gradient[a] != 0 && tangent[a] != 0)
+                            return false;
+                    return true;
+                };
+                if (fraction_response && f[g.owner] == owned[c] && f[g.neighbor] == owned[c] &&
+                    zero_tangent(grad_f[g.owner], g.tangent_left) &&
+                    zero_tangent(grad_f[g.neighbor], g.tangent_right))
+                    return 0.;
+                return face[fid] - owned[c];
+            },
+            [](double a, double b) { return a + b; }, [](double a, double b) { return a * b; },
+            [](double a, double b) { return a / b; }, [](double value) { return value == 0; });
+    };
+    std::vector<Vector> boundary_grad_f;
+    arithmetic_guard(
+        [&]
+        {
+            boundary_grad_f.resize(self.volumes_.size());
+            if (sigma != 0)
+                boundary_grad_f = face_response(fraction, fraction_face, true);
+        });
     std::vector<Vector> force(self.volumes_.size());
     {
         const auto lease = self.mesh_->acquire_execution_view();
@@ -410,7 +442,8 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                     // capillary normal reaction. For constant kappa, p=sigma*
                     // kappa*f then cancels on the complete control volume.
                     const double value =
-                        sigma * kappa[c] * dot(grad_f[c], convert(self.mesh_->face_center_vector(fid, LO(c)))) * g.area;
+                        sigma * kappa[c] * dot(boundary_grad_f[c],
+                            convert(self.mesh_->face_center_vector(fid, LO(c)))) * g.area;
                     for (unsigned a = 0; a < 3; ++a)
                         force[c][a] += value * g.normal[a];
                     continue;
@@ -498,69 +531,32 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
             {
                 if (p.size() != self.mesh_->num_cells())
                     throw std::runtime_error("Exact pressure halo shape mismatch.");
+                const auto shared_pressure = [&](LO fid)
+                {
+                    const auto& g = self.geometry_[fid];
+                    const auto left_weight = vof_exact::leased_scale(M::from_value(rho[g.neighbor]), g.right,
+                        scalar_budget);
+                    const auto right_weight = vof_exact::leased_scale(M::from_value(rho[g.owner]), g.left,
+                        scalar_budget);
+                    return vof_exact::leased_divide(vof_exact::leased_add(exact_product(left_weight, p[g.owner]),
+                        exact_product(right_weight, p[g.neighbor]), scalar_budget),
+                        vof_exact::leased_add(left_weight, right_weight, scalar_budget), scalar_budget);
+                };
+                const auto boundary_grad = self.boundary_gradient(M{},
+                    [&](std::size_t c, LO fid)
+                    {
+                        return vof_exact::leased_add(shared_pressure(fid),
+                            vof_exact::leased_scale(p[c], -1, scalar_budget), scalar_budget);
+                    },
+                    [&](const M& a, const M& b) { return vof_exact::leased_add(a, b, scalar_budget); },
+                    [&](const M& a, double b) { return vof_exact::leased_scale(a, b, scalar_budget); },
+                    [&](const M& a, double b)
+                    { return vof_exact::leased_divide(a, M::from_value(b), scalar_budget); },
+                    [](const M& value) { return value.sign() == 0; });
                 const auto lease = self.mesh_->acquire_execution_view();
                 for (std::size_t c = 0; c < self.volumes_.size(); ++c)
                 {
-                    // Freeze the same represented geometry-only WLS matrix and
-                    // solve its pressure response exactly; no tiny p is narrowed.
-                    std::array<std::array<double, 3>, 3> metric{};
-                    std::array<std::array<M, 4>, 3> matrix{};
-                    for (auto fid : self.mesh_->faces(LO(c)))
-                    {
-                        const auto& g = self.geometry_[fid];
-                        if (g.boundary)
-                            continue;
-                        auto r = convert(self.mesh_->cell_center_vector(fid, LO(c)));
-                        for (unsigned a = 0; a < 3; ++a)
-                            r[a] /= self.spans_[c][a];
-                        const double w = 1 / dot(r, r);
-                        const auto delta = vof_exact::leased_add(p[self.mesh_->opposite_cell(fid, LO(c))],
-                            vof_exact::leased_scale(p[c], -1, scalar_budget), scalar_budget);
-                        for (unsigned a = 0; a < 3; ++a)
-                        {
-                            matrix[a][3] = vof_exact::leased_add(
-                                matrix[a][3], vof_exact::leased_scale(delta, w * r[a], scalar_budget), scalar_budget);
-                            for (unsigned b = 0; b < 3; ++b)
-                                metric[a][b] += w * r[a] * r[b];
-                        }
-                    }
-                    for (unsigned a = 0; a < 3; ++a)
-                        for (unsigned b = 0; b < 3; ++b)
-                            matrix[a][b] = M::from_value(metric[a][b]);
-                    for (unsigned a = 0; a < 3; ++a)
-                    {
-                        unsigned pivot = a;
-                        for (unsigned row = a + 1; row < 3; ++row)
-                        {
-                            const auto magnitude = matrix[row][a].sign() < 0
-                                                       ? vof_exact::leased_scale(matrix[row][a], -1, scalar_budget)
-                                                       : matrix[row][a];
-                            const auto previous = matrix[pivot][a].sign() < 0
-                                                      ? vof_exact::leased_scale(matrix[pivot][a], -1, scalar_budget)
-                                                      : matrix[pivot][a];
-                            if (magnitude.compare(previous) > 0)
-                                pivot = row;
-                        }
-                        if (!matrix[pivot][a].sign())
-                            throw std::runtime_error("Exact pressure WLS matrix is singular.");
-                        std::swap(matrix[a], matrix[pivot]);
-                        const auto diagonal = matrix[a][a];
-                        for (unsigned b = a; b < 4; ++b)
-                            matrix[a][b] = vof_exact::leased_divide(matrix[a][b], diagonal, scalar_budget);
-                        for (unsigned row = 0; row < 3; ++row)
-                            if (row != a)
-                            {
-                                const auto factor = matrix[row][a];
-                                for (unsigned b = a; b < 4; ++b)
-                                    matrix[row][b] = vof_exact::leased_add(matrix[row][b],
-                                        vof_exact::leased_scale(exact_product(factor, matrix[a][b]), -1, scalar_budget),
-                                        scalar_budget);
-                            }
-                    }
-                    std::array<M, 3> grad;
-                    for (unsigned a = 0; a < 3; ++a)
-                        grad[a] =
-                            vof_exact::leased_divide(matrix[a][3], M::from_value(self.spans_[c][a]), scalar_budget);
+                    const auto& grad = boundary_grad[c];
                     exact_pressure[c] = vof_exact::leased_add(exact_pressure[c], p[c], scalar_budget);
                     for (auto fid : self.mesh_->faces(LO(c)))
                     {
@@ -575,14 +571,7 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                         }
                         else
                         {
-                            const auto left_weight =
-                                vof_exact::leased_scale(M::from_value(rho[g.neighbor]), g.right, scalar_budget);
-                            const auto right_weight =
-                                vof_exact::leased_scale(M::from_value(rho[g.owner]), g.left, scalar_budget);
-                            const auto face_p =
-                                vof_exact::leased_divide(vof_exact::leased_add(exact_product(left_weight, p[g.owner]),
-                                                             exact_product(right_weight, p[g.neighbor]), scalar_budget),
-                                    vof_exact::leased_add(left_weight, right_weight, scalar_budget), scalar_budget);
+                            const auto face_p = shared_pressure(fid);
                             value = vof_exact::leased_scale(
                                 vof_exact::leased_add(
                                     face_p, vof_exact::leased_scale(p[c], -1, scalar_budget), scalar_budget),
@@ -808,6 +797,8 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                 });
             face_velocity = self.faces(face_velocity);
             p_face = self.faces(p_face);
+            std::vector<Vector> boundary_grad_p;
+            arithmetic_guard([&] { boundary_grad_p = face_response(p_owned, p_face); });
             arithmetic_guard(
                 [&]
                 {
@@ -827,7 +818,7 @@ void GeneralVoFFlowWorkspace::project(detail::GeneralVoFFlowWorkspace& self, std
                             // pressure force on a boundary control volume.
                             const double value =
                                 g.boundary
-                                    ? -dot(grad_p[c], convert(self.mesh_->face_center_vector(fid, LO(c)))) * g.area
+                                    ? -dot(boundary_grad_p[c], convert(self.mesh_->face_center_vector(fid, LO(c)))) * g.area
                                     : -(g.owner == LO(c) ? 1 : -1) * (p_face[fid] - p_owned[c]) * g.area;
                             for (unsigned a = 0; a < 3; ++a)
                                 if (provenance)

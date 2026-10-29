@@ -44,6 +44,16 @@ a permitted physical trace does not create a second geometric interface. Mixed
 sections require actual positive polygon geometry. Scalar transport-volume
 admission does not establish surface-area or curvature accuracy.
 
+Mixed-cell capillary orientation is reconstructed by the cell owner from every
+complete configured face-neighbor ring. This fixed physical support is independent
+of the smaller complete ring selected for a transport plane's directional fit.
+Both estimators retain the same independent minority-volume, model, conditioning
+and arithmetic gates. A full-rank local transport stencil alone does not establish
+that its normal resolves surface bending. Retained adopted interface geometry
+remains authoritative. Missing capillary support rejects before fitting; it does
+not trigger a switch to a smaller stencil. Unused transport planes are not a
+prerequisite for constructing this catalog.
+
 For planar transitions, the capillary reconstruction may use an authenticated
 aligned-face plane instead of the transport normal fit. The canonical cell owner
 must verify a complete reconstruction stencil: declared-pure cells retain
@@ -67,7 +77,16 @@ in this graph and remain inside the source's admitted cell support. Area and
 physical-distance weights feed a coordinate-scaled, column-pivoted Householder
 QR fit of a quadratic Monge surface. Normals point from gas to carrier; curvature
 is `div(n)`, positive for a convex gas drop. The fit retains sample, conditioning,
-normalized residual, slope and normal-consistency gates. Its condition indicator
+normalized residual, slope and normal-consistency gates.
+
+Conservative scalar phase transfer alone does not authenticate gas connectivity
+across the donor face. A positive minority receipt can produce a newly mixed cell
+whose independently volume-fitted gas is separated from the donor's reconstructed
+gas by carrier. Its inventory and mixed declaration remain intact. If that
+reconstructed component has too few connected physical patches, continuation
+rejects with the measured sample count; nearby patches across the carrier gap
+cannot supply the fit. Complete native cell support and a successful target-volume
+oracle do not establish this missing surface support. Its condition indicator
 is the squared infinity-norm estimate of the scaled QR factor, not the former
 normal-equation matrix condition or a certified bound.
 
@@ -175,14 +194,19 @@ separate mixed-surface paths and qualification boundaries.
 This model does not establish interface or capillary accuracy at arbitrary
 resolution. Kernel sphere/cylinder reports and focused conservation/transaction
 checks are separate from complete motion, pressure-jump, spurious-current and
-capillary-time qualification. The algebraic campaign preregisters area-weighted
-curvature and pressure-jump errors at most 5% on the finest resolved uniform
-mesh, spurious velocity at most `1e-3` of the declared capillary velocity, and
-dynamic period and amplitude/decay errors at most 5%. Observation covers at
-least five capillary times and extends when viscous relaxation controls.
+capillary-time qualification. Relevant native-cylinder and curvature prerequisites
+remain required for the declared short-horizon capillary scope. A broader
+static-equilibrium or dynamic-response claim activates the conditional algebraic
+follow-ons: area-weighted curvature and pressure-jump errors at most 5% on the
+finest resolved uniform mesh, spurious velocity at most `1e-3` of the declared
+capillary velocity, and dynamic period and amplitude/decay errors at most 5%.
+For those claims, observation covers at least five capillary times and extends
+when viscous relaxation controls.
 See the [capillary manifest](../../verification/vof/algebraic_capillary_manifest.json)
 and [qualification gates](../verification/vof_solver_contracts.md#algebraic-face-volume-qualification).
-These are acceptance requirements, not completed validation.
+These unchanged thresholds apply to the stated claims; they are not completed
+validation or a requirement to implement every capillary model for the scoped
+fixed-mesh default. Record cleanup policy and sensitivity separately.
 
 The filtered uniform-sphere study holds the filter at two cell lengths, so its
 physical width decreases with refinement. Reconstructed mixed surfaces and

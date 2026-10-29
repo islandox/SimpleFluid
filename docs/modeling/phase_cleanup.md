@@ -9,8 +9,14 @@ does not make the operation exactly conservative. Strict PLIC offset acceptance
 and the transport, momentum, occupancy and physical drift tolerances remain
 unchanged.
 
-For the independently stored gas and carrier volumes, eligibility is
-`0 < min(G,L) <= relative_cutoff * actual_geometry_volume`. The proposed operation
+For a cell with inferred mixed geometry, eligibility is
+`0 < min(G,L) <= relative_cutoff * actual_geometry_volume` for the independently
+stored gas and carrier volumes. Already validated `PureGas`/`PureCarrier`
+declarations retain their independent minority inventories: their geometry needs
+no relabeling, so they create no cleanup event or budget debit, including when a
+pinned phase cap is zero. This protection also applies with an explicit positive
+cleanup cutoff and cap. It does not admit a contradictory pure declaration or
+change the budget rejection for an eligible inferred mixed cell. The proposed operation
 sets the smaller phase to zero and adds its old amount to the dominant phase
 using binary64 arithmetic. It never replaces the dominant amount with the cell
 volume. Every correction is the difference between the actual published before
@@ -129,7 +135,35 @@ prepared family when cleanup is enabled. Its final canonical phase streams remai
 the raw transport authority; cleanup is a separately recorded correction after
 raw acceptance.
 
-The uncleaned microscopic fixed-normal PLIC problem may still reject. The
-integration obligation is to clean an eligible amount within budget, publish a
-pure cell, and avoid requesting that mixed-cell fit. Wider plane representations
-remain separate robustness work.
+The uncleaned microscopic fixed-normal PLIC problem may still reject. For the
+enabled policy, eligible cleanup must remain within budget and publish its
+result before any subsequent mixed-cell fit; budget exhaustion still rejects.
+Successful microscopic zero-cutoff completion and wider plane representations
+are optional robustness work. Preserve the captured inputs/local replay and
+collective rejection without changing accepted state or calling the failed
+physical horizon passed.
+
+## Qualification and sensitivity
+
+Default-policy qualification uses Ordinary SweptPartition with automatic cleanup;
+GeometricFace's enabled policy requires its own evidence. Record automatic versus
+explicit configuration and the resolved cutoff/caps. The current named swept
+full50 uses automatic defaults, while controlled algebraic fixtures usually set
+zero explicitly. Their recorded outcomes are not interchangeable; see
+[regimes and evidence](../verification/vof_solver_contracts.md#stage-7-scope-and-priorities).
+
+Cleanup sensitivity is a core acceptance task: compare matched complete mesh/time
+studies under declared cutoff and cumulative-cap variations, including zero where
+admissible. Keep the original physical initial inventory, oracle, endpoints,
+tolerances and resource limits. Report raw physical drift, signed/absolute phase
+corrections, mass/momentum changes, event counts, exhausted budgets and interface
+accuracy/convergence. Report a strict-policy rejection as such; sensitivity does
+not require successful reconstruction of every microscopic zero-policy state.
+Small direct cleanup volume does not prove small future trajectory or flux error.
+
+Cleanup-enabled coupled AMR/remap is an explicit capability extension. It needs
+an auxiliary-channel correction/transfer contract, preserved original caps and
+spending, independent material/momentum checks and atomic serial/MPI rollback.
+Existing phase-only remap and ownership migration do not close this gate. Until
+it is implemented and qualified, preserve coupled-channel rejection and label
+raw-policy Q5 results separately. Complete solver restart remains separate work.

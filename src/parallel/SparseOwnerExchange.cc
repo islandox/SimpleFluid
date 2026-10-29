@@ -7,6 +7,8 @@
 #include <Tpetra_Distributor.hpp>
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -188,6 +190,23 @@ OwnerExchange exchange_owner_packets(
             metadata = plus(metadata, times(records, sizeof(OwnerPacket)));
             // Output payload coexists briefly with received packed bytes. Reject the
             // conservative upper bound before allocating either flat byte buffer.
+            if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
+            {
+                std::size_t input_size = input.size() * sizeof(OwnerPacket), input_capacity = input_size;
+                for (const auto& packet : input)
+                {
+                    input_size = plus(input_size, packet.bytes.size());
+                    input_capacity = plus(input_capacity, packet.bytes.capacity());
+                }
+                std::fprintf(stderr,
+                    "ADAPTIVE_EXCHANGE rank=%d packets=%zu input_range_size=%zu input_range_capacity=%zu "
+                    "planned_send_size=%zu planned_send_capacity=%zu planned_receive_size=%zu "
+                    "planned_receive_capacity=%zu planned_decoded_size=%zu metadata_capacity=%zu "
+                    "scratch_bound=%zu limit=%zu\n",
+                    comm->getRank(), input.size(), input_size, input_capacity, sent_wire, sent_wire, received_wire,
+                    received_wire, received_wire, metadata, plus(metadata, plus(sent_wire, times(received_wire, 2))),
+                    budget);
+            }
             if (plus(metadata, plus(sent_wire, times(received_wire, 2))) > budget)
                 throw std::length_error("Owner packet receive buffers exceed byte budget.");
         });
@@ -241,6 +260,71 @@ OwnerExchange exchange_owner_packets(
     output.stats.received_packets = records;
     output.stats.peak_scratch_bytes =
         plus(metadata, plus(send.capacity(), plus(received.capacity(), output.stats.received_bytes)));
+    if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
+    {
+        std::size_t decoded_capacity = output.packets.capacity() * sizeof(OwnerPacket);
+        for (const auto& packet : output.packets)
+            decoded_capacity = plus(decoded_capacity, packet.bytes.capacity());
+        std::fprintf(stderr,
+            "ADAPTIVE_EXCHANGE_DONE rank=%d send_size=%zu send_capacity=%zu receive_size=%zu "
+            "receive_capacity=%zu decoded_size=%zu decoded_capacity=%zu metadata_capacity=%zu "
+            "scratch_capacity=%zu limit=%zu\n",
+            comm->getRank(), send.size(), send.capacity(), received.size(), received.capacity(),
+            output.packets.size() * sizeof(OwnerPacket) + output.stats.received_bytes, decoded_capacity, metadata,
+            output.stats.peak_scratch_bytes, budget);
+    }
     return output;
+}
+OwnerExchange consume_owner_packets(
+    std::vector<OwnerPacket>&& input, Teuchos::RCP<const Teuchos::Comm<int>> comm, std::size_t budget)
+{
+    if (comm.is_null())
+        throw std::invalid_argument("Owner exchange needs a communicator.");
+    int remote = 0, any_remote = 0;
+    std::size_t bytes = 0, capacity = 0;
+    collectively(*comm,
+        [&]
+        {
+            if (input.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                throw std::length_error("Owner exchange packet count exceeds MPI/Teuchos range.");
+            capacity = times(input.capacity(), sizeof(OwnerPacket));
+            for (const auto& packet : input)
+            {
+                if (packet.peer < 0 || packet.peer >= comm->getSize())
+                    throw std::invalid_argument("Owner packet peer is out of range.");
+                remote |= packet.peer != comm->getRank();
+                bytes = plus(bytes, packet.bytes.size());
+                capacity = plus(capacity, packet.bytes.capacity());
+            }
+            if (plus(bytes, times(input.size(), sizeof(Word))) >
+                static_cast<std::size_t>(std::numeric_limits<int>::max()))
+                throw std::length_error("Owner exchange packed exports exceed supported MPI count range.");
+        });
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &remote, &any_remote);
+    if (any_remote)
+    {
+        auto result = exchange_owner_packets(std::span<const OwnerPacket>(input), comm, budget);
+        std::vector<OwnerPacket>().swap(input);
+        return result;
+    }
+    collectively(*comm,
+        [&]
+        {
+            if (capacity > budget)
+                throw std::length_error("Local owner packet capacities exceed byte budget.");
+        });
+    OwnerExchange result;
+    result.stats.sent_packets = result.stats.received_packets = input.size();
+    result.stats.sent_bytes = result.stats.received_bytes = bytes;
+    result.stats.peak_scratch_bytes = capacity;
+    if (std::getenv("SIMPLEFLUID_ADAPTIVE_DIAGNOSTICS"))
+        std::fprintf(stderr,
+            "ADAPTIVE_EXCHANGE rank=%d local_delivery=1 packets=%zu input_size=%zu "
+            "input_capacity=%zu send_size=0 send_capacity=0 receive_size=0 receive_capacity=0 "
+            "decoded_size=%zu decoded_capacity=%zu scratch_capacity=%zu limit=%zu\n",
+            comm->getRank(), input.size(), input.size() * sizeof(OwnerPacket) + bytes, capacity,
+            input.size() * sizeof(OwnerPacket) + bytes, capacity, capacity, budget);
+    result.packets = std::move(input);
+    return result;
 }
 } // namespace SimpleFluid

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
+#include <limits>
 #include <set>
 
 namespace
@@ -303,6 +304,35 @@ TEST(FiniteNativeGeometryTest, PlaneMeasureIntegratesObliqueCubeAndComplementWit
     EXPECT_EQ(stats.constructions, 0u);
     EXPECT_EQ(stats.intersections, 0u);
     EXPECT_EQ(stats.moment_evaluations, 0u);
+}
+
+TEST(FiniteNativeGeometryTest, StrictFaceSideUsesBothOffsetEndpointsAndRejectsMalformedInput)
+{
+    using Side = PLIC::WholeFacePlaneSide;
+    std::array<PLIC::Point<ordinary>, 4> face;
+    face[0].value = {0, 0, 0};
+    face[1].value = {0, 1, 0};
+    face[2].value = {0, 1, 1};
+    face[3].value = {0, 0, 1};
+    const PLIC::GeometryHalfspace plane{{1, 0, 0}, {}, 0};
+    const auto side = [&](std::array<long double, 2> offsets)
+    { return PLIC::OrdinaryPlaneMeasure::strict_face_side(face, plane, offsets); };
+    EXPECT_EQ(side({1, 2}), Side::StrictNegative);
+    EXPECT_EQ(side({-2, -1}), Side::StrictPositive);
+    EXPECT_EQ(side({0, 1}), Side::UnknownOrContact);
+    EXPECT_EQ(side({-1, 1}), Side::UnknownOrContact);
+    auto crossing = face;
+    crossing[2].value[0] = 2;
+    EXPECT_EQ(PLIC::OrdinaryPlaneMeasure::strict_face_side(crossing, plane, {1, 1}), Side::UnknownOrContact);
+    EXPECT_THROW((void) PLIC::OrdinaryPlaneMeasure::strict_face_side(std::span(face).first(2), plane, {1, 2}),
+        std::invalid_argument);
+    EXPECT_THROW((void) side({2, 1}), std::invalid_argument);
+    EXPECT_THROW((void) side({1, std::numeric_limits<long double>::infinity()}), std::invalid_argument);
+    auto invalid = face;
+    invalid[3].value[2] = std::numeric_limits<long double>::quiet_NaN();
+    EXPECT_THROW((void) PLIC::OrdinaryPlaneMeasure::strict_face_side(invalid, plane, {-1, 1}), std::invalid_argument);
+    const PLIC::GeometryHalfspace zero_normal{{0, 0, 0}, {}, 0};
+    EXPECT_THROW((void) PLIC::OrdinaryPlaneMeasure::strict_face_side(face, zero_normal, {1, 2}), std::invalid_argument);
 }
 
 TEST(FiniteNativeGeometryTest, PlaneMeasureUsesLocalScaledCoordinatesAndMeasuresTinyPhaseDirectly)
