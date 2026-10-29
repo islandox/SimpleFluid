@@ -6,6 +6,12 @@ namespace
 {
 testing::Environment* const environment = testing::AddGlobalTestEnvironment(new utils_test::KokkosEnvironment);
 using Declaration = GeneralVoFPhaseGeometry;
+using Backend = GeneralVoFTransportBackend;
+constexpr std::array cleanup_face_backends{Backend::GeometricFace};
+const char* backend_name(Backend backend)
+{
+    return backend == Backend::DonorCell ? "DonorCell" : "GeometricFace";
+}
 GeneralVoFOptions cleanup_options(double cutoff = 1e-14, double budget = 1e-12)
 {
     GeneralVoFOptions result;
@@ -331,13 +337,14 @@ TEST(GeneralVoFPhaseCleanup, PolicyIsCollectivelyValidatedIncludingEmptyOwners)
             (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
     }
 }
-TEST(GeneralVoFPhaseCleanup, OwnershipMigrationRetainsLedgerAndRejectsCoupledChannels)
+void ownership_migration_retains_ledger(Backend backend)
 {
     auto input = fixture();
     constexpr double small = 0x1p-60;
     std::fill(input.gas.begin(), input.gas.end(), small);
     std::fill(input.carrier.begin(), input.carrier.end(), 1);
-    const auto options = cleanup_options();
+    auto options = cleanup_options();
+    options.transport_backend = backend;
     GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
     const auto before = source.phase_cleanup_state();
     const auto identity = source.accepted_identity();
@@ -397,6 +404,189 @@ TEST(GeneralVoFPhaseCleanup, OwnershipMigrationRetainsLedgerAndRejectsCoupledCha
                          source.carrier_volumes(), options, source.phase_geometry_declarations(), disagreement),
             std::invalid_argument);
     }
+}
+
+TEST(GeneralVoFPhaseCleanup, OwnershipMigrationRetainsLedgerAndRejectsCoupledChannels)
+{
+    ownership_migration_retains_ledger(Backend::SweptPartition);
+}
+
+TEST(GeneralVoFPhaseCleanup, GeometricInitializationChargesActualEndpoints)
+{
+    const auto input = fixture();
+    for (const auto backend : cleanup_face_backends)
+    {
+        SCOPED_TRACE(backend_name(backend));
+        for (const bool minority_gas : {false, true})
+            for (const double small : {0x1p-48, 0x1p-60})
+            {
+                const double dominant = 1 - small;
+                auto options = cleanup_options();
+                options.transport_backend = backend;
+                const std::vector<double> gas(input.order.size(), minority_gas ? small : dominant);
+                const std::vector<double> carrier(input.order.size(), minority_gas ? dominant : small);
+                GeneralVoF source(input.hierarchy, input.order, gas, carrier, options);
+                const unsigned m = minority_gas ? 0 : 1, d = 1 - m;
+                // Binary64 can represent the credit at 2^-48, but adding 2^-60
+                // to one leaves the dominant endpoint unchanged.
+                const long double credit = small == 0x1p-48 ? small : 0;
+                EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 8u);
+                EXPECT_EQ(source.phase_cleanup_state().signed_volume[m], -8.L * small);
+                EXPECT_EQ(source.phase_cleanup_state().signed_volume[d], 8 * credit);
+                EXPECT_EQ(source.phase_cleanup_state().absolute_volume[m], 8.L * small);
+                EXPECT_EQ(source.phase_cleanup_state().absolute_volume[d], 8 * credit);
+                ASSERT_EQ(source.latest_phase_cleanup().size(), input.order.size());
+                for (const auto& delta : source.latest_phase_cleanup())
+                {
+                    EXPECT_EQ(delta.before[m], small);
+                    EXPECT_EQ(delta.before[d], dominant);
+                    EXPECT_EQ(delta.after[m], 0);
+                    EXPECT_EQ(delta.after[d], 1);
+                    EXPECT_EQ(delta.volume[m], -static_cast<long double>(small));
+                    EXPECT_EQ(delta.volume[d], credit);
+                }
+                for (const auto declaration : source.phase_geometry_declarations())
+                    EXPECT_EQ(declaration, minority_gas ? Declaration::PureCarrier : Declaration::PureGas);
+            }
+    }
+}
+
+TEST(GeneralVoFPhaseCleanup, GeometricCanonicalTransportRetainsRawMassAndCumulativeBudget)
+{
+    const auto input = fixture();
+    constexpr double q = 0x1p-48;
+    constexpr std::array<double, 2> density{.1, 1000};
+    for (const auto backend : cleanup_face_backends)
+    {
+        SCOPED_TRACE(backend_name(backend));
+        auto options = cleanup_options(1e-14, 3 * q);
+        options.transport_backend = backend;
+        GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+        const auto source_identity = source.accepted_identity();
+        const auto first = source.plan_face_transport(cycle(source, q), 1, density, 42);
+        const auto sibling = source.plan_face_transport(cycle(source, q), 1, density, 42);
+        const auto next = source.apply(first);
+        EXPECT_EQ(source.accepted_identity(), source_identity);
+        EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 0u);
+        EXPECT_EQ(source.gas_volumes(), input.gas);
+        EXPECT_EQ(source.carrier_volumes(), input.carrier);
+        EXPECT_EQ(next->gas_volumes(), input.gas);
+        EXPECT_EQ(next->carrier_volumes(), input.carrier);
+        EXPECT_EQ(next->phase_cleanup_state().cleaned_cells, 2u);
+        EXPECT_EQ(next->phase_cleanup_state().signed_volume, (std::array<long double, 2>{0, 0}));
+        EXPECT_EQ(next->phase_cleanup_state().absolute_volume, (std::array<long double, 2>{2 * q, 2 * q}));
+        EXPECT_EQ(sibling.candidate()->phase_cleanup_state().absolute_volume,
+            next->phase_cleanup_state().absolute_volume);
+        const auto prepared = first.prepare_transport(density, 42);
+        ASSERT_TRUE(prepared);
+        first.validate_prepared_transport(*prepared, density, 42);
+        EXPECT_EQ(prepared->family, GeneralVoFTransportFamily::AlgebraicFaceVolume);
+        EXPECT_EQ(prepared->backend, backend);
+        EXPECT_EQ(prepared->old_phase_cleanup.cleaned_cells, 0u);
+        EXPECT_EQ(prepared->new_phase_cleanup.absolute_volume, next->phase_cleanup_state().absolute_volume);
+        EXPECT_EQ(prepared->phase_cleanup.size(), next->latest_phase_cleanup().size());
+        std::uint64_t local_receipts = prepared->phase_cleanup.size(), global_receipts = 0;
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_receipts, &global_receipts);
+        EXPECT_EQ(global_receipts, 2u);
+        for (const auto& delta : prepared->phase_cleanup)
+        {
+            const auto row = next->mesh()->owned_cell_map()->getLocalElement(delta.gid);
+            ASSERT_GE(row, 0);
+            const auto center = source.hierarchy()->geometry(source.hierarchy()->owned().at(delta.key))->centroid();
+            // The closed square cycle exports q gas from the sole gas cell
+            // into its +x neighbour; all other streams carry pure carrier.
+            const bool gas_origin = center[0] < 1;
+            EXPECT_LT(center[1], 1);
+            EXPECT_LT(center[2], 1);
+            EXPECT_EQ(delta.before[0], gas_origin ? 1 - q : q);
+            EXPECT_EQ(delta.before[1], gas_origin ? q : 1 - q);
+            EXPECT_EQ(delta.after[0], gas_origin ? 1 : 0);
+            EXPECT_EQ(delta.after[1], gas_origin ? 0 : 1);
+            EXPECT_EQ(delta.volume[0], gas_origin ? q : -q);
+            EXPECT_EQ(delta.volume[1], gas_origin ? -q : q);
+            EXPECT_EQ(prepared->raw_new_mass[row], static_cast<long double>(density[0]) * delta.before[0] +
+                                                      static_cast<long double>(density[1]) * delta.before[1]);
+            EXPECT_EQ(prepared->new_mass[row], gas_origin ? static_cast<long double>(density[0]) : density[1]);
+            EXPECT_EQ(prepared->cleanup_mass[row], static_cast<long double>(density[0]) * delta.volume[0] +
+                                                      static_cast<long double>(density[1]) * delta.volume[1]);
+        }
+        const auto accepted_identity = next->accepted_identity();
+        const auto checkpoint_bytes = next->phase_cleanup_checkpoint();
+        EXPECT_THROW((void) next->plan_face_transport(cycle(*next, q), 1, density), std::invalid_argument);
+        EXPECT_EQ(next->accepted_identity(), accepted_identity);
+        EXPECT_EQ(next->gas_volumes(), input.gas);
+        EXPECT_EQ(next->carrier_volumes(), input.carrier);
+        EXPECT_EQ(next->phase_cleanup_checkpoint(), checkpoint_bytes);
+        const auto checkpoint = GeneralVoF::decode_phase_cleanup_checkpoint(checkpoint_bytes);
+        GeneralVoF restored(next->hierarchy(), next->owned_order(), next->gas_volumes(), next->carrier_volumes(),
+            options, next->phase_geometry_declarations(), checkpoint);
+        EXPECT_EQ(restored.phase_cleanup_checkpoint(), checkpoint_bytes);
+        EXPECT_THROW((void) restored.plan_face_transport(cycle(restored, q), 1, density), std::invalid_argument);
+        const auto still = next->plan_face_transport(circulation(*next, true), 1, density);
+        const auto stationary_state = next->apply(still);
+        const auto stationary_prepared = still.prepare_transport(density);
+        EXPECT_TRUE(stationary_state->latest_phase_cleanup().empty());
+        EXPECT_TRUE(stationary_prepared->phase_cleanup.empty());
+        EXPECT_EQ(stationary_state->phase_cleanup_checkpoint(), checkpoint_bytes);
+        EXPECT_EQ(stationary_state->gas_volumes(), input.gas);
+        EXPECT_EQ(stationary_state->carrier_volumes(), input.carrier);
+        EXPECT_EQ(stationary_prepared->raw_new_mass, stationary_prepared->new_mass);
+        for (const auto mass : stationary_prepared->cleanup_mass)
+            EXPECT_EQ(mass, 0);
+        // The preceding accepted publication still owns its original receipt.
+        EXPECT_EQ(next->latest_phase_cleanup().size(), prepared->phase_cleanup.size());
+    }
+}
+
+TEST(GeneralVoFPhaseCleanup, GeometricDisabledAndAboveCutoffPreserveInventory)
+{
+    auto input = fixture();
+    for (const auto backend : cleanup_face_backends)
+    {
+        SCOPED_TRACE(backend_name(backend));
+        for (const double small : {0x1p-48, 0x1p-40})
+        {
+            std::fill(input.gas.begin(), input.gas.end(), small);
+            std::fill(input.carrier.begin(), input.carrier.end(), 1 - small);
+            for (const bool enabled : {false, true})
+            {
+                if (enabled && small == 0x1p-48)
+                    continue;
+                auto options = cleanup_options(enabled ? 1e-14 : 0);
+                options.transport_backend = backend;
+                GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+                EXPECT_EQ(source.gas_volumes(), input.gas);
+                EXPECT_EQ(source.carrier_volumes(), input.carrier);
+                EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 0u);
+                EXPECT_TRUE(source.latest_phase_cleanup().empty());
+                for (const auto declaration : source.phase_geometry_declarations())
+                    EXPECT_EQ(declaration, Declaration::Infer);
+            }
+        }
+    }
+}
+
+TEST(GeneralVoFPhaseCleanup, GeometricOwnershipMigrationRetainsLedgerAndRejectsCoupledChannels)
+{
+    for (const auto backend : cleanup_face_backends)
+    {
+        SCOPED_TRACE(backend_name(backend));
+        ownership_migration_retains_ledger(backend);
+    }
+}
+
+TEST(GeneralVoFPhaseCleanup, EnabledCleanupRejectsBoundedAndExactArithmetic)
+{
+    const auto input = fixture();
+    for (const auto mode : {ArithmeticMode::BoundedCertification, ArithmeticMode::Exact})
+        for (const auto backend : {Backend::SweptPartition, Backend::DonorCell, Backend::GeometricFace})
+        {
+            auto options = cleanup_options();
+            options.arithmetic_mode = mode;
+            options.transport_backend = backend;
+            EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options),
+                std::invalid_argument);
+        }
 }
 
 } // namespace

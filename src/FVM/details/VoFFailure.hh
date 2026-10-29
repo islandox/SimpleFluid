@@ -50,7 +50,8 @@ enum class Field : std::uint64_t
     Simplex = 16384,
     Control = 32768,
     Cut = 65536,
-    Resolution = 131072
+    Resolution = 131072,
+    CellOwner = 262144
 };
 /** Fixed-size wire record. A field is meaningful only when its presence bit is set.
  * Construction is an ordinal within the identified face, never a fabricated global ID.
@@ -59,7 +60,7 @@ enum class Field : std::uint64_t
 struct Record
 {
     std::uint64_t present = 0;
-    int origin_rank = -1;
+    int origin_rank = -1, cell_owner = -1;
     Category category = Category::Unknown;
     int geometry_code = -1, resolution_reason = -1;
     ArithmeticMode arithmetic_mode = ArithmeticMode::Ordinary;
@@ -157,16 +158,18 @@ public:
     {
         std::snprintf(text_.data(), text_.size(),
             "VoF collective rejection: stage=%s category=%s origin_rank=%d cause=%s "
-            "[context presence=0x%llx cell=%llu face=%llu donor=%llu recipient=%llu construction=%llu cut=%llu "
+            "[context presence=0x%llx cell=%llu cell_owner=%d face=%llu donor=%llu recipient=%llu construction=%llu "
+            "cut=%llu "
             "arithmetic=%d scale=%Lg volume_budget=%Lg byte_budget=%llu bytes_used=%llu retry=%u resolution=%d; "
             "unmarked fields are absent]",
             record.stage.data(), category_name(record.category), record.origin_rank, record.message.data(),
             static_cast<unsigned long long>(record.present), static_cast<unsigned long long>(record.cell),
-            static_cast<unsigned long long>(record.face), static_cast<unsigned long long>(record.donor),
-            static_cast<unsigned long long>(record.recipient), static_cast<unsigned long long>(record.construction),
-            static_cast<unsigned long long>(record.cut), int(record.arithmetic_mode), record.scale,
-            record.volume_budget, static_cast<unsigned long long>(record.byte_budget),
-            static_cast<unsigned long long>(record.bytes_used), record.retry, record.resolution_reason);
+            record.cell_owner, static_cast<unsigned long long>(record.face),
+            static_cast<unsigned long long>(record.donor), static_cast<unsigned long long>(record.recipient),
+            static_cast<unsigned long long>(record.construction), static_cast<unsigned long long>(record.cut),
+            int(record.arithmetic_mode), record.scale, record.volume_budget,
+            static_cast<unsigned long long>(record.byte_budget), static_cast<unsigned long long>(record.bytes_used),
+            record.retry, record.resolution_reason);
         if (record.has(Field::Simplex))
         {
             const auto used = std::char_traits<char>::length(text_.data());

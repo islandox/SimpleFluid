@@ -2,7 +2,8 @@
 
 `GeneralVoFOptions::phase_cleanup` defaults to enabled for Ordinary
 `SweptPartition` and `GeometricFace` transport. Set `relative_cutoff = 0`
-explicitly to disable cleanup.
+explicitly to disable cleanup. `DonorCell` retains a disabled automatic default
+and rejects an explicit positive cutoff.
 It deliberately changes represented phase inventories; recording those changes
 does not make the operation exactly conservative. Strict PLIC offset acceptance
 and the transport, momentum, occupancy and physical drift tolerances remain
@@ -15,7 +16,7 @@ using binary64 arithmetic. It never replaces the dominant amount with the cell
 volume. Every correction is the difference between the actual published before
 and after values. If the dominant addition rounds away, its correction is zero.
 
-The default cutoff is `1e-14`. Each default extensive `maximum_absolute_volume`
+The enabled automatic cutoff is `1e-14`. Each automatic extensive `maximum_absolute_volume`
 cap is `1e-13` times that phase's initial global inventory, before any cleanup.
 These are cumulative run budgets in cubic metres, derived conservatively from
 owned inputs only. The policy is a numerical control, not a universal resolution
@@ -113,14 +114,20 @@ cleanup on the new candidate after raw remap checks. Ownership migration retains
 spending without charging ghosts or copied inventories. Cleanup-enabled remaps
 with coupled channels reject explicitly: correction of transported auxiliary
 fields has no implemented contract. Solver regrid therefore requires explicit
-cleanup opt-out on the geometry backends. Ordinary solver ownership-only repartition instead uses
-phase-only migration and a separate keyed copy of accepted flow fields. It keeps
-the cleanup checkpoint, current and cumulative cleanup momentum, and clock
-unchanged; it neither performs a new cleanup transaction nor recovers velocity
-by dividing transferred momentum by mass. Failed migration leaves the complete
-accepted publication unchanged. See [measured live balancing](../architecture/general_vof_balancing.md).
+cleanup opt-out on the geometry backends. Ordinary solver ownership-only
+repartition instead uses phase-only migration and a separate keyed copy of
+accepted flow fields. It keeps the cleanup checkpoint, current and cumulative
+cleanup momentum, and clock unchanged; it neither performs a new cleanup
+transaction nor recovers velocity by dividing transferred momentum by mass.
+Failed migration leaves the complete accepted publication unchanged. See
+[measured live balancing](../architecture/general_vof_balancing.md).
+
 BoundedCertification, Exact and DonorCell retain disabled defaults and reject an
-explicit positive cutoff. Their automatic caps resolve to zero.
+explicit positive cutoff. Disabled automatic policies resolve their caps to zero.
+`GeometricFace` retains its configured identity and `AlgebraicFaceVolume`
+prepared family when cleanup is enabled. Its final canonical phase streams remain
+the raw transport authority; cleanup is a separately recorded correction after
+raw acceptance.
 
 The uncleaned microscopic fixed-normal PLIC problem may still reject. The
 integration obligation is to clean an eligible amount within budget, publish a

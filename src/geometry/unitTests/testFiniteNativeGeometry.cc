@@ -2,10 +2,13 @@
  * @brief Ordinary native topology and geometry without rational source preparation.
  */
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/GeometryInstrumentation.hh"
 #include "geometry/PLIC/GeometryMeasure.hh"
 #include "geometry/PLIC/PlanarGeometry.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
+#include "geometry/PLIC/details/ordinary/NativeSupportAccess.hh"
+#include <algorithm>
 #include <cmath>
 #include <gtest/gtest.h>
 #include <set>
@@ -103,6 +106,82 @@ TEST(FiniteNativeGeometryTest, PointIdentityAndEdgePropagationRetainFiniteCoordi
     PLIC::EdgePointIndex<ordinary> index(propagated->vertex_identities());
     const auto ids = face->vertex_identities();
     EXPECT_EQ(index.closed_segment(ids[0], ids[1]).size(), 3u);
+}
+
+TEST(FiniteNativeGeometryTest, RetainedNativeBoundaryVerticesHaveStructuralIncidence)
+{
+    // Captured extrusion coordinates: each repeated xy pair and common height
+    // establish the side's planar rectangle independently of a fitted normal.
+    // The retained-support seam reproduces native extrusion recipe ancestry;
+    // different support identities deliberately require geometric containment.
+    constexpr long double ax = .784053262272993323201L, ay = -.158935464636048989773L;
+    constexpr long double bx = .931063248949179467218L, by = -.188735864255308138926L;
+    constexpr long double height = .0666666666666666657415L;
+    const std::array<Face::WidePoint, 4> side_points{
+        {{ax, ay, 0}, {bx, by, 0}, {bx, by, height}, {ax, ay, height}}};
+    const Face::WidePoint normal{by - ay, ax - bx, 0};
+    const auto side = PLIC::details::NativeSupportAccess::face_support(side_points, normal, {'s', 'i', 'd', 'e'});
+    const std::array<Face::WidePoint, 4> cap_points{{{ax, ay, height}, {bx, by, height},
+        {.945253957014124512881L, -.0948417458144867470127L, height},
+        {.796003332222420700859L, -.0798667333174625238001L, height}}};
+    const auto cap = Face::make_wide(cap_points);
+    ASSERT_EQ(side->points().size(), 4u);
+    ASSERT_EQ(cap->points().size(), 4u);
+    ASSERT_NE(PLIC::planar_support<ordinary>(*side), PLIC::planar_support<ordinary>(*cap));
+    // This exact shared edge starts at the side's fourth vertex. The faces
+    // meet on that edge but their remaining vertices have distinct planes.
+    EXPECT_EQ(side->points()[3], cap->points()[0]);
+    EXPECT_EQ(side->points()[2], cap->points()[1]);
+    EXPECT_FALSE(side->contains(*cap));
+    EXPECT_FALSE(cap->contains(*side));
+    EXPECT_FALSE(side->equivalent(*cap));
+    EXPECT_FALSE(cap->equivalent(*side));
+    for (const bool reversed : {false, true})
+        for (unsigned rotation = 0; rotation < side_points.size(); ++rotation)
+        {
+            SCOPED_TRACE(reversed);
+            SCOPED_TRACE(rotation);
+            auto reordered = side_points;
+            std::rotate(reordered.begin(), reordered.begin() + rotation, reordered.end());
+            auto reordered_normal = normal;
+            if (reversed)
+            {
+                std::reverse(reordered.begin(), reordered.end());
+                for (auto& value : reordered_normal)
+                    value = -value;
+            }
+            const auto equivalent = PLIC::details::NativeSupportAccess::face_support(
+                reordered, reordered_normal, {'r', 'e', 'o', 'r', 'd', 'e', 'r'});
+            EXPECT_TRUE(side->contains(*equivalent));
+            EXPECT_TRUE(equivalent->contains(*side));
+            EXPECT_TRUE(side->equivalent(*equivalent));
+            EXPECT_FALSE(equivalent->equivalent(*cap));
+            for (const auto& point : equivalent->vertex_identities())
+                EXPECT_TRUE(side->contains_point(point));
+        }
+    // Equality, not proximity, admits a represented vertex. A dyadic shift
+    // away from the side plane must fail the ordinary geometric query.
+    const auto shifted = cap->translated({0, 1. / 1024, 0});
+    EXPECT_FALSE(side->contains_point(shifted->vertex_identities().front()));
+}
+
+TEST(FiniteNativeGeometryTest, SourceValidationStillRejectsOffPlaneFourthVertex)
+{
+    const std::array<Face::WidePoint, 4> nonplanar{{
+        {.784053262272993323201L, -.158935464636048989773L, 0},
+        {.931063248949179467218L, -.188735864255308138926L, 0},
+        {.931063248949179467218L, -.188735864255308138926L, .0666666666666666657415L},
+        {.784053262272993323201L, -.158935464636048989773L + 1.L / 1024, .0666666666666666657415L}}};
+    try
+    {
+        (void) Face::make_wide(nonplanar);
+        FAIL() << "An actually off-plane fourth vertex must not inherit structural incidence.";
+    }
+    catch (const PLIC::GeometryError& error)
+    {
+        EXPECT_EQ(error.code(), PLIC::GeometryErrorCode::InvalidTopology);
+        EXPECT_STREQ(error.what(), "Ordinary native face is nonplanar.");
+    }
 }
 
 TEST(FiniteNativeGeometryTest, PartitionRejectsRealGapAndOverlapBelowMetricBudget)

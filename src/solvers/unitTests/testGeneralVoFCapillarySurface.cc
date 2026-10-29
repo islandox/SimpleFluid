@@ -58,7 +58,8 @@ struct SourceSnapshot
 };
 std::shared_ptr<const VoF::GeneralVoF> binary_box(std::array<unsigned, 3> counts,
     const std::function<bool(Point)>& is_gas, bool traces = false,
-    const std::function<std::optional<double>(Point)>& mixed_fraction = {}, unsigned support_rings = 2)
+    const std::function<std::optional<double>(Point)>& mixed_fraction = {}, unsigned support_rings = 2,
+    bool qualification = false, QualificationPhaseReference* raw = nullptr)
 {
     const auto comm = Tpetra::getDefaultComm();
     std::vector<std::uint64_t> owned;
@@ -127,6 +128,12 @@ std::shared_ptr<const VoF::GeneralVoF> binary_box(std::array<unsigned, 3> counts
     }
     VoF::GeneralVoFOptions options;
     options.support_rings = support_rings;
+    options.phase_cleanup.relative_cutoff = 0;
+    if (qualification)
+    {
+        options.transport_backend = VoF::GeneralVoFTransportBackend::GeometricFace;
+        qualification_phase_policy(options, gas, carrier, *comm, qualification_phase_cleanup_enabled(), raw);
+    }
     return std::make_shared<const VoF::GeneralVoF>(hierarchy, order, gas, carrier, options, declarations);
 }
 bool cube(const Point& p, double lower, double upper)
@@ -350,6 +357,62 @@ TEST(GeneralVoFCapillarySurface, ResolvedFilteredBinaryDropHasInspectibleCurvatu
     snapshot.check(*source);
 }
 
+TEST(GeneralVoFCapillarySurface, FilteredSphereCurvatureRefinementQualification)
+{
+    if (!std::getenv("SIMPLEFLUID_RUN_ALGEBRAIC_CAPILLARY"))
+        GTEST_SKIP() << "Opt-in Q4 curvature study; see verification/vof/algebraic_capillary_manifest.json";
+    // Physical domain [0,1]^3, sphere R=.25. binary_box uses cell-length
+    // coordinates, so multiply reported curvature by N to recover physical units.
+    // Width=2 cells is fixed; its physical width is 2/N on this refinement path.
+    std::array<double, 3> errors{};
+    unsigned level = 0;
+    for (const unsigned n : {16u, 24u, 32u})
+    {
+        SCOPED_TRACE(::testing::Message() << "N=" << n);
+        QualificationPhaseReference raw;
+        const auto source = binary_box(
+            {n, n, n},
+            [n](Point p)
+            {
+                const auto x = p[0] / n - .5, y = p[1] / n - .5, z = p[2] / n - .5;
+                return x * x + y * y + z * z < .25 * .25;
+            },
+            false, {}, 2, true, &raw);
+        const SourceSnapshot snapshot(*source);
+        const auto catalog = source->capillary_surface(filtered(2));
+        auto material = inviscid();
+        material.gas_density = material.liquid_density = 1;
+        material.surface_tension = 1;
+        GeneralVoFSolverOptions options;
+        options.capillary = filtered(2);
+        GeneralVoFSolver solver(source, material, options);
+        record_qualification_cleanup(solver, "N" + std::to_string(n) + "_");
+        RecordProperty("actual_prepared_family_N" + std::to_string(n), "unpublished_initialization_only");
+        RecordProperty("configured_backend_N" + std::to_string(n), "GeometricFace");
+        qualification_cleanup_metric("original_gas_volume_N" + std::to_string(n), raw.global_volume[0]);
+        qualification_cleanup_metric("original_carrier_volume_N" + std::to_string(n), raw.global_volume[1]);
+        std::map<VoF::GeneralVoFSurfaceKey, double> areas;
+        for (const auto& patch : catalog.patches)
+            areas.emplace(patch.key, patch.area);
+        long double local_area = 0, local_error = 0;
+        for (const auto& fit : solver.capillary_diagnostics().fits)
+        {
+            const auto area = areas.at(fit.key);
+            local_area += area;
+            local_error += area * std::abs(n * fit.curvature - 8) / 8;
+        }
+        const auto area = sum_wide(*source->hierarchy()->communicator(), local_area);
+        ASSERT_GT(area, 0);
+        errors[level++] = double(sum_wide(*source->hierarchy()->communicator(), local_error) / area);
+        RecordProperty("area_weighted_curvature_error_N" + std::to_string(n), errors[level - 1]);
+        RecordProperty("physical_filter_width_N" + std::to_string(n), 2. / n);
+        snapshot.check(*source);
+    }
+    EXPECT_LT(errors[2], errors[1]);
+    EXPECT_LT(errors[1], errors[0]);
+    EXPECT_LE(errors[2], .05);
+}
+
 TEST(GeneralVoFCapillarySurface, FilteringPreservesEachOfTwoDistinctEnclosedComponentVolumes)
 {
     const auto source = binary_box({14, 6, 6},
@@ -458,8 +521,10 @@ TEST(GeneralVoFCapillarySurface, UnequalCellVolumesRetainVolumeWeightedFilteredC
     // Independent box widths are (.75 + 1.25) by 2 by 2. The target uses
     // geometric gas declarations and excludes the independently retained traces.
     EXPECT_EQ(geometric_volume, 8);
+    VoF::GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
     const auto source =
-        std::make_shared<const VoF::GeneralVoF>(hierarchy, order, gas, carrier, VoF::GeneralVoFOptions{}, declarations);
+        std::make_shared<const VoF::GeneralVoF>(hierarchy, order, gas, carrier, options, declarations);
     const SourceSnapshot snapshot(*source);
     check_components(*source, source->capillary_surface(filtered(.25)), {geometric_volume});
     snapshot.check(*source);

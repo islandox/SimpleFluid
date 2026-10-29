@@ -4,9 +4,9 @@ namespace SimpleFluid::PLIC
 {
 namespace exact_geometry_detail
 {
-thread_local bool count_exact_geometry = false;
+constinit thread_local bool count_exact_geometry = false;
 
-thread_local BackendStatistics<ArithmeticMode::Exact> exact_geometry_counts;
+constinit thread_local BackendStatistics<ArithmeticMode::Exact> exact_geometry_counts;
 
 void sample_exact_measure_result(const Q& value)
 {

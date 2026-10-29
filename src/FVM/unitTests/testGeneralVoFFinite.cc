@@ -122,6 +122,18 @@ void check_budget_diagnostics(const GeneralVoF& state, const GeneralVoF::Trial& 
         if (std::isfinite(minimum[i])) EXPECT_EQ(minimum[i], maximum[i]);
 }
 
+TEST(GeneralVoFFinite, ReconstructionResolutionFailureRetainsTypedClassification)
+{
+    namespace failure = SimpleFluid::detail::vof_failure;
+    PLIC::PolyhedralResolutionAssessment assessment;
+    assessment.reason = PLIC::PolyhedralResolutionAssessment::Reason::NoDirectionalSignal;
+    failure::Record record;
+    failure::classify(record, std::make_exception_ptr(PLIC::PolyhedralResolutionRequired(assessment)));
+    EXPECT_EQ(record.category, failure::Category::Resolution);
+    EXPECT_TRUE(record.has(failure::Field::Resolution));
+    EXPECT_EQ(record.resolution_reason, int(assessment.reason));
+}
+
 TEST(GeneralVoFFinite, SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners)
 {
     const auto input = fixture(); // Pure phases; validation must precede reconstruction.
@@ -746,6 +758,65 @@ TEST(GeneralVoFFinite, FiniteMigrationCopiesInventoriesAndRejectsForeignSchemaAt
     EXPECT_THROW(source.plan_remap(plan, target, channels, invalid), std::invalid_argument);
     EXPECT_EQ(source.gas_volumes(), input.gas);
     EXPECT_EQ(source.carrier_volumes(), input.carrier);
+}
+
+TEST(GeneralVoFFinite, MixedOwnershipMigrationPreservesOrientationAndMeasuredResidual)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    const auto ordinal = [](const AdaptiveCellKey& key)
+    {
+        const auto index = std::get<CartesianCellAncestry>(key.ancestry).index;
+        return std::size_t(index[0] + 2 * index[1] + 4 * index[2]);
+    };
+    const auto diagnostics = [](const PLIC::PolyhedralInterface& plane)
+    {
+        return std::array{double(plane.orientation_method), double(plane.fit_converged), double(plane.fit_iterations),
+            double(plane.stencil_volume_residual_measured), plane.stencil_volume_residual, plane.stencil_condition,
+            plane.orientation_step};
+    };
+    for (const double fraction : {1e-6, .1, .5})
+    {
+        SCOPED_TRACE(fraction);
+        auto input = fixture();
+        for (std::size_t c = 0; c < input.order.size(); ++c)
+        {
+            const auto index = std::get<CartesianCellAncestry>(input.order[c].ancestry).index;
+            input.gas[c] = index[0] == 0 ? fraction : 0;
+            input.carrier[c] = 1 - input.gas[c];
+        }
+        GeneralVoFOptions options;
+        options.phase_cleanup.relative_cutoff = 0; // This case carries coupled remap channels.
+        GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+        const auto before = source.reconstruct();
+        constexpr std::size_t width = 7;
+        std::array<double, 8 * width> local{}, expected{};
+        for (std::size_t c = 0; c < source.owned_order().size(); ++c)
+        {
+            const auto fields = diagnostics(before[c]);
+            std::copy(fields.begin(), fields.end(), local.begin() + width * ordinal(source.owned_order()[c]));
+            if (input.gas[c] != 0)
+            {
+                EXPECT_EQ(before[c].orientation_method, fraction < .5
+                                                            ? PLIC::PolyhedralOrientationMethod::Gradient
+                                                            : PLIC::PolyhedralOrientationMethod::AngularVolumeFit);
+                EXPECT_EQ(before[c].stencil_volume_residual_measured, fraction >= .000125);
+            }
+        }
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, int(local.size()), local.data(), expected.data());
+        const std::vector<int> destinations(input.order.size(), (comm->getRank() + 1) % comm->getSize());
+        const auto plan = source.hierarchy()->plan_migration(destinations);
+        const auto target = bound_candidate(source.hierarchy(), plan);
+        const auto trial = source.plan_remap(plan, target, initial_channels(source), channel_options());
+        ASSERT_TRUE(trial.ownership_only());
+        const auto moved = trial.candidate();
+        const auto after = moved->reconstruct();
+        for (std::size_t c = 0; c < moved->owned_order().size(); ++c)
+        {
+            const auto fields = diagnostics(after[c]);
+            for (std::size_t field = 0; field < width; ++field)
+                EXPECT_EQ(fields[field], expected[width * ordinal(moved->owned_order()[c]) + field]);
+        }
+    }
 }
 
 TEST(GeneralVoFFinite, SourceOccupancyFollowsGeometricDonorSharesAndRecordsSignedFitRedistribution)

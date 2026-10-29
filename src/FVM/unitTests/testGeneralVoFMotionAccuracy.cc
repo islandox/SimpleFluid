@@ -1,11 +1,22 @@
 #include "FVM/GeneralVoF.hh"
+#include "FVM/details/VoFFailure.hh"
+#include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/mesh/AMR/ExtrudedAMR.hh"
+#include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "utils/testing_environment.hh"
 #include <Teuchos_CommHelpers.hpp>
 #include <Tpetra_Core.hpp>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <set>
+#include <iterator>
+#include <optional>
+#include <stdexcept>
 #include <gtest/gtest.h>
 #include <iomanip>
 #include <iostream>
@@ -199,6 +210,9 @@ std::vector<GeneralVoFFaceVolume> controls(const GeneralVoF& source)
     }
     return result;
 }
+#include "algebraic_motion_qualification.hh"
+#include "algebraic_reconstruction_replay.hh"
+
 TEST(GeneralVoFMotionAccuracy, IndependentPolygonOracleIntegratesKnownShearedCuts)
 {
     const Polygon unit{{0, 0}, {1, 0}, {1, 1}, {0, 1}};

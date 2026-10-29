@@ -93,6 +93,15 @@ std::shared_ptr<State> Initialization<Mode>::prepare(Resources& resources,
         const auto closure_topology =
             projection_topology<detail::GeneralVoFFiniteProjectionClosureTopology>(*mesh, *next->phases);
         next->finite_projection.byte_budget = options.byte_budget;
+        if constexpr (Mode == ArithmeticMode::Ordinary)
+        {
+            const bool face_backend =
+                next->phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition;
+            if (face_backend || next->phases->homogeneous_transport_eligible())
+                next->finite_projection.transport_readiness =
+                    detail::GeneralVoFFiniteProjectionProvenance::TransportReadiness{
+                        next->phases->options().reconstruction.volume_tolerance, options.flow.max_courant};
+        }
         flow.project(next->face_velocity, next->velocity, next->pressure, next->density, next->fraction,
             next->curvature, 1, 0, options.flow, next->diagnostics, &next->finite_projection,
             std::span<const long double>(next->finite_mass), &closure_topology,

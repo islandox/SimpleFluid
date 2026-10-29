@@ -7,6 +7,7 @@
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "utils/CompensatedSum.hh"
+#include <limits>
 namespace SimpleFluid::VoF
 {
 namespace
@@ -69,6 +70,94 @@ struct FaceAdmission
     std::vector<GeneralVoFFiniteTransfer> transfers;
     std::vector<GeneralVoFFiniteDonorBudget> budgets;
 };
+std::array<long double, 3> donor_displacement(const GeneralVoF::Data& data, const FaceLedger& ledger, const Key& key)
+{
+    // Fit all authenticated incident normal displacements, including zero
+    // controls and exterior walls. Area weighting is additive under coplanar
+    // face subdivision. For constant displacement d, q_f=A_f n_f.d makes
+    // b=(sum A_f n_f n_f^T)d, so a full-rank fit reproduces d exactly.
+    const auto& faces = data.topology->cell_tiles.at(key);
+    long double maximum_area = 0;
+    for (const auto index : faces)
+    {
+        const auto av = data.topology->tiles.at(index).geometry->area_vector();
+        const auto area = std::hypot(static_cast<long double>(av.x), av.y, av.z);
+        if (!(area > 0) || !std::isfinite(area))
+            throw std::invalid_argument("Face predictor has invalid native face metric.");
+        maximum_area = std::max(maximum_area, area);
+    }
+    if (!(maximum_area > 0))
+        throw std::invalid_argument("Face predictor has no incident normal support.");
+    std::array<std::array<long double, 3>, 3> matrix{};
+    std::array<long double, 3> rhs{};
+    for (const auto index : faces)
+    {
+        const auto& tile = data.topology->tiles.at(index);
+        const auto av = tile.geometry->area_vector();
+        const auto area = std::hypot(static_cast<long double>(av.x), av.y, av.z);
+        std::array<long double, 3> normal{av.x / area, av.y / area, av.z / area};
+        long double q = 0;
+        if (const auto stream = ledger.streams.find(tile.face_gid); stream != ledger.streams.end())
+        {
+            // Controls use first-to-second orientation independently of the
+            // native polygon winding. Nonzero exterior controls were rejected.
+            long double orientation = 0;
+            for (unsigned a = 0; a < 3; ++a)
+                orientation += normal[a] * (static_cast<long double>(data.cells.at(*tile.second).centroid[a]) -
+                                               data.cells.at(tile.first).centroid[a]);
+            if (orientation == 0 || !std::isfinite(orientation))
+                throw std::invalid_argument("Face predictor native orientation is unresolved.");
+            if (orientation < 0)
+                for (auto& n : normal)
+                    n = -n;
+            q = stream->second.direction * stream->second.volume;
+        }
+        const auto weight = area / maximum_area;
+        for (unsigned a = 0; a < 3; ++a)
+        {
+            rhs[a] += normal[a] * (q / maximum_area);
+            for (unsigned b = 0; b < 3; ++b)
+                matrix[a][b] += weight * normal[a] * normal[b];
+        }
+    }
+    // Symmetric adjugate gives both the solution and an explicit infinity-norm
+    // condition estimate. A deficient geometric fit is a support rejection, never
+    // an arithmetic donor-cell fallback.
+    const auto& a = matrix;
+    std::array<std::array<long double, 3>, 3> inverse{};
+    inverse[0] = {a[1][1] * a[2][2] - a[1][2] * a[2][1], a[0][2] * a[2][1] - a[0][1] * a[2][2],
+        a[0][1] * a[1][2] - a[0][2] * a[1][1]};
+    inverse[1] = {inverse[0][1], a[0][0] * a[2][2] - a[0][2] * a[2][0], a[0][2] * a[1][0] - a[0][0] * a[1][2]};
+    inverse[2] = {inverse[0][2], inverse[1][2], a[0][0] * a[1][1] - a[0][1] * a[1][0]};
+    const auto determinant = a[0][0] * inverse[0][0] + a[0][1] * inverse[0][1] + a[0][2] * inverse[0][2];
+    if (!(determinant > 0) || !std::isfinite(determinant))
+        throw std::invalid_argument("Face predictor incident normals are rank deficient.");
+    long double norm = 0, inverse_norm = 0;
+    for (unsigned row = 0; row < 3; ++row)
+    {
+        long double row_norm = 0, inverse_row_norm = 0;
+        for (unsigned column = 0; column < 3; ++column)
+        {
+            inverse[row][column] /= determinant;
+            row_norm += std::abs(a[row][column]);
+            inverse_row_norm += std::abs(inverse[row][column]);
+        }
+        norm = std::max(norm, row_norm);
+        inverse_norm = std::max(inverse_norm, inverse_row_norm);
+    }
+    const auto condition = norm * inverse_norm;
+    if (!std::isfinite(condition) || condition > data.options.reconstruction.maximum_condition)
+        throw std::invalid_argument("Face predictor incident normals are ill conditioned.");
+    std::array<long double, 3> displacement{};
+    for (unsigned row = 0; row < 3; ++row)
+    {
+        for (unsigned column = 0; column < 3; ++column)
+            displacement[row] += inverse[row][column] * rhs[column];
+        if (!std::isfinite(displacement[row]))
+            throw std::invalid_argument("Face predictor displacement is nonfinite.");
+    }
+    return displacement;
+}
 FaceLedger build_face_ledger(const GeneralVoF::Data& data, std::span<const GeneralVoFFaceVolume> controls, double dt,
     std::array<double, 2> density, std::uint64_t time_stage)
 {
@@ -246,7 +335,21 @@ FaceLedger build_face_ledger(const GeneralVoF::Data& data, std::span<const Gener
                 if (out > std::min(v, g + l))
                     throw std::invalid_argument("Face transport outgoing-volume CFL exceeded.");
                 if (std::abs(continuity) > data.options.reconstruction.volume_tolerance * v)
+                {
+                    namespace failure = ::SimpleFluid::detail::vof_failure;
+                    failure::Scope scope("algebraic_bulk_continuity");
+                    scope.record.cell = c.gid;
+                    scope.record.cell_owner = c.owner;
+                    scope.record.arithmetic_mode = mode;
+                    scope.record.scale = v;
+                    scope.record.control = continuity;
+                    scope.record.volume_budget = data.options.reconstruction.volume_tolerance * v;
+                    for (const auto field : {failure::Field::Cell, failure::Field::CellOwner,
+                             failure::Field::Arithmetic, failure::Field::Scale, failure::Field::Control,
+                             failure::Field::VolumeBudget})
+                        scope.record.mark(field);
                     throw std::invalid_argument("Face transport bulk continuity defect.");
+                }
                 if (t.gas_out.value() > g || t.liquid_out.value() > l)
                     throw std::invalid_argument("Face transport low-order phase export exceeds old inventory.");
                 diagnostics.maximum_outgoing_courant = std::max(diagnostics.maximum_outgoing_courant, out / v);
@@ -626,6 +729,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
             [&]
             {
                 std::map<std::uint64_t, std::optional<PLIC::PolyhedralInterface>> planes;
+                std::map<std::uint64_t, std::array<long double, 3>> displacements;
                 wire::Budget budget{limit};
                 for (const auto& [face, original] : streams)
                 {
@@ -657,6 +761,11 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                             if (!planes.at(s.donor))
                                 throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
                                     "Face transport donor plane is numerically unresolved.");
+                            if (!displacements.contains(s.donor))
+                            {
+                                budget.add(sizeof(std::pair<const std::uint64_t, std::array<long double, 3>>) + 64);
+                                displacements.emplace(s.donor, donor_displacement(data, ledger, donor_key));
+                            }
                             auto plane = planes.at(s.donor)->gas;
                             const auto area_vector = tiles.at(face)->geometry->area_vector();
                             const std::array<long double, 3> av{area_vector.x, area_vector.y, area_vector.z};
@@ -679,10 +788,26 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                                                 data.cells.at(tile.first).centroid[a]);
                             if (orientation == 0 || !std::isfinite(orientation))
                                 throw std::invalid_argument("Face transport native orientation is unresolved.");
+                            // The donor fit supplies tangential motion. Replace
+                            // its normal component with this face's prescribed
+                            // q/A, preserving authoritative one-dimensional
+                            // crossing even for spatially varying cell controls.
+                            // This local constant-plane predictor approximates
+                            // variable flow; it does not infer gross counterflow.
+                            const auto& displacement = displacements.at(s.donor);
+                            std::array<long double, 3> outward{};
+                            long double donor_normal = 0;
+                            for (unsigned a = 0; a < 3; ++a)
+                            {
+                                outward[a] = av[a] / area * (orientation > 0 ? 1 : -1) * s.direction;
+                                donor_normal += displacement[a] * outward[a];
+                            }
                             long double shift = 0;
                             for (unsigned a = 0; a < 3; ++a)
-                                shift += plane.normal[a] * av[a] / area * (orientation > 0 ? 1 : -1) * s.direction *
-                                         s.volume / area;
+                                shift +=
+                                    plane.normal[a] * (displacement[a] + outward[a] * (s.volume / area - donor_normal));
+                            if (!std::isfinite(shift))
+                                throw std::invalid_argument("Face predictor plane displacement is nonfinite.");
                             std::vector<long double> times{0, 1};
                             if (shift != 0)
                                 for (const auto& p : vertices)

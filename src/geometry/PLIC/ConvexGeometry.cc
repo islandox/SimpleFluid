@@ -107,7 +107,7 @@ const std::vector<PlaneAuthority>& DynamicPoint::supports() const
 
 namespace SimpleFluid::PLIC::details
 {
-thread_local GeometryStatistics statistics;
+constinit thread_local GeometryStatistics statistics;
 
 [[noreturn]] void resource_failure(ArithmeticMode mode, std::string_view reason)
 {
@@ -133,7 +133,7 @@ thread_local GeometryStatistics statistics;
 
 namespace SimpleFluid::PLIC::details
 {
-thread_local Work* active_work = nullptr;
+constinit thread_local Work* active_work = nullptr;
 }
 
 namespace SimpleFluid::PLIC::details

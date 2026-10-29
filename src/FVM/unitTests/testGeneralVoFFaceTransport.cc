@@ -11,6 +11,58 @@ GeneralVoFOptions face_options()
     o.transport_backend = GeneralVoFTransportBackend::DonorCell;
     return o;
 }
+// Independent unit-square integration; this fixture never uses a PLIC cut to
+// initialize the plane. A streamfunction closes the flow at the box walls,
+// while the central [2,4]^2 patch has constant displacement (dx,dy,0).
+Fixture planar_patch(bool diagonal, double cell_height = 1)
+{
+    const auto comm = Tpetra::getDefaultComm();
+    AMRGrid grid;
+    grid.block_cells = {6, 6, 2};
+    grid.extent = {6, 6, 2 * cell_height};
+    CartesianAMR mesh(grid);
+    std::vector<std::uint64_t> owned;
+    for (std::uint64_t id = 0; id < 72; ++id)
+        if (int(id % std::min(2, comm->getSize())) == comm->getRank())
+            owned.push_back(id);
+    auto source = mesh.detach_owned(owned, {'p', 'l', 'a', 'n', 'a', 'r', '_', 'p', 'a', 't', 'c', 'h'});
+    Fixture input;
+    input.hierarchy = std::make_shared<const DistributedAdaptiveHierarchy>(
+        std::move(source.owned), std::move(source.families), source.kernel, comm);
+    for (const auto& [key, leaf] : input.hierarchy->owned())
+    {
+        const auto c = input.hierarchy->geometry(leaf)->centroid();
+        const auto x = std::floor(c[0]), y = std::floor(c[1]);
+        long double gas = std::clamp(2.75L - x, 0.L, 1.L);
+        if (diagonal)
+        {
+            const auto t = 5.2L - x - y;
+            gas = t <= 0 ? 0 : t >= 2 ? 1 : t <= 1 ? t * t / 2 : 1 - (2 - t) * (2 - t) / 2;
+        }
+        input.order.push_back(key);
+        input.gas.push_back(double(gas * cell_height));
+        input.carrier.push_back(double((1 - gas) * cell_height));
+    }
+    return input;
+}
+std::vector<GeneralVoFFaceVolume> planar_patch_controls(const GeneralVoF& state, long double dx, long double dy)
+{
+    const auto taper = [](long double x) { return std::min({1.L, x / 2, (6 - x) / 2}); };
+    const auto psi = [&](long double x, long double y)
+    { return (dx * (y - 3) - dy * (x - 3)) * taper(x) * taper(y); };
+    std::vector<GeneralVoFFaceVolume> result;
+    for (const auto& face : state.tiles())
+    {
+        const auto c = face.geometry->centroid(), n = face.geometry->area_vector();
+        long double q = 0;
+        if (!face.exterior && n.x != 0)
+            q = (psi(c.x, c.y + .5L) - psi(c.x, c.y - .5L)) * n.x;
+        if (!face.exterior && n.y != 0)
+            q = (psi(c.x - .5L, c.y) - psi(c.x + .5L, c.y)) * n.y;
+        result.push_back({face.face_gid, double(q)});
+    }
+    return result;
+}
 TEST(GeneralVoFFaceTransport, MovingPurePhasesNeedNoInterfaceGeometry)
 {
     for (const bool gas : {false, true})
@@ -113,38 +165,37 @@ TEST(GeneralVoFFaceTransport, RejectsCflDivergenceBoundaryAndForeignSourceAtomic
 }
 TEST(GeneralVoFFaceTransport, GeometricPlanarFaceIntegralUsesPrescribedBulk)
 {
-    auto input = fixture();
-    for (std::size_t i = 0; i < input.order.size(); ++i)
-    {
-        const auto c = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[i]))->centroid();
-        input.gas[i] = c[0] < 1 ? .75 : 0;
-        input.carrier[i] = 1 - input.gas[i];
-    }
+    const auto input = planar_patch(false);
     auto options = face_options();
     options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
     GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
     for (const double q : {1. / 64, .25, .5})
     {
-        auto flux = circulation(state);
-        for (auto& f : flux)
-            f.integrated_volume *= q * 64;
+        const auto flux = planar_patch_controls(state, q, 0);
         const auto trial = state.plan_face_transport(flux, 1, {1, 1000});
         const auto next = state.apply(trial);
         EXPECT_EQ(trial.prepared_transport()->diagnostics.fallback_streams, 0u);
         std::map<std::uint64_t, const AdaptiveTile*> tiles;
         for (const auto& tile : state.tiles())
             tiles.emplace(tile.face_gid, &tile);
+        int local_faces = 0, global_faces = 0;
         for (const auto& stream : trial.prepared_transport()->streams)
         {
             const auto& tile = *tiles.at(stream.face);
             const auto c = tile.geometry->centroid(), n = tile.geometry->area_vector();
-            const auto expected = n.y != 0 && c.x < 1   ? .75L * stream.volume
-                                  : n.x != 0 && c.y < 1 ? std::max(0.L, stream.volume - .25L)
-                                                        : 0.L;
-            EXPECT_NEAR(stream.gas_high, expected, 2e-12L * stream.volume);
+            if (n.x != 0 && c.x == 3 && c.y == 2.5)
+            {
+                // The plane x=2.75 reaches x=3 at t=.25/q. Its independent
+                // space-time face integral is max(0,q-.25).
+                EXPECT_NEAR(stream.volume, q, 1e-15);
+                EXPECT_NEAR(stream.gas_high, std::max(0.L, q - .25L), 2e-12L * stream.volume);
+                local_faces += stream.donor_owner == Tpetra::getDefaultComm()->getRank();
+            }
             EXPECT_EQ(stream.gas + stream.liquid, stream.volume);
             EXPECT_EQ(stream.mass, stream.gas + 1000 * stream.liquid);
         }
+        Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_faces, &global_faces);
+        EXPECT_EQ(global_faces, 2);
         for (const auto& p : next->phase_volumes())
             EXPECT_NEAR(p.gas + p.carrier, p.bulk, 1e-15);
     }
@@ -225,6 +276,106 @@ TEST(GeneralVoFFaceTransport, DefaultGeometricCleanupPreparesPublishedEndpointMa
     EXPECT_EQ(repeated->new_phase_cleanup.absolute_volume, cleanup.absolute_volume);
     EXPECT_EQ(next->phase_cleanup_state().cleaned_cells, 2u);
     EXPECT_EQ(next->phase_cleanup_state().absolute_volume, cleanup.absolute_volume);
+}
+TEST(GeneralVoFFaceTransport, ObliquePlanarFaceIntegralIncludesTangentialDisplacement)
+{
+    const auto input = planar_patch(true);
+    auto options = face_options();
+    options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto trial = state.plan_face_transport(planar_patch_controls(state, .2L, .1L), 1);
+    std::map<std::uint64_t, const AdaptiveTile*> tiles;
+    for (const auto& tile : state.tiles())
+        tiles.emplace(tile.face_gid, &tile);
+    int local_faces = 0, global_faces = 0;
+    for (const auto& stream : trial.prepared_transport()->streams)
+    {
+        const auto& tile = *tiles.at(stream.face);
+        const auto c = tile.geometry->centroid(), n = tile.geometry->area_vector();
+        const bool x_face = n.x != 0 && c.x == 3 && c.y == 2.5;
+        const bool y_face = n.y != 0 && c.y == 3 && c.x == 2.5;
+        if (!x_face && !y_face)
+            continue;
+        // In donor [2,3]^2 the exact moving gas plane is
+        // x+y <= 5.2+.3t. Each selected unit face has gas area .2+.3t.
+        // Assert the candidate before limiting, independently of reconstruction
+        // and of the final conservative blend.
+        const long double q = x_face ? .2L : .1L;
+        EXPECT_NEAR(stream.volume, q, 1e-15);
+        EXPECT_FALSE(stream.lower_order);
+        EXPECT_NEAR(stream.gas_high, q * (.2L + .3L / 2), 2e-12L * q);
+        EXPECT_EQ(stream.gas_high + stream.liquid_high, stream.volume);
+        local_faces += stream.donor_owner == Tpetra::getDefaultComm()->getRank();
+    }
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_faces, &global_faces);
+    EXPECT_EQ(global_faces, 4);
+}
+TEST(GeneralVoFFaceTransport, ReversedObliquePlanarFaceIntegralUsesIncomingDonor)
+{
+    const auto input = planar_patch(true);
+    auto options = face_options();
+    options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto trial = state.plan_face_transport(planar_patch_controls(state, -.2L, -.1L), 1);
+    std::map<std::uint64_t, const AdaptiveTile*> tiles;
+    for (const auto& tile : state.tiles())
+        tiles.emplace(tile.face_gid, &tile);
+    int local_faces = 0, global_faces = 0;
+    for (const auto& stream : trial.prepared_transport()->streams)
+    {
+        const auto& tile = *tiles.at(stream.face);
+        const auto c = tile.geometry->centroid(), n = tile.geometry->area_vector();
+        const bool x_face = n.x != 0 && c.x == 3 && c.y == 2.5;
+        const bool y_face = n.y != 0 && c.y == 3 && c.x == 2.5;
+        if (!x_face && !y_face)
+            continue;
+        // Reversal selects the neighboring old donors. On either selected
+        // unit face x+y<=5.2-.3t gives gas area max(0,.2-.3t),
+        // whose exact integral is the triangle .2^2/(2*.3).
+        const long double q = x_face ? .2L : .1L;
+        EXPECT_NEAR(stream.volume, q, 1e-15);
+        EXPECT_FALSE(stream.lower_order);
+        EXPECT_NEAR(stream.gas_high, q * .2L * .2L / (2 * .3L), 2e-12L * q);
+        EXPECT_EQ(stream.gas_high + stream.liquid_high, stream.volume);
+        EXPECT_EQ(stream.gas + stream.liquid, stream.volume);
+        local_faces += stream.donor_owner == Tpetra::getDefaultComm()->getRank();
+    }
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_faces, &global_faces);
+    EXPECT_EQ(global_faces, 4);
+}
+TEST(GeneralVoFFaceTransport, PredictorConditioningRejectsAfterAdmittedPlaneReconstruction)
+{
+    // Unit x/y widths and dyadic height 1/16 give the area-weighted normal
+    // matrix diag(1/8,1/8,2), hence condition 16. Reconstruction normalizes
+    // neighbor directions; preflight below must admit its stencil at limit 8.
+    // Use the declared gradient orientation and measure-only offset path so
+    // angular fitting and construction arithmetic cannot mask this condition
+    // rejection. The original target-volume tolerance remains unchanged.
+    const auto input = planar_patch(false, 1. / 16);
+    auto options = face_options();
+    options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
+    options.reconstruction.maximum_condition = 8;
+    options.reconstruction.minimum_optimized_phase_length_ratio = 1;
+    options.reconstruction.measure_only = true;
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
+    ASSERT_NO_THROW((void) state.reconstruct());
+    const auto before = state.accepted_identity();
+    bool rejected = false;
+    try
+    {
+        (void) state.plan_face_transport(planar_patch_controls(state, .2L, 0), 1);
+    }
+    catch (const std::exception& e)
+    {
+        rejected = true;
+        const auto* failure = dynamic_cast<const SimpleFluid::detail::vof_failure::Failure*>(&e);
+        ASSERT_NE(failure, nullptr);
+        EXPECT_STREQ(failure->record().message.data(), "Face predictor incident normals are ill conditioned.");
+    }
+    EXPECT_TRUE(rejected);
+    EXPECT_EQ(state.accepted_identity(), before);
+    EXPECT_EQ(state.gas_volumes(), input.gas);
+    EXPECT_EQ(state.carrier_volumes(), input.carrier);
 }
 TEST(GeneralVoFFaceTransport, LimiterSharesEndpointAndOldExportCapacities)
 {

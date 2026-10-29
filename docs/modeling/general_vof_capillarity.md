@@ -175,4 +175,26 @@ separate mixed-surface paths and qualification boundaries.
 This model does not establish interface or capillary accuracy at arbitrary
 resolution. Kernel sphere/cylinder reports and focused conservation/transaction
 checks are separate from complete motion, pressure-jump, spurious-current and
-capillary-time qualification. Those physical thresholds remain to be agreed.
+capillary-time qualification. The algebraic campaign preregisters area-weighted
+curvature and pressure-jump errors at most 5% on the finest resolved uniform
+mesh, spurious velocity at most `1e-3` of the declared capillary velocity, and
+dynamic period and amplitude/decay errors at most 5%. Observation covers at
+least five capillary times and extends when viscous relaxation controls.
+See the [capillary manifest](../../verification/vof/algebraic_capillary_manifest.json)
+and [qualification gates](../verification/vof_solver_contracts.md#algebraic-face-volume-qualification).
+These are acceptance requirements, not completed validation.
+
+The filtered uniform-sphere study holds the filter at two cell lengths, so its
+physical width decreases with refinement. Reconstructed mixed surfaces and
+filtered binary surfaces remain separate studies. The existing native cylinder
+keeps its complete `.02` endpoint and original pressure, velocity, conservation
+and divergence checks under explicit face-backend selection; that short
+prerequisite does not satisfy the five-capillary-time gate. Larger distributed
+components still require complete retained component/halo support; incomplete
+support is a resolution rejection rather than a local curvature approximation.
+`SpatialPartitionRetainsCompleteCurvedSupport` supplies a positive case inside
+that boundary: the existing three-layer native cylinder uses axial ownership
+slabs, two halo rings, twelve owned curved patches and an asserted empty owner
+at four ranks. It checks initial curvature and unchanged inventories for both
+face backends. This initialization-only component check does not advance the
+capillary clock or close the continuation gate.

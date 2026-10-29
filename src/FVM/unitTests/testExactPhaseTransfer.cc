@@ -299,7 +299,7 @@ TEST(ExactPhaseTransfer, OwnershipMigrationPreservesOrientationAndFitDiagnostics
             plane.orientation_step, double(plane.fit_iterations), double(plane.fit_converged),
             double(plane.orientation_method), double(plane.pure_gas), double(plane.pure_carrier),
             double(plane.target_volume_difference.value), double(plane.target_volume_difference.absolute_error),
-            double(plane.target_volume_difference.exact_nonzero)};
+            double(plane.target_volume_difference.exact_nonzero), double(plane.stencil_volume_residual_measured)};
     };
     for (const double minority : {1e-6, .5})
     {
@@ -315,7 +315,7 @@ TEST(ExactPhaseTransfer, OwnershipMigrationPreservesOrientationAndFitDiagnostics
         }
         GeneralVoF initial(hierarchy, keys, gas, carrier, exact_options());
         const auto source = initial.export_transfer_source(true);
-        constexpr std::size_t width = 19;
+        constexpr std::size_t width = 20;
         std::array<double, 8 * width> local{}, expected{};
         int local_mixed = 0, global_mixed = 0;
         const auto ordinal = [](const AdaptiveCellKey& key)
