@@ -196,7 +196,7 @@ std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(unsigned nx, unsign
     }
     return std::make_shared<const VoF::GeneralVoF>(hierarchy, std::move(order), std::move(gas), std::move(carrier));
 }
-std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool cleanup = false)
+std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool cleanup = false, bool record_balance_work = false)
 {
     PLIC::GeometryLimits limits;
     limits.arithmetic_mode = ArithmeticMode::Ordinary;
@@ -267,6 +267,7 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool cleanup = fal
         carrier.push_back(amounts.carrier.as_double());
     }
     VoF::GeneralVoFOptions options;
+    options.record_balance_work = record_balance_work;
     if (cleanup)
     {
         double local[2]{}, global[2]{};

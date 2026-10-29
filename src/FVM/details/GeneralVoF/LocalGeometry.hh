@@ -26,6 +26,7 @@ struct LocalGeometryResult
 {
     std::vector<LocalFaceGeometry> owned_faces;
     GeneralVoFTransportDiagnostics diagnostics;
+    std::shared_ptr<GeneralVoFWorkSample> balance_work;
 };
 SIMPLEFLUID_FVM_LOCAL LocalGeometryResult prepare_local_sweeps(const GeneralVoF::Data&, const OrdinaryTraceMap&,
     const OrdinaryFluxMap&, const std::map<std::uint64_t, long double>&, const PLIC::GeometryPacketContext&);

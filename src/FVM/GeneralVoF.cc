@@ -148,6 +148,28 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
     }
     topology->draft = AMR::fetch_adaptive_native_draft(*hierarchy);
     complete_node_fans(*data, *topology);
+    // Canonical node fans can include diagonal cells outside the initial
+    // face halo. Fetch their full shells before expanding the physical support
+    // rings; otherwise each expansion discovers those shells one round late.
+    std::vector<Key> fan_seeds;
+    wire::collective(*comm,
+        [&]
+        {
+            wire::Budget budget{options.byte_budget};
+            std::set<Key> seeds;
+            for (const auto& [node, fan] : topology->node_fans)
+                for (const auto& key : fan)
+                    if (!hierarchy->owned().contains(key) && !seeds.contains(key))
+                    {
+                        if (seeds.size() >= options.maximum_halo_cells)
+                            throw std::invalid_argument("General VoF halo cell budget exhausted.");
+                        budget.add(2 * (sizeof(Key) + AMR::encode_adaptive_key(key).size()) + 8 * sizeof(void*));
+                        seeds.insert(key);
+                    }
+            fan_seeds.assign(seeds.begin(), seeds.end());
+        });
+    topology->draft = AMR::fetch_adaptive_native_draft(*hierarchy, fan_seeds);
+    std::vector<Key>().swap(fan_seeds);
     for (unsigned ring = 1; ring <= options.support_rings; ++ring)
     {
         std::vector<Key> additional;

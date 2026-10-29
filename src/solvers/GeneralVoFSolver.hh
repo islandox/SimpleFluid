@@ -2,8 +2,9 @@
  * @brief Source-free geometric two-phase flow on certified native polyhedral cells.
  */
 #pragma once
-#include "geometry/GeometryStatisticsSnapshot.hh"
 #include "FVM/GeneralVoF.hh"
+#include "FVM/GeneralVoFBalance.hh"
+#include "geometry/GeometryStatisticsSnapshot.hh"
 #include "solvers/VoFSolver.hh"
 namespace SimpleFluid
 {
@@ -38,6 +39,15 @@ struct GeneralVoFMomentumDiagnostics
      * from arithmetic uncertainty and the raw transport physical residual. */
     long double cleanup_momentum = 0, accumulated_cleanup_momentum = 0;
     double cleanup_identity_relative_residual = 0;
+};
+/** Synchronous live ownership operation. Forecasts remain one-step-lag observations;
+ * timings are maximum-rank wall time, native bytes exclude phase/solver fields. */
+struct GeneralVoFRebalanceResult
+{
+    VoF::GeneralVoFBalanceProposal proposal;
+    bool applied = false;
+    double proposal_seconds = 0, migration_seconds = 0;
+    std::uint64_t local_native_application_bytes = 0, global_native_application_bytes = 0;
 };
 /** Independent general-mesh backend; Cartesian specialized solvers are retained.
  *
@@ -96,9 +106,15 @@ public:
      */
     void regrid(
         std::span<const Meshes::AMR::AdaptiveMark> refine, std::span<const Meshes::AMR::AdaptiveBytes> coarsen = {});
-    /** Ownership-only conservative native migration in current owned-key order.
-     * Enabled phase cleanup rejects this coupled momentum/pressure remap. */
+    /** Ownership-only native migration in current owned-key order. Ordinary
+     * preserves accepted keyed fields and cleanup accounting without arithmetic
+     * recovery. Other modes retain their existing coupled-remap restrictions. */
     void repartition(std::span<const int> destinations);
+    /** Collectively forecast from this exact accepted state's last complete
+     * captured Ordinary interface-local step and apply an accepted proposal.
+     * Rejection preserves the publication. Success clears partition-bound
+     * prepared work; another accepted captured step is required before reuse. */
+    [[nodiscard]] GeneralVoFRebalanceResult rebalance(const VoF::GeneralVoFBalanceOptions& options = {});
     [[nodiscard]] double time() const noexcept;
     [[nodiscard]] const std::shared_ptr<const VoF::GeneralVoF>& phases() const noexcept;
     [[nodiscard]] const std::shared_ptr<const MeshHandle<>>& mesh() const noexcept;

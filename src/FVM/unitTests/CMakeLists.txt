@@ -4,6 +4,9 @@ file(GLOB TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/test*.cc")
 foreach(TEST_SRC IN LISTS TEST_SOURCES)
   get_filename_component(TEST_NAME "${TEST_SRC}" NAME_WE)
   add_executable(${TEST_NAME} "${TEST_SRC}")
+  if(TEST_NAME STREQUAL "testGeneralVoFBalance")
+    target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/BalanceForecast.cc)
+  endif()
   if(TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach")
     target_sources(${TEST_NAME} PRIVATE ../details/GeneralVoF/LocalSpatialCache.cc)
   endif()
@@ -27,7 +30,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/LayeredCases.cc
         gradient_traverse/OnePassCases.cc)
   endif()
-  if(TEST_NAME STREQUAL "testGeneralVoFPhaseCleanup" OR TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach" OR TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy" OR TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testFilteredSurfaceGeometry" OR TEST_NAME STREQUAL "testGeneralVoFInterfaceTransport" OR TEST_NAME STREQUAL "testGeneralVoFHomogeneousTransport" OR TEST_NAME STREQUAL "testGeneralVoFPreparedTransport" OR TEST_NAME STREQUAL "testGeneralVoFFaceTransport" OR TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testOrdinaryVoFSweep" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
+  if(TEST_NAME STREQUAL "testGeneralVoFBalance" OR TEST_NAME STREQUAL "testGeneralVoFPhaseCleanup" OR TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach" OR TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy" OR TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testFilteredSurfaceGeometry" OR TEST_NAME STREQUAL "testGeneralVoFInterfaceTransport" OR TEST_NAME STREQUAL "testGeneralVoFHomogeneousTransport" OR TEST_NAME STREQUAL "testGeneralVoFPreparedTransport" OR TEST_NAME STREQUAL "testGeneralVoFFaceTransport" OR TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testOrdinaryVoFSweep" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
       OR TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
       OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
@@ -54,6 +57,17 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+foreach(PROCS IN ITEMS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFBalance_${PROCS}procs
+    TARGET testGeneralVoFBalance PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFBalance.*:GeneralVoFBalanceCapture.*:GeneralVoFBalanceForecast.UnobservedMixedReceiverIsUnavailableAndPureReceiverCostsZero:GeneralVoFBalanceForecast.RankLocalMalformedRowsDependenciesAndBudgetRejectCollectively"
+    LABELS "vof;balance;geometry;conservation;collective;empty_rank" TIMEOUT 240)
+endforeach()
+simplefluid_add_mpi_test(NAME GeneralVoFBalanceForecast_4procs
+  TARGET testGeneralVoFBalance PROCS 4
+  ARGS "--gtest_filter=GeneralVoFBalanceForecast.ExplicitMovePreservesObservedReceiversAndDeduplicatesFanout"
+  LABELS "vof;balance;collective;empty_rank" TIMEOUT 60)
 
 foreach(PROCS IN ITEMS 2 4)
   simplefluid_add_mpi_test(NAME GeneralVoFOwnerPlaneRequests_${PROCS}procs

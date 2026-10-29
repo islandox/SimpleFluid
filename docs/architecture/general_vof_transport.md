@@ -29,6 +29,11 @@ global signed/absolute corrections, and exposes raw versus cleaned prepared
 mass and declared cleanup momentum. It is a physical numerical correction,
 separate from geometry quality, roundoff and the strict PLIC fit gate.
 
+Optional [measured live balancing](general_vof_balancing.md) records unique
+reconstruction and canonical face work. Its explicitly lagged forecasts can
+drive Ordinary ownership-only solver repartition, including cleanup accounting,
+without changing the physical clock or enabling cleanup-coupled regridding.
+
 ## Homogeneous specialization
 
 `homogeneous_transport_eligible()` collectively checks the current source.

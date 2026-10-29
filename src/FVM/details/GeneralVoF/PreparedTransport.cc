@@ -2,6 +2,7 @@
  * @brief Detached finite phase-ledger preparation for both transport families.
  */
 #include "FVM/details/GeneralVoFInternal.hh"
+#include "FVM/details/GeneralVoF/WorkCapture.hh"
 #include "geometry/PLIC/GeometryError.hh"
 namespace SimpleFluid::VoF
 {
@@ -90,6 +91,8 @@ void GeneralVoFPreparedTransport::validate_byte_budget(std::size_t remaining) co
         remaining -= count * width;
     };
     reserve(1, sizeof(*this));
+    if (balance_work)
+        reserve(general_vof_detail::balance_work_storage_bytes(*balance_work), 1);
     reserve(streams.capacity(), sizeof(GeneralVoFDirectedStream));
     reserve(signed_face_contributions.capacity(), sizeof(GeneralVoFFiniteFaceContribution));
     reserve(positive_transfers.capacity(), sizeof(GeneralVoFFiniteTransfer));
@@ -158,6 +161,19 @@ void GeneralVoF::validate_prepared_transport_source(const GeneralVoFPreparedTran
                 prepared.arithmetic_mode != data_->options.arithmetic_mode ||
                 prepared.backend != data_->options.transport_backend || prepared.authenticated_source_ != data_ ||
                 prepared.authenticated_candidate_ != prepared.candidate_identity ||
+                prepared.authenticated_balance_work_ != prepared.balance_work ||
+                (prepared.balance_work &&
+                    (prepared.balance_work->source_identity != data_ ||
+                        prepared.balance_work->source_control != data_->control ||
+                        prepared.balance_work->mesh_identity != data_->hierarchy ||
+                        prepared.balance_work->topology_identity != data_->topology ||
+                        prepared.balance_work->observation != data_->observation ||
+                        prepared.balance_work->communicator != data_->hierarchy->communicator().getRawPtr() ||
+                        prepared.balance_work->timestep != prepared.timestep ||
+                        prepared.balance_work->time_stage != prepared.time_stage ||
+                        prepared.balance_work->arithmetic_mode != prepared.arithmetic_mode ||
+                        prepared.balance_work->backend != prepared.backend ||
+                        prepared.family != GeneralVoFTransportFamily::InterfaceLocalSwept)) ||
                 prepared.authenticated_transaction_ != prepared.transaction ||
                 prepared.authenticated_source_control_ != prepared.source_control ||
                 prepared.authenticated_time_stage_ != prepared.time_stage ||
@@ -176,6 +192,55 @@ void GeneralVoF::validate_prepared_transport_source(const GeneralVoFPreparedTran
                 throw std::invalid_argument("Prepared VoF transport belongs to another source or mesh publication.");
         });
     agree_transaction(data_->hierarchy->communicator(), data_->control);
+}
+void GeneralVoF::validate_prepared_transport_candidate(const GeneralVoFPreparedTransport& prepared) const
+{
+    const auto comm = data_->hierarchy->communicator();
+    // Authenticate on the current communicator before interpreting any opaque
+    // predecessor or entering a collective on its retained communicator.
+    wire::collective(*comm,
+        [&]
+        {
+            current(*data_);
+            if (prepared.authenticated_candidate_ != data_ || prepared.candidate_identity != data_ ||
+                !prepared.authenticated_source_)
+                throw std::invalid_argument("Prepared VoF transport does not authenticate this candidate.");
+        });
+    const auto predecessor = std::static_pointer_cast<const Data>(prepared.authenticated_source_);
+    wire::collective(*comm,
+        [&]
+        {
+            if (predecessor->hierarchy->communicator().getRawPtr() != comm.getRawPtr() ||
+                predecessor->observation != data_->observation || predecessor->topology != data_->topology ||
+                predecessor->supplied_observation != data_->supplied_observation ||
+                predecessor->topology->order != data_->topology->order ||
+                predecessor->options.arithmetic_mode != data_->options.arithmetic_mode ||
+                predecessor->options.transport_backend != data_->options.transport_backend ||
+                predecessor->hierarchy->owned().size() != data_->hierarchy->owned().size() ||
+                !std::isfinite(prepared.timestep) || prepared.timestep <= 0)
+                throw std::invalid_argument("Prepared VoF candidate changed its predecessor's native layout.");
+            current(*predecessor);
+            for (const auto& [key, leaf] : data_->hierarchy->owned())
+            {
+                const auto found = predecessor->hierarchy->owned().find(key);
+                if (found == predecessor->hierarchy->owned().end() || found->second.revision != leaf.revision)
+                    throw std::invalid_argument("Prepared VoF candidate owned key or revision differs.");
+                const auto& old = predecessor->cells.at(key);
+                const auto& next = data_->cells.at(key);
+                if (old.owner != next.owner || old.revision != next.revision || old.revision != leaf.revision)
+                    throw std::invalid_argument("Prepared VoF candidate cell ownership or revision differs.");
+            }
+            // Identity algebraic publications can retain the predecessor's
+            // control. Interface-local transport always publishes its transaction.
+            if (data_->control != prepared.authenticated_transaction_ &&
+                (prepared.authenticated_family_ == GeneralVoFTransportFamily::InterfaceLocalSwept ||
+                    data_->control != prepared.authenticated_source_control_))
+                throw std::invalid_argument("Prepared VoF candidate control is not factory-authenticated.");
+        });
+    // This retains every source, sample, transaction, stage and density check;
+    // predecessor compatibility above makes its communicator safe to enter.
+    GeneralVoF(predecessor).validate_prepared_transport_source(prepared);
+    agree_transaction(comm, data_->control);
 }
 void GeneralVoF::Trial::validate_prepared_transport_mode(
     ArithmeticMode mode, const std::shared_ptr<const GeneralVoFPreparedTransport>* retained) const
@@ -265,6 +330,11 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
                 remaining -= count * width;
             };
             reserve(1, sizeof(GeneralVoFPreparedTransport));
+            if (unbound_balance_work_)
+            {
+                // Unbound trial measurement and detached copy coexist during preparation.
+                reserve(general_vof_detail::balance_work_storage_bytes(*unbound_balance_work_), 2);
+            }
             reserve(prepared_ ? prepared_->streams.size() : unbound_streams_.size(), sizeof(GeneralVoFDirectedStream));
             reserve(finite_faces_.size(), sizeof(GeneralVoFFiniteFaceContribution));
             reserve(finite_transfers_.size(), sizeof(GeneralVoFFiniteTransfer));
@@ -305,6 +375,23 @@ std::shared_ptr<const GeneralVoFPreparedTransport> GeneralVoF::Trial::prepare_tr
                              : homogeneous_algebraic_ || result->backend != GeneralVoFTransportBackend::SweptPartition
                                  ? GeneralVoFTransportFamily::AlgebraicFaceVolume
                                  : GeneralVoFTransportFamily::GeometricSweptTetrahedra;
+            if (unbound_balance_work_)
+            {
+                auto sample = std::make_shared<GeneralVoFWorkSample>(*unbound_balance_work_);
+                sample->source_identity = source_;
+                sample->mesh_identity = source_->hierarchy;
+                sample->topology_identity = source_->topology;
+                sample->source_control = source_->control;
+                sample->observation = source_->observation;
+                sample->communicator = comm.getRawPtr();
+                sample->time_stage = time_stage;
+                sample->timestep = timestep_;
+                sample->arithmetic_mode = source_->options.arithmetic_mode;
+                sample->backend = source_->options.transport_backend;
+                sample->retained_bytes = general_vof_detail::balance_work_storage_bytes(*sample);
+                result->balance_work = std::move(sample);
+                result->authenticated_balance_work_ = result->balance_work;
+            }
             result->authenticated_source_ = source_;
             result->authenticated_candidate_ = candidate_;
             result->authenticated_transaction_ = transaction_;

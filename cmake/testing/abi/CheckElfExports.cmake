@@ -1071,6 +1071,11 @@ simplefluid_require_exact_api(
     "^SimpleFluid::PressureProjectionEquation<.*>[ ]*::project_reusing_cached_predictor[(].*, SimpleFluid::VolumeContinuityTarget<.*> const&[)]$"
     2)
 
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    simplefluid_require_exact_api(
+        "^SimpleFluid::GeneralVoFSolver::rebalance[(]SimpleFluid::VoF::GeneralVoFBalanceOptions const&[)]$" 1)
+endif()
+
 set(simplefluid_missing_exact_api_patterns)
 list(LENGTH simplefluid_required_exact_api_patterns
      simplefluid_required_exact_api_pattern_count)
@@ -1366,13 +1371,18 @@ set(simplefluid_api_symbol_lower_bound 1450)
 # NOX-OFF 1603 + 4 - 39 = 1568; retain exactly three headroom entries: 1571.
 # The eleven NOX facade symbols are already included in that baseline.
 set(simplefluid_final_species_cleanup_symbol_delta -35)
+set(simplefluid_live_vof_balance_symbol_budget 0)
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
+    # One separately anchored live balance entry; private migration stays hidden.
+    set(simplefluid_live_vof_balance_symbol_budget 1)
+endif()
 set(simplefluid_preexisting_api_symbol_upper_bound 1550)
 set(simplefluid_disabled_vof_symbol_count 0)
 if(NOT SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
     set(simplefluid_disabled_vof_symbol_count 142)
 endif()
 math(EXPR simplefluid_api_symbol_upper_bound
-    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count} + ${simplefluid_final_species_cleanup_symbol_delta}")
+    "${simplefluid_preexisting_api_symbol_upper_bound} + ${simplefluid_reacting_schema_public_symbol_budget} + ${simplefluid_reacting_thermodynamic_public_symbol_budget} + ${simplefluid_species_adapters_public_symbol_budget} + ${simplefluid_low_mach_public_symbol_budget} + ${simplefluid_source_history_public_symbol_budget} + ${simplefluid_caloric_domain_public_symbol_budget} + ${simplefluid_species_diffusion_public_symbol_budget} + ${simplefluid_population_events_public_symbol_budget} + ${simplefluid_species_surface_public_symbol_budget} + ${simplefluid_native_ale_public_symbol_budget} + ${simplefluid_conditioned_thermal_public_symbol_budget} + ${simplefluid_bouss_vapor_public_symbol_budget} - ${simplefluid_disabled_vof_symbol_count} + ${simplefluid_final_species_cleanup_symbol_delta} + ${simplefluid_live_vof_balance_symbol_budget}")
 # Preserve develop's fixed, reviewed ten-percent API headroom after adding
 # the independently anchored reacting APIs and subtracting disabled VoF APIs.
 # The historical budget above contains three spare entries; remove those before

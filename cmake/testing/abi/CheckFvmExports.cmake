@@ -129,6 +129,14 @@ if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::detail::vof_failure::context_s
     message(FATAL_ERROR "Missing shared VoF diagnostic context bridge in FVM")
 endif()
 
+if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::plan_initial_partition[(]")
+    message(FATAL_ERROR "Missing compiled measured initial VoF partition API in FVM")
+endif()
+if(NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::plan_partition_proposal[(]"
+   OR NOT demangled_full MATCHES "(^|\n)SimpleFluid::VoF::GeneralVoF::validate_prepared_transport_candidate[(]")
+    message(FATAL_ERROR "Missing compiled accepted-successor work forecast API in FVM")
+endif()
+
 # The lower-level FVM DSO must own the compiled DIC API; solvers consume it.
 foreach(method IN ITEMS DICPreconditioner apply)
     if(NOT demangled_names MATCHES "(^|\n)SimpleFluid::detail::DICPreconditioner<[^\n]+>::${method}([(]|\n|$)")

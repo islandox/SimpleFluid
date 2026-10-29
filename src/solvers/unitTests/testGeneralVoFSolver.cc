@@ -1,5 +1,10 @@
 /** @file testGeneralVoFSolver.cc */
+#include "FVM/GeneralVoFBalance.hh"
+#include "FVM/details/VoFFailure.hh"
 #include "general_vof_solver_test_helpers.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "parallel/SparseOwnerExchange.hh"
+#include <bit>
 #include <iostream>
 namespace
 {
@@ -440,7 +445,68 @@ TEST(GeneralVoFSolverTest, MicroscopicDeclaredTraceAggregatesPhaseMassBeforeDiag
 
 namespace
 {
-TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependentInventories)
+enum class Full50Partition
+{
+    Canonical,
+    CapturedCanonical,
+    MeasuredLive
+};
+void verify_full50_phase_ownership(const VoF::GeneralVoF& source, const VoF::GeneralVoF& candidate)
+{
+    namespace wire = AMR::adaptive_detail;
+    const auto comm = source.hierarchy()->communicator();
+    const auto owners = candidate.hierarchy()->lookup_cells(source.owned_order());
+    std::vector<OwnerPacket> packets;
+    ::SimpleFluid::detail::vof_failure::collective(*comm,
+        [&]
+        {
+            for (std::size_t i = 0; i < source.owned_order().size(); ++i)
+            {
+                wire::Writer writer;
+                writer.bytes(AMR::encode_adaptive_key(source.owned_order()[i]));
+                writer.word(std::bit_cast<std::uint64_t>(source.gas_volumes()[i]));
+                writer.word(std::bit_cast<std::uint64_t>(source.carrier_volumes()[i]));
+                packets.push_back({owners[i].owner, std::move(writer.data)});
+            }
+        });
+    const auto received = exchange_owner_packets(packets, comm, source.options().byte_budget);
+    ::SimpleFluid::detail::vof_failure::collective(*comm,
+        [&]
+        {
+            std::map<VoF::GeneralVoF::Key, std::size_t> indices;
+            for (std::size_t i = 0; i < candidate.owned_order().size(); ++i)
+                indices.emplace(candidate.owned_order()[i], i);
+            std::set<VoF::GeneralVoF::Key> seen;
+            for (const auto& packet : received.packets)
+            {
+                wire::Reader reader{packet.bytes};
+                const auto key = AMR::decode_adaptive_key(reader.bytes());
+                const auto i = indices.at(key);
+                const auto gas = reader.word(), carrier = reader.word();
+                reader.done();
+                if (!seen.insert(key).second || gas != std::bit_cast<std::uint64_t>(candidate.gas_volumes()[i]) ||
+                    carrier != std::bit_cast<std::uint64_t>(candidate.carrier_volumes()[i]))
+                    throw std::invalid_argument("Initial partition changed a keyed phase inventory.");
+            }
+            if (seen.size() != indices.size() ||
+                candidate.phase_cleanup_checkpoint() != source.phase_cleanup_checkpoint())
+                throw std::invalid_argument("Initial partition lost a cell or changed the cleanup ledger.");
+        });
+}
+std::vector<VoF::Vector> full50_initial_velocity(const MeshHandle<>& mesh)
+{
+    std::vector<VoF::Vector> velocity(mesh.num_owned_cells());
+    for (std::size_t c = 0; c < velocity.size(); ++c)
+    {
+        const auto x = mesh.cell_centroid(DefaultTpetraTypes::local_ordinal_type(c));
+        const double xi = x.x - .2 * x.y, eta = x.y;
+        const double vx = .05 * std::pow(std::sin(std::numbers::pi * xi), 2) * std::sin(2 * std::numbers::pi * eta);
+        const double vy = -.05 * std::pow(std::sin(std::numbers::pi * eta), 2) * std::sin(2 * std::numbers::pi * xi);
+        velocity[c] = {vx + .2 * vy, vy, 0};
+    }
+    return velocity;
+}
+void run_full50_case(Full50Partition partition)
 {
     using Clock = std::chrono::steady_clock;
     const auto started = Clock::now();
@@ -449,7 +515,7 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     {
         std::ostringstream text;
         text << std::setprecision(20) << value;
-        RecordProperty(name, text.str());
+        ::testing::Test::RecordProperty(name, text.str());
         if (std::getenv("SIMPLEFLUID_VOF_TEST_PROGRESS") && Tpetra::getDefaultComm()->getRank() == 0)
             std::cerr << name << '=' << text.str() << std::endl;
     };
@@ -502,13 +568,18 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     material.gas_density = .1;
     material.liquid_density = 1;
     const auto fixture_started = Clock::now();
-    const auto initial_phases = skew_coarse_fine_plane(true);
+    auto initial_phases = skew_coarse_fine_plane(true, partition != Full50Partition::Canonical);
     const auto fixture_finished = Clock::now();
+    record("partition_experiment", partition == Full50Partition::Canonical           ? "canonical_kernel"
+                                   : partition == Full50Partition::CapturedCanonical ? "captured_canonical"
+                                                                                     : "measured_live");
+    double planning_seconds = 0, migration_seconds = 0;
+    const auto evaluation_started = Clock::now();
     GeneralVoFSolver solver(initial_phases, material);
     const auto constructor_finished = Clock::now();
     record("fixture_seconds", std::chrono::duration<double>(fixture_finished - fixture_started).count());
-    record("solver_constructor_seconds",
-        std::chrono::duration<double>(constructor_finished - fixture_finished).count());
+    record(
+        "solver_constructor_seconds", std::chrono::duration<double>(constructor_finished - evaluation_started).count());
     record("phase_initialization", "ordinary_fp");
     record("arithmetic_mode", "Ordinary");
     record_exact("after_construction");
@@ -532,15 +603,7 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     EXPECT_GT(structure[0], 16);
     EXPECT_LE(structure[0], 64);
     EXPECT_GT(structure[1], 0);
-    std::vector<VoF::Vector> velocity(solver.mesh()->num_owned_cells());
-    for (std::size_t c = 0; c < velocity.size(); ++c)
-    {
-        const auto x = solver.mesh()->cell_centroid(DefaultTpetraTypes::local_ordinal_type(c));
-        const double xi = x.x - .2 * x.y, eta = x.y;
-        const double vx = .05 * std::pow(std::sin(std::numbers::pi * xi), 2) * std::sin(2 * std::numbers::pi * eta);
-        const double vy = -.05 * std::pow(std::sin(std::numbers::pi * eta), 2) * std::sin(2 * std::numbers::pi * xi);
-        velocity[c] = {vx + .2 * vy, vy, 0};
-    }
+    const auto velocity = full50_initial_velocity(*solver.mesh());
     record_exact("before_initialize");
     const auto explicit_initialize_started = Clock::now();
     solver.initialize(velocity);
@@ -548,7 +611,7 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     const auto initialized = Clock::now();
     record("explicit_initialize_seconds",
         std::chrono::duration<double>(initialized - explicit_initialize_started).count());
-    // Historical property includes fixture, constructor and explicit initialize.
+    // Initial setup only; live repartition happens after the first accepted step.
     record("initialization_seconds", std::chrono::duration<double>(initialized - started).count());
     const auto region_gas = [&]
     {
@@ -570,6 +633,8 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     unsigned accepted_steps = 0;
     std::array<unsigned long long, 15> owner_request_counts{};
     double owner_reconstruction_seconds = 0;
+    std::array<double, 4> measured_work_seconds{}, measured_later_work_seconds{};
+    std::array<unsigned long long, 15> later_owner_request_counts{};
     record_exact("before_loop");
     for (unsigned step = 0; step < 10; ++step)
     {
@@ -612,10 +677,42 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
                 requests.zero_phase_offset_returns, requests.geometry_volume_evaluations,
                 requests.geometry_intersections, requests.peer_cache_peak_bytes, requests.workspace_peak_bytes};
             for (std::size_t i = 0; i < 13; ++i)
+            {
                 owner_request_counts[i] += counts[i];
+                if (step > 0)
+                    later_owner_request_counts[i] += counts[i];
+            }
             for (std::size_t i = 13; i < counts.size(); ++i)
+            {
                 owner_request_counts[i] = std::max(owner_request_counts[i], counts[i]);
+                if (step > 0)
+                    later_owner_request_counts[i] = std::max(later_owner_request_counts[i], counts[i]);
+            }
             owner_reconstruction_seconds += requests.reconstruction_seconds;
+            if (partition != Full50Partition::Canonical)
+            {
+                EXPECT_TRUE(prepared->balance_work);
+                if (prepared->balance_work)
+                {
+                    EXPECT_TRUE(prepared->balance_work->fully_deduplicated);
+                    std::array<double, 4> step_work{};
+                    for (const auto& cell : prepared->balance_work->cells)
+                        step_work[0] += cell.reconstruction.seconds;
+                    for (const auto& face : prepared->balance_work->faces)
+                    {
+                        step_work[1] += face.setup.seconds;
+                        step_work[2] += face.aggregate.seconds;
+                    }
+                    for (const auto& receiver : prepared->balance_work->receivers)
+                        step_work[3] += receiver.remeasurement.seconds;
+                    for (std::size_t i = 0; i < step_work.size(); ++i)
+                    {
+                        measured_work_seconds[i] += step_work[i];
+                        if (step > 0)
+                            measured_later_work_seconds[i] += step_work[i];
+                    }
+                }
+            }
         }
         gas_drift = std::max(gas_drift, std::abs(after.gas_mass - before.gas_mass) / before.gas_mass);
         liquid_drift = std::max(liquid_drift, std::abs(after.liquid_mass - before.liquid_mass) / before.liquid_mass);
@@ -660,6 +757,55 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         for (unsigned phase = 0; phase < 2; ++phase)
             EXPECT_LE(
                 cleanup.absolute_volume[phase], initial_phases->options().phase_cleanup.maximum_absolute_volume[phase]);
+        if (partition == Full50Partition::MeasuredLive && step == 0)
+        {
+            const auto before_phases = solver.phases();
+            const auto before_prepared = solver.prepared_transport();
+            const auto before_time = solver.time();
+            const auto balance = solver.rebalance();
+            planning_seconds = balance.proposal_seconds;
+            migration_seconds = balance.migration_seconds;
+            const auto& proposal = balance.proposal;
+            EXPECT_EQ(solver.time(), before_time);
+            EXPECT_EQ(proposal.current_phase_identity, before_phases->accepted_identity());
+            record("balance_accepted", proposal.accepted);
+            record("balance_applied", balance.applied);
+            record("balance_rejection", static_cast<int>(proposal.rejection));
+            record("balance_forecast_binding", "accepted_successor_previous_step");
+            record("balance_before_max_compute_seconds", proposal.measured_before.maximum_compute_seconds);
+            record("balance_before_mean_compute_seconds", proposal.measured_before.mean_compute_seconds);
+            record("balance_forecast_available", proposal.forecast_proposed.compute_available);
+            record("balance_proposed_max_compute_seconds", proposal.forecast_proposed.maximum_compute_seconds);
+            record("balance_proposed_mean_compute_seconds", proposal.forecast_proposed.mean_compute_seconds);
+            record("balance_before_remote_consumers", proposal.measured_before.remote_donor_consumers);
+            record("balance_proposed_remote_consumers", proposal.forecast_proposed.remote_donor_consumers);
+            record("balance_before_request_bytes", proposal.measured_before.request_payload_bytes);
+            record("balance_before_reply_bytes", proposal.measured_before.reply_payload_bytes);
+            record("balance_proposed_request_bytes", proposal.forecast_proposed.request_payload_bytes);
+            record("balance_proposed_reply_bytes", proposal.forecast_proposed.reply_payload_bytes);
+            record("balance_before_cut_faces", proposal.measured_before.canonical_cut_faces);
+            record("balance_proposed_cut_faces", proposal.forecast_proposed.canonical_cut_faces);
+            record("balance_native_application_bytes", balance.global_native_application_bytes);
+            record("balance_proposal_seconds", planning_seconds);
+            record("balance_migration_seconds", migration_seconds);
+            if (balance.applied)
+            {
+                EXPECT_LT(proposal.forecast_proposed.maximum_compute_seconds,
+                    proposal.measured_before.maximum_compute_seconds);
+                EXPECT_TRUE(proposal.native_plan.final.wire_bytes_exact);
+                EXPECT_NE(solver.phases(), before_phases);
+                EXPECT_FALSE(solver.prepared_transport());
+            }
+            else
+            {
+                EXPECT_EQ(solver.phases(), before_phases);
+                EXPECT_EQ(solver.prepared_transport(), before_prepared);
+            }
+            const auto verification_started = Clock::now();
+            verify_full50_phase_ownership(*before_phases, *solver.phases());
+            record("live_partition_verification_seconds",
+                std::chrono::duration<double>(Clock::now() - verification_started).count());
+        }
     }
     // The region's only open internal boundary is the actual refined stripe
     // interface xi=.5; external walls are impermeable. The initial analytic
@@ -683,16 +829,34 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
         &global_fraction_maximum);
     record("maximum_gas_fraction", global_fraction_maximum);
     record("regional_gas_passage", passage);
-    record("complete_case_seconds", std::chrono::duration<double>(Clock::now() - started).count());
+    const auto completed = Clock::now();
+    const double complete_seconds = std::chrono::duration<double>(completed - started).count();
+    const double evaluation_seconds = std::chrono::duration<double>(completed - evaluation_started).count();
+    record("complete_case_seconds", complete_seconds);
+    record("evaluation_case_seconds", evaluation_seconds);
     // Gather rank-local work only after the timed physical horizon. Work counters
     // may decrease with reuse; physical and cleanup receipts remain the parity oracle.
     const auto comm = Tpetra::getDefaultComm();
     std::vector<unsigned long long> all_owner_counts(owner_request_counts.size() * comm->getSize());
     std::vector<double> all_owner_seconds(comm->getSize());
+    std::vector<double> all_measured_seconds(measured_work_seconds.size() * comm->getSize());
+    const std::array<double, 4> local_durations{
+        planning_seconds, migration_seconds, evaluation_seconds, complete_seconds};
+    std::vector<double> all_durations(local_durations.size() * comm->getSize());
+    std::vector<double> all_later_work_seconds(measured_later_work_seconds.size() * comm->getSize());
+    std::vector<unsigned long long> all_later_owner_counts(later_owner_request_counts.size() * comm->getSize());
     Teuchos::gatherAll(*comm, int(owner_request_counts.size()), owner_request_counts.data(),
         int(all_owner_counts.size()), all_owner_counts.data());
     Teuchos::gatherAll(
         *comm, 1, &owner_reconstruction_seconds, int(all_owner_seconds.size()), all_owner_seconds.data());
+    Teuchos::gatherAll(*comm, int(measured_work_seconds.size()), measured_work_seconds.data(),
+        int(all_measured_seconds.size()), all_measured_seconds.data());
+    Teuchos::gatherAll(
+        *comm, int(local_durations.size()), local_durations.data(), int(all_durations.size()), all_durations.data());
+    Teuchos::gatherAll(*comm, int(measured_later_work_seconds.size()), measured_later_work_seconds.data(),
+        int(all_later_work_seconds.size()), all_later_work_seconds.data());
+    Teuchos::gatherAll(*comm, int(later_owner_request_counts.size()), later_owner_request_counts.data(),
+        int(all_later_owner_counts.size()), all_later_owner_counts.data());
     constexpr std::array<const char*, 15> owner_count_names{"local_owned_requests", "incoming_peer_requests",
         "local_result_hits", "peer_cache_hits", "peer_cache_admissions", "cache_admission_denials",
         "owner_reconstruction_calls", "mixed_cell_fits", "retained_interface_returns", "pure_declaration_returns",
@@ -702,10 +866,57 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     {
         const auto prefix = "owner_requests_rank_" + std::to_string(rank) + "_";
         for (std::size_t i = 0; i < owner_count_names.size(); ++i)
+        {
             record(prefix + owner_count_names[i], all_owner_counts[rank * owner_count_names.size() + i]);
+            record("post_balance_rank_" + std::to_string(rank) + "_" + owner_count_names[i],
+                all_later_owner_counts[rank * owner_count_names.size() + i]);
+        }
         record(prefix + "reconstruction_seconds", all_owner_seconds[rank]);
+        constexpr std::array<const char*, 4> work_names{"reconstruction", "face_setup", "face_aggregate", "receiver"};
+        for (std::size_t i = 0; i < work_names.size(); ++i)
+            record("measured_work_rank_" + std::to_string(rank) + "_" + work_names[i] + "_seconds",
+                all_measured_seconds[rank * work_names.size() + i]);
+    }
+    double measured_total = 0, measured_maximum = 0;
+    for (int rank = 0; rank < comm->getSize(); ++rank)
+    {
+        double seconds = 0;
+        for (std::size_t i = 0; i < measured_work_seconds.size(); ++i)
+            seconds += all_measured_seconds[rank * measured_work_seconds.size() + i];
+        record("measured_work_rank_" + std::to_string(rank) + "_total_seconds", seconds);
+        measured_total += seconds;
+        measured_maximum = std::max(measured_maximum, seconds);
+    }
+    record("measured_work_total_seconds", measured_total);
+    record("measured_work_maximum_rank_seconds", measured_maximum);
+    record("measured_work_mean_rank_seconds", measured_total / comm->getSize());
+    double later_total = 0, later_maximum = 0;
+    for (int rank = 0; rank < comm->getSize(); ++rank)
+    {
+        double seconds = 0;
+        for (std::size_t i = 0; i < measured_later_work_seconds.size(); ++i)
+            seconds += all_later_work_seconds[rank * measured_later_work_seconds.size() + i];
+        record("post_balance_rank_" + std::to_string(rank) + "_compute_seconds", seconds);
+        later_total += seconds;
+        later_maximum = std::max(later_maximum, seconds);
+    }
+    record("post_balance_total_compute_seconds", later_total);
+    record("post_balance_maximum_rank_compute_seconds", later_maximum);
+    record("post_balance_mean_rank_compute_seconds", later_total / comm->getSize());
+    constexpr std::array<const char*, 4> duration_names{"proposal", "migration", "evaluation", "workflow"};
+    for (std::size_t i = 0; i < duration_names.size(); ++i)
+    {
+        double maximum = 0;
+        for (int rank = 0; rank < comm->getSize(); ++rank)
+        {
+            const double seconds = all_durations[rank * duration_names.size() + i];
+            record("duration_rank_" + std::to_string(rank) + "_" + duration_names[i] + "_seconds", seconds);
+            maximum = std::max(maximum, seconds);
+        }
+        record("maximum_" + std::string(duration_names[i]) + "_seconds", maximum);
     }
     const auto operations = observed_geometry_statistics().bounded;
+    record("geometry_counter_scope", "complete_workflow");
     // These are bounded-kernel counters. A zero here alone is not a global
     // proof that other infrastructure performed no rational operation.
     record("bounded_kernel_source_imports", operations.source_imports);
@@ -725,6 +936,19 @@ TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependent
     record("bounded_kernel_reported_rational_measures", operations.rational_measures);
     record("bounded_kernel_reported_rational_ledgers", operations.rational_ledgers);
 }
+TEST(GeneralVoFSolverTest, NonzeroSkewCoarseFinePhasePassagePreservesIndependentInventories)
+{
+    run_full50_case(Full50Partition::Canonical);
+}
+TEST(GeneralVoFPartitionExperiment, CanonicalPartitionMeasuredWork)
+{
+    run_full50_case(Full50Partition::CapturedCanonical);
+}
+TEST(GeneralVoFPartitionExperiment, MeasuredLivePartition)
+{
+    run_full50_case(Full50Partition::MeasuredLive);
+}
+
 } // namespace
 
 namespace

@@ -1,14 +1,15 @@
 /** @file Remap.tcc
  * @brief Compiled general VoF Remap operation.
  */
-#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "geometry/PLIC/details/PhaseArithmetic.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveNative.hh"
+#include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "solvers/details/GeneralVoF/AdaptedFaceTransfer.hh"
 #include "solvers/details/GeneralVoF/Curvature.hh"
 #include "solvers/details/GeneralVoF/Diagnostics.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
 #include "solvers/details/GeneralVoF/OwnedFaceTransfer.hh"
+#include "solvers/details/GeneralVoF/OwnedMigration.hh"
 #include "solvers/details/GeneralVoF/PhaseStorage.hh"
 #include "solvers/details/GeneralVoF/Remap.hh"
 #include <algorithm>
@@ -54,6 +55,21 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                     ordered.push_back(requested.at(key));
             });
     }
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        if (migration)
+        {
+            bool moved = false;
+            for (int destination : ordered)
+                moved = moved || destination != hierarchy->communicator()->getRank();
+            if (execution.maximum(moved ? 1. : 0.) == 0)
+            {
+                execution.require(old.phases->accepted_unchanged() && hierarchy->geometry_unchanged(),
+                    "Identity ownership migration has stale accepted geometry or source publication.");
+                return {nullptr, nullptr, true};
+            }
+            const auto plan = hierarchy->plan_migration(ordered);
+            return prepare_owned_migration(resources, old, plan);
+        }
     const auto plan = migration ? hierarchy->plan_migration(ordered) : hierarchy->plan_adaptation(refine, coarsen);
     const auto raw_target = hierarchy->apply(plan);
     const auto native = Meshes::AMR::assemble_adaptive_native(*raw_target, raw_target->configuration_descriptor());
@@ -78,8 +94,9 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                 for (unsigned a = 0; a < 3; ++a)
                     item.amounts.push_back(A::multiply(A::make_value(old.finite_mass[c], old.finite_mass_error[c]),
                         A::make_value(old.velocity[c][a], 0)));
-                item.amounts.push_back(A::multiply(
-                    SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()), A::make_value(old.pressure[c], 0)));
+                item.amounts.push_back(
+                    A::multiply(SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()),
+                        A::make_value(old.pressure[c], 0)));
                 channels.push_back(std::move(item));
             }
         });
@@ -116,8 +133,8 @@ PreparedRemap Remap<Mode>::prepare(const Resources& resources, const State& old,
                 for (unsigned a = 0; a < 3; ++a)
                     state->velocity[c][a] = A::as_double(
                         A::divide(item.amounts[a], A::make_value(state->finite_mass[c], state->finite_mass_error[c])));
-                state->pressure[c] = A::as_double(
-                    A::divide(item.amounts[3], SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume())));
+                state->pressure[c] = A::as_double(A::divide(
+                    item.amounts[3], SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume())));
             }
         });
     state->curvature = Curvature<Mode>::assemble(*(*candidate).mesh, (*candidate).flow, *state->phases,

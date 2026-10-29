@@ -4,6 +4,7 @@
 #include "geometry/swept_volume/details/FiniteGeometryAccess.hh"
 #include "FVM/details/GeneralVoF/LocalSpatialCache.hh"
 #include "FVM/details/GeneralVoF/OwnerPlaneRequests.hh"
+#include "FVM/details/GeneralVoF/WorkCapture.hh"
 #include "FVM/details/GeneralVoF/PlaneOrientation.hh"
 #include "FVM/details/GeneralVoFInternal.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
@@ -347,9 +348,11 @@ void current(const GeneralVoF::Data& data)
         throw std::invalid_argument("General VoF source geometry/control is stale.");
 }
 template<ArithmeticMode Mode>
-void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes)
+void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> proposed_spatial_bytes,
+    std::size_t extra_retained_bytes, std::size_t* remaining_bytes)
 {
     wire::Budget budget{data.options.byte_budget};
+    budget.add(extra_retained_bytes);
     std::set<const void*> geometry;
     budget.add(data.latest_phase_cleanup.capacity() * sizeof(GeneralVoFPhaseCleanupDelta));
     for (const auto& delta : data.latest_phase_cleanup)
@@ -468,6 +471,8 @@ void retained_budget(const GeneralVoF::Data& data, std::optional<std::size_t> pr
                 budget.add(wall.geometry->storage_bytes());
         }
     }
+    if (remaining_bytes)
+        *remaining_bytes = budget.limit - budget.used;
 }
 // Every incident owner registers its actual cell once. The node authority
 // authenticates those registrations and returns the complete canonical fan;
@@ -673,9 +678,9 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
             if (!options.maximum_face_geometry_operations)
                 throw std::invalid_argument("General VoF face geometry operation limit must be positive.");
             validate_phase_cleanup_options(options);
-            budget.packet(25 * 8);
+            budget.packet(26 * 8);
             wire::Writer w;
-            w.word(6); // Includes explicit physical phase cleanup controls.
+            w.word(7); // Includes optional source-pinned balance work capture.
             for (auto value : {std::uint64_t(options.maximum_stencil_cells), std::uint64_t(options.maximum_halo_cells),
                      std::uint64_t(options.support_rings), std::uint64_t(options.arithmetic_mode),
                      std::uint64_t(options.transport_backend), std::uint64_t(options.reconstruction.measure_only),
@@ -685,7 +690,8 @@ void agree_options(const GeneralVoFOptions& options, Teuchos::RCP<const Teuchos:
                      std::uint64_t(options.reconstruction.maximum_clip_evaluations),
                      std::uint64_t(options.sweep.maximum_simplices), std::uint64_t(options.sweep.maximum_atoms),
                      std::uint64_t(options.sweep.maximum_pair_tests),
-                     std::uint64_t(options.maximum_face_geometry_operations)})
+                     std::uint64_t(options.maximum_face_geometry_operations),
+                     std::uint64_t(options.record_balance_work)})
                 w.word(value);
             real(w, options.phase_cleanup.relative_cutoff);
             for (double value : options.phase_cleanup.maximum_absolute_volume)
@@ -891,12 +897,17 @@ namespace
 struct OwnerReconstructionObservation
 {
     GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics;
+    GeneralVoFWorkCell* cell;
+    GeneralVoFOwnerPlaneRequestDiagnostics previous{};
     std::chrono::steady_clock::time_point started{};
     PLIC::GeometryStatistics before{};
-    explicit OwnerReconstructionObservation(GeneralVoFOwnerPlaneRequestDiagnostics* value) : diagnostics(value)
+    explicit OwnerReconstructionObservation(GeneralVoFOwnerPlaneRequestDiagnostics* value, GeneralVoFWorkCell* row)
+        : diagnostics(value), cell(row)
     {
         if (diagnostics)
         {
+            if (cell)
+                previous = *diagnostics;
             ++diagnostics->owner_reconstruction_calls;
             before = PLIC::geometry_statistics();
             started = std::chrono::steady_clock::now();
@@ -906,19 +917,33 @@ struct OwnerReconstructionObservation
     {
         if (diagnostics)
         {
-            diagnostics->reconstruction_seconds +=
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+            diagnostics->reconstruction_seconds += elapsed;
             const auto after = PLIC::geometry_statistics();
             diagnostics->geometry_volume_evaluations += after.volume_evaluations - before.volume_evaluations;
             diagnostics->geometry_intersections += after.intersections - before.intersections;
+            if (cell)
+            {
+                cell->reconstruction.seconds += elapsed;
+                cell->reconstruction.floating_operations += after.floating_operations - before.floating_operations;
+                cell->reconstruction.volume_evaluations += after.volume_evaluations - before.volume_evaluations;
+                cell->reconstruction.intersections += after.intersections - before.intersections;
+                cell->reconstruction.constructions += after.constructions - before.constructions;
+                cell->calls += diagnostics->owner_reconstruction_calls - previous.owner_reconstruction_calls;
+                cell->mixed_fits += diagnostics->mixed_cell_fits - previous.mixed_cell_fits;
+                cell->retained_returns += diagnostics->retained_interface_returns - previous.retained_interface_returns;
+                cell->pure_returns += diagnostics->pure_declaration_returns - previous.pure_declaration_returns;
+                cell->zero_phase_returns += diagnostics->zero_phase_offset_returns - previous.zero_phase_offset_returns;
+            }
         }
     }
 };
 template<ArithmeticMode Mode>
 PLIC::PolyhedralInterface reconstruct_cell_impl(
-    const GeneralVoF::Data& data, const Key& key, GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics)
+    const GeneralVoF::Data& data, const Key& key, GeneralVoFOwnerPlaneRequestDiagnostics* diagnostics,
+    GeneralVoFWorkCell* row = nullptr)
 {
-    OwnerReconstructionObservation observation(diagnostics);
+    OwnerReconstructionObservation observation(diagnostics, row);
     const auto& cell = data.cells.at(key);
     ::SimpleFluid::detail::vof_failure::Scope scope("general_vof_reconstruct_cell");
     scope.record.cell = cell.gid;
@@ -1108,12 +1133,39 @@ template<ArithmeticMode Mode> std::map<Key, PLIC::PolyhedralInterface> import_pl
 
 std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVoF::Data& data,
     const std::set<Key>& requested, const PLIC::GeometryPacketContext& context, geometry::swept_volume::Work& work,
-    GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics)
+    GeneralVoFOwnerPlaneRequestDiagnostics& diagnostics, GeneralVoFWorkSample* balance_work)
 {
     constexpr auto Mode = ArithmeticMode::Ordinary;
     const auto comm = data.hierarchy->communicator();
     const auto limit = data.options.byte_budget;
     PlaneImportStorage storage(work, diagnostics);
+    const auto reconstruct = [&](const Key& key)
+    {
+        auto* row = balance_cell(balance_work, key);
+        auto fitted = reconstruct_cell_impl<Mode>(data, key, &diagnostics, row);
+        if (row)
+        {
+            row->mixed = !fitted.pure_gas && !fitted.pure_carrier;
+            row->fit_iterations = fitted.fit_iterations;
+            row->request_payload_bytes = owner_plane_key_wire_bytes(key) + 48;
+            // Same codec as a real reply; this calibration is outside reconstruction timing.
+            storage.charge(216);
+            {
+                wire::Writer writer;
+                writer.data.reserve(216);
+                if (writer.data.capacity() > 216)
+                    storage.charge(writer.data.capacity() - 216);
+                plane(writer, fitted);
+                if (writer.data.size() > 216)
+                    throw std::invalid_argument("General VoF plane exceeds its capture envelope.");
+                row->reply_payload_bytes = row->request_payload_bytes + writer.data.size();
+                if (writer.data.capacity() > 216)
+                    storage.release(writer.data.capacity() - 216);
+            }
+            storage.release(216);
+        }
+        return fitted;
+    };
     std::map<Key, PLIC::PolyhedralInterface> result;
     wire::collective(*comm,
         [&]
@@ -1127,7 +1179,7 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
                 if (data.cells.at(key).owner == comm->getRank())
                 {
                     ++diagnostics.local_owned_requests;
-                    result.emplace(key, reconstruct_cell_impl<Mode>(data, key, &diagnostics));
+                    result.emplace(key, reconstruct(key));
                 }
         });
     std::vector<OwnerPacket> requests;
@@ -1199,7 +1251,7 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
                     if (cell.owner != comm->getRank() || cell.revision != revision)
                         throw std::invalid_argument("General VoF stale plane request.");
                 },
-                [&](const Key& key) { return reconstruct_cell_impl<Mode>(data, key, &diagnostics); },
+                [&](const Key& key) { return reconstruct(key); },
                 [&](wire::Writer& writer, const PLIC::PolyhedralInterface& fitted)
                 {
                     plane(writer, fitted);
@@ -1251,12 +1303,24 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
                 auto fitted =
                     plane(r, data.options.arithmetic_mode == ArithmeticMode::Exact ? std::optional<ArithmeticMode>{}
                                                                                    : data.options.arithmetic_mode);
+                GeneralVoFWorkReceiver* receiver = nullptr;
+                if (balance_work)
+                    for (auto& row : balance_work->receivers)
+                        if (row.donor.key == key)
+                        {
+                            receiver = &row;
+                            row.mixed = !fitted.pure_gas && !fitted.pure_carrier;
+                            row.request_payload_bytes = owner_plane_key_wire_bytes(key) + 48;
+                            row.reply_payload_bytes = packet.bytes.size();
+                            break;
+                        }
                 if constexpr (Mode != ArithmeticMode::Exact)
                 {
                     if (!fitted.finite_geometry)
                         throw std::invalid_argument("Finite VoF imported an exact interface authority.");
                     if (!fitted.pure_gas && !fitted.pure_carrier)
                     {
+                        WorkObservation receiver_observation(receiver ? &receiver->remeasurement : nullptr);
                         const auto amounts = SimpleFluid::geometry::swept_volume::runtime_phases<Mode>(
                             PLIC::ConvexCellGeometry<Mode>::from_dynamic(cell.finite_geometry)->phases(fitted.gas));
                         const bool gas = cell.phase.gas_volume <= cell.phase.carrier_volume;
@@ -1274,6 +1338,8 @@ std::map<Key, PLIC::PolyhedralInterface> import_requested_planes(const GeneralVo
             if (seen.size() != remote_requests)
                 throw std::invalid_argument("General VoF incomplete plane replies.");
         });
+    if (balance_work)
+        balance_work->fully_deduplicated = diagnostics.cache_admission_denials == 0;
     return result;
 }
 
@@ -1319,8 +1385,10 @@ template long double phase_allowance<ArithmeticMode::Ordinary>(PLIC::DynamicGeom
 template void import_phases<ArithmeticMode::BoundedCertification>(GeneralVoF::Data&);
 template long double phase_allowance<ArithmeticMode::BoundedCertification>(PLIC::DynamicGeometryValue, double);
 template void import_phases<ArithmeticMode::Exact>(GeneralVoF::Data&);
-template void retained_budget<ArithmeticMode::Ordinary>(const GeneralVoF::Data&, std::optional<std::size_t>);
+template void retained_budget<ArithmeticMode::Ordinary>(
+    const GeneralVoF::Data&, std::optional<std::size_t>, std::size_t, std::size_t*);
 template void retained_budget<ArithmeticMode::BoundedCertification>(
-    const GeneralVoF::Data&, std::optional<std::size_t>);
-template void retained_budget<ArithmeticMode::Exact>(const GeneralVoF::Data&, std::optional<std::size_t>);
+    const GeneralVoF::Data&, std::optional<std::size_t>, std::size_t, std::size_t*);
+template void retained_budget<ArithmeticMode::Exact>(
+    const GeneralVoF::Data&, std::optional<std::size_t>, std::size_t, std::size_t*);
 } // namespace SimpleFluid::VoF::general_vof_detail

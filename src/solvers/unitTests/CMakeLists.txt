@@ -55,7 +55,10 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;exact\\;conservation\\;collective")
   elseif(TEST_NAME STREQUAL "testGeneralVoFSolver")
-    simplefluid_discover_tests(${TEST_NAME} PROPERTIES LABELS "vof\\;general_mesh\\;integration" TIMEOUT 1800)
+    simplefluid_discover_tests(${TEST_NAME} TEST_FILTER "-GeneralVoFPartitionExperiment.*"
+      PROPERTIES LABELS "vof\\;general_mesh\\;integration" TIMEOUT 1800)
+    simplefluid_discover_tests(${TEST_NAME} TEST_FILTER "GeneralVoFPartitionExperiment.*"
+      PROPERTIES LABELS "vof\\;partition_experiment\\;measured_work\\;integration" TIMEOUT 1800)
   elseif(TEST_NAME STREQUAL "testGeneralVoFInterfaceFlow")
     simplefluid_discover_tests(${TEST_NAME}
       PROPERTIES LABELS "vof\\;interface\\;conservation\\;transaction" TIMEOUT 300)
@@ -89,6 +92,14 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
     simplefluid_discover_tests(${TEST_NAME})
   endif()
 endforeach()
+
+if(TARGET testGeneralVoFLivePartition)
+  foreach(_live_partition_ranks IN ITEMS 2 4)
+    simplefluid_add_mpi_test(NAME GeneralVoFLivePartition_${_live_partition_ranks}procs
+      TARGET testGeneralVoFLivePartition PROCS ${_live_partition_ranks}
+      LABELS "vof;balance;cleanup;conservation;transaction;empty_rank" TIMEOUT 300)
+  endforeach()
+endif()
 
 # Finite-solvent fixed-reference Bouss bulk/wall sources and rank-coherent setup.
 foreach(_bouss_vapor_ranks IN ITEMS 2 4)
@@ -719,6 +730,16 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
       ARGS "--gtest_filter=GeneralVoFSolverTest.NonzeroSkewCoarseFinePhasePassagePreservesIndependentInventories"
       LABELS "mpi;vof;finite;general_mesh;integration"
       TIMEOUT 1800)
+    simplefluid_add_mpi_test(
+      NAME GeneralVoFPartitionControl_${_finite_projection_procs}procs
+      TARGET testGeneralVoFSolver PROCS ${_finite_projection_procs}
+      ARGS "--gtest_filter=GeneralVoFPartitionExperiment.CanonicalPartitionMeasuredWork"
+      LABELS "mpi;vof;partition_experiment;measured_work" TIMEOUT 1800)
+    simplefluid_add_mpi_test(
+      NAME GeneralVoFLiveMeasuredPartition_${_finite_projection_procs}procs
+      TARGET testGeneralVoFSolver PROCS ${_finite_projection_procs}
+      ARGS "--gtest_filter=GeneralVoFPartitionExperiment.MeasuredLivePartition"
+      LABELS "mpi;vof;partition_experiment;measured_work" TIMEOUT 1800)
     simplefluid_add_mpi_test(
       NAME GeneralVoFFiniteProjection_${_finite_projection_procs}procs
       TARGET testGeneralVoFFlowWorkspace

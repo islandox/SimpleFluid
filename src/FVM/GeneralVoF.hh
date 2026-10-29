@@ -3,6 +3,7 @@
  */
 #pragma once
 #include "FVM/GeneralVoFSurface.hh"
+#include "FVM/GeneralVoFWork.hh"
 #include "FVM/ExactPhaseTransfer.hh"
 #include "FVM/ExperimentalPhaseInventory.hh"
 #include "FVM/PhaseVolumes.hh"
@@ -124,6 +125,8 @@ struct GeneralVoFOptions
     std::size_t byte_budget = 64 * 1024 * 1024, maximum_stencil_cells = 128, maximum_halo_cells = 65536;
     unsigned support_rings = 2;
     GeneralVoFTransportBackend transport_backend = GeneralVoFTransportBackend::SweptPartition;
+    /** Optional rank-local measurements for source-pinned partition forecasts. */
+    bool record_balance_work = false;
     GeneralVoFPhaseCleanupOptions phase_cleanup;
     PLIC::PolyhedralReconstructionOptions reconstruction;
     SimpleFluid::geometry::swept_volume::SweepLimits sweep;
@@ -379,6 +382,7 @@ struct GeneralVoFPreparedTransport
     std::vector<long double> raw_new_mass, raw_new_mass_error, cleanup_mass;
     std::vector<std::array<long double, 3>> cleanup_momentum;
     GeneralVoFTransportDiagnostics diagnostics;
+    std::shared_ptr<const GeneralVoFWorkSample> balance_work;
     std::vector<GeneralVoFFaceChainDiagnostic> face_chain_diagnostics;
     std::vector<GeneralVoFCellClosureDiagnostic> cell_closure_diagnostics;
     /** Solver-attached immutable coefficient preparation, shared by component
@@ -393,6 +397,7 @@ private:
     // The actual family is factory-authenticated, independently of public
     // backend configuration and of whether this rank retains any streams.
     std::shared_ptr<const void> authenticated_source_, authenticated_candidate_;
+    std::shared_ptr<const GeneralVoFWorkSample> authenticated_balance_work_;
     std::uint64_t authenticated_transaction_ = 0, authenticated_source_control_ = 0;
     std::uint64_t authenticated_time_stage_ = 0, authenticated_mesh_generation_ = 0,
                   authenticated_mesh_topology_generation_ = 0;
@@ -549,6 +554,10 @@ public:
     [[nodiscard]] bool accepted_unchanged() const noexcept;
     /** Collective source and native-publication authentication. */
     void validate_prepared_transport_source(const GeneralVoFPreparedTransport&) const;
+    /** Collective authentication of this exact prepared candidate and its
+     * retained predecessor on an unchanged native layout. Past measurements
+     * remain source-bound; using them for this candidate is a forecast. */
+    void validate_prepared_transport_candidate(const GeneralVoFPreparedTransport&) const;
     /** Collective on the opaque transfer's source communicator. Authenticate
      * this actual adopted publication without exporting/reconstructing capsules. */
     void validate_transfer_target(const ExactPhaseTransferResult&) const;
@@ -659,6 +668,7 @@ public:
         std::vector<GeneralVoFFiniteDonorBudget> numerical_support_budgets_;
         std::vector<GeneralVoFDirectedStream> unbound_streams_;
         GeneralVoFTransportDiagnostics unbound_diagnostics_;
+        std::shared_ptr<const GeneralVoFWorkSample> unbound_balance_work_;
         std::vector<GeneralVoFFaceContribution> faces_;
         std::vector<GeneralVoFTransfer> transfers_;
         std::vector<GeneralVoFDonorBudget> budgets_;

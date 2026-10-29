@@ -41,6 +41,10 @@ void GeneralVoFSolver::repartition(std::span<const int> destinations)
 {
     impl_->remap(true, destinations, {}, {});
 }
+GeneralVoFRebalanceResult GeneralVoFSolver::rebalance(const VoF::GeneralVoFBalanceOptions& options)
+{
+    return impl_->rebalance(options);
+}
 double GeneralVoFSolver::time() const noexcept
 {
     return impl_->accepted->diagnostics.time;

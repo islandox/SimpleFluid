@@ -16,6 +16,7 @@ set(SIMPLEFLUID_GENERAL_VOF_COMPONENT_SOURCES
     details/GeneralVoF/FaceTransfer.cc
     details/GeneralVoF/NodeVelocity.cc
     explicit_instantiation/GeneralVoF/OwnedFaceTransfer.cc
+    details/GeneralVoF/OwnedMigration.cc
     explicit_instantiation/GeneralVoF/PhaseStorage.cc
     details/GeneralVoF/exact/Diagnostics.cc
     details/GeneralVoF/exact/PhaseStorage.cc
