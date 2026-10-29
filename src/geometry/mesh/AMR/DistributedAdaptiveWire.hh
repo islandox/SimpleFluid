@@ -5,23 +5,44 @@
 #include "geometry/mesh/AMR/DistributedAdaptiveTypes.hh"
 #include "parallel/SparseOwnerExchange.hh"
 #include <Teuchos_CommHelpers.hpp>
+#include <algorithm>
 #include <exception>
 #include <stdexcept>
+#include <string>
 namespace SimpleFluid::Meshes::AMR::adaptive_detail
 {
 struct Budget
 {
-    std::size_t limit, used = 0;
+    std::size_t limit, used = 0, peak = 0, cumulative = 0;
     void add(std::size_t bytes)
     {
         if (bytes > limit - used)
-            throw std::invalid_argument("Distributed adaptive payload budget exhausted.");
+            throw std::invalid_argument("Distributed adaptive payload budget exhausted: used=" + std::to_string(used) +
+                                        " request=" + std::to_string(bytes) + " limit=" + std::to_string(limit) + ".");
         used += bytes;
+        peak = std::max(peak, used);
+        cumulative += bytes;
     }
     void packet(std::size_t payload)
     {
         add(sizeof(OwnerPacket));
         add(payload);
+    }
+    /** Admit vector reallocation while its previous allocation is still live.
+     * Release the old charge only after reserve has destroyed that allocation. */
+    template<class T> void append_capacity(std::vector<T>& values)
+    {
+        if (values.size() < values.capacity())
+            return;
+        const auto previous = values.capacity();
+        if (previous > limit / sizeof(T) / 2)
+            throw std::invalid_argument("Distributed adaptive vector capacity budget exhausted.");
+        const auto next = previous ? 2 * previous : 1;
+        add(next * sizeof(T));
+        values.reserve(next);
+        if (values.capacity() != next)
+            throw std::invalid_argument("Distributed adaptive vector capacity differs from admission.");
+        used -= previous * sizeof(T);
     }
 };
 struct Writer

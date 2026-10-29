@@ -133,5 +133,49 @@
     "accounting": "actual signed, absolute and largest endpoint corrections, event counts; raw/cleaned mass and declared momentum corrections reported separately",
     "physical_acceptance": "original physical drift includes cleanup; original oracle, endpoints, tolerances, resources and backend identity unchanged",
     "support": "Ordinary SweptPartition and GeometricFace support cleanup; the qualification switch enables GeometricFace only and DonorCell remains raw. Without the switch controlled fixtures explicitly disable cleanup. Ownership-only migration preserves cleanup state; cleanup-enabled coupled AMR/remap with transported auxiliary channels remains unsupported"
+  },
+  "single_interface_baseline": {
+    "test": "GeneralVoFMotionAccuracy.SingleInterfaceClosedShearGeometricFace",
+    "backends": [
+      "GeometricFace",
+      "SweptPartition"
+    ],
+    "geometry": "one logical plane X+2*U*t*Y=.5+U*t, physical x=X+.25*Y, U=1/16; gas on lower-X side; full z extrusion",
+    "mesh": "existing skew coarse/fine 4x2x2 roots with central refinement; includes remote and empty-owner support in MPI2/MPI4",
+    "motion": "closed solenoidal streamfunction U*f(X)*Y*(1-Y), f=4X below .25, 1 on [.25,.75],4(1-X) above .75; exact interface remains in core",
+    "endpoint": 0.125,
+    "steps": 8,
+    "timestep": 0.015625,
+    "oracle": "independent test-local polygon half-plane clipping/shoelace; separate gas/carrier integration; reports phase L1 and maximum fraction error, raw inventory drift, theta",
+    "qualification": "separate genuine single-interface baseline; does not replace PlanarPatch four-edge stress or full Q2 motion cases",
+    "execution": "opt-in SIMPLEFLUID_RUN_ALGEBRAIC_MOTION=1; original fixture endpoint preserved; cleanup disabled",
+    "acceptance": {
+      "each_phase_relative_drift": 2e-11,
+      "endpoint_relative_shape_error": 0.02,
+      "endpoint_centroid_error_in_minimum_interface_cell_widths": 0.25,
+      "GeometricFace_fallback_streams": 0
+    },
+    "centroid_oracle": "s=U*t; meanY=.5-s/3; meanXphysical=.25+s*s/3+.25*meanY; meanZ=.5; compare cell-centered numerical phase moments separately from cell-volume integration"
+  },
+  "first_repair_endpoint": {
+    "test": "GeneralVoFMotionAccuracy.OriginalPlanarPatchN16Endpoint",
+    "case": "PlanarPatch",
+    "backend": "GeometricFace",
+    "resolution": 16,
+    "courant": 0.5,
+    "endpoint": 1,
+    "acceptance": "original midpoint, inventory and zero-fallback gates; report shape and centroid; finest-grid shape/order gates require separate N32/N64 campaign"
+  },
+  "required_N32_endpoint_diagnostic": {
+    "test": "GeneralVoFMotionAccuracy.RequiredPlanarPatchN32EndpointDiagnostic",
+    "case": "PlanarPatch",
+    "backend": "GeometricFace",
+    "mesh": "Uniform",
+    "resolution": 32,
+    "courant": 0.5,
+    "endpoint": 1,
+    "shape_gate": 0.02,
+    "centroid_gate_interface_widths": 0.25,
+    "scope": "separately labelled extraction of the existing N32 case with original finest-case limits additionally checked; does not erase failed N16 or qualify N64/refinement order"
   }
 }

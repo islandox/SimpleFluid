@@ -24,6 +24,13 @@ struct PlaneAreaMeasure
     long double area = 0, numerical_error_estimate = 0;
     PlaneMeasureStatus status = PlaneMeasureStatus::Resolved;
 };
+/** A strict side for every original face vertex and offset endpoint. */
+enum class WholeFacePlaneSide
+{
+    UnknownOrContact,
+    StrictNegative,
+    StrictPositive
+};
 /** Prepared immutable original boundary. Queries clip individual original face
  * loops, integrate them with a reference on the cut plane, and discard them.
  * No cap, closed clipped polyhedron, support identities, or moments are built.
@@ -33,6 +40,11 @@ class OrdinaryPlaneMeasure
 public:
     explicit OrdinaryPlaneMeasure(const ConvexCellGeometry<ArithmeticMode::Ordinary>&);
     [[nodiscard]] PlaneVolumeMeasure below(const GeometryHalfspace&, bool section_area = false) const;
+    /** Evaluate original Ordinary vertices against both finite ordered offsets.
+     * Contact or an unresolved sign yields UnknownOrContact. Malformed inputs
+     * reject; this witness does not certify construction provenance. */
+    [[nodiscard]] static WholeFacePlaneSide strict_face_side(
+        std::span<const Point<ArithmeticMode::Ordinary>>, const GeometryHalfspace&, std::array<long double, 2> offsets);
 
 private:
     GeometryPoint origin_{};

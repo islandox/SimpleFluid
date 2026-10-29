@@ -839,6 +839,10 @@ foreach(PROCS 2 4)
     TARGET testGeneralVoFFaceFlow PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFFaceFlow.HighDensityRatioSkewCoarseFinePassage"
     LABELS "mpi;vof;qualification" TIMEOUT 600)
+  simplefluid_add_mpi_test(NAME GeneralVoFDonorCellBaseline_${PROCS}procs
+    TARGET testGeneralVoFFaceFlow PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFaceFlow.DonorCellHighDensityRatioSkewCoarseFinePassage"
+    LABELS "mpi;vof;qualification" TIMEOUT 600)
   simplefluid_add_mpi_test(NAME GeneralVoFFaceLongFlow_${PROCS}procs
     TARGET testGeneralVoFFaceFlow PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFFaceFlow.HighDensityLongHorizon*"
@@ -861,7 +865,11 @@ foreach(PROCS 2 4)
   endforeach()
   simplefluid_add_mpi_test(NAME GeneralVoFAlgebraicReadiness_${PROCS}procs
     TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
-    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.OrdinaryAlgebraicReadiness*"
+    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.OrdinaryAlgebraicReadiness*:GeneralVoFFlowWorkspaceTest.OrdinaryCumulativeOccupancyProjection*"
+    LABELS "mpi;vof;projection;collective;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFOneSidedWallPressure_${PROCS}procs
+    TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.DensityJumpWallPressure*:GeneralVoFFlowWorkspaceTest.InactiveCapillarityDoesNotRequireUnusedBoundaryGradientSupport"
     LABELS "mpi;vof;projection;collective;empty_rank" TIMEOUT 180)
   simplefluid_add_mpi_test(NAME GeneralVoFAlgebraicLimitedMomentum_${PROCS}procs
     TARGET testConservativeVoFTransport PROCS ${PROCS}
@@ -875,6 +883,12 @@ foreach(PROCS 2 4)
     TARGET testGeneralVoFFaceCapillary PROCS ${PROCS}
     ARGS "--gtest_filter=AlgebraicCapillary/GeneralVoFFaceCapillary.*"
     LABELS "mpi;vof;capillary;qualification" TIMEOUT 1800)
+  foreach(_capillary_backend IN ITEMS DonorCell GeometricFace)
+    simplefluid_add_mpi_test(NAME GeneralVoFFaceCapillaryEndpoint_${_capillary_backend}_${PROCS}procs
+      TARGET testGeneralVoFFaceCapillary PROCS ${PROCS}
+      ARGS "--gtest_filter=AlgebraicCapillary/GeneralVoFFaceCapillary.NativeCylinderRetainsCompletePhysicalEndpoint/${_capillary_backend}"
+      LABELS "mpi;vof;capillary;qualification" TIMEOUT 1800)
+  endforeach()
   simplefluid_add_mpi_test(NAME GeneralVoFFaceCapillarySpatial_${PROCS}procs
     TARGET testGeneralVoFFaceCapillary PROCS ${PROCS}
     ARGS "--gtest_filter=AlgebraicCapillary/GeneralVoFFaceCapillary.SpatialPartitionRetainsCompleteCurvedSupport/*"

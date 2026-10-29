@@ -29,7 +29,8 @@ enum class Category
     ResourceLimit,
     Metadata,
     Arithmetic,
-    Resolution
+    Resolution,
+    Optimizer
 };
 enum class Field : std::uint64_t
 {
@@ -51,7 +52,8 @@ enum class Field : std::uint64_t
     Control = 32768,
     Cut = 65536,
     Resolution = 131072,
-    CellOwner = 262144
+    CellOwner = 262144,
+    AngularFit = 524288
 };
 /** Fixed-size wire record. A field is meaningful only when its presence bit is set.
  * Construction is an ordinal within the identified face, never a fabricated global ID.
@@ -69,6 +71,13 @@ struct Record
     unsigned retry = 0;
     long double scale = 0, volume_budget = 0, control = 0;
     std::array<long double, 12> simplex{};
+    // Fixed collective diagnostic capacity; total/retained counts explicitly
+    // expose truncation for a caller-configured stencil larger than 128.
+    std::array<std::uint64_t, 128> fit_stencil_ids{};
+    std::uint64_t fit_stencil_cells = 0, fit_retained_ids = 0, fit_clip_evaluations = 0;
+    std::array<double, 3> fit_normal{}, fit_best_normal{};
+    double fit_rms = 0, fit_best_rms = 0, fit_angular_step = 0, fit_difference_scale = 0, fit_condition = 0;
+    unsigned fit_iterations = 0;
     std::array<char, 80> stage{};
     std::array<char, 384> message{};
     [[nodiscard]] bool has(Field field) const noexcept { return (present & std::uint64_t(field)) != 0; }
@@ -139,6 +148,8 @@ inline const char* category_name(Category category) noexcept
             return "arithmetic";
         case Category::Resolution:
             return "resolution";
+        case Category::Optimizer:
+            return "optimizer";
         default:
             return "unknown";
     }
@@ -179,6 +190,29 @@ public:
                 21, p[1], 21, p[2], 21, p[3], 21, p[4], 21, p[5], 21, p[6], 21, p[7], 21, p[8], 21, p[9], 21, p[10], 21,
                 p[11]);
         }
+        if (record.has(Field::AngularFit))
+        {
+            auto used = std::char_traits<char>::length(text_.data());
+            std::snprintf(text_.data() + used, text_.size() - used,
+                " fit={normal=(%.17g,%.17g,%.17g),rms=%.17g,step=%.17g,fd=%.17g,condition=%.17g,iterations=%u,clips=%llu} stencil_ids=[",
+                record.fit_normal[0], record.fit_normal[1], record.fit_normal[2], record.fit_rms,
+                record.fit_angular_step, record.fit_difference_scale, record.fit_condition, record.fit_iterations,
+                static_cast<unsigned long long>(record.fit_clip_evaluations));
+            const auto count = std::min<std::size_t>(record.fit_retained_ids, record.fit_stencil_ids.size());
+            std::size_t printed = 0;
+            for (; printed < count; ++printed)
+            {
+                used = std::char_traits<char>::length(text_.data());
+                if (text_.size() - used < 96)
+                    break;
+                std::snprintf(text_.data() + used, text_.size() - used, printed ? ",%llu" : "%llu",
+                    static_cast<unsigned long long>(record.fit_stencil_ids[printed]));
+            }
+            used = std::char_traits<char>::length(text_.data());
+            std::snprintf(text_.data() + used, text_.size() - used,
+                "] (%zu/%llu printed; complete retained IDs available in record)", printed,
+                static_cast<unsigned long long>(record.fit_stencil_cells));
+        }
     }
     [[nodiscard]] const char* what() const noexcept override { return text_.data(); }
     [[nodiscard]] const Record& record() const noexcept override { return record_; }
@@ -189,6 +223,22 @@ private:
     std::exception_ptr cause_;
     std::array<char, 1536> text_{};
 };
+inline void copy_fit_diagnostics(Record& record, const PLIC::PolyhedralFitDiagnostics& d) noexcept
+{
+    record.mark(Field::AngularFit);
+    record.fit_stencil_cells = d.stencil_ids.size();
+    record.fit_retained_ids = std::min(d.stencil_ids.size(), record.fit_stencil_ids.size());
+    std::copy_n(d.stencil_ids.begin(), record.fit_retained_ids, record.fit_stencil_ids.begin());
+    record.fit_normal = d.normal;
+    record.fit_best_normal = d.best_normal;
+    record.fit_rms = d.rms;
+    record.fit_best_rms = d.best_rms;
+    record.fit_angular_step = d.angular_step;
+    record.fit_difference_scale = d.finite_difference_scale;
+    record.fit_condition = d.condition;
+    record.fit_iterations = d.iterations;
+    record.fit_clip_evaluations = d.clip_evaluations;
+}
 inline void classify(Record& record, const std::exception_ptr& error) noexcept
 {
     try
@@ -206,11 +256,28 @@ inline void classify(Record& record, const std::exception_ptr& error) noexcept
         record.mark(Field::Resolution);
         copy(record.message, failure.what());
     }
+    catch (const PLIC::PolyhedralFitFailure& failure)
+    {
+        record.geometry_code = int(failure.code());
+        record.mark(Field::GeometryCode);
+        record.category = failure.code() == PLIC::GeometryErrorCode::ResourceLimit ? Category::ResourceLimit
+            : failure.code() == PLIC::GeometryErrorCode::UnresolvedArithmetic ? Category::Arithmetic
+            : failure.reason() == PLIC::PolyhedralFitFailure::Reason::Geometry ? Category::Metadata
+            : Category::Optimizer;
+        const auto& d = failure.diagnostics();
+        copy_fit_diagnostics(record, d);
+        std::snprintf(record.message.data(), record.message.size(),
+            "%s n=(%.17g,%.17g,%.17g) rms=%.17g step=%.17g fd=%.17g condition=%.17g iterations=%u clips=%zu cells=%zu",
+            failure.what(), d.normal[0], d.normal[1], d.normal[2], d.rms, d.angular_step,
+            d.finite_difference_scale, d.condition, d.iterations, d.clip_evaluations, d.stencil_ids.size());
+    }
     catch (const PLIC::PolyhedralResolutionRequired& failure)
     {
         record.category = Category::Resolution;
         record.resolution_reason = int(failure.assessment().reason);
         record.mark(Field::Resolution);
+        if (failure.has_fit_diagnostics())
+            copy_fit_diagnostics(record, failure.diagnostics());
         copy(record.message, failure.what());
     }
     catch (const PLIC::GeometryError& failure)

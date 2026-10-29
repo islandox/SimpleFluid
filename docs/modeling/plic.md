@@ -59,7 +59,38 @@ retained finite interface or an explicitly declared pure-phase geometry.
 Declared geometry is distinct from inventory: a declaration does not authorize
 deleting a trace amount. For inferred geometry, an exactly zero phase amount
 selects the pure-cell offset path. A mixed cell gathers neighbors through the
-configured topology support rings and enters reconstruction.
+configured topology support rings and enters reconstruction. Finite reconstruction
+uses a separate, deterministic selection: gather a complete canonical-face first
+ring in persistent-key order and assess its three-dimensional weighted-LS rank and
+infinity-norm condition. The angular-fit branch additionally requires observed
+mixed-neighbor support for both angular directions: project normalized neighbor
+centroid displacements onto the weighted-gradient seed's tangent plane and check
+the two-dimensional Gram matrix against the existing rank and `maximum_condition`
+gates. A neighbor contributes only when both phases are positive and its supplied
+geometry is observed mixed. The `GeneralVoF` adapter excludes pure declarations
+and retained pure capsules from that evidence; independent positive traces do
+not invent interface support. The existing `minimum_optimized_phase_length_ratio`
+exemption remains target-only. The target fixes the offset and adds no
+angular displacement row. Pure neighbors can constrain an explicit plane fit but
+do not prove that the observed interface extends in an independent direction.
+
+Expand by complete rings only when geometric coverage, conditioning, or this
+observed angular support requires it, up to the unchanged configured ring and
+resource limits. The selection performs no clipping and evaluates no plane-model
+residual. A deficient final ring rejects with a typed support reason; it never
+switches an angular-eligible case to a gradient fallback. Weak-majority and
+subthreshold-target gradient-only policies remain unchanged. A geometry-selected
+ring with ambiguous phase direction also rejects. The complete halo remains available to curvature,
+contact and other non-reconstruction consumers, including remote owners and all
+canonical coarse/fine covering faces; this does not reduce `support_rings`.
+
+`assess_transport_support()` implements this stronger complete-ring caller
+contract. The standalone explicit-stencil `reconstruct()` kernel retains its
+separate clipping/optimizer/model-defect contract, including stencils deliberately
+used to demonstrate a one-plane contradiction. Observed tangent support is a
+preflight requirement, not a certificate of subsequent clipped-volume optimizer
+convergence; the existing angular arithmetic, conditioning and convergence gates
+still apply.
 
 Mixed-cell admission checks the target and stencil before selecting an orientation method:
 
@@ -213,14 +244,58 @@ After those checks, angular convergence requires either the stencil RMS
 residual to meet `fit_tolerance` or the proposed step norm to meet
 `orientation_tolerance`. Otherwise, a line search tries scales from `1` down to
 `1/128` by successive halving, renormalizes the candidate normal, and accepts
-only a strict decrease in $J$. No improving candidate or an exhausted iteration
+only a strict decrease in $J$. When the qualified Gauss-Newton step exceeds one,
+those eight values instead bound a dogleg trial between the Cauchy and
+Gauss-Newton steps. Each smaller radius recomputes the direction from the same
+qualified normal equations. This prevents a poorly directed, oversized step
+from exhausting the search without testing useful local directions.
+
+Qualification uses the existing finer probe scales `5e-5` and `2.5e-5` when
+the search stalls or a nonconverged step is smaller than its probe scale.
+If the qualified Gauss-Newton linear model can already fit the residual vector
+within `fit_tolerance`, its direction remains authoritative for that iteration.
+This protects consistent, nearly zero-residual solves from slower curvature
+steps. Otherwise, a nonconverged qualified normal may try one residual-curvature
+Newton correction at its current probe scale. Four diagonal probes supplement the
+existing axial probes to estimate $J_r^T J_r+\sum_i r_i\nabla^2 r_i$.
+The optional Hessian must be positive definite, satisfy the existing condition
+bound, and give a descent step no larger than one in tangent coordinates. Only strict objective
+decrease accepts that trial; recoverable arithmetic or nondecrease leaves the
+ordinary search available. An improving trial must also satisfy the unchanged
+observability and conditioning gates before becoming the current iterate; a
+trial failing those gates leaves backtracking available. An initially or
+currently unobservable normal still rejects. These extra probes consume the same
+clip budget. Fatal geometry errors still propagate. Accepted trials are
+qualified again on the next outer iteration: the original Gauss-Newton step,
+not a shortened trial step, governs convergence and reported evidence.
+
+Every probe and optional trial shares the original clip budget; the iteration
+and resource caps are unchanged. Exhausting those scales or the iteration
 budget rejects the fit.
+The nominal squared-residual merit retains wide measured residuals and uses
+compensated accumulation before strict comparison. The derivative vector remains
+binary64. This avoids premature narrowing of near-equal objective totals; it
+does not relax stationarity or provide additional significand bits on platforms
+where `long double` equals `double`.
+`PolyhedralFitFailure` retains stencil IDs, final/best normal, RMS, angular step,
+finite-difference scale, condition, iterations and clip counts. Nonstationarity
+does not establish plane-model incompatibility. Collective diagnostics label it
+as an optimizer failure and preserve the typed local cause on failing ranks.
 
 A converged optimizer must also satisfy `maximum_model_residual`. Curved
 interfaces can have a nonzero plane-model defect even at an angular optimum.
 Exceeding this separate bound produces an `UnresolvedPlaneModel` refinement
 request. Optimizer convergence therefore does not establish adequate spatial
 resolution.
+
+A finite rectangle illustrates why support selection precedes the objective:
+a target cut by one physical edge can have a two-ring halo spanning other
+rectangle edges. A converged excessive residual on that broad halo diagnoses
+that selected neighborhood model; it is not proof that the target itself
+requires multiple planes. The complete first-ring policy retains the unchanged
+`0.2` model-defect bound. The genuine single-interface closed-shear fixture and
+finite-rectangle `PlanarPatch` stress case have independent polygon oracles and
+remain distinct verification problems.
 
 ### Inner plane-offset solve
 

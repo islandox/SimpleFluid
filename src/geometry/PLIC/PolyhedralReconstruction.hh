@@ -4,8 +4,12 @@
 #pragma once
 #include "SimpleFluidExport.hh"
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "geometry/PLIC/GeometryError.hh"
 #include <span>
 #include <stdexcept>
+#include <cstdint>
+#include <limits>
+#include <vector>
 
 namespace SimpleFluid::PLIC
 {
@@ -17,6 +21,32 @@ template<ArithmeticMode Mode> struct PolyhedralPhaseSample
 {
     ConvexGeometryPtr<Mode> geometry;
     double gas_volume = 0, carrier_volume = 0;
+    std::uint64_t id = std::numeric_limits<std::uint64_t>::max(); ///< Optional caller's persistent cell ID.
+    /** Transport support evidence only. Independent inventory on validated pure
+     * geometry is not an observed mixed-interface angular constraint. */
+    bool observed_mixed = true;
+};
+/** Evidence from the final retained (and best accepted) angular iterate. */
+struct PolyhedralFitDiagnostics
+{
+    GeometryPoint normal{}, best_normal{};
+    double rms = 0, best_rms = 0, angular_step = 0, finite_difference_scale = 0, condition = 0;
+    unsigned iterations = 0;
+    std::size_t clip_evaluations = 0;
+    std::vector<std::uint64_t> stencil_ids;
+};
+/** Numerical nonstationarity is distinct from an incompatible plane model. */
+class SIMPLEFLUID_FVM_EXPORT PolyhedralFitFailure : public GeometryError
+{
+public:
+    enum class Reason { Nonstationary, IterationLimit, Unobservable, Geometry };
+    PolyhedralFitFailure(Reason, PolyhedralFitDiagnostics);
+    PolyhedralFitFailure(Reason, const GeometryError&, PolyhedralFitDiagnostics);
+    [[nodiscard]] Reason reason() const noexcept { return reason_; }
+    [[nodiscard]] const PolyhedralFitDiagnostics& diagnostics() const noexcept { return diagnostics_; }
+private:
+    Reason reason_;
+    PolyhedralFitDiagnostics diagnostics_;
 };
 /** Directional admission, separate from arithmetic acceptance and spatial
  * convergence qualification. A failed assessment requests fresh support. */
@@ -30,7 +60,9 @@ struct PolyhedralResolutionAssessment
         UnresolvedPlaneModel,
         RankDeficientStencil,
         IllConditionedStencil,
-        NoDirectionalSignal
+        NoDirectionalSignal,
+        RankDeficientAngularSupport,
+        IllConditionedAngularSupport
     };
     Reason reason = Reason::Admitted;
     double local_cell_span = 0, requested_cell_span = 0;
@@ -38,6 +70,10 @@ struct PolyhedralResolutionAssessment
     /** Dimensionless LS conditioning and direction strength. Uncertainty is a
      * propagated roundoff estimate, not a certified enclosure. */
     double stencil_condition = 0, directional_strength = 0, directional_uncertainty = 0;
+    /** Transport-only observed mixed-neighbor support in the seed tangent
+     * plane. Not a clipped-volume optimizer convergence certificate. */
+    double angular_support_condition = 0;
+    std::size_t angular_support_cells = 0;
     /** True only after directional admission and sufficient phase support. */
     bool angular_fit_eligible = false;
     std::size_t stencil_cells = 0;
@@ -49,10 +85,15 @@ class SIMPLEFLUID_FVM_EXPORT PolyhedralResolutionRequired : public std::invalid_
 {
 public:
     explicit PolyhedralResolutionRequired(PolyhedralResolutionAssessment);
+    PolyhedralResolutionRequired(PolyhedralResolutionAssessment, PolyhedralFitDiagnostics);
     [[nodiscard]] const PolyhedralResolutionAssessment& assessment() const noexcept { return assessment_; }
+    [[nodiscard]] const PolyhedralFitDiagnostics& diagnostics() const noexcept { return diagnostics_; }
+    [[nodiscard]] bool has_fit_diagnostics() const noexcept { return has_fit_diagnostics_; }
 
 private:
     PolyhedralResolutionAssessment assessment_;
+    PolyhedralFitDiagnostics diagnostics_;
+    bool has_fit_diagnostics_ = false;
 };
 struct PolyhedralReconstructionOptions
 {
@@ -123,6 +164,16 @@ public:
     /** Read-only preflight of rank, conditioning and meaningful direction.
      * Majority-phase support selects angular eligibility rather than admission. */
     [[nodiscard]] static PolyhedralResolutionAssessment assess_resolution(const PolyhedralPhaseSample<Mode>&,
+        std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
+    /** Geometry-only complete-ring selection preflight. No fractions, signal,
+     * phase support or neighbor volume-model residual determine selection. */
+    [[nodiscard]] static PolyhedralResolutionAssessment assess_stencil_geometry(const PolyhedralPhaseSample<Mode>&,
+        std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
+    /** Complete-ring transport admission additionally requires two resolved
+     * observed mixed-neighbor directions for the angular branch. This contains
+     * no clipping or model-residual evaluation. Explicit-stencil reconstruct()
+     * retains its separate optimizer/model contract. */
+    [[nodiscard]] static PolyhedralResolutionAssessment assess_transport_support(const PolyhedralPhaseSample<Mode>&,
         std::span<const PolyhedralPhaseSample<Mode>>, PolyhedralReconstructionOptions = {});
     /** Offset utility for a supplied normal. Physical interface admission
      * belongs to reconstruct()/assess_resolution(). */

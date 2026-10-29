@@ -1,5 +1,6 @@
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "geometry/PLIC/GeometryError.hh"
+#include "geometry/PLIC/details/ordinary/Predicates.hh"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -97,6 +98,37 @@ void check_result(long double measure, long double error)
             GeometryErrorCode::UnresolvedArithmetic, "Ordinary plane measure has negative signed volume.");
 }
 } // namespace
+WholeFacePlaneSide OrdinaryPlaneMeasure::strict_face_side(std::span<const Point<ArithmeticMode::Ordinary>> vertices,
+    const GeometryHalfspace& plane, std::array<long double, 2> offsets)
+{
+    if (vertices.size() < 3 || !std::isfinite(offsets[0]) || !std::isfinite(offsets[1]) || offsets[0] > offsets[1])
+        throw std::invalid_argument("Ordinary strict face side requires a face and finite ordered offsets.");
+    (void) normal(plane);
+    for (const auto& point : vertices)
+        for (const auto value : point.value)
+            if (!std::isfinite(value))
+                throw std::invalid_argument("Ordinary strict face side has nonfinite coordinates.");
+    namespace predicates = details::ordinary_predicates;
+    predicates::Point n{}, anchor{};
+    for (unsigned a = 0; a < 3; ++a)
+    {
+        n[a] = plane.normal[a];
+        anchor[a] = plane.anchor[a];
+    }
+    bool negative = true, positive = true;
+    for (const auto& point : vertices)
+        for (const auto offset : offsets)
+        {
+            if (!negative && !positive)
+                break;
+            const auto sign = predicates::plane_distance(point.value, n, anchor, offset).sign;
+            negative = negative && sign == predicates::Sign::Negative;
+            positive = positive && sign == predicates::Sign::Positive;
+        }
+    return negative ? WholeFacePlaneSide::StrictNegative
+        : positive ? WholeFacePlaneSide::StrictPositive : WholeFacePlaneSide::UnknownOrContact;
+}
+
 OrdinaryPlaneMeasure::OrdinaryPlaneMeasure(const ConvexCellGeometry<ArithmeticMode::Ordinary>& cell)
     : origin_(cell.origin()), faces_(cell.faces())
 {

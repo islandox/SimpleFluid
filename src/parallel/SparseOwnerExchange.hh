@@ -32,4 +32,10 @@ struct OwnerExchange
  * callers requiring larger transfers must schedule bounded collective rounds. */
 [[nodiscard]] OwnerExchange exchange_owner_packets(
     std::span<const OwnerPacket>, Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget);
+/** Consumes packet storage. Collective rounds containing only local deliveries
+ * move their authenticated packets directly, admitting actual vector/payload
+ * capacities before transfer. Remote rounds retain the transport above and
+ * release consumed source storage before returning. */
+[[nodiscard]] OwnerExchange consume_owner_packets(
+    std::vector<OwnerPacket>&&, Teuchos::RCP<const Teuchos::Comm<int>>, std::size_t byte_budget);
 } // namespace SimpleFluid

@@ -11,7 +11,8 @@ namespace
 {
 constexpr auto mode = ArithmeticMode::Ordinary;
 constexpr auto original_face = std::numeric_limits<std::uint64_t>::max();
-constexpr std::uint64_t protocol = 0x5346434150504c02ULL;
+constexpr auto full_support_plane = original_face - 1;
+constexpr std::uint64_t protocol = 0x5346434150504c03ULL;
 using Geometry = PLIC::ConvexCellGeometry<mode>;
 using Wide = std::array<long double, 3>;
 using Planes = std::map<Key, PLIC::PolyhedralInterface>;
@@ -58,8 +59,9 @@ bool complete_stencil(const GeneralVoF::Data& data, const Key& target, std::set<
     };
     insert(target);
     std::set<Key> front{target};
-    // Match reconstruction_stencil's entire admitted graph neighborhood, while
-    // requiring full cells rather than silently truncating unknown neighbors.
+    // Authenticate a native-plane witness against the entire configured support
+    // neighborhood. This stronger capillary-only check requires full cells even
+    // when transport reconstruction selects an earlier complete geometric ring.
     for (unsigned ring = 0; ring < data.options.support_rings; ++ring)
     {
         std::set<Key> next;
@@ -228,14 +230,33 @@ bool same_plane(const Candidate& a, const Candidate& b)
 std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
     const GeneralVoF::Data& data, const Planes& original, const Key& target, std::size_t retained_bytes)
 {
-    const auto& initial = original.at(target);
-    if (geometric_phase(data.cells.at(target), initial))
+    auto initial = original.at(target);
+    const auto& target_cell = data.cells.at(target);
+    SimpleFluid::detail::vof_failure::Scope context("capillary_plane_reconstruction");
+    context.record.cell = target_cell.gid;
+    context.record.cell_owner = target_cell.owner;
+    context.record.mark(SimpleFluid::detail::vof_failure::Field::Cell);
+    context.record.mark(SimpleFluid::detail::vof_failure::Field::CellOwner);
+    if (geometric_phase(target_cell, initial))
         return {original_face, initial};
     wire::Budget budget{data.options.byte_budget};
     budget.add(retained_bytes);
     std::set<Key> stencil;
     if (!complete_stencil(data, target, stencil, budget))
-        return {original_face, initial};
+        throw GeneralVoFSurfaceResolutionError(GeneralVoFSurfaceResolutionReason::IncompleteSupport,
+            "Capillary plane reconstruction requires its complete physical support.");
+    // Curvature and transport have distinct geometric support requirements.
+    // Always estimate capillary orientation from the complete configured rings;
+    // a locally full-rank transport stencil need not resolve surface bending.
+    // An adopted interface capsule remains the immutable geometric authority.
+    const auto initial_choice = target_cell.retained_interface ? original_face : full_support_plane;
+    if (!target_cell.retained_interface)
+    {
+        budget.add(2 * (stencil.size() - 1) * sizeof(PLIC::PolyhedralPhaseSample<mode>));
+        const auto support = reconstruction_stencil<mode>(data, target, true);
+        initial = PLIC::PolyhedralReconstruction<mode>::reconstruct(
+            reconstruction_sample<mode>(target_cell), support, data.options.reconstruction);
+    }
     std::vector<const AMR::AdaptiveTile*> faces;
     for (const auto& tile : data.topology->surface_tiles)
         if (stencil.contains(tile.first) || (tile.second && stencil.contains(*tile.second)))
@@ -279,7 +300,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
         if (!valid)
             continue;
         if (selected && !same_plane(*selected, *candidate))
-            return {original_face, initial};
+            return {initial_choice, initial};
         if (!selected)
         {
             budget.add(candidate->support.size());
@@ -289,7 +310,7 @@ std::pair<std::uint64_t, PLIC::PolyhedralInterface> choose_plane(
         }
     }
     if (!selected)
-        return {original_face, initial};
+        return {initial_choice, initial};
     // A native witness is a separately admitted plane, not the old angular
     // optimizer result. Retain only the unchanged spatial-resolution evidence;
     // optimizer condition/iterations/convergence stay at their neutral defaults.
@@ -335,28 +356,47 @@ void release(std::vector<OwnerPacket>& packets)
 }
 } // namespace
 
-Planes import_capillary_planes(const GeneralVoF::Data& data, const Planes& original)
+Planes import_capillary_planes(const GeneralVoF::Data& data)
 {
     const auto comm = data.hierarchy->communicator();
     const auto rank = comm->getRank();
     const auto limit = data.options.byte_budget;
-    Planes result;
+    Planes original, result;
     std::map<Key, std::uint64_t> choices;
     std::size_t retained_bytes = 0, requested_bytes = 0;
     wire::collective(*comm,
         [&]
         {
             current(data);
-            if (data.options.arithmetic_mode != mode || original.size() != data.cells.size())
+            if (data.options.arithmetic_mode != mode)
                 throw std::invalid_argument("Capillary plane source mode or complete plane catalog differs.");
             wire::Budget budget{limit};
             for (const auto& [key, cell] : data.cells)
             {
-                const auto& initial = original.at(key);
+                PLIC::PolyhedralInterface initial;
+                if (cell.retained_interface)
+                    initial = *cell.retained_interface;
+                else
+                {
+                    initial.finite_geometry = true;
+                    initial.pure_gas =
+                        cell.declaration == GeneralVoFPhaseGeometry::PureGas ||
+                        (cell.declaration == GeneralVoFPhaseGeometry::Infer && cell.phase.carrier_volume == 0);
+                    initial.pure_carrier =
+                        cell.declaration == GeneralVoFPhaseGeometry::PureCarrier ||
+                        (cell.declaration == GeneralVoFPhaseGeometry::Infer && cell.phase.gas_volume == 0);
+                    if (initial.pure_gas || initial.pure_carrier)
+                    {
+                        const auto minority = initial.pure_gas ? cell.phase.carrier_volume : cell.phase.gas_volume;
+                        initial.target_volume_residual = minority;
+                        initial.finite_target_volume_difference = {-static_cast<long double>(minority), 0, mode};
+                    }
+                }
                 // Original/result maps and owner choices coexist throughout
                 // selection and exchange; include both sets of plane records.
                 budget.add(2 * sizeof(Planes::value_type) + sizeof(Key) + sizeof(std::uint64_t) + 12 * sizeof(void*) +
                            3 * AMR::encode_adaptive_key(key).size());
+                original.emplace(key, initial);
                 result.emplace(key, initial);
                 if (cell.owner == rank)
                     choices.emplace(key, original_face);
@@ -485,7 +525,7 @@ Planes import_capillary_planes(const GeneralVoF::Data& data, const Planes& origi
                 chosen.target_volume_residual = static_cast<double>(evidence->difference);
                 chosen.finite_target_volume_difference = {evidence->difference, 0, mode};
                 chosen.target_volume_numerical_error_estimate = evidence->numerical_error;
-                chosen.resolution = original.at(key).resolution;
+
                 result.at(key) = std::move(chosen);
             }
             if (seen.size() != requested.size())

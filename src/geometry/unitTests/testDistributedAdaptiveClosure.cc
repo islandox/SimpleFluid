@@ -1,11 +1,16 @@
 /** @file testDistributedAdaptiveClosure.cc
  * @brief Independent exact closed-contact and sparse closure rejection oracles.
  */
+#include "geometry/mesh/AMR/CartesianAMR.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveClosure.hh"
+#include "geometry/mesh/AMR/DistributedAdaptiveHierarchy.hh"
 #include "geometry/mesh/AMR/DistributedAdaptiveWire.hh"
+#include "geometry/mesh/AMR/ExtrudedAMR.hh"
 #include "utils/testing_environment.hh"
 #include <Tpetra_Core.hpp>
+#include <cstdlib>
 #include <gtest/gtest.h>
+#include <iostream>
 namespace
 {
 using namespace SimpleFluid;
@@ -121,6 +126,33 @@ TEST(DistributedAdaptiveClosure, IsolatedVertexContactRequiresCoarseRefinement)
 {
     require_coarse(owned(leaf(0, {0, 0, 0}, {4, 4, 4}), leaf(1, {4, 4, 4}, {5, 5, 5})), ContactKernel{});
 }
+TEST(DistributedAdaptiveClosure, GeometryAndTracesAreInternedAcrossClosedPointIncidences)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    const auto comm = Tpetra::getDefaultComm();
+    const auto source = owned(leaf(0, {0, 0, 0}, {4, 4, 4}), leaf(1, {4, 4, 4}, {5, 5, 5}));
+    AMR::AdaptiveClosureStats statistics;
+    AMR::AdaptiveClosureOptions options;
+    options.statistics = &statistics;
+    require_coarse(source, ContactKernel{true}, options);
+    EXPECT_EQ(statistics.geometry_records, source.size());
+    EXPECT_EQ(statistics.trace_records, source.size());
+    EXPECT_EQ(statistics.contacts, 8 * source.size());
+    EXPECT_LE(statistics.transmitted_geometry_records, source.size() * std::min(8, comm->getSize()));
+    EXPECT_LE(statistics.decoded_geometry_records, 2);
+    EXPECT_LE(statistics.live_peak_bytes, options.byte_budget);
+    EXPECT_GE(statistics.cumulative_bytes, statistics.live_peak_bytes);
+    if (!source.empty())
+        EXPECT_GT(statistics.cumulative_bytes, statistics.live_peak_bytes);
+    if (comm->getSize() < 8 && !source.empty())
+        EXPECT_LT(statistics.transmitted_geometry_records, statistics.contacts);
+    if (comm->getSize() == 1)
+        EXPECT_EQ(statistics.replicated_record_bytes, statistics.unique_record_bytes);
+    // The same contact/trace work cap remains cumulative across all points.
+    options.contact_budget = 1;
+    EXPECT_THROW(AMR::required_adaptive_refinements(source, ContactKernel{true}, comm, options), std::invalid_argument);
+    EXPECT_TRUE(AMR::required_adaptive_refinements({}, ContactKernel{}, comm).empty());
+}
 TEST(DistributedAdaptiveClosure, EdgeTJunctionPropagatesInteriorSegmentEndpoints)
 {
     require_coarse(owned(leaf(0, {0, 0, 0}, {4, 4, 4}), leaf(1, {4, 4, 1}, {5, 5, 2})), ContactKernel{});
@@ -180,5 +212,57 @@ TEST(DistributedAdaptiveClosure, StaticDemandAndWorkOrByteExhaustionRejectCollec
         std::invalid_argument);
     for (const auto& value : source)
         EXPECT_EQ(value.domain, ::SimpleFluid::Meshes::AMR::AdaptiveBytes{'d'});
+}
+// Explicit construction-only reproduction. Dimensions, coordinates and owners
+// match the motion/capillary qualification fixtures; no phase initialization or
+// physical advancement is performed. Disabled to keep ordinary unit runs small.
+TEST(DistributedAdaptiveClosure, DISABLED_QualificationSetupOnly)
+{
+    namespace AMR = ::SimpleFluid::Meshes::AMR;
+    const auto comm = Tpetra::getDefaultComm();
+    const unsigned n = std::getenv("SIMPLEFLUID_SETUP_N") ? std::stoul(std::getenv("SIMPLEFLUID_SETUP_N")) : 16;
+    const std::string kind = std::getenv("SIMPLEFLUID_SETUP_KIND") ? std::getenv("SIMPLEFLUID_SETUP_KIND") : "q2";
+    ASSERT_TRUE(n > 0 && n % 2 == 0);
+    ASSERT_TRUE(kind == "q2" || kind == "three_dimensional" || kind == "sphere");
+    const unsigned nz = kind == "q2" ? 2 : n;
+    const bool sphere = kind == "sphere";
+    AMR::AMRGrid grid;
+    grid.root_blocks = {n / 2, n / 2, nz / 2};
+    grid.block_cells = {2, 2, 2};
+    if (sphere)
+        grid.extent = {double(n), double(n), double(nz)};
+    std::vector<std::uint64_t> selected;
+    const AMR::AdaptiveBytes domain =
+        sphere ? AMR::AdaptiveBytes{'c', 'a', 'p', 'i', 'l', 'l', 'a', 'r', 'y', 'b', 'o', 'x'}
+               : AMR::AdaptiveBytes{'q', '2', 'm', 'o', 't', 'i', 'o', 'n'};
+    auto bootstrap = [&]
+    {
+        AMR::CartesianAMR provider(grid);
+        for (std::uint64_t gid = 0; gid < std::uint64_t(n) * n * nz; ++gid)
+        {
+            const auto box = provider.cell_box(gid);
+            const auto x = (box.lower[0] + box.upper[0]) / 2;
+            const auto owner = sphere ? int(gid % std::min(2, comm->getSize())) : int(x * comm->getSize());
+            if (owner == comm->getRank())
+                selected.push_back(gid);
+        }
+        return provider.detach_owned(selected, domain);
+    }();
+    std::cout << "SETUP_ONLY rank=" << comm->getRank() << " kind=" << kind << " N=" << n
+              << " stage=hierarchy_begin owned=" << selected.size() << " byte_budget=67108864 maximum_tiles=262144\n"
+              << std::flush;
+    auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
+        std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
+    const auto storage = hierarchy->storage();
+    std::cout << "SETUP_ONLY rank=" << comm->getRank()
+              << " stage=hierarchy_complete owned_bytes=" << storage.owned_bytes
+              << " ancestor_bytes=" << storage.ancestor_bytes << " directory_bytes=" << storage.directory_bytes
+              << " procedural_bytes=" << storage.procedural_bytes << " native_bytes=" << storage.native_bytes << '\n'
+              << std::flush;
+    const auto draft = hierarchy->native_draft();
+    EXPECT_EQ(hierarchy->global_cells(), std::uint64_t(n) * n * nz);
+    std::cout << "SETUP_ONLY rank=" << comm->getRank() << " stage=native_draft_complete tiles=" << draft.tiles.size()
+              << " nodes=" << draft.nodes.size() << " physical_steps=0\n"
+              << std::flush;
 }
 } // namespace

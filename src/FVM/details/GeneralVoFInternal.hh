@@ -206,7 +206,7 @@ template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralPhaseSample<Mode> reconstruction_sample(const Cell& cell);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL std::vector<PLIC::PolyhedralPhaseSample<Mode>> reconstruction_stencil(
-    const GeneralVoF::Data& data, const Key& key);
+    const GeneralVoF::Data& data, const Key& key, bool complete_support = false);
 template<ArithmeticMode Mode>
 SIMPLEFLUID_FVM_LOCAL PLIC::PolyhedralInterface reconstruct_cell(const GeneralVoF::Data& data, const Key& key);
 template<ArithmeticMode Mode>

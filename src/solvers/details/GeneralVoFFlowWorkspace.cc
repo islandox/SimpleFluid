@@ -3,8 +3,10 @@
  * @brief Conditioned native gradients, stress transport and nonorthogonal projection.
  */
 #include "geometry/PLIC/ConvexGeometry.hh"
+#include "FVM/details/GeneralVoF/OccupancyAdmission.hh"
 #include "solvers/details/ConservativeVoFExactArithmetic.hh"
 #include "solvers/details/GeneralVoF/Execution.hh"
+#include "solvers/details/GeneralVoF/FlowTrace.hh"
 #include "solvers/details/GeneralVoFExactPressure.hh"
 #include "solvers/details/GeneralVoFExactStorage.hh"
 #include "solvers/details/GeneralVoFFiniteProjectionArithmetic.hh"
@@ -371,6 +373,7 @@ void GeneralVoFFlowWorkspace::prepare_gradient_geometry()
     {
         const auto lease = mesh_->acquire_execution_view();
         gradient_stencils_.resize(volumes_.size());
+        face_gradient_stencils_.resize(volumes_.size());
         for (std::size_t c = 0; c < volumes_.size(); ++c)
         {
             const auto x = convert(mesh_->cell_centroid(LO(c)));
@@ -382,6 +385,9 @@ void GeneralVoFFlowWorkspace::prepare_gradient_geometry()
             }
             auto& stencil = gradient_stencils_[c];
             for (auto fid : mesh_->faces(LO(c)))
+            {
+                face_gradient_stencils_[c].has_exterior = face_gradient_stencils_[c].has_exterior ||
+                    geometry_[fid].boundary;
                 if (!geometry_[fid].boundary)
                 {
                     auto r = convert(mesh_->cell_center_vector(fid, LO(c)));
@@ -391,7 +397,13 @@ void GeneralVoFFlowWorkspace::prepare_gradient_geometry()
                         r[a] /= spans_[c][a];
                     }
                     stencil.samples.push_back({mesh_->opposite_cell(fid, LO(c)), r, 1 / dot(r, r)});
+                    auto face_r = convert(mesh_->face_center_vector(fid, LO(c)));
+                    for (unsigned a = 0; a < 3; ++a)
+                        face_r[a] /= spans_[c][a];
+                    finite = finite && std::isfinite(dot(face_r, face_r)) && dot(face_r, face_r) > 0;
+                    face_gradient_stencils_[c].samples.push_back({fid, face_r, 1 / dot(face_r, face_r)});
                 }
+            }
         }
     }
     catch (...)
@@ -445,6 +457,19 @@ void GeneralVoFFlowWorkspace::prepare_gradient_geometry()
     for (unsigned a = 0; a < 3; ++a)
         wall_reaction_axis_[a] = absent_gradient_axis_[a] && global_wall_axis[a];
     for (auto& stencil : gradient_stencils_)
+        factor_gradient_stencil(stencil);
+    for (auto& stencil : face_gradient_stencils_)
+        factor_gradient_stencil(stencil);
+}
+std::size_t GeneralVoFFlowWorkspace::boundary_gradient_storage_bytes() const
+{
+    std::size_t result = face_gradient_stencils_.capacity() * sizeof(GradientStencil);
+    for (const auto& stencil : face_gradient_stencils_)
+        result += stencil.samples.capacity() * sizeof(GradientSample);
+    return result;
+}
+void GeneralVoFFlowWorkspace::factor_gradient_stencil(GradientStencil& stencil) const
+{
     {
         std::array<std::array<double, 7>, 3> m{};
         for (const auto& sample : stencil.samples)
@@ -719,6 +744,14 @@ double GeneralVoFFlowWorkspace::stable_timestep(
             if (sigma > 0)
                 local_inverse =
                     std::max(local_inverse, std::sqrt(sigma / (rho * span * span * span)) / options.capillary_safety);
+            general_vof::flow_trace(mesh_->owned_cell_map()->getComm()->getRank(), "physical_timestep", [&](auto& out)
+            {
+                out << ",\"cell\":" << mesh_->cell_global_id(LO(c))
+                    << ",\"face_cfl_inverse\":" << flux / (2 * volumes_[c] * options.max_courant)
+                    << ",\"viscous_inverse\":" << viscous / options.viscous_safety
+                    << ",\"capillary_inverse\":"
+                    << (sigma > 0 ? std::sqrt(sigma / (rho * span * span * span)) / options.capillary_safety : 0);
+            });
         }
     }
     const double inverse = maximum(local_inverse);

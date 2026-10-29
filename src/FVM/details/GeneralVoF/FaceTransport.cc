@@ -2,11 +2,19 @@
  * @brief Conservative fixed-mesh directed transport; geometry is measurement only.
  */
 #include "FVM/details/GeneralVoF/FaceTransport.hh"
-#include "FVM/details/GeneralVoF/Wire.hh"
+#include "FVM/details/GeneralVoF/FaceSweptPlaneBounds.hh"
+#include "FVM/details/GeneralVoF/OccupancyAdmission.hh"
+#include "FVM/details/GeneralVoF/LimiterReplay.hh"
+#include "FVM/details/GeneralVoF/LimiterProtocol.hh"
 #include "FVM/details/GeneralVoF/PhaseCleanup.hh"
+#include "FVM/details/GeneralVoF/Wire.hh"
 #include "geometry/PLIC/GeometryError.hh"
 #include "geometry/PLIC/PlaneMeasure.hh"
 #include "utils/CompensatedSum.hh"
+#include <cstdio>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 namespace SimpleFluid::VoF
 {
@@ -344,9 +352,9 @@ FaceLedger build_face_ledger(const GeneralVoF::Data& data, std::span<const Gener
                     scope.record.scale = v;
                     scope.record.control = continuity;
                     scope.record.volume_budget = data.options.reconstruction.volume_tolerance * v;
-                    for (const auto field : {failure::Field::Cell, failure::Field::CellOwner,
-                             failure::Field::Arithmetic, failure::Field::Scale, failure::Field::Control,
-                             failure::Field::VolumeBudget})
+                    for (const auto field :
+                        {failure::Field::Cell, failure::Field::CellOwner, failure::Field::Arithmetic,
+                            failure::Field::Scale, failure::Field::Control, failure::Field::VolumeBudget})
                         scope.record.mark(field);
                     throw std::invalid_argument("Face transport bulk continuity defect.");
                 }
@@ -383,6 +391,12 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
             std::map<std::pair<std::uint64_t, std::uint64_t>, GeneralVoFFiniteTransfer> routes;
             for (const auto& [face, s] : streams)
             {
+                if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY") && tiles.at(face)->first_owner == rank)
+                    std::cerr << std::setprecision(21) << "CAPILLARY_STREAM rank=" << rank
+                              << " control=" << data.control << " face=" << face << " donor=" << s.donor
+                              << " recipient=" << s.recipient << " bulk=" << s.volume << " gas=" << s.gas
+                              << " carrier=" << s.liquid << " gas_low=" << s.gas_low << " gas_high=" << s.gas_high
+                              << " theta=" << s.theta << " lower_order=" << s.lower_order << '\n';
                 if (tiles.at(face)->first_owner == rank)
                 {
                     ++ledger.diagnostics.streams;
@@ -460,6 +474,11 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
                     ((recipient.declaration == GeneralVoFPhaseGeometry::PureGas && route.amount.carrier.value > 0) ||
                         (recipient.declaration == GeneralVoFPhaseGeometry::PureCarrier && route.amount.gas.value > 0)))
                     mixed_receipts.insert(route.recipient);
+                if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
+                    std::cerr << std::setprecision(21) << "CAPILLARY_RECEIPT rank=" << comm->getRank()
+                              << " control=" << data.control << " donor=" << route.donor
+                              << " recipient=" << route.recipient << " bulk=" << route.amount.bulk.value
+                              << " gas=" << route.amount.gas.value << " carrier=" << route.amount.carrier.value << '\n';
                 admitted.transfers.push_back(route);
             }
             std::size_t owned_index = 0;
@@ -490,6 +509,11 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
                     c.declaration = GeneralVoFPhaseGeometry::PureCarrier;
                 if (c.phase.carrier_volume == 0)
                     c.declaration = GeneralVoFPhaseGeometry::PureGas;
+                if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
+                    std::cerr << std::setprecision(21) << "CAPILLARY_DECLARATION rank=" << comm->getRank()
+                              << " control=" << data.control << " cell=" << c.gid << " before=" << int(old.declaration)
+                              << " after=" << int(c.declaration) << " gas=" << c.phase.gas_volume
+                              << " carrier=" << c.phase.carrier_volume << '\n';
                 const auto geometric_volume =
                     PLIC::ConvexCellGeometry<mode>::from_dynamic(c.finite_geometry)->volume().value;
                 SimpleFluid::detail::CompensatedSum<long double> defect_sum;
@@ -500,6 +524,52 @@ FaceAdmission admit_face_ledger(const GeneralVoF::Data& data, FaceLedger& ledger
                 const long double arithmetic = (16 + 4 * data.topology->cell_tiles.at(key).size()) *
                                                std::numeric_limits<long double>::epsilon() * c.native_volume;
                 const auto closure = std::abs(totals[c.gid].bulk_in.value() - totals[c.gid].bulk_out.value());
+                // Arithmetic provenance may accumulate, but it cannot enlarge
+                // the physical cell capacity. Account for the previous SIGNED
+                // discrepancy and final publication uncertainty on this update.
+                SimpleFluid::detail::CompensatedSum<long double> expected;
+                expected += old.phase.gas_volume;
+                expected += old.phase.carrier_volume;
+                expected += -geometric_volume;
+                const auto previous = expected.value();
+                expected += totals[c.gid].bulk_in.value();
+                expected += -totals[c.gid].bulk_out.value();
+                const long double uncertainty = c.roundoff.gas + c.roundoff.carrier + arithmetic;
+                const auto occupancy = algebraic_occupancy_admission(
+                    pg.first, pl.first, c.native_volume, geometric_volume, expected.value(), defect, uncertainty);
+                if (!occupancy.admitted())
+                {
+                    namespace failure = ::SimpleFluid::detail::vof_failure;
+                    failure::Scope scope("algebraic_cumulative_occupancy");
+                    scope.record.cell = c.gid;
+                    scope.record.cell_owner = c.owner;
+                    scope.record.arithmetic_mode = mode;
+                    scope.record.scale = occupancy.geometry_admitted ? c.native_volume : geometric_volume;
+                    scope.record.control = !occupancy.geometry_admitted ? expected.value()
+                                           : !occupancy.native_admitted ? occupancy.native_prediction
+                                                                        : occupancy.rounded_native_published;
+                    scope.record.volume_budget = !occupancy.geometry_admitted ? occupancy.geometric_limit
+                                                 : !occupancy.native_admitted ? occupancy.native_limit
+                                                                              : occupancy.rounded_native_limit;
+                    for (const auto field :
+                        {failure::Field::Cell, failure::Field::CellOwner, failure::Field::Arithmetic,
+                            failure::Field::Scale, failure::Field::Control, failure::Field::VolumeBudget})
+                        scope.record.mark(field);
+                    std::ostringstream message;
+                    message << std::setprecision(21)
+                            << "Face transport cumulative physical occupancy defect: previous=" << previous
+                            << ", signed_canonical_bulk_transfer="
+                            << totals[c.gid].bulk_out.value() - totals[c.gid].bulk_in.value()
+                            << ", predicted=" << expected.value() << ", published=" << defect
+                            << ", publication_uncertainty=" << uncertainty
+                            << ", physical_limit=" << occupancy.geometric_limit
+                            << ", native_predicted=" << occupancy.native_prediction
+                            << ", native_published=" << occupancy.native_published
+                            << ", native_limit=" << occupancy.native_limit
+                            << ", binary64_native_published=" << occupancy.rounded_native_published
+                            << ", binary64_native_limit=" << occupancy.rounded_native_limit;
+                    throw std::invalid_argument(message.str());
+                }
                 c.occupancy.difference = double(defect);
                 c.occupancy.admitted_bound = fp::upper_double(
                     old.occupancy.admitted_bound + closure + c.roundoff.gas + c.roundoff.carrier + arithmetic);
@@ -772,8 +842,10 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                             const auto area = std::hypot(av[0], av[1], av[2]);
                             if (!(area > 0) || !std::isfinite(area))
                                 throw std::invalid_argument("Face transport has invalid native face metric.");
+                            auto face_points = finite_face_points<mode>(face);
                             std::vector<std::array<long double, 3>> vertices;
-                            for (const auto& point : finite_face_points<mode>(face))
+                            vertices.reserve(face_points.size());
+                            for (const auto& point : face_points)
                             {
                                 auto local = point.value;
                                 for (unsigned a = 0; a < 3; ++a)
@@ -808,74 +880,104 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                                     plane.normal[a] * (displacement[a] + outward[a] * (s.volume / area - donor_normal));
                             if (!std::isfinite(shift))
                                 throw std::invalid_argument("Face predictor plane displacement is nonfinite.");
-                            std::vector<long double> times{0, 1};
-                            if (shift != 0)
-                                for (const auto& p : vertices)
-                                {
-                                    long double distance = -plane.offset;
-                                    for (unsigned a = 0; a < 3; ++a)
-                                        distance += plane.normal[a] * p[a];
-                                    const auto time = distance / shift;
-                                    if (time > 0 && time < 1)
-                                        times.push_back(time);
-                                }
-                            std::sort(times.begin(), times.end());
-                            times.erase(std::unique(times.begin(), times.end()), times.end());
-                            SimpleFluid::detail::CompensatedSum<long double> covered_gas, covered_liquid;
-                            const auto sample = [&](long double time)
+                            // A convex face and affine plane translation need no area
+                            // integration when every original vertex is strictly on
+                            // the same side over the enclosed offset range. Include
+                            // the exact-add translated endpoint as well as rounded
+                            // sample offsets; narrowing must not erase a crossing.
+                            // Compensated signs account for evaluation error without
+                            // rounding an uncertain contact into a pure phase.
+                            const auto offsets = swept_face_offset_bounds(plane.offset, shift);
+                            auto side = PLIC::WholeFacePlaneSide::UnknownOrContact;
+                            if (offsets && face_points.size() >= 3)
+                                side = PLIC::OrdinaryPlaneMeasure::strict_face_side(face_points, plane, *offsets);
+                            const bool gas_full = side == PLIC::WholeFacePlaneSide::StrictNegative;
+                            const bool carrier_full = side == PLIC::WholeFacePlaneSide::StrictPositive;
+                            // Keep the original query buffer out of the partial-area scratch peak.
+                            decltype(face_points){}.swap(face_points);
+                            if (gas_full || carrier_full)
                             {
-                                auto translated = plane;
-                                translated.offset =
-                                    static_cast<double>(static_cast<long double>(plane.offset) + shift * time);
-                                auto opposite = translated;
-                                for (auto& n : opposite.normal)
-                                    n = -n;
-                                opposite.offset = -opposite.offset;
-                                const auto gas_area =
-                                    PLIC::ordinary_plane_face_area(vertices, translated, plane.anchor);
-                                const auto liquid_area =
-                                    PLIC::ordinary_plane_face_area(vertices, opposite, plane.anchor);
-                                ledger.diagnostics.plane_measurements += 2;
-                                for (const auto& result : {gas_area, liquid_area})
-                                    if (result.status != PLIC::PlaneMeasureStatus::Resolved || result.area > area ||
-                                        result.area < 0)
-                                        throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
-                                            "Face phase area is numerically unresolved.");
-                                return std::array<long double, 2>{gas_area.area, liquid_area.area};
-                            };
-                            // Polygon area is quadratic between vertex crossings.
-                            // Interior Gauss points also handle the discontinuous
-                            // face-parallel contact without counting an endpoint twice.
-                            for (std::size_t i = 1; i < times.size(); ++i)
-                            {
-                                const auto half = (times[i] - times[i - 1]) / 2;
-                                const auto midpoint = (times[i] + times[i - 1]) / 2;
-                                const auto distance = half / std::sqrt(3.L);
-                                const auto left = sample(midpoint - distance), right = sample(midpoint + distance);
-                                covered_gas += half * (left[0] + right[0]);
-                                covered_liquid += half * (left[1] + right[1]);
-                            }
-                            const auto gas_amount = s.volume * (covered_gas.value() / area);
-                            const auto liquid_amount = s.volume * (covered_liquid.value() / area);
-                            if (gas_amount < 0 || liquid_amount < 0 || gas_amount > s.volume ||
-                                liquid_amount > s.volume || !std::isfinite(gas_amount) ||
-                                !std::isfinite(liquid_amount) ||
-                                std::abs(gas_amount + liquid_amount - s.volume) >
-                                    data.options.reconstruction.volume_tolerance * s.volume)
-                                throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
-                                    "Face phase integral is numerically unresolved.");
-                            // The smaller face integral need not be the donor-cell
-                            // minority. Measure both sides directly before choosing
-                            // the complement, retaining any representable small stream.
-                            if (gas_amount <= liquid_amount)
-                            {
-                                s.gas_high = gas_amount;
-                                s.liquid_high = s.volume - gas_amount;
+                                // The canonical bulk receipt remains authoritative;
+                                // this is an empty/full geometric witness, not a
+                                // correction to a positive measured phase amount.
+                                s.gas_high = gas_full ? s.volume : 0;
+                                s.liquid_high = carrier_full ? s.volume : 0;
+                                if (std::getenv("SIMPLEFLUID_CAPILLARY_REPLAY"))
+                                    std::cerr << "CAPILLARY_EXTREMUM rank=" << rank << " control=" << data.control
+                                              << " face=" << face << " donor=" << s.donor << " gas_full=" << gas_full
+                                              << " carrier_full=" << carrier_full << '\n';
                             }
                             else
                             {
-                                s.liquid_high = liquid_amount;
-                                s.gas_high = s.volume - liquid_amount;
+                                std::vector<long double> times{0, 1};
+                                if (shift != 0)
+                                    for (const auto& p : vertices)
+                                    {
+                                        long double distance = -plane.offset;
+                                        for (unsigned a = 0; a < 3; ++a)
+                                            distance += plane.normal[a] * p[a];
+                                        const auto time = distance / shift;
+                                        if (time > 0 && time < 1)
+                                            times.push_back(time);
+                                    }
+                                std::sort(times.begin(), times.end());
+                                times.erase(std::unique(times.begin(), times.end()), times.end());
+                                SimpleFluid::detail::CompensatedSum<long double> covered_gas, covered_liquid;
+                                const auto sample = [&](long double time)
+                                {
+                                    auto translated = plane;
+                                    translated.offset =
+                                        static_cast<double>(static_cast<long double>(plane.offset) + shift * time);
+                                    auto opposite = translated;
+                                    for (auto& n : opposite.normal)
+                                        n = -n;
+                                    opposite.offset = -opposite.offset;
+                                    const auto gas_area =
+                                        PLIC::ordinary_plane_face_area(vertices, translated, plane.anchor);
+                                    const auto liquid_area =
+                                        PLIC::ordinary_plane_face_area(vertices, opposite, plane.anchor);
+                                    ledger.diagnostics.plane_measurements += 2;
+                                    for (const auto& result : {gas_area, liquid_area})
+                                        if (result.status != PLIC::PlaneMeasureStatus::Resolved || result.area > area ||
+                                            result.area < 0)
+                                            throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                                                "Face phase area is numerically unresolved.");
+                                    return std::array<long double, 2>{gas_area.area, liquid_area.area};
+                                };
+                                // Polygon area is quadratic between vertex crossings.
+                                // Interior Gauss points also handle the discontinuous
+                                // face-parallel contact without counting an endpoint twice.
+                                for (std::size_t i = 1; i < times.size(); ++i)
+                                {
+                                    const auto half = (times[i] - times[i - 1]) / 2;
+                                    const auto midpoint = (times[i] + times[i - 1]) / 2;
+                                    const auto distance = half / std::sqrt(3.L);
+                                    const auto left = sample(midpoint - distance), right = sample(midpoint + distance);
+                                    covered_gas += half * (left[0] + right[0]);
+                                    covered_liquid += half * (left[1] + right[1]);
+                                }
+                                const auto gas_amount = s.volume * (covered_gas.value() / area);
+                                const auto liquid_amount = s.volume * (covered_liquid.value() / area);
+                                if (gas_amount < 0 || liquid_amount < 0 || gas_amount > s.volume ||
+                                    liquid_amount > s.volume || !std::isfinite(gas_amount) ||
+                                    !std::isfinite(liquid_amount) ||
+                                    std::abs(gas_amount + liquid_amount - s.volume) >
+                                        data.options.reconstruction.volume_tolerance * s.volume)
+                                    throw PLIC::GeometryError(PLIC::GeometryErrorCode::UnresolvedArithmetic,
+                                        "Face phase integral is numerically unresolved.");
+                                // The smaller face integral need not be the donor-cell
+                                // minority. Measure both sides directly before choosing
+                                // the complement, retaining any representable small stream.
+                                if (gas_amount <= liquid_amount)
+                                {
+                                    s.gas_high = gas_amount;
+                                    s.liquid_high = s.volume - gas_amount;
+                                }
+                                else
+                                {
+                                    s.liquid_high = liquid_amount;
+                                    s.gas_high = s.volume - liquid_amount;
+                                }
                             }
                         }
                         catch (const PLIC::GeometryError& e)
@@ -947,12 +1049,14 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
         // Four independent positive budgets: endpoint gas/liquid positivity,
         // plus safe explicit export of old gas/liquid concentrations/history.
         using Four = std::array<long double, 4>;
-        std::map<std::uint64_t, Four> demand, ratio;
-        const auto correction = [](const Stream& s)
-        { return s.gas_low <= s.liquid_low ? s.gas_high - s.gas_low : s.liquid_low - s.liquid_high; };
+        std::map<std::uint64_t, Four> demand, ratio, availability;
+        const auto correction = limiter_replay::correction;
         wire::collective(*comm,
             [&]
             {
+                wire::Budget budget{limit};
+                budget.add(data.topology->order.size() *
+                    (sizeof(std::pair<const std::uint64_t, Four>) + 4 * sizeof(void*)));
                 for (const auto& [face, s] : streams)
                 {
                     const auto a = correction(s);
@@ -977,6 +1081,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                     const Four available{g - t.gas_out.value() + t.gas_in.value(),
                         l - t.liquid_out.value() + t.liquid_in.value(), g - t.gas_out.value(),
                         l - t.liquid_out.value()};
+                    availability.emplace(cell.gid, available);
                     Four r{1, 1, 1, 1};
                     for (unsigned a = 0; a < 4; ++a)
                         if (demand[cell.gid][a] > 0)
@@ -988,7 +1093,6 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                     ratio.emplace(cell.gid, r);
                 }
                 packets.clear();
-                wire::Budget budget{limit};
                 for (const auto& [face, s] : streams)
                     for (const auto endpoint : {s.donor, s.recipient})
                         if (ratio.contains(endpoint))
@@ -1029,29 +1133,116 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                     const auto d = endpoint_ratios.at({face, s.donor}), c = endpoint_ratios.at({face, s.recipient});
                     const auto a = correction(s);
                     s.theta = a >= 0 ? std::min({d[0], d[2], c[1]}) : std::min({d[1], d[3], c[0]});
-                    // Convex endpoint evaluation preserves a resolved microscopic
-                    // high-order minority even when high-low rounds to -low.
-                    const auto blend = [&](long double low_value, long double high_value)
-                    {
-                        if (s.theta == 0)
-                            return low_value;
-                        if (s.theta == 1)
-                            return high_value;
-                        return (1 - s.theta) * low_value + s.theta * high_value;
-                    };
-                    s.gas = blend(s.gas_low, s.gas_high);
-                    s.liquid = blend(s.liquid_low, s.liquid_high);
-                    if (s.gas <= s.liquid)
-                        s.liquid = s.volume - s.gas;
-                    else
-                        s.gas = s.volume - s.liquid;
-                    if (s.gas < 0 || s.liquid < 0 || s.gas > s.volume || s.liquid > s.volume)
-                        throw std::invalid_argument("Limited phase stream is inadmissible.");
-                    s.mass = density[0] * s.gas + density[1] * s.liquid;
+                    limiter_replay::evaluate(s, density);
                 }
             });
         distribute();
-        wire::collective(*comm,
+        const auto prepare_replay = [&](auto& replacements)
+        {
+            totals.clear();
+            for (const auto& [face, s] : streams)
+            {
+                auto& d = totals[s.donor];
+                auto& c = totals[s.recipient];
+                d.bulk_out += s.volume;
+                d.gas_out += s.gas;
+                d.liquid_out += s.liquid;
+                c.bulk_in += s.volume;
+                c.gas_in += s.gas;
+                c.liquid_in += s.liquid;
+            }
+            wire::Budget replay_budget{limit};
+            // This newly retained map is still live throughout replay.
+            replay_budget.add(availability.size() * (sizeof(std::pair<const std::uint64_t, Four>) + 4 * sizeof(void*)));
+            for (const auto& key : data.topology->order)
+            {
+                const auto& c = data.cells.at(key);
+                const auto& t = totals[c.gid];
+                if (t.gas_out.value() > c.phase.gas_volume || t.liquid_out.value() > c.phase.carrier_volume)
+                {
+                    std::vector<Stream> outgoing;
+                    const auto outgoing_count = std::count_if(
+                        streams.begin(), streams.end(), [&](const auto& item) { return item.second.donor == c.gid; });
+                    // Input, retained result, current trial and proposal nodes
+                    // are all charged before allocation, across all donors.
+                    replay_budget.add(
+                        outgoing_count *
+                        (sizeof(Stream) * 3 + sizeof(std::pair<const std::uint64_t, long double>) + 4 * sizeof(void*)));
+                    outgoing.reserve(outgoing_count);
+                    for (const auto& [face, s] : streams)
+                        if (s.donor == c.gid)
+                            outgoing.push_back(s);
+                    limiter_replay::Evidence evidence;
+                    const auto repaired = limiter_replay::repair(outgoing, {c.phase.gas_volume, c.phase.carrier_volume},
+                        availability.at(c.gid), demand[c.gid], ratio.at(c.gid), density, &evidence);
+                    if (repaired)
+                    {
+                        for (const auto& s : *repaired)
+                        {
+                            replacements.emplace(s.face, s.theta);
+                            if (std::getenv("SIMPLEFLUID_VOF_LIMITER_REPLAY"))
+                                std::cerr
+                                    << std::setprecision(21) << "LIMITER_REPAIR donor_rank=" << rank
+                                    << " control=" << data.control << " time_stage=" << time_stage << " donor=" << c.gid
+                                    << " face=" << s.face << " canonical_rank=" << tiles.at(s.face)->first_owner
+                                    << " old_theta=" << streams.at(s.face).theta << " theta=" << s.theta
+                                    << " evaluations=" << evidence.evaluations << " gas_change=" << evidence.movement[0]
+                                    << " gas_change_bound=" << evidence.movement_limit[0]
+                                    << " carrier_change=" << evidence.movement[1]
+                                    << " carrier_change_bound=" << evidence.movement_limit[1]
+                                    << " old_gas_export=" << evidence.original_export[0]
+                                    << " final_gas_export=" << evidence.final_export[0]
+                                    << " old_carrier_export=" << evidence.original_export[1]
+                                    << " final_carrier_export=" << evidence.final_export[1] << '\n';
+                        }
+                        continue;
+                    }
+                    namespace failure = ::SimpleFluid::detail::vof_failure;
+                    failure::Scope scope("geometric_face_limiter_export");
+                    scope.record.cell = c.gid;
+                    scope.record.cell_owner = c.owner;
+                    scope.record.arithmetic_mode = mode;
+                    scope.record.scale = c.native_volume;
+                    scope.record.control =
+                        std::max(t.gas_out.value() - c.phase.gas_volume, t.liquid_out.value() - c.phase.carrier_volume);
+                    scope.record.retry = evidence.evaluations;
+                    for (const auto field : {failure::Field::Cell, failure::Field::CellOwner,
+                             failure::Field::Arithmetic, failure::Field::Scale, failure::Field::Control})
+                        scope.record.mark(field);
+                    scope.record.mark(failure::Field::Retry);
+                    if (std::getenv("SIMPLEFLUID_VOF_LIMITER_REPLAY"))
+                    {
+                        std::cerr << std::setprecision(21) << "LIMITER_EXPORT rank=" << rank
+                                  << " control=" << data.control << " cell=" << c.gid
+                                  << " old_gas=" << c.phase.gas_volume << " old_carrier=" << c.phase.carrier_volume
+                                  << " export_gas=" << t.gas_out.value() << " export_carrier=" << t.liquid_out.value()
+                                  << " demand=" << demand[c.gid][0] << ',' << demand[c.gid][1] << ','
+                                  << demand[c.gid][2] << ',' << demand[c.gid][3] << " ratio=" << ratio[c.gid][0] << ','
+                                  << ratio[c.gid][1] << ',' << ratio[c.gid][2] << ',' << ratio[c.gid][3] << '\n';
+                        for (const auto& [face, s] : streams)
+                            if (s.donor == c.gid || s.recipient == c.gid)
+                                std::cerr << "LIMITER_FACE face=" << face << " donor=" << s.donor
+                                          << " recipient=" << s.recipient << " volume=" << s.volume
+                                          << " gas_low=" << s.gas_low << " gas_high=" << s.gas_high
+                                          << " carrier_low=" << s.liquid_low << " carrier_high=" << s.liquid_high
+                                          << " theta=" << s.theta << " gas=" << s.gas << " carrier=" << s.liquid
+                                          << '\n';
+                    }
+                    char message[384];
+                    std::snprintf(message, sizeof(message),
+                        "Limited phase export exceeds old donor inventory: control=%llu cell=%llu "
+                        "gas_old=%.21Lg gas_out=%.21Lg carrier_old=%.21Lg carrier_out=%.21Lg.",
+                        static_cast<unsigned long long>(data.control), static_cast<unsigned long long>(c.gid),
+                        static_cast<long double>(c.phase.gas_volume), t.gas_out.value(),
+                        static_cast<long double>(c.phase.carrier_volume), t.liquid_out.value());
+                    throw std::invalid_argument(message);
+                }
+            }
+        };
+        limiter_replay::synchronize(
+            comm, limit, streams, authority, packets, density, prepare_replay, [&](std::uint64_t face)
+            { return tiles.at(face)->first_owner; }, [&](wire::Writer& w, long double value) { finite_real(w, value); },
+            [&](wire::Reader& r) { return finite_real(r); }, distribute,
             [&]
             {
                 totals.clear();
@@ -1071,7 +1262,7 @@ GeneralVoF::Trial GeneralVoF::plan_face_transport_impl(std::span<const GeneralVo
                     const auto& c = data.cells.at(key);
                     const auto& t = totals[c.gid];
                     if (t.gas_out.value() > c.phase.gas_volume || t.liquid_out.value() > c.phase.carrier_volume)
-                        throw std::invalid_argument("Limited phase export exceeds old donor inventory.");
+                        throw std::invalid_argument("Replayed limited phase export exceeds old donor inventory.");
                 }
             });
     }

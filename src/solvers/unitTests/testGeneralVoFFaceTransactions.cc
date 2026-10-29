@@ -142,15 +142,16 @@ std::array<long double, 2> global_history(const GeneralVoFSolver& solver)
     global[1] = sum_wide(*Tpetra::getDefaultComm(), local[1]);
     return global;
 }
-void expect_fixed_clock_remap(
-    const GeneralVoFSolver& solver, const VoFStepDiagnostics& before, const std::array<long double, 2>& history_before)
+void expect_fixed_clock_remap(const GeneralVoFSolver& solver, const VoFStepDiagnostics& before,
+    const std::array<long double, 2>& history_before, bool changed = true)
 {
     EXPECT_EQ(solver.time(), before.time);
     EXPECT_LE(std::abs(solver.diagnostics().gas_mass - before.gas_mass), 2e-11 * before.gas_mass);
     EXPECT_LE(std::abs(solver.diagnostics().liquid_mass - before.liquid_mass), 2e-11 * before.liquid_mass);
     for (unsigned a = 0; a < 3; ++a)
         EXPECT_NEAR(solver.diagnostics().momentum[a], before.momentum[a], 2e-11);
-    EXPECT_FALSE(solver.prepared_transport());
+    if (changed)
+        EXPECT_FALSE(solver.prepared_transport());
     const auto history_after = global_history(solver);
     for (unsigned phase = 0; phase < 2; ++phase)
     {
@@ -436,20 +437,39 @@ void moving_mixed_transactions(Backend backend, bool empty_owners)
         {
             const auto fields = physical_fields(solver);
             const auto before = solver.diagnostics();
+            const auto before_phases = solver.phases();
+            const auto before_mesh = solver.mesh();
+            const auto before_prepared = solver.prepared_transport();
             const auto history_before = global_history(solver);
             const auto partition_generation = solver.phases()->hierarchy()->partition_generation();
             std::vector<int> destinations(solver.phases()->owned_order().size(), (comm->getRank() + 1) % active);
+            const int local_change = std::any_of(
+                destinations.begin(), destinations.end(), [&](int owner) { return owner != comm->getRank(); });
+            int changed = 0;
+            Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 1, &local_change, &changed);
             testing::Test::RecordProperty("attempted_transaction", "spatial_repartition_after_continued_mixed_motion");
             ASSERT_NO_THROW(solver.repartition(destinations));
-            expect_fixed_clock_remap(solver, before, history_before);
+            expect_fixed_clock_remap(solver, before, history_before, changed);
+            if (!changed)
+            {
+                // Same-owner migration is a validated identity operation. It
+                // preserves the exact publication, including its current ledger;
+                // actual ownership changes must still invalidate preparation.
+                EXPECT_EQ(solver.phases(), before_phases);
+                EXPECT_EQ(solver.mesh(), before_mesh);
+                EXPECT_EQ(solver.prepared_transport(), before_prepared);
+            }
+            testing::Test::RecordProperty("ownership_migration_changed", changed);
             expect_gates(solver, initial, backend);
-            if (active > 1)
+            if (changed)
                 EXPECT_GT(solver.phases()->hierarchy()->partition_generation(), partition_generation);
             else
                 EXPECT_EQ(solver.phases()->hierarchy()->partition_generation(), partition_generation);
             expect_owners(solver, active, true);
             const auto migrated = physical_fields(solver);
             ASSERT_EQ(migrated.size(), fields.size());
+            if (!changed)
+                EXPECT_EQ(migrated, fields);
             for (std::size_t c = 0; c < fields.size(); ++c)
                 for (std::size_t a = 0; a < fields[c].size(); ++a)
                     if (a == 3 || a == 4 || a == 11 || a == 12)

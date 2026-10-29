@@ -53,8 +53,8 @@ TEST(SparseOwnerExchange, RankLocalBadPeerAndReceiveBudgetRejectCollectively)
     packets.clear();
     if (comm->getRank() == 0)
         packets.push_back({comm->getSize() - 1, std::vector<char>(8192, 'x')});
-    EXPECT_THROW(exchange_owner_packets(packets, comm, comm->getRank() == comm->getSize() - 1 ? 1 : budget),
-        std::length_error);
+    EXPECT_THROW(
+        exchange_owner_packets(packets, comm, comm->getRank() == comm->getSize() - 1 ? 1 : budget), std::length_error);
     // Invalid metadata outranks a simultaneous resource failure on another
     // owner; every rank must make the same reject-versus-fallback decision.
     if (comm->getSize() > 1)
@@ -64,10 +64,32 @@ TEST(SparseOwnerExchange, RankLocalBadPeerAndReceiveBudgetRejectCollectively)
             packets.push_back({comm->getSize(), {'x'}});
         else if (comm->getRank() == comm->getSize() - 1)
             packets.push_back({0, {'x'}});
-        EXPECT_THROW(exchange_owner_packets(packets, comm, comm->getRank() == 0 ? budget : 0),
-            std::invalid_argument);
+        EXPECT_THROW(exchange_owner_packets(packets, comm, comm->getRank() == 0 ? budget : 0), std::invalid_argument);
     }
     // A failed round does not poison later exchanges, including all-empty ranks.
     EXPECT_TRUE(exchange_owner_packets({}, comm, 0).packets.empty());
+}
+TEST(SparseOwnerExchange, ConsumedLocalDeliveryMovesPayloadAndAdmitsRetainedCapacities)
+{
+    auto comm = Tpetra::getDefaultComm();
+    std::vector<OwnerPacket> packets;
+    packets.reserve(16);
+    packets.push_back({comm->getRank(), {'x'}});
+    packets.front().bytes.reserve(4096);
+    const auto capacity = packets.capacity() * sizeof(OwnerPacket) + packets.front().bytes.capacity();
+    const auto* payload = packets.front().bytes.data();
+    EXPECT_THROW(
+        consume_owner_packets(std::move(packets), comm, comm->getRank() == comm->getSize() - 1 ? capacity - 1 : budget),
+        std::length_error);
+    // Rejection leaves the ownership transfer unperformed and the next
+    // collective can succeed, including otherwise empty application owners.
+    auto result = consume_owner_packets(std::move(packets), comm, capacity);
+    ASSERT_EQ(result.packets.size(), 1);
+    EXPECT_EQ(result.packets.front().bytes.data(), payload);
+    EXPECT_EQ(result.packets.front().peer, comm->getRank());
+    EXPECT_EQ(result.stats.sent_bytes, 1);
+    EXPECT_EQ(result.stats.received_bytes, 1);
+    EXPECT_EQ(result.stats.peak_scratch_bytes, capacity);
+    EXPECT_TRUE(consume_owner_packets({}, comm, 0).packets.empty());
 }
 } // namespace

@@ -722,7 +722,7 @@ std::vector<GeneralVoFResolutionRequest> GeneralVoF::resolution_requests() const
                     cell.phase.carrier_volume == 0)
                     continue;
                 auto assessment =
-                    PLIC::PolyhedralReconstruction<Mode>::assess_resolution(reconstruction_sample<Mode>(cell),
+                    PLIC::PolyhedralReconstruction<Mode>::assess_transport_support(reconstruction_sample<Mode>(cell),
                         reconstruction_stencil<Mode>(*data_, key), data_->options.reconstruction);
                 if (!assessment.admitted())
                     result.push_back({cell.gid, key, assessment});

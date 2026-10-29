@@ -592,9 +592,11 @@ rejects atomically; a computational witness is not itself a measured output.
 ## Qualification boundary
 
 The [Stage 7 roadmap](../../TODO.md#stage-7--general-vof-and-flow-qualification)
-separates the shared foundation, homogeneous specialization, interface-local signed
-ledger and aggregate metric admission from unified capillary surfaces and checked
-preparation interfaces. The configured default backend remains unchanged. Ordinary
+separates mandatory default-policy qualification, capability extensions,
+conditional optimization/performance and optional strict-mode completion.
+[Qualification regimes](../verification/vof_solver_contracts.md#stage-7-scope-and-priorities)
+record backend, cleanup, mesh, material, Courant and horizon explicitly.
+Ordinary SweptPartition with automatic cleanup remains the baseline. Ordinary
 interface-local preparation uses the storage-lifetime and explicit work policies
 above; strict measured geometry required by other consumers is unchanged.
 
@@ -612,8 +614,8 @@ The shared [capillary geometry model](../modeling/general_vof_capillarity.md)
 provides mixed/aligned patch identities and explicit binary filtering with
 component-volume constraints, independent of the transport backend. It changes
 no accepted inventory, history or transport declaration. Complete motion/capillary
-horizons, accuracy/convergence targets and production scaling remain separate
-qualification obligations. Focused preparation and failure tests
+horizons and accuracy/convergence for the claimed regime remain core gates;
+production scaling is a separate conditional performance claim. Focused preparation and failure tests
 cannot establish those results.
 
 ### Independent prescribed-motion probe
@@ -635,20 +637,25 @@ counts and can be summed across ranks. This prescribed transport reference is
 not an analytic coupled pressure/velocity solution, and no new accuracy threshold
 is inferred from its reports.
 
-The complete swept probe is disabled in routine discovery while its full
-reconstruction and motion horizon remains unqualified. The provisional small-phase
+The swept probe is opt-in while its full reconstruction and motion horizon
+remains unqualified. The provisional small-phase
 policy in
 [PLIC reconstruction](../modeling/plic.md#initial-normal-and-angular-objective)
 uses a supported gradient normal without angular optimization below its configured
-length ratio; it retains directional admission and target-volume gates. Run the probe
-explicitly after building the
-target with `--gtest_also_run_disabled_tests` and
-`--gtest_filter=GeneralVoFMotionAccuracy.DISABLED_RepeatedClosedMotionReportsIndependentPhaseErrorAndTheta`.
+length ratio; it retains directional admission and target-volume gates. Run the
+current probe with `SIMPLEFLUID_RUN_ALGEBRAIC_MOTION=1` and
+`--gtest_filter=GeneralVoFMotionAccuracy.SingleInterfaceClosedShearSweptPartition`.
+It explicitly disables cleanup; the old `DISABLED_RepeatedClosedMotion...` name
+is historical and is no longer a registered test.
 Successful preliminary steps do not qualify its complete horizon. The
 50-cell solver test and its `GeneralVoFFinitePassage_2procs`/`4procs` registrations
 remain separate qualification gates for physical residuals and repeated passage.
-Their explicit cleanup-enabled configuration retains the original raw numerical
-gates; it does not qualify the cleanup-disabled configuration.
+The current named full50 helper leaves cleanup automatic (its Boolean argument
+records balance work). It retains the original raw numerical gates. An explicitly
+configured zero-cutoff microscopic variant is separate optional robustness work.
+The historical capture used the then-disabled policy; preserve its failed MPI
+horizon, local replay and collective state-preserving rejection without making
+successful completion a default-policy prerequisite.
 
 The algebraic variants in the same executable enter through
 `plan_face_transport` with explicit `DonorCell` or `GeometricFace`. They have a
@@ -657,6 +664,8 @@ and [gate checklist](../verification/vof_solver_contracts.md#algebraic-face-volu
 Their independent polygon/prism oracle covers complete translation, rotation and
 deformation-return motions, spatial and temporal refinement, and actual directed
 stream limiting/fallback. Midpoint excursions distinguish physical motion from a
-stationary return endpoint. These algebraic qualifications keep phase cleanup
-disabled. Those results cannot qualify swept reach or geometry,
-and swept failures do not establish failure of the algebraic family.
+stationary return endpoint. Controlled algebraic fixtures explicitly disable
+cleanup unless their documented switch is selected; the separate single-interface eight-step fixtures
+remain explicit-zero. Default-policy independent accuracy and cleanup-sensitivity
+evidence must therefore be identified separately. Algebraic results do not qualify
+swept reach/geometry, and swept failures do not establish algebraic failure.

@@ -31,7 +31,7 @@ foreach(TEST_SRC IN LISTS TEST_SOURCES)
         gradient_traverse/OnePassCases.cc)
   endif()
   if(TEST_NAME STREQUAL "testGeneralVoFBalance" OR TEST_NAME STREQUAL "testGeneralVoFPhaseCleanup" OR TEST_NAME STREQUAL "testGeneralVoFFaceWorkspace" OR TEST_NAME STREQUAL "testGeneralVoFBoundaryReach" OR TEST_NAME STREQUAL "testGeneralVoFMotionAccuracy" OR TEST_NAME STREQUAL "testGeneralVoFSpatialCache" OR TEST_NAME STREQUAL "testFilteredSurfaceGeometry" OR TEST_NAME STREQUAL "testGeneralVoFInterfaceTransport" OR TEST_NAME STREQUAL "testGeneralVoFHomogeneousTransport" OR TEST_NAME STREQUAL "testGeneralVoFPreparedTransport" OR TEST_NAME STREQUAL "testGeneralVoFFaceTransport" OR TEST_NAME STREQUAL "testExactGeneralVoF" OR TEST_NAME STREQUAL "testExactPolyhedralReconstruction" OR TEST_NAME STREQUAL "testFiniteVoFRemap" OR TEST_NAME STREQUAL "testBoundedPhaseArithmetic" OR TEST_NAME STREQUAL "testGeneralVoFFinite" OR TEST_NAME STREQUAL "testOrdinaryVoFSweep" OR TEST_NAME STREQUAL "testExactFaceTransfer" OR TEST_NAME STREQUAL "testExactPhaseTransfer" OR TEST_NAME STREQUAL "testPolyhedralReconstruction" OR TEST_NAME STREQUAL "testGeneralVoF" OR TEST_NAME STREQUAL "testFvmLibrary" OR TEST_NAME STREQUAL "testGeometricVoF"
-      OR TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests"
+      OR TEST_NAME STREQUAL "testGeneralVoFOwnerPlaneRequests" OR TEST_NAME STREQUAL "testGeneralVoFLimiterProtocol"
       OR TEST_NAME STREQUAL "testAdaptiveVoF" OR TEST_NAME STREQUAL "testAdaptiveVoFThreeDimensional"
       OR TEST_NAME STREQUAL "testVoFPhysicalSources" OR TEST_NAME STREQUAL "testConservativeAMRRemap" OR TEST_NAME STREQUAL "testProductAMRRemap" OR TEST_NAME STREQUAL "testPolyhedralAMRRemap" OR TEST_NAME STREQUAL "testMixedAMRRemap" OR TEST_NAME STREQUAL "testDistributedNativeOperators" OR TEST_NAME STREQUAL "testDistributedAdaptiveState")
     # Catch dependencies from FVM back into the higher-level solver DSO.
@@ -331,6 +331,12 @@ foreach(PROCS IN ITEMS 2 4)
     TARGET testPolyhedralReconstruction PROCS ${PROCS}
     LABELS "vof;geometry;resolution;finite;collective"
     TIMEOUT 180)
+  simplefluid_add_mpi_test(
+    NAME GeneralVoFSingleInterfaceMotion_${PROCS}procs
+    TARGET testGeneralVoFMotionAccuracy PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFMotionAccuracy.SingleInterfaceClosedShearSweptPartition:GeneralVoFMotionAccuracy.SingleInterfaceClosedShearGeometricFace"
+    LABELS "vof;geometry;reconstruction;motion;coarse_fine;collective;empty_rank"
+    TIMEOUT 300)
 endforeach()
 
 foreach(PROCS IN ITEMS 2 4)
@@ -352,6 +358,7 @@ endforeach()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     set_source_files_properties(testGeneralVoFPhaseCleanup.cc testGeneralVoFFaceWorkspace.cc ../details/GeneralVoF/FaceWorkspaceBudget.cc testGeneralVoFOwnerPlaneRequests.cc ../details/GeneralVoF/OwnerPlaneRequests.cc testGeneralVoFBoundaryReach.cc testGeneralVoFMotionAccuracy.cc testGeneralVoFSpatialCache.cc ../details/GeneralVoF/LocalSpatialCache.cc testFilteredSurfaceGeometry.cc ../details/GeneralVoF/FilteredSurfaceGeometry.cc testGeneralVoFInterfaceTransport.cc testGeneralVoFHomogeneousTransport.cc testGeneralVoFPreparedTransport.cc testFiniteVoFRemap.cc testBoundedPhaseArithmetic.cc testGeneralVoF.cc testGeneralVoFFinite.cc testOrdinaryVoFSweep.cc
+        testGeneralVoFFaceTransport.cc testGeneralVoFLimiterProtocol.cc testPolyhedralReconstruction.cc testExactPolyhedralReconstruction.cc
         testExactGeneralVoF.cc exact/GeneralVoFRoundtrip.cc PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off;-fno-lto"
         SKIP_UNITY_BUILD_INCLUSION TRUE
@@ -386,6 +393,13 @@ foreach(PROCS 2 4)
   simplefluid_add_mpi_test(NAME GeneralVoFFaceTransport_${PROCS}procs
     TARGET testGeneralVoFFaceTransport PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFFaceTransport.*")
+endforeach()
+
+foreach(PROCS 2 4)
+  simplefluid_add_mpi_test(NAME GeneralVoFLimiterProtocol_${PROCS}procs
+    TARGET testGeneralVoFLimiterProtocol PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFLimiterProtocol.*"
+    LABELS "vof;transport;collective;empty_rank;synthetic" TIMEOUT 120)
 endforeach()
 
 foreach(PROCS 2 4)

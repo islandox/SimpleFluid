@@ -120,6 +120,7 @@ foreach(index RANGE ${last_symbol})
     # the remaining PLIC geometry implementations belong to Mesh.
     if(symbol_type MATCHES "^[TW]$" AND name MATCHES "^SimpleFluid::PLIC::"
        AND NOT name MATCHES "^SimpleFluid::PLIC::PolyhedralReconstruction<"
+       AND NOT name MATCHES "^SimpleFluid::PLIC::PolyhedralFitFailure::"
        AND NOT name MATCHES "^SimpleFluid::PLIC::PolyhedralResolutionRequired::")
         message(FATAL_ERROR "Mesh-owned PLIC symbol exported by FVM: ${name}")
     endif()

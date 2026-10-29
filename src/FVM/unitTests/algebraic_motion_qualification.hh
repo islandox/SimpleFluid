@@ -1139,6 +1139,42 @@ INSTANTIATE_TEST_SUITE_P(AlgebraicMotion, AlgebraicMotionQualification, testing:
     });
 } // namespace algebraic_motion
 
+// First endpoint check after reconstruction repair. This preserves the
+// original finite rectangle, N16, C=.5, midpoint and complete T=1 endpoint.
+TEST(GeneralVoFMotionAccuracy, OriginalPlanarPatchN16Endpoint)
+{
+    if (const auto* enabled = std::getenv("SIMPLEFLUID_RUN_ALGEBRAIC_MOTION"); !enabled || std::string(enabled) != "1")
+        GTEST_SKIP() << "Opt-in original prescribed-motion endpoint";
+    using namespace algebraic_motion;
+    const Case c{Motion::PlanarPatch, Mesh::Uniform, GeneralVoFTransportBackend::GeometricFace, .5};
+    const auto result = run(c, 16, .5, "original_planar_patch_N16");
+    ASSERT_TRUE(result.has_value());
+    RecordProperty("original_endpoint_shape_error", result->shape);
+    RecordProperty("original_endpoint_centroid_error", result->centroid);
+    // The .02 shape and quarter-cell centroid gates apply to N64 in the
+    // original manifest. An N16 endpoint reports accuracy without relabeling
+    // those finest-grid gates as passed.
+}
+
+// A separately labelled extraction of the preregistered N32 case. It cannot
+// replace the failed N16 stress case or establish the three-resolution order.
+TEST(GeneralVoFMotionAccuracy, RequiredPlanarPatchN32EndpointDiagnostic)
+{
+    if (const auto* enabled = std::getenv("SIMPLEFLUID_RUN_ALGEBRAIC_MOTION"); !enabled || std::string(enabled) != "1")
+        GTEST_SKIP() << "Opt-in required N32 prescribed-motion endpoint diagnostic";
+    using namespace algebraic_motion;
+    const Case c{Motion::PlanarPatch, Mesh::Uniform, GeneralVoFTransportBackend::GeometricFace, .5};
+    const auto result = run(c, 32, .5, "required_planar_patch_N32");
+    ASSERT_TRUE(result.has_value());
+    RecordProperty("diagnostic_only", "required N32 case; N16 failure and N64/refinement requirements remain");
+    RecordProperty("endpoint_shape_error", result->shape);
+    RecordProperty("endpoint_centroid_error", result->centroid);
+    // Apply the original finest-case limits here as an additional diagnostic,
+    // without claiming that the finest resolution itself was constructed/run.
+    EXPECT_LE(result->shape, .02);
+    EXPECT_LE(result->centroid, .25 * result->width);
+}
+
 TEST(GeneralVoFMotionAccuracy, IndependentAlgebraicPolygonAndMomentOracle)
 {
     using namespace algebraic_motion;

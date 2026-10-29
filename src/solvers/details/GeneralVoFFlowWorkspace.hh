@@ -12,6 +12,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <utility>
 
 namespace SimpleFluid::detail
 {
@@ -37,6 +38,8 @@ struct GeneralVoFFiniteProjectionProvenance
     {
         double volume_tolerance = 0;
         double max_courant = 0;
+        bool cumulative = false;
+        std::vector<long double> signed_discrepancy, volume;
     };
     std::optional<ArithmeticMode> arithmetic_mode;
     /** Ordinary algebraic transport additionally requires either |net rate| /
@@ -153,13 +156,22 @@ private:
         Vector divisor{};
         std::array<Vector, 3> factor{};
         bool valid = true;
+        bool has_exterior = false; ///< Used by the separate wall-response stencil.
     };
     std::vector<GradientStencil> gradient_stencils_;
+    // Separate one-sided response of shared internal-face values. Center
+    // gradients remain the nonorthogonal interior reconstruction operator.
+    std::vector<GradientStencil> face_gradient_stencils_;
     std::array<bool, 3> absent_gradient_axis_{};
     std::array<bool, 3> wall_reaction_axis_{};
     std::uint64_t geometry_epoch_ = 0;
     MeshHandle<>::MultiRegionPtr native_owner_;
     void prepare_gradient_geometry();
+    void factor_gradient_stencil(GradientStencil&) const;
+    [[nodiscard]] std::size_t boundary_gradient_storage_bytes() const;
+    template<class Scalar, class Difference, class Add, class Scale, class Divide, class IsZero>
+    [[nodiscard]] std::vector<std::array<Scalar, 3>> boundary_gradient(
+        Scalar zero, Difference difference, Add add, Scale scale, Divide divide, IsZero is_zero) const;
     [[nodiscard]] bool current_geometry() const noexcept;
     Pack::import_type cell_import_, face_import_;
     mutable Pack::vector_type cell_owned_, cell_overlap_, face_owned_, face_overlap_;
@@ -189,3 +201,5 @@ struct SIMPLEFLUID_SOLVERS_LOCAL GeneralVoFFlowWorkspace
 };
 } // namespace Exact
 } // namespace SimpleFluid::detail
+
+#include "solvers/details/GeneralVoFBoundaryGradient.ipp"
