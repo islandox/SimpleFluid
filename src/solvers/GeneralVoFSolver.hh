@@ -8,8 +8,8 @@
 #include "solvers/VoFSolver.hh"
 namespace SimpleFluid
 {
-/** General native flow controls. All physical tolerances retain their original
- * extensive/face equations; no volume or inventory floor is introduced.
+/** General native flow controls. Physical tolerances retain their original
+ * extensive/face equations. Phase cleanup is configured on the supplied authority.
  */
 struct GeneralVoFSolverOptions
 {

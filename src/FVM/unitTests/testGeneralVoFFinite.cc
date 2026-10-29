@@ -682,7 +682,10 @@ void check_remap(const GeneralVoF::FiniteRemapTrial& trial, unsigned expected_ce
 TEST(GeneralVoFFinite, FiniteRefineCoarsenPreservesPhasesWeightedChannelsAndSource)
 {
     const auto input = fixture();
-    const auto source = std::make_shared<const GeneralVoF>(input.hierarchy, input.order, input.gas, input.carrier);
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
+    const auto source =
+        std::make_shared<const GeneralVoF>(input.hierarchy, input.order, input.gas, input.carrier, options);
     const auto control = source->accepted_control();
     std::vector<AdaptiveMark> marks;
     for (std::size_t c = 0; c < source->owned_order().size(); ++c)
@@ -715,7 +718,9 @@ TEST(GeneralVoFFinite, FiniteRefineCoarsenPreservesPhasesWeightedChannelsAndSour
 TEST(GeneralVoFFinite, FiniteMigrationCopiesInventoriesAndRejectsForeignSchemaAtomically)
 {
     const auto input = fixture();
-    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier);
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
     const auto comm = Tpetra::getDefaultComm();
     std::vector<int> destinations(source.hierarchy()->owned().size(), (comm->getRank() + 1) % comm->getSize());
     const auto plan = source.hierarchy()->plan_migration(destinations);
@@ -783,7 +788,9 @@ TEST(GeneralVoFFinite, SamePureGeometryKeepsIndependentTraceInventoryWithoutInve
     std::fill(input.gas.begin(), input.gas.end(), 1.);
     std::fill(input.carrier.begin(), input.carrier.end(), 1e-18);
     const std::vector<GeneralVoFPhaseGeometry> declarations(input.order.size(), GeneralVoFPhaseGeometry::PureGas);
-    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, {}, declarations);
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options, declarations);
     const auto moved = state.apply(state.plan_transport(stationary(state), circulation(state), 1));
     const auto pure = moved->reconstruct();
     for (std::size_t i = 0; i < input.order.size(); ++i)
@@ -805,7 +812,9 @@ TEST(GeneralVoFFinite, IncomingTinyGeometryInvalidatesPureHintAndIdentityPreserv
         input.gas[i] = center[0] < 1 ? cut : 0;
         input.carrier[i] = 1 - input.gas[i];
     }
-    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier);
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options);
     const auto identity = state.plan_transport(stationary(state), circulation(state, true), 1);
     EXPECT_EQ(state.apply(identity)->accepted_identity(), state.accepted_identity());
     const auto moved = state.apply(state.plan_transport(stationary(state), circulation(state), 1));

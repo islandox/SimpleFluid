@@ -87,7 +87,7 @@ TEST(GeneralVoFPhaseCleanup, DisabledAndAboveCutoffPreserveInventory)
     constexpr double small = 0x1p-40;
     std::fill(input.gas.begin(), input.gas.end(), small);
     std::fill(input.carrier.begin(), input.carrier.end(), 1 - small);
-    for (const auto options : {GeneralVoFOptions{}, cleanup_options()})
+    for (const auto options : {cleanup_options(0), GeneralVoFOptions{}, cleanup_options()})
     {
         GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
         EXPECT_EQ(source.gas_volumes(), input.gas);
@@ -109,7 +109,7 @@ TEST(GeneralVoFPhaseCleanup, DisabledTinyPhaseRemainsIndependentAndUncertaintyIs
     auto input = fixture();
     std::fill(input.gas.begin(), input.gas.end(), 0x1p-60);
     std::fill(input.carrier.begin(), input.carrier.end(), 1);
-    GeneralVoF raw(input.hierarchy, input.order, input.gas, input.carrier);
+    GeneralVoF raw(input.hierarchy, input.order, input.gas, input.carrier, cleanup_options(0));
     GeneralVoF clean(input.hierarchy, input.order, input.gas, input.carrier, cleanup_options());
     EXPECT_EQ(raw.gas_volumes(), input.gas);
     EXPECT_EQ(raw.carrier_volumes(), input.carrier);
@@ -122,6 +122,129 @@ TEST(GeneralVoFPhaseCleanup, DisabledTinyPhaseRemainsIndependentAndUncertaintyIs
         EXPECT_EQ(raw.accumulated_phase_errors()[c].gas, clean.accumulated_phase_errors()[c].gas);
         EXPECT_EQ(raw.accumulated_phase_errors()[c].carrier, clean.accumulated_phase_errors()[c].carrier);
         EXPECT_EQ(raw.initial_occupancy_errors()[c].admitted_bound, clean.initial_occupancy_errors()[c].admitted_bound);
+    }
+}
+
+TEST(GeneralVoFPhaseCleanup, GeometryBackendsDefaultToPinnedGlobalBudgets)
+{
+    constexpr double small = 0x1p-48;
+    auto input = fixture();
+    for (std::size_t c = 0; c < input.order.size(); ++c)
+    {
+        const auto x = input.hierarchy->geometry(input.hierarchy->owned().at(input.order[c]))->centroid();
+        if (x[0] > 1 && x[1] < 1 && x[2] < 1)
+        {
+            input.gas[c] = small;
+            input.carrier[c] = 1 - small;
+        }
+    }
+    for (const auto backend : {GeneralVoFTransportBackend::SweptPartition, GeneralVoFTransportBackend::GeometricFace})
+    {
+        GeneralVoFOptions options;
+        options.transport_backend = backend;
+        GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+        const auto& policy = source.options().phase_cleanup;
+        EXPECT_EQ(policy.relative_cutoff, 1e-14);
+        EXPECT_DOUBLE_EQ(policy.maximum_absolute_volume[0], 1e-13 * (1 + small));
+        EXPECT_DOUBLE_EQ(policy.maximum_absolute_volume[1], 1e-13 * (7 - small));
+        EXPECT_GT(policy.maximum_absolute_volume[0], 1e-13); // Raw initial inventory, before cleanup.
+        EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 1u);
+        EXPECT_EQ(source.phase_cleanup_state().signed_volume, (std::array<long double, 2>{-small, small}));
+        EXPECT_EQ(source.phase_cleanup_state().absolute_volume, (std::array<long double, 2>{small, small}));
+        for (std::size_t c = 0; c < input.order.size(); ++c)
+            EXPECT_TRUE(source.gas_volumes()[c] == 0 || source.carrier_volumes()[c] == 0);
+        const auto packet = source.phase_cleanup_checkpoint();
+        GeneralVoF restored(source.hierarchy(), source.owned_order(), source.gas_volumes(), source.carrier_volumes(),
+            options, source.phase_geometry_declarations(), GeneralVoF::decode_phase_cleanup_checkpoint(packet));
+        EXPECT_EQ(restored.phase_cleanup_checkpoint(), packet);
+        EXPECT_EQ(restored.options().phase_cleanup.maximum_absolute_volume, policy.maximum_absolute_volume);
+        EXPECT_TRUE(restored.latest_phase_cleanup().empty());
+
+        // Ownership changes may not derive another allowance from the already-cleaned state.
+        const auto comm = Tpetra::getDefaultComm();
+        const auto plan = source.hierarchy()->plan_migration(
+            std::vector<int>(source.owned_order().size(), (comm->getRank() + 1) % comm->getSize()));
+        const auto raw = source.hierarchy()->apply(plan);
+        const auto native = assemble_adaptive_native(*raw, raw->configuration_descriptor());
+        const auto target =
+            source.hierarchy()->apply(plan, raw->with_partition(native.partition, native.mesh->owned_cell_map()));
+        const auto moved = source.plan_remap(plan, target).candidate();
+        EXPECT_EQ(moved->phase_cleanup_checkpoint(), packet);
+        EXPECT_EQ(moved->options().phase_cleanup.maximum_absolute_volume, policy.maximum_absolute_volume);
+        EXPECT_TRUE(moved->latest_phase_cleanup().empty());
+
+        options.phase_cleanup.relative_cutoff = 0;
+        GeneralVoF disabled(input.hierarchy, input.order, input.gas, input.carrier, options);
+        EXPECT_EQ(disabled.gas_volumes(), input.gas);
+        EXPECT_EQ(disabled.carrier_volumes(), input.carrier);
+        EXPECT_EQ(disabled.phase_cleanup_state().cleaned_cells, 0u);
+        options.phase_cleanup.relative_cutoff = GeneralVoFPhaseCleanupOptions::automatic;
+        options.phase_cleanup.maximum_absolute_volume[0] = 0;
+        EXPECT_THROW(
+            (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    }
+}
+
+TEST(GeneralVoFPhaseCleanup, AutomaticDefaultsLeaveOtherBackendsAndModesUnchanged)
+{
+    auto input = fixture();
+    std::fill(input.gas.begin(), input.gas.end(), 0x1p-60);
+    std::fill(input.carrier.begin(), input.carrier.end(), 1);
+    for (const auto mode : {ArithmeticMode::Ordinary, ArithmeticMode::BoundedCertification, ArithmeticMode::Exact})
+    {
+        GeneralVoFOptions options;
+        options.arithmetic_mode = mode;
+        if (mode == ArithmeticMode::Ordinary)
+            options.transport_backend = GeneralVoFTransportBackend::DonorCell;
+        GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+        EXPECT_EQ(source.options().phase_cleanup.relative_cutoff, 0);
+        EXPECT_EQ(source.options().phase_cleanup.maximum_absolute_volume, (std::array<double, 2>{0, 0}));
+        EXPECT_EQ(source.gas_volumes(), input.gas);
+        EXPECT_EQ(source.carrier_volumes(), input.carrier);
+        options.phase_cleanup.relative_cutoff = 1e-14;
+        EXPECT_THROW(
+            (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, options), std::invalid_argument);
+    }
+}
+
+TEST(GeneralVoFPhaseCleanup, AutomaticBudgetRejectsRemovalOfEntireDiluteGlobalPhase)
+{
+    auto input = fixture();
+    std::fill(input.gas.begin(), input.gas.end(), 0x1p-60);
+    std::fill(input.carrier.begin(), input.carrier.end(), 1);
+    EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier), std::invalid_argument);
+    GeneralVoFOptions disabled;
+    disabled.phase_cleanup.relative_cutoff = 0;
+    GeneralVoF previous(input.hierarchy, input.order, input.gas, input.carrier, disabled);
+    GeneralVoF restored(previous.hierarchy(), previous.owned_order(), previous.gas_volumes(),
+        previous.carrier_volumes(), {}, previous.phase_geometry_declarations(),
+        GeneralVoF::decode_phase_cleanup_checkpoint(previous.phase_cleanup_checkpoint()));
+    EXPECT_EQ(restored.options().phase_cleanup.relative_cutoff, 0);
+    EXPECT_EQ(restored.gas_volumes(), input.gas);
+    EXPECT_EQ(restored.phase_cleanup_checkpoint(), previous.phase_cleanup_checkpoint());
+}
+
+TEST(GeneralVoFPhaseCleanup, AutomaticRequestsAndRestoredPoliciesAgreeBeforeResolution)
+{
+    const auto input = fixture();
+    const auto comm = Tpetra::getDefaultComm();
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier);
+    auto invalid = source.options();
+    invalid.phase_cleanup.relative_cutoff = -2;
+    EXPECT_THROW(
+        (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, invalid), std::invalid_argument);
+    if (comm->getSize() > 1)
+    {
+        GeneralVoFOptions requests;
+        if (comm->getRank() == comm->getSize() - 1)
+            requests.phase_cleanup.maximum_absolute_volume[0] = 0;
+        EXPECT_THROW(
+            (void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, requests), std::invalid_argument);
+        auto state = source.phase_cleanup_state();
+        if (comm->getRank() == comm->getSize() - 1)
+            state.policy.maximum_absolute_volume[0] *= 2;
+        EXPECT_THROW((void) GeneralVoF(input.hierarchy, input.order, input.gas, input.carrier, {}, {}, state),
+            std::invalid_argument);
     }
 }
 TEST(GeneralVoFPhaseCleanup, AbsoluteBudgetDoesNotCancelOppositeRepairs)

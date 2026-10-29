@@ -1,7 +1,8 @@
 # Budgeted phase cleanup
 
-`GeneralVoFOptions::phase_cleanup` is an opt-in numerical policy for Ordinary
-`SweptPartition` transport. Its default `relative_cutoff = 0` disables cleanup.
+`GeneralVoFOptions::phase_cleanup` defaults to enabled for Ordinary
+`SweptPartition` and `GeometricFace` transport. Set `relative_cutoff = 0`
+explicitly to disable cleanup.
 It deliberately changes represented phase inventories; recording those changes
 does not make the operation exactly conservative. Strict PLIC offset acceptance
 and the transport, momentum, occupancy and physical drift tolerances remain
@@ -14,13 +15,19 @@ using binary64 arithmetic. It never replaces the dominant amount with the cell
 volume. Every correction is the difference between the actual published before
 and after values. If the dominant addition rounds away, its correction is zero.
 
-The caller supplies two extensive `maximum_absolute_volume` budgets, in cubic
-metres, for the entire run. A cutoff around `1e-14` is an experimental starting
-point, not a library default or a universal resolution criterion. Budget choice
-must be small relative to the application's permitted raw phase-inventory drift.
-The full50 test explicitly selects `1e-14` and caps each cumulative phase repair
-at `1e-13` times its initial global inventory. These controls belong to that test;
-they do not alter other callers.
+The default cutoff is `1e-14`. Each default extensive `maximum_absolute_volume`
+cap is `1e-13` times that phase's initial global inventory, before any cleanup.
+These are cumulative run budgets in cubic metres, derived conservatively from
+owned inputs only. The policy is a numerical control, not a universal resolution
+criterion; applications can override the cutoff and either absolute cap.
+
+Unconstructed options use `GeneralVoFPhaseCleanupOptions::automatic` (`-1`)
+independently for the cutoff and each cap. Construction agrees these requests
+collectively and resolves them once. `GeneralVoF::options()` and cleanup
+checkpoints contain concrete values. An explicit cap of zero permits no spending
+for that phase; it does not request automatic sizing. No positive budget floor is
+introduced for a globally absent or dilute phase. In particular, deleting an
+entire nonzero dilute phase can exceed its relative global allowance and reject.
 
 The budget bounds direct inventory corrections. It does not bound the change in
 future fluxes or interface position caused by pure/mixed reclassification;
@@ -89,7 +96,10 @@ publication. The seven-argument `GeneralVoF` constructor accepts a prior
 `GeneralVoFPhaseCleanupState` before any new initialization cleanup. Save
 `phase_cleanup_checkpoint()` with the accepted phase checkpoint, decode it with
 `decode_phase_cleanup_checkpoint()`, and pass the recovered state to that
-constructor together with the original options. The versioned finite codec
+constructor together with compatible options. Automatic fields inherit
+the checkpoint's bound values, including a previously disabled policy; caps are
+never recalculated from restarted or remapped inventories. Explicit conflicting
+values reject. The versioned finite codec
 retains cumulative spending and the bound policy; malformed data, policy changes
 and rank disagreement reject. Resuming with a fresh empty ledger would start a
 new allowance and is not a valid continuation of an existing run.
@@ -102,15 +112,15 @@ Phase-only finite remap inherits the original ledger and can admit further
 cleanup on the new candidate after raw remap checks. Ownership migration retains
 spending without charging ghosts or copied inventories. Cleanup-enabled remaps
 with coupled channels reject explicitly: correction of transported auxiliary
-fields has no implemented contract. Solver regrid therefore remains unsupported
-with cleanup enabled. Ordinary solver ownership-only repartition instead uses
+fields has no implemented contract. Solver regrid therefore requires explicit
+cleanup opt-out on the geometry backends. Ordinary solver ownership-only repartition instead uses
 phase-only migration and a separate keyed copy of accepted flow fields. It keeps
 the cleanup checkpoint, current and cumulative cleanup momentum, and clock
 unchanged; it neither performs a new cleanup transaction nor recovers velocity
 by dividing transferred momentum by mass. Failed migration leaves the complete
 accepted publication unchanged. See [measured live balancing](../architecture/general_vof_balancing.md).
-BoundedCertification, Exact, DonorCell and GeometricFace do not support this
-policy and reject an enabled cutoff.
+BoundedCertification, Exact and DonorCell retain disabled defaults and reject an
+explicit positive cutoff. Their automatic caps resolve to zero.
 
 The uncleaned microscopic fixed-normal PLIC problem may still reject. The
 integration obligation is to clean an eligible amount within budget, publish a

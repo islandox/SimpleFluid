@@ -7,6 +7,41 @@ namespace SimpleFluid::VoF::general_vof_detail
 namespace
 {
 using State = GeneralVoFPhaseCleanupState;
+constexpr double automatic = GeneralVoFPhaseCleanupOptions::automatic;
+bool supported(const GeneralVoFOptions& options)
+{
+    return options.arithmetic_mode == ArithmeticMode::Ordinary &&
+           (options.transport_backend == GeneralVoFTransportBackend::SweptPartition ||
+               options.transport_backend == GeneralVoFTransportBackend::GeometricFace);
+}
+// Nonnegative inventory lower bound, alongside the compensated nominal sum.
+// TwoSum identifies an upward-rounded addition without changing the rounding mode.
+long double add_lower(long double a, long double b)
+{
+    auto value = a + b;
+    if (!std::isfinite(value))
+        throw std::invalid_argument("General VoF initial phase inventory overflow.");
+    const auto z = value - a;
+    const auto residual = (a - (value - z)) + (b - z);
+    if (residual < 0)
+        value = std::nextafter(value, 0.L);
+    return value;
+}
+double automatic_cap(long double inventory)
+{
+    auto value = inventory * static_cast<long double>(1e-13);
+    if (!std::isfinite(value))
+        throw std::invalid_argument("General VoF automatic phase cleanup budget overflow.");
+    // Round toward zero at both arithmetic and binary64 storage boundaries.
+    if (value > 0)
+        value = std::nextafter(value, 0.L);
+    if (value > std::numeric_limits<double>::max())
+        return std::numeric_limits<double>::max();
+    auto result = static_cast<double>(value);
+    if (result > value)
+        result = std::nextafter(result, 0.);
+    return result;
+}
 long double add_upper(long double a, long double b)
 {
     if (b == 0)
@@ -81,14 +116,149 @@ State read(wire::Reader& r)
 void validate_phase_cleanup_options(const GeneralVoFOptions& options)
 {
     const auto& cleanup = options.phase_cleanup;
-    if (!std::isfinite(cleanup.relative_cutoff) || cleanup.relative_cutoff < 0 || cleanup.relative_cutoff >= .5)
-        throw std::invalid_argument("General VoF phase cleanup cutoff must be finite in [0,0.5).");
+    if (!std::isfinite(cleanup.relative_cutoff) ||
+        (cleanup.relative_cutoff != automatic && (cleanup.relative_cutoff < 0 || cleanup.relative_cutoff >= .5)))
+        throw std::invalid_argument("General VoF phase cleanup cutoff must be automatic or finite in [0,0.5).");
     for (double value : cleanup.maximum_absolute_volume)
-        if (!std::isfinite(value) || value < 0)
-            throw std::invalid_argument("General VoF phase cleanup absolute budgets must be finite and nonnegative.");
-    if (cleanup.relative_cutoff > 0 && (options.arithmetic_mode != ArithmeticMode::Ordinary ||
-                                           options.transport_backend != GeneralVoFTransportBackend::SweptPartition))
-        throw std::invalid_argument("General VoF phase cleanup supports Ordinary SweptPartition only.");
+        if (!std::isfinite(value) || (value != automatic && value < 0))
+            throw std::invalid_argument("General VoF phase cleanup absolute budgets must be automatic or nonnegative.");
+    if (cleanup.relative_cutoff > 0 && !supported(options))
+        throw std::invalid_argument("General VoF phase cleanup supports Ordinary geometry transport only.");
+}
+void resolve_phase_cleanup_options(GeneralVoF::Data& data)
+{
+    const auto comm = data.hierarchy->communicator();
+    auto& options = data.options.phase_cleanup;
+    std::vector<OwnerPacket> packets;
+    wire::collective(*comm,
+        [&]
+        {
+            validate_phase_cleanup_options(data.options);
+            validate(data.phase_cleanup);
+            wire::Writer writer;
+            write(writer, data.phase_cleanup);
+            wire::Budget budget{data.options.byte_budget};
+            budget.packet(writer.data.size());
+            packets.push_back({0, std::move(writer.data)});
+        });
+    auto incoming = exchange_owner_packets(packets, comm, data.options.byte_budget);
+    wire::collective(*comm,
+        [&]
+        {
+            if (comm->getRank() != 0)
+                return;
+            if (incoming.packets.size() != std::size_t(comm->getSize()))
+                throw std::invalid_argument("General VoF initial phase cleanup state has missing owners.");
+            wire::Writer reference;
+            write(reference, data.phase_cleanup);
+            std::set<int> owners;
+            for (const auto& packet : incoming.packets)
+                if (!owners.insert(packet.peer).second || packet.bytes != reference.data)
+                    throw std::invalid_argument("General VoF initial phase cleanup state differs across owners.");
+        });
+    // Raw requests were agreed before entering this function. Resolve checkpoint
+    // fields first: a restart must never compute new caps from cleaned inventories.
+    wire::collective(*comm,
+        [&]
+        {
+            if (options.relative_cutoff == automatic)
+                options.relative_cutoff = data.phase_cleanup.policy_bound ? data.phase_cleanup.policy.relative_cutoff
+                                                                          : (supported(data.options) ? 1e-14 : 0);
+            for (unsigned p = 0; p < 2; ++p)
+                if (options.maximum_absolute_volume[p] == automatic && data.phase_cleanup.policy_bound)
+                    options.maximum_absolute_volume[p] = data.phase_cleanup.policy.maximum_absolute_volume[p];
+            if (data.phase_cleanup.policy_bound)
+                validate(data.phase_cleanup, &options);
+            if (options.relative_cutoff == 0)
+                for (auto& value : options.maximum_absolute_volume)
+                    if (value == automatic)
+                        value = 0;
+            validate_phase_cleanup_options(data.options);
+        });
+    if (options.maximum_absolute_volume[0] != automatic && options.maximum_absolute_volume[1] != automatic)
+        return;
+    packets.clear();
+    wire::collective(*comm,
+        [&]
+        {
+            std::array<::SimpleFluid::detail::CompensatedSum<long double>, 2> sum;
+            std::array<long double, 2> lower{};
+            for (const auto& [key, cell] : data.cells)
+                if (cell.owner == comm->getRank())
+                {
+                    const std::array<double, 2> volumes{cell.phase.gas_volume, cell.phase.carrier_volume};
+                    for (unsigned p = 0; p < 2; ++p)
+                        if (options.maximum_absolute_volume[p] == automatic)
+                        {
+                            sum[p] += volumes[p];
+                            lower[p] = add_lower(lower[p], volumes[p]);
+                        }
+                }
+            wire::Writer writer;
+            for (unsigned p = 0; p < 2; ++p)
+            {
+                finite_real(writer, sum[p].value());
+                finite_real(writer, lower[p]);
+            }
+            wire::Budget budget{data.options.byte_budget};
+            budget.packet(writer.data.size());
+            packets.push_back({0, std::move(writer.data)});
+        });
+    incoming = exchange_owner_packets(packets, comm, data.options.byte_budget);
+    std::vector<OwnerPacket> replies;
+    wire::collective(*comm,
+        [&]
+        {
+            if (comm->getRank() != 0)
+                return;
+            if (incoming.packets.size() != std::size_t(comm->getSize()))
+                throw std::invalid_argument("General VoF initial phase inventory has missing owners.");
+            std::array<::SimpleFluid::detail::CompensatedSum<long double>, 2> sum;
+            std::array<long double, 2> lower{};
+            std::set<int> owners;
+            for (const auto& packet : incoming.packets)
+            {
+                if (!owners.insert(packet.peer).second)
+                    throw std::invalid_argument("General VoF initial phase inventory repeats an owner.");
+                wire::Reader reader{packet.bytes};
+                for (unsigned p = 0; p < 2; ++p)
+                {
+                    const auto nominal = finite_real(reader), bound = finite_real(reader);
+                    if (nominal < 0 || bound < 0)
+                        throw std::invalid_argument("General VoF initial phase inventory is negative.");
+                    sum[p] += nominal;
+                    lower[p] = add_lower(lower[p], bound);
+                }
+                reader.done();
+            }
+            wire::Writer writer;
+            for (unsigned p = 0; p < 2; ++p)
+            {
+                if (!std::isfinite(sum[p].value()))
+                    throw std::invalid_argument("General VoF initial phase inventory overflow.");
+                real(writer, options.maximum_absolute_volume[p] == automatic
+                                 ? automatic_cap(std::min(sum[p].value(), lower[p]))
+                                 : options.maximum_absolute_volume[p]);
+            }
+            wire::Budget budget{data.options.byte_budget};
+            for (int rank = 0; rank < comm->getSize(); ++rank)
+            {
+                budget.packet(writer.data.size());
+                replies.push_back({rank, writer.data});
+            }
+        });
+    const auto returned = exchange_owner_packets(replies, comm, data.options.byte_budget);
+    wire::collective(*comm,
+        [&]
+        {
+            if (returned.packets.size() != 1 || returned.packets.front().peer != 0)
+                throw std::invalid_argument("General VoF automatic phase cleanup budgets are missing.");
+            wire::Reader reader{returned.packets.front().bytes};
+            for (auto& value : options.maximum_absolute_volume)
+                value = real(reader);
+            reader.done();
+            validate_phase_cleanup_options(data.options);
+        });
 }
 void apply_phase_cleanup(GeneralVoF::Data& data)
 {
@@ -104,6 +274,9 @@ void apply_phase_cleanup(GeneralVoF::Data& data)
         [&]
         {
             validate_phase_cleanup_options(data.options);
+            if (options.relative_cutoff == automatic || options.maximum_absolute_volume[0] == automatic ||
+                options.maximum_absolute_volume[1] == automatic)
+                throw std::invalid_argument("General VoF phase cleanup controls were not resolved.");
             validate(data.phase_cleanup, &options);
             wire::Budget budget{data.options.byte_budget};
             if (options.relative_cutoff > 0)

@@ -138,6 +138,8 @@ void GeneralVoF::construct_mode(std::shared_ptr<const Hierarchy> hierarchy, std:
             }
         });
     agree_options(options, comm);
+    resolve_phase_cleanup_options(*data);
+    options = data->options;
     data->control = transaction(comm);
     if (transfer)
     {

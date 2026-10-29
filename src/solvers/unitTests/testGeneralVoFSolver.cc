@@ -91,7 +91,7 @@ TEST(GeneralVoFSolverTest, SingleLayerInitialNormalMotionUsesPressureWithoutAppl
 }
 TEST(GeneralVoFSolverTest, FiniteSolverKeepsSelectedGeometryThroughStepAndRegrid)
 {
-    const auto source = phases(0, false, true);
+    const auto source = phases(0, false, true, false);
     const auto comm = Tpetra::getDefaultComm();
     const auto reset = []
     {
@@ -198,7 +198,7 @@ TEST(GeneralVoFSolverTest, SweptPlanarBinaryInterfaceAdmitsPhysicalZeroCurvature
 }
 TEST(GeneralVoFSolverTest, SymmetricNativeRegridRetainsAcceptedPhysicalMomentumAtFixedClock)
 {
-    GeneralVoFSolver solver(phases(0), inviscid());
+    GeneralVoFSolver solver(phases(0, false, false, false), inviscid());
     std::vector<VoF::Vector> velocity(solver.mesh()->num_owned_cells());
     for (std::size_t c = 0; c < velocity.size(); ++c)
     {
@@ -417,11 +417,13 @@ namespace
 TEST(GeneralVoFSolverTest, MicroscopicDeclaredTraceAggregatesPhaseMassBeforeDiagnosticNarrowing)
 {
     const auto base = phases(0);
+    auto phase_options = base->options();
+    phase_options.phase_cleanup.relative_cutoff = 0;
     const double eta = std::numeric_limits<double>::denorm_min();
     std::vector<double> gas(base->owned_order().size(), eta), carrier = base->carrier_volumes();
     std::vector<VoF::GeneralVoFPhaseGeometry> geometry(gas.size(), VoF::GeneralVoFPhaseGeometry::PureCarrier);
     auto source = std::make_shared<const VoF::GeneralVoF>(
-        base->hierarchy(), base->owned_order(), gas, carrier, base->options(), geometry);
+        base->hierarchy(), base->owned_order(), gas, carrier, phase_options, geometry);
     auto material = inviscid();
     material.gas_density = .5;
     material.liquid_density = 1;
@@ -568,7 +570,7 @@ void run_full50_case(Full50Partition partition)
     material.gas_density = .1;
     material.liquid_density = 1;
     const auto fixture_started = Clock::now();
-    auto initial_phases = skew_coarse_fine_plane(true, partition != Full50Partition::Canonical);
+    auto initial_phases = skew_coarse_fine_plane(partition != Full50Partition::Canonical);
     const auto fixture_finished = Clock::now();
     record("partition_experiment", partition == Full50Partition::Canonical           ? "canonical_kernel"
                                    : partition == Full50Partition::CapturedCanonical ? "captured_canonical"
@@ -956,12 +958,14 @@ namespace
 TEST(GeneralVoFSolverTest, DominantGasOccupancyDefectUsesSharedBoundedGeometricView)
 {
     const auto base = phases(0);
+    auto phase_options = base->options();
+    phase_options.phase_cleanup.relative_cutoff = 0;
     std::vector<double> gas = base->carrier_volumes(), carrier(gas.size(), std::numeric_limits<double>::denorm_min());
     for (auto& amount : gas)
         amount = std::nextafter(amount, std::numeric_limits<double>::infinity());
     std::vector<VoF::GeneralVoFPhaseGeometry> geometry(gas.size(), VoF::GeneralVoFPhaseGeometry::PureGas);
     auto source = std::make_shared<const VoF::GeneralVoF>(
-        base->hierarchy(), base->owned_order(), gas, carrier, base->options(), geometry);
+        base->hierarchy(), base->owned_order(), gas, carrier, phase_options, geometry);
     auto material = inviscid();
     material.gas_density = material.liquid_density = 1;
     GeneralVoFSolver solver(source, material);

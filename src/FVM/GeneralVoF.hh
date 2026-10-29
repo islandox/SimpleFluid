@@ -92,18 +92,23 @@ struct GeneralVoFFaceInterface
     PLIC::GeometryPoint centroid{}, normal{};
     double area = 0;
 };
-/** Explicit physical phase relabeling. Volumes and budgets are m^3; zero cutoff disables cleanup. */
+/** Budgeted physical phase relabeling. Volumes and budgets are m^3; zero cutoff disables cleanup. */
 struct GeneralVoFPhaseCleanupOptions
 {
-    double relative_cutoff = 0;
-    std::array<double, 2> maximum_absolute_volume{};
+    /** Resolve once at construction, or reuse the bound checkpoint policy. */
+    static constexpr double automatic = -1;
+    /** Automatic is 1e-14 for Ordinary geometry transport and zero otherwise. */
+    double relative_cutoff = automatic;
+    /** Automatic is 1e-13 times each initial global independent phase inventory.
+     * Explicit zero is an exact zero cap. Disabled automatic policies use zero caps. */
+    std::array<double, 2> maximum_absolute_volume{automatic, automatic};
 };
 /** Replicated global cumulative ledger. Absolute spends never cancel signed corrections. */
 struct GeneralVoFPhaseCleanupState
 {
     /** Absolute volume is a conservative upper debit, separate from signed nominal sums. */
     std::array<long double, 2> signed_volume{}, absolute_volume{}, largest_absolute_volume{};
-    GeneralVoFPhaseCleanupOptions policy;
+    GeneralVoFPhaseCleanupOptions policy{0, {0, 0}};
     bool policy_bound = false;
     std::uint64_t cleaned_cells = 0;
 };
@@ -470,7 +475,7 @@ public:
      * geometry does not itself assert a new interface. With cleanup disabled,
      * nonzero fresh-input minorities remain Infer regardless of magnitude;
      * explicit declarations (including Infer) and adopted capsule geometry
-     * remain authoritative. Opt-in budgeted cleanup may relabel an admitted
+     * remain authoritative. Enabled budgeted cleanup may relabel an admitted
      * minority to zero and publish the corresponding pure declaration. */
     GeneralVoF(std::shared_ptr<const Hierarchy>, std::vector<Key> input_keys, std::vector<double> gas,
         std::vector<double> carrier, GeneralVoFOptions = {}, std::vector<GeneralVoFPhaseGeometry> declarations = {});
