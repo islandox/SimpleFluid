@@ -14,6 +14,8 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
     const auto n = volumes_.size(), nf = mesh_->num_owned_faces();
     const auto budget = provenance ? provenance->byte_budget : 64 * 1024 * 1024;
     constexpr bool bounded = Mode == ArithmeticMode::BoundedCertification;
+    const auto readiness = provenance ? provenance->transport_readiness
+                                      : std::optional<GeneralVoFFiniteProjectionProvenance::TransportReadiness>{};
     bool valid = arithmetic_mode_ != ArithmeticMode::Exact && (!bounded || PLIC::certification_environment()) &&
                  (!provenance || !provenance->arithmetic_mode || *provenance->arithmetic_mode == arithmetic_mode_) &&
                  current_geometry() && velocity.size() == n && density.size() == n && fraction.size() == n &&
@@ -27,6 +29,9 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
             std::isfinite(options.pressure_relative_tolerance) && options.pressure_relative_tolerance >= 0 &&
             std::isfinite(options.divergence_tolerance) && options.divergence_tolerance > 0 &&
             options.max_pressure_iterations > 0;
+    valid = valid &&
+            (!readiness || (!bounded && std::isfinite(readiness->volume_tolerance) && readiness->volume_tolerance > 0 &&
+                               std::isfinite(readiness->max_courant) && readiness->max_courant > 0));
     for (std::size_t c = 0; c < n; ++c)
         valid = valid && std::isfinite(density[c]) && density[c] > 0 && std::isfinite(fraction[c]) &&
                 fraction[c] >= 0 && fraction[c] <= 1 && std::isfinite(kappa[c]) &&
@@ -50,13 +55,25 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
     valid = valid && budget > 0 && payload_units <= budget / 2;
     require(valid,
         "Finite General VoF projection has invalid inputs, unsupported FP environment or exhausted payload cap.");
-    int local_requests[3] = {bool(physical_mass), bool(closure_topology), bool(physical_mass_error)},
-        minimum_requests[3]{}, maximum_requests[3]{};
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 3, local_requests, minimum_requests);
-    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, local_requests, maximum_requests);
+    int local_requests[4] = {bool(physical_mass), bool(closure_topology), bool(physical_mass_error), bool(readiness)},
+        minimum_requests[4]{}, maximum_requests[4]{};
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 4, local_requests, minimum_requests);
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 4, local_requests, maximum_requests);
     require(minimum_requests[0] == maximum_requests[0] && minimum_requests[1] == maximum_requests[1] &&
-                minimum_requests[2] == maximum_requests[2],
+                minimum_requests[2] == maximum_requests[2] && minimum_requests[3] == maximum_requests[3],
         "Finite projection requests differ across ranks.");
+    long double readiness_limit = 0;
+    if (readiness)
+    {
+        double controls[2] = {readiness->volume_tolerance, readiness->max_courant}, minimum[2]{}, maximum[2]{};
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MIN, 2, controls, minimum);
+        Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 2, controls, maximum);
+        require(minimum[0] == maximum[0] && minimum[1] == maximum[1],
+            "Finite projection transport readiness controls differ across ranks.");
+        readiness_limit = static_cast<long double>(readiness->volume_tolerance) / (2.L * readiness->max_courant);
+        require(std::isfinite(readiness_limit) && readiness_limit > 0,
+            "Finite projection transport readiness has an unrepresentable ratio threshold.");
+    }
     const auto wide_maximum = [&](long double local)
     {
         int exponent = std::numeric_limits<int>::min(), global_exponent = 0;
@@ -216,6 +233,7 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
         },
         "Finite projection force construction exceeds its supported arithmetic range.");
     std::vector<long double> net(n), cell_radius(n), overlap_rate, overlap_radius;
+    long double readiness_ratio = 0, readiness_step_defect = 0;
     const auto refresh_rates = [&]
     {
         overlap_rate = halo_rates(rate);
@@ -223,6 +241,8 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
         std::fill(net.begin(), net.end(), 0);
         std::fill(cell_radius.begin(), cell_radius.end(), 0);
         long double local_divergence = 0;
+        long double local_readiness_ratio = 0;
+        long double local_step_defect = 0;
         arithmetic_guard(
             [&]
             {
@@ -230,16 +250,33 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
                 for (std::size_t c = 0; c < n; ++c)
                 {
                     fp::SumFor<Mode> row(arithmetic_mode_);
+                    fp::SumFor<Mode> incident(arithmetic_mode_);
                     for (auto fid : mesh_->faces(LO(c)))
+                    {
                         row.add(arithmetic_value(
                             (geometry_[fid].owner == LO(c) ? 1 : -1) * overlap_rate[fid], overlap_radius[fid]));
+                        if (readiness)
+                            incident.add(arithmetic_value(std::abs(overlap_rate[fid]), 0));
+                    }
                     const auto sum = row.value();
                     net[c] = sum.value;
                     cell_radius[c] = sum.absolute_error;
                     local_divergence = std::max(local_divergence, std::abs(net[c]) / volumes_[c]);
+                    if (readiness)
+                    {
+                        const auto total = incident.value().value;
+                        const auto ratio = total > 0 ? std::abs(net[c]) / total : 0.L;
+                        local_readiness_ratio = std::max(local_readiness_ratio, ratio);
+                        local_step_defect = std::max(local_step_defect, std::abs(net[c]) * dt / volumes_[c]);
+                    }
                 }
             },
             "Finite projection row accumulation exceeds its supported arithmetic range.");
+        if (readiness)
+        {
+            readiness_ratio = wide_maximum(local_readiness_ratio);
+            readiness_step_defect = wide_maximum(local_step_defect);
+        }
         return wide_maximum(local_divergence);
     };
     auto residual = refresh_rates();
@@ -316,7 +353,6 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
         require(std::isfinite(wall_normal_residual) && wall_normal_residual <= limit,
             "Finite wall pressure failed its original physical normal-velocity threshold.");
     }
-    pressure.assign(n, 0);
     std::vector<long double> wide_pressure(n);
     diagnostics.pressure_iterations = 0;
     bool closed = false;
@@ -334,37 +370,42 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
         {
             if constexpr (!bounded)
             {
-                // The unchanged original physical face-rate residual accepts
-                // ordinary FP; no capacity-certified forest repair is requested.
-                closed = true;
-                break;
+                // Generic Ordinary retains its original gate. Algebraic
+                // consumers additionally resolve their relative or finite-step
+                // volume budget. The next timestep also bounds the accepted
+                // rate defect, avoiding an exact-zero demand on closed trees.
+                closed = !readiness || readiness_ratio <= readiness_limit ||
+                         readiness_step_defect <= static_cast<long double>(readiness->volume_tolerance) / 2;
+                if (closed)
+                    break;
             }
-            try
-            {
-                auto closure = close_general_vof_finite_rate(mesh_, rate, radius, cell_radius, budget / 2,
-                    ArithmeticMode::BoundedCertification, closure_topology);
-                arithmetic_guard(
-                    [&]
-                    {
-                        for (std::size_t f = 0; f < nf; ++f)
+            else
+                try
+                {
+                    auto closure = close_general_vof_finite_rate(mesh_, rate, radius, cell_radius, budget / 2,
+                        ArithmeticMode::BoundedCertification, closure_topology);
+                    arithmetic_guard(
+                        [&]
                         {
-                            const auto correction =
-                                A::subtract(arithmetic_value(closure.rate[f], 0), arithmetic_value(rate[f], 0));
-                            radius[f] = fp::bound_add(
-                                radius[f], fp::bound_add(std::abs(correction.value), correction.absolute_error));
-                        }
-                    },
-                    "Finite projection closure correction exceeds its arithmetic range.");
-                rate = std::move(closure.rate);
-                closure_storage = closure.admitted_storage_bytes;
-                residual = refresh_rates();
-                closed = residual <= limit;
-            }
-            catch (const GeneralVoFPhiInfeasible& error)
-            {
-                closure_reason = error.what();
-                closed = false;
-            }
+                            for (std::size_t f = 0; f < nf; ++f)
+                            {
+                                const auto correction =
+                                    A::subtract(arithmetic_value(closure.rate[f], 0), arithmetic_value(rate[f], 0));
+                                radius[f] = fp::bound_add(
+                                    radius[f], fp::bound_add(std::abs(correction.value), correction.absolute_error));
+                            }
+                        },
+                        "Finite projection closure correction exceeds its arithmetic range.");
+                    rate = std::move(closure.rate);
+                    closure_storage = closure.admitted_storage_bytes;
+                    residual = refresh_rates();
+                    closed = residual <= limit;
+                }
+                catch (const GeneralVoFPhiInfeasible& error)
+                {
+                    closure_reason = error.what();
+                    closed = false;
+                }
             if (closed)
                 break;
         }
@@ -462,8 +503,14 @@ void GeneralVoFFlowWorkspace::project_finite(std::vector<double>& face_velocity,
                 << "Finite General VoF projection failed original physical/arithmetic acceptance: residual=" << residual
                 << ", limit=" << limit << ", iterations=" << diagnostics.pressure_iterations
                 << ", closure=" << closure_reason;
+        if (readiness)
+            message << ", transport_readiness_ratio=" << readiness_ratio
+                    << ", transport_readiness_limit=" << readiness_limit
+                    << ", transport_step_defect=" << readiness_step_defect
+                    << ", transport_step_limit=" << static_cast<long double>(readiness->volume_tolerance) / 2;
         throw std::runtime_error(message.str());
     }
+    pressure.assign(n, 0);
     for (std::size_t f = 0; f < nf; ++f)
         face_velocity[f] = geometry_[f].boundary ? 0 : double(rate[f] / geometry_[f].area);
     face_velocity = faces(face_velocity);

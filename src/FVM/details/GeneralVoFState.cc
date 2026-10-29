@@ -948,6 +948,8 @@ PLIC::PolyhedralInterface reconstruct_cell_impl(
     ::SimpleFluid::detail::vof_failure::Scope scope("general_vof_reconstruct_cell");
     scope.record.cell = cell.gid;
     scope.record.mark(::SimpleFluid::detail::vof_failure::Field::Cell);
+    scope.record.cell_owner = cell.owner;
+    scope.record.mark(::SimpleFluid::detail::vof_failure::Field::CellOwner);
     scope.record.arithmetic_mode = Mode;
     scope.record.mark(::SimpleFluid::detail::vof_failure::Field::Arithmetic);
     validate_cell<Mode>(cell, data.options);

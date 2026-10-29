@@ -119,6 +119,11 @@ bool coplanar(const Polygon& a, const Polygon& b)
 }
 bool point_inside(const Polygon& poly, const on::WidePoint& p, bool check_plane = true)
 {
+    // A represented boundary vertex has structural incidence, including for
+    // retained native supports. Keep this query shortcut out of on_plane:
+    // polygon validation must still establish planarity of every input vertex.
+    if (std::find(poly.begin(), poly.end(), p) != poly.end())
+        return true;
     const auto plane = defining_plane(poly);
     if (check_plane && !on_plane(poly, plane, p))
         return false;

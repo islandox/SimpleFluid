@@ -95,7 +95,7 @@ flowchart TD
     B["Validate sample and controls"]
     C{"Pure cell?"}
     P["Return pure-phase support plane"]
-    D{"Complete usable 3D stencil<br/>and meaningful direction?"}
+    D{"Usable gathered 3D stencil<br/>and meaningful direction?"}
     R["Request refinement / reassessment<br/>Preserve accepted inventories"]
     E["Weighted least-squares gradient<br/>Supported gas-outward unit normal"]
     S{"Minority equivalent length<br/>below optimization threshold?"}

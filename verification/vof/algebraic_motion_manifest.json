@@ -1,0 +1,137 @@
+{
+  "schema": 1,
+  "campaign": "Q2 algebraic manufactured motion, preregistered before candidate runs",
+  "arithmetic": "Ordinary",
+  "backends": [
+    "DonorCell",
+    "GeometricFace"
+  ],
+  "prepared_family": "AlgebraicFaceVolume",
+  "domain": "logical [0,1]^3, physical x=X+mesh_shear*Y, y=Y, z=Z; closed nonperiodic walls",
+  "meshes": {
+    "uniform": 0,
+    "skew": 0.25,
+    "coarse_fine": "shear .25; isotropically refine logical .375<X<.625 base cells"
+  },
+  "spatial_resolutions": [
+    16,
+    32,
+    64
+  ],
+  "layers_2d": 2,
+  "layers_3d": "same as XY resolution",
+  "outgoing_courant_targets": [
+    0.2,
+    0.5,
+    0.8
+  ],
+  "timestep_policy": "global maximum sum of positive owner-oriented incident bulk face rates / native cell volume; fixed dt<=target/rate, split exactly at T/2 and T; no timestep reduction on rejection",
+  "temporal_study": {
+    "resolution": 32,
+    "courant_sequence": [
+      0.8,
+      0.4,
+      0.2
+    ],
+    "separate_from_spatial_order": true
+  },
+  "oracle": "test-local convex polygon clipping/shoelace and exact z-interval overlap; 128-sided polygon is the declared drop, not an approximation silently labelled an analytic circle; arithmetic accuracy gate 5e-12 of initial phase volume by global reference inventory",
+  "flux": "Stokes line integral of piecewise-polynomial vector potential, six-point Gauss integrated after edge splits at coordinate breakpoints and quadratic roots r^2=.3^2,.45^2. Degree<=8 on each piece. No opposing normal streams hidden in net face volume; analytic sign structure and independent finite-difference normal samples are checked on N16 faces. No production PLIC oracle.",
+  "cutoff": "Translation: f(s)=8s below1/8,1 on[1/8,7/8],8(1-s) above7/8; g(s)=-3s below1/8,s-.5 core,3(1-s) above7/8. Az=Ux*f(X)*g(Y)-Uy*g(X)*f(Y); genuine3D Ay=.1*g(X)*f(Z). Shear Az=sign*.4*g(Y)^2*f(X), reversal aligned at t=.5. Rotation Az=F(r^2), F=-pi*s for s<=.3^2; for a<s<b F=-pi*[a+(b-a)*(t-t^3+.5t^4)], t=(s-a)/(b-a), a=.3^2,b=.45^2; outside F=-pi*[a+(b-a)/2]. F prime<=0. Closed walls; grid lines include every extension breakpoint and sign reversal. Entire phase trajectory remains in unchanged analytic core.",
+  "cases": [
+    {
+      "name": "PlanarPatch",
+      "geometry": "rectangle halfwidths (.14,.055), rotated .37 rad, center (.35,.4), z=[0,1]",
+      "motion": "translation (.2,.1,0)",
+      "endpoint": 1,
+      "shape_gate": 0.02
+    },
+    {
+      "name": "AxisDrop",
+      "geometry": "128-gon radius .12, center (.35,.4), z=[0,1]",
+      "motion": "translation (.2,0,0)",
+      "endpoint": 1,
+      "shape_gate": 0.02
+    },
+    {
+      "name": "DiagonalDrop",
+      "geometry": "128-gon radius .12, center (.35,.4), z=[0,1]",
+      "motion": "translation (.2,.1,0)",
+      "endpoint": 1,
+      "shape_gate": 0.02
+    },
+    {
+      "name": "FullRotation",
+      "geometry": "128-gon ellipse radii (.105,.07), center (.65,.5), z=[0,1]",
+      "motion": "rigid rotation around (.5,.5), omega=2*pi",
+      "endpoint": 1,
+      "shape_gate": 0.05
+    },
+    {
+      "name": "ShearReturn",
+      "geometry": "128-gon radius .12, center (.5,.5), z=[0,1]",
+      "motion": "u=+.8*(Y-.5) for t<.5, u=-.8*(Y-.5) for t>=.5; v=w=0",
+      "endpoint": 1,
+      "shape_gate": 0.1
+    },
+    {
+      "name": "ThreeDimensional",
+      "geometry": "128-gon radius .12, center (.35,.4), z=[.3,.55]",
+      "motion": "translation (.12,.08,.1), genuine nonzero z phase gradient and flux",
+      "endpoint": 1,
+      "shape_gate": 0.02
+    }
+  ],
+  "acceptance": {
+    "shape": "sum absolute cell gas-volume error / initial gas volume, gates above apply to finest GeometricFace result",
+    "translation_centroid": "finest error <=.25 times minimum width among reference or numerical mixed interface cells, physical coordinates",
+    "spatial_order": "log(E32/E64)/log(2)>=.9; no claim of second order",
+    "fallback": "zero required for completed GeometricFace candidates; model, halo and arithmetic rejection remain failed gates",
+    "independent_phase_drift": "each <=2e-11 relative",
+    "occupancy": "absolute defect <=1e-13*cell volume",
+    "limiter": "GeometricFace ShearReturn C=.8: at least four accepted steps with active directed-stream theta<1; failure leaves sustained-limiting gate open",
+    "comparison": "DonorCell is conservative low-order comparison, no sharper-interface shape/order gate",
+    "temporal": "complete endpoints and invariants; report errors and differences independently, no assumed temporal order",
+    "midpoint_checkpoint": "Every run/resolution/backend must accept exactly t=.5 as a step endpoint before completing unchanged T=1.",
+    "rotation_midpoint_excursion": "Both backends: initial physical x centroid minus t=.5 physical x centroid >=.15. Exact off-centre full-rotation reference is -.3 x at midpoint; half its displacement in the correct direction is an excursion sanity gate, separate from final accuracy.",
+    "shear_midpoint_deformation": "Both backends: physical xy covariance(t=.5)-covariance(0) >=.25 times the positive exact polygon-moment covariance change; summed absolute cell gas-volume change from independent initial reference at t=.5 >=.25 times independent midpoint-versus-initial reference L1. These 25% lower bounds prove nonzero deformation without imposing GeometricFace sharp-interface accuracy on DonorCell; final shape/order gates remain unchanged.",
+    "flux_fixture_regression": "Always-on N16 all-motions independent finite-difference curl versus analytic derivative, no opposing analytic normal samples per logical face, zero exterior face flux, six-face Stokes closure across cells straddling every coordinate breakpoint/midplane; explicit former X=.5,Y[1/16,1/8] counterexample now u=-.6 and q=-3/80 for unit height.",
+    "actual_face_regression": "Always-on explicit Cartesian, physically affine-skew, oblique-logical-chord, and horizontal native-face vertex witnesses admit each manufactured flow; an oblique radial chord crossing its active zero line rejects with the multistream diagnostic. No mesh build is required for these geometry witnesses."
+  },
+  "metrics": [
+    "accepted steps/time",
+    "actual outgoing Courant",
+    "actual cell-centered centroid displacement",
+    "reference displacement",
+    "phase distribution error",
+    "centroid error",
+    "six cell-centered raw second moments versus exact physical reference moments",
+    "mixed volume / independent polygon surface measure",
+    "theta histogram from canonical directed streams",
+    "limited affected bulk volume",
+    "discarded gas high-order correction",
+    "fallback streams and bulk volume",
+    "exact physical polygon/prism centroid and raw moments",
+    "sampled-reference centroid and raw moment errors separately",
+    "midpoint physical x centroid excursion",
+    "midpoint physical xy covariance change and exact analytic reference change",
+    "midpoint phase-distribution change and independent reference change"
+  ],
+  "execution": "opt-in environment SIMPLEFLUID_RUN_ALGEBRAIC_MOTION=1, parameterized GTest filter AlgebraicMotion/*; no result in this manifest claims a pass",
+  "mesh_providers": {
+    "uniform": "CartesianAMR: root_blocks=(N/2,N/2,nz/2), block_cells=(2,2,2), unit origin/extent, geometrically identical N*N*nz cells; actual cell_box centers select x-stripe owners",
+    "skew_and_coarse_fine": "ExtrudedAMR unchanged; actual base-root node logical centers select x-stripe owners. Global XY catalog reconstruction/validation can dominate setup; timed setup rejection/interruption is zero accepted physical time and not a numerical pass."
+  },
+  "provider_change_scope": "Representation/setup change only: coordinates, resolutions, oracle, timestep/Courant, endpoints, acceptance targets and resource bounds unchanged.",
+  "invalidated_fixture_evidence": "Earlier cubic-cutoff motion runs are invalid as Q2 qualification evidence because opposing spatial normal streams were collapsed to net face volumes. Zero-step accepted-source Q1 reconstruction snapshots remain valid input diagnostics. Corrected extension preserves exact phase oracle/geometry, N sequence, T=1, gates, and caps.",
+  "moment_interpretation": "Numerical centroid/covariance/raw moments use the cell-centered piecewise-constant phase distribution; compare against exact physical polygon/prism moments and report sampled-reference errors separately. Initial actual displacement is defined as zero.",
+  "actual_face_admission": "Before creating controls, every actual native face is unsheared and validated locally. Non-rotation faces must remain within aligned f/g cutoff boxes (Z alignment needed only for genuine3D). Translation normal extrema are affine vertex values. Shear vertical-chord normal is quadratic: interior .25/.5/.75 fit locates its stationary point, and one-sided interior-box endpoint limits are checked. Radial normal sign factor nX*(Y-.5)-nY*(X-.5) is checked on the chord restricted to r<.45. Horizontal normal is zero or affine3D w. Unsupported geometry/alignment rejects; any positive and negative normal values reject explicitly as manufactured fixture requires spatial multistream with face id. No epsilon permits uncertain signs. Generic coarse/fine faces passing conservation alone are not admitted by this check.",
+  "optional_phase_cleanup": {
+    "enable_environment": "SIMPLEFLUID_QUALIFICATION_PHASE_CLEANUP=1",
+    "relative_cutoff": 1e-14,
+    "cumulative_absolute_volume_caps": "1e-13 times each original global phase inventory before initialization cleanup",
+    "accounting": "actual signed, absolute and largest endpoint corrections, event counts; raw/cleaned mass and declared momentum corrections reported separately",
+    "physical_acceptance": "original physical drift includes cleanup; original oracle, endpoints, tolerances, resources and backend identity unchanged",
+    "support": "Ordinary SweptPartition and GeometricFace support cleanup; the qualification switch enables GeometricFace only and DonorCell remains raw. Without the switch controlled fixtures explicitly disable cleanup. Ownership-only migration preserves cleanup state; cleanup-enabled coupled AMR/remap with transported auxiliary channels remains unsupported"
+  }
+}

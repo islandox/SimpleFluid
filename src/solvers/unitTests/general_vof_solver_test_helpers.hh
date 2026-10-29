@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -27,6 +28,104 @@ namespace
 {
 using namespace SimpleFluid;
 namespace AMR = SimpleFluid::Meshes::AMR;
+// Qualification-only controls: component trace/rejection fixtures keep their defaults.
+bool qualification_phase_cleanup_enabled()
+{
+    const auto value = std::getenv("SIMPLEFLUID_QUALIFICATION_PHASE_CLEANUP");
+    const int enabled = value && std::string(value) == "1";
+    const int local[2]{enabled, -enabled};
+    int global[2]{};
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_MAX, 2, local, global);
+    if (global[0] != -global[1])
+        throw std::runtime_error("Qualification phase-cleanup environment must agree across ranks.");
+    return enabled;
+}
+struct QualificationPhaseReference
+{
+    std::vector<double> gas, carrier;
+    std::array<double, 2> global_volume{};
+    VoFStepDiagnostics physical_reference(VoFStepDiagnostics initial, const VoFMaterial& material) const
+    {
+        initial.gas_volume = global_volume[0];
+        initial.gas_mass = material.gas_density * global_volume[0];
+        initial.liquid_mass = material.liquid_density * global_volume[1];
+        return initial;
+    }
+};
+void qualification_phase_policy(VoF::GeneralVoFOptions& options, const std::vector<double>& gas,
+    const std::vector<double>& carrier, const Teuchos::Comm<int>& comm, bool enabled,
+    QualificationPhaseReference* raw = nullptr)
+{
+    // Every rank, including empty owners, contributes before initialization cleanup.
+    double local[2]{}, global[2]{};
+    for (const auto amount : gas)
+        local[0] += amount;
+    for (const auto amount : carrier)
+        local[1] += amount;
+    Teuchos::reduceAll(comm, Teuchos::REDUCE_SUM, 2, local, global);
+    if (raw)
+        *raw = {gas, carrier, {global[0], global[1]}};
+    options.phase_cleanup = {0, {0, 0}};
+    if (enabled && options.transport_backend != VoF::GeneralVoFTransportBackend::DonorCell)
+    {
+        options.phase_cleanup.relative_cutoff = 1e-14;
+        options.phase_cleanup.maximum_absolute_volume = {1e-13 * global[0], 1e-13 * global[1]};
+    }
+}
+void qualification_cleanup_metric(const std::string& name, long double value)
+{
+    std::ostringstream output;
+    output << std::setprecision(20) << value;
+    testing::Test::RecordProperty(name, output.str());
+}
+void record_qualification_cleanup(const GeneralVoFSolver& solver, const std::string& prefix = "")
+{
+    const auto& policy = solver.phases()->options().phase_cleanup;
+    const auto& state = solver.phases()->phase_cleanup_state();
+    const auto record = [&](const std::string& name, long double value)
+    { qualification_cleanup_metric(prefix + "cleanup_" + name, value); };
+    record("enabled", policy.relative_cutoff > 0);
+    record("relative_cutoff", policy.relative_cutoff);
+    record("cells", state.cleaned_cells);
+    for (unsigned phase = 0; phase < 2; ++phase)
+    {
+        const std::string name = phase == 0 ? "gas_" : "carrier_";
+        record(name + "budget", policy.maximum_absolute_volume[phase]);
+        record(name + "signed_volume", state.signed_volume[phase]);
+        record(name + "absolute_volume", state.absolute_volume[phase]);
+        record(name + "largest_absolute_volume", state.largest_absolute_volume[phase]);
+        EXPECT_LE(state.absolute_volume[phase], policy.maximum_absolute_volume[phase]);
+    }
+    const auto prepared = solver.prepared_transport();
+    if (!prepared)
+        return;
+    // These are reporting reductions; conservation gates retain raw physical references.
+    double local[6]{}, global[6]{};
+    for (std::size_t c = 0; c < prepared->new_mass.size(); ++c)
+    {
+        local[0] += static_cast<double>(prepared->raw_new_mass[c]);
+        local[1] += static_cast<double>(prepared->new_mass[c]);
+        local[2] += static_cast<double>(prepared->cleanup_mass[c]);
+        if (c < prepared->cleanup_momentum.size())
+            for (unsigned axis = 0; axis < 3; ++axis)
+                local[3 + axis] += static_cast<double>(prepared->cleanup_momentum[c][axis]);
+    }
+    Teuchos::reduceAll(*solver.mesh()->owned_cell_map()->getComm(), Teuchos::REDUCE_SUM, 6, local, global);
+    record("prepared_raw_mass", global[0]);
+    record("prepared_cleaned_mass", global[1]);
+    record("prepared_mass_correction", global[2]);
+    for (unsigned axis = 0; axis < 3; ++axis)
+    {
+        const auto& momentum = solver.momentum_transport_diagnostics()[axis];
+        const auto name = std::to_string(axis);
+        record("prepared_momentum_" + name, global[3 + axis]);
+        record("momentum_" + name, momentum.cleanup_momentum);
+        record("accumulated_momentum_" + name, momentum.accumulated_cleanup_momentum);
+        record("identity_relative_residual_" + name, momentum.cleanup_identity_relative_residual);
+        record("physical_relative_residual_" + name, momentum.physical_relative_residual);
+        EXPECT_LE(momentum.physical_relative_residual + momentum.cleanup_identity_relative_residual, 1e-12);
+    }
+}
 std::shared_ptr<const VoF::GeneralVoF> phases(
     unsigned fixture, bool skew = false, bool single_layer = false, bool cleanup = true)
 {
@@ -108,7 +207,9 @@ std::shared_ptr<const VoF::GeneralVoF> phases(
     EXPECT_EQ(empty, comm->getSize() - owning_ranks);
     return result;
 }
-std::shared_ptr<const VoF::GeneralVoF> cylinder_sector_phases()
+std::shared_ptr<const VoF::GeneralVoF> cylinder_sector_phases(bool spatial_partition = false,
+    VoF::GeneralVoFTransportBackend backend = VoF::GeneralVoFTransportBackend::SweptPartition,
+    bool cleanup = false, QualificationPhaseReference* raw = nullptr)
 {
     AMR::ExtrudedAMRGrid grid;
     const std::array<double, 4> radii = {.8, .95, 1.05, 1.2};
@@ -137,11 +238,19 @@ std::shared_ptr<const VoF::GeneralVoF> cylinder_sector_phases()
     grid.z_edges = {0, .2 / 3, 2 * .2 / 3, .2};
     grid.boundary_aliases = {{"zmin", "symmetry_zmin"}, {"zmax", "symmetry_zmax"}};
     const auto comm = Tpetra::getDefaultComm();
+    auto provider = std::make_shared<AMR::ExtrudedAMR>(grid);
     std::vector<std::uint64_t> owned;
     for (std::uint64_t c = 0; c < 36; ++c)
-        if (int(c % comm->getSize()) == comm->getRank())
+    {
+        int owner = int(c % comm->getSize());
+        if (spatial_partition)
+        {
+            const auto layer = std::get<AMR::ProductCellAncestry>(provider->cell_key(c).ancestry).axial.root;
+            owner = int(layer * std::min(3, comm->getSize()) / 3);
+        }
+        if (owner == comm->getRank())
             owned.push_back(c);
-    auto provider = std::make_shared<AMR::ExtrudedAMR>(grid);
+    }
     auto bootstrap =
         provider->detach_owned(owned, {'c', 'y', 'l', 'i', 'n', 'd', 'e', 'r', 's', 'e', 'c', 't', 'o', 'r'});
     auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
@@ -173,9 +282,14 @@ std::shared_ptr<const VoF::GeneralVoF> cylinder_sector_phases()
         gas.push_back(layer == 0 ? shell->moments().volume.as_double() : gas_area * height);
         carrier.push_back(layer == 2 ? shell->moments().volume.as_double() : carrier_area * height);
     }
-    return std::make_shared<const VoF::GeneralVoF>(hierarchy, std::move(order), std::move(gas), std::move(carrier));
+    VoF::GeneralVoFOptions options;
+    options.transport_backend = backend;
+    qualification_phase_policy(options, gas, carrier, *comm, cleanup, raw);
+    return std::make_shared<const VoF::GeneralVoF>(
+        hierarchy, std::move(order), std::move(gas), std::move(carrier), options);
 }
-std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(unsigned nx, unsigned ny, unsigned nz)
+std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(
+    unsigned nx, unsigned ny, unsigned nz, bool cleanup = true)
 {
     AMR::AMRGrid grid;
     grid.root_blocks = {1, 1, 1};
@@ -198,9 +312,15 @@ std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(unsigned nx, unsign
         gas.push_back(0);
         carrier.push_back(hierarchy->geometry(leaf)->moments().volume.as_double());
     }
-    return std::make_shared<const VoF::GeneralVoF>(hierarchy, std::move(order), std::move(gas), std::move(carrier));
+    VoF::GeneralVoFOptions options;
+    if (!cleanup)
+        options.phase_cleanup.relative_cutoff = 0;
+    return std::make_shared<const VoF::GeneralVoF>(
+        hierarchy, std::move(order), std::move(gas), std::move(carrier), options);
 }
-std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool record_balance_work = false)
+std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(std::optional<bool> cleanup,
+    VoF::GeneralVoFTransportBackend backend, QualificationPhaseReference* raw_reference = nullptr,
+    bool record_balance_work = false)
 {
     PLIC::GeometryLimits limits;
     limits.arithmetic_mode = ArithmeticMode::Ordinary;
@@ -272,8 +392,16 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool record_balanc
     }
     VoF::GeneralVoFOptions options;
     options.record_balance_work = record_balance_work;
+    options.transport_backend = backend;
+    if (cleanup)
+        qualification_phase_policy(options, gas, carrier, *comm, *cleanup, raw_reference);
     return std::make_shared<const VoF::GeneralVoF>(
         refined, std::move(order), std::move(gas), std::move(carrier), options);
+}
+std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool record_balance_work = false)
+{
+    return skew_coarse_fine_plane(
+        std::nullopt, VoF::GeneralVoFTransportBackend::SweptPartition, nullptr, record_balance_work);
 }
 VoFMaterial inviscid()
 {

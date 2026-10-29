@@ -19,6 +19,8 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <sstream>
+#include <sstream>
 #include <string>
 
 namespace
@@ -132,6 +134,170 @@ TEST(ConservativeVoFTransportTest, FiniteMomentumReusesThreeRhsAndInvalidatesCha
     check_constant(.125);
     EXPECT_EQ(transport.preparation_statistics().finite_builds, 3);
     EXPECT_EQ(transport.preparation_statistics().finite_hits, 3);
+}
+
+TEST(ConservativeVoFTransportTest, ActiveGeometricFaceLimiterUsesFinalPhaseMassForConstantMomentum)
+{
+    namespace AMR = Meshes::AMR;
+    using GO = DefaultTpetraTypes::global_ordinal_type;
+    using Transport = detail::ConservativeVoFTransport;
+    const auto comm = Tpetra::getDefaultComm();
+    AMR::AMRGrid grid;
+    grid.block_cells = {2, 2, 2};
+    grid.extent = {2, 2, 2}; // Closed, nonperiodic; the existing periodic operator probe remains separate.
+    AMR::CartesianAMR provider(grid);
+    std::vector<std::uint64_t> owned;
+    for (std::uint64_t gid = 0; gid < 8; ++gid)
+        if (int(gid % std::min(2, comm->getSize())) == comm->getRank())
+            owned.push_back(gid);
+    auto bootstrap =
+        provider.detach_owned(owned, {'l', 'i', 'm', 'i', 't', 'e', 'd', 'm', 'o', 'm', 'e', 'n', 't', 'u', 'm'});
+    auto hierarchy = std::make_shared<const AMR::DistributedAdaptiveHierarchy>(
+        std::move(bootstrap.owned), std::move(bootstrap.families), bootstrap.kernel, comm);
+    std::vector<AMR::AdaptiveCellKey> order;
+    std::vector<double> gas, liquid;
+    for (const auto& [key, leaf] : hierarchy->owned())
+    {
+        const auto x = hierarchy->geometry(leaf)->centroid();
+        const double g = x[0] < 1 && x[1] < 1 ? .125 : x[0] > 1 && x[1] > 1 ? 1 : .875;
+        order.push_back(key);
+        gas.push_back(g);
+        liquid.push_back(1 - g);
+    }
+    VoF::GeneralVoFOptions options;
+    options.transport_backend = VoF::GeneralVoFTransportBackend::GeometricFace;
+    VoF::GeneralVoF state(hierarchy, order, gas, liquid, options);
+    const auto mesh = state.mesh();
+    const auto map = mesh->owned_cell_map();
+    const auto n = mesh->num_owned_cells();
+    int local_empty = n == 0, empty = 0;
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_empty, &empty);
+    EXPECT_EQ(empty, std::max(0, comm->getSize() - 2));
+    EXPECT_EQ(hierarchy->global_cells(), 8u);
+    std::vector<VoF::GeneralVoFFaceVolume> controls;
+    std::map<std::uint64_t, const AMR::AdaptiveTile*> tiles;
+    for (const auto& tile : state.tiles())
+    {
+        tiles.emplace(tile.face_gid, &tile);
+        const auto x = tile.geometry->centroid(), normal = tile.geometry->area_vector();
+        double phi = 0;
+        if (!tile.exterior && x.x == 1 && normal.x != 0)
+            phi += (x.y < 1 ? .2 : -.2) * (normal.x > 0 ? 1 : -1);
+        if (!tile.exterior && x.y == 1 && normal.y != 0)
+            phi += ((x.x > 1 ? .2 : -.2) + (x.z < 1 ? .4 : -.4)) * (normal.y > 0 ? 1 : -1);
+        if (!tile.exterior && x.z == 1 && normal.z != 0)
+            phi += (x.y > 1 ? .4 : -.4) * (normal.z > 0 ? 1 : -1);
+        controls.push_back({tile.face_gid, phi});
+    }
+    const auto trial = state.plan_face_transport(controls, 1, {1, 1000}, 23);
+    const auto candidate = trial.candidate();
+    const auto prepared = trial.prepared_transport();
+    ASSERT_TRUE(prepared);
+    EXPECT_EQ(prepared->backend, options.transport_backend);
+    EXPECT_EQ(prepared->family, VoF::GeneralVoFTransportFamily::AlgebraicFaceVolume);
+    std::vector<long double> old_mass(n), new_mass(n), outgoing(n), incoming(n), zero(n), old(n);
+    std::vector<Transport::FiniteTransfer> routes;
+    std::vector<Transport::FiniteFaceContribution> faces;
+    std::map<std::pair<GO, GO>, std::array<long double, 3>> final_routes;
+    double local_work[3]{}, global_work[3]{};
+    for (const auto& stream : prepared->streams)
+    {
+        const long double mass = stream.gas + 1000.L * stream.liquid;
+        EXPECT_EQ(stream.mass, mass);
+        const auto donor = map->getLocalElement(GO(stream.donor));
+        const auto recipient = map->getLocalElement(GO(stream.recipient));
+        if (donor >= 0)
+            outgoing[donor] += mass;
+        if (recipient >= 0)
+        {
+            incoming[recipient] += mass;
+            auto& amounts = final_routes[{GO(stream.donor), GO(stream.recipient)}];
+            amounts[0] += stream.volume;
+            amounts[1] += stream.gas;
+            amounts[2] += stream.liquid;
+        }
+        const auto face = mesh->owned_face_map()->getLocalElement(GO(stream.face));
+        if (face >= 0)
+            faces.push_back({face, GO(stream.donor), stream.direction * mass, 0});
+        if (tiles.at(stream.face)->first_owner == comm->getRank() && stream.theta < 1)
+        {
+            ++local_work[0];
+            local_work[1] += double(std::abs(stream.gas_high - stream.gas));
+            local_work[2] += double(std::abs(stream.gas_high + 1000.L * stream.liquid_high - mass));
+        }
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 3, local_work, global_work);
+    EXPECT_GT(global_work[0], 0);
+    EXPECT_GT(global_work[1], 0);
+    EXPECT_GT(global_work[2], 0); // A high-candidate momentum ledger would measurably differ.
+    const auto record = [](const std::string& name, long double value)
+    {
+        std::ostringstream text;
+        text << std::setprecision(20) << value;
+        RecordProperty(name, text.str());
+    };
+    record("canonical_limited_streams", global_work[0]);
+    record("discarded_gas_correction", global_work[1]);
+    record("discarded_high_candidate_mass", global_work[2]);
+    RecordProperty("actual_ranks", comm->getSize());
+    RecordProperty("asserted_empty_owners", empty);
+    for (const auto& [pair, amount] : final_routes)
+        routes.push_back({pair.first, pair.second, amount[1] + 1000.L * amount[2], 0});
+    std::size_t checked_routes = 0;
+    for (const auto& route : prepared->positive_transfers)
+        if (route.donor != route.recipient)
+        {
+            const auto& final = final_routes.at({GO(route.donor), GO(route.recipient)});
+            EXPECT_EQ(route.amount.bulk.value, final[0]);
+            EXPECT_EQ(route.amount.gas.value, final[1]);
+            EXPECT_EQ(route.amount.carrier.value, final[2]);
+            ++checked_routes;
+        }
+    EXPECT_EQ(checked_routes, final_routes.size());
+    EXPECT_EQ(prepared->signed_face_contributions.size(), faces.size());
+    for (const auto& face : prepared->signed_face_contributions)
+    {
+        const auto stream = std::ranges::find(prepared->streams, face.face, &VoF::GeneralVoFDirectedStream::face);
+        ASSERT_NE(stream, prepared->streams.end());
+        EXPECT_EQ(face.donor, stream->donor);
+        EXPECT_EQ(face.direction, stream->direction);
+        EXPECT_EQ(face.amount.bulk.value, stream->volume);
+        EXPECT_EQ(face.amount.gas.value, stream->gas);
+        EXPECT_EQ(face.amount.carrier.value, stream->liquid);
+    }
+    for (std::size_t c = 0; c < n; ++c)
+    {
+        // Storage is evaluated from independent accepted phase arrays, never
+        // from candidate-high fluxes or a constructed row-sum capacity.
+        old_mass[c] = static_cast<long double>(state.gas_volumes()[c]) + 1000.L * state.carrier_volumes()[c];
+        new_mass[c] = static_cast<long double>(candidate->gas_volumes()[c]) + 1000.L * candidate->carrier_volumes()[c];
+        EXPECT_EQ(prepared->old_mass[c], old_mass[c]);
+        EXPECT_EQ(prepared->new_mass[c], new_mass[c]);
+        EXPECT_NEAR(new_mass[c] + outgoing[c] - incoming[c], old_mass[c], 1e-13L * old_mass[c]);
+    }
+    Transport transport(mesh);
+    double local_error[3]{}, global_error[3]{};
+    for (const double component : {.5, -.75, 1.25})
+    {
+        for (std::size_t c = 0; c < n; ++c)
+            old[c] = old_mass[c] * component;
+        const auto result = transport.solve(old, zero, new_mass, outgoing, routes, faces, false, 3000, 1e-12);
+        local_error[0] = std::max(local_error[0], result.physical_relative_residual);
+        EXPECT_LE(result.physical_relative_residual, 1e-12);
+        for (std::size_t c = 0; c < n; ++c)
+        {
+            EXPECT_NEAR(result.cell_trace[c], component, 1e-11);
+            EXPECT_NEAR(result.amount[c], static_cast<double>(new_mass[c] * component), 1e-9);
+            local_error[1] = std::max(local_error[1], std::abs(result.cell_trace[c] - component));
+            local_error[2] = std::max(local_error[2], std::abs(result.amount[c] - double(new_mass[c] * component)));
+        }
+    }
+    Teuchos::reduceAll(*comm, Teuchos::REDUCE_MAX, 3, local_error, global_error);
+    record("maximum_physical_relative_residual", global_error[0]);
+    record("maximum_constant_trace_error", global_error[1]);
+    record("maximum_extensive_amount_error", global_error[2]);
+    EXPECT_EQ(transport.preparation_statistics().finite_builds, 1);
+    EXPECT_EQ(transport.preparation_statistics().finite_hits, 2);
 }
 
 TEST(ConservativeVoFTransportTest, SignedNonincidentCounterflowUsesPhysicalOperatorAndCollectiveMode)

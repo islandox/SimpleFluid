@@ -393,6 +393,10 @@ foreach(PROCS 2 4)
     TARGET testGeneralVoFPreparedTransport PROCS ${PROCS}
     ARGS "--gtest_filter=GeneralVoFPreparedTransport.*"
     LABELS "vof;transport;conservation;collective;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFReconstructionAdmission_${PROCS}procs
+    TARGET testGeneralVoFFinite PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFinite.OrientationWirePreservesEveryMethodAndRejectsUnknownWords:GeneralVoFFinite.StencilResidualMeasurementWirePreservesBothValuesAndRejectsUnknownWords:GeneralVoFFinite.ReconstructionResolutionFailureRetainsTypedClassification:GeneralVoFFinite.SmallPhasePolicyIsValidatedAndAgreedOnEmptyOwners:GeneralVoFFinite.ConstructionAlgorithmBindsSmallPhasePolicy:GeneralVoFFinite.MixedOwnershipMigrationPreservesOrientationAndMeasuredResidual"
+    LABELS "vof;reconstruction;collective;empty_rank" TIMEOUT 180)
 endforeach()
 
 foreach(PROCS 2 4)

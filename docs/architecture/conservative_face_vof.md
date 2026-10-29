@@ -57,6 +57,18 @@ It never computes a minority inventory from cell volume minus the dominant phase
 The positive retained/incoming decomposition is also the sole momentum transfer
 ledger; legacy geometric routes are not combined with limited physical streams.
 
+Ordinary `GeometricFace` also supports
+[budgeted phase cleanup](../modeling/phase_cleanup.md). It runs after raw transport
+acceptance and records actual endpoint changes separately. The original physical
+drift gates include those changes. Cleanup defaults to enabled for `GeometricFace`.
+`DonorCell` retains raw algebraic inventories, defaults to disabled cleanup and
+rejects an explicit positive cutoff. Enabling cleanup does not change the
+configured backend or prepared transport family.
+Momentum first uses raw endpoint mass, then records the cleanup mass correction
+at the transported velocity. Ownership-only solver migration preserves cleanup
+state and accepted flow fields. Cleanup-enabled coupled AMR/remap remains
+unsupported.
+
 ## Admissible donor-cell baseline
 
 For donor inventories `G,L`, the smaller low-order flux is measured directly as
@@ -98,8 +110,20 @@ BoundedCertification and Exact retain their separate algorithms. Existing
 for remapping and surface-sensitive consumers.
 
 A geometric candidate integrates the covered area of the canonical face while
-translating the donor plane at the prescribed constant face-normal velocity.
-The velocity magnitude is `q/(area*dt)`. Both phase-covered areas are measured
+translating the donor plane with a locally reconstructed displacement. For each
+donor, an area-weighted least-squares fit uses all authenticated incident normal
+controls, including zero wall controls, to estimate the complete displacement.
+The face predictor keeps its tangential components and replaces its normal
+component with the prescribed signed `q/area`. Thus constant vector motion is
+reproduced, one-dimensional crossings retain their authoritative displacement,
+and tangential motion contributes to an oblique interface's face coverage.
+The fit rejects deficient or nonfinite geometry and conditioning beyond
+`reconstruction.maximum_condition`; these support failures do not select the
+arithmetic fallback. Its temporary cache is charged to the existing byte budget.
+For spatially varying flow this is a local predictor, not an exact trajectory or
+a claim of second-order accuracy.
+
+Both phase-covered areas are measured
 directly: the cell minority need not be the outflow-face minority. Time intervals
 are split at original face-vertex crossings. Two interior Gauss points integrate
 the quadratic area on each interval and avoid assigning finite weight to a
@@ -156,6 +180,21 @@ momentum, or projection work leaves the accepted state untouched. Fixed-clock
 remap/repartition creates a new mesh-bound workspace and does not remap a cached
 transport operator as physical state.
 
+Ordinary algebraic projection also checks transport readiness. A physical
+pressure residual alone can leave a rate defect too large for the next phase
+volume budget. With tolerance `tau`, Courant control `C`, signed incident rate
+sum `net` and absolute incident rate sum `S`, the existing pressure correction
+loop requires either `abs(net)/S <= tau/(2*C)` or
+`abs(net)*dt/V <= tau/2`, alongside its original physical acceptance. The finite
+interval alternative allows zero-circulation problems without requiring an
+exact-zero roundoff tail. No interval-certified closure is invoked in Ordinary.
+For every accepted algebraic state, `stable_timestep()` additionally bounds the
+next interval by `tau*V/(2*abs(net))` on cells with nonzero net rate. This derived
+bound also covers transferred face fields after fixed-clock remap. It retains
+the original absolute-face-rate, viscous and capillary limits and cannot turn an
+incomplete physical horizon into a pass. Projection and linear iteration caps
+are unchanged.
+
 ## Explicit face-aligned surfaces
 
 `face_interfaces()` returns canonical opposite-pure geometric faces with
@@ -182,6 +221,14 @@ face surfaces, and planar capillary support under tangential MPI stripes.
 Coupled-flow tests exercise pure motion, pure-liquid hydrostatics, and a
 high-density-ratio skew coarse/fine passage. Test registration is not a pass;
 current commands/results belong in local build logs.
+
+The opt-in qualification manifests in `verification/vof/` prescribe complete
+motion, coupled-flow and capillary endpoints before candidate runs. The motion
+harness uses independent polygon/prism integration, spatial and temporal
+refinement, midpoint excursion checks for return cycles, and canonical directed
+stream theta statistics. It reports affected bulk volume separately from discarded
+high-order correction. `DonorCell` is the conservative low-order comparison;
+the sharper-interface accuracy gates apply to `GeometricFace`.
 
 The default must remain `SweptPartition` until relevant coupled physical gates
 are met. A short conservative passage or robust geometry query does not establish

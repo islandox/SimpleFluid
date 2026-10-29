@@ -209,6 +209,101 @@ not overlap other builds or
 numerical jobs. No operation-count, memory or universal scaling claim may be
 inferred from an inclusive CPU profile alone.
 
+## Algebraic face-volume qualification
+
+The initial contract is Ordinary, source-free incompressible flow with constant
+positive phase densities, convex native cells, closed nonperiodic boundaries and
+geometry fixed within a step. AMR/remap/repartition occurs only between accepted
+steps. `SweptPartition` remains the configured default. Evidence records both the
+configured backend and the actual prepared family; `GeometricFace` and `DonorCell`
+both prepare `AlgebraicFaceVolume`.
+
+The machine-readable preregistrations are
+[motion](../../verification/vof/algebraic_motion_manifest.json),
+[coupled flow and transactions](../../verification/vof/algebraic_flow_manifest.json)
+and [capillarity](../../verification/vof/algebraic_capillary_manifest.json).
+Their criteria are fixed before candidate runs. A registration, skipped opt-in
+test, partial horizon, or successfully rejected transaction is not a physical
+qualification pass.
+
+| Gate | Executable evidence and acceptance |
+| --- | --- |
+| Q0 baseline | `GeneralVoFFaceTransport`, `GeneralVoFPreparedTransport`, `GeneralVoFFaceFlow`, `GeneralVoFFaceSurface`; fresh Debug serial, registered MPI2/MPI4 and surface MPI3/MPI4 stripes. The 50-cell mixed fixture explicitly checks coarse/fine seams, ten `.002` steps to `.02`, backend/family, original phase/divergence/momentum/occupancy gates and fixture-specific regional passage. |
+| Q1 admission | `PolyhedralReconstruction` and finite transfer regressions distinguish absent direction, rank/conditioning, majority eligibility, selected model residual and arithmetic. A gradient orientation has no angular convergence claim. Replay actual algebraic failures from lossless finite geometry and independent inventory records; report fitting samples separately from physical amounts. |
+| Q2 motion | `AlgebraicMotion/AlgebraicMotionQualification` uses independent polygon clipping and prism integration on uniform/skew/coarse-fine meshes. Three spatial resolutions and separate temporal refinement retain full translation, rotation and shear-return endpoints. Midpoint excursion gates prevent a stationary return-cycle false pass. Shape error is summed absolute cell phase-volume error divided by initial transported volume: GeometricFace limits are 2%, 5% and 10%; translation centroid error is at most .25 interface-cell widths and finest-pair spatial order at least .9. DonorCell is a conservative low-order comparison. |
+| Q3 coupled flow | Explicit backends retain hydrostatic, pure-motion and analytic viscous endpoints. Long mixed cases use `.2`, `.5`, `.8` of `stable_timestep()` through eight seconds and report actual outgoing Courant. The `.8` GeometricFace case requires at least four accepted steps with limiting; momentum routes must equal final phase streams. A prescribed advection solution is not used as a coupled-flow reference. |
+| Q4 capillarity | Explicit-backend native cylinder retains its `.02` endpoint and original physical gates, with an additional area-weighted curvature assertion. Uniform filtered-sphere refinement fixes width at two cell lengths. Five-capillary-time pressure/spurious-current and dynamic gates are conditional follow-ons; a geometry fit alone does not satisfy them. |
+| Q5 transactions | `GeneralVoFFaceTransactions` moves mixed phases, refines at `.004`, coarsens at `.008`, repartitions at `.012` and continues to `.02`. Rank-1 injection preserves accepted fields, preparation, clock and histories. Spatial and empty-owner variants record sorted physical fields for explicit serial/MPI2/MPI4 comparison. |
+| Q6 Release | Conditional on numerical qualification. Matched complete cases must distinguish setup, reconstruction, integration, limiting, communication, momentum, projection and capillarity, with process RSS separate from accounted storage. Debug timing and preparation counts are not speedup evidence. |
+| Q7 extensions | Conditional on the closed-flow contract passing. Explicit inflow composition, outflow/backflow budgets and ordered gross counterstreams remain unsupported until implemented and independently qualified. |
+
+The phase-only harness is opt-in; for example:
+
+```sh
+python3 verification/vof/run_algebraic_motion.py \
+  --executable build/gcc/bin/Debug/testGeneralVoFMotionAccuracy \
+  --output build/gcc/verification/algebraic-motion/planar-uniform-c50 \
+  --filter '*GeometricFace_PlanarPatch_Uniform_C50'
+```
+
+The runner preserves commands, source/build hashes, per-rank XML, complete-time
+metrics and failing-state geometry certificates. It rejects absent XML, zero
+tests and skips as evidence of completion. Coupled long cases require
+`SIMPLEFLUID_RUN_ALGEBRAIC_FLOW=1`; curved capillary qualification requires
+`SIMPLEFLUID_RUN_ALGEBRAIC_CAPILLARY=1`. These switches select tests and never
+change production tolerances, resource caps or arithmetic. Count skipped default
+discoveries explicitly. Keep the original disabled swept motion probe separate.
+
+`SIMPLEFLUID_QUALIFICATION_PHASE_CLEANUP=1` selects a separately reported Ordinary
+`GeometricFace` cleanup variant for the motion, flow and capillary fixtures.
+`DonorCell` retains raw inventories even with this switch enabled. Without this
+switch, these controlled fixtures explicitly disable cleanup regardless of the
+library's automatic defaults. The enabled variant uses
+the documented `1e-14` cell-relative cutoff and cumulative absolute caps of
+`1e-13` times each original global phase inventory. Initialization and later
+cleanup remain inside the original physical drift comparison; signed/absolute
+phase changes and raw/cleaned mass and momentum corrections are reported
+separately. Cleanup-enabled transport does not qualify cleanup-enabled coupled
+AMR: auxiliary-channel remap still rejects, so GeometricFace Q5 is unsupported in
+this variant. Its coupled transaction fixtures report an explicit unsupported
+skip when this switch is enabled; they never silently run the cleanup-disabled
+case as evidence for the enabled policy. DonorCell Q5 continues with raw
+inventories. Ownership-only solver migration preserves cleanup state;
+that support does not qualify Q5's refine/coarsen remaps. Phase-only migration
+and coupled-channel rejection are covered by the cleanup component tests.
+
+Arithmetic fallback counts and affected bulk volume are required even on
+conservative runs. Only unresolved arithmetic may use the documented donor-cell
+candidate fallback. Geometry/support/resource rejection retains atomic failure.
+Algebraic limiter histograms come from canonical directed streams, not the swept
+geometric-face histogram; affected bulk and discarded correction are distinct.
+`ActiveGeometricFaceLimiterUsesFinalPhaseMassForConstantMomentum` supplies a
+closed eight-cell, density-ratio-1000 component check with active limiting,
+independent old/new mass capacities, three constant momentum components and
+one operator build/two reuses. Its MPI2/MPI4 registrations include empty owners.
+It tests the momentum operator before pressure projection; complete coupled
+motion remains a separate gate.
+
+For Q5, compare the completed per-rank field records with
+`verification/vof/compare_transaction_fields.py`. It requires successful serial
+references for both backends, complete MPI2/MPI4 coverage and the original `.02`
+endpoint. Comparison removes the pressure gauge and uses the preregistered
+phase, velocity and pressure allowances; all original physical assertions remain
+mandatory in every run. The MPI cases are registered separately so each complete
+physical horizon retains its 600-second wall limit.
+
+The current complete-qualification boundaries include coarse one-plane model
+support, native hierarchy/packet budgets at the preregistered larger resolutions,
+long coupled occupancy/stability, and curved-capillary continuation. Captured
+coarse-corner stencils have complete halo and usable direction; their independent
+gradient fit exceeds the model bound and angular reconstruction rejects.
+Raising caps, accepting an unmeasured angular fit or omitting
+the failed coarse level cannot establish a refinement sequence. The opt-in
+fixtures retain these failures as qualification gates.
+
+Periodic transport, within-step ALE, reacting sources and level subcycling remain
+outside this campaign.
+
 ## Benchmark setup and reference data
 
 A benchmark may use verified reference data or independent analytic phase

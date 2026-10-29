@@ -52,6 +52,10 @@ double Advance<Mode>::stable_timestep(
         speed = std::nextafter(speed, std::numeric_limits<double>::infinity());
     speed = execution.maximum(speed);
     namespace fp = VoF::finite_detail;
+    bool algebraic = false;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+        algebraic = state.phases->options().transport_backend != VoF::GeneralVoFTransportBackend::SweptPartition ||
+                    state.phases->homogeneous_transport_eligible();
     const auto rates = face_rates<Mode>(*mesh, *state.phases, state.finite_projection, flow);
     const auto geometry = state.phases->owned_finite_geometry<Mode>();
     double local_rate = std::numeric_limits<double>::infinity();
@@ -62,8 +66,13 @@ double Advance<Mode>::stable_timestep(
             for (std::size_t c = 0; c < volume.size(); ++c)
             {
                 VoF::finite_detail::SumFor<Mode> sum(arithmetic_mode_);
+                VoF::finite_detail::SumFor<Mode> net(arithmetic_mode_);
                 for (const auto face : mesh->faces(LO(c)))
+                {
                     sum.add(A::make_value(std::abs(rates[face].value), rates[face].absolute_error));
+                    if (algebraic)
+                        net.add(mesh->owner_cell(face) == LO(c) ? rates[face] : A::negate(rates[face]));
+                }
                 const auto outgoing = sum.value();
                 const auto upper_rate = outgoing.value + (bounded_mode ? outgoing.absolute_error : 0);
                 if (upper_rate > 0)
@@ -78,6 +87,23 @@ double Advance<Mode>::stable_timestep(
                         value = std::nextafter(value, 0.);
                     if (!(value > 0) || std::isnan(value))
                         throw std::runtime_error("Finite VoF canonical rates have no positive timestep.");
+                    local_rate = std::min(local_rate, value);
+                }
+                if (algebraic && net.value().value != 0)
+                {
+                    // Accepted pressure rounding may leave a nonzero canonical
+                    // rate defect. Bound its integrated volume at the future
+                    // step, independently of CFL and the physical projection
+                    // gate; a zero net rate imposes no additional restriction.
+                    const auto cell_volume =
+                        SimpleFluid::geometry::swept_volume::runtime_value<Mode>(geometry[c]->volume()).value;
+                    const auto time = cell_volume * state.phases->options().reconstruction.volume_tolerance /
+                                      (2.L * std::abs(net.value().value));
+                    double value = static_cast<double>(time);
+                    if (static_cast<long double>(value) > time)
+                        value = std::nextafter(value, 0.);
+                    if (!(value > 0) || std::isnan(value))
+                        throw std::runtime_error("Finite VoF canonical continuity has no positive timestep.");
                     local_rate = std::min(local_rate, value);
                 }
             }
@@ -403,6 +429,15 @@ std::shared_ptr<State> Advance<Mode>::prepare(Resources& resources, const State&
         resources.material.surface_tension, resources.options.byte_budget, resources.options.capillary,
         &next->capillary);
     next->finite_projection.byte_budget = options.byte_budget;
+    if constexpr (Mode == ArithmeticMode::Ordinary)
+    {
+        // Publish rates ready for the next state's transport family; pure
+        // declarations are authenticated collectively, including empty owners.
+        if (face_backend || next->phases->homogeneous_transport_eligible())
+            next->finite_projection.transport_readiness =
+                detail::GeneralVoFFiniteProjectionProvenance::TransportReadiness{
+                    next->phases->options().reconstruction.volume_tolerance, options.flow.max_courant};
+    }
     const auto closure_topology =
         projection_topology<detail::GeneralVoFFiniteProjectionClosureTopology>(*mesh, *next->phases);
     flow.project(next->face_velocity, next->velocity, next->pressure, next->density, next->fraction, next->curvature,

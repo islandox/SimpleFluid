@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "arithmetic": "Ordinary",
+  "backends": [
+    "DonorCell",
+    "GeometricFace"
+  ],
+  "family": "AlgebraicFaceVolume",
+  "Q0": {
+    "cells": 50,
+    "dt": 0.002,
+    "steps": 10,
+    "endpoint": 0.02,
+    "rho_g": 1,
+    "rho_l": 1000,
+    "regional_passage_minimum": 1e-06,
+    "justification": "see test fixture restricted-area velocity integral; threshold differs from swept material fixture"
+  },
+  "Q3": {
+    "endpoint": 8,
+    "stable_timestep_fractions": [
+      0.2,
+      0.5,
+      0.8
+    ],
+    "gas_centroid_displacement_minimum": 0.125,
+    "relative_gas_redistribution_minimum": 0.1,
+    "minimum_accepted_steps": 11,
+    "transition_steps_minimum": 2,
+    "GeometricFace_fraction08_minimum_limited_steps": 4,
+    "maximum_steps": 512,
+    "reference": "coupled evolving flow, no prescribed advection accuracy oracle"
+  },
+  "Q5": {
+    "cells": 24,
+    "dt": 0.002,
+    "steps": 10,
+    "endpoint": 0.02,
+    "refine_after_step": 2,
+    "coarsen_after_step": 4,
+    "repartition_after_step": 6,
+    "failure_origin_rank": "1 for MPI,0 serial",
+    "partitions": "spatial x stripes; separate min(2,ranks) owner case",
+    "comparison": "globally sorted centroid/phase/velocity/pressure/history matrix before and after repartition and across rank counts",
+    "decomposition_comparison": {
+      "geometry_absolute_tolerance": 1e-14,
+      "phase_volume_absolute_tolerance": "2e-11 * cell bulk volume",
+      "velocity_absolute_tolerance": 1e-09,
+      "pressure": "remove volume-weighted gauge; 1e-8 * max(1 Pa, reference absolute pressure)",
+      "basis": "velocity uses original 1e-12 momentum residual times density ratio1000; pressure uses original 1e-11 relative pressure gate times density ratio1000; these comparison allowances do not replace any per-rank physical acceptance gate",
+      "histories": "report differences separately; require finite nonnegative channels, exact preservation through ownership-only migration, and nondecrease through adaptation"
+    }
+  },
+  "physical_gates": {
+    "each_phase_relative_mass_drift": 2e-11,
+    "divergence": 1e-08,
+    "momentum_relative_residual": 1e-12,
+    "relative_cell_occupancy_defect": 1e-13
+  },
+  "status": "preregistered, no result claims",
+  "optional_phase_cleanup": {
+    "enable_environment": "SIMPLEFLUID_QUALIFICATION_PHASE_CLEANUP=1",
+    "relative_cutoff": 1e-14,
+    "cumulative_absolute_volume_caps": "1e-13 times each original global phase inventory before initialization cleanup",
+    "accounting": "actual signed, absolute and largest endpoint corrections, event counts; raw/cleaned mass and declared momentum corrections reported separately",
+    "physical_acceptance": "original physical drift includes cleanup; original oracle, endpoints, tolerances, resources and backend identity unchanged",
+    "transactions": "With the cleanup switch enabled, GeometricFace Q5 reports unsupported because it refines/coarsens; DonorCell Q5 continues with raw inventories",
+    "support": "Ordinary SweptPartition and GeometricFace support cleanup; the qualification switch enables GeometricFace only and DonorCell remains raw. Without the switch controlled fixtures explicitly disable cleanup. Ownership-only migration preserves cleanup state; cleanup-enabled coupled AMR/remap with transported auxiliary channels remains unsupported"
+  }
+}

@@ -89,7 +89,7 @@ namespace SimpleFluid::PLIC
 namespace details SIMPLEFLUID_LOCAL
 {
 [[nodiscard]] PlaneAuthority original_support_authority(std::span<const char>);
-extern thread_local GeometryStatistics statistics;
+extern constinit thread_local GeometryStatistics statistics;
 [[noreturn]] void reject(std::string_view reason);
 [[noreturn]] void reject(ArithmeticMode mode, std::string_view reason);
 
@@ -101,7 +101,7 @@ struct Work
     void charge(std::size_t count, std::size_t size);
     void pair();
 };
-extern thread_local Work* active_work;
+extern constinit thread_local Work* active_work;
 struct GeometrySourceSnapshot
 {
     NumericalConvexShell<ArithmeticMode::Ordinary> shell;

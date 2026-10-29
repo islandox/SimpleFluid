@@ -819,6 +819,7 @@ foreach(_semi_ranks IN ITEMS 2 4)
         LABELS "mpi;semi_structured;ale;continuity;transaction;empty_rank" TIMEOUT 120)
 endforeach()
 
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
 foreach(PROCS 2 4)
   simplefluid_add_mpi_test(NAME GeneralVoFHomogeneousFlow_${PROCS}procs
     TARGET testGeneralVoFHomogeneousFlow PROCS ${PROCS}
@@ -832,7 +833,52 @@ foreach(PROCS 2 4)
     ARGS "--gtest_filter=GeneralVoFSolverTest.PhysicalHydrostaticPressureBalancesSkewNativeCentersOverFourSteps"
     LABELS "mpi;vof;homogeneous;hydrostatic;empty_rank" TIMEOUT 180)
   simplefluid_add_mpi_test(NAME GeneralVoFFaceFlow_${PROCS}procs
-    TARGET testGeneralVoFFaceFlow PROCS ${PROCS} ARGS "--gtest_filter=GeneralVoFFaceFlow.*")
+    TARGET testGeneralVoFFaceFlow PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFaceFlow.*-GeneralVoFFaceFlow.HighDensityLongHorizon*")
+  simplefluid_add_mpi_test(NAME GeneralVoFGeometricFaceBaseline_${PROCS}procs
+    TARGET testGeneralVoFFaceFlow PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFaceFlow.HighDensityRatioSkewCoarseFinePassage"
+    LABELS "mpi;vof;qualification" TIMEOUT 600)
+  simplefluid_add_mpi_test(NAME GeneralVoFFaceLongFlow_${PROCS}procs
+    TARGET testGeneralVoFFaceFlow PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFaceFlow.HighDensityLongHorizon*"
+    LABELS "mpi;vof;qualification" TIMEOUT 1800)
+  # Bound each physical horizon separately with a 600-second wall limit.
+  # Empty-owner variants are distinct at four ranks.
+  set(_face_transaction_cases
+    DonorCellMovingMixedSpatialRefineCoarsenRepartition
+    GeometricFaceMovingMixedSpatialRefineCoarsenRepartition)
+  if(PROCS GREATER 2)
+    list(APPEND _face_transaction_cases
+      DonorCellMovingMixedEmptyOwnersRefineCoarsenRepartition
+      GeometricFaceMovingMixedEmptyOwnersRefineCoarsenRepartition)
+  endif()
+  foreach(_face_transaction_case IN LISTS _face_transaction_cases)
+    simplefluid_add_mpi_test(NAME GeneralVoFFaceTransactions_${_face_transaction_case}_${PROCS}procs
+      TARGET testGeneralVoFFaceTransactions PROCS ${PROCS}
+      ARGS "--gtest_filter=GeneralVoFFaceTransactions.${_face_transaction_case}"
+      LABELS "mpi;vof;amr;transaction;empty_rank" TIMEOUT 600)
+  endforeach()
+  simplefluid_add_mpi_test(NAME GeneralVoFAlgebraicReadiness_${PROCS}procs
+    TARGET testGeneralVoFFlowWorkspace PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFlowWorkspaceTest.OrdinaryAlgebraicReadiness*"
+    LABELS "mpi;vof;projection;collective;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFAlgebraicLimitedMomentum_${PROCS}procs
+    TARGET testConservativeVoFTransport PROCS ${PROCS}
+    ARGS "--gtest_filter=ConservativeVoFTransportTest.ActiveGeometricFaceLimiterUsesFinalPhaseMassForConstantMomentum"
+    LABELS "mpi;vof;momentum;conservation;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFAlgebraicCleanup_${PROCS}procs
+    TARGET testGeneralVoFFaceFlow PROCS ${PROCS}
+    ARGS "--gtest_filter=GeneralVoFFaceFlow.CleanupPreservesConstantTransportedVelocityAndRawMassMomentumIdentity:GeneralVoFFaceFlow.CleanupBudgetRejectionRetainsCompleteAcceptedPublication"
+    LABELS "mpi;vof;cleanup;momentum;transaction;empty_rank" TIMEOUT 180)
+  simplefluid_add_mpi_test(NAME GeneralVoFFaceCapillary_${PROCS}procs
+    TARGET testGeneralVoFFaceCapillary PROCS ${PROCS}
+    ARGS "--gtest_filter=AlgebraicCapillary/GeneralVoFFaceCapillary.*"
+    LABELS "mpi;vof;capillary;qualification" TIMEOUT 1800)
+  simplefluid_add_mpi_test(NAME GeneralVoFFaceCapillarySpatial_${PROCS}procs
+    TARGET testGeneralVoFFaceCapillary PROCS ${PROCS}
+    ARGS "--gtest_filter=AlgebraicCapillary/GeneralVoFFaceCapillary.SpatialPartitionRetainsCompleteCurvedSupport/*"
+    LABELS "mpi;vof;capillary;surface;empty_rank" TIMEOUT 600)
   simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_${PROCS}procs
     TARGET testGeneralVoFFaceSurface PROCS ${PROCS} ARGS "--gtest_filter=GeneralVoFFaceSurface.*-GeneralVoFFaceSurface.*TangentStripes*")
 endforeach()
@@ -843,6 +889,7 @@ simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_Stripes_3procs
 simplefluid_add_mpi_test(NAME GeneralVoFFaceSurface_StripesEmpty_4procs
   TARGET testGeneralVoFFaceSurface PROCS 4
   ARGS "--gtest_filter=GeneralVoFFaceSurface.ThreeOrMoreTangentStripesRetainCollectivesWithAnEmptyOwner")
+endif()
 
 if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   foreach(PROCS 2 4)
@@ -852,12 +899,14 @@ if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   endforeach()
 endif()
 
+if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
 foreach(PROCS 2 4)
   simplefluid_add_mpi_test(NAME GeneralVoFSignedMomentum_${PROCS}procs
     TARGET testConservativeVoFTransport PROCS ${PROCS}
     ARGS "--gtest_filter=ConservativeVoFTransportTest.SignedNonincidentCounterflowUsesPhysicalOperatorAndCollectiveMode"
     LABELS "mpi;vof;signed;momentum;conservation;empty_rank" TIMEOUT 180)
 endforeach()
+endif()
 
 if(SIMPLEFLUID_ENABLE_EXPERIMENTAL_VOF)
   foreach(PROCS 2 4)

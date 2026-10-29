@@ -33,7 +33,19 @@ struct GeneralVoFProjectionProvenance
  * describe arithmetic only and never replace physical pressure thresholds. */
 struct GeneralVoFFiniteProjectionProvenance
 {
+    struct TransportReadiness
+    {
+        double volume_tolerance = 0;
+        double max_courant = 0;
+    };
     std::optional<ArithmeticMode> arithmetic_mode;
+    /** Ordinary algebraic transport additionally requires either |net rate| /
+     * sum|rate| <= volume_tolerance / (2 * max_courant), or a projection-step
+     * volume defect <= volume_tolerance / 2. Subsequent timestep selection also
+     * bounds the defect from accepted canonical rates. The half budget reserves
+     * control integration/publication error. This requests pressure refinement,
+     * never certified forest closure or exactly zero rates on a closed tree. */
+    std::optional<TransportReadiness> transport_readiness;
     std::size_t byte_budget = 64 * 1024 * 1024;
     std::vector<long double> face_rate, face_radius, cell_radius;
     std::vector<std::array<long double, 3>> velocity_error;

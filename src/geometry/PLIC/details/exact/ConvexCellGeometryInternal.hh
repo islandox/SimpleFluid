@@ -54,8 +54,8 @@ using I = boost::multiprecision::cpp_int;
 using P = std::array<Q, 3>;
 
 using Face = std::vector<std::size_t>;
-extern thread_local bool count_exact_geometry;
-extern thread_local BackendStatistics<ArithmeticMode::Exact> exact_geometry_counts;
+extern constinit thread_local bool count_exact_geometry;
+extern constinit thread_local BackendStatistics<ArithmeticMode::Exact> exact_geometry_counts;
 void sample_exact_measure_result(const Q& value);
 
 struct Poly

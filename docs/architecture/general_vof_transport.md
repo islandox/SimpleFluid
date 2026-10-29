@@ -635,14 +635,28 @@ counts and can be summed across ranks. This prescribed transport reference is
 not an analytic coupled pressure/velocity solution, and no new accuracy threshold
 is inferred from its reports.
 
-The complete probe is disabled in routine discovery while its reconstructed phase
-neighborhood lacks sufficient support. The provisional small-phase policy in
+The complete swept probe is disabled in routine discovery while its full
+reconstruction and motion horizon remains unqualified. The provisional small-phase
+policy in
 [PLIC reconstruction](../modeling/plic.md#initial-normal-and-angular-objective)
 uses a supported gradient normal without angular optimization below its configured
-length ratio; it retains the phase-support and target-volume gates. Run the probe
+length ratio; it retains directional admission and target-volume gates. Run the probe
 explicitly after building the
 target with `--gtest_also_run_disabled_tests` and
 `--gtest_filter=GeneralVoFMotionAccuracy.DISABLED_RepeatedClosedMotionReportsIndependentPhaseErrorAndTheta`.
-Successful preliminary steps do not qualify its complete horizon. The unchanged
+Successful preliminary steps do not qualify its complete horizon. The
 50-cell solver test and its `GeneralVoFFinitePassage_2procs`/`4procs` registrations
 remain separate qualification gates for physical residuals and repeated passage.
+Their explicit cleanup-enabled configuration retains the original raw numerical
+gates; it does not qualify the cleanup-disabled configuration.
+
+The algebraic variants in the same executable enter through
+`plan_face_transport` with explicit `DonorCell` or `GeometricFace`. They have a
+separate [preregistered campaign](../../verification/vof/algebraic_motion_manifest.json)
+and [gate checklist](../verification/vof_solver_contracts.md#algebraic-face-volume-qualification).
+Their independent polygon/prism oracle covers complete translation, rotation and
+deformation-return motions, spatial and temporal refinement, and actual directed
+stream limiting/fallback. Midpoint excursions distinguish physical motion from a
+stationary return endpoint. These algebraic qualifications keep phase cleanup
+disabled. Those results cannot qualify swept reach or geometry,
+and swept failures do not establish failure of the algebraic family.
