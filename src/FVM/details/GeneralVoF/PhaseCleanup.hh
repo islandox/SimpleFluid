@@ -22,6 +22,8 @@ inline void phase_cleanup_key_storage(const Key& key, wire::Budget& budget)
         key.ancestry);
 }
 SIMPLEFLUID_FVM_LOCAL void validate_phase_cleanup_options(const GeneralVoFOptions&);
+/** Collective. Raw controls and prior ledger must agree before automatic inventory reduction. */
+SIMPLEFLUID_FVM_LOCAL void resolve_phase_cleanup_options(GeneralVoF::Data&);
 /** Collective. Owner-only proposed batch is admitted globally before private candidate mutation. */
 SIMPLEFLUID_FVM_LOCAL void apply_phase_cleanup(GeneralVoF::Data&);
 } // namespace SimpleFluid::VoF::general_vof_detail

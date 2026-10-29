@@ -149,6 +149,83 @@ TEST(GeneralVoFFaceTransport, GeometricPlanarFaceIntegralUsesPrescribedBulk)
             EXPECT_NEAR(p.gas + p.carrier, p.bulk, 1e-15);
     }
 }
+TEST(GeneralVoFFaceTransport, DefaultGeometricCleanupPreparesPublishedEndpointMass)
+{
+    const auto input = fixture();
+    auto options = face_options();
+    options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
+    GeneralVoF source(input.hierarchy, input.order, input.gas, input.carrier, options);
+    const auto identity = source.accepted_identity();
+    constexpr double q = 0x1p-48;
+    constexpr std::array<double, 2> density{.1, 1000};
+    constexpr std::uint64_t stage = 42;
+    auto flux = circulation(source);
+    for (auto& face : flux)
+        face.integrated_volume *= q * 64;
+    const auto trial = source.plan_face_transport(flux, 1, density, stage);
+    const auto next = source.apply(trial);
+    EXPECT_EQ(source.accepted_identity(), identity);
+    EXPECT_EQ(source.gas_volumes(), input.gas);
+    EXPECT_EQ(source.carrier_volumes(), input.carrier);
+    EXPECT_EQ(source.phase_cleanup_state().cleaned_cells, 0u);
+    EXPECT_TRUE(source.latest_phase_cleanup().empty());
+    EXPECT_EQ(next->gas_volumes(), input.gas);
+    EXPECT_EQ(next->carrier_volumes(), input.carrier);
+    const auto cleanup = next->phase_cleanup_state();
+    EXPECT_EQ(cleanup.cleaned_cells, 2u);
+    EXPECT_EQ(cleanup.signed_volume, (std::array<long double, 2>{0, 0}));
+    EXPECT_EQ(cleanup.absolute_volume, (std::array<long double, 2>{2 * q, 2 * q}));
+    EXPECT_EQ(cleanup.policy.relative_cutoff, 1e-14);
+    EXPECT_DOUBLE_EQ(cleanup.policy.maximum_absolute_volume[0], 1e-13);
+    EXPECT_DOUBLE_EQ(cleanup.policy.maximum_absolute_volume[1], 7 * 1e-13);
+    for (std::size_t phase = 0; phase < 2; ++phase)
+        EXPECT_LE(cleanup.absolute_volume[phase], cleanup.policy.maximum_absolute_volume[phase]);
+    double local_count = next->latest_phase_cleanup().size(), global_count = 0;
+    Teuchos::reduceAll(*Tpetra::getDefaultComm(), Teuchos::REDUCE_SUM, 1, &local_count, &global_count);
+    EXPECT_EQ(global_count, 2);
+
+    const auto prepared = trial.prepared_transport();
+    ASSERT_TRUE(prepared);
+    EXPECT_NO_THROW(trial.validate_prepared_transport(*prepared, density, stage));
+    EXPECT_EQ(prepared->source_identity, identity);
+    EXPECT_EQ(prepared->candidate_identity, next->accepted_identity());
+    EXPECT_EQ(prepared->old_phase_cleanup.cleaned_cells, 0u);
+    EXPECT_EQ(prepared->new_phase_cleanup.cleaned_cells, 2u);
+    EXPECT_EQ(prepared->new_phase_cleanup.absolute_volume, cleanup.absolute_volume);
+    ASSERT_EQ(prepared->phase_cleanup.size(), next->latest_phase_cleanup().size());
+    ASSERT_EQ(prepared->new_mass.size(), input.order.size());
+    ASSERT_EQ(prepared->raw_new_mass.size(), input.order.size());
+    ASSERT_EQ(prepared->cleanup_mass.size(), input.order.size());
+    for (std::size_t row = 0; row < input.order.size(); ++row)
+        EXPECT_EQ(prepared->new_mass[row], static_cast<long double>(density[0]) * next->gas_volumes()[row] +
+                                               static_cast<long double>(density[1]) * next->carrier_volumes()[row]);
+    for (const auto& delta : prepared->phase_cleanup)
+    {
+        const auto row = next->mesh()->owned_cell_map()->getLocalElement(delta.gid);
+        ASSERT_GE(row, 0);
+        const bool gas = input.gas[row] == 1;
+        EXPECT_EQ(delta.before, (gas ? std::array<double, 2>{1 - q, q} : std::array<double, 2>{q, 1 - q}));
+        EXPECT_EQ(delta.after, (std::array<double, 2>{input.gas[row], input.carrier[row]}));
+        for (std::size_t phase = 0; phase < 2; ++phase)
+            EXPECT_EQ(delta.volume[phase], static_cast<long double>(delta.after[phase]) - delta.before[phase]);
+        // Use the represented density, not the decimal real .1.
+        EXPECT_EQ(prepared->raw_new_mass[row], static_cast<long double>(density[0]) * delta.before[0] +
+                                                   static_cast<long double>(density[1]) * delta.before[1]);
+        EXPECT_EQ(prepared->cleanup_mass[row], static_cast<long double>(density[0]) * delta.volume[0] +
+                                                   static_cast<long double>(density[1]) * delta.volume[1]);
+    }
+    const auto repeated = trial.prepare_transport(density, stage);
+    EXPECT_NO_THROW(trial.validate_prepared_transport(*repeated, density, stage));
+    EXPECT_EQ(repeated->candidate_identity, prepared->candidate_identity);
+    EXPECT_EQ(repeated->raw_new_mass, prepared->raw_new_mass);
+    EXPECT_EQ(repeated->new_mass, prepared->new_mass);
+    EXPECT_EQ(repeated->cleanup_mass, prepared->cleanup_mass);
+    EXPECT_EQ(repeated->new_phase_cleanup.cleaned_cells, 2u);
+    EXPECT_EQ(repeated->new_phase_cleanup.signed_volume, cleanup.signed_volume);
+    EXPECT_EQ(repeated->new_phase_cleanup.absolute_volume, cleanup.absolute_volume);
+    EXPECT_EQ(next->phase_cleanup_state().cleaned_cells, 2u);
+    EXPECT_EQ(next->phase_cleanup_state().absolute_volume, cleanup.absolute_volume);
+}
 TEST(GeneralVoFFaceTransport, LimiterSharesEndpointAndOldExportCapacities)
 {
     auto input = fixture();
@@ -209,6 +286,7 @@ TEST(GeneralVoFFaceTransport, MixedDonorPureFaceDoesNotManufactureSurfaceFromRec
     }
     auto options = face_options();
     options.transport_backend = GeneralVoFTransportBackend::GeometricFace;
+    options.phase_cleanup.relative_cutoff = 0;
     GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options, declarations);
     const auto next = state.apply(state.plan_face_transport(circulation(state), 1));
     const auto hints = next->phase_geometry_declarations();

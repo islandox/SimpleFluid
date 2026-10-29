@@ -1698,7 +1698,10 @@ implicit-upwind specialization while retaining the general swept path.
       geometry indexes with identity checks, accounted storage and prepublication
       budget admission. Report executed index work and final geometric-face theta
       distributions; retain dynamic phase classification each trial.
-- [x] Add opt-in, cell-relative Ordinary phase cleanup with cumulative global
+- [x] Default cell-relative Ordinary phase cleanup on `SweptPartition` and
+      `GeometricFace`, with explicit cutoff-zero opt-out and automatic cumulative
+      caps bound once to the initial global phase inventories. Preserve other
+      backends/arithmetic defaults. Retain cumulative global
       absolute budgets, signed actual endpoint corrections, transactional owner
       admission, policy-bound cleanup checkpoints and phase-only remap history.
       Keep raw transport/physical drift gates and strict PLIC unchanged; expose

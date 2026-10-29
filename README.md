@@ -829,6 +829,13 @@ authority is imported explicitly, with separate optional [ExactVoF](docs/archite
 Automatic refinement and application-level resolution/convergence
 qualification remain future work.
 
+Ordinary `SweptPartition` and `GeometricFace` use
+[budgeted tiny-phase cleanup](docs/modeling/phase_cleanup.md) by default, with
+a `1e-14` cell-relative cutoff and cumulative per-phase caps of `1e-13` times the
+initial global inventory. Actual corrections remain separate from raw physical
+drift and arithmetic uncertainty. Set `phase_cleanup.relative_cutoff = 0` to
+opt out; `DonorCell` and non-Ordinary modes keep disabled defaults.
+
 ## Dependencies
 
 | Dependency | Role | Version | Requirement |

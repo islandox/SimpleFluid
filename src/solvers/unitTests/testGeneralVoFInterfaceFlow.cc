@@ -115,11 +115,17 @@ TEST(GeneralVoFInterfaceFlow, ThreeStepAlignedAndMixedPassageUsesSignedMomentumA
         EXPECT_EQ(solver.time(), 3. / 64);
     }
 }
-TEST(GeneralVoFInterfaceFlow, CleanupUsesRawMassAndExplicitMomentumAndRejectsWithoutSpending)
+void check_cleanup_coupling(VoF::GeneralVoFTransportBackend backend)
 {
     constexpr double dt = 0x1p-44, q = dt / 16;
-    const auto initial = interface_phases(1);
+    const auto base = interface_phases(1);
+    VoF::GeneralVoFOptions raw_options;
+    raw_options.transport_backend = backend;
+    raw_options.phase_cleanup.relative_cutoff = 0;
+    const auto initial = std::make_shared<const VoF::GeneralVoF>(
+        base->hierarchy(), base->owned_order(), base->gas_volumes(), base->carrier_volumes(), raw_options);
     VoF::GeneralVoFOptions options;
+    options.transport_backend = backend;
     options.phase_cleanup = {1e-14, {6 * q, 6 * q}};
     auto cleaned = std::make_shared<const VoF::GeneralVoF>(
         initial->hierarchy(), initial->owned_order(), initial->gas_volumes(), initial->carrier_volumes(), options);
@@ -208,5 +214,14 @@ TEST(GeneralVoFInterfaceFlow, CleanupUsesRawMassAndExplicitMomentumAndRejectsWit
     EXPECT_EQ(solver.velocity(), accepted_velocity);
     EXPECT_EQ(solver.pressure(), accepted_pressure);
     EXPECT_EQ(solver.phases()->phase_cleanup_checkpoint(), ledger);
+}
+TEST(GeneralVoFInterfaceFlow, CleanupUsesRawMassAndExplicitMomentumAndRejectsWithoutSpending)
+{
+    for (const auto backend :
+        {VoF::GeneralVoFTransportBackend::SweptPartition, VoF::GeneralVoFTransportBackend::GeometricFace})
+    {
+        SCOPED_TRACE(int(backend));
+        check_cleanup_coupling(backend);
+    }
 }
 } // namespace

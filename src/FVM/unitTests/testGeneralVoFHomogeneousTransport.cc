@@ -68,6 +68,8 @@ TEST(GeneralVoFHomogeneousTransport, PureCirculationUsesCanonicalStreamsAtEveryP
 TEST(GeneralVoFHomogeneousTransport, VaryingIndependentTraceMatchesAnalyticCycle)
 {
     const auto input = fixture();
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
     for (const bool gas : {false, true})
         for (const double trace_scale : {1e-25, 2e-16})
         {
@@ -78,7 +80,7 @@ TEST(GeneralVoFHomogeneousTransport, VaryingIndependentTraceMatchesAnalyticCycle
                 minority.push_back(trace_scale * (1 + int(c[0]) + 2 * int(c[1])));
             }
             GeneralVoF state(input.hierarchy, input.order, gas ? std::vector<double>(input.order.size(), 1) : minority,
-                gas ? minority : std::vector<double>(input.order.size(), 1), {},
+                gas ? minority : std::vector<double>(input.order.size(), 1), options,
                 std::vector<Declaration>(input.order.size(), gas ? Declaration::PureGas : Declaration::PureCarrier));
             for (const double q : {1. / 64, 1.})
             {
@@ -120,7 +122,9 @@ TEST(GeneralVoFHomogeneousTransport, AbsentNominalPhaseKeepsItsTransportedUncert
         if (c[0] < 1 && c[1] < 1)
             input.carrier[i] = 1e-25;
     }
-    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, {},
+    GeneralVoFOptions options;
+    options.phase_cleanup.relative_cutoff = 0;
+    GeneralVoF state(input.hierarchy, input.order, input.gas, input.carrier, options,
         std::vector<Declaration>(input.order.size(), Declaration::PureGas));
     const auto first = state.plan_transport(stationary(state), cycle(state, 1), 1).candidate();
     const auto second = first->plan_transport(stationary(*first), cycle(*first, 1. / 64), 1);

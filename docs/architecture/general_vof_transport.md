@@ -22,12 +22,15 @@ arithmetic only; the swept path retains its
 explicit finite and Exact providers. See the [face-volume contract](conservative_face_vof.md)
 and [floating-point ownership contract](vof_transport.md).
 
-Ordinary `SweptPartition` also offers explicit, disabled-by-default
-[budgeted phase cleanup](../modeling/phase_cleanup.md). It runs after raw
+Ordinary `SweptPartition` and `GeometricFace` enable
+[budgeted phase cleanup](../modeling/phase_cleanup.md) by default. It runs after raw
 transport acceptance and before candidate halo publication, carries cumulative
 global signed/absolute corrections, and exposes raw versus cleaned prepared
 mass and declared cleanup momentum. It is a physical numerical correction,
 separate from geometry quality, roundoff and the strict PLIC fit gate.
+The default cutoff is `1e-14`; global absolute caps are derived once from each
+initial phase inventory and retained across restart/migration. Explicit cutoff
+zero opts out; `DonorCell` and non-Ordinary arithmetic retain disabled defaults.
 
 Optional [measured live balancing](general_vof_balancing.md) records unique
 reconstruction and canonical face work. Its explicitly lagged forecasts can

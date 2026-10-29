@@ -27,7 +27,8 @@ namespace
 {
 using namespace SimpleFluid;
 namespace AMR = SimpleFluid::Meshes::AMR;
-std::shared_ptr<const VoF::GeneralVoF> phases(unsigned fixture, bool skew = false, bool single_layer = false)
+std::shared_ptr<const VoF::GeneralVoF> phases(
+    unsigned fixture, bool skew = false, bool single_layer = false, bool cleanup = true)
 {
     const auto comm = Tpetra::getDefaultComm();
     std::vector<std::uint64_t> owned;
@@ -94,8 +95,11 @@ std::shared_ptr<const VoF::GeneralVoF> phases(unsigned fixture, bool skew = fals
         gas.push_back(g);
         carrier.push_back(c);
     }
-    auto result =
-        std::make_shared<const VoF::GeneralVoF>(hierarchy, std::move(order), std::move(gas), std::move(carrier));
+    VoF::GeneralVoFOptions options;
+    if (!cleanup)
+        options.phase_cleanup.relative_cutoff = 0;
+    auto result = std::make_shared<const VoF::GeneralVoF>(
+        hierarchy, std::move(order), std::move(gas), std::move(carrier), options);
     int local_present = result->mesh()->num_owned_cells() > 0, present = 0;
     int local_empty = !local_present, empty = 0;
     Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 1, &local_present, &present);
@@ -196,7 +200,7 @@ std::shared_ptr<const VoF::GeneralVoF> pure_cartesian_phases(unsigned nx, unsign
     }
     return std::make_shared<const VoF::GeneralVoF>(hierarchy, std::move(order), std::move(gas), std::move(carrier));
 }
-std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool cleanup = false, bool record_balance_work = false)
+std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool record_balance_work = false)
 {
     PLIC::GeometryLimits limits;
     limits.arithmetic_mode = ArithmeticMode::Ordinary;
@@ -268,18 +272,6 @@ std::shared_ptr<const VoF::GeneralVoF> skew_coarse_fine_plane(bool cleanup = fal
     }
     VoF::GeneralVoFOptions options;
     options.record_balance_work = record_balance_work;
-    if (cleanup)
-    {
-        double local[2]{}, global[2]{};
-        for (auto value : gas)
-            local[0] += value;
-        for (auto value : carrier)
-            local[1] += value;
-        Teuchos::reduceAll(*comm, Teuchos::REDUCE_SUM, 2, local, global);
-        options.phase_cleanup.relative_cutoff = 1e-14;
-        // Global extensive allowances: 0.5% of the unchanged 2e-11 drift gate.
-        options.phase_cleanup.maximum_absolute_volume = {1e-13 * global[0], 1e-13 * global[1]};
-    }
     return std::make_shared<const VoF::GeneralVoF>(
         refined, std::move(order), std::move(gas), std::move(carrier), options);
 }
