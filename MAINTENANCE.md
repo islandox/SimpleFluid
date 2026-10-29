@@ -432,6 +432,8 @@ Useful configuration switches are:
 | `SIMPLEFLUID_BUILD_BENCHMARKS` | `ON` | Build benchmark and performance-regression targets |
 | `SIMPLEFLUID_ENABLE_COVERAGE` | `OFF` | Add GCC/Clang coverage instrumentation |
 | `SIMPLEFLUID_ENABLE_LTO` | `ON` | Enable IPO in Release and RelWithDebInfo |
+| `SIMPLEFLUID_SPLIT_DEBUG_INFO` | `ON` on Linux GCC/Clang; `OFF` otherwise | Store Debug/RelWithDebInfo symbols in reusable `.dwo` files for non-IPO targets; IPO targets retain embedded symbols |
+| `SIMPLEFLUID_DEBUG_SYMBOLS`, `SIMPLEFLUID_DEBUG_SYMBOLS_<MODULE>` | `INHERIT` | Select Debug/RelWithDebInfo symbols globally or per module with `INHERIT`, `ON`, or `OFF` |
 | `SIMPLEFLUID_MAX_TEST_PROCS` | `0` | Limit generated MPI tests; CI commonly uses `2` |
 | `SIMPLEFLUID_GTEST_DISCOVERY_TIMEOUT` | `30` | Bound Google Test discovery time in seconds |
 | `SIMPLEFLUID_BUILD_DOCS` | `OFF` | Require Doxygen and enable the `docs` target |
@@ -439,6 +441,9 @@ Useful configuration switches are:
 | `SIMPLEFLUID_PLANTUML_JAR` | empty | Optional explicit path to the PlantUML JAR used by diagram-enabled docs |
 | `SIMPLEFLUID_ENABLE_IF97` | `OFF` | Build the optional water material library; [usage and limits](docs/modeling/if97_water.md) |
 | `SIMPLEFLUID_ENABLE_NOX` | `OFF` | Enable the optional NOX/Thyra nonlinear flow solver; [dependencies and scope](docs/architecture/coupled_nonlinear_solver.md) |
+
+See [focused debug symbols](cmake/README.md#focused-debug-symbols) for module
+precedence, split-DWARF debugger paths, PCH behavior, and LTO/PGO interactions.
 
 The project uses one shared precompiled header. Add only stable, frequently
 included third-party or standard-library headers to
@@ -721,12 +726,16 @@ mode, wall time, iteration counts, and numerical residuals. Treat profiler
 instruction counts as a lead. Accept an optimization only after normal timing
 and numerical-equivalence checks.
 
-Release and RelWithDebInfo enable LTO by default. Compiler-specific PGO presets
+Release and RelWithDebInfo enable LTO by default. Split debug information
+preserves this policy: IPO targets retain embedded symbols, while non-IPO
+Debug/RelWithDebInfo targets use reusable `.dwo` files on supported platforms.
+Compiler-specific PGO presets
 designate `natural_convection_shiri` as the training workload. A generate
 preset builds the instrumented target; run it to collect profiles and use the
 LLVM merge preset where applicable before configuring the matching use preset.
-Keep compiler, configuration, source fingerprint, and workload provenance
-matched. A PGO-use build that lacks complete current profiles should fail
+Keep compiler, configuration, source fingerprint, split-debug policy, and workload
+provenance matched. Existing profiles require fresh training after adopting the
+split-debug policy. A PGO-use build that lacks complete current profiles should fail
 rather than silently optimize only part of a production target.
 
 ## Documentation policy

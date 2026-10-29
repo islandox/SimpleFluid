@@ -35,6 +35,9 @@ if(SIMPLEFLUID_ENABLE_LTO AND NOT SIMPLEFLUID_ENABLE_COVERAGE)
     endif()
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+    if(SIMPLEFLUID_SPLIT_DEBUG_INFO)
+        message(STATUS "Split debug information: IPO targets retain embedded symbols; LTO remains enabled")
+    endif()
 
     # Use LLD for Clang ThinLTO. Legacy direct-static Trilinos linking also
     # needs the non-LTO compatibility object in src/CMakeLists.txt.

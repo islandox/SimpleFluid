@@ -28,12 +28,50 @@ static Trilinos archives. Leaving the option empty builds the backend normally.
 ## Focused debug symbols
 
 `SIMPLEFLUID_DEBUG_SYMBOLS` and `SIMPLEFLUID_DEBUG_SYMBOLS_<MODULE>` accept
-`INHERIT`, `ON`, or `OFF`; all default to `INHERIT`. They affect **RelWithDebInfo
-only**. `ON` appends `-g`, `OFF` appends `-g0`, and a fully inherited setting
-leaves the compiler's existing flags unchanged. GCC, Clang and AppleClang support
+`INHERIT`, `ON`, or `OFF`; all default to `INHERIT`. They affect **Debug and
+RelWithDebInfo**; Release is unchanged. `ON` appends `-g`, `OFF` appends `-g0`,
+and a fully inherited setting leaves the compiler's existing flags unchanged.
+GCC, Clang and AppleClang support
 overrides; other compilers reject requested overrides during configuration.
-Optimization, frame pointers, `NDEBUG`, LTO/PGO policy and strict floating-point
-source options retain their existing settings.
+Module selection preserves optimization, frame pointers, `NDEBUG`, and strict
+floating-point source options.
+
+`SIMPLEFLUID_SPLIT_DEBUG_INFO` defaults to `ON` on Linux with GCC or Clang and
+`OFF` elsewhere. Configuration checks `-gsplit-dwarf` and GNU ld.bfd/LLD
+linker-script support; use `OFF` with unsupported linkers such as gold.
+It adds that compile-only flag privately to eligible project targets and shared
+PCH providers in Debug and RelWithDebInfo; `-gsplit-dwarf` is not passed at link time.
+For eligible targets, debug information stays in `.dwo` files beside the object
+files; static-library consumers reuse those files, while executables and shared
+libraries retain small skeleton references. This avoids copying each linked
+archive object's full debug information into every unit-test binary. It does not
+deduplicate header/template information emitted by separate translation units
+or rebuild imported dependencies. Native executable/shared-library links omit
+the optional `.debug_gnu_pubnames` and `.debug_gnu_pubtypes` accelerator tables,
+which otherwise duplicate large PCH name indexes. Full names/types remain in
+the `.dwo` files; DWARF skeletons, line tables and addresses remain in the binary.
+This uses a supplemental GNU ld/LLD linker script and can make initial debugger
+name lookup slower. IPO links and split-mode opt-out do not apply that script.
+
+Split storage and symbol selection are independent: `-gsplit-dwarf` does not
+enable debug information, and `OFF` selections still append `-g0` (the compiler
+may emit an empty `.dwo`). Keep the `.dwo` files and their build-tree paths
+available to the debugger; copying a binary alone is insufficient. Set
+`SIMPLEFLUID_SPLIT_DEBUG_INFO=OFF` for conventional embedded debug information.
+
+Split mode preserves optimization and IPO/LTO policy. A target is eligible only
+when IPO is disabled for the active configuration: its
+`INTERPROCEDURAL_OPTIMIZATION_<CONFIG>` property takes precedence over the
+general `INTERPROCEDURAL_OPTIMIZATION` property. IPO targets retain conventional
+embedded DWARF because GCC LTO cannot provide reusable split DWARF and Clang LTO
+creates per-link debug bundles. Storage follows this target-level decision even
+when a source's numerical options include `-fno-lto`.
+
+With the defaults, Debug uses reusable split information, while RelWithDebInfo
+targets with LTO retain embedded information. Set `SIMPLEFLUID_ENABLE_LTO=OFF`
+to obtain reusable split information in both configurations for project targets
+governed by that option. PGO remains available; split mode is part of profile
+provenance, so existing profiles require fresh training.
 
 | Module | Compiled scope and fallback order before the global setting |
 | --- | --- |
@@ -78,8 +116,8 @@ The global flag applies to project targets and shared PCH providers together.
 Sources whose module setting differs from the global setting append their flag
 after existing numerical source options and skip shared PCH reuse. CMake's
 `SKIP_PRECOMPILE_HEADERS` source property is not configuration-specific, so such
-sources also bypass PCH in Debug/Release, while symbol flags remain limited to
-RelWithDebInfo. Global-only overrides preserve PCH reuse.
+sources bypass PCH in every configuration, while symbol flags remain limited to
+Debug and RelWithDebInfo. Global-only overrides preserve PCH reuse.
 
 Component lists register mixed-owner sources with
 `simplefluid_debug_symbols_sources("CHILD;PARENT" ...)` and target defaults with

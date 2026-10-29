@@ -61,6 +61,7 @@ macro(simplefluid_configure_profile_guided_optimization)
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.cc"
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.hh"
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.cmake"
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.ld"
             "${CMAKE_CURRENT_SOURCE_DIR}/cmake/*.map")
         list(FILTER SIMPLEFLUID_PGO_SOURCE_INPUTS
              EXCLUDE REGEX "/unitTests/")
@@ -102,6 +103,7 @@ macro(simplefluid_configure_profile_guided_optimization)
             "configuration=${SIMPLEFLUID_PGO_CONFIG}\n"
             "source_fingerprint=${SIMPLEFLUID_PGO_SOURCE_FINGERPRINT}\n"
             "lto=${SIMPLEFLUID_ENABLE_LTO}\n"
+            "split_debug_info=${SIMPLEFLUID_SPLIT_DEBUG_INFO}\n"
             "cxx_flags=${CMAKE_CXX_FLAGS}|${${SIMPLEFLUID_PGO_CONFIG_FLAGS_VARIABLE}}\n")
         string(JOIN "" SIMPLEFLUID_PGO_EXPECTED_MANIFEST
                ${SIMPLEFLUID_PGO_EXPECTED_MANIFEST})
