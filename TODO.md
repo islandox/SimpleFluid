@@ -12,10 +12,12 @@ excluded. This option does not enable multispecies reacting-VoF integration or
 establish full-flow physical qualification. Shared geometry and FVM utilities
 remain available independently.
 
-**Documentation review date:** October 24, 2026
+**Documentation cleanup date:** October 29, 2026
 
-This refresh reconciles the current source, public APIs, and checked-in test
-coverage. It does not represent a new runtime qualification or full-suite run.
+Completed work is summarized here; detailed contracts and recorded evidence live
+in `docs/modeling/`, `docs/architecture/`, `docs/verification/` and local
+`docs/qualification/` reports. This cleanup changes no implementation or
+qualification status and includes no new runtime or full-suite results.
 
 **Near-term goal:** qualify supplied reacting-flow materials and closures,
 external-source protocols and applications against the implemented generic
@@ -94,171 +96,41 @@ remain open.
 
 ### Implemented foundation — squashed Phases -1 to 8
 
-The following infrastructure is implemented and should not be re-planned as
-active roadmap phases unless regressions are found. The open numerical and
-verification items below mean the foundation as a whole is not yet complete.
+The foundation is implemented with the verification gaps below. Capability and
+support details live in [README](README.md), [mesh decomposition](docs/architecture/orthogonal_decomposition.md)
+and the [parallel semi-structured guide](docs/semi_structured_parallel.md).
 
-- [x] Mesh and geometry infrastructure
-  - [x] CRTP mesh hierarchy
-  - [x] Cartesian 3D mesh
-  - [x] Orthogonal cylindrical 3D mesh
-  - [x] Semi-structured XY×Z prism mesh
-  - [x] STK/Exodus adapter for `HEX_8` and `WEDGE_6` meshes
-  - [x] Runtime type-erased `MeshHandle`
-  - [x] Owned/ghost cell decomposition
-  - [x] Zoltan2/ParMETIS partitioning
-- [x] Field infrastructure
-  - [x] Cell-centered scalar, vector, and tensor fields
-  - [x] Face-centered scalar and vector fields
-  - [x] Boundary-face fields
-  - [x] Tpetra-backed distributed storage
-  - [x] Ghost-value synchronization
-  - [x] Mesh-aware `FieldStored` abstraction
-- [x] Finite-volume operators
-  - [x] Cached least-squares scalar/vector gradient reconstruction
-  - [x] Gauss-linear scalar/vector gradient reconstruction
-  - [x] Orthogonal scalar/vector diffusion
-  - [x] Explicit non-orthogonal correction
-  - [x] Fully implicit non-orthogonal diffusion
-  - [x] Hybrid implicit/explicit non-orthogonal treatment
-  - [x] MPI partition-face implicit gradients with synchronized remote halves
-  - [x] Scalar/vector transport systems
-  - [x] Boundary-condition-aware diffusion in transport systems
-  - [x] First-order upwind convection
-  - [x] Backward Euler time integration
-  - [x] Opt-in constant-step BDF2 for legacy/native mapped weighted-scalar and
-        native mapped physical-temperature transport, with a required older field
-  - [x] Opt-in bounded linear-upwind scalar convection through a conservative
-        deferred correction
-- [x] Momentum and pressure-velocity coupling
-  - [x] Momentum equation assembly
-  - [x] SIMPLE
-  - [x] PISO
-  - [x] PIMPLE
-  - [x] Fully coupled block-Krylov pressure-velocity solver
-  - [x] Rhie–Chow collocated-grid stabilization
-  - [x] Slip-wall momentum transport without spurious boundary diffusion
-  - [x] Residual reporting for momentum, pressure, and continuity
-- [x] Physical solver baseline
-  - [x] Transient incompressible Navier–Stokes
-  - [x] Boussinesq buoyancy
-  - [x] Temperature transport
-  - [x] Natural-convection driver
-  - [x] Compact solid-cell subdomains with synthetic interface boundaries
-  - [x] Selected-first mesh reordering with range-backed solid membership
-  - [x] Transient conservative solid heat conduction
-- [x] Native runtime-mesh solver path
-  - [x] Run `FluidSolver` and `BoussinesqSolver` directly on supported
-        `MeshHandle` backends without reconstructing a legacy mesh
-  - [x] Select `FieldStored` scalar, vector, and tensor cell storage plus
-        scalar/vector face storage through `MeshFieldTraits`
-  - [x] Support mapped diffusion, convection, pressure projection,
-        Rhie–Chow fluxes, and coupled pressure–velocity assembly
-  - [x] Carry turbulence, wall distance/treatment, prescribed heating, the
-        typed reacting source, boiling, void, material feedback, linear
-        source/decay scalars, and steady-state search
-        through the native field path
-  - [x] Preserve exact legacy `Mesh` identity, public solver hooks, and
-        established behavior through a distinct compatibility path
-  - [x] Cover Cartesian and cylindrical serial/distributed execution with
-        focused regressions
-  - [x] Add count-balanced, width-aware Cartesian/cylindrical tensor partitioning
-        and contiguous owned cell/face algebraic maps
-  - [x] Replace orthogonal local source-ID tables with compact halo-aware topology
-        and arithmetic lookups
-  - [x] Cover native unstructured execution directly in serial and through
-        `MeshPartitioner`/`PartitionedMesh` in MPI
-  - [x] Support native `SemiStructuredXY_Z` serial/MPI ownership with Zoltan2
-        XY graph partitions crossed with Z slabs, `MeshReorderingFactory` XY
-        ordering, compact decomposed XY/Z topology, contiguous algebraic cell/face
-        maps, adjacency ghosts and axial ALE, including empty owners
-        (see [scope and checks](docs/semi_structured_parallel.md))
-- [x] I/O and utilities
-  - [x] VTU output for ParaView
-  - [x] STK Exodus II mesh input for `HEX_8` and `WEDGE_6` volume elements
-  - [x] Typed key-value `Database`
-  - [x] `RandomAccessView`
-  - [x] `vec3`
-  - [x] Concept-based Tpetra type configuration
-- [x] Verification suite
-  - [x] Lid-driven cavity transient smoke cases, Re = 100 and 1000
-  - [x] Poiseuille flow
-  - [x] Manufactured incompressible Navier–Stokes solutions
-  - [x] Skewed-mesh diffusion
-  - [x] Natural-convection square cavity
-  - [x] External OpenFOAM comparison workflow and case-definition check
-  - [x] Gradient/divergence reconstruction tests
-  - [x] Pressure projection tests
-  - [x] Rhie–Chow checkerboard-suppression tests
-  - [x] Slip-boundary momentum-diffusion regression tests
+- [x] Mesh/partition infrastructure, native `MeshHandle`/`FieldStored`, distributed
+      fields, VTU/Exodus I/O and configuration utilities.
+- [x] Reconstruction, diffusion, scalar/vector transport, momentum and pressure
+      coupling; opt-in constant-step BDF2 and bounded linear upwind retain the
+      Backward Euler and first-order-upwind defaults.
+- [x] Incompressible/Boussinesq flow, temperature and solid conduction, native
+      solver execution and legacy object-identity compatibility.
+- [x] Analytic/manufactured and flow smoke regressions, OpenFOAM comparison
+      tooling, and launchers aligned with current build presets.
 
 #### Known foundational gaps
 
-- [x] Align `verification/environments.sh` with the current preset output
-      directories (`build/gcc` and `build/llvm`).
-- [x] Add and verify opt-in constant-step BDF2 for legacy/native mapped
-      weighted-scalar and native mapped physical-temperature transport while
-      preserving Backward Euler defaults.
-- [x] Add and verify opt-in bounded linear-upwind deferred correction for
-      scalar transport while preserving first-order-upwind defaults.
 - [ ] Add quantitative lid-driven-cavity profile checks against Ghia et al.
 - [ ] Bundle validated OpenFOAM centerline profiles and enforce tolerances in
       an automated test.
 
----
-
 ### Compact region composition
 
-The current annular factory and swept-provider APIs are documented in
-[annular meshes](docs/annular_meshes.md). Their checked-in regressions cover
-geometry, transfer, and motion contracts; they do not establish physical
-pool-flow validation.
+- [x] Compact serial/MPI composition, canonical coarse/fine seams, translated
+      periodic geometry, native diffusion/flow execution, common axial affine
+      ALE, annular/swept providers and explicit region partitioning.
 
-- [x] Separate topology and geometry contracts with shared Cartesian topology
-      and independent coordinate providers.
-- [x] Add static conforming serial composition through `MeshHandle`, canonical
-      seam faces, explicit mixed HEX_8/prism-side interfaces, and namespaced BCs.
-- [x] Replace normal implicit cell-face materialization with independent ranges;
-      retain explicit compatibility CSR and preserve native ownership/halo queries.
-- [x] Add assembled FVM/flow regressions, diffusion example, VTU region metadata,
-      and an opt-in capacity/timing benchmark. Support and numerical gates are
-      maintained in [region mesh contracts](docs/region_meshes.md); physical
-      validation remains separate.
-- [x] Verify the merged coupled block-composite backend on Cartesian and mixed
-      HEX/prism regions, including all operator/workspace choices, both pressure
-      gradients, backend switching and zero mesh-connectivity materialization.
-- [x] Compact implicit-region MPI: multiple regions per rank, split regions,
-      unique canonical face ownership, halos, owned-cell output and conservative
-      two/four-rank tests. Explicit global constituents remain rejected.
-- [x] Nested planar coarse/fine interfaces with coverage/overlap validation,
-      canonical subfaces and signed conservative flux transfer.
-- [x] Composite common axial affine ALE using existing GCL, epoch, lease,
-      cache refresh and rollback machinery, including solver-integrated tests.
-- [x] Cylindrical composition, physical angular closure and explicit translated
-      periodic patches with image-correct geometry and fluxes.
-- [x] Independent extruded geometry providers sharing immutable base topology,
-      with analytic geometry, native parity and serial/MPI solver tests.
-- [x] Validated execution views, geometry read leases, per-region interface
-      directories and Cartesian/extruded descriptor validation without volume sweeps.
-- [x] Nonlinear/coarse-fine, periodic-through-seam and decomposition-invariance
-      qualification; diagnostic N/R/P baselines with peak RSS. See
-      `docs/region_execution.md` and `docs/region_scaling.md` for measured scope.
-- [x] Converge lagged MPI gradients in the actual implicit steady diffusion
-      helper; require a fresh full-equation residual before success, retaining
-      native/mapped paths and the original native overload symbols.
-- [x] Resolved-face and transformed region-native scalar diffusion assembly,
-      with a generic reference and motion/periodic/coarse-fine parity checks.
-- [x] Remove per-cell exact-reserve allocation from explicit compatibility CSR.
-- [x] Build graded polygonal annuli with independently sized radial wall rings,
-      fixed-boundary Delaunay bulk triangles, hex wall layers, and conforming
-      bottom/top prism stacks.
-- [x] Coarsen eligible bottom wall intersections with compact swept R–Z
-      mitered regions, preserving native volumes, canonical interfaces,
-      distributed ownership, and common affine Z motion.
-- [x] Distributed explicit region packets and region-aware load balancing via
-      `CompositeMeshSource`/`MeshPartitioner`; native topology and canonical
-      interfaces retained. Source union and graph construction remain centralized
-      on the source rank; see `docs/composite_partitioning.md`.
+Contracts and recorded scope are maintained in [region meshes](docs/region_meshes.md),
+[region execution](docs/region_execution.md), [annular meshes](docs/annular_meshes.md)
+and [composite partitioning](docs/composite_partitioning.md). The
+[scaling guide](docs/region_scaling.md) defines measurement contracts; retained
+local reports under `docs/qualification/` do not establish physical pool-flow
+validation or production scaling. Explicit global constituents remain rejected
+by compact composition; explicit-region source union/graph construction remains
+centralized on the source rank.
+
 - [ ] General mortar/AMI intersections, curved/nonconvex face subdivision,
       wider polygonal volume/output types and rotated periodic field transforms.
 - [ ] Nonaffine composite motion and moving periodic lengths: require consistent
@@ -272,75 +144,29 @@ mistaken for foundation or Phase 9 completion.
 
 #### Implemented scope
 
-- [x] Add runtime selection for six transported two-equation closures:
-  - [x] standard k-epsilon
-  - [x] RNG k-epsilon
-  - [x] realizable k-epsilon
-  - [x] standard k-omega
-  - [x] Menter BSL k-omega
-  - [x] Menter SST k-omega
-- [x] Preserve a laminar selection that allocates no turbulence state.
-- [x] Couple eddy viscosity to momentum and gradient-diffusion turbulent
-      transport to temperature.
-- [x] Add resolved low-Re SST, resolved standard/realizable k-epsilon, and
-      standard high-Re k-epsilon wall treatments.
-- [x] Add smooth/sand-grain high-Re momentum wall laws, constant-Prandtl and
-      Jayatilleke thermal wall laws, and resolved-wall compatibility checks.
-- [x] Add distributed Poisson wall distance with configurable non-orthogonal
-      and linear-solver controls; BSL/SST automatically include every no-slip
-      wall.
-- [x] Add globally reduced wall-y+ diagnostics and a rebuild-only
-      boundary-layer adaptation driver with mesh-quality rejection.
-- [x] Couple signed OpenFOAM-style Boussinesq production/destruction into both
-      transported turbulence equations.
-- [x] Add formula, option-validation, transport, wall-treatment, solver, and
-      MPI consistency tests.
-- [x] Add the transient `pitz_daily` standard-k-epsilon example and the
-      OpenFOAM profile-comparison workflow.
-- [x] Add a transient isothermal incompressible solver that advances RANS
-      without allocating or solving a temperature equation, and use it for
-      `pitz_daily`.
-- [x] Add the matched 1000 W Gaussian heated-solution-tank SST comparison,
-      including 2 mm R-Z spacing, wall-layer refinement, and R-Z error figures.
-- [x] Document that the current RANS variables use single-continuum, full-cell
-      transport rather than phase-volume-fraction-weighted equations.
+- [x] Six transported RANS closures (standard/RNG/realizable k-epsilon and
+      standard/BSL/SST k-omega), laminar selection, momentum/thermal coupling,
+      wall treatments, distributed wall distance and diagnostics.
+- [x] Focused formula/transport/solver/MPI checks, isothermal `pitz_daily`, and
+      heated-solution-tank comparison tooling.
+
+Current transport is single-continuum and full-cell; phase-weighted turbulence
+remains Phase 21 work.
 
 #### SST-1994 plus SAS source extension
 
-- [x] Implement opt-in `SSTKOmegaSAS` without changing ordinary SST-1994.
-- [x] Add bounded local algebra, physical-time cap, explicit omega source,
-      unit-coefficient vector Laplacian, lazy work fields and accepted diagnostics.
-- [x] Add pointwise reference, derivative, source-weighting, disabled-equivalence,
-      wall/configuration, native/legacy and serial/MPI transaction checks.
-- [x] Add a small isothermal transient activation example without IF97.
-- [x] Qualify native cylindrical SAS with Cartesian vector components and
-      integrated radial-face normals, including serial/MPI transient swirl.
-- [x] Qualify serial SemiStructuredXY_Z SAS on skewed triangular extrusions.
-- [x] Qualify mixed slip SAS boundaries with normal-foot reconstruction and
-      serial/MPI affine, curved-source and transient tests.
-- [x] Qualify native Cartesian periodic SAS and legacy translational pairs,
-      including wrapped derivatives, flux geometry and output images.
-- [x] Qualify Gauss-linear SAS with coordinate-moment consistency correction
-      on native/legacy, curved, skewed, slip and periodic paths.
-- [x] Add rollback-safe SAS material feedback.
-- [x] Add rollback-safe SAS scalar void diffusion/collapse and mixture feedback.
-- [x] Add rollback-safe SAS linear source/decay scalar inventories and balance diagnostics.
-- [x] Add rollback-safe SAS legacy ideal/two-population gas models and single-gas ledgers.
-- [x] Add rollback-safe SAS bulk/wall boiling and phase-change state.
-- [x] Add rollback-safe fixed-grid SAS free-surface/liquid-mass budgets,
-      including lazy initialization and accepted history.
-- [x] Support NOX velocity-pressure coupling for native isothermal and physical
-      Boussinesq SAS, with frozen coefficients, one turbulence advance per
-      physical step, accepted-report restoration and retry after rejection.
+- [x] Opt-in SST-1994 SAS source, supported mesh/boundary/gradient paths,
+      rollback-safe optional physics and NOX integration, with focused checks
+      and an activation example.
+
+The [SAS model and qualification scope](docs/modeling/sst_sas.md#qualification-status)
+record supported combinations and exclusions. Parent SST and pitzDaily
+acceptance gates remain unchanged.
+
 - [ ] Establish spatial/temporal resolution and sustained three-dimensional
       scale-resolution evidence beyond source activation.
 - [ ] Perform qualified whole-flow external comparisons with explicit parent-SST
       and discretization differences, then quantitative physical validation.
-
-The [SAS model document](docs/modeling/sst_sas.md) distinguishes
-implemented, component-tested, solver-regression-tested, externally compared
-and physically validated status. The parent closure and pending pitzDaily gates
-are unchanged.
 
 #### Remaining work and acceptance
 
@@ -361,187 +187,69 @@ are unchanged.
 quantitative external-reference validation criteria and a phase-aware
 turbulent bubbly-flow formulation remain open.
 
----
-
 ## Core infrastructure and source phases — Phases 9 to 12
 
 ### Phase 9 — Performance and solver-regression benchmarks
 
-Keep this phase independent of the new physics so solver performance changes can be diagnosed cleanly.
+**Status:** the benchmark harness and major setup/allocation optimizations are
+implemented. Cross-machine qualification and general device assembly remain open.
 
-- [x] Add a repeatable benchmark harness.
-- [x] Record nonlinear iteration counts.
-- [x] Record Krylov iteration counts.
-- [x] Record wall time.
-- [x] Record memory usage.
-- [x] Record continuity residuals.
-- [x] Measure iteration count versus mesh non-orthogonality.
-- [x] Compare diffusion/momentum treatments:
-  - [x] explicit non-orthogonal correction + AMG
-  - [x] implicit non-orthogonal matrix + AMG-preconditioned GMRES
-  - [x] hybrid non-orthogonal treatment + AMG-preconditioned GMRES
-  - [x] coupled Krylov + Schur preconditioner
-- [x] Add MPI scaling benchmarks.
-- [x] Ensure benchmark output is machine-readable, for example CSV or JSON.
-- [x] Store versioned benchmark baselines keyed by case, preset, mesh, MPI
-      size, non-orthogonality, treatment, coupling mode, and preconditioner.
-- [x] Check deterministic iteration ceilings and a deliberately generous
-      wall-time ceiling in CTest after warmup and repeated measured runs.
-- [x] Reuse compatible coupled-system graphs, static pressure-gradient
-      geometry, Schur-product storage, Ifpack/MueLu numeric state, Belos state,
-      and preconditioner scratch vectors under an explicit rebuild policy.
-- [x] Move coupled preconditioner packing, gradient updates, and unpacking to
-      Kokkos device-local kernels.
-- [x] Resolve ghost-cell ownership through a distributed Tpetra directory
-      rather than replicating every owned mesh GID on every rank.
-- [x] Cache mesh-only least-squares transport geometry and boundary-face
-      locations while continuing to materialize dynamic boundary data.
-- [x] Batch dynamic-source collective validation and skip disabled/static
-      source and material imports.
-- [x] Cache VTU topology and support appended binary rank pieces with a PVTU
-      index.
+- [x] Repeatable CTest/manual benchmarks with machine-readable provenance,
+      iteration/time/memory/residual measurements, MPI scaling and stored baselines.
+- [x] Debug smoke-regression ceilings and compatible graph, geometry, solver,
+      preconditioner and VTU reuse; distributed ownership lookup and batched imports.
+- [x] Coupled block-composite operators and streamed products with supported
+      solver/native/legacy/ALE regressions. See
+      [coupled backend contracts](docs/architecture/coupled_operator_backends.md).
+
+Timing ceilings are smoke guards; Release scaling/profiling remains a manual
+measurement workflow. Local results do not qualify accelerator execution.
+
 - [ ] Migrate the remaining host-side finite-volume row assembly loops to
       backend-portable Kokkos kernels after defining a device assembly API.
 - [ ] Revisit scoped geometry execution in
-      `PlanarALEMeshMotion::compute_trial_state` only with stronger
-      application-level performance evidence. The October 11, 2026 review of
-      external host candidate C2 reverted the trial-read lease and its two added
-      tests because the measured benefit did not clear the predeclared
-      performance gate, not because of a correctness failure. On the
-      267,652-cell, six-rank, 0–0.1 s startup fixture, warmed ABBAAB runs passed
-      exact parity for all ten selected output files and matched native phase
-      call counts; focused serial/MPI and rejection/replay checks also passed.
-      Rank-zero inclusive ALE-geometry median time fell from 33.47 to 28.80 s
-      (about 14%), while whole-run median time fell from 292.05 to 284.55 s
-      (2.57%). Observed ranges overlapped: control 269.73–292.99 s, candidate
-      277.49–287.13 s. The acceptance rule required at least 1% lower median
-      wall time **and nonoverlapping observed ranges**; the application benefit
-      therefore remained uncertain. Warmups and an earlier block contaminated
-      by a competing build were excluded. Preserve arithmetic, traversal order,
-      collective failure handling, and physical gates in any requalification;
-      do not treat the inclusive phase reduction as an established wall-time
-      speedup. The patch and evidence remain in the local, untracked external host
-      directory `build/next-optimization-20261010/`: `C2.patch`,
-      `C2-comparison.json`, `C2-decision.json`, and `report.json`.
-
-The timing ceiling is a smoke-regression guard, not a claim of comparable
-performance across different machines. Release scaling and profiling remain
-manual measurement workflows.
-
-- [x] Add opt-in coupled block application without monolithic CRS allocation,
-      with retained-generation ownership and serial/two-/four-rank algebra tests.
-- [x] Add independent streamed distributed-product assembly retaining final
-      stabilization/Schur matrices; record small separate-process memory results.
-- [x] Qualify coupled backend choices across current solver classes, native/legacy
-      mesh paths and supported ALE motion; align interpolation and pressure-gradient
-      reconstruction, and refresh MueLu numeric state during reuse.
+      `PlanarALEMeshMotion::compute_trial_state` only with stronger application
+      evidence. The reverted C2 trial-read lease passed parity but failed the
+      declared wall-time gate (at least 1% lower median and nonoverlapping ranges).
+      Preserve arithmetic, traversal, collective failures and physical gates;
+      inclusive phase timing alone is insufficient. Patch and decision evidence:
+      external-host local `build/next-optimization-20261010/` (`C2.patch`,
+      `C2-comparison.json`, `C2-decision.json`, `report.json`).
 - [ ] Add native scalar face-based orthogonal diffusion and frozen upwind/BE
       transport, with independent operator/diagonal/preconditioner inputs.
 - [ ] Qualify coupled memory/performance at larger converged sizes and on
       accelerator builds; separate preconditioner/Krylov allocation accounting.
 
-#### Phase 9 acceptance criteria
-
-- [x] Benchmarks can be run from CTest or a documented command.
-- [x] At least one small benchmark is safe for local Debug builds.
-- [x] At least one larger benchmark is suitable for Release/RelWithDebInfo profiling.
-- [x] Results include enough metadata to compare solver configuration, mesh size, MPI size, and compiler mode.
-- [x] Debug CTest fails when a matching stored baseline exceeds its configured
-      iteration or wall-time ceiling.
-
-**Status:** measurement harness, a deterministic Debug smoke-regression gate,
-and the highest-frequency setup/allocation/metadata bottlenecks are addressed.
-Cross-machine qualification and general device-side matrix assembly remain
-open.
-
----
-
 ### Phase 10 — Source-term and material-property infrastructure
 
-Before adding reacting-gas sources or boiling, make the solver accept explicit source fields and updateable material properties cleanly.
-
-- [x] Add a generic volumetric scalar source interface for transport equations.
-- [x] Add source-term support to the temperature/energy equation.
-- [x] Add optional explicit source fields to VTU output.
-- [x] Add a reusable material-property interface for:
-  - [x] density-like feedback field
-  - [x] viscosity-like feedback field
-  - [x] thermal diffusivity or conductivity if already supported by the energy equation
-- [x] Add `Database` parsing helpers with defaults, validation, and unit comments.
-- [x] Add robust field initialization from programmatic configuration.
-- [x] Preserve existing Boussinesq behavior when new models are disabled.
-
-#### Phase 10 acceptance criteria
-
-- [x] Existing natural-convection examples reproduce their old behavior when all new model switches are off.
-- [x] A constant heat source produces the expected one-cell analytic temperature change when diffusion/advection are disabled.
-- [x] Invalid source/property parameters fail with clear error messages.
-- [x] Source fields can be written to VTU.
-
----
+- [x] Generic scalar/thermal sources, updateable material properties,
+      validated configuration, initialization and VTU output, with analytic
+      heat-source, invalid-input and disabled-model equivalence checks.
 
 ### Phase 11 — Prescribed and reaction heat-source coupling
 
-Provide thermal sources independently of the reacting-gas production law.
-Prescribed heating can drive convection without producing gas; an accepted
-reaction extent can release or absorb heat without requiring a power-yield law.
+- [x] Independent `PrescribedHeatSource` profiles/imports, total-power
+      normalization, time multipliers and output; retired source keys reject.
+- [x] Accepted-extent reaction heat and separate external, latent and carried
+      thermal channels, with focused donor/energy/rollback checks.
 
-**Status:** prescribed non-negative profiles, imported cell fields, normalized
-total power, time multipliers, energy-equation coupling, and VTU output exist.
-The neutral `PrescribedHeatSource` publishes `qdot_external` under
-`prescribed_heat_*` controls. Retired source names and keys have no aliases
-and explicit old keys reject. General reaction/source kernels and their field
-and native-flow adapters retain separate chemical/external thermal ledgers.
-Broader physical material and multiphysics qualification remain open.
-
-- [x] Support constant and Gaussian prescribed heating and caller-supplied
-      non-negative cell fields.
-- [x] Normalize spatial profiles to configured total power on Cartesian and
-      cylindrical meshes and couple the result to the temperature equation.
-- [x] Cover zero heating and analytic one-cell temperature rise in focused tests.
-- [x] Introduce neutral source names and controls as a deliberate API break,
-      with no aliases and explicit rejection of retired keys.
-- [x] Evaluate reaction heat from the same accepted extents used for species
-      production and donor consumption, matched to the stored thermal potential
-      and its excluded chemical/formation-energy terms.
-- [x] Distinguish prescribed external heat, reaction heat, phase-change latent
-      heat, and transferred species enthalpy so each is counted once.
-- [x] Verify exothermic/endothermic reactions, zero reaction with independent
-      heating, donor-limited heat release, and rejected-step energy rollback.
-
----
+See [source and heat ownership](docs/modeling/reacting_gas_sources.md) and the
+[species energy contract](docs/architecture/reacting_species_contract.md).
+Physical material and multiphysics qualification remains open in Phase 12.
 
 ### Phase 12 — General reacting gas source in solution
 
-**Status:** immutable species/reaction schemas, supplied rates or integrated
-extents, finite donor accounting and independent thermal inputs are implemented.
-The [source design](docs/modeling/reacting_gas_sources.md) and
-[species contract](docs/architecture/reacting_species_contract.md) define units,
-volume bases and supported adapters. Numerical qualification uses manufactured
-laws; no universal chemistry or physical material calibration is implied.
+- [x] Immutable species/reaction schemas, supplied rates/extents, finite donors,
+      accepted material/thermal ledgers and weak/native low-Mach adapters.
+- [x] Componentwise conservative transport and bounded refinement for absent
+      gas/tiny arrivals, with focused serial and two-/four-rank rollback checks.
 
-- [x] Supply stable species IDs, molar masses, elemental composition and phase
-      membership without reserved H2/donor/solvent slots.
-- [x] Accept alternative rate and integrated-extent inputs; convert actual
-      liquid/bulk volume and timestep exactly once and retain source location.
-- [x] Support production, reverse reactions, explicit external reservoirs and
-      separate heat under a declared formation/sensible-energy convention.
-- [x] Reserve competing raw donor events against their actual predecessor stock;
-      reject or recompute failed steps without clipping inventories.
-- [x] Use accepted events for species, element, mass, thermal and history ledgers,
-      retaining tiny representable material and count endpoints through replay.
-- [x] Integrate the weak field adapter and conservative native low-Mach controller
-      with collective configuration/failure handling and immutable accepted state.
-- [x] Remove enabled null-mechanism/yield fallbacks, old source selectors and
-      misleading fixed-species fields; explicit retired keys reject.
-- [x] Resolve the reproduced native low-Mach exactly-empty-gas rejection under
-      nonuniform heating at small timesteps through componentwise conservative
-      transport checks and bounded refinement within the original scalar iteration
-      budget. Focused serial and two-/four-rank mixture tests cover tiny physical
-      arrivals, signed fixed/ALE energy, absent gas and budget rejection/rollback;
-      [the transport contract](docs/architecture/low_mach_reacting_flow.md#componentwise-transport-consistency)
-      retains the original true-residual, physical-work and empty-phase gates.
-      This does not qualify untested source, mesh or thermodynamic combinations.
+The [source design](docs/modeling/reacting_gas_sources.md),
+[species contract](docs/architecture/reacting_species_contract.md) and
+[native transport contract](docs/architecture/low_mach_reacting_flow.md#componentwise-transport-consistency)
+define units, ownership, support and rejection gates. Manufactured-law checks
+do not calibrate physical chemistry or qualify untested combinations.
+
 - [ ] Improve or explicitly bound large-volume/small-timestep EOS-minus-advected-volume
       cancellation while retaining independent physical continuity and occupancy gates.
 - [ ] Add a separately qualified stiff-chemistry/Jacobian integration backend.
@@ -550,215 +258,59 @@ laws; no universal chemistry or physical material calibration is implied.
 - [ ] Qualify additional mesh, inlet, source and multiphysics combinations before
       relaxing the documented support/rejection matrix.
 
----
-
 ## Active multiphysics phases — Phases 13 to 20
 
 ### Phase 13 — Bulk and wall boiling source model
 
-Add a simple energy-consistent boiling model. This is a placeholder for a later RPI-like wall heat-flux partitioning model.
+**Status:** explicit bulk/wall boiling and latent-energy coupling are implemented;
+RPI-style heat-flux partitioning remains open.
 
-**Status:** partial. The explicit bulk/wall source, latent-energy coupling, and
-focused conservation tests are implemented; the RPI heat-flux-partitioning
-interface remains open.
+- [x] Bounded boiling sources, configuration/output and focused threshold,
+      latent-energy, conservative wall-distribution and disabled-path checks.
 
-#### Bulk superheat model
+Equations, finite-vapor ownership and supported combinations are maintained in
+[reacting gas and boiling](docs/modeling/reacting_bubble_boiling.md) and the
+[Boussinesq finite-vapor contract](docs/architecture/bouss_finite_vapor.md).
 
-For cells with:
-
-$$
-T > T_{\mathrm{sat}} + \Delta T_{\mathrm{act}}
-$$
-
-compute a requested energy rate, capped so one explicit step cannot remove
-more than the cell's sensible superheat:
-
-$$
-\dot e_{\mathrm{avail}} = \rho_l c_{p,l}
-\frac{\max(T - T_{\mathrm{sat}},0)}{\max(\tau_b,\Delta t)}
-$$
-
-then:
-
-$$
-\dot m_b = \frac{\dot e_{\mathrm{avail}}}{h_{\mathrm{fg}}}
-$$
-
-$$
-S_{\alpha,\mathrm{boil}} = \frac{\dot m_b}{\rho_g}
-$$
-
-and latent heat sink:
-
-$$
-Q_{\mathrm{latent}} = \dot m_b h_{\mathrm{fg}}
-$$
-
-Before the temperature update, limit aggregate bulk and wall boiling to the
-void capacity remaining after the current single-gas source and optional
-timestep-realizable collapse. Scale `S_alpha_boil` and `Q_latent` together so
-latent energy is removed only for vapor admitted into the authoritative scalar
-`alpha_g` field.
-
-#### Wall boiling placeholder
-
-For heated boundary faces:
-
-$$
-\dot m''_w = f_{\mathrm{evap}}\frac{q''_w}{h_{\mathrm{fg}}}
-$$
-
-Distribute to owner cells:
-
-$$
-\dot m_{w,\mathrm{vol}} = \dot m''_w \frac{A_f}{V_P}
-$$
-
-#### Tasks
-
-- [x] Add `BoilingSourceModel` or equivalent.
-- [x] Add configurable parameters:
-  - [x] `enable_bulk_boiling`
-  - [x] `enable_wall_boiling`
-  - [x] `saturation_temperature`
-  - [x] `boiling_activation_delta_t`
-  - [x] `boiling_time_scale`
-  - [x] `latent_heat`
-  - [x] `gas_density`
-  - [x] `wall_evaporation_fraction`
-- [x] Compute `S_alpha_boil` as a cell field.
-- [x] Compute `latentHeatSink` as a cell field in W/m³.
-- [x] Subtract `latentHeatSink` from the temperature equation.
-- [x] Write `S_alpha_boil` and `latentHeatSink` to VTU.
-- [x] Keep the implementation explicit and bounded.
 - [ ] Leave a clean interface for future wall heat-flux partitioning:
   - [ ] convective heat transfer
   - [ ] quenching heat transfer
   - [ ] evaporative heat transfer
 
-#### Phase 13 acceptance criteria
-
-- [x] Below threshold, boiling source is zero.
-- [x] Above threshold, boiling source is positive.
-- [x] `latentHeatSink == mDot * latentHeat` within tolerance.
-- [x] Zero latent heat or invalid density fails with clear error.
-- [x] Wall boiling distributes face source to owner cells conservatively.
-- [x] Existing cases are unchanged when boiling is disabled.
-
----
-
 ### Phase 14 — Low-order void-fraction field update and optional transport
 
-Introduce `alpha_g` as the first unresolved gas-state field for source-driven
-gas generation and boiling workflows. This phase is the low-order scalar path:
-The legacy Phase 12 source produces `S_alpha_reaction`, Phase 13 provides boiling sources, and
-Phase 14.1 can replace the scalar update with a two-population bubble model
-that reconstructs `alpha_g` from bubble inventories.
+- [x] Standalone bounded scalar source/collapse update, conservative diffusion,
+      synchronized gas fields and state-derived `S_alpha_total` output, with
+      analytic, boundedness and zero-flux conservation checks.
 
-The legacy ideal-gas mode publishes `S_alpha_reaction` and keeps its model-local
-`alpha_g` unchanged. The implemented Phase 14 path owns the aggregate
-`S_alpha_total` bookkeeping, bounded low-order scalar update, collapse, and
-optional diffusion.
+The [standalone scalar contract](docs/modeling/reacting_bubble_boiling.md#standalone-scalar-controls)
+defines this low-order approximation. It has no advective population balance
+and rejects nonzero reserved slip; operational bubble slip belongs to Phase 14.1.
+Generic species own their material and accepted void publication. Scalar
+clipping cannot establish species/energy conservation; collapse needs an
+explicit dissolved, headspace or external sink ledger.
 
-**Status:** partial. Aggregate bookkeeping and the bounded source/collapse
-update are implemented. Low-order advection and slip transport remain open;
-the operational slip setting belongs only to Phase 14.1 today.
-
-#### Standalone scalar update
-
-$$
-\alpha_g^{n+1} = \operatorname{clamp}\left(\alpha_g^n + \Delta t\,S_{\alpha,\mathrm{total}},\alpha_{\mathrm{min}},\alpha_{\mathrm{max}}\right)
-$$
-
-where:
-
-$$
-S_{\alpha,\mathrm{total}} = S_{\alpha,\mathrm{reaction}} + S_{\alpha,\mathrm{boil}} + S_{\alpha,\mathrm{wall}} - S_{\alpha,\mathrm{collapse}}
-$$
-
-Here `reaction` identifies the neutral gas-source output. The current
-standalone scalar source is supplied independently of the species model.
-The generic species path owns its finite material and accepted void publication;
-bounding a separate scalar void alone cannot conserve species or energy.
-Any gas removed by collapse needs an explicit dissolved, headspace or external
-sink ledger. Implementing those contracts remains open.
-
-The existing collapse term is bounded over the explicit step:
-
-$$
-S_{\alpha,\mathrm{collapse}} = \min\left(\frac{\alpha_g}{\tau_c},
-\frac{\alpha_g-\alpha_{\mathrm{min}}}{\Delta t}\right).
-$$
-
-#### Optional transport upgrade
-
-If the existing scalar transport API allows it cleanly, add:
-
-$$
-\frac{\partial \alpha_g}{\partial t}
-+ \nabla\cdot(U_l \alpha_g)
-+ \nabla\cdot(U_{\mathrm{slip}}\alpha_g)
-=
-\nabla\cdot(D_\alpha\nabla\alpha_g)
-+ S_{\alpha,\mathrm{total}}
-$$
-
-#### Tasks
-
-- [x] Allocate and initialize gas `alpha_g` and `alpha_l`.
-- [x] Allocate and initialize `S_alpha_reaction`.
-- [x] Allocate and initialize `S_alpha_total`.
-- [x] Add bounded explicit update for the low-order scalar model.
-- [x] Derive mirrored `S_alpha_total` from the published scalar state change
-  instead of copying a provider's internal source history.
-- [x] Add conservative bounded diffusion for the low-order scalar model.
 - [ ] Connect accepted general reaction sources and conservative collapse/sink
       ledgers without using post-update clipping to satisfy inventory gates.
 - [ ] Add low-order scalar advection with liquid face fluxes.
 - [ ] Add configurable upward slip velocity aligned opposite gravity.
-- [x] Add configurable `alpha_diffusivity`.
-- [x] Add optional simple collapse/removal time scale for gas disengagement tests.
-- [x] Ensure gas-model fields are ghost-synchronized after model advance.
-- [x] Write legacy gas-model `alpha_g`, `alpha_l`, and `S_alpha_reaction` to VTU behind output switches.
-- [x] Write `S_alpha_total` to VTU after aggregate source bookkeeping exists.
-
-#### Phase 14 acceptance criteria
-
-- [x] One-cell constant-source update matches the analytic result.
-- [x] `alpha_g` never leaves `[alphaMin, alphaMax]`.
-- [x] Legacy ideal-gas mode does not advance `alpha_g` before the low-order update path exists.
-- [x] With all sources disabled, `alpha_g` remains unchanged.
-- [x] Scalar diffusion conserves total gas inventory with zero-flux boundaries.
 - [ ] Advective transport conserves total gas inventory up to boundary flux and sources.
-- [x] VTU output can include legacy gas-model `alpha_g` and `S_alpha_reaction`.
-- [x] VTU output includes `S_alpha_total`.
-
----
 
 ### Phase 14.1 — Dissolved-gas transport and bubble populations
 
-**Status:** general species fields and named populations own finite material and
-bubble counts. The field adapter retains its weak sensible-temperature model;
-[the native low-Mach solver](docs/architecture/low_mach_reacting_flow.md) owns
-conservative phase internal energy, EOS occupancy and physical pressure work.
-`ReactingGasMode::Species` requires supplied chemistry/material setup.
+- [x] Schema-indexed species and named populations, declared carrier/slip
+      transport, EOS/radius and absolute-pressure handling, finite joint donors,
+      accepted events and fixed/ALE rollback transactions.
+- [x] Native pressure-conditioned interphase thermal stages and weak RANS/SAS
+      species coupling within their separate support matrices.
 
-- [x] Transport Liquid/Dissolved species and each named gas/count inventory once
-      with its declared carrier/slip flux; retain accepted physical escape events.
-- [x] Use supplied mixture EOS, species diffusivity/solubility, partial pressures
-      and capillary pressure for bounded bubble-radius reconstruction.
-- [x] Keep constant, reconstructed and prescribed-history absolute pressure
-      separate from the incompressible pressure correction. Retired inertial
-      pressure selection rejects in the general model.
-- [x] Reserve finite material transfers jointly, preserve every species through
-      population conversion and dissolution, and require paired count events.
-- [x] Retain exact accepted raw event components before reporting reduction;
-      gross withdrawals cannot borrow same-stage incoming material or counts.
-- [x] Couple configured local interphase heat/material stages to native pressure
-      recovery with partial molar enthalpies and explicit ordered donors.
-- [x] Preserve typed fixed-grid surface/headspace and constrained planar-ALE
-      inventory, geometry, history and rollback transactions.
-- [x] Retain weak RANS/SAS-plus-species coupling and native/legacy mesh identity.
+See [reacting gas sources](docs/modeling/reacting_gas_sources.md),
+[native low-Mach flow](docs/architecture/low_mach_reacting_flow.md) and
+[interphase thermal ownership](docs/architecture/reacting_interphase_thermal.md).
+The field adapter retains weak sensible-temperature storage; the native solver
+owns phase internal energy and pressure work. Prescribed slip supplies no gas
+momentum equation, and numerical checks do not establish physical validation.
+
 - [ ] Qualify material/rate, nucleation, film, slip and boiling closures against
       physical gas-release/bubble-column data and mesh/timestep convergence.
 - [ ] Add a combined RANS/reacting-gas user example and phase-aware turbulence.
@@ -768,173 +320,80 @@ conservative phase internal energy, EOS occupancy and physical pressure work.
 - [ ] Qualify live reacting repartition/remap and general interface representation
       changes. VoF and bounded-FP/exact-rational paths remain deferred.
 
-Prescribed slip is not a gas momentum equation. Population size/number closure
-and composition are independent inputs; a scalar radius or aggregate gas amount
-cannot stand in for per-species inventories. Current numerical tests do not
-establish a physically validated turbulent multiphase flow model.
-
----
-
 ### Phase 15 — Temperature- and void-dependent feedback properties
 
-Add temperature- and void-dependent property feedback for reacting solutions.
+- [x] Constant, Boussinesq and mixture-density feedback; constant viscosity,
+      positive floors, momentum coupling and VTU output, with focused limiting
+      behavior and disabled-model checks.
 
-**Status:** partial. Density feedback and constant-viscosity feedback with
-safety floors are implemented. Temperature/void viscosity extensions and a
-natural-convection stability acceptance case remain open.
+See [material feedback](docs/modeling/reacting_bubble_boiling.md#boussinesq-support-and-rejection-limits).
+Temperature/void viscosity extensions and natural-convection acceptance remain open.
 
-#### Density feedback
-
-Support a conservative default:
-
-$$
-\rho_{\mathrm{mix}}(T,\alpha_{\mathrm{g}})
-= (1 - \alpha_{\mathrm{g}})\rho_{\mathrm{l}}(T) + \alpha_{\mathrm{g}}\rho_{\mathrm{g}}
-$$
-
-and a Boussinesq-compatible form:
-
-$$
-\rho_{\mathrm{fb}}(T,\alpha_{\mathrm{g}})
-= \rho_{\mathrm{ref}}\left[1 - \beta(T - T_\mathrm{ref})\right](1-\alpha_{\mathrm{g}})
-+ \rho_{\mathrm{g}}\alpha_{\mathrm{g}}
-$$
-
-#### Viscosity feedback
-
-Start with:
-
-$$
-\mu_\mathrm{eff}(T,\alpha_g) = \mu_l(T) f_\mu(\alpha_g)
-$$
-
-where $f_\mu(\alpha_g) = 1$ by default until a validated correction is added.
-
-#### Tasks
-
-- [x] Add `MaterialFeedbackModel` or equivalent.
-- [x] Add configurable density model:
-  - [x] constant
-  - [x] Boussinesq temperature-only
-  - [x] Boussinesq + void fraction
-  - [x] mixture density
-- [x] Add configurable viscosity model:
-  - [x] constant
-  - [ ] temperature-dependent if existing support is available
-  - [ ] optional void correction
-- [x] Add safety floors:
-  - [x] `min_density`
-  - [x] `min_viscosity`
-- [x] Couple density feedback into buoyancy/body-force calculation.
-- [x] Couple viscosity feedback into momentum diffusion only if existing equation design allows it cleanly.
-- [x] Write `rhoFeedback` and `muFeedback` to VTU.
-
-#### Phase 15 acceptance criteria
-
-- [x] Increasing `alpha_g` lowers density for liquid-like systems.
-- [x] Increasing `T` lowers density under Boussinesq settings.
-- [x] Density and viscosity never become negative.
-- [x] Existing Boussinesq cases remain unchanged when feedback models are disabled.
+- [ ] Add temperature-dependent viscosity if existing support is available.
+- [ ] Add an optional void correction to viscosity.
 - [ ] Natural-convection benchmark remains stable with temperature-dependent density enabled.
-
----
 
 ### Phase 16 — Reacting-solution tank demonstration
 
-**Status:** `reacting_solution_tank_demo` and `constant_power_cylinder_vessel`
-supply manufactured finite-reactant/two-gas mechanisms independently of heating.
-The cylinder retains its bulk and wall vapor behavior through the finite
-Boussinesq reference closure. H2/IF97 benchmark applications keep their explicit
-chosen reference material and external-reservoir source laws.
+- [x] Manufactured finite-reactant/two-gas tank and cylinder demos with explicit
+      material/source/energy ownership, independent heating and accepted output.
 
-- [x] Supply ordinary species, stoichiometry, finite stocks, population counts,
-      material laws and independent heat through the generic API.
-- [x] Retain cylindrical geometry, boundary heat, material feedback and accepted
-      species/event output with explicit source and energy ownership.
-- [x] Document manufactured versus matched-reference material/source provenance.
+`reacting_solution_tank_demo` and `constant_power_cylinder_vessel` retain their
+documented manufactured inputs; H2/IF97 reference applications retain explicit
+reference materials and external-reservoir laws. See
+[source inputs and examples](docs/modeling/reacting_gas_sources.md#current-interfaces).
+
 - [ ] Verify output opens in ParaView.
 - [ ] Verify disabled reactions/boiling recover the independently heated
       natural-convection baseline over a complete physical run.
 - [ ] Add matched serial/MPI and mesh/timestep convergence before presenting
       any example as physical validation.
 
----
-
 ### Phase 17 — Unit, regression, and conservation tests for reacting gas and boiling
 
-**Status:** focused generic numerical regressions cover supplied chemistry,
-phase/count transport, finite thermal admission, pressure/volume work and atomic
-acceptance. Serial-first Debug runs and registered two/four-rank cases qualify
-only their documented configurations; skipped or omitted tests are not passes.
+- [x] Focused species/donor/count/energy, boundary/empty-owner, fixed/ALE,
+      rejection/replay and API/export checks within documented configurations.
+- [x] Recorded 1008-cell, scale-1 bottom-convection NOX startup through two serial
+      steps with GMRES/BiCGStab and pressure-Schur AMG/SGS under unchanged gates;
+      this does not qualify developed flow, longer runs or MPI application behavior.
 
-- [x] Cover multiple species, forward/reverse rates, source-volume bases,
-      independent heat and external reservoirs, zero source and complete donors.
-- [x] Cover raw material/count cancellation, small occupied phases, gross donor
-      competition and explicit full-disappearance count ownership.
-- [x] Cover supplied EOS/film/property failures, actual empty owners, physical
-      boundary escape, source location and partition-independent identities.
-- [x] Retain standalone boiling/void and finite bulk/wall latent-energy checks.
-- [x] Test fixed/ALE conservation, actual pressure work, complete rollback,
-      stale retained candidates and callback-free commit/checkpoint replay.
-- [x] Audit public exports and disabled-family boundaries with exact API anchors.
+See [reacting acceptance gates](docs/modeling/reacting_gas_sources.md#numerical-and-physical-acceptance-gates)
+and [NOX validation scope](docs/architecture/coupled_nonlinear_solver.md#validation-and-remaining-qualification).
+Skipped or omitted tests are not passes; focused local checks are not full-suite
+or hosted CI results.
+
 - [ ] Qualify broader material, toolchain, solver and mesh combinations and hosted
       coverage without treating local focused tests as a full-suite/CI result.
-- [x] Qualify the 1008-cell scale-1 bottom-convection NOX startup through two
-      serial physical steps with GMRES and BiCGStab corrections and pressure
-      Schur AMG/SGS, retaining the prescribed sources, timestep, forcing controls,
-      and every residual and physical gate. This bounded startup qualification
-      does not establish developed-flow, longer-run, or MPI application behavior.
 - [ ] Complete independent physical validation and convergence campaigns.
-
----
 
 ### Phase 18 — Documentation and configuration examples
 
-Document the general reacting-gas source contract, low-order scalar path and
-population path separately from a full Euler–Euler formulation.
+- [x] Governing quantities, storage/energy ownership, supplied providers,
+      migration/rejection rules and model limits in the
+      [source design](docs/modeling/reacting_gas_sources.md) and architecture guides.
 
-**Status:** the general design is documented in
-[reacting gas sources in solution](docs/modeling/reacting_gas_sources.md).
-Generic API/configuration names, explicit species ownership and the migration
-mapping are implemented without aliases. The support/rejection matrices separate
-weak Boussinesq, native conservative low-Mach and deferred VoF paths. A complete
-key/default/unit/validity reference remains open.
+The complete key/default/unit/validity reference and runnable user coverage remain open.
 
-- [x] Document governing quantities, storage bases, conservation gates and
-      limitations of the existing numerical foundation.
-- [x] Separate weak RANS-plus-bubble coupling from phase-aware turbulent
-      Euler–Euler flow and distinguish proposed design from current APIs.
 - [ ] Complete the [external host companion migration](docs/architecture/external_host_reacting_flow.md),
       including finite species/isotope feedback and a supported bulk Winter-diffusion
       owner before claiming parity with the removed reacting APIs.
 - [ ] Document every supported configuration key with default, SI unit,
       validity range and migration mapping; retired source keys must reject.
-- [x] Document supplied rate/stoichiometry/property interfaces, finite donor
-      limits, heat/phase-change ownership, restart state and rejection behavior.
 - [ ] Provide runnable zero-reaction, closed-batch and convecting-solution
       examples with auditable source and property inputs.
 - [ ] Ensure a developer can configure each supported model from the user
       reference without consulting implementation headers.
 
----
-
 ### Phase 19 — Solution-species transport and reaction inventories
 
-**Status:** Liquid/Dissolved compartments share a physical solution phase while
-retaining their individual species amounts. Native and weak field adapters use
-declared transport carriers and accepted source events. The standalone
-`ScalarSourceDecayTransport` utility retains generic analytic scalar source/decay
-and transport; it supplies no chemistry mechanism or power-yield coupling.
+- [x] Conservative solution-species and gas transport, shared accepted source
+      events and fixed/planar-ALE transactions; separate scalar source/decay utility.
 
-- [x] Supply explicit species/composition/property hooks and shared accepted
-      reaction/transfer events with Phases 12 and 14.1.
-- [x] Transport finite solvent, solutes and gas-forming reactants/products within
-      the supported closed/escape boundary matrix.
-- [x] Preserve joint finite donors, raw signed event receipts, history/schema
-      identity and atomic failure/replay across actual empty MPI owners.
-- [x] Use conservative accepted-old/trial-new storage and relative flux for
-      supported fixed-topology planar ALE; retain independent absolute continuity.
-- [x] Retain separate generic scalar source/decay conservation coverage.
+Liquid/Dissolved species share one physical solution phase while retaining
+individual amounts. The [species contract](docs/architecture/reacting_species_contract.md)
+and [native flow guide](docs/architecture/low_mach_reacting_flow.md) define
+carrier, boundary and thermal limits; the standalone scalar utility supplies no chemistry.
+
 - [ ] Qualify prescribed inlet compositions, wider boundary exchange and
       transport/reaction convergence for physical material laws.
 - [ ] Qualify generalized field-adapter bulk-mixture diffusion and broader
@@ -943,33 +402,17 @@ and transport; it supplies no chemistry mechanism or power-yield coupling.
 - [ ] Add reacting conservative remap/repartition and broader ALE only with
       species, mass, energy, momentum and count closure.
 
----
-
 ### Phase 20 — External reaction/source coupling and feedback maps
 
-Map solution temperature, absolute pressure, composition and phase inventories
-to an external reaction/source provider and import rates/heat with explicit
-units, spatial support and time intervals.
+- [x] In-memory heat/source callbacks, feedback snapshots and subcycle scaffold;
+      typed schema/unit/location/interval/accepted-receipt contracts.
+- [x] Scalar/vector/tensor cell transfer, MPI donor exchange, supported conservative
+      overlaps and explicit coverage/geometry invalidation diagnostics.
 
-**Status:** an in-memory heat-exchange scaffold, feedback registry, mapped
-snapshots and placeholder outer loop exist. Reusable cell transfer supports
-nearest/inverse-distance interpolation and conservative supported overlaps,
-including explicit partial coverage and intensive/extensive quantities; see
-[mesh-to-mesh transfer](docs/mesh_to_mesh_transfer.md).
-The scaffold's neutral external-heat field is `qdot_external`. Typed in-memory
-reaction/source callbacks now bind units, schema, source location, interval and
-accepted receipts. Spatially mapped external chemistry and a production transport
-protocol remain separate work.
+See [cell transfer](docs/mesh_to_mesh_transfer.md) and
+[external-host contracts](docs/architecture/external_host_reacting_flow.md).
+Spatially mapped chemistry and a production provider protocol remain open.
 
-- [x] Retain volume-averaging utilities, deterministic feedback snapshots and
-      constant-field/integral-preservation mapping tests.
-- [x] Retain scalar/vector/tensor cell transfer, MPI donor exchange,
-      coverage/inventory diagnostics, and geometry/map invalidation.
-- [x] Retain conservative Cartesian/coaxial cylindrical overlaps and supported
-      cylindrical-to-XY/Z or swept R–Z overlaps with native-volume accounting.
-- [x] Retain imported heat fields and the existing callback/subcycle scaffold.
-- [x] Define typed in-memory provider contracts for rate basis, species ordering,
-      stoichiometry, sign, timestamps and accepted source intervals.
 - [ ] Exchange pure-liquid composition/occupancy and absolute pressure without
       substituting void-reduced mixture density or gauge pressure.
 - [ ] Conserve species and heat over spatial maps and subcycles, including
@@ -979,95 +422,28 @@ protocol remain separate work.
 - [ ] Select and validate a production transport/protocol only when a concrete
       external reaction/source provider is selected.
 
----
-
 ### Phase 20.1 — Planar free-surface volume budget and constrained ALE
 
-Add liquid-level bookkeeping and a deliberately constrained planar moving-mesh
-path without confusing either with a resolved interface method.
+**Status:** fixed-grid volume bookkeeping and a constrained solver-integrated
+planar-ALE core are implemented with conservation-focused tests. Physical
+validation, wider vapor support and conservative occupancy/mapping remain open.
 
-**Status:** the supported Milestone-A fixed-grid component path is implemented
-and focused-tested, including accepted-step Boussinesq integration, automatic
-accepted-state history with an explicit CSV writer, opt-in VTU fields, an explicitly
-approximate cell-centre occupancy with volume error, and a checked-in analytic
-verification driver. Species-bound liquid following and catalogued gas/headspace
-events are implemented. Wider vapor transport and phase-aware mapping remain
-open. Milestone B has a constrained solver-integrated planar-ALE core for native
-mutable structured/extruded geometry, constant-area vessels, Backward Euler,
-laminar temperature, species-bound liquid mass, vented headspace and supported
-multispecies population transport/escape. Broader model combinations fail closed. This is
-conservation-focused implementation coverage, not quantitative physical
-validation. Milestone C does not yet provide conservative pool occupancy or
-cross-mesh mapping.
+The [model, configuration and support matrix](docs/modeling/planar_free_surface_volume_budget.md),
+[species/surface contract](docs/architecture/reacting_species_surface.md) and
+[coupler ownership](docs/architecture/multiphysics_solver_coupler.md) own the
+detailed equations, transactions, diagnostics and verification scope.
 
 #### Milestone A — implemented fixed-grid components
 
-- [x] Add analytic constant-area and monotone tabulated vessel maps with
-      guarded inversion, area queries, endpoint/range diagnostics, and explicit
-      `error` or `clampAndReport` handling.
-- [x] Parse and validate the flat `free_surface_*` model, vessel, fill,
-      headspace, and nonlinear-coupling keys without changing disabled default
-      behavior.
-- [x] Add the explicitly limited `globalConstantMass` liquid inventory with
-      MPI reductions, accepted evaporation/condensation, mass residuals, and
-      bubble-free `rhoLiquid` evaluation.
-- [x] Add opt-in `cellMassInventory` transport on the fixed reference mesh
-      with the projected single-continuum face flux, transactional trial/commit,
-      local boiling/condensation sources, pure-density volume evaluation,
-      strict solver-independent conservation residuals, and serial/MPI
-      partition tests. Require error depletion and zero physical-boundary flux
-      until phase-acceptance and inlet-composition contracts exist.
-- [x] Bind finite species/population inventories and supplied EOS/Laplace laws
-      to non-mutating candidate-pressure volume evaluation.
-- [x] Consume actual accepted species and count escape events; keep dissolved
-      boundary discharge distinct and never infer escape from rounded cumulative
-      totals or changes that can include internal phase transfer.
-- [x] Give boiling one accepted phase-change path: cap-consistent evaporation
-      and latent energy, rejected-vapor diagnostics, submerged steam ownership,
-      and explicit condensate return after scalar-void collapse.
-- [x] Reject removal or replacement of free-surface tracking while boiling
-      still owns nonzero submerged steam rather than stranding that inventory.
-- [x] Add vented constant-pressure and closed lumped ideal-gas headspaces with
-      by-species transfer, positive absolute-pressure/volume guards, and a
-      safeguarded nonlinear pressure/level closure.
-- [x] Report old/current clear and pool levels, volume closure, overflow/dry-out,
-      headspace state, nonlinear convergence, fixed-grid validity, and
-      per-species gas closure through immutable diagnostic snapshots.
-- [x] Add optional stable feedback registry names for `rhoLiquid`,
-      `clearLevel`, `poolLevel`, `headspacePressure`, and `poolOccupancy` while
-      preserving the disabled/legacy field contract.
-- [x] Keep optional physics and acceptance in `MultiphysicsSolverCoupler`,
-      with one species/thermal/transport owner, exact accepted escape, supplied
-      headspace closure and accepted diagnostic publication.
-- [x] Restore geometry, fields, model ledgers, time and histories atomically
-      for the supported checkpoint/ALE transaction; publish accepted states only.
-- [x] Add opt-in VTU output for `rhoLiquid`, `clearLevel`, `poolLevel`,
-      `headspacePressure`, and a clearly labeled cell-centre `poolOccupancy`;
-      report its signed global volume error.
-- [x] Retain initialization and accepted-step history with named species and
-      compartments, headspace, thermal and closure diagnostics; generic output
-      does not label all gas as hydrogen.
-- [x] Add the deterministic `planar_free_surface_verification` driver for
-      uniform heating, gas generation, complete escape, closed headspace, and
-      boiling liquid-mass loss, with analytic tolerances and CSV stdout.
-- [x] Verify the supported fixed-grid, geometry and solver scope through
-      focused serial and actual registered MPI conservation/replay cases.
-- [x] Document equations, ownership, all current `free_surface_*`
-      keys/defaults/SI units,
-      diagnostics, tests, and fixed-grid limitations in
-      `docs/modeling/planar_free_surface_volume_budget.md`.
+- [x] Vessel maps, reference/cellwise/species-bound liquid inventories, supplied
+      gas/headspace closure and exact accepted escape/phase-change accounting.
+- [x] Atomic acceptance/rollback, diagnostics, history/CSV, opt-in VTU/feedback
+      and analytic verification drivers, with focused serial/MPI coverage.
 
-#### Milestone A — remaining integration and acceptance
+Cell-centre occupancy remains approximate. Reference `cellMassInventory`
+requires error depletion and zero physical-boundary liquid flux; typed solvent/
+solute following does not qualify every evaporation or inlet law.
 
-- [x] Retain automatic global history for liquid mass/volume, gas compartments,
-      clear/pool levels, headspace state, and normalized closure residuals
-      without repeating reductions, with an explicit rank-zero CSV writer.
-- [x] Complete the current full GCC RelWithDebInfo rebuild after the geometry-substrate and
-      cellwise-inventory changes.
-- [x] Add a cellwise conservative effective-liquid-mass inventory without
-      claiming composition-preserving evaporation.
-- [x] Retain solvent and individual solute extensive inventories in the typed
-      surface follower. This alone does not qualify every evaporation/inlet law.
 - [ ] Add conservative steam transport and an exact steam escape transfer
       before sending boiling vapor to the headspace/vent.
 - [ ] Couple boiling saturation to absolute headspace pressure before allowing
@@ -1076,54 +452,16 @@ cross-mesh mapping.
 
 #### Milestone B — constrained solver-integrated planar ALE core
 
-`PlanarALEMeshMotion` supplies the geometry/GCL authority for Cartesian
-X/Y/Z and cylindrical or `SemiStructuredXY_Z` axial motion in serial/MPI. It retains topology/IDs/maps, owns
-transactional trial/accept/rollback, old/new volumes, exact structured swept
-face flux, quality rejection, shared geometry epochs, and cellwise GCL checks.
-The integrated path adds an opt-in mutable native-solver seam, conservative
-old/new-volume and mesh-relative transport, one generalized continuity target,
-moving-top boundary ownership, complete refresh/invalidation for the supported
-solver state, and whole-step accept/rollback. It remains restricted to the
-matrix in `docs/modeling/planar_free_surface_volume_budget.md`; unsupported
-optional models are rejected collectively. Within that matrix, temperature
-conserves $V_c m_{l,c}^*c_{p,c}T_c$ with accepted/trial cellwise liquid-mass
-density; pure-liquid density remains the liquid-volume conversion and
-void-reduced mixture density does not own sensible-energy storage.
+- [x] Transactional geometry/GCL, old/new-volume and relative-flux transport,
+      geometry-epoch cache refresh, generalized continuity, moving-top/escape
+      ownership and whole-step rollback for the supported matrix.
 
-- [x] Add transactional fixed-topology geometry motion for the explicitly
-      supported structured/extruded families, with MPI-conforming partition
-      faces, controller ownership, and quality rollback.
-- [x] Store old/new local cell volumes and exact structured swept-face mesh
-      flux, then verify the cellwise geometric conservation law in serial/MPI.
-- [x] Demonstrate constant-field preservation after transport operators consume
-      old/new volumes and mesh-relative flux.
-- [x] Add shared geometry epochs and stale detection/refresh for the core
-      gradient, transport-geometry, and Rhie--Chow caches while preserving
-      topology-safe graphs and partitioning.
-- [x] Extend epoch refresh/invalidation to every solver-owned geometry-dependent
-      cache and numeric preconditioner state in the enabled ALE matrix; keep
-      other model combinations rejected.
-- [x] Generalize every extensive transient/convection operator in the enabled
-      ALE matrix to old/new volumes and mesh-relative flux; do not post-correct
-      fixed-volume results.
-- [x] Add an owned low-Mach volume-source field and generalized continuity RHS
-      for SIMPLE, PISO, PIMPLE, Rhie-Chow, and coupled Krylov paths, with one
-      common target-residual definition, bounded pressure-only refinement, and
-      accepted per-outer-corrector residual histories.
-- [x] Implement the moving-surface kinematic/dynamic and exact bubble-escape
-      boundary contracts, including a moving-top slip condition that preserves
-      tangential liquid flow while fixed-flux pressure ownership enforces the
-      exact mesh-normal kinematics.
-- [x] Add geometry-substrate serial/MPI GCL, expand-contract, shared-face, controller-alias,
-      stale-cache, and mesh-quality rollback tests.
-- [x] Add constant-field, nonzero-divergence, and conservative ALE liquid/gas/
-      energy tests with the solver-integrated operators, including
-      liquid-mass-weighted sensible energy and a checked-in solver-integrated
-      verification driver; verify that standalone source/decay scalars and other unmigrated
-      transports fail closed.
-- [x] Snapshot and restore supported fields, model ledgers, geometry, time,
-      history, and output state so a rejected outer trial leaves one accepted
-      state and commits escape exactly once.
+The integrated scope is native mutable structured/extruded geometry,
+constant-area vessels, Backward Euler, laminar temperature, species-bound
+liquid mass, vented headspace and supported population transport/escape.
+Unsupported model combinations reject; geometry-only support does not widen
+this solver contract.
+
 - [ ] Complete the whole-solver fault-injection matrix for an actual
       mesh-quality rejection, deliberately corrupted GCL, volume-source and
       liquid-mass gates, and rollback with nonzero pending escape. Current
@@ -1154,8 +492,6 @@ physical closure; generic cell transfer alone does not complete them.
 Full VoF interface capturing and macroscopic surface breakup belong to the
 separate Phase 22 program below; Euler–Euler gas momentum remains Phase 21.
 Completing this planar phase must not imply those capabilities.
-
----
 
 ## Deferred architecture — Phase 21
 
@@ -1202,8 +538,6 @@ not liquid-volume-fraction weighted.
       selected reference limits.
 - [ ] Full model is validated against at least one independent bubbly-flow benchmark.
 
----
-
 ## Phase 22 — Resolved and dispersed reacting-gas bubbles
 
 **Status:** Stage 1's serial uniform backend and Stage 2's distributed Cartesian
@@ -1218,98 +552,40 @@ open; numerical tests alone do not qualify reacting-solution transients.
 
 ### Physical and ownership contracts
 
+- [x] Separate resolved/dispersed/liquid inventories and accepted material,
+      momentum/thermal and representation histories with external solver ownership.
+
+The retained [single-gas contract](docs/modeling/reacting_vof.md) and
+[transport/state contract](docs/architecture/vof_transport.md) define these
+historical components. `ReactingVoFCoupler` and dependent fixtures remain
+excluded even when experimental source-free VoF is enabled.
+
 - [ ] Generalize the legacy single-gas substrate to the species/rate and shared
       donor/heat contracts in [Phase 12](#phase-12--general-reacting-gas-source-in-solution)
       and [Phase 14.1](#phase-141--dissolved-gas-transport-and-bubble-populations).
       Verify each species through dissolved/dispersed/resolved/headspace storage,
       source acceptance, representation changes, adaptation and MPI exchange.
 
-- [x] Keep resolved gas `f`, dispersed fractions `alpha_d,k`, and liquid
-      `alpha_l = 1 - f - sum(alpha_d,k)` distinct. Canonical conservative
-      physical arrays store extensive amounts per owned cell. Published
-      population number/molar densities are per bulk volume. Dissolved
-      concentration `C_H2` is per liquid volume; the legacy bulk inventory
-      density `I_H2 = alpha_l*C_H2` corresponds to cell amount `V*I_H2`.
-- [x] Add resolved-gas molar inventory and a single-gas ledger covering
-      dissolved, dispersed, resolved, produced, and escaped gas. Every molecule
-      belongs to one inventory; representation changes create no gas inventory.
-- [x] Extend conservative phase mass/momentum/thermal transport to low-Mach
-      gas EOS and material-volume sources, keeping absolute thermodynamic and
-      gauge pressures distinct and counting capillary pressure once.
-- [x] Keep supplied solution properties and legacy material correlations
-      external. Use validated domains for all selected transfer/slip laws.
-- [x] Retain external shared ownership of the flow solver. Checkpoint phase
-      inventories and cumulative physical-transfer ledgers; publish accepted
-      states only.
-- [x] Extend checkpoints to persistent birth identities, pending conversion
-      reservations, and accepted representation-change events. Instantaneous
-      component labels are not a material-lineage tracker through advection,
-      breakup or coalescence.
-
 ### Stage 1 — Uniform-mesh geometric VoF
 
-The first executable baseline is fixed, uniform Cartesian, isothermal,
-source-free flow with two incompressible phases of different densities. It
-establishes the geometric/conservative flow core before gas EOS, thermal and
-reaction-source coupling is introduced. Supported boundary and parallel contracts
-must be explicit and unsupported modes rejected.
+- [x] Serial uniform Cartesian geometric PLIC/transport, variable-density flow,
+      capillarity, timestep control and atomic failure handling with focused checks.
 
-- [x] Add compiled geometric PLIC reconstruction and conservative swept-volume
-      advection with bounded fractions and shared phase face fluxes.
-- [x] Add a variable-density VoF flow solver with consistent mass/momentum
-      transport, variable-coefficient pressure projection, balanced surface
-      tension, and computed interface curvature.
-- [x] Bound the timestep by advection, explicit capillarity, and applicable
-      viscous limits; reject invalid input or a failed step without publishing
-      partially advanced fields/time.
-- [x] Expose native mesh/field results and focused reproducible verification
-      cases without changing the existing Boussinesq path.
-- [x] Verify geometric plane volumes, translation/deformation transport,
-      boundedness, and phase-mass conservation.
-- [x] Verify static Laplace pressure, spurious-current behavior, capillary
-      oscillation, and transport/projection at the intended density ratios.
-- [x] Document algorithms, units, boundary/parallel scope, and numerical
-      qualification separately from future physical validation.
-
-See the [solver guide](docs/modeling/vof.md) and the dedicated
-[VoF verification contracts](docs/verification/vof_solver_contracts.md).
-The evidence includes density ratio 10,000, a complete capillary-wave period,
-and matched-time static bubbles. Short inviscid tests do not establish
-long-time parasitic-current limits, viscous rising-bubble accuracy, or coupled
-reacting-solution qualification.
+See [the solver guide](docs/modeling/vof.md) and
+[verification contracts](docs/verification/vof_solver_contracts.md). High-density
+and capillary checks do not qualify long-time parasitic currents, viscous rising
+bubbles or reacting solutions. The two-rank check verifies rejection, not MPI flow.
 
 ### Stage 2 — Conservative three-dimensional AMR
 
-The implemented backend uses immutable Cartesian blocks and one shared
-timestep in serial and MPI. Its native mesh/field transaction is the seam for
-the later physical coupling controller.
+- [x] Distributed Cartesian 2:1 AMR, conservative PLIC/extensive remap,
+      refinement policies, shared-timestep transport and atomic regrid/replay.
 
-- [x] Add a dyadic block hierarchy with 2:1 neighboring refinement, including
-      edges/corners, and canonical conservative coarse/fine subfaces. Match
-      periodic face levels and retain exact partial coarse-patch coverage.
-- [x] Refine interface/curvature stencils, predicted motion buffers,
-      curvature-driven thin-neck indicators, nearby interfaces/walls, supplied
-      wake indicators, and imminent promotion regions. Restrict coarsening to
-      uniform pure-phase siblings outside protected neighborhoods.
-- [x] Expose a configurable 24–32-cell minimum-diameter target (0.31–0.42 mm
-      for 10 mm bubbles), with an explicit maximum-level resolution limitation.
-- [x] Prolong PLIC geometry geometrically and transfer phase masses, dissolved
-      and population amounts, signed momentum, and thermal amounts
-      conservatively. These quantities are passive extensives until Stage 3
-      supplies their physical equations and closures.
-- [x] Publish mesh/state changes atomically; freeze topology while a replay
-      checkpoint is active. Rebuild native maps, halos, graphs, and fields;
-      expose topology/partition generations and reject stale refinement plans
-      so external transfers can be invalidated at accepted coupling boundaries.
-- [x] Verify refinement/coarsening and three-dimensional interface passage
-      across coarse/fine and MPI boundaries, capillary startup against a uniform
-      fine reference, viscous stress, pressure balance, rejection, and replay.
-- [x] Verify conservative implicit passive-momentum bounds, microscopic phase
-      donor budgets and passive-carrier conditioning without inventory clipping.
-- [x] Share immutable adaptive geometry and reuse compatible transport/projection
-      workspaces, while refreshing numerical coefficients and protecting replay.
-- [x] Add active curved-interface seam passage at density ratio ten and a stated
-      finite-duration static-bubble check with a uniformly fine interface band.
+The [adaptive guide](docs/modeling/adaptive_vof.md) and
+[numerical verification contracts](docs/verification/vof_solver_contracts.md#numerical-assertions)
+maintain the numerical scope, including lower-contrast curved-seam passage
+and finite-duration static bubbles with a uniformly fine interface band.
+
 - [ ] Qualify active curved interfaces at high density contrast directly on a
       coarse/fine seam. The retained strict qualification probe remains disabled;
       short fine-band static and lower-contrast moving cases do not close it.
@@ -1324,48 +600,16 @@ the later physical coupling controller.
       corrections. Synchronous levels currently use the same canonical
       subface flux directly and require no time-subcycling flux register.
 
-See the [adaptive solver guide](docs/modeling/adaptive_vof.md) and the dedicated
-[VoF verification contracts](docs/verification/vof_solver_contracts.md) for the
-supported contracts, reproducible checks, and remaining qualification limits.
-
 ### Stage 3 — Reaction-source and interface coupling
 
-**Numerical implementation present; physical calibration and application
-qualification remain open.**
+- [x] Retained single-gas source/population, prescribed-film, low-Mach
+      mass/momentum/energy, capture and vent ledgers with focused transaction checks.
 
-- [x] Retain the legacy microbubble substep through shared reactions-only
-      kernels. Add fixed-molar-pivot upper populations, conservative birth/
-      growth/dissolution/breakup/coalescence event ledgers, explicit underflow
-      policy, and externally supplied rates with declared validity domains.
-      Physical collision kernels use the actual carrier volume, while stored
-      population densities remain bulk-based.
-- [x] Add resolved-interface dissolved single-gas flux using uniquely owned PLIC or
-      aligned-face area, one-sided single-gas partial pressure and Henry equilibrium.
-      Implement a prescribed stagnant-film closure with exact carrier-geometry
-      averaging and analytic planar/oblique checks; thickness and its physical
-      validity remain supplied inputs.
-- [x] Couple liquid/gas caloric EOS, thermal transport, finite chemical-donor
-      and liquid-mass accounting, and dispersed slip to one material-volume
-      constraint. Close global volume with thermodynamic pressure and local
-      volume with a compressibility-aware pressure solve; retain actual mass,
-      physical momentum and internal-energy ledgers.
-- [x] Extend geometric phase transport and its source splitting consistently
-      to nonzero material-volume sources; preserve boundedness and matching
-      phase/momentum fluxes rather than bypassing the Stage 1 divergence guard.
-- [x] Capture dispersed gas from interface-relative collision flux and an
-      explicit coalescence efficiency; retain uncaptured inventory in liquid.
-      Use actual molecular Stefan flux and relative slip; EOS-only motion
-      does not count as a collision flux.
-- [x] Define unresolved drainage/rupture through supplied efficiency/rate
-      laws and retain geometric VoF coalescence at resolved grid contact.
-- [x] Define fixed-domain headspace ownership by accepted fully gas cells in
-      supplied regions. Record only actual vented legacy gas/inert amounts, enthalpy and
-      momentum as escape, and publish cumulative ledgers only on commit.
-- [x] Verify production, dissolution/growth, capture and escape against
-      independent manufactured rates and single-gas/liquid/thermal budgets.
-      Cover periodic momentum, source rejection, mixed-phase remap,
-      retained tiny-phase inventories, stale trials and checkpoint replay,
-      with serial, two-rank and empty-rank cases.
+See [the retained coupling contract](docs/modeling/reacting_vof.md) and
+[numerical verification contracts](docs/verification/vof_solver_contracts.md#numerical-assertions).
+These records do not enable generic reacting-VoF integration or establish
+physical calibration.
+
 - [ ] Supply and qualify aqueous growth, breakup, coalescence, capture and
       film-thickness calibrations over the intended size/flow/temperature
       range. A shared slip selector does not automatically qualify both
@@ -1379,43 +623,16 @@ qualification remain open.**
       tension/Marangoni stresses and a planar-ALE extension remain separate
       implementation and qualification gates.
 
-See the [current source/VoF coupling contract](docs/modeling/reacting_vof.md) and the separate
-[VoF verification contracts](docs/verification/vof_solver_contracts.md) for the
-implemented contracts, supplied inputs and reproducible verification scope.
-
 ### Stage 4 — Bidirectional representation changes
 
-**Numerical implementation and focused verification are present; physical
-localization/calibration and application convergence remain open.**
+- [x] Retained birth registry, size/resolution hysteresis, complete-component
+      selection, conservative zero-time conversion and subsequent physical
+      relaxation, with distributed ownership and replay checks.
 
-- [x] Add a checkpointed birth registry with caller-supplied persistent spatial
-      IDs, eligible fixed-molar-bin donors, and one whole bubble per promotion.
-      Bind reservations to state/topology revisions and require the insertion
-      and guard region to be sufficiently resolved at `max_level`. Void
-      fraction alone is not a birth criterion.
-- [x] Use configurable physical-size and resolution hysteresis. Initial
-      diameter defaults are 10 mm and 4 mm, with 24 cells across promotion and
-      a 16-cell demotion resolution threshold. Demotion inspects actual cell
-      widths, not an unused finer configured level.
-- [x] Identify complete gas components through shared PLIC traces across
-      coarse/fine, periodic and MPI faces. Retain attached ligaments,
-      wall/headspace-connected components, and inert-containing gas. Current
-      conversion stencils must fit the domain coordinate box; wrapped events
-      are explicitly deferred.
-- [x] Transfer typed gas inventories, internal energy and physical momentum
-      atomically. Redistribute the complete remaining carrier, including
-      liquid, dissolved/donor stock and other dispersed populations, within
-      disjoint event supports. Preserve fixed-pivot number/molar moments,
-      including tiny nonzero bins; reject undefined generic passive transfers.
-- [x] Keep conversion at fixed physical time with retained phase-volume,
-      pressure and energy histories. The next requested physical step performs
-      EOS/capillary relaxation; a private predictor initializes coupled source
-      correctors without duplicate time, heat or production. Report actual
-      surface-area/energy and represented-number changes separately.
-- [x] Verify whole-bubble and round-trip budgets, local displacement, donor
-      exhaustion, hysteresis/refinement guards, distributed component/event
-      ownership, rejection, stale plans and checkpoint replay. Cover serial,
-      two-rank and active sparse conversion with an empty-owned rank.
+The [representation guide](docs/modeling/bubble_representation.md) and
+[numerical verification contracts](docs/verification/vof_solver_contracts.md#numerical-assertions)
+define the supported numerical scope and exclusions.
+
 - [ ] Qualify birth localization, demotion host-volume assumptions and physical
       threshold sensitivity for the intended aqueous bubble population.
 - [ ] Extend wrapped conversion stencils, dispersed inert species and
@@ -1428,12 +645,6 @@ localization/calibration and application convergence remain open.**
       The original Hysing no-slip horizontal walls are outside the present
       adaptive slip-wall contract.
 
-See the [representation guide](docs/modeling/bubble_representation.md) and the
-separate [VoF verification contracts](docs/verification/vof_solver_contracts.md)
-for the implemented API, reproducible checks and qualification limits.
-
----
-
 ## Phase 23 — AMR for native extruded, polyhedral, and mixed-region meshes
 
 **Status: Stages 1–6 implemented and verified within the stated scope; Stage 7
@@ -1445,147 +656,21 @@ Preserve the corrected Cartesian [transport/state contracts](docs/architecture/v
 and [numerical verification gates](docs/verification/vof_solver_contracts.md)
 throughout; each non-Cartesian algorithm also needs its own focused and physical gates.
 
-### Stage 1 — Common hierarchy contracts and Cartesian adapter
+### Stages 1–6 — Hierarchy, geometry and distributed migration
 
-- [x] Introduce immutable provider-specific ancestry behind an
-      `AdaptiveHierarchy` seam, preserving the `CartesianAMR` API and optimized
-      backend. Keep physical region/material identity separate from fragments,
-      canonical GIDs, and MPI/local field order.
-- [x] Track topology, partition, geometry, and accepted-state/control revisions
-      independently. Pin plans and trials to exact source observations and
-      preserve collective preflight, atomic publication, and stale-plan rejection.
-- [x] Separate canonical inventories/history and immutable trial ledgers from
-      derived fields and mutable workspaces. Require exact collective geometry
-      and numerical-operator cache compatibility; schema identity is independent
-      of mesh identity, and reinitialization invalidates old trials.
-- [x] Verify unchanged corrected Cartesian geometry/numerics, native traversal,
-      independent repartition stamps, retained-trial isolation after failure,
-      cache refresh/reuse, and rollback without compatibility CSR.
+- [x] Common hierarchy/identity contracts, immutable trial state and Cartesian adapter.
+- [x] Certified actual-cell geometry and ancestry-based conservative remap.
+- [x] Whole-product XY/Z and convex polyhedral refinement/coarsening.
+- [x] Mixed-region closure and compact local XY/Z products.
+- [x] Detached distributed planning/migration, sparse native packets, measured
+      work balancing and focused empty-owner/collective-failure checks.
 
-Stage 1 support and qualification limits are maintained in
-[general AMR qualification summary](docs/architecture/general_amr.md#qualification-status). Native partition
-bindings qualify hierarchy, FVM and solver construction; live accepted-state
-repartition/migration uses the separate detached Stage 6 path.
-
-### Stage 2 — Geometric kernels and ancestry-based overlap
-
-- [x] Add certified actual-cell halfspace clips, sections, moments, face
-      apertures, and nested ancestry overlap records. Preserve positive tiny
-      pieces; reject invalid/sliver geometry instead of dropping volume.
-- [x] Factor reusable sparse transfer semantics while retaining physical
-      carrier geometry. Use polygon-area times Z-overlap for bulk products and
-      actual 3D clipped intersections for tilted PLIC phase volumes.
-- [x] Verify analytic cube/tetrahedron/prism/skew cuts, tangencies, complements,
-      represented coverage under scale/translation, first moments, and signed
-      and nonnegative extensive conservation. Use provider-specific arithmetic
-      bounds on actual clipped queries; retain real-gap rejection without
-      nominal-spacing/origin-scaled tolerances or coverage normalization.
-- [x] Preserve positive phase remnants hidden by rounded pure fractions,
-      moving paired inventories by consistent overlap weights only when that
-      retained phase volume lies within its consistency bound; reject material
-      carrier mismatches.
-
-Stage 2 support and qualification limits are maintained in
-[certified geometry and remap scope](docs/architecture/general_amr.md#qualification-status).
-This utility stage does not enable general-mesh VoF or a new refinement provider.
-
-### Stage 3 — Whole-product XY/Z refinement
-
-- [x] Add separate base-cell/edge and axial-interval ancestry, deterministic
-      triangular base refinement with conformity closure, and common Z
-      bisection. XY refinement initially covers whole columns.
-- [x] Add quality-checked convex quadrilateral/polygon templates with complete
-      inverse families. Preserve original polygonal walls and patch labels.
-- [x] Verify XY-then-Z/Z-then-XY key and geometry identity, factor-specific
-      sibling coarsening, exact parent recovery, compact O(base + layers)
-      storage, and the native composite serial/MPI route. Initial extrusions
-      are nonperiodic; new periodic descriptors need separate qualification.
-
-Stage 3 support and limits are maintained in
-[whole-product construction and remap scope](docs/architecture/general_amr.md#qualification-status).
-Compact provider/hierarchy storage does not imply scalable distributed remap
-catalog construction; bounded complete-family catalogs remain a bootstrap.
-General-mesh VoF/flow and local/mixed product adaptation remain later stages.
-
-### Stage 4 — Convex polyhedral refinement
-
-- [x] Clip the actual convex parent with its AABB midpoint planes; record a
-      variable set of nonempty octant children. Certify convexity, closed
-      topology, representability, child quality, containment, and disjoint union.
-- [x] Construct canonical parent-face subdivisions from both incident split
-      patterns and propagate new edge vertices through every incident loop.
-      Restore saved parent geometry on complete-family coarsening while
-      retaining finer-neighbor face tiles.
-- [x] Verify variable child counts, unrelated neighboring cuts, face/edge
-      closure, signed incidence, volume/first moments, sliver rejection,
-      transactional failure, and exact parent-shell recovery.
-
-Stage 4 support and limits are maintained in
-[convex hierarchy and exact explicit-provider scope](docs/architecture/general_amr.md#qualification-status).
-This is bounded replicated canonical planning with sparse native resident
-providers, not scalable distributed hierarchy storage. The separate detached Stage 6 path qualifies exact sparse shard reassembly. Stage 4 alone does not qualify mixed-region closure
-(Stage 5) or general VoF/flow.
-
-### Stage 5 — Mixed-region closure and local XY/Z products
-
-Implemented and verified within the scope recorded in
-[local/mixed qualification scope](docs/architecture/general_amr.md#qualification-status). The boundary includes
-shared exact base/axis/run views, typed multiple adaptive/static participants,
-stable physical-patch joins, bounded physical-span closure and closed face/edge/
-vertex admission (including one-generation comparable factor traces), exact multi-provider
-native tiles, grouped complete native-patch membership, and independent sparse
-patch cardinality catalogs. Explicit O(interface tiles) seam metadata remains a
-bounded bootstrap cost rather than a universal base-plus-layers bound. Contacts retain
-separate native domains. Mixed storage reports are explicitly nonadditive and
-do not establish complete planner/RSS or distributed scaling bounds. Native
-field/remap qualification does not enable a general VoF/flow solver.
-
-- [x] Represent local extrusion refinement as shared base patches times Z
-      runs, with immutable shared base topology/metrics and compact seam
-      descriptors. Account for unique templates and local-product overhead.
-- [x] Close refinement across region joins using physical scales and common
-      interface ancestry; preserve same-fluid pressure connectivity and
-      distinct material/contact laws. Keep unsupported providers static.
-- [x] Initially require nested supported joins. Add validated multi-provider
-      subface descriptors for local products after qualifying coverage and
-      ownership; crossed anisotropic tilings must close compatibly or reject.
-- [x] Verify one canonical integrated flux per tile, complete unique coverage,
-      patch inheritance, periodic support limits, contact isolation, bounded
-      closure, and compact repeated seam storage.
-
-### Stage 6 — Distributed planning and migration
-
-Implemented and verified within the bounded scope of the design. Detached
-owner-local Cartesian/product/convex/Mixed kernels use typed ancestry and exact
-registered face/edge/node contact authorities, sparse actual native maps,
-full requested ghosts and outer metric neighbors. Named accepted/history frames
-preserve independent gas/carrier amounts and pair metadata. Ownership-only
-migration has a distinct whole-domain frozen-native route for unsupported
-accepted geometry; any topology request on that route rejects globally.
-Measured compute work and final prepared native-plus-state application packet
-bytes govern balance acceptance before owner exchange. Payload, capacity
-estimates, packet scratch and normalized process RSS are separate reports.
-Qualification limits are maintained in [the general AMR design](docs/architecture/general_amr.md#qualification-status).
-The initial complete-source bootstrap remains bounded; this stage does not
-qualify general VoF, sparse ALE, production scaling or physical applications.
-
-- [x] Replace root-assembled AMR planning with distributed closure, ancestry
-      lookup, canonical face/edge decisions, and owner-to-owner geometry/state
-      migration. Use the present root assembly only as an explicitly bounded
-      bootstrap for preceding stages.
-- [x] Replace Stage 2's global-maximum-width padded native certificate bootstrap
-      with variable-length sparse owner packets; bound heterogeneous-shell memory
-      by actual local/imported payload and add a sharded typed ancestry directory.
-      Include distributed seam/contact proofs and explicit membership payloads,
-      planner ancestry, partition maps and actual per-rank memory accounting.
-- [x] Balance measured reconstruction/interface/population work and migration
-      cost; retain sparse native fragments and reconstruction halos.
-- [x] Verify partition-equivalent keys and budgets, split sibling families,
-      observed/asserted empty owners, unique ownership, collective failures
-      without deadlock, and per-rank memory bounds without global explicit
-      geometry or solution copies. Separate metadata payload from normalized
-      process RSS in bounded correctness and work-accounting checks. Production
-      scaling and matched performance qualification remain open.
+Stages 1–6 are consolidated in the
+[general AMR scope](docs/architecture/general_amr.md#qualification-status) and
+[stage acceptance matrix](docs/architecture/general_amr.md#implementation-stages-and-focused-acceptance).
+Bounded bootstrap/catalog and interface-tile costs remain; focused geometry,
+remap and migration coverage does not establish scalable planner storage/RSS,
+production performance, sparse ALE or general physical-flow qualification.
 
 ### Stage 7 — General VoF and flow qualification
 
@@ -1597,122 +682,70 @@ source-pinned phase/momentum preparation and collective rejection. See the
 
 #### Shared foundation — repair Stage 1
 
-- [x] Provide bounded collective failure records with originating rank, stage,
-      category, available cell/face/construction identities, scales and retry
-      context; preserve the local cause and atomic rejection.
-- [x] Prepare an immutable finite transport ledger for both paths, carrying
-      independent phase transfers/history, canonical signed physical face
-      contributions, positive route support, capacities and source/mesh/stage
-      identity. Validate before the three momentum component solves.
-- [x] Reuse finite momentum routing/operator/preconditioner across component
-      RHSs. Each RHS retains its own physical residual and iteration gate;
-      route support does not replace the original signed physical equation.
+- [x] Source-pinned immutable phase/momentum ledgers, bounded collective
+      failure records and reusable compatible momentum preparation; each
+      component retains its independent physical residual/iteration gate.
+
+See [prepared transport and solver consumption](docs/architecture/general_vof_transport.md#one-detached-finite-ledger).
 
 #### Path A — algebraic face-volume transport
 
-`DonorCell` and `GeometricFace` use canonical integrated face volumes and
-algebraic endpoint/export accounting. `GeometricFace` measures a PLIC candidate;
-it does not construct swept tetrahedra or recipient partitions. The
-[face transport contract](docs/architecture/conservative_face_vof.md) records
-its explicit fixed-mesh support and rejection boundaries.
+- [x] Opt-in `DonorCell`/`GeometricFace` transport, measure-only PLIC candidates
+      and explicit face-aligned surfaces within the
+      [fixed-mesh face transport contract](docs/architecture/conservative_face_vof.md).
 
-- [x] Implement the opt-in source-free donor-cell and limited geometric-candidate
-      face transport contract, retaining independent trace inventories.
-- [x] Separate scalar PLIC measurements from explicit closed-surface construction.
-- [x] Expose explicit face-aligned surfaces with bounded halo planar support.
 - [ ] Qualify this path against the shared motion/accuracy gates below, including
       high-density-ratio drop translation and rotation/deformation.
 - [ ] Qualify open boundary interfaces and multiple physical streams per face.
 
 #### Path B — geometric swept-tetrahedra transport
 
-`SweptPartition` uses authenticated node trajectories and corrected signed
-swept tetrahedra. The following repairs target `Ordinary` first; preserve
-explicit BoundedCertification and Exact paths and their separate qualification.
-Stage 1 establishes the shared contract. Stage 2 adds the explicit homogeneous
-implicit-upwind specialization while retaining the general swept path.
+- [x] Ordinary homogeneous specialization (repair Stage 2), interface-local
+      signed face ledgers (Stage 3) and resolved aggregate geometry (Stage 4),
+      retaining independent phase budgets and unchanged momentum/physical gates.
 
-- [x] **Repair Stage 2 — homogeneous transport:** bypass swept construction in
-      interface-free Ordinary steps using algebraic canonical face-volume transport
-      and adjacent-cell implicit upwind momentum. Select the face-only solver
-      entry before unused nodal interpolation; retain face-based stability gates
-      and authenticate all supplied controls on either public entry.
-      Preserve independent traces, absent-phase uncertainty and pure-fit evidence.
-      Check nonconstant velocity against an independent implicit circulation
-      solution, pure gas/liquid motion and unchanged hydrostatic gates, including
-      empty MPI owners. Mixed domains use the separate Stage 3 signed ledger.
-- [x] **Repair Stage 3 — interface-local transport:** make one canonical signed
-      face ledger authoritative for phase/momentum updates, with shared
-      conservative flux correction and old-donor/endpoint/history budgets.
-      Select the interface transport neighborhood from geometric declarations,
-      face-aligned interfaces and conservative trajectory reach; authenticate
-      sparse donors through a spatial index. Do not splice independent recipient
-      partitions with algebraic routes or discard opposing signed streams.
-      Keep signed source coefficients/budgets distinct from positive numerical
-      support; propagate correlated histories before taking absolute values.
-      Use the raw signed momentum operator with positive low-order row scaling.
-      Retain explicit halo/reach rejection, original face/cell allowances and
-      the remaining repeated-flow qualification gates.
-- [x] **Repair Stage 4 — aggregate geometry:** retain immutable source tetrahedra
-      and unmeasured barycentric cut witnesses; cancel surviving shared boundaries
-      by construction identity before measuring face/donor/sign/phase aggregates.
-      Use independent old-phase accuracy allowances shared across all requested
-      face/sign authorities through sparse owner counts, including remote donors.
-      Check positive results, placement error and arithmetic range; permit one
-      source replay per authority and reject unresolved geometry. Limit the final
-      shared correction by its independent phase-quality shares. Keep numerical
-      quality estimates distinct from conservative approximation bounds; the
-      resolved provider accepts no nonzero approximation without a ledger debit.
-      Preserve separate surface accuracy, original caps and physical gates.
-      Cover analytic tiny phases, budget/range rejection and three accepted
-      aligned/mixed coupled steps, including empty MPI owners. Complete physical
-      horizons and unresolved aggregate approximations remain separate work.
+The [transport design](docs/architecture/general_vof_transport.md) owns
+trajectory/support authority, aggregate accounting and focused checks.
+Unresolved approximations require the explicit ledger-debit work below;
+BoundedCertification and Exact retain separate paths and qualification.
 
 #### Shared surfaces, interfaces and qualification — repair Stages 5–6
 
-- [x] **Repair Stage 5 — capillary surfaces:** unify Ordinary mixed sections,
-      aligned faces and filtered patches with canonical identities and connected
-      owner fits, independent of transport backend. Admit coherent native-plane
-      witnesses through independent source-volume checks. Provide explicit
-      `FilteredBinary` geometry with conservative smoothing and per-component
-      extraction/publication volume constraints; preserve inventories, histories
-      and transport declarations. Reject deficient fits, incomplete support,
-      merging, cavities, plateaus and unrepresentable publication. Retain accepted
-      model/width/volume/fit diagnostics atomically. See the
-      [capillary model](docs/modeling/general_vof_capillarity.md); complete
-      capillary-time horizons and quantitative accuracy thresholds remain open.
-- [x] **Repair Stage 6 — interfaces and build boundaries:** provide mode-checked,
-      source-pinned control and prepared-trial views, including empty owners;
-      retain checked public adapters and separate Exact authority. Expose swept
-      trajectories, face/cell diagnostics and local work counters through the
-      prepared ledger. Group general-native source-free, adaptive, low-Mach and
-      representation providers with existing library ownership and feature gates.
-      See [implementation boundaries](docs/architecture/general_vof_implementation.md)
-      and the [prepared interface](docs/architecture/general_vof_transport.md#checked-controls-and-prepared-views).
-- [x] Resolve aggregate cut contacts from actual arithmetic residuals and
-      ancestral source-edge expressions, independently of metric quality estimates.
-      Cover dyadic and nonbinary contacts, swapped cuts, signed perturbations and
-      unresolved range rejection; retain zero explicit approximation allowances.
-- [x] Admit a dedicated low-order ledger without discarded candidate publication
-      or ghost import. Reuse immutable source predicates and retained-domain
-      geometry indexes with identity checks, accounted storage and prepublication
-      budget admission. Report executed index work and final geometric-face theta
-      distributions; retain dynamic phase classification each trial.
-- [x] Default cell-relative Ordinary phase cleanup on `SweptPartition` and
-      `GeometricFace`, with explicit cutoff-zero opt-out and automatic cumulative
-      caps bound once to the initial global phase inventories. Preserve other
-      backends/arithmetic defaults. Retain cumulative global
-      absolute budgets, signed actual endpoint corrections, transactional owner
-      admission, policy-bound cleanup checkpoints and phase-only remap history.
-      Keep raw transport/physical drift gates and strict PLIC unchanged; expose
-      cleaned mass and declared cleanup momentum separately from arithmetic error.
-      See [phase cleanup](docs/modeling/phase_cleanup.md). Coupled remap channels
-      and complete solver restart serialization remain outside this policy.
-- [x] Exercise the original 50-cell ten-step passage horizon in serial and MPI
-      2/4 with cleanup explicitly enabled at a `1e-14` cell-relative cutoff and
-      cumulative caps of `1e-13` times each initial global phase inventory.
-      Retain the original raw drift, boundedness, momentum, divergence and passage
-      checks, and report actual signed/absolute cleanup and momentum corrections.
+- [x] Unified capillary surfaces (repair Stage 5), checked prepared interfaces
+      and provider/build boundaries (Stage 6): see the
+      [capillary model](docs/modeling/general_vof_capillarity.md) and
+      [implementation boundaries](docs/architecture/general_vof_implementation.md).
+- [x] Ordinary support/contact predicates, construction replay, indexed face
+      candidates and face-local storage under the
+      [transport contract](docs/architecture/general_vof_transport.md).
+- [x] Directional PLIC admission and the provisional 5% volume-equivalent
+      cell-length threshold for angular optimization, retaining strict offsets
+      and gradient normals: see [PLIC](docs/modeling/plic.md).
+- [x] Default budgeted cleanup for Ordinary `SweptPartition`/`GeometricFace`,
+      with cutoff-zero opt-out, separate mass/momentum corrections and unchanged
+      strict PLIC/raw physical gates. See [phase cleanup](docs/modeling/phase_cleanup.md);
+      coupled remap and complete solver restart remain outside its policy.
+- [x] Recorded 50-cell ten-step passage with cleanup enabled in serial/MPI2/MPI4,
+      using a `1e-14` cell-relative cutoff and cumulative caps of `1e-13` times
+      each initial global phase inventory, under the original acceptance gates.
+- [x] Finite typed PLIC, independent phase ledgers, compatible flow operators,
+      support/refinement requests, cache reuse and atomic transaction coverage.
+      See [FP implementation and scope](docs/architecture/general_amr.md#floating-point-geometry-and-arithmetic).
+
+**Qualification boundary:** `ArithmeticMode::Ordinary` remains the primary/default
+arithmetic; BoundedCertification and Exact are explicit choices independent of
+transport backend. The source-free scope is closed, nonperiodic convex-native
+geometry. Periodic images, material/species sources, low-Mach thermodynamics,
+population drift and representation coupling remain outside this backend.
+Full physical qualification remains open. The optional rational-route history
+and backlog are maintained in [ExactVoF](docs/architecture/exact_vof.md#recorded-implementation-and-remaining-work),
+[ExactTransport](docs/architecture/exact_transport.md) and
+[ExactGeometry](docs/architecture/exact_geometry.md).
+
+The following gates retain their original physical tolerances, resource limits
+and [complete flow horizons](docs/verification/vof_solver_contracts.md#general-native-amr-and-flow-checks).
+Per-rank memory guards are engineering admission limits, not physical constraints.
+
 - [ ] Qualify the original 50-cell skew/coarse-fine passage case with cleanup
       disabled over its ten-step
       serial/MPI horizon under the uncertainty/conservation gates and documented
@@ -1725,31 +758,6 @@ implicit-upwind specialization while retaining the general swept path.
       remains optional robustness work for uncleaned inputs. The conservative
       frontier supporting-halfspace screen remains an admission limit for other
       constructions; finite-polygon containment is separate outstanding work.
-- [x] Share authenticated original-support contact between Ordinary wall
-      trajectories, reach admission, donor clipping and source-simplex tests.
-      Retain physical-wall versus halo frontier metadata, validate current source
-      ownership/revision separately, and replay the face-17 wall construction.
-      Nonzero cap corrections invalidate inherited support. This contact repair
-      does not establish finite-polygon containment or the full passage horizon.
-- [x] Retain source-tetrahedron and original donor support equations for generated
-      aggregate vertices. Resolve ambiguous cuts with bounded defining-support
-      predicates, preserve complementary orientation and metric error, and reuse
-      immutable evaluations under the original resource limits. Replay shared-edge
-      contact, representable perturbations, both donor orders and nested budgets.
-- [x] Remove unused aggregate ancestry and retain only face-referenced child
-      vertices. Share classification, crossings and cap construction across
-      complementary coverage and phase cuts, preserving all support evidence and
-      source-face cancellation. Attribute cumulative charges by face/stage and
-      report active/stored vertices and tracked live-witness capacity separately.
-- [x] Separate retained preparation storage from face-local conservative scratch.
-      Admit output while scratch remains reserved, commit only surviving output
-      capacity, and release unpublished allocations after destruction on failure.
-      Keep cumulative traffic/work diagnostics, a collectively agreed per-face
-      operation guard and independent pair/witness limits.
-- [x] Separate PLIC directional admission from majority-phase eligibility for
-      angular improvement. Retain explicit rank/conditioning/signal failures,
-      strict current-volume offsets and model bounds, the existing tiny-phase
-      orientation policy, measured-RMS diagnostics and actual failing cell IDs.
 - [ ] Establish a current native-cell-complex coverage certificate before replacing
       repeated donor-complement subtraction. Bind complete cavity/halo frontiers,
       source containment and complete donor queries to the same geometry/partition
@@ -1758,11 +766,6 @@ implicit-upwind specialization while retaining the general swept path.
       Reassess it under the current directional-admission policy, retaining the
       complete horizon, independent phase-distribution oracle and original gates
       rather than truncating the case or increasing numerical budgets.
-- [x] Exclude phases below the provisional 5% volume-equivalent cell-length ratio
-      from angular normal optimization. Use the supported gradient normal and
-      strict target-offset fit without altering phase inventories or pure geometry
-      declarations. Authenticate the configurable threshold and preserve explicit
-      orientation-method diagnostics through halo exchange and transfer.
 - [ ] Exercise complete homogeneous/hydrostatic, interface-passage,
       translation/rotation/deformation and curved-capillary horizons in serial
       and MPI, including empty owners and mixed/face transitions. Keep existing
@@ -1771,53 +774,6 @@ implicit-upwind specialization while retaining the general swept path.
 - [ ] Agree and meet quantitative interface and capillary accuracy/convergence
       thresholds before claiming full physical qualification. Conservation-only
       checks do not establish those thresholds or authorize a default switch.
-
-**Experimental source-free execution:** explicit VoF enablement permits focused finite geometry/flow development. Reacting-VoF schema migration and full-flow qualification remain open; historical implementation records are not current validation.
-
-**Floating-point arithmetic is the primary VoF implementation and development
-priority.** `ArithmeticMode::Ordinary` is the general-VoF default, with explicit
-`BoundedCertification` and `Exact` selections. Focused numerical coverage is
-available for the source-free, closed, nonperiodic convex-native backend. Overall Stage 7 physical
-qualification remains incomplete. The [general AMR design](docs/architecture/general_amr.md#qualification-status)
-maintains the scope and limits. Checked items below mean implementation plus
-the specified focused coverage, not production or application qualification.
-
-- [x] Implement polyhedral PLIC, canonical unsplit swept-volume transport,
-      independent complementary phase ledgers and finite accepted histories.
-      Publish independent binary64 gas/carrier amounts once per step/remap with
-      counted roundoff bounds; retain conservative inventory accounting without
-      clipping. Arithmetic range support alone does not qualify interface resolution.
-- [x] Expose mode-typed PLIC geometry, points, measures and results, with checked
-      runtime adapters for configured solver policies. Preserve publication
-      uncertainty, provenance and resource caps; keep simple members inline and
-      heavier conversions in compiled providers. Cover type separation and
-      finite analytic geometry without changing the numerical acceptance gates.
-- [x] Remove the native exact-geometry prerequisite and legacy geometry aliases.
-      Use ordinary PLIC cells, faces, extrusion recipes and atomic complexes in
-      AMR, with optional Exact conversions behind public PLIC interfaces. Retain
-      source support ancestry and geometric coverage gates, independently validate
-      bounded imports, and test zero exact work in native/FVM/solver finite paths.
-- [x] Implement source-free compatible implicit momentum, physical-coordinate
-      pressure/capillary/viscous operators, geometry-based timestep controls,
-      attainable inner solves and original physical-residual acceptance under
-      shared iteration/resource limits.
-- [x] Balance missing-direction normal momentum with physical wall-pressure
-      traction on qualified closed slabs. Check pressure offsets, cell momentum,
-      face flux and divergence in both finite modes, including empty MPI owners;
-      retain separate full hydrostatic and general-flow qualification gates.
-- [x] Verify focused reconstruction, donor budgets, microscopic/subnormal
-      inventories, stale identity, rejection, rollback, regrid, policy and
-      empty-owner contracts in serial and MPI.
-- [x] Share immutable topology and geometry preparation with identity/epoch/map
-      invalidation. Reuse numerical operators only for matching preparation.
-      The optional rational-route implementation/history and backlog are owned
-      by [ExactVoF](docs/architecture/exact_vof.md#recorded-implementation-and-remaining-work),
-      [ExactTransport](docs/architecture/exact_transport.md) and
-      [ExactGeometry](docs/architecture/exact_geometry.md).
-- [x] Implement a necessary scale-invariant interface-support/model screen
-      and typed refinement requests, retaining small grazing cuts when their
-      neighborhood is supported. Reject without changing accepted inventory.
-      This does not establish full physical thickness/curvature resolution.
 - [ ] Qualify physical resolution and convergence, including caller/controller
       refinement or reinitialization, reevaluation and exhausted/unavailable
       refinement. Use neither an absolute phase-volume cutoff nor arbitrary
@@ -1847,29 +803,12 @@ the specified focused coverage, not production or application qualification.
       Preserve ordinary-volume signed support, complementary fits and phase-aware
       accuracy. No exact result for each positive intermediate piece is required;
       bounded aggregate accounting must retain all contributions without mass loss.
-- [x] Retain generated source-edge incidence and authenticated construction replay,
-      with focused finite predicate, planar-admission, optional PLIC trial and
-      serial/MPI transport coverage. Account shared immutable allocations once
-      without increasing construction caps. Full physical horizons remain open.
-- [x] Add private Ordinary split drafts and joint measurement admission in shared
-      geometry. Reuse recovered source identities, validate connected directed
-      boundaries, preserve contact sections and shared caps, and retain inside-only
-      operations without requiring an unused sibling measure.
-- [x] Add one deterministic Ordinary reconstruction retry for failed measured
-      strict tetrahedral cuts when every parent coordinate can be reframed
-      without loss. Rebuild shared crossings from the original parent/cut and
-      retain replay and resource gates. This does not qualify tiny-feature relative
-      accuracy or the complete flow horizon; strict cuts cannot become contacts.
 - [ ] Extend aggregate geometry to unresolved contact-like contributions only
       with conservative bounds and explicit shared face/cell/phase ledger debits.
       Resolved Ordinary aggregate witnesses already avoid per-child metric
       admission; unresolved approximations still reject. Keep signed streams,
       independent inventories, momentum and replay consistent, and retain separate
       moment/section requirements for surface-sensitive consumers.
-- [x] Replace Ordinary full retained-donor/recipient-overlay scans with indexed
-      face candidates and signed-ledger publication. Track local index/candidate
-      work without changing construction caps; BoundedCertification and Exact
-      retain their separate partition paths. Production scaling remains open.
 - [ ] Remove certification-only communication and closure preparation from
       Ordinary projection; index pure-cell curvature support and qualify its work
       with surface tension enabled.
@@ -1899,12 +838,6 @@ the specified focused coverage, not production or application qualification.
 - [ ] Qualify production runtime and distributed scaling with matched source,
       runtime and complete physical horizons. Small-case speedups and operation
       counts do not establish whole-process memory bounds or production scaling.
-
-Periodic images, material-volume/species sources, low-Mach thermodynamics,
-population drift and representation coupling remain outside this backend;
-Stages 8–9 retain their separate gates. Per-rank memory guards are engineering
-admission limits, not physical constraints.
-
 
 ### Stage 8 — Reacting-gas and representation integration
 
@@ -1951,28 +884,20 @@ the design and modeling documents. Level subcycling, simultaneous
 ALE/regridding, curved-cell refinement, and rotated periodic transformations
 remain outside this design.
 
----
-
 ## Global acceptance criteria
 
-**Overall status: not met.** The core configure/build/test criteria are
-satisfied, but an auxiliary verification-launcher path, open model work,
-turbulence validation, and documentation criteria remain.
+**Overall status: not met.** Historical configure/build/test completion does
+not close the open model, verification and documentation gates above or establish
+a current-tree full-suite/CI result.
 
-- [x] `cmake --preset GCC-ninja-multi` succeeds.
-- [x] `cmake --build --preset GCC-Debug` succeeds.
-- [x] `ctest --preset GCC-Debug` passes, including registered MPI tests, in the
-      supported local development environment.
-- [x] Require a representative GCC Debug configure/build/test job in CI while
-      retaining GCC and LLVM Release coverage.
-- [x] Any MPI failures caused by sandbox/PMIx restrictions are reported separately from code failures.
-- [x] Existing verified cases remain stable when new physics is disabled.
-- [x] New physics fields are bounded and finite.
-- [x] New source terms are dimensionally documented.
-- [x] VTU output supports the implemented solver feedback fields.
-- [x] Supported runtime model selectors and options can be changed from
-      `Database` without recompilation.
-- [x] Documentation clearly states which models are engineering placeholders and which are verified numerical capabilities.
+- [x] Recorded local GCC Debug configure/build/serial/MPI checks; CI requires
+      representative GCC Debug plus GCC/LLVM Release coverage.
+- [x] Disabled-physics regressions, bounded fields, source units, VTU/configuration
+      support and documented model limitations within the implemented scope.
+
+Continue to report launcher restrictions separately from code failures and
+identify actual ranks, skips and run provenance.
+
 - [ ] Complete the Phase 18 key/default/unit reference.
 - [ ] Satisfy every acceptance criterion in the non-deferred roadmap phases.
 - [ ] Close the remaining quantitative RANS validation criteria.
